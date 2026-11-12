@@ -161,6 +161,17 @@ routed.
 dev checkout, both with a worker running, each creating sandboxes and RAG stores. Then confirm each
 one's reapers leave the other's resources alone — which is the assertion this whole plan exists for.
 
+S4's runbook must allocate distinct install IDs, Compose project names, published ports and
+scratch stores, with a manifest of every created resource and its ownership label before either
+worker boots. Use `pnpm docker` for the dev stack lifecycle and the generated wrapper for the
+published install. Compare positive controls (own orphan reaped) and negative controls (other
+install's running and orphan resources kept), including the default install's legacy unlabeled
+rule. Inspect task activity before restarting any worker; the test must never sweep real dev
+resources. Clean up only resources recorded as created by this run, retaining all existing data
+volumes. S4 is pending evidence; unit guards alone do not close it. The current IDE legacy label
+exception is documented in [Sandbox](../architecture/sandbox.md), so “every container labelled”
+is a target invariant to check, not proof that every creator already stamps it.
+
 ## Open questions
 
 - **`HOST_REPO_ROOT_REAL` on Windows.** The worker needs the DAEMON's view of the host path when it

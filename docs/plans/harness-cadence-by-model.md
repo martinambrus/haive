@@ -1,5 +1,6 @@
 # When Haive's checks run: harness cadence by model
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **Not started** (2026-10-13). One source is reviewed: Naresh Jain, "Are Harnesses Worth the
 > Cost?", martinfowler.com, 13 October 2026. Nothing here is approved. P0 is a measurement and gates
 > P1; P2 is parked. The test-edit half of the article is already planned as `aide2-harness-lessons`
@@ -116,6 +117,14 @@ too hard for this comparison. A cheaper 07 alone does not count, since
 the article's harness costs 3-4× more inside the implementation step. Local only: the patch and any
 CLI preference change are snapshotted and reverted after. Rollback: revert the local patch.
 
+P0 runs in isolated scratch task state and queues, with a pinned fixture and provider/model/effort
+configuration. Alternate/randomize arm order, keep rules, RAG and caches comparable, and report
+all attempts (infrastructure holds and unknown outcomes included). A successful gate approval is
+not alone ground truth: run the same independent acceptance checks on both arms. Three runs per
+arm are a pilot; equal rates there do not establish statistical non-inferiority. Record uncertainty
+and keep P1 conditional on a repeatable benefit. Restore only the local settings this experiment
+changed, using compare-and-swap so a concurrent user edit is not overwritten.
+
 ### P1. Checks inside implementation, as an explicit per-step setting (conditional on P0)
 
 A per-repository setting on the Tooling page, beside the declared commands: "Run checks during
@@ -212,6 +221,17 @@ timeout or a Stop; a DDEV repository's check runs host-side and returns; one liv
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
 its own checks. Rollback: the
 setting is additive; off restores today's prompt.
+
+**Request admission.** The check transport accepts a fixed slot id, never an agent-supplied shell
+command, cwd, container id or repository path. Bind it to the live invocation, task epoch and
+worktree; re-check cancellation, ownership, task choices and the repository switch at execution.
+Deduplicate retries by request id, serialize checks on one worktree and cap calls/output/time per
+invocation so a model cannot start an unlimited deterministic loop. A returned verdict names the
+tree revision or dirty-tree fingerprint it checked; later edits invalidate it. For a second check
+container, reserve and account RAM as well as slots through the existing governor; a configured
+slot count alone does not prove capacity. Drop the extra reservation when the invocation ends,
+including cancellation and worker recovery. These are gates on either D3/D5 transport, not a
+reason to execute project commands in the host worker.
 
 ### P2. Config-name mismatch check (parked)
 

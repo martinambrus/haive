@@ -1,9 +1,10 @@
 # Context-tiered model pricing: prices that change with prompt size
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **NOT STARTED.** Written 2026-11-10 from the tree at `a79a84bf3`, the live LiteLLM and OpenRouter
 > feeds fetched that day, the vendors' pricing pages, and read-only queries on the dev install.
-> Four PRs in the order below. PR 1 stores tier rates and changes no computed cost; PR 3 is the
-> first that changes a number.
+> Four PRs in order: PR 1 stores tiers and marks unsupported feed models unpriced;
+> PR 3 first applies tier arithmetic to supported models.
 
 ## Context
 
@@ -119,8 +120,10 @@ only for ollama. The assistant events of the claude binary itself carry message_
 2. **Tier shape:** `{ aboveTokens: number; inclusive: boolean; inputRate; outputRate; cacheReadRate;
    cacheWriteRate; cacheWrite1hRate }`, sorted ascending by `aboveTokens`. A request uses the
    highest tier it crosses (`prompt > aboveTokens`, or `>=` when `inclusive`). Inheritance is
-   resolved at PARSE time (an absent tier key takes the base value, as both feeds define it), so a
-   stored tier is complete and the pricing code never inherits. `inclusive` is true for LiteLLM rows
+   resolved at PARSE time. LiteLLM threshold fields inherit absent keys from the base. OpenRouter
+   overrides are applied in feed order to every matching threshold: later matching entries win
+   **per key**, so a higher threshold that changes only output keeps a lower matching override
+   for input. Materialize that cumulative result at each threshold. A stored tier is complete and the pricing code never inherits. `inclusive` is true for LiteLLM rows
    of vendor `xai` (xAI's "reaches") and false everywhere else, OpenRouter's x-ai rows included,
    since OpenRouter documents its own boundary.
 3. **`tiers` absent, `null` and `[]` are one value.** `ratesEqual` normalizes them before
@@ -141,7 +144,8 @@ only for ollama. The assistant events of the claude binary itself carry message_
      the whole run: not for a steered run whose usage comes from more than one `result` event
      (T369 item 5 keeps only the last one); or
    - the run made exactly one request (one assistant `message.id`, or gemini `api.totalRequests`
-     of 1).
+     of 1), only with a complete transcript and reconciled whole-run usage. One observed message
+     in an elided stream, or one parent message hiding sub-agent calls, does not prove one request.
 
    Any other row (requests in more than one tier with per-request output unknown; muse, openrouter,
    codex `exec --json` or gemini runs over the threshold with several requests) is recorded
@@ -157,7 +161,7 @@ only for ollama. The assistant events of the claude binary itself carry message_
    step. A manual rate entered for a tiered model before this lands has no tiers; the rollout notes
    tell admins to re-enter it once PR 3's form exists.
 
-## PR 1: store tiers (no cost changes)
+## PR 1: store tiers; unsupported feed models become explicitly unpriced
 
 - `packages/shared/src/cli-providers/model-pricing.ts`: `PriceTier`, `ModelPriceRates.tiers?`,
   `ratesEqual` with the normalization of Decision 3, and a pure `tierRatesFor(rates, promptTokens)`
@@ -167,7 +171,7 @@ only for ollama. The assistant events of the claude binary itself carry message_
   which no Haive invocation uses. Resolve inheritance there, then set `inclusive` for vendor `xai`
   inside `litellmRowsForProviders`, where the vendor is known.
 - Fail loud on a tier the parser cannot read. A mapped-vendor entry that carries a `tiered_pricing`
-  table, or an `_above_` key outside the recognized set, writes NO row for that model and lands in
+  table, or an `_above_` key outside the recognized set, does not publish a base-only row for that model and lands in
   the refresh `errors` as `price:<provider>` with the model named. That is the Ollama rule: "a block
   that EXISTS and cannot be read fails loud and writes nothing". Storing its base rates alone would
   misprice every request over the threshold without anyone noticing. No mapped entry triggers this
@@ -187,10 +191,29 @@ only for ollama. The assistant events of the claude binary itself carry message_
   model); `ratesEqual` normalization; a sync test where untiered rows stay
   `inserted 0, closed 0` and tiered rows close and re-insert once, then stay put on a second run.
 
+**Unsupported conditions and stale rows.** Counting and skipping an unknown OpenRouter condition
+must not silently make a model look untiered. Mark its pricing unsupported when that condition can
+affect the requested rate. Likewise, “write nothing” on a failed model parse leaves an old live row
+usable: store `pricingState: 'unsupported'` with a bounded reason code in the rate jsonb, close
+and replace the old live feed row transactionally, and have lookup refuse that row for computed
+pricing. This is PR 1's one deliberate cost effect; no tier computation lands until PR 3. A
+supported refresh removes the marker. Keep manual precedence and historical snapshots unchanged.
+A whole-feed network failure keeps the existing last-good policy; a positively unsupported model
+is a different result. Test a model that first syncs successfully and then gains an unsupported
+condition, plus recovery on the next supported feed.
+
+Normalize and validate tiers at every ingress: finite nonnegative rates or explicit null,
+positive safe-integer thresholds, unique boundaries and deterministic ordering. Avoid converting
+an explicitly null/invalid price into a free zero or an inherited value. Put the normalization in
+shared pricing code so the API and the feed parsers cannot disagree. Snapshot rates by value.
+
 ## PR 2: capture per-request usage (no cost changes)
 
 - `RequestUsage = { inputTokens; cacheReadTokens; cacheCreationTokens; outputTokens: number | null }`,
-  with null meaning the CLI did not report this request's output. It is returned beside `tokenUsage`
+  with null meaning the CLI did not report this request's output. Include stable request/turn
+  identity and the request's model, plus cache-write TTL buckets where observable; the invocation
+  may contain sub-agent requests or a model reroute. Never price a request at another model's tier.
+  Unknown model/TTL or missing coverage makes the affected computation unpriced. It is returned beside `tokenUsage`
   on the in-process exec result (`exec-core.ts` return branches, `handlers.ts`) with a coverage
   flag, and is NOT persisted: `stream_log` already keeps the raw evidence, and the cost snapshot
   keeps the per-tier totals.
@@ -199,11 +222,27 @@ only for ollama. The assistant events of the claude binary itself carry message_
   was one `result` event. Output counts as known only when the per-request output sum equals the
   result's output. That is a structural check, not a provider list, and it is what separates grok
   (equal) from the claude binary (message_start values).
-- codex app-server (`cli-executor/codex-app-server.ts`): append `last` from each
-  `thread/tokenUsage/updated`. That gives exact buckets, `cacheWriteInputTokens` included.
+- codex app-server (`cli-executor/codex-app-server.ts`): collect `last` from `thread/tokenUsage/updated` only after verifying that exact binary's
+  notification-to-request relationship. A turn can make several model requests, so deduping
+  solely by turn id loses usage. Prefer a stable request id; otherwise use the monotonic
+  cumulative `total` watermark to distinguish a repeated notification from a new request and
+  reconcile each accepted `last` against its total delta. A jump, reset, missing update or
+  incompatible `last` marks coverage incomplete, never fabricates request sizes. Reconcile
+  every bucket against final usage before marking coverage complete. Preserve the provider's inclusive input convention exactly once,
+  subtracting cached buckets only when pricing, never both on collection and computation.
 - codex `exec --json`, gemini and antigravity report no per-request usage, so they pass none. gemini
   passes its request count so that a one-request run is decided.
 - Tests: the existing stream fixtures plus one fixture per channel above.
+
+The list must survive every normal exec-result boundary (single dispatch and any sequential
+sub-agent aggregate) with a single declared bucket convention. If a run contains multiple model
+ids, either snapshot/price each known model's requests separately or leave it unpriced in v1;
+never put another model's usage into the invocation model's tier. Completeness includes expected
+request count and reconciled buckets, not only equal prompt sums. Truncated/malformed streams,
+missing ids, duplicate notifications and contradictory totals cannot prove exact coverage.
+Retaining request data only in memory means a completion recovered after worker death can lose
+it: such a recovery must rebuild through the same collector from sufficient retained evidence,
+or record unknown. Never rerun the model merely to recover pricing.
 
 ## PR 3: tier-aware pricing and snapshot
 
@@ -227,6 +266,13 @@ only for ollama. The assistant events of the claude binary itself carry message_
   a claude-code run with every request in one tier (exact); codex app-server with mixed tiers
   (exact); a steered run with two results (aggregate proof refused); a gemini run with one request
   (exact).
+
+For an unknown split, bounds price all potentially billable buckets at the applicable minimum
+and maximum rates, not just the input side. Bounds are absent if usage coverage or a required
+rate is unknown; show “unpriced” rather than an invented finite range. If every request's prompt
+is known but output allocation is not, keep exact input cost and bound the output allocation.
+Test the bounds contain every feasible allocation, including multiple thresholds and null rates.
+Live row counts in Verification are dated examples, not assertions against today's feeds.
 
 ## PR 4: check the CLIs' own totals on tiered models
 

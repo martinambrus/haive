@@ -1,7 +1,8 @@
 # Time and cost report: tests, human, AI
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **NOT STARTED.** Written 2026-11-09 from the tree at `18a6cde1d` and read-only queries on the dev
-> install. Three independent PRs, in the order below. PR 1 needs no schema change and shows history.
+> install. Three independently revertible PRs, in the order below. PR 1 needs no schema change and shows history.
 
 ## Context
 
@@ -64,7 +65,7 @@ id through a reorder precisely because it is the persisted `task_steps.step_id`.
 `task_steps` would need a backfill and buys nothing. Any id not in the map counts as Other, which
 covers onboarding, module and custom steps.
 
-**AI time is `workMs`, with agent-hours beside it.** `workMs` is what the task page already calls
+**Workflow work is `workMs`, with agent-hours beside it.** `workMs` is what the task page already calls
 work, counts a fan-out once, and includes deterministic work such as DDEV boot and the test suite.
 Agent-hours counts each concurrent agent and is the compute figure, not elapsed time.
 
@@ -118,8 +119,12 @@ so a new step cannot silently land in Other. Check the list against the registry
 test, since ids set through constants are easy to miss.
 
 **`packages/shared/src/stats/`**: pure `sumFormWaits(events)` and `buildTimeCostReport(input)`,
-tested without a database. Wait pairing is per `task_step_id`, ordered by time, and counts only a
-`waiting_form` whose next event for that row is `form_submitted`.
+tested without a database. Wait pairing is per task and `task_step_id`, ordered by `(created_at, id)`, over the full
+lifecycle event stream, not just the two event types. A wait closes at its next submit only if no
+retry, reset, skip, stop, cancel or replacement park invalidated it. A new park replaces an open
+one; orphan submits and still-open waits contribute nothing. Historical rows that cannot be
+paired unambiguously are disclosed as unmeasured, never joined across attempts. Use the exact
+event types emitted by the current API and worker when building the reducer.
 
 **`modules/statistics/src/routes.ts`**: lazy `GET /m/statistics/time-cost`, with the same parser,
 all-users re-check and `costDisplay` as `/summary`.
@@ -129,7 +134,8 @@ all-users re-check and `costDisplay` as `/summary`.
 3. `cli_invocations` grouped by task and step id with `invocationAttributionFilter`: agent-ms,
    `realCostUsdSql`, `notionalCostUsdSql`, unpriced count, and a count of `cost IS NULL` runs for
    the lower-bound mark.
-4. The two `task_events` types for those tasks, which `task_events_task_id_idx` serves. Run
+4. The lifecycle `task_events` needed by the wait reducer for those tasks, which
+   `task_events_task_id_idx` serves. Run
    `EXPLAIN` on this query at the two-year window before merging.
 
 The response has `totals`, `byCategory` (work, agent-ms, real, notional) and `rows`, capped at the
@@ -137,17 +143,32 @@ The response has `totals`, `byCategory` (work, agent-ms, real, notional) and `ro
 over all tasks, not over the rows kept. The provider facet does not apply because step timing has no
 provider; when it is set the tab says it was ignored.
 
+**Population and units.** Fetch task timing at each task's `completedAt`, never the live clock.
+Query the entire task history for costs and form waits; do not apply the invocation-window filter
+on this tab. Join recap invocations through `coalesce(task_step_id, summary_for_step_id)` before
+assigning categories, with unattributable legacy rows disclosed. Reuse the existing money helpers
+so legacy reported costs and immutable snapshots retain their current semantics. A missing
+snapshot alone does not prove missing cost: count coverage by the helper's priced/unpriced result.
+Use bounded batches for task-id queries and paginate display rows without changing totals.
+`computeWorkByCategory` must share the task-wide park suppression in `computeTaskTiming`; summing
+raw per-step contributions is not an alternative implementation. All category work is elapsed
+step work, not pure model time, and can overlap the test phase. Name the tile “Workflow work”
+with that explanation; agent-hours is the separate summed invocation time.
+
 **`modules/statistics/src/web/stats-page.tsx`**: tab `report`, labelled "Time & cost report", after
 Time & throughput, fetched only when opened.
 
-- Tile row: Tasks completed; Test phase; AI work (agent-hours as hint); Human active; Waiting for a
+- Tile row: Tasks completed; Test phase; Workflow work (agent-hours as hint); Human active; Waiting for a
   person; Billed; At API rates (`≥` when a lower bound).
 - One `StackedShareBar` of work by category, with the category colours checked by the `dataviz`
   validator against `#0a0a0a`. Colour binds to the category. Text uses `neutral-400` or lighter.
-- A table with Task (link), Repository, Test phase, AI work, Human active, Waiting, Billed, At API
+- A table with Task (link), Repository, Test phase, Workflow work, Human active, Waiting, Billed, At API
   rates.
-- A figure that does not exist renders as an em dash, never as zero. Test phase is a dash when no
-  test-category step did any work.
+- A figure that was not measured renders as an em dash; a measured zero stays zero. Test phase
+  is elapsed step work, including setup and skipped commands, and must not imply a test executed.
+  Show command execution coverage separately: before PR 2 use persisted check outcomes where
+  available, otherwise “execution not recorded”; after PR 2 distinguish no rows, `not_run`, and
+  actual test runs. A nonzero test-phase span with no test command is labelled “not run”.
 - A short "What these figures cover" note: test commands run by agents are in Implementation, the
   human figure counts only time on a waiting form, and tab totals differ from Money by population.
 
@@ -176,20 +197,29 @@ dropped, remove it with a later numbered migration. Never edit an applied one.
 schema file beside `custom-tools.ts`:
 
 `task_check_runs`: `id`, `task_id` (cascade), `task_step_id` (set null), `step_id`, `slot` (`test`,
-`lint`, `php_lint`, `typecheck`), `outcome` (`passed`, `failed`, `not_run`), `started_at`, `ended_at`.
+`lint`, `php_lint`, `typecheck`), `outcome` (`running`, `passed`, `failed`, `not_run`,
+`interrupted`), `started_at`, nullable `ended_at`, and an attempt/check identity unique within
+its task/step/slot. Use text plus validated values if rollback without enum changes matters.
 Indexed on `task_id`. No command text or output, matching `custom_tool_calls`.
 
 **Worker**: `recordCheckRun` in a new `_check-runs.ts`. A failed insert logs a warning and never
-fails the step. Call it around the test, lint, php lint and typecheck slots in `apply` of
-`08-phase-5-verify.ts`, after `classifyTestEnvFailure` so an environment stop records `not_run`, and
-around the selective run in `08b-test-management.ts`. A skipped slot records nothing. A run cut off
-by a thrown error records nothing either. Check active tasks before the worker reloads, since a
+fails the step. Start it before each test, lint, php lint and typecheck slot in `apply` of
+`08-phase-5-verify.ts`; finalize after `classifyTestEnvFailure` so an environment stop records
+`not_run`. Do the same around the selective run in `08b-test-management.ts`. A skipped slot records nothing. Insert a running record before executing a command and
+finalize it in `finally`, with nullable `ended_at` and an explicit `running` / `interrupted`
+outcome in addition to the outcomes above. An abrupt worker death leaves a running record,
+which the UI calls incomplete, never passed or zero-duration. Use an attempt/run identity so a
+replayed apply cannot duplicate a completed check; a deliberate retry writes a new attempt.
+Store environment `not_run` separately from genuine test failures. Never include `not_run`,
+`running` or `interrupted` in the pass-share denominator; report those counts beside it. Check active tasks before the worker reloads, since a
 restart can reap live CLIs.
 
 **Report**: `testSuiteMs`, run count and pass share via `sampledRatio`, from rows with slot `test`
 only. New tile "Test suite runs" and a table column. Rows before this PR have no data, so the column
 is a dash and the tile states the date recording began. The task page cell gains the suite time in
-its tooltip.
+its tooltip. A known measured zero is zero; incomplete records have no duration. Recording-start
+coverage comes from a durable feature/version marker, not the earliest surviving row, which may
+belong to a repository later deleted.
 
 Verify: a unit test per slot and outcome; an insert failure does not fail the step; a real task with
 a detected test command writes one row per slot per round, with a duration within a few seconds of

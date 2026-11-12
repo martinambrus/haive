@@ -1,8 +1,14 @@
 # Project state that travels between installations
 
-> **In progress** (2026-09-26). Track B of `found-not-fixed-sweep-3.md` (plan file
-> `compiled-noodling-squid`). Phase 0 shipped, each live-verified: B0.1 (#326), B0.2 (#327) and
-> B0.3 (#328).
+> **Core phases IMPLEMENTED; historical design with per-slice as-built detail below.** Reviewed
+> 2026-11-12 at `3426c8c34`: `shared/src/project-state`, `worker/src/project-state`, conflict
+> resolution, checkout observation, CLI union, repository rules and the Haive data panel ship.
+> B5.1 shipped through #973/#976/#979; B5.2/B5.3 through #988 (`42577ae961`). The former
+> “Phase 0 only” header and index row were stale. Current contracts live in
+> [Onboarding template versioning](../architecture/onboarding-upgrades.md),
+> [Plan canvas](../architecture/plan-canvas.md) and [Repository refresh](../architecture/repository-refresh.md).
+> Remaining fixes/checkpoints are independently tracked in root `TASKS.md`; this is not a new
+> phases-1–5 backlog. Track B belongs to `found-not-fixed-sweep-3.md`, not `compiled-noodling-squid`.
 
 ## Context
 

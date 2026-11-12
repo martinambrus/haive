@@ -1,11 +1,13 @@
 # Modular / user-definable task types — implementation plan (half A: data model, buildRunList, pgEnum, migration, seed)
 
-> **Merged into `twinkling-frolicking-toast.md` (approved 2026-10-12).** This file stays the design
-> reference for its half; where the two disagree, the merged plan wins.
->
-> **Not started.** This file is **half A** of the feature designed in
-> `rippling-wibbling-puffin.md` — data model, `buildRunList`, pgEnum, migration, seed. It does not
-> supersede that plan and that plan does not supersede it; read both.
+> **Historical design; foundations implemented, re-verified 2026-11-12 at `3426c8c34`.**
+> This reference contributed task-type storage, seeding and run-list snapshots to `twinkling-frolicking-toast.md`.
+> Its original “not started” baseline is obsolete. The current contracts are
+> [Task types](../architecture/task-types.md), [Modules](../architecture/modules.md) and
+> [Integrations](../architecture/integrations.md); they supersede conflicting sketches here.
+> Read the merged plan's current header for deferred scope, and `TASKS.md` for follow-ups.
+> Do not replay migrations, assume all proposed features shipped, or roll back the enum cast
+> after a custom/module task exists.
 
 Grounded against the current tree. All line refs were verified read when written and re-checked
 2026-08-21; two had drifted and are corrected in place below. Resolve any remaining number by symbol

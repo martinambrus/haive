@@ -1,5 +1,6 @@
 # What "The Economic Benefit of Refactoring" offers Haive: what agents read, and refactors measured by it
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **Not started** 2026-10-17. One source: Giles Edwards-Alexander, "The Economic Benefit of
 > Refactoring", martinfowler.com (Exploring Gen AI), 30 July 2026. Four items, turned into phases.
 > Nothing is approved. P0 gates the rest: without a record of what agents read there is no hotspot
@@ -122,6 +123,23 @@ in context. Per repository: the files that cost the most, and which steps pay fo
 **Rollback.** Additive: a jsonb key, tally feeds, a backfill pass and a statistics section. Revert
 the commits; rows keep a `reads` key that nothing reads. No migration.
 
+**Measurement semantics.** `weightedChars` estimates repeated context exposure, not billable
+tokens or dollars. A truncated transcript is not necessarily a numeric lower bound: missing
+compaction boundaries can overstate a result's lifetime. Mark its weighted exposure unknown;
+observed raw characters/calls can still be floors. Reconcile numerator and denominator over the
+same observable runs, with per-provider coverage stated. Repeated message/content-block and tool
+result events are deduplicated by stable ids. A shell call reading several files has one combined
+output: unless the result carries file boundaries, put it in an unattributed multi-file bucket,
+never charge the whole output to every parsed path. Unknown shell syntax stays unattributed;
+never execute shell text to discover a path. No file read is needed just to tally a result.
+
+Choose and document D1 before coding: a bounded per-run file list, aggregated overflow bucket and
+explicit omitted counts, with an algorithm version on the record. Backfill selects missing or
+older versions, including JSON-null `reads`, and converges to an explicit terminal coverage state.
+It never rewrites `token_usage` or immutable cost snapshots. M5's fallback defect has since been
+fixed (`assistantUsageByMessage` in `queues/cli-exec/stream.ts`); retain the historical caveat for
+old rows rather than reimplementing that fix.
+
 ### P1. Measure a refactor by replay
 
 **Goal.** The article's protocol, with Haive's exact usage instead of characters / 4: what the same
@@ -219,10 +237,11 @@ Nothing yet.
 
 ## Found, not fixed
 
-- **Killed runs record wrong token usage** (M5). PRE-EXISTING, in `queues/cli-exec/stream.ts`
+- **Historical killed runs recorded wrong token usage** (M5). Fixed in the current
+  `assistantUsageByMessage` fallback; the original defect was in `queues/cli-exec/stream.ts`
   (`getTokenUsage` fallback): cache reads as the largest single turn, other buckets summed per
   stream event. The remedy is to sum the four buckets once per `message.id`, as the CLI's own
-  `result` does. It is its own PR, outside this plan: P0 does not wait for it, since its shares
+  `result` does. That fix is outside this plan; P0 does not wait for a historical rewrite, since its shares
   count only `resultSeen` runs. Stored rows are not rewritten, because `cost` is an immutable
   snapshot.
 

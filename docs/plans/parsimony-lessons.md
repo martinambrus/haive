@@ -1,5 +1,6 @@
 # What Parsimony offers Haive: measured change size, and the statistics to read it
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **Not started** 2026-10-17. Five findings from Parsimony (parsimony.lasu.dev,
 > github.com/La5u/Parsimony), turned into phases. Nothing is approved; one decision is made: the
 > counter parses with tree-sitter (2026-10-17). P0 gates everything else: without a counter there is
@@ -55,14 +56,18 @@ nothing else uses it first.
 **Goal.** Answer one open question with data: does `07a-code-simplify` make the change smaller, and
 what does it cost? Today the per-task toggle is on or off with no evidence either way.
 
-**The counter (finding 3).** A pure function in `@haive/shared` (no IO, so it is unit-testable and
-both worker and statistics can import it):
+**The counter (finding 3).** A pure calculation behind a server-only shared subpath, with a
+separate asynchronous initialization that loads pinned WASM grammars. Both the worker and
+server statistics code may import it; browser code receives only the serialized result. No
+parser/Node/WASM loader enters a web-safe barrel. The initialized counter accepts bytes and
+grammars and performs no filesystem IO:
 
 - Input: the base and head text of each changed file, plus its path.
 - Output per file: `{ added, deleted, net, churn, structuralChurn } | null`, and a set total.
 - **Units, not lines.** Count statements, expressions, comparisons, names and literals, and one
   `EndBlock` per block, so formatting churn scores zero and moving code in or out of a block does
-  not. A renamed identifier or a changed literal is one changed unit. `structuralChurn` ignores
+  not. A renamed identifier or changed literal replaces one unit: one added and one deleted
+  (churn 2, net 0); it is not a single churn unit. `structuralChurn` ignores
   identifier and literal values, which separates "renamed things" from "added logic".
 - **Alignment** by a minimum edit script over the unit sequence (Myers). Above an edit budget, fall
   back to a line-anchored approximation and set a flag on the result. Never return a silently wrong
@@ -89,8 +94,11 @@ in the sandbox, so this cannot run inside it):
 2. After the simplifier pass: `afterSimplify`.
 3. After the fixup pass, if it ran: `afterFixup`.
 
-Store these in the step's `output` (`task_steps.output`, jsonb), not in a new column. That needs no
-migration, and P0 is a question, not a feature yet.
+Store the latest pass in the step's `output` (`task_steps.output`, jsonb) and a versioned
+attempt record in `task_events`, keyed by invocation/round/pass. A reset erases output, so it
+cannot be the sole source of a before/after study covering retries. No new column is needed; a
+failed/interrupted measurement stays explicitly unknown, and rerunning apply does not duplicate
+an event or replace its frozen before-image.
 
 **Check.**
 - Unit tests for the counter: per-language fixtures, including the `has_negative` pair from the
@@ -116,10 +124,12 @@ written keep the extra keys harmlessly.
 tasks that reached a clean end.
 
 - Measure the implementation diff at the end of `07-phase-2-implement` (single-agent) and per DAG
-  issue in `06c-dag-execute`, with the counter from P0, and store it beside the step's
-  `model_identity`.
+  issue in `06c-dag-execute`, with the counter from P0, and store its explicit invocation ids and their `model_identity` (the identity lives on
+  `cli_invocations`, not a single step column). A task edited by several models stays a mixed
+  cohort; attributing its whole final diff to the last model is not a per-model measurement.
 - **The success gate.** Count a task's numbers only when it passed gate 3 (`10-gate-3-commit`) and
-  was not reverted. Parsimony counts only resolved tasks; a failed attempt that changed nothing would
+  was not reverted according to a structural recorded revert outcome; do not infer that from
+  message text or assume external git reversions are detectable. Disclose that limit. Parsimony counts only resolved tasks; a failed attempt that changed nothing would
   otherwise drag every median toward zero.
 - **Storage.** A statistics query over jsonb `output` is fine for a first view. If a query proves
   slow, move to a column through a numbered migration (`ADD COLUMN IF NOT EXISTS`, declared last in
@@ -139,13 +149,27 @@ with real rows from the dev install.
 Reverting removes them. A migration, if one is needed, adds a nullable column only, and the undo is
 to stop reading it; dropping it is a later, separate change.
 
+**Counter contract before rollout.** Pin a counter version, tree-sitter runtime and grammar
+versions, included file kinds, and the unit projection for each supported language. Counting all
+named tree-sitter nodes is not Python AST unit parity; publish this as Haive's metric and compare
+only within a language/counter version. Define sequence matching deterministically, including
+renames, moved blocks, file additions/deletions and syntax errors. Unsupported, binary,
+unparseable or over-budget files are coverage gaps, never zero units. Parse untrusted bytes with
+size/time limits outside a credentialed CLI; read both sides through the repository's held
+filesystem/git primitives. Add fixtures for a rename-only diff, formatting/comments-only change,
+a deleted function, an untracked new file and a parser error. Store the tree/diff hashes measured:
+07a's before/after pair is one pass, and final-task size is the base-to-delivered-tree diff, not a
+sum of passes or model-attributed slices of a jointly authored change.
+
 ## P2 — Statistics rules for the numbers Haive already shows
 
 Parsimony's discipline, applied to effort estimation, spend and throughput, not only to P1:
 
 - **Medians, not means**, for anything per task. One runaway task (a long fix loop, a big
   attachment) moves a mean and leaves a median alone. Audit `modules/statistics` and `_estimate.ts`
-  for means over per-task values and switch those that report "typical" cost or time.
+  for means labelled “typical” cost or time; change only those summaries. Preserve additive
+  totals, throughput as Σtokens/Σtime, calibrated estimation algorithms and the existing
+  `sampledRatio` floor. A median is not a replacement for an accounting total or an estimator.
 - **A failure needs explicit evidence.** A task missing a row or a log is `unknown`, never `failed`,
   and never 0. Audit the aggregations in `@haive/shared/stats` for a missing value read as 0.
 - **Sample size on every number.** Every median shown carries its n. Below a threshold (say 5), grey

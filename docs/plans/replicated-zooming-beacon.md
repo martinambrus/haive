@@ -1,15 +1,13 @@
 # Agent memory + spec handoff optimization
 
-> **Not started** as of 2026-08-21 — but the grounds recorded then are now WRONG, and the verdict is
-> unverified. That entry read "no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists";
-> **all three exist today** (`step-engine/task-ledger.ts`, `step-engine/steps/_doc-view.ts`,
-> `step-engine/steps/workflow/_spec-artifact.ts`). And `REVIEW_FANOUT_DISTILL` /
-> `condenseSpecForReview` — the mechanism defect 1 below is written against — are absent from the
-> entire `packages/` tree. Neither fact settles the verdict: a vanished mechanism could mean fixed,
-> refactored or removed. RE-CHECKED 2026-09-18 to that depth ONLY, so before implementing anything
-> here, re-verify each of the three defects below against the tree by symbol name rather than
-> trusting this header. The anchors in this file were corrected on 2026-08-21; treat any line number
-> as a hint and resolve by symbol name.
+> **IMPLEMENTED — historical design, re-verified 2026-11-12 at `3426c8c34`.** All four slices
+> have readers and writers: gate 1 calls `writeSpecArtifact`; `_spec-artifact.ts` owns
+> `resolveApprovedSpec`/`resolveSpecView`; DAG dispatch reads the view and augments its ledger;
+> `task-ledger.ts` compacts whole entries; `step-runner.ts` mirrors summaries. The original live
+> proof and remaining coverage questions are in `curious-drifting-lantern.md`. Do not recreate
+> these helpers or restore `REVIEW_FANOUT_DISTILL`. Context and slice instructions below describe
+> the original defect, not today's tree. Summary calls are attributed via `summary_for_step_id`
+> and count toward spend; “unlinked, out of token totals” below is historical, not a requirement.
 
 ## Context
 

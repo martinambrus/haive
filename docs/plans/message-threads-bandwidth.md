@@ -1,5 +1,6 @@
 # Message threads and incremental-request transports for agent CLIs
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > Status: Not started. Written 2026-11-10 from `threads.pdf` (a paywalled Medium post; only its
 > intro survives in the PDF) plus primary sources listed at the end.
 
@@ -86,19 +87,31 @@ previous state. No migration, no data change.
    Run it on `claude-code` twice with the same prompt and model: provider envVars
    `CLAUDE_CODE_TETHER_LIVE=0`, then `=1`. Provider envVars already reach the binary
    (`mergedEnv`), so no code is needed.
-   Verify: squid access log bytes for the `api.anthropic.com` CONNECT tunnel per run; wall clock;
-   identical `token_usage` (expected, since tokens do not change).
+   Verify with a deterministic scripted tool exchange or repeated paired trials. Record upload
+   and download bytes separately at an instrumented client/network boundary, wall clock,
+   request count and usage. Squid CONNECT logs see an encrypted tunnel, not its HTTP request
+   bodies or the inner WebSocket upgrade, and their ordinary byte counter is not an upload
+   measurement. No TLS interception of credentialed traffic. Token accounting rules are
+   unchanged; stochastic live runs need not have identical token counts.
 2. Run the same step with no override. Verify with the binary's debug log (`--debug` written to a
    file, grep `[tether]`) whether the default path threads. If it does not, find which gate is
    false (feature-flag host blocked by egress is the prime suspect).
 3. codex: run one `exec` and one `app-server` invocation; check codex logs for the websocket
-   transport vs HTTPS fallback, and squid log for the upgrade.
-4. grok, amp, agy: one run each; inspect request shape in squid log or CLI debug output for any
+   transport vs HTTPS fallback, and transport diagnostics from inside the sandbox; a CONNECT success proves only a tunnel.
+4. grok, amp, agy: one run each; inspect sanitized CLI debug/transport diagnostics for any
    incremental mechanism. Record the finding.
 
 Exit: a short table in this file (per CLI: threaded yes/no, bytes up per run before/after, TTFT or
 wall clock delta). If claude-code default is already threaded and codex already uses websockets,
 skip to Phase 3.
+
+For each measurement pin the actual sandbox image ID, binary version, model, auth mode and
+endpoint. Do not infer default transport from a host binary or an undocumented flag accepted by
+its parser. Confirm the override's meaning in that exact version, restore only that experiment's
+provider setting, and redact/delete debug files that can contain prompts or credentials. Do not
+request ZDR/HIPAA policy changes to enable a transport. If the CLI exposes no usable diagnostics,
+record unknown and stop that provider's experiment. Re-verify the dated external transport
+contracts in the primary docs below before changing code; they are not stable guarantees.
 
 ### Phase 2: fix what Phase 1 finds blocked (only if it does)
 

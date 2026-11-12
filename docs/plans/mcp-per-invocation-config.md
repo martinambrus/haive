@@ -176,6 +176,17 @@ per-invocation config, exactly as `bind` already does, and clears nothing shared
 7. **Kill switch**, defaulting OFF for this one, unlike the usual default-on: it changes credential
    plumbing on live task tooling, so the first release should be opt-in per install.
 
+**Implementation review 2026-11-12.** Shelving remains the decision; this docs pass does not
+reopen it. All lever results are scoped to the recorded binary versions, not a permanent vendor
+guarantee. Reopen only after checking a changed primary contract and testing it against a populated
+home in disposable auth-free containers. Never copy hot SQLite/WAL files or mount an invocation
+home read-write over another invocation's state. If reopened, carry the per-call config through
+all exec/sub-agent/summary paths, keep the paired `disableTools`/empty-MCP invariant, and test a
+real overlap barrier with two different surfaces and a `none` run. A mutex around file writes
+alone cannot isolate a surface that a live CLI reads later. Unknown provider capabilities must
+not be advertised as enforced isolation. The current package typecheck includes test files via
+`tsconfig.typecheck.json`; the old tsconfig-exclusion warning below is historical.
+
 ## Verification
 
 1. **Extend `mcp-none.test.ts`** rather than adding a file — it already mocks the three volume

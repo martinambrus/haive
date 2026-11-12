@@ -17,62 +17,56 @@ after 30 days.
 - **A shipped plan stays here as a record.** It is marked below and in a status blockquote under its
   own H1. Do not re-implement from a plan marked shipped.
 
-## Status — rows verified 2026-08-21, table completed 2026-09-18
+## Status — inventory reviewed 2026-11-12
 
-Verified against the tree, not taken from the plan bodies.
+All **75 tracked plan files** (excluding this README) have a row below. Untracked experiment files
+are not plans accepted into this archive and were excluded. The review baseline is `3426c8c34`.
+Earlier dates and measurements inside a plan remain historical evidence, not today's live state.
+The pass checked pending designs and residual work against the current tree and corrected stale
+implementation statuses. It did not run paid experiments, perform live acceptance checks, or
+revalidate every external paper/vendor claim. Re-check dated external contracts before building.
 
-**This table is COMPLETE as of 2026-09-18 — every plan file has a row.** MEASURED that day:
-`docs/plans/` held 50 plan files against 50 rows, nineteen of them added that day after verifying
-each against the tree, plus `plan-patch-drop-measurement` as a not-started follow-up. **Re-measured
-2026-09-21: 52 files and 52 rows**, both `comm` directions still empty, so no row names a missing file
-and no file lacks a row — `plan-patch-gap-sweep` and `plan-patch-guard-losses` arrived with their
-rows, which is the rule below working rather than an exception to it.
+**Read the status block before a checklist.** An implemented plan is an archive, even if old boxes
+or its “Context” still describe the original defect. The current architecture topic and actual code
+win over an archived sketch. “Implemented” does not imply every proposed mechanism shipped:
+modularity, integrations, installer and project-state records name their as-built contracts and
+remaining exceptions in their headers. Open/parked follow-ups belong to root `TASKS.md`; a plan
+review does not reopen them or authorize feature execution.
 
-An earlier version of this paragraph said 48 files against 29 rows; both counts were stale, and that
-is the reason for the rule that follows: **a plan added to this directory adds its row in the same
-change.** Nothing else keeps the two in step, and a missing row reads as "unknown" rather than as an
-oversight.
-Rows are in historical order rather than alphabetical, with those nineteen together ahead of any
-later addition.
+A new plan must add its row in the same commit. A changed status needs evidence (symbols, commits,
+or a recorded acceptance run), never only its previous status line. Resolve line-number anchors by
+symbol, and allocate the next migration at implementation time; numbers in old plans are occupied.
 
-**A plan's own status line is NOT evidence, in either direction.** `amber-provider-verdict-heron`
-read "IN PROGRESS, started 2026-08-24" with its checklist still unchecked while every part of the
-work was in the tree — and it shipped at `StepTerminal.tsx`, not the `CliStreamViewer.tsx` its
-checklist names, so a grep for the planned component reports the feature missing. Two rows were
-found stale in the other direction on the same date (`parsed-churning-yeti`,
-`replicated-zooming-beacon`). Re-verify any row here before acting on it.
+## Before implementing pending work
 
-**Every plan this pass touched now carries a status blockquote.** Fourteen were written on
-2026-09-18 — twelve that had none at all (`blank-repo-scaffold`, `cli-prompt-delivery`,
-`curious-drifting-lantern`, `curious-drifting-lantern-RESUME`, `glistening-jumping-bee`,
-`impact-view-readable-radius`, `plan-build-lost-subtree`, `plan-coverage-check`, `plan-delete`,
-`plan-document-import`, `plan-mined-status`, `plan-patch-partial-refs`) and two that recorded theirs
-as a bare `STATUS:` line (`plan-chat-unread-badges`, `smooth-sleeping-flute`) — each naming the
-evidence its verdict rests on rather than asserting a state. A fifteenth went to
-`parsed-churning-yeti`, which is shipped and so wants one under the convention above.
+- Read the relevant `AGENTS.md` architecture topics in full. Preserve package boundaries: API
+  authorizes/queues, worker executes, web uses the public API, and module web parts use the host's
+  `web-kit` API/session. Generic step forms use `FormSchema`; prose uses `MarkdownView`.
+- Treat stored detector output, repository bytes, agent replies and replay artifacts as untrusted.
+  Revalidate when rendering/using them; use the shared fence scanner/containment helpers. Repository
+  IO uses `fs-safe` anchored at the repository root and tools receive held descriptors.
+- Specify attempt identity, task epoch/step ownership and atomic claims for any new dispatch or
+  durable record. A retry after “committed but reply lost” must neither repeat a side effect nor
+  count a sample twice. A superseded run must not write the next attempt's output.
+- New schema uses guarded numbered migrations, columns declared last, schema parity and a
+  non-destructive code rollback. Never edit an applied migration or drop data as the code rollback.
+- Scope reads and writes to the authenticated owner; preserve Origin checks, private data and
+  secret boundaries. Keep missing, partial, unknown and not-run outcomes distinct from zero/pass.
+- Acceptance names the observable result, failure/recovery controls and resource limits. Use
+  isolated database/Redis for queue smokes, `pnpm docker` for dev lifecycle, and inspect active
+  tasks before source edits that reload the worker. Do not require untracked scratch or memories
+  from another machine to reproduce a check.
 
-**Four plans carry no blockquote, and that is deliberate rather than an omission:**
-`kind-riding-dream`, `patient-pinning-kernighan`, `purring-marinating-peacock` and
-`translator-module` are all not started, so this table is the whole record. MEASURED 2026-09-18 by
-counting blockquote lines in every plan file, so that list is complete rather than sampled; the
-fifth it found, `serialized-chasing-thacker`, gained one on 2026-10-12 when it was merged into
-`twinkling-frolicking-toast`.
+These are shared constraints, not a replacement for each plan's specific design. The reviewed
+pending sections now resolve the main ambiguities about measurement populations, price tiers,
+benchmark cohorts/sharing, parser coverage, probe identity, translation checkpoints, scan budgets
+and conditional phase gates.
 
-**One verdict is "landed differently", which is not the same as shipped.** `plan-document-import`
-describes a mechanism that is NOT what reached the tree, so its body must not be implemented as
-written; its blockquote says what shipped instead.
-
-**`plan-patch-partial-refs` was corrected from that same verdict to shipped on 2026-09-18**, after
-being re-measured against the applier rather than read off two throw sites. Its remedy is its own —
-`dropUnresolvableOps`, a pre-flight inside `apply-patch.ts` that every agent path reaches — and its
-field outcome was measured the same day by `plan-patch-drop-measurement`: the reply-loss rate went
-from 27% to 0 across 393 expansion agents. The lesson generalises:
-a verdict read from the PRESENCE of an error path can be exactly backwards, because the path may be
-unreachable for the input the plan was about.
+## Plans
 
 | Plan | Subject | Status |
 |---|---|---|
-| `amber-fencing-hopper` | Onboarding scope + LSP + mirror + retrieval | **In progress.** Slices 1-2 done (`e0bee51`); slice 3 partial (`5ca82ac`, 3b/3d open); slice 4 not started. Per-slice status is in its header blockquote. |
+| `amber-fencing-hopper` | Onboarding scope + LSP + mirror + retrieval | **Partially implemented.** Scope/mirror and centralized retrieval guidance ship; selected-LSP image layer (3b) remains pending, 3d is live acceptance. Header and remaining-slice contract reviewed 2026-11-12. |
 | `bright-doodling-catmull` | Scope-fence the blocking reviewers | **Shipped** `3415278`. Its end-to-end benchmark re-runs are unmeasured. |
 | `crispy-dazzling-crane` | Mid-task CLI credential harvest | **Shipped** `56a9cc3` |
 | `functional-knitting-fairy` | Global KB title digest at dispatch | **Shipped** `e9c2dfe` |
@@ -85,30 +79,30 @@ unreachable for the input the plan was about.
 | `yielding-preempting-dijkstra` | Vote-driven agent-slot preemption | **Shipped** `19bf74e` |
 | `external-change-catchup` | KB + plan catch-up for commits made outside Haive | **Shipped** `f177e2f` / `e799f08` / `7a01345`, plus `ca4b64b` for a tree-resolution defect found reviewing slice 2. Repo-page drift badge deferred by design |
 | `codex-app-server-steering` | Steer codex through its app-server JSON-RPC protocol | Implemented 2026-09-13 on `feat/codex-app-server-steering` — steerable codex runs use the app-server once a zero-token probe verifies it per task, with `codex exec` as the default and the fallback; verified on live runs against codex-cli 0.154.0 (mid-run steer, probe, same-invocation fallback, admin switch) |
-| `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | Not started; extended 2026-09-07 with the install-time channel, macOS as a first-class RUN-IT target, and a Docker Desktop Extension as the no-terminal path |
-| `kind-riding-dream` | Deep project analysis — resellable module | Not started; depends optionally on `purring-marinating-peacock` phase 2b |
-| `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | Not started |
+| `frictionless-bootstrapping-otter` | One-line install (RUN-IT) | **Installer, first-admin and channels implemented.** Channel install shipped T335 (#1007–#1009); remaining Docker Desktop Extension is an unverified proposal, vanity domain an owner decision. Namespacing S4 is separate acceptance. |
+| `kind-riding-dream` | Deep project analysis — resellable module | **Not implemented.** Foundations ship; reviewed design now names missing snapshot/guard/fix-loop/DAG policy contracts, durable budgets, range semantics and strict report persistence. Multi-model remains optional. |
+| `lexical-jingling-dawn` | Learned step guidance (self-improving prompts) | **Shipped.** `step-engine/guidance-context.ts`, `11e-prompt-guidance` and the config/API switches exist; the plan records as-built departures. Being disabled on a particular install does not make the feature unimplemented. |
 | `mcp-per-invocation-config` | Per-invocation MCP config for codex + grok (the per-task race) | **Not started, SHELVED and BLOCKED** on mechanism, 2026-09-18. Every cheap lever was probed against the live binaries and closed: `-c mcp_servers=…` and `-p/--profile` both MERGE rather than replace, so neither can narrow a surface; `--tools`/`--disallowed-tools` are grok-only and built-ins-only; none of codex's 140 feature flags gates MCP; grok has no config override at all. Only `CODEX_HOME`/`GROK_HOME` works, and it relocates the whole state tree (five live SQLite DBs, thread history, memories, `installation_id`, writer locks), so per-invocation isolation would discard cross-invocation state. The defect analysis and the muse `400` invariant still stand; the mechanism does not. gemini out of scope (no image, no provider row); antigravity left the set in #164. **Reopening condition, checkable rather than a judgement:** codex or grok ships a per-invocation config-FILE pointer, any flag that scopes MCP servers for one run, or REPLACE rather than MERGE semantics for `mcp_servers` on `-c`/`-p`. Until one of those appears, relocating the config home is the only mechanism and it discards cross-invocation state, so do not re-probe the closed levers |
 | `parsed-churning-yeti` | Project plan canvas | **Shipped** `7a217e57` (2026-08-25, persistence layer + blank repositories). Corrected 2026-09-18: this row still read "Not started" while `packages/database/src/schema/plan.ts` exists and `AGENTS.md` documents the canvas in depth — the row predated the work |
-| `patient-pinning-kernighan` | Runtime versions the generator ignores (Go/Rust/Ruby, DDEV node) | Not started; three different failures — Go is frozen, Rust/Ruby drift, DDEV node is detected then dropped — so one blanket fix would trade one for another |
+| `patient-pinning-kernighan` | Runtime versions the generator ignores (Go/Rust/Ruby, DDEV node) | **Implemented 2026-08-23**, as its own body records: generator/declaration changes and tests exist. Live generated-image/DDEV acceptance was not established by that record; do not rebuild the feature from this stale former “not started” row. |
 | `nimble-browsing-lovelace` | User-selectable browser type + version | **Shipped** `dde9c36` / `bc1b209` / `abb5609` for Chrome + Edge, each gated on a verified CDP handshake. Opera REJECTED on evidence — release builds do not expose CDP. Firefox excluded as a COST decision, not an impossibility — @playwright/mcp drives firefox and webkit |
-| `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; Phases 1-2 BACKLOGGED on a hand-merge measurement that failed its reopening condition. The fan-out unpin is carved out as the one piece worth building |
+| `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | **Backlogged.** Per-seat mining provider choice has shipped; model-set/consolidator phases 1/2b remain gated on evidence, 2c is dropped. Reopening design corrected for group claims, read-only members, parser/context bounds and rollback. |
 | `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic. Two browser defects found while verifying, plus a poisoned-npx-cache defect found with them, are fixed in `b7884e6` / `0580c51` / `507cb84`. Both bandwidth caveats are retired: nothing here passes `--no-cache`, and the apt cost is once per host, not once per template |
-| `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started, but its EVIDENCE is stale and its verdict is unverified. Corrected 2026-09-18: the header's grounds were "no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists" and all three DO exist, while `REVIEW_FANOUT_DISTILL` and `condenseSpecForReview` — the mechanism its first defect describes — are absent from the whole tree. Whether the three defects still hold needs its own pass; do not read this row either way |
-| `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12, kept as the design reference for task types |
-| `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12; companion to the above, neither supersedes the other |
-| `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12, kept as the design reference for modules and integrations, with integration decisions 1-4 LOCKED that day. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it. Integrations (Slices 6-8) added 2026-10-10: decisions 1-4 PROPOSED, write access DECIDED as one switch per user per integration |
-| `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | Not started; **next priority after `steadfast-committing-gray`**. Containers, networks, six volumes AND the RAG/global-KB databases all carry global names today, so a second install shares them SILENTLY |
+| `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | **Implemented.** Gate-1 spec artifact, `resolveSpecView`, DAG spec view, task ledger and summary mirrors are all connected. Historical live evidence/residual checks: `curious-drifting-lantern`. Re-verified 2026-11-12. |
+| `rippling-wibbling-puffin` | Modular (user-definable) task types | **Historical design; foundations implemented** through `twinkling-frolicking-toast`. Current contract: `docs/architecture/task-types.md`; deferred mechanisms are not implied shipped. |
+| `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | **Historical half-A design; implemented storage/seeding/snapshots.** See current task-types topic and merged-plan header; do not repeat enum conversion/migrations. |
+| `serialized-chasing-thacker` | Haive module system — extension infrastructure | **Historical design; module/integration/distribution foundations implemented.** Current modules/integrations topics win; Google provider, shared accounts and provider-pinned dispatch remain deferred. |
+| `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | **S0–S3 implemented; S4 live two-install isolation check remains.** Naming module and ownership rules ship. S4 runbook now requires isolated ids/projects/ports and positive/negative reaper controls. |
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
 | `toasty-percolating-kernighan` | Per-call agent isolation | **SHIPPED** 2026-09-21 in six PRs — #191 `7deb542d`, #192 `bde5722e`, #193 `fe3148a5`, #194 `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45` (planned 2026-09-14, re-verified twice before starting). An invocation that QUALIFIES no longer loads every repository agent definition and gets the assigned persona pasted instead — and read-only is necessary rather than sufficient: `agentIsolationApplies` (`dispatcher.ts:203`) also requires the switch on, a `prompt` input, no `file_write`, no `subagents`, no `agentPool: '*'` (which `07_7-secret-sweep` declares), and that neither the prompt with marker blocks stripped, nor any persona body verbatim, nor the provider's instruction chain names an agent path — a scan that could not be completed counts as naming one. Pasting additionally needs the SELECTED provider to have a `projectAgentsDir` (`:328`, `:557`); one without keeps its inline protocol. `rippling-wibbling-puffin` Phase 3.1 builds on it. Piece 4 shipped WITHOUT the exec-time recheck Decision 1 requires and was reported as built — #196 closed it, and the lesson is recorded in the plan: one writer and no readers is a shipped no-op. Verification item 2 is COMPLETE (#200, then #202 `842012ff` for the prompt-builder scan: 186 built prompts, 13 deliberate positives, 3 database-bound sources named), and it found a defect the plan had not predicted — `adaptPrompt` appends the MCP surface and the global-KB digest AFTER the rule returns, both carrying repository- or author-written text, so the rule gained a SEVENTH condition in #211 `689f842a`. What remains is items 1 and 4 (capture harness, the live 08c check), parked on the next onboarding run |
 | `twinkling-frolicking-toast` | Modular Haive: module system, data-driven task types and integrations (merges `serialized-chasing-thacker` and `rippling-wibbling-puffin`) | **Approved 2026-10-12, not started.** Shared contracts first, then task types, modules and integrations in parallel, then the joints, then distribution. Integrations are declared per step by category and resolved like a CLI choice (task override > user preference > admin default) |
-| `translator-module` | Translator — resellable module | Not started |
+| `translator-module` | Translator — resellable module | **Not implemented.** Foundations ship. Reviewed design specifies pre-form generation, durable per-pass/chunk checkpoints, loop-limit dependency, artifact ownership, bounded extraction/rendering and honest quality checks. |
 | `amber-provider-verdict-heron` | Persistent provider-verdict banner below the CLI terminal | **Shipped**, and its own status line said otherwise — corrected 2026-09-18. `failure-class.ts:215` carries `content_filter: 'Provider refused the prompt (content filter)'` with the refusal pattern at `:295` anchored on refusal-specific wording rather than generic words; `describeInvocationStatus` (`web/src/components/terminal/cli-stream-status.ts`) has its own unit test; `StepTerminal.tsx:536-544` renders the persistent amber block, reading the invocation row rather than the stream so it survives the CLI ending and the 600s stream expiry. It landed at `StepTerminal.tsx`, NOT the `CliStreamViewer.tsx` its checklist names |
 | `anointing-gatekeeping-ibex` | First-admin onboarding + registration gating | **Shipped in full** 2026-09-09, verified 2026-09-18: `registration-status` in `api/src/routes/auth.ts`, `CONFIG_KEYS.REGISTRATION_MODE` (`config.service.ts:129`) with `REGISTRATION_MODES` at `:619`, migration `0153_user_invites.sql`, and `/admin/users` |
 | `blank-repo-scaffold` | A blank repo arrives ready, and stops asking to be onboarded | **Shipped.** `'blank'` is a first-class repository `source` (`schema/repos.ts:30`) and `repo/clone.ts` scaffolds it; the repo-queue INIT job creates the storage dir, `git init`s it and lands one commit, which is what makes worktrees and the `.haive-data/` mirror work on a project that does not exist yet |
 | `calibrating-adversarial-mongoose` | QA reviewer-CLI benchmark: the persona x CLI matrix | **Findings record (part 1); part 2 shipped.** Verifier attribution is in the tree — 08d carries the per-lens verifier panel and `verificationTiers`, and 08d2 folds only findings a verifier actually executed and could not reproduce (`filteredCount`). The xhigh re-run it defers to ~2026-09-01 was never recorded as run |
 | `cli-prompt-delivery` | A large prompt must not crash the CLI that receives it | **Shipped.** `cli-adapters/prompt-delivery.ts` holds `MAX_ARG_BYTES = 131_072` (Linux `MAX_ARG_STRLEN`) and the measured failure it exists for — a Codex plan build losing 26 of 47 agents to `E2BIG`, 12 of 12 in two consecutive waves — with oversized prompts routed to stdin |
-| `curious-drifting-lantern` | Follow-ups from the agent-memory / spec-handoff verification run | **Not a single-status plan: a findings register, F1-F9, with per-item status inline.** Six fixed (`6e72b08`, `d5162d5`, `1243213`, `53aa478`); F2 NARROWED (`d73bb55`) with one sub-item still open whose fix was attempted and REVERTED (`3ac59bd`) under an explicit do-not-retry note; F3 a coverage gap needing no code change; F5 a process note; F8 root-caused and not fixed. Read the per-item headings, never a whole-plan verdict |
+| `curious-drifting-lantern` | Follow-ups from the agent-memory / spec-handoff verification run | **Historical findings register.** Per-item fixed/coverage/process notes remain; F2’s harmless duplicate-job optimization stays deferred. F8’s old bake-in-image proposal is superseded by the shipped npm-cache warm/private-seed architecture. No live re-run performed in this review. |
 | `curious-drifting-lantern-RESUME` | Resume note for a paused DAG verification run | **Not a plan.** An operational note from a 2026-08-21 power cut recording that global pause was left ON and how to resume. Kept as a record; nothing to implement |
 | `dag-timeout-ladder-gap` | DAG executor cannot climb the timeout ladder | **Shipped** 2026-08-24. `overrideOrLearned` and `escalatedTimeoutMs` live in `step-engine/dispatch-timeout.ts` with `dispatch-timeout.test.ts` beside it, consumed by `dag-executor.ts`. The escalation is written to the STEP rather than the issue, so a fan-out's wall-clock ceiling stays computable |
 | `glistening-jumping-bee` | Per-agent browser tabs, and reclaiming the tabs agents leave | **Shipped.** `BROWSER_TAB_DISCIPLINE` in `sandbox/mcp-surface.ts`; `closeExtraBrowserTabs` called from `step-runner.ts`, `app-runner.ts` and `ddev-runner.ts`. The tab it keeps is the one RECORDED as the human's, because three separate inference attempts were measured lying |
@@ -129,11 +123,11 @@ unreachable for the input the plan was about.
 | `agent-rules-followups` | Found-not-fixed follow-ups from the agent-rules series (12 PRs) | **Shipped** 2026-09-24: PR 1 #249, PR 2 #250, PR 3 #252, PR 4 #256, PR 5 #254, PR 6 #260, PR 7 #258, PR 8 #261, PR 9 #265, PR 10 #255, PR 11 #262, PR 12 #253. |
 | `found-not-fixed-sweep` | The found-not-fixed list cleared: fixes, a handover of seven recovery items, recorded reasons (25 PRs) | **Shipped** 2026-09-25: PRs 1-25, 5c, 21b and 24b (#267-#280, #282-#286, #288-#291, #294-#296, #299, #300). The seven recovery items went to the parallel recovery series. Open checkpoints: the release-action bumps (next rc) and Dependabot's first npm run after 2026-09-25 16:19Z. |
 | `found-not-fixed-sweep-2` | The consolidated found-not-fixed list, including the recovery session's hand-over: fixes and recorded reasons (24 PRs) | **Shipped** 2026-09-26: PRs 1-24 and 20b (#301-#325). Open checkpoints: Dependabot's first npm run after 2026-09-25 16:19Z and the release-action bumps (next rc). |
-| `found-not-fixed-sweep-3` | The next found-not-fixed list: orchestration, the merge fixer, upgrade and rollback, storage and images, web and the e2e harness (Track A); Track B is `two-install-project-sync` | **In progress** 2026-09-26: Phase 0 shipped (B0.1 #326, B0.2 #327, B0.3 #328, B0.1b #329); A1 shipped and live-verified (#330-#335); A2.1 shipped and live-verified (#336); A2.1b shipped and live-verified (#337); A2.2 shipped and live-verified (#338); A3.1 shipped and live-verified (#339); A3.1b shipped and live-verified (#340); A3.2 shipped and live-verified (#341); A3.3 shipped and live-verified (#342); A3.4 shipped and live-verified (#343); A3.5 shipped and live-verified (#344); A3.6 shipped and live-verified (#345); A3.7 shipped and live-verified (#346); A4.1 shipped and live-verified (#347); A4.2 shipped and live-verified (#348); A4.3 shipped and live-verified (#349); A4.4 shipped and live-verified (#350); A4.5 shipped and live-verified (#351); A5.1 shipped and live-verified (#352); A5.2 shipped and live-verified (#353); A5.3 shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 shipped and live-verified (#359); A2.3 shipped and live-verified (#360); A5.6 shipped and live-verified (#361). |
-| `two-install-project-sync` | Project state that travels between installations: a committed per-unit record, three-way sync with conflicts asked, the plan, checkout moves, repository-level CLI set and rules block | **In progress** 2026-09-26: Phase 0 shipped and live-verified: B0.1 (imported MCP servers inert until accepted, #326), B0.2 (refresh fast-forwards, #327), B0.3 (mirror import hardening, #328); phases 1-5 not started. |
-| `rag-retrieval-improvements` | RAG retrieval: external sources checked against Haive, measured findings, ranked phases | **Not started** 2026-09-30: a findings register and a ranked plan, nothing approved; P0 (retrieval eval) gates the rest. |
+| `found-not-fixed-sweep-3` | The next found-not-fixed list: orchestration, the merge fixer, upgrade and rollback, storage and images, web and the e2e harness (Track A); Track B is `two-install-project-sync` | **Historical sweep; Track A and Track B core implemented.** B5 reached #988. Follow-ups/checkpoints remain in root `TASKS.md`; do not replay this PR list. |
+| `two-install-project-sync` | Project state that travels between installations: a committed per-unit record, three-way sync with conflicts asked, the plan, checkout moves, repository-level CLI set and rules block | **Core phases implemented.** Current project-state/plan/refresh topics are authoritative. B5.1 #973/#976/#979; B5.2/B5.3 #988. Remaining follow-ups/checkpoints have independent board entries. |
+| `rag-retrieval-improvements` | RAG retrieval: external sources checked against Haive, measured findings, ranked phases | **Partially implemented.** Historical P0 eval, P1 chunking/own-file budgets, dense settings and P2(e) accent configuration landed. Ranking experiments T144/T147 need a reproducible current eval; P3/P4 remain conditional. Header and eval/rerank contracts corrected. |
 | `aide2-harness-lessons` | What Weco's AIDE² paper offers Haive: bounded role-scoped plan context, a change of approach when a fix loop stalls, checks the fixer cannot see, cheaper models on narrow seats, and grading prompt changes on fixed inputs | **In progress** 2026-10-03: first wave approved 2026-10-02 (P0, P1's parity arm, P2, F17, F18); F17 shipped (diagnosis head and tail reach 07, #395); P0 shipped (the Haive build on every CLI run, #396); P1's parity arm shipped (sequence agents see a bounded neighbourhood, #397); P2 shipped (07 is told when the same check sent the last round back, #401); F18 shipped (Haive's fixer instructions reach 07 outside the fence, #436, follow-ups #437). |
-| `abstract-splashing-owl` | Enforced global-KB house rules: a skills-style title and description list, admin-enforced rules that Haive loads by scope, 07b blocking on violations in changed lines; folds in three found-not-fixed fixes (Drupal 7 facet family, title-list omission notice, lint verdict scoped to the change) | **In progress** 2026-10-03: approved; PR1 shipped (#398), PR2 shipped (#399); PR3 shipped (#402); PR4 shipped (#400); PR5 shipped (#432); PR6 (house rules in prompts, the 07b check, the gate row) in review. |
+| `abstract-splashing-owl` | Enforced global-KB house rules: a skills-style title and description list, admin-enforced rules that Haive loads by scope, 07b blocking on violations in changed lines; folds in three found-not-fixed fixes (Drupal 7 facet family, title-list omission notice, lint verdict scoped to the change) | **PR1–PR7 implemented; PR8 gated.** Similarity remains off/record only; T298 needs graded per-rule data and T300, T299 owns PR7a live evidence. Reviewed 2026-11-12. |
 | `harness-cadence-by-model` | What "Are Harnesses Worth the Cost?" (martinfowler.com, 2026-10-13) offers Haive: checks during implementation for cheaper models, the final gate kept for all, measured before built | **Not started** 2026-10-13: findings and phases, nothing approved; P0 (a two-arm measurement) gates P1; test-edit weakening is `aide2-harness-lessons` P6. |
 | `blastloop-lessons` | What BlastLoop (rlshaw-ml/BlastLoop) offers Haive: one owner per shared contract, measured against parallel DAG issues that conflict on shared files | **Shipped** 2026-10-16: P0 merged as #814 (`b8a3fc780`): a DAG level merge records each conflict's files in a `dag_issue.merge_conflict` task event, written with the conflict status. P1 (contract-first rule in the planner and the advisor's SPLIT) and P2 (overlap guard) stay parked on measured cost until that event's data reopens them. |
 | `parsimony-lessons` | What Parsimony (parsimony.lasu.dev) offers Haive: a change-size counter in syntax units, `07a-code-simplify` measured before and after, change size per CLI/model in statistics read only on successful tasks, medians and explicit-failure rules for existing statistics, and same-task replay for a paired comparison | **Not started** 2026-10-17: findings and phases, nothing approved; P0 (the counter and the 07a measurement) gates the rest; the counter parses with tree-sitter (decided 2026-10-17). |
@@ -146,50 +140,30 @@ unreachable for the input the plan was about.
 | `agent-memory-lessons` | What Anthropic's agent-memory research and its dreaming (offline consolidation) offer Haive: step 11 able to reconcile every learning, records for the next benchmark round, the measurements that round must take, and a consolidation pass, an injected learnings layer, purpose framing and steering by model each built only on its trigger | **Not started** 2026-11-11 apart from P0, shipped with T580 (`a3d71d4f7` every learning listed, `dfa43bf68` the `learning-recorder` persona matching the reconcile protocol); P1 records and P2 measurements come before any P3 gap; legacy `.claude/learnings` is a benchmark precondition, not a defect. |
 | `tokeneconomizer-lessons` | What Microsoft TokenEconomizer (arXiv 2610.22732) offers Haive: its `AbsentTool` fact built from the sandbox image rather than learned from failures, so an agent is told before its first command which of its repository's interpreters the image cannot run; tool pruning, the loop guard, the other learned facts and cost accounting measured and not ported | **Not started.** One PR: a per-image `command -v` probe, a peek at the image that never builds, and a prompt block per provider at dispatch. Written 2026-11-12 |
 
+| `calm-crafting-fiddle` | Channel installation and upgrade (T335 / D2b) | **Shipped** 2026-11-05, #1007–#1009. Historical A/B/C plan now links to the as-built modules topic; independently tracked follow-ups remain. |
+| `message-threads-bandwidth` | Measure CLI incremental-request transports and any blocked egress prerequisites | **Not started.** Review corrected encrypted-tunnel observability, experimental controls, token-count expectations and dated external-contract checks. |
+
 ## Cross-plan dependencies
 
-- `kind-riding-dream` and `translator-module` both build on the module system in
-  `serialized-chasing-thacker`, and both reference `purring-marinating-peacock`'s multi-model
-  fan-out as an optional improvement, never a prerequisite.
-- `serialized-chasing-thacker` and `rippling-wibbling-puffin` turned out to depend on each other
-  only at their joints (module steps in the step catalog, module-seeded task types, dangling
-  references, dead tasks, step integration requirements), so both are merged into
-  `twinkling-frolicking-toast` (2026-10-12): shared contracts first, both cores and the
-  integrations track in parallel, the joints last. Integration decisions 1-5 are all locked there.
-- `glistening-percolating-snowflake` rides `.haive-data/`, which shipped as slice 2 of
-  `amber-fencing-hopper`.
-- `steadfast-committing-gray` and `frictionless-bootstrapping-otter` share one slice exactly:
-  published images plus the compose `run` overlay are otter's RUN-IT prerequisite and gray's Phase 0
-  prerequisite. Whichever ships first builds them. Otter owns the FIRST install; gray owns every
-  install after it, which is the follow-up otter names and defers. They also share the CHANNEL: gray
-  made the release manifest per-channel for upgrades, and otter resolves the same channel at install
-  time — an installer that always fetched the public manifest would hand a module customer the wrong
-  stack before any upgrade happened.
-- `steadfast-committing-gray` generalises `serialized-chasing-thacker`'s urgent/graceful drain
-  choice from module scope to system scope.
-- `solitary-partitioning-lampson` is what lets a published install and a dev checkout run side by
-  side, and therefore what lets `steadfast-committing-gray`'s upgrade path be tested with the worker
-  running. Not a prerequisite for that plan — with the dev stack stopped there is nothing to collide
-  with — but the reason its install tests have to exclude the worker today. It also closes the
-  silent half of the collision recorded in `frictionless-bootstrapping-otter` under "Two installs on
-  one machine": containers and networks clash loudly, the six named volumes and the RAG databases
-  share without a word.
-- **Decided 2026-09-07, spanning four plans:** a published-image install has no source and no build,
-  while a module is rebuild-on-install — so such an install could run no modules, including the paid
-  ones the module system exists to sell. Resolved in favour of **per-customer api+worker images
-  built by the vendor**, derived from a base release, with web left as the stock public image. The
-  reasoning and the two rejected alternatives live in `serialized-chasing-thacker` under "DECIDED —
-  a published-image install gets PER-CUSTOMER images built by the vendor", because it is that plan's
-  locked rebuild-on-install constraint that created the conflict. A user's OWN module is the other
-  half of the same decision and does NOT force them into a developer checkout: the stack runs a
-  published `haive-builder` image as a one-shot to build api+worker locally. Four-cell delivery
-  matrix in that section. `frictionless-bootstrapping-otter` (RUN-IT), `kind-riding-dream` and
-  `translator-module` inherit it; `steadfast-committing-gray` carries two consequences — a
-  per-channel release manifest, and a Phase 0 local rebuild for installs that carry own modules.
-- Authoring a TASK TYPE is unaffected by all of the above: `rippling-wibbling-puffin` makes task
-  types data and states at Phase 3.1 that prompt-template steps need no rebuild. Only a module
-  contributing steps, routes or jobs requires a build.
-- `toasty-percolating-kernighan` ships first and independently, and `rippling-wibbling-puffin`
-  Phase 3.1 builds on it: a prompt-template step's `agentPool` and `{{agent:<id>}}` tokens reach
-  the same per-invocation agent isolation, and the token widens that plan's persona resolver for
-  personas with no inline fallback.
+- `kind-riding-dream` and `translator-module` use the **shipped** module/task-type foundations.
+  Read the architecture topics, not the old modularity plans as a to-do list. Deep scan still
+  needs its explicitly named core capabilities; translation must validate its long-job contract.
+- `purring-marinating-peacock` model-set consolidation is optional for both modules and stays
+  backlogged. Per-seat CLI selection already exists and is not that feature.
+- `step-benchmark-suite` owns the shared frozen-input replay harness used by
+  `refactoring-economics-lessons` P1, `parsimony-lessons` P3 and `aide2-harness-lessons` P8.
+  Build its minimal P6 store before P1's runner; cost pilots/measurement gates still apply.
+- `agent-memory-lessons` P0 and `sleep-paper-lessons` PR1/PR2 shipped together with T580.
+  Further learning instrumentation/experiments follow their P1/P2 gates; estimator P3 needs
+  eligible historical data. Independent step samples do not test cross-task memory: a memory
+  experiment needs isolated repository sequences with a reset between arms.
+- `time-and-cost-report` uses one completed-task population. `human-time-idle-detection` may add
+  plan-page activity by repository/hour, shown separately so the report still reconciles.
+  Check-run duration records and attention intervals use distinct attempt/coverage identities.
+- Channel images/builders/install/upgrade now ship (`calm-crafting-fiddle`, `steadfast-committing-gray`,
+  `frictionless-bootstrapping-otter`). A module with compiled web parts needs a web build; a
+  declarative page does not. Private Docker pull credentials live on the install, vendor npm
+  credentials do not. Per-install naming ships, with S4's live isolation check still separate.
+- Portable onboarding state now uses `two-install-project-sync`'s record and outbox. Older
+  environment/tooling mirror sketches are historical compatibility detail. Use the current
+  onboarding/plan/refresh topics when extending state, never a second competing writer.

@@ -1,8 +1,11 @@
 # One-line install for Haive
 
 > **The installer SHIPPED 2026-09-08** as `install/install.sh` and `install/install.ps1`, and was
-> exercised on both platforms against published images — see "As built" below. Still absent from
-> it: first-admin bootstrap (owned by `anointing-gatekeeping-ibex`) and non-public channels.
+> exercised on both platforms against published images — see "As built" below. **Status corrected
+> 2026-11-12:** first-admin bootstrap also shipped (`auth.ts`, `anointing-gatekeeping-ibex`),
+> as did non-public channels (T335, #1007–#1009, `calm-crafting-fiddle`). Per-install naming
+> shipped S0–S3; S4 live isolation evidence remains separate. The Docker Desktop Extension is
+> still an unverified future proposal; domain registration is an owner decision, not code.
 >
 > Status: PROPOSED, 2026-08-25. Prompted by the DeepSeek `dsh` harness (harness.pdf), whose entire
 > install is `npx @deepseek-ai/dsh web` — a browser tab opens, asks for an API key, and a full
@@ -60,13 +63,14 @@ images.** A module is rebuild-on-install by `serialized-chasing-thacker`'s locke
 customer adds a dependency and rebuilds api+worker — which a RUN-IT host, having no source and no
 toolchain, cannot do. The resolution keeps RUN-IT's promise exactly as written: the VENDOR builds
 api+worker with that customer's entitled modules and publishes a private per-customer tag, so the
-install still performs no build and holds no registry token. See "DECIDED — a published-image
+install still performs no source build. As built, a private channel DOES hold an install-local
+Docker pull credential under `.docker/`; it never receives the vendor's npm publish token. See "DECIDED — a published-image
 install gets PER-CUSTOMER images built by the vendor" in that plan, which owns the reasoning and the
 rejected alternatives.
 
 Two consequences land on this plan, and neither costs the default install anything. A module
-customer's compose bundle pins their per-customer api+worker tags (web stays the stock public image,
-since nav and pages are runtime-fetched), so the installer fetches the manifest for the customer's
+customer's compose bundle pins their per-customer api+worker tags (web stays public only for modules without compiled web parts; modules exporting `./web` or
+`./dashboard` need a channel web build too), so the installer fetches the manifest for the customer's
 channel rather than the public one. And a user installing their OWN module — from a git URL or by
 folder-drop — pulls a `haive-builder` image the stack runs as a one-shot to build api+worker
 locally; they never clone Haive and never install a toolchain, so no RUN-IT user is pushed into
@@ -340,48 +344,22 @@ Sequencing: the one-liner ships first and is the documented path. The Extension 
 later piece of work that reuses the same compose bundle and the same first-run setup, adding a
 surface rather than a second installer.
 
-## Two installs on one machine — NOT possible today
+## Two installs on one machine — naming shipped, live acceptance separate
 
-Worth stating before someone tries it, because the failure is not a clean refusal. Compose gives
-each project its own namespace, but this stack overrides that in three places, all of which are
-GLOBAL to the daemon:
+`HAIVE_INSTALL_ID` and the shared naming helpers now namespace owned resources; use a distinct
+id, Compose project and host ports for each install. Never reuse volumes or ids to test this.
+`solitary-partitioning-lampson` S4 remains the explicit reaper/isolation check, with ownership
+labels included. Keep all project data volumes; never run the development stack with `down -v`
+or volume-prune commands. Published installer uninstall behavior is a separate explicit user
+operation, not a development verification shortcut.
 
-- every service sets an explicit `container_name` (`haive-api`, `haive-postgres`, …);
-- all three networks set an explicit `name:`;
-- six volumes set an explicit `name:` — including `haive_repos`.
-
-Containers and networks would collide, which is loud. The volumes would SILENTLY SHARE, which is
-not: a second install would mount the first one's cloned repositories and its worker would act on
-them. That is the part that makes "just try it" a bad idea.
-
-The fix has its own plan — `solitary-partitioning-lampson`, the next priority after
-`steadfast-committing-gray` — because it is wider than these three: the worker also constructs
-sandbox containers, auth and IDE volumes, runtime runners and the RAG/global-KB DATABASE names in
-code, and several reapers select what to delete by matching those same prefixes. A per-INSTALL id
-defaulting to today's names keeps an existing install byte-identical. **Not a version in the
-name** — the name must identify the install, not what it currently runs, or every upgrade renames
-every container and a rollback renames them back, breaking anything holding a name and cutting logs
-and monitoring in half at each release. The version already lives in the image tag and at
-`/version`, which is where a changing value belongs.
-
-**RESOLVED 2026-09-08.** `lampson` S0-S3 shipped, so this is no longer a limitation: pass
-`--install-id <id>` (`-InstallId` on Windows) and the second install names its own containers,
-volumes, networks, images and databases. The installer writes it to `.env` as `HAIVE_INSTALL_ID`
-and uses it for `COMPOSE_PROJECT_NAME` too. Omitting it gives `haive`, which is byte-identical to
-what shipped — so an existing install is unchanged.
-
-One correction to the uninstall section below, forced by the same facts: `docker compose down -v`
-is WRONG while any install shares this machine. Five volumes carry an explicit global `name:`, so
-`-v` from one install takes the other's cloned repositories with it. The generated `uninstall.sh` /
-`uninstall.ps1` removes only the project-scoped volumes and NAMES the shared ones rather than
-touching them.
-
-## First-run setup — the part that does not exist yet
+## First-run setup — shipped; historical proposal below
 
 > Detailed in its own plan: `anointing-gatekeeping-ibex` (first-admin onboarding + registration
 > gating). That plan owns the auth/user model; this section is the installer's view of it. VERIFIED
-> against the tree: `POST /auth/register` is open and makes every user a `'user'`, there is no
-> first-admin bootstrap, and the web already has a `(auth)/register` page — so the gap is real.
+> against the tree when written; that baseline is obsolete. `registration-status`, setup-token
+> bootstrap and registration modes now exist. The bullets below are historical alternatives,
+> not an instruction to add another unauthenticated setup route or plaintext admin-password flag.
 
 `bootstrap.ts` bootstraps signing secrets, and `auth.ts` has `/login`, but there is NO first-admin
 creation flow: a fresh DB has no users, so the app opens to a login wall with no way in. The

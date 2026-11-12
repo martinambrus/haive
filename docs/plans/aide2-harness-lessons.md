@@ -282,8 +282,8 @@ Two arms, in order:
    character budget. F2 says 99.7% of this role's output stays inside what it is shown about its own
    node.
 
-Trade-off, stated in the prompt: a node outside the neighbourhood carries no id, so the rare
-cross-subtree `depends_on` (0.3% in F2) can no longer be named.
+Trade-off, stated in the prompt: a node outside the neighbourhood carries no id, so the cross-subtree `depends_on` outside that view can no longer be named directly. F2's
+re-measurement found zero genuine cross-subtree links; the old 0.3% claim counted malformed refs.
 
 Arms are compared on the same parents from the same plan state, and two waves on one repository cannot
 give that: `loadAskedParents` collects every parent any sequence agent of the repository was ever asked
@@ -335,6 +335,23 @@ half waits for a stable defect identity (D3). Verification: resolution unit test
 at a gate and answered with another provider runs its next 07 on it, and a SELECT of both preference
 tables is identical before and after. Rollback: additive; removing the option restores today's
 resolution.
+
+P3 reuses existing `task_step_cli_choices`; do not add another user-wide preference table.
+A “next round” override must name its target round/role and be consumed or expire after that
+round, with a clear UI preview of its scope. Re-check provider ownership, enabled state and
+capabilities when dispatching; no silent fallback to another model. Persist the override and the
+round transition in the existing fenced transaction so Retry cannot dispatch both choices.
+
+P4/P5 below remain pending in the current tree: plan chat still calls `renderPlanMarkdown`,
+and its `rag_only` surface cannot be assumed to offer a versioned plan lookup. D11's snapshot or
+lookup is a prerequisite. Retained chat messages exceeding a new submit limit must have an explicit
+legacy path (show the oversized pending turn and require a user edit, or a bounded continuation);
+otherwise a new limit strands a message that already exists. A snapshot is scoped to one owned
+dispatch, uses repository-safe IO and a bounded lifetime, and cannot expose another user's plan.
+The total prompt budget must reserve fixed instructions, the pending user turn, attachments,
+agent/house rules and output before packing optional context. A plan-context constant alone is
+not a model-context bound. Apply reports partial/version-refused ops through `applyAgentPatch`,
+never silently retries against a newer version or advances an external watermark over unseen work.
 
 ### P4. Bound plan chat's whole prompt
 
@@ -391,9 +408,10 @@ node lies outside the index still gets a proposal for it. Rollback: revert.
 
 Cheap half first:
 
-- Each fix prompt (07's fix pass, 08b's fix pass and the DAG fix coder) gets one line: the defect is
-  re-checked by checks the fixer cannot see, so fix the behaviour, and change a test's expectation only
-  where the spec says it is wrong, naming that spec line in the reply.
+- Each fix prompt (07's fix pass, 08b's fix pass and the DAG fix coder) asks for a behaviour
+  fix and permits changing a test's expectation only where the approved spec proves it wrong,
+  naming the spec section. Do not claim unseen checks exist: this cheap half records edits
+  but does not create a private grader. State the actual final checks and their independence.
 - Each fix pass's test edits are recorded when the pass ends, host-side: the test files it changed;
   each one's content before the pass, kept whole as an immutable reference (a blob), which the
   heavier half replays from; and a bounded patch of each for display. A later pass editing the same
@@ -421,6 +439,18 @@ writes a test and pass 1 edits it, recording the edit under pass 1 alone; a thir
 same file, which leaves pass 1's reference unchanged; the gate row rendered from that record; a
 heavier-half re-run that leaves the integration worktree byte-identical; and field counts. Rollback:
 the record is additive, the rest display and prompt only.
+
+P6 captures its before-image before dispatch and its after-image after the owned pass settles,
+using repository-root `fs-safe`/held git reads. Key records by invocation/pass/round and pin blob
+hashes, including added/deleted/renamed/binary tests, test config, harness and fixtures. A
+self-reported changed-file list is insufficient. Keep immutable blobs out of the agent mount,
+with bounded storage and retention; a missing/over-budget image is “not captured”, not no edit.
+Store durable references in task events because step resets clear output. Test crash/retry and
+concurrent cancellation. Showing a diff does not mechanically decide expectation weakening.
+The heavier replay runs project code only in the credential-free command sandbox or a disposable
+DDEV runtime, never in the host worker. Grade unchanged acceptance expectations as well as test
+success, and mark unavailable commands unknown. Reuse the shared frozen-input harness specified
+in `step-benchmark-suite.md`, not an untracked review-corpus script as a required dependency.
 
 ### P7. A cheaper model on a narrow, high-volume seat (configuration, no code)
 

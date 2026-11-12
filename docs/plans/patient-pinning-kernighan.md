@@ -1,6 +1,6 @@
 # patient-pinning-kernighan — runtime versions the spec can express but the generator ignores
 
-Status: IMPLEMENTED 2026-08-23 (unit/tsc verified, NOT live-e2e — no image was built and no DDEV
+> Status: IMPLEMENTED 2026-08-23 (unit/tsc verified, NOT live-e2e — no image was built and no DDEV
 project was booted from a generated config).
 
 What shipped, against the three shapes below:

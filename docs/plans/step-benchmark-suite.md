@@ -1,5 +1,7 @@
 # Step benchmark suite: models and efforts measured through Haive, one step at a time
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
+>
 > **Not started** 2026-10-20. Written on a machine with almost nothing onboarded, so every token
 > number this plan needs is a step to run, not a figure stated here. P0 (token estimates) runs first
 > on the machine that holds the earlier benchmark tasks, and its numbers gate the scope of P1-P5.
@@ -13,7 +15,7 @@
 
 The benchmarks in `benchmarks/` (README, onboarding and full-workflow comparisons from 2026-07 to
 2026-09) ran whole tasks end to end on one 2008 PHP repository: a README task, a full onboarding
-with KB generation, and a DDEV task. Four problems make them unfit to compare models:
+with KB generation, and a DDEV task. Six problems make them unfit to compare models:
 
 - **Too slow and too expensive to repeat.** Even the README task, run as a bugfix workflow, goes
   through many steps and takes hours. Monthly subscriptions run out of 5-hour and weekly allowances
@@ -73,14 +75,16 @@ Run before anything is built. Every query reads only successful runs, by the ste
 predicate (`step-runner.ts`): `ended_at IS NOT NULL`, `exit_code = 0`, `trim(error_message)` null or
 empty, plus `superseded_at IS NULL`. Exit code alone is not enough: a codex app-server run or a
 stream without a success result can exit 0 with an error recorded, and such partial runs would
-understate tokens and time. Killed runs record wrong token usage
-(`refactoring-economics-lessons`, Found not fixed: the `getTokenUsage` fallback in
-`queues/cli-exec/stream.ts`), so they would skew every figure.
+understate tokens and time. Historical killed-run usage predates the per-message fallback fix
+(`assistantUsageByMessage` in `queues/cli-exec/stream.ts`); exclude those partial attempts from
+the successful-run cost pilot, but report their count and spend separately when estimating the
+full matrix budget. A matrix result itself must retain failures and unknown outcomes.
 
 1. **Per-step cost table.** For every step id in `CLI_DISPATCH_STEPS` that has rows: number of
    invocations, median and p80 of input, output, cache-read and cache-write tokens, wall time as
    `ended_at - started_at` (the expression `modules/statistics/src/routes.ts` uses, since
-   `duration_ms` is null on some successful rows), and `cost.costUsd` (notional where `billable` is false). Group by step id, CLI provider,
+   `duration_ms` is null on some successful rows), and `cost.costUsd` only on priced snapshots (`source != none`), separated into real and
+   notional. Missing/unpriced snapshots are unknown, never zero-price samples. Group by step id, CLI provider,
    model, and effort. Model is `coalesce(model_identity.served, model_identity.requested)`, else
    `unknown`: codex `exec` records only `requested` and its app-server records `served` only on a
    reroute (`docs/architecture/cli-adapters.md`), so grouping on `served` alone would merge every
@@ -105,8 +109,8 @@ understate tokens and time. Killed runs record wrong token usage
    provider subscription in use (Claude, Codex, others).
 5. **Scale factor for the new fixture.** Historical numbers come from the 2008 repository and
    overstate a small fixture. After P2 exists, run each candidate step once on it at a middle effort
-   and take `tokens(fixture) / median tokens(history)` per step. Until then, treat history as an
-   upper bound and use it to rank steps by cost.
+   and take `tokens(fixture) / median tokens(history)` per step. Until then, use history as a sizing heuristic to rank steps by cost, with uncertainty;
+   it is not a guaranteed upper bound for another fixture or model.
 6. **Matrix size.** Per step: `models × efforts × fixtures × k × median tokens(step, model, effort)
    × scale factor`, k = 2 plus an expected 20% third runs (P4). Sum over steps, convert with step 4's
    ratio to weeks of allowance, and write the table into this plan's **Decided** section.
@@ -124,6 +128,18 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
 `08c-code-review`, `10-gate-3-commit` (message). Not benchmarked: model-health canaries,
 `01e-external-kb-sync`, `01f-external-plan-sync`, `13-pr-wait`, `01a-app-boot`.
 
+P0 includes A/A pilots, judge calls, adaptive runs, fixture capture and failed attempts in the
+allowance/time budget; the model-call formula alone omits them. A subscription usage delta is a
+noisy, provider-specific observation (different token buckets and concurrent usage consume limits
+differently), not a stable tokens-to-weeks conversion. Record the measurement window and concurrent
+usage, and report a range. No token-history machine or scratch transcript is required for a reader
+to implement P1: persist the chosen pilot table here before running the matrix.
+
+**Build order.** P0 → minimal P6 schema/module and pack codec → P1 capture/runner → P2 reference
+pack and P3 deterministic graders → P4 pilot/matrix → P5/P6 views → P7 sharing. P1 writes P6's
+store, so P6's storage is a prerequisite, despite its section number. P4's cost approval remains
+separate from this documentation review.
+
 ## P1 — Fixture capture and a single-step runner
 
 - **Capture switch.** A per-task or per-step flag. At `llm` dispatch, the worker writes a fixture:
@@ -138,8 +154,8 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   rows are never edited, so a matrix can never run whichever model one happens to be configured
   with. It restores the fixture into a throwaway workspace and sandbox, sets the CLI choice and effort,
   re-renders the prompt from current step code (so a result always measures Haive as it is now),
-  runs the step's dispatch phase (+ `apply` when the output is files), grades it (P3), and writes
-  one result row.
+  runs the step's dispatch phase (+ `apply` only when allowlisted for isolated replay),
+  grades it (P3), and writes one result row.
 - **Two dispatch shapes.** Steps with `llm` run that phase once. Steps that dispatch through
   `agentMining` (`08c-code-review`, plan-build `01-plan-build`, part of `09_5-skill-generation`)
   run ONE mining agent per sample: the fixture names the agent (reviewer dimension, plan node,
@@ -157,8 +173,8 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
 - **Fixtures belong to a pack.** A fixture is captured from a run on a pack's repository and stored
   under that pack; a fixture captured from a user's own repository is a private pack that is never
   exported (P7).
-- **Cohort.** A matrix pins each CLI's version for its whole duration. The cell key is (step,
-  model, effort, CLI version, `haive_build`), and a cell whose rows mix versions is refused, since
+- **Cohort.** A matrix pins each CLI's version for its whole duration. The cell key includes pack hash, fixture/unit id, step, requested model, effective effort
+  level **and source**, CLI version, grader version, and `haive_build`, and a cell whose rows mix versions or other cohort inputs is refused, since
   a CLI upgrade between weekly allowances changes prompt handling, tools and output parsing.
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
   results with old ones and reports the fixture as stale. Results are compared only within one `haive_build`: a
@@ -166,14 +182,44 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   git sha unchanged on a dirty tree, but not the build stamp. Re-capture is one cheap run of the
   upstream steps on the fixture repo, not a benchmark. The rule holds across installs too (P6, P7):
   two results are compared only when their pack hash, build stamp, grader version and CLI versions
-  all match. Installs on one release share the stamp `release:<version>`, so users on that release
-  pool their runs. A `tree:` stamp names an uncommitted checkout no other install can reproduce,
+  all match. Installs on one release may share `release:<version>`, but pool only with identical
+  relevant runtime inputs. Also hash the sandbox image digest, module/adapter versions, rules,
+  house-rule approvals, prompt-building inputs and retrieval snapshot. The build stamp alone
+  cannot identify these mutable facts, and its current implementation excludes built library
+  dist. An unknown build or an unverifiable environment is local-only, outside comparisons. A `tree:` stamp names an uncommitted checkout no other install can reproduce,
   so such results stay local and are never exported.
 - **Replay at zero tokens.** Every cell and every repeat gets the same prompt, so a prompt hash
-  cannot identify a response. A replay restores the fixture, applies the workspace diff stored on
-  one chosen result row (that row's id is the key), and runs `apply` and the grader on that row's
-  raw output. Grader and `apply` changes then
+  cannot identify a response. A replay restores the fixture and the recorded **pre-apply** workspace mutation from
+  one chosen result row (that row's id is the key), then runs `apply` exactly once and the grader
+  on that row's raw output. Capture pre-apply and post-apply tree hashes separately; applying
+  the final diff and then calling `apply` would perform file mutations twice. Preserve modes,
+  deletes, renames, binary files and untracked files; a text-only patch is insufficient. Grader and `apply` changes then
   re-run without any model call. Model and effort comparisons always run live.
+
+**Isolation and reproducibility gates.** A capture is a versioned immutable manifest of every
+read needed by this dispatch: fixture tree/state, step rows, form answers, persona definitions,
+rules/house rules, RAG corpus/query configuration, global KB and time/random seeds where relevant.
+Do not silently read the live database or live RAG store on replay. Run the normal dispatch and
+adapter path so current code is measured, recording both the rendered source prompt and final
+provider-specific `dispatch_prompt`; different CLIs may adapt it differently. Input identity is
+frozen within a cohort, not across different builds. Refuse unsupported standalone steps by a
+capability list; do not invoke general task advance and accidentally run the rest of the workflow.
+In particular a gate-3 message sample must intercept commit/push side effects.
+
+Benchmark provider clones, invocation rows and queues need a dedicated database/Redis namespace
+and auth resolution supplied by the harness, rather than live task inserts that the dev worker can
+consume. Never copy plaintext secrets to a fixture or result. Reuse credentials by an authorized
+reference at run time, preserve routing/auth mode, and clean up only harness-owned rows/containers.
+Repository bytes enter capture/export via `fs-safe` and held tool descriptors. Compare the source
+fingerprint before/after capture and refuse a moving tree. Kill-and-await every process/container
+on timeout, with bounded disk, output, memory and wall time. A failed or timed-out sample remains
+a result with a structural outcome; it is never silently rerun until it passes. A served-model
+reroute or dropped effort is disclosed and excluded from the intended cell, not relabelled.
+
+The runner and fixture loader cannot depend on untracked scripts, scratch `.claude` files or a
+memory key on one machine. Commit the minimal harness/fixtures needed to reproduce each check.
+Preserve private/public provenance on capture; public export requires a separately reviewed
+allowlist of pack artifacts, never the task workspace wholesale.
 
 **Check.** A fixture captured from a real run replays to an output of the same shape. The same
 result row replayed twice gives a byte-identical grade. A stale fixture is refused.
@@ -228,8 +274,9 @@ not runnable. For an authored pack the reviewed ideal output is part of the pack
    A pairwise verdict depends on the opponent, so it is not a per-run grade: verdicts go into their
    own record (run A, run B, order, winner or tie) and are reported as win rates per pair of
    cells. The per-run grade on a result row comes only from layers 1 and 2, and only that grade
-   feeds P4's means, A/A spread and intervals. A/A for the judge is a cell judged against itself,
-   whose win rate should sit near 50%.
+   feeds P4's means, A/A spread and intervals. For judge calibration compare independent outputs from the same cell in both orders,
+   track ties separately, and require no systematic position preference. Identical output
+   against itself should tie; it is not evidence for a 50% non-tie win rate.
 
 DDEV: no DDEV task. If environment setup is worth measuring, a **micro DDEV fixture** — the P2 app
 with `01-env-detect`'s DDEV output graded by `ddev config` validating, `ddev start`, HTTP 200 and the
@@ -241,9 +288,14 @@ A and B are swapped on at least 9 of 10 fixed pairs.
 
 ## P4 — Noise floor, then the matrix
 
-1. **A/A per chosen step.** One model, one middle effort, k = 4. The spread is that step's noise
-   floor. A difference smaller than the floor is not reported as a difference.
-2. **Matrix at k = 2.** Variance comes from the pooled A/A estimate, not from each cell.
+1. **A/A per chosen step.** One model, one middle effort, k = 4. Predeclare the spread statistic (sample standard deviation plus observed range) per
+   (step, pack, fixture/unit, model, effort); four observations are only a pilot noise estimate.
+   A difference smaller than the chosen floor is not reported as a difference, and exceeding
+   it alone does not prove significance.
+2. **Matrix at k = 2.** Use the matched A/A pilot as a disclosed provisional variance estimate,
+   never as proof that every model/effort has the same variance. A zero pilot variance gives
+   “insufficient variance evidence”, not a zero-width interval. Do not declare a step
+   effort-insensitive from a single pair; say “no difference detected at this budget”.
 3. **Adaptive third run.** A cell gets run 3 only when its two runs differ by more than the floor,
    or when it sits within one floor of a ranking boundary.
 4. **Effort extremes first.** Run the lowest and highest effort per model. Fill the middle levels
@@ -252,11 +304,18 @@ A and B are swapped on at least 9 of 10 fixed pairs.
 5. **More fixtures before more repeats.** Several small fixtures at k = 2 beat few at k = 5 for the
    same tokens. Add fixtures (other trap sets, other packs on the same topic) before raising k.
    The A/A floor is measured per (step, pack): one pack's noise says nothing about another's.
-6. **Reporting.** Per (step, model, effort): grade mean and run count n, with an interval built
-   from the pooled A/A standard deviation (mean ± t × sd_pooled / √n), never a bootstrap over the
-   cell's own two or three runs, which collapses to zero width when they agree. A bootstrap is used
-   only across fixtures, once a cell has several. pass^k for reliability-type steps, median tokens, cost and wall time. A grade-per-token view per step,
-   because a cheaper effort that scores within the floor is the useful answer.
+6. **Reporting.** Per cell: deterministic grade mean, n, successes/failures/unknowns, pilot
+   noise and a clearly labelled pilot-based interval. For a paired difference use the
+   uncertainty of **both** means; a t critical value uses the variance estimate's degrees of
+   freedom (k=4 gives 3 for one pilot), not the matrix cell's n. Pool only matched, defensible
+   variance groups and document the formula and confidence level in the implementation.
+   Adaptive third runs and screening many models make ordinary intervals exploratory;
+   confirm selected comparisons on fresh runs before publishing a statistical winner.
+   Once several independent fixtures exist, bootstrap paired differences by fixture, with a
+   fixed seed and every repeat of a fixture kept in one resample unit. Report observed
+   all-k-success counts for reliability; do not present a two-run estimate of p raised to k
+   as an established reliability probability. Include median tokens, cost and wall time
+   with priced coverage, and correctness beside any grade-per-token ratio.
 
 **Check.** A/A floors are recorded per step before any comparison is published; every published
 difference names the floor it exceeds.
@@ -282,8 +341,10 @@ tables for packs, result rows and judge verdicts, and two sources:
 hard Rust pack with an easy one ranks whichever model happened to run on the easy one. So models
 are compared only within a pack both ran on and under one cohort (P1: same build stamp, grader
 version and CLI versions), as the difference of their cell means against that pack's A/A floor. A
-topic's report combines those per-pack differences across every pack with the topic tag, weighted
-by run count and showing the number of packs and builds behind each comparison. Each difference is
+topic's report combines those per-pack differences across every pack with the topic tag, with equal pack weight by default and showing the number of independent packs, repeats
+and builds behind each comparison. An author running more repeats must not silently give their
+pack more influence. Predeclare any alternative weights; never average across different step
+scales or grader versions. Each difference is
 controlled for the Haive build on its own, so differences from several releases can be combined;
 the default view takes only the current release. Two
 models that never shared a pack are not ranked against each other; the report says so rather than
@@ -294,7 +355,10 @@ The page shows local and official results side by side and filters by topic, ste
 build (default: current release).
 
 **Check.** Importing the same directory twice changes no row. A fixed set of bundles gives a
-byte-identical topic report. A synthetic case where A beats B on every pack both ran, while B alone
+byte-identical topic report, with stable ordering and no clock-dependent fields in its canonical
+form. Import all rows transactionally only after full validation; a failed import changes nothing.
+Static report generation uses that same pure calculation, not a live module database.
+Use module-owned storage through `ensure-schema` and host API/session props through `web-kit`. A synthetic case where A beats B on every pack both ran, while B alone
 also ran easier packs where it scores higher than A did anywhere, still reports A ahead.
 
 **Rollback.** Additive; nothing outside the module reads its tables. Deactivate the module and run
@@ -305,16 +369,33 @@ already removed keeps its data (`Missing`) until "Purge data..." on `/admin/modu
 
 - **Export.** The page exports a result bundle: pack id and hash, build stamp, step-source hashes, grader
   version, CLI versions, models and efforts, A/A floors, per-cell grades with intervals, tokens,
-  cost and wall time. No raw outputs, prompts or diffs. Only public packs export; a private pack,
+  cost and wall time. No raw outputs, prompts or diffs. Export per-run numeric observations, structural outcomes and stable run ids, plus
+  grader/fixture/cohort identities; means/intervals alone cannot support recomputation,
+  deduplication or adaptive-run auditing. Keep cost source/coverage explicit. A bundle and
+  its local rows share run identities so importing one's own accepted bundle cannot double-count
+  a run; corrections supersede logical run ids rather than inventing new observations.
+  Only public packs export; a private pack,
   and any fixture captured from a user's repository, never leaves the install.
 - **Submission.** A GitHub issue template takes the bundle, and the pack when it is new. A GitHub
-  Action validates the schema, recomputes the hashes, refuses a `tree:` build stamp, checks the pack against P2's check, and labels
-  the issue.
+  Action performs bounded data/schema/hash validation with no submitted code execution, no
+  secrets and no privileged `pull_request_target` checkout. Refuse `tree:`/unknown builds.
+  Treat packs and bundles as untrusted: reject traversal, links escaping the pack, decompression
+  bombs, unexpected files and oversized fields before extraction. P2's runnable grader/repo
+  checks happen only after maintainer review in a disposable credential-free sandbox with
+  bounded resources and no Docker socket; issue labels alone never authorize execution.
 - **Acceptance.** A maintainer moves an accepted bundle into `benchmarks/community/` by PR; P6
   ingests it on the next update. Results are self-reported: the page marks them so, and because the
   pack is public a maintainer can re-run any cell to spot-check it.
 - **Docs list.** A generated docs page (or the wiki) renders P6's topic reports from the committed
   bundles, so the public list and an install's page come from the same data and the same code.
+
+**Sharing limits.** Keep the answer key and hidden grader out of the contestant's mount, prompt,
+RAG corpus and subprocess environment, even when they are public in the pack repository. Public
+traps cannot prove absence of training contamination; the generator-family exclusion is a bias
+control, not a guarantee. Grades are self-reported until rerun. Exported HTML/Markdown renders
+model text through the shared Markdown policy, and no raw model HTML is executed. P3's zero-token
+byte-identical check applies to deterministic graders only; an LLM judge is replayed from a stored
+verdict or called live as a separately costed observation.
 
 ## Not taken
 

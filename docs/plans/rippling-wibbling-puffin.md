@@ -1,26 +1,13 @@
 # Modular (user-definable) task types
 
-> **Merged into `twinkling-frolicking-toast.md` (approved 2026-10-12).** This file stays the design
-> reference for its half; where the two disagree, the merged plan wins.
->
-> **Not started** — none of `schema/task-types.ts`, `routes/task-types.ts`,
-> `task-type-manifest.ts`, `composable-catalog.ts`, `routes/custom-mcp.ts` or the admin
-> task-types page exists (re-verified 2026-08-21).
->
-> **Two files describe this feature and neither supersedes the other.** This one is the whole
-> design and the locked user decisions.
-> `rippling-wibbling-puffin-agent-a233cf7f9b59974f6.md` is a subagent-written **half A** — data
-> model, `buildRunList`, pgEnum, migration and seed — grounded line-by-line against the tree at
-> the time. Read this one for the design, half A for the migration mechanics and the `findIndex`
-> invariant. Half A covers only the first slice; it is not an alternative plan.
->
-> Anchor drift shared by both: `buildRunList` is now `task-queue.ts:152` (half A says 112-130)
-> and `buildRunAppRunList` is `:186` (says 146-178). Both `execution-paths.ts:98`
-> (`PATH_REQUIRED_TARGETS`) and `:133` (`orderWorkflowRunList`) still resolve exactly as cited.
->
-> **Depends on `toasty-percolating-kernighan`** for Phase 3.1's agent handling. A prompt-template
-> step's `agentPool` and `{{agent:<id>}}` tokens ride that plan's per-invocation agent isolation,
-> which ships first and independently.
+> **Historical design; foundations implemented, re-verified 2026-11-12 at `3426c8c34`.**
+> This reference contributed task types and the composer to `twinkling-frolicking-toast.md`.
+> Its original “not started” baseline is obsolete. The current contracts are
+> [Task types](../architecture/task-types.md), [Modules](../architecture/modules.md) and
+> [Integrations](../architecture/integrations.md); they supersede conflicting sketches here.
+> Read the merged plan's current header for deferred scope, and `TASKS.md` for follow-ups.
+> Do not replay migrations, assume all proposed features shipped, or roll back the enum cast
+> after a custom/module task exists.
 
 ## Context
 

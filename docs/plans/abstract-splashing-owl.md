@@ -1,9 +1,12 @@
 # Enforced house rules from the global KB, plus three found-not-fixed fixes
 
-> **In progress**, approved 2026-10-03. Shipped: PR1 (#398: the Drupal 7 facet family with the major
-> the token implies, plus an inherited-key guard on the facet alias lookup), PR2 (#399: the title list
-> states its omission), PR3 (#402), PR4 (#400: descriptions, backend and web) and PR5 (#432,
-> 2026-10-08). PR6 is in review; PR7 and PR8 follow. Line numbers are as of writing; resolve by symbol.
+> **PR1–PR7 implemented; PR8 remains gated.** Re-verified 2026-11-12 at `3426c8c34`:
+> `resolveGlobalKbContext`, house-rule roles/injection/stamps, 07b and gate checks, named-path
+> selection and record-only similarity exist. `HOUSE_RULES_SIMILARITY_MODES` still contains only
+> `off` and `record`; do not add `on` without graded per-rule data. T298 is blocked on that data
+> and T300; T299 owns the outstanding PR7a live check. The original PR6 “in review” status was
+> stale. [Global knowledge base](../architecture/global-kb.md) is the as-built rulebook; the PR
+> list below is historical except for PR8 and the explicitly gated measurements.
 
 ## Context
 

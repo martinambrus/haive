@@ -14,7 +14,10 @@
 > shipped and live-verified (#355); A5.4 shipped and live-verified (#356); A5.3b shipped and
 > live-verified (#357); A5.5 shipped and live-verified (#358); A5.7 shipped and live-verified
 > (#359); A2.3 shipped and live-verified (#360); A5.6 shipped and live-verified (#361).
-> Track B's plan and its Phase 0 status live in `two-install-project-sync.md`.
+> **Status correction 2026-11-12:** Track A above is implemented; Track B's core phases have
+> also landed (see the current header of `two-install-project-sync.md`, B5 through #988).
+> This is a historical sweep, not a command to repeat all its PRs. Root `TASKS.md` owns the
+> remaining checkpoints and follow-ups; session scratch/memory paths below are historical evidence.
 
 ## Context
 

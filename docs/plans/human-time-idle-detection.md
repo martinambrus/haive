@@ -1,7 +1,8 @@
 # Human time: plan page timing and idle detection
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **NOT STARTED.** Written 2026-11-09 from the tree at `7591d9f2a` and read-only queries on the dev
-> install. Three independent PRs, in the order below. Replaces the five-minute cutoff that
+> install. Three independently revertible PRs, in the order below. Replaces the five-minute cutoff that
 > `time-and-cost-report` PR 3 used to carry.
 
 ## Context
@@ -36,7 +37,19 @@ tell us how real people read and were not used to set the limits below.
 ## Decisions
 
 **One idle rule for both pages.** A person counts as present until an allowance has passed since
-their last real input. The time up to that point counts, and the rest does not. An absence
+their last real input. The time up to that point counts, and the rest does not. Compute the eligible overlap of
+each sampled interval with its presence deadline using a monotonic clock: a tick after the
+deadline must count the part before it, and input after an absence must not retro-count the gap.
+Visibility/focus loss ends the interval before flushing; returning resets the sampling baseline.
+Only trusted user events renew presence. Initial navigation grants one allowance, while a poll,
+element-level programmatic focus or a synthetic input event cannot renew it. Window focus
+re-entry is a separate signal; `event.isTrusted` alone does not distinguish a script focusing an
+element. Iframe focus grants its allowance on entry, not on every sample while it remains active. Freeze an activity epoch at the last
+trusted input: the deferred text measurement may set that epoch's allowance once, with the
+deadline still measured from the input time, never from the measurement time. Repeated renders
+cannot slide it forward. Pending/iframe transitions may extend a deadline only for a person
+still present; they cannot revive an already-idle timer. Returning to idle uses that epoch's
+reading allowance rather than restarting its clock. An absence
 therefore overcounts by at most one allowance.
 
 **Base the allowance on how much text is visible.** `allowance = visibleWords / 150 wpm`, clamped to
@@ -54,7 +67,7 @@ clamps, are named constants. Confirm the estimates above in a browser when build
 
 - `keydown`, `pointerdown`, `wheel` and `touchmove`, as capture listeners on `window` so that xterm
   and noVNC cannot swallow them.
-- `pointermove` only when the coordinates changed. A browser can dispatch mouse events under a still
+- Trusted `pointermove` only when the coordinates changed due to user motion. A browser can dispatch mouse events under a still
   cursor after a layout change, and these pages re-render on a poll.
 - `scroll` only while a pointer is held down (a scrollbar drag). Otherwise a page's own auto-scroll
   would read as a person.
@@ -101,16 +114,27 @@ New `packages/web/src/lib/active-time/`:
 
 - `activity-clock.ts`, pure and tested with no DOM: tracks last input and last restart, and answers
   `isPresent(now)` from the allowance. Holds the constants and `readingAllowanceMs(words)`.
-- `visible-words.ts`: walks text nodes under `document.body`, takes per-line rects, and counts a
-  line only if it is in the viewport and `elementFromPoint` at its centre hits that node's parent.
+- `visible-words.ts`: walks text nodes under `document.body`, uses a bounded text sample with line rectangles clipped against the viewport and every
+  scroll ancestor. Word count is prorated for partially visible text; do not count a whole text
+  node once per rectangle. Hit testing accepts descendants of the containing element, including
+  inline Markdown links and spans, rather than requiring exact parent equality.
   The hit test handles clipped scrollers and a maximized body covering the page. Runs once about 2 s
   after input stops, and again when content arrives. Never on the 1 s tick. Measure it on the largest
   real gate form and keep it under about 10 ms.
 - `use-active-time.ts`: the existing sampling, flushing and display logic, moved out of the page, with
   `counting()` also requiring `isPresent`. Takes `enabled`, `pending`, `contentKey` and a flush sink.
 
-`useUserActiveTimer` keeps its signature and becomes a thin wrapper, so its three uses in the task
-page are unchanged. `contentKey` is the waiting step row id. A capped timer simply stops, and the
+The text estimator is a heuristic, not a proof of reading. Cap its node/rectangle work and
+fall back to the base allowance on overflow or failure. Test nested scrollers, a covered page,
+inline markup, a maximized dialog and a long code block. DOM measurement never records the text
+it sees. The timer keeps pending deltas tied to their original sink (task/step or repository),
+flushes before changing targets, and uses a stable callback so polling does not recreate it.
+At most one tab per browser profile counts attention at a time, using a bounded expiring lease;
+include task and plan pages in that arbitration. Server limits remain necessary across devices.
+Delivery is explicitly best-effort unless the request has an idempotency key: never retry an
+ambiguous additive POST and count its delta twice. Test unmount, blur and request failure.
+
+`useUserActiveTimer` keeps its signature and becomes a thin wrapper, so its existing task-page call site retains its contract. `contentKey` is the waiting step row id. A capped timer simply stops, and the
 per-step display stops with it.
 
 Verify:
@@ -133,7 +157,10 @@ good, remove it with a later numbered migration, never by editing an applied one
 key on all three of the first columns. Stored as UTC wall clock like the other timestamps.
 
 **API**: `POST /repositories/:id/plan/user-active` in `routes/plan.ts`, through `requireOwnedRepo`,
-same `deltaMs` bounds as the step route. The hour is the server's. Upsert adds to `active_ms`, clamped
+same `deltaMs` bounds as the step route. The hour is the server's UTC hour (`timestamp without time zone` carrying UTC, as the
+statistics topic requires). A flush crossing an hour is attributed to its receipt hour in v1,
+so precision is one flush interval plus one hour at report edges; do not pretend it is exact
+event time. Upsert atomically adds to `active_ms`, clamped
 to one hour's worth of milliseconds so a misbehaving client cannot inflate a row.
 
 **Web**: `postPlanUserActive` in `api-client.ts` beside `postUserActive`, and `useActiveTime` on the
@@ -156,9 +183,11 @@ No schema change. Rollback: revert the PR.
   and "Plan" facets, because it is plan work. The provider facet does not apply.
 - Time tab: tile "Plan page" beside the human figures. A dash, never 0, when no row exists for the
   window, since older periods were not measured.
-- If `time-and-cost-report` has shipped by then, its Human active tile becomes tasks plus plan, with
-  the two parts in the hint, and its note mentions the idle limits. Step time attaches to tasks by
-  completion and plan time by the hour it happened, so the note states that too.
+- If `time-and-cost-report` has shipped by then, keep its completed-task Human active total and
+  per-task rows unchanged. Add a separate “Plan page (activity window)” figure, with the idle
+  limits disclosed. Plan time belongs to a repository/hour and cannot be assigned to completed
+  tasks or reconciled with that report's task population. The summary may show the two parts
+  separately; never combine them into a completed-task metric.
 - `docs/architecture/statistics.md`: what counts, the allowance rule, and that window edges are
   accurate to the hour for plan time.
 

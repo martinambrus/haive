@@ -3,8 +3,8 @@
 > **NOT a single-status plan — a findings register (F1-F9) whose status is PER ITEM, inline below.**
 > Six are fixed (`6e72b08`, `d5162d5`, `1243213`, `53aa478`); F2 is NARROWED (`d73bb55`) with one
 > sub-item still open whose fix was attempted and REVERTED (`3ac59bd`) under an explicit
-> do-not-retry note; F3 is a coverage gap needing no code change; F5 is a process note; F8 is
-> root-caused and not fixed. Read the per-item headings rather than looking for a whole-plan
+> do-not-retry note; F3 is a coverage gap needing no code change; F5 is a process note; F8
+> now points to the shipped npm-cache replacement (reviewed 2026-11-12). Read the per-item headings rather than looking for a whole-plan
 > verdict. Checked 2026-09-18.
 
 ## Context
@@ -273,7 +273,11 @@ honest in `notes` — the step just does not read it.
 
 ## F8 — chrome-devtools MCP never connected in 08a mcp mode
 
-**Severity: medium. ROOT CAUSE FOUND, not yet fixed.**
+**Historical root cause; replacement cache architecture now shipped.** Re-verified 2026-11-12:
+`sandbox/npm-cache.ts` warms the MCP packages in a worker-owned shared base and each sandbox
+seeds a private copy from a read-only mount (`NPM_CACHE_SEED_PRELUDE`). The below bake-in-image
+proposal is superseded, not pending work. A live cold-start regression needs measurements of
+that current path; do not mount the shared cache writable or install a second MCP delivery path.
 
 **The agent's MCP discovery window (~50s) is less than half chrome-devtools-mcp's cold
 npx download (MEASURED 111s).** The server was still fetching from npm when the agent

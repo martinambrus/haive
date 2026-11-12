@@ -1,5 +1,13 @@
 # T335 — channel install and upgrade (plan D2b)
 
+> **SHIPPED — T335, 2026-11-05; re-verified in the tree 2026-11-12.** PR A #1007
+> (`4d4193768`), B #1008 (`d71934772`), C #1009 (`d94aafc00`). The builder/release image,
+> updater channel path and both installers exist. [Modules](../architecture/modules.md)
+> “Installing a channel” / “Upgrading a channel install” records the as-built validation,
+> credentials and image pins; the original public-byte-identity promise below predates
+> necessary public-path fixes. Follow-ups are T533/T538/T539 and their successor board entries,
+> not unimplemented A/B/C slices. Do not execute this plan again.
+
 ## Context
 
 T351/T353/T352 build, boot-check and publish a per-customer channel (`haive-<channel>-{api,worker,web}`

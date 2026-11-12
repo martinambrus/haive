@@ -1,5 +1,6 @@
 # What TokenEconomizer offers Haive: tell an agent which interpreter its sandbox lacks
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **Not started.** Written 2026-11-12. One source is reviewed: Microsoft TokenEconomizer
 > (github.com/microsoft/TokenEconomizer, Apache 2.0) and its paper (arXiv 2610.22732). Verdict: one
 > idea carries over, TE's `AbsentTool` environment fact, built from the sandbox image instead of
@@ -91,11 +92,28 @@ run.
 
 **Probe.** New `sandbox/toolchain-probe.ts`, shaped like `imageRunsRtkHook`
 (`sandbox/task-auth-volume.ts`): one `docker run --rm` of the image with the entrypoint cleared and
-`sh -c 'command -v <name> >/dev/null 2>&1'`, bounded by a timeout. Exit 0 is present, exit 1 is
-absent. Anything else (no status, a timeout, a spawn failure) is unknown, is not cached, and is asked
+a Haive-owned shell script `if command -v <name> >/dev/null 2>&1; then exit 0; else exit 199; fi`,
+bounded by a timeout. Exit 0 is found, the reserved `BINARY_MISSING_EXIT` 199 is absent.
+Do not assume the shell's raw not-found status is 1: measured 2026-11-12, `/bin/bash` returns 1
+and `/bin/sh` (dash) returns 127 for the same missing name. Anything else (no status, a timeout, a spawn failure) is unknown, is not cached, and is asked
 again next time. The answer is cached as a promise per image ID and name, so concurrent dispatches
 share one run. The image ID comes from `runner.inspect`, not the tag: composed and per-provider tags
 are content hashes, but the no-derived-image fallback runs the base under the mutable `:latest`.
+
+**Probe isolation and identity.** Run by the inspected immutable image ID, with no repository,
+auth or Docker socket mount, no provider env, `--network none`, a read-only filesystem, a bounded
+PID/memory/CPU allowance and an install-labelled container. A timeout removes and awaits that
+container; killing the docker client alone does not settle it. Bound dispatch wait and concurrency
+for the whole provider batch, evict unknown/rejected promises, and cap the cache size. A probe
+must not create unaccounted heavy work on every cold fan-out.
+
+`command -v php` tests command discovery, not that PHP starts successfully. Phrase presence as
+“found”, and absence only when the shell ran and returned the documented absent status; an absent
+shell or a Docker failure is unknown. Match the invocation's effective PATH/user, and treat
+repository-local binaries, provider PATH overrides and later image selection as possible changes.
+A dispatch-time peek is advisory: if exec chooses a different image ID, omit/replace the fact
+before running. Test a tag rebuilt between inspect, probe and exec; never make a definitive claim
+about the peek's image while launching another one.
 
 **Which names.** A Haive-owned map from the primary language of `resolveTaskFacets`
 (`@haive/shared/global-kb`, read from 01-env-detect and the user's confirmation) to interpreter
@@ -125,8 +143,8 @@ so a re-dispatched stored prompt is not given a second one. It is skipped when t
 shell, by the same predicate as `withMcpSurface`'s `noBuiltInTools`.
 
 **The block** states only what the probe proved, roughly: "Not installed in this sandbox: `php`.
-Anything that runs PHP (`php -l`, `composer`, `vendor/bin/*`) fails here with command not found, so
-do not run it; read the code instead." It makes no promise about later steps. A DDEV project's PHP
+Direct PHP commands cannot run here. PHP-based checks may need the project runtime; do not
+try a bare `php` check in this sandbox. Read the code and report checks you could not run." It makes no promise about later steps. A DDEV project's PHP
 checks do run in its container at `08-phase-5-verify` (`buildVerifyCommand` under `ddevMode`), but
 the dispatcher cannot prove DDEV mode without step-engine helpers, the measured tasks were still
 adding DDEV, and the existing `ddev-control` line already says the container cannot be exec'd from
@@ -170,7 +188,7 @@ in the sandbox": what the probe asks, why by exit status and image ID, and that 
 
 Tests, written first:
 
-- `toolchain-probe.test.ts`: exit 0 is present, exit 1 absent; no exit status, a timeout or a spawn
+- `toolchain-probe.test.ts`: exit 0 is found, the reserved 199 absent; raw shell exit 1/127 is unknown; no exit status, a timeout or a spawn
   failure is unknown and asked again on the next call; concurrent calls share one run; two tags of
   one image ID share one run; a tag whose ID changed is asked again.
 - A new `sandbox-image-peek.test.ts` beside `sandbox-image-tag-turn.test.ts` (`packages/worker/test/`):

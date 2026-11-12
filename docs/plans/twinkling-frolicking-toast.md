@@ -1,9 +1,15 @@
 # Modular Haive — module system, data-driven task types, integrations (merged plan)
 
-> **Approved 2026-10-12, not started.** Merges `serialized-chasing-thacker.md` (module system +
-> integrations, "T") and `rippling-wibbling-puffin.md` + its half A (data-driven task types, "P").
-> Both stay as design references; where this file disagrees, this file wins. Re-grounded against
-> main @ 3313a5db8; analysis notes in the untracked `.claude/tmp/modularity/analysis/`.
+> **Foundations IMPLEMENTED; historical delivery plan.** Re-verified 2026-11-12 at `3426c8c34`:
+> `bootStepEngine`, `schema/task-types.ts`, `step_catalog`, module loaders/codegen, prompt steps,
+> the integration broker/choices, statistics module and channel scripts all exist. Use the
+> current architecture topics [Task types](../architecture/task-types.md),
+> [Modules](../architecture/modules.md) and [Integrations](../architecture/integrations.md)
+> as the as-built contract; several original mechanisms below were intentionally narrowed.
+> I7 Google remains parked (T331, OAuth client); provider-pinned dispatch, shared accounts and
+> generated integration drafts are deferred. Follow-ups live in root `TASKS.md`, with their own
+> triggers. Do not execute this P/M/I/J/D checklist as new work or reuse its migration numbers.
+> Approval was 2026-10-12; the context below describes that earlier baseline.
 
 ## Context
 

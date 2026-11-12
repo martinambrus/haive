@@ -1,5 +1,11 @@
 # Multi-model per step (fan-out + consolidator)
 
+> **Backlogged; reviewed 2026-11-12 against `3426c8c34`.** No model-set/consolidator feature
+> exists. The per-seat mining provider choice this plan carved out **has shipped** (`roleKey`
+> on `AgentMiningDispatch`, resolved for each seat in `step-runner.ts`); preserve it. Phase 1/2b
+> remain conditional on the measurements below; Phase 2c is dropped. The historical “one provider
+> pinned for the whole fan-out” premise no longer describes current code.
+
 ## Context
 
 Today every step runs exactly one CLI/model. The user wants to attach an unlimited set of
@@ -46,9 +52,9 @@ Decisions (sensible defaults; flag if you disagree):
 - The retry/robustness seam re-rolls the CONSOLIDATOR (one cheap invocation), not the members.
 
 Rollback (write-before-change): the entire feature is three additive, nullable/defaulted columns
-plus new code paths gated on "is a set configured". Rollback = drop the three columns and the set
-config is inert; every step falls back to the single path. No enum changes, no data migration,
-no destructive step.
+plus new code paths gated on "is a set configured". Rollback = disable/revert the feature code and retain the columns and history.
+Dropping columns while the writer still uses them would fail every dispatch and destroy audit
+data. Any later DROP is a separate numbered migration; existing applied migrations stay frozen.
 
 ---
 
@@ -107,7 +113,7 @@ Both directions are evidenced by `benchmarks/README.md` (66 runs, 19 models):
 
 ### Sequencing
 
-1. **First, and cheapest by a wide margin: unpin the provider in the fan-out.** Give
+1. **Already shipped: per-seat providers in the fan-out.** The historical design was to give
    `dispatchMiningAgents` a per-dispatch provider instead of one resolved for the whole set. Then
    08c's peer reviewer runs on a different model from 07's implementer, and 08d's adversaries spread
    across models. Zero extra invocations — those agents already run — and no new columns, no
@@ -124,7 +130,7 @@ Both directions are evidenced by `benchmarks/README.md` (66 runs, 19 models):
    to triangulate, pure cost.
 
 This makes Phase 2b optional rather than the goal: `kind-riding-dream.md` already declares it
-optional, and under this sequencing 2c should be dropped rather than deferred.
+optional, and under this sequencing Phase 2c is dropped; the retained historical subsection is not authorized scope.
 
 ### The consolidator needs the refuter's evidence bar
 
@@ -294,7 +300,7 @@ Phase 1 stays backlogged, now on a measurement rather than a projection.
 ## Line anchors — re-verified 2026-08-21
 
 The body was written against a ~1600-line `step-runner.ts` that is now 3269 lines. Re-verified
-2026-08-21; the body is left byte-identical per the plan-archive convention, so read the anchors
+2026-08-21; the body records the historical design; corrections are folded in place, so read the anchors
 through this table and grep the symbol rather than trusting either column later.
 
 | Body says | Actually (2026-08-21) |
@@ -393,6 +399,26 @@ final answer in the exact format specified above, plus a short `<<CONSOLIDATION_
 consolidator invocation for display (it rides in `rawOutput`; the step's `parseOutput` already
 ignores trailing prose, or strip it before parse).
 
+**Prerequisites if reopened.** The current single-live-step invocation uniqueness cannot simply
+accept N plain rows. Design a durable group/attempt/member identity and atomic reservation first,
+with one consolidator claim per group under step ownership. Include round and iteration in the
+identity; `agentId`/`issueKey` alone can refer to later waves or retries. Recovery, cancel, CLI
+switch and summary attribution must all read that group, and a stale completion cannot launch a
+consolidator after the task epoch changed. Define output eligibility from the full success
+predicate, never only `ended_at`. Member tools must be read-only; multiple file writers mounting
+one worktree would race. Eligibility therefore also checks capabilities, not just presence of
+`llm` and absence of `loop`/mining. Deterministic validation enforces the step's exact JSON
+contract; no parser may assume it tolerates trailing prose. Keep the consolidation report in a
+separate validated envelope/record and pass only the contract payload to the step.
+
+Bound total original prompt + drafts + framing + output to the consolidator's context before
+dispatch, with a stated omission/hold policy. Drafts are fenced untrusted agent text, and the
+original step instructions remain Haive's framing outside those fences. For greenfield discovery,
+a unique requirement may be a question for the person rather than a fact verifiable at `file:line`.
+Agreement is not proof either. Failure/degradation names missing members, and the gate never
+mistakes survivor-only consolidation for full coverage. “Unlimited” is a UI idea, not an unbounded
+API list: enforce a configured member/input budget and include it in cost approval.
+
 ### 1c. Retry seam
 The apply-throw retry block (step-runner.ts:1521) currently calls `markLatestInvocationConsumed` +
 `resolveLlmPhase`. For a multi-model step, add a branch that instead marks the CONSOLIDATOR row
@@ -405,8 +431,9 @@ counted over consolidator rows. Members are never re-rolled in Phase 1.
   `tasks.model_sets.default`.
 - New route `PATCH /tasks/:id/steps/:stepId/model-set` (sibling of the `cli-provider` handler,
   `packages/api/src/routes/tasks/steps.ts:765`): validate, write `tasks.model_sets.steps[stepId]`,
-  invalidate + re-enqueue advance like the existing handler (steps.ts:957). Empty members clears the
-  step override (falls back to default/single).
+  invalidate + re-enqueue advance like the existing handler (steps.ts:957). Distinguish inherit (`null`/clear) from an explicit single-model override; otherwise a
+  task default can never be turned off for one step. The lock and provider ownership rules
+  apply to every member/consolidator, and a busy group cannot change underneath its barrier.
 - Surface it: extend `enrichStepsWithCliPreferences`
   (`packages/api/src/routes/tasks/_helpers.ts:85`) to attach `modelSet: StepModelSet | null`
   (resolved step-override-or-default) so the UI can render the current set per step.
@@ -457,7 +484,7 @@ barrier then proceeds unchanged. This is the genuinely complex, N x M-cost piece
 behind the per-task concurrency cap (`MAX_PARALLEL_AGENTS_PER_TASK`), and `log` any deferral so the
 throttle is visible.
 
-### 2c. DAG coder steps (nested barrier + worktrees)
+### 2c. DAG coder steps — DROPPED; historical sketch only
 Same nesting as 2b applied to the DAG coder fan-out (`dag-executor.ts` coder loop ~1378), where each
 coder writes files in its own worktree. Highest cost and complexity; recommend shipping last (or
 deferring) — a consolidator reconciling N code-writing drafts also has to reconcile file edits, not
@@ -490,5 +517,6 @@ just text. Flag explicitly as optional.
   that StepTerminal shows N member terminals + a consolidator terminal, the step completes, and
   `apply` consumed the consolidator output. Verify auto-continue still auto-advances forms and the
   default-set "lock" applies to every step until a per-step override is set.
-- Migration: `drizzle-kit push --force` on a clean DB, confirm the three columns exist and default
-  correctly; confirm dropping them (rollback) leaves the single path working.
+- Migration: apply the next guarded migration twice to a scratch database, check schema parity and
+  defaults. Verify disabling/reverting the writer leaves historical rows intact and the single
+  path usable. Never use a destructive schema push as rollback.

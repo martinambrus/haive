@@ -1,6 +1,10 @@
 # RAG retrieval improvements
 
-> **P0 baseline measured (2026-10-12); nothing past P0 started or approved.** Seven external
+> **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
+> eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
+> lexical configuration have since shipped. P2(b)/(c) remain parked (T144/T147), as does index-space
+> work (T149); P3/P4 are conditional proposals. A reproducible current eval still gates ranking
+> changes; historical scratch results alone do not satisfy that gate. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
 > 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
 > change belongs to: a new source goes into Sources reviewed, a re-measured number replaces the old
@@ -382,9 +386,9 @@ single gold chunk, so they are judged in pairs instead of scored by recall. A sc
 recall@k and MRR for k in {5, 8, 12, 20} against a store built from the current chunker, and its
 numbers are recorded here as the baseline. It also reports the dense pool's recall against an exact
 search on the same queries (S7's flat baseline), since the HNSW path keeps 40 candidates by
-approximation (F14). A nullable `hits` column on `rag_query_log` (source path, section, rank, each
-ranker's rank) makes real calls replayable from then on. Rollback: the column is additive and
-nullable; stop writing it, and drop it in a later change.
+approximation (F14). The existing nullable `result_hits` column on `rag_query_log` (migration 0180) (source path, section, rank, each
+ranker's rank) records final hit identity/order; it does not by itself freeze the historical corpus or
+reproduce search. Keep it; do not add a second `hits` column or replay migration 0180.
 
 **Baseline (2026-10-12).** A scratch store `haive_rag_p0_eval` built by `rag-build-store.ts` from
 the current chunker over the scoped tree plus the repository KB (20,839 chunks, 0 hash vectors).
@@ -407,6 +411,17 @@ Search takes p50 33 ms, p95 49 ms. The lexical-only branch (no embedding) scores
 empty (F6), its page is the identifier ranker's few candidates. MRR can fall as k grows because the
 knowledge reserve takes `min(2, floor(top_k / 3))` slots, so a smaller page is not a prefix of a
 larger one. The dense pool's numbers are in F14.
+
+**Eval reproducibility gate.** Before changing ranking, commit a non-private fixture corpus,
+query/label set and script configuration (or a versioned private-artifact manifest for owner data),
+with source commit, exclusions, chunker/embedder versions, model/dimension and index settings.
+Label answerable source spans/stable facts, not only a chunk id that a new chunker removes. Keep
+all original questions in the denominator: a gold span lost by chunking is a miss, not a query to
+delete. Report by query class and language, include no-answer queries, and separate tuning from
+held-out grading. Compare the same corpus/config, with paired per-query changes and uncertainty;
+20 valid spot checks do not establish every gold's correctness. Public fixtures must not contain
+client code or logged private queries. Main `TASKS.md` explicitly parks T144/T147 until such an
+eval exists, despite the historical P0 table here.
 
 ### P1. Chunker corrections, shipped as one reindex
 
@@ -473,13 +488,21 @@ Each sits behind a config key, off until P0 says on, so the rollback is the key.
 - **(d)** Ranked-list truncation, for S3: end a page at a relative score cliff instead of filling
   `top_k` whenever candidates clear the absolute floors, which today almost never cut a page of 12
   or fewer (F10). The cut needs an absolute signal: `rrf` depends only on ranks, so today it is
-  taken on dense similarity, and on a reranker's probability once P3 lands (S5). P0 measures the
+  taken on dense similarity, and on a reranker's validated score scale once P3 lands (S5). P0 measures the
   recall it costs against the hits it removes.
-- **(e)** Accent-insensitive lexical matching, for F13: unaccent the stored `content_tsv` and the
+- **(e) Shipped; historical design.** Accent-insensitive lexical matching, for F13: unaccent the stored `content_tsv` and the
   query where the store has `unaccent`, and keep today's vector where it does not. A change to how
   `content_tsv` is derived needs a backfill like the identifier one, since an unchanged chunk is
   never re-upserted; it costs a tsvector rewrite, not a re-embed. Inflection stays unhandled by
   the `english` configuration; the dense half is what matches it.
+
+For (a), key the instruction to the selected embedder's documented query contract and include
+instruction/version in the query-embedding cache identity. An unrelated model must not inherit
+Qwen-specific formatting. For (b)–(d), preserve `applyKnowledgeReserve` on the final page after
+candidate expansion/deduplication/reranking; removing reserved KB/learning slots is a different
+experiment. Dedupe retains all source locations and chooses deterministically without merging
+semantically different bodies that merely normalize alike. A score cliff uses a documented score
+scale and a minimum useful page; low RRF alone is not a calibrated relevance probability.
 
 MMR only if P0 shows near-duplicate crowding that (c) leaves.
 
@@ -487,9 +510,10 @@ MMR only if P0 shows near-duplicate crowding that (c) leaves.
 
 Only when P0 shows recall at 50 well above recall at `top_k`. S3 gives the reason order pays: a
 reader uses the first slots best and gains little past 20. A cross-encoder (S5, S6) scores each
-candidate against the query and yields a probability. It needs a candidate pool wider than
-`LIMIT top_k`, which on the HNSW path also means wider than `ef_search` (F14: iterative scan widens
-it without raising `ef_search`, at the cost of a transaction per search), a window that holds a
+candidate against the query and yields a model-specific score (often a logit, not a calibrated probability). It needs a candidate pool wider than
+`LIMIT top_k`, which on the HNSW path also means wider than `ef_search` (F14: iterative scan can fill a filtered candidate pool, but does not fix the wrong-region
+failures F14 measured; retain the shipped `ef_search`/planner policy and restore settings
+before returning from a caller-owned transaction), a window that holds a
 whole chunk (F11), a model that reads Slovak (F13), and a runtime: Ollama has no rerank endpoint,
 and a hosted reranker is a new processor of repository code (D3). It judges each chunk's text
 alone, so it follows P1 rather than precedes it (S6). A page has

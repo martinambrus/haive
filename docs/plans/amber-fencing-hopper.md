@@ -1,25 +1,12 @@
 # Onboarding Scope + LSP + Onboarding-Mirror + Retrieval Refactor
 
-> **Status — in progress**, re-verified 2026-08-21 against the tree rather than taken from this
-> file. The per-slice `[DONE]`/`[TODO]` markers below agree with it.
->
-> - **Slice 1 — complete** (1a-1g, including 1g-D dropping the dead columns). NOT live-verified:
->   the API `/repos/:id/scope-tree` endpoint and the web tree editor have never been hit in a
->   browser.
-> - **Slice 2 — complete and pushed** (`e0bee51`): repo-level persistence refactor —
->   `onboarding_environment`/`onboarding_tooling` jsonb cols + the `.haive-data/` committed mirror
->   (environment/tooling/exclusions), written at `12-post-onboarding`, imported non-clobbering in
->   `persistDetection`; consumers (`loadRepoStackAnchors`, `resolveRagSyncPrefs`, `declare-deps`,
->   cli-exec `resolveRagMcpConfig` + `loadUserMcpServers`) read col-first + fallback. NOT
->   live-verified e2e (onboard on host A, clone to host B, confirm the columns restore).
-> - **Slice 3 — partly shipped** (`5ca82ac`): 3a (PHP LSP fix) and 3c (composed-image eviction)
->   are DONE; **3b** (LSP compose layer) and **3d** (live PHP LSP e2e) are still TODO.
-> - **Slice 4 — not started.**
-> - Slice 1 landed as `7272078`.
-Owner context: Drupal 11 onboarding took ~3h on a 7-module repo because the expensive
-agentic mining steps crawl the WHOLE repo (vendor, core, contrib). This refactor scopes
-them to custom code, fixes LSP so tasks can use installed language servers, syncs
-onboarding state across machines, and fixes retrieval to combine RAG/KB with LSP/grep.
+> **Slices 1/2 and retrieval slice 4 implemented; LSP slice 3b remains pending.** Reviewed
+> 2026-11-12 at `3426c8c34`: `shared/src/repo/scope-tree.ts`, scope selection and the persisted
+> scope/mirror consumers exist; `_retrieval-guidance.ts` centralizes the discover/ground variants.
+> `ComposeInput` in `sandbox/image-composer.ts` still has no selected-LSP layer. Slice 3d is
+> unverified live acceptance, not proof of missing code. Read the per-slice record below for the
+> earlier measurements; do not repeat the scope/mirror work. The project-state record now owns
+> portable onboarding state (see `two-install-project-sync.md` and the onboarding topic).
 
 ## Problem (verified)
 - The expensive steps hand the repo to a CLI told "deeply explore this repository" with no
@@ -68,7 +55,7 @@ onboarding state across machines, and fixes retrieval to combine RAG/KB with LSP
 12. Retrieval: rewrite prompt guidance from fallback-chain to discover(RAG/KB)→ground(LSP+grep run
     together). ~8 prompt builders + the rag_search tool description. NO new orchestration engine.
 
-## Code anchors (from research — execute without re-searching)
+## Historical code anchors — resolve symbols against the current tree before changing anything
 Scope injection (agentic prompt builders + det predicates):
 - 06_5-agent-discovery.ts: buildAgentDiscoveryPrompt:549 (fileTree inject); requiredCapabilities:[] @1108 (cheap; KEEP full-repo).
 - 08-knowledge-acquisition.ts: buildKnowledgePrompt:174; existing "This repo's OWN custom code lives under:" line ~215 (sourced from customCodePaths.include = broken FRAMEWORK_PATTERNS; REPOINT to deny-list complement); IGNORE_DIRS:100; single llm @1287.
@@ -107,14 +94,14 @@ SLICE 1 — Exclusions core (large; sub-tasks):
   1e. [DONE] Deterministic RAG. (a) 01_5 scanExtensions predicate now skips NO_RECURSE_DIRS segments — extension set describes custom code, not build-output junk (NOTE walk() already skips node_modules/.git/vendor recursion, so 01_5 never crawled those; the real cost is the LLM agent, not detect-side traversal which is seconds). (b) 10-rag-populate: loadScopeExcludeGlobs unioned into collectCodeFiles excludePaths (alongside legacy 01-env customCodePaths.exclude); deny list = single source of truth; selectedDirs allow-list now inert (09_7 emits []) → dirFilter null. (c) 09_7 REWRITTEN picker→read-only `note` confirmation: uses buildScopeTree (1a walker, retired its bespoke buildTree/collectDefaults/countRootFiles) + deny list; shows ~N in-scope files + excluded dirs + indexed extensions; still resolves extensionSet from 01_5 for 10; apply emits {selectedDirs:[], extensionSet}. Only consumer of selectedDirs was 10 (verified) → safe. tsc 0 errors, worker reloaded clean (ready, CLI-dispatch assertion intact). NULL deny list → indexes everything minus legacy exclude = pre-feature behavior.
   1f. [DONE] Task-end RAG applies the deny list. Single injection in the shared _rag-index.ts (both 02-pre-rag-sync run-start + 11c-rag-reindex post-commit funnel through it): collectCodeFiles gained optional exclude param (isDeniedPath, after CODE_IGNORE_DIRS, KB files UNfiltered — .claude/ always in scope); runRagIndexSync loads loadScopeExcludeGlobs and passes it. Plus the two direct count-preview calls (02:62 main checkout, 11c:77 worktree) scoped too so detect count == indexed count. Cross-import ../onboarding/_scope.js matches established pattern (these files already import 4 ../onboarding/ modules). Worktree paths are repo-relative → deny globs match. BONUS: stale-cleanup (line ~432) purges newly-excluded dirs from RAG when scope tightens (correct — RAG shrinks to match). tsc 0 errors, worker reloaded clean. Empty deny list → old behavior.
       Slice 1 core complete (1a-1f). 1g (web repos-page rework) is the only remainder.
-  1g. [IN PROGRESS] repos-page rework. USER CHOSE full deep+hidden tree editor (not glob-list) + drop dead columns now. 5-package feature; execute A→B→C→D, typecheck each.
+  1g. [DONE] repos-page rework. USER CHOSE full deep+hidden tree editor (not glob-list) + drop dead columns now. 5-package feature; execute A→B→C→D, typecheck each.
       Grounding: web repos page /app/(app)/repos/page.tsx = top-level checkbox UI on repo.excludedPaths (dead col); PATCH /:id/exclusions (api repos.ts:573) reads repo.fileTree(flat string[])→topLevel, writes excludedPaths+selectedPaths. fileTree is FLAT + NON-hidden (framework-detect buildFileTree drops dotfolders) → can't drive a deep+hidden tree. buildScopeTree (deep+hidden, live) is worker-only. API reads repos via storagePath??localPath (repos.ts:669/699, files/raw precedent). scope-tree.ts is PURE (node:fs + TreeNode type) → relocatable. shared exports = explicit subpaths (add ./scope-tree → dist/repo/scope-tree). Dead cols excludedPaths/selectedPaths written by clone.ts:88-89 from framework-detect computePathSelection:172 (feeds ONLY those cols) + PATCH; read ONLY by web UI + PATCH (NO scan consumer). KEEP fileTree col (other consumers). api test repo-exclusions-schema.test.ts covers the validator.
       1g-A [DONE] Walker relocated → shared/src/repo/scope-tree.ts(+test 4/4); "./scope-tree" export subpath added; 4 worker importers repointed to @haive/shared/scope-tree; shared dist clean-rebuilt; worker runtime resolves (transient ERR_MODULE_NOT_FOUND during reload race self-recovered once shared dist landed).
       1g-B [DONE] API GET /repos/:id/scope-tree (root=storagePath??localPath, live buildScopeTree, returns {tree, scopeExcludeGlobs}); PATCH /:id/exclusions repointed → normalizes+dedupes+writes scopeExcludeGlobs, NESTED globs allowed, no tree-existence validation (mirrors 06_7), strips fileTree from response; shared schema field excludedPaths→scopeExcludeGlobs; api test rewritten 7/7. tsc 0.
       1g-C [DONE] Web: api-client Repo −excludedPaths/−selectedPaths +scopeExcludeGlobs; repos page reworked — gate Exclusions on scopeExcludeGlobs!=null, fetch /scope-tree on expand, reused DirectoryTreeSelect, deny↔included conversion mirrors 06_7 (includedFromDeny/denyFromIncluded), save→PATCH, header "N files in scope · M ignored" from tree; collapsed badge = deny-count (cheap, no per-poll walk). tsc 0.
       1g-D [DONE] Dropped excluded_paths/selected_paths: db schema −2 cols +comment fix (06_7 is deterministic not LLM); migration 0082_drop_dead_repo_path_columns.sql (DROP IF EXISTS, rollback documented) applied live (verified only scope_exclude_globs remains); framework-detect −computePathSelection −2 DetectionResult fields; clone.ts stop writing; api exclusions test rewritten; db dist clean-rebuilt. Fixed latent 1c miss: onboarding-registry.test.ts (added 06_7 id + index 6.5). Worker 1611/1611, shared 185/185, api 7/7, all pkgs tsc 0.
       NOT LIVE-VERIFIED: the API /scope-tree endpoint + web tree editor need one browser hit against an onboarded repo (unit+tsc green, no live HTTP yet).
-SLICE 2 — Onboarding mirror + REPO-LEVEL PERSISTENCE REFACTOR (user chose option 3, IN PROGRESS).
+SLICE 2 — [DONE] Onboarding mirror + REPO-LEVEL PERSISTENCE REFACTOR (historical design below).
   Grounding: the onboarding-derived data lost on clone is NOT on the repos row — it's TASK-SCOPED (looked up via "find the repo's onboarding task → read its 01/02/04 step outputs"). Central resolvers: loadRepoStackAnchors (_repo-stack.ts:99, reads onboarding-task 01-env-detect detect + 02-detection-confirmation output.values via resolveStackVersions) + resolveRagSyncPrefs (_rag-index.ts:129, reads onboarding-task 04-tooling output.tooling {ragMode,ragConnectionString,ollamaUrl,embeddingModel,embeddingDimensions}) + env-replicate 01-declare-deps prefill (reuseLastCompletedFormValues + onboarding-task 04 read :28/:115). Other lookups: 01b-install-plugins:131, onboarding-upgrade/01-upgrade-plan:170. 02-detection-confirmation.apply currently returns {confirmed,values} ONLY (no repo write). 04-tooling.apply writes repositories.rtkEnabled + returns {tooling}. persistDetection (clone.ts:76) sets framework/languages/fileTree/size only. `.haive/install.json` commits via plain git add (so `.haive-data/` needs NO gitignore change — onboarding writes no .gitignore, only reads it).
   Design: 2 jsonb cols on repositories storing the RAW structures consumers already parse (minimal parsing change) — onboarding_environment {schemaVersion, envDetectData (01 detect .data), confirmedValues (02 values)} + onboarding_tooling {schemaVersion, tooling (04 output.tooling, incl infra for LOCAL use)}. Consumers read col first, FALLBACK to task-lookup (old repos keep working, no backfill). Mirror strips infra (ollamaUrl/ragConnectionString); import leaves infra null (per-machine).
   2A [DONE] Schema +onboarding_environment +onboarding_tooling jsonb (repos.ts, loose $type<Record> to avoid db->shared cycle) + migration 0083_repo_onboarding_mirror.sql (ADD COLUMN IF NOT EXISTS, applied live). Shared types in types/index.ts: OnboardingEnvironmentMirror {schemaVersion,envDetectData,confirmedValues} + OnboardingToolingMirror {schemaVersion,tooling} + ONBOARDING_{ENVIRONMENT,TOOLING}_SCHEMA_VERSION=1 + ONBOARDING_TOOLING_INFRA_KEYS=[ragConnectionString,ollamaUrl]. db+shared dist clean-rebuilt.
@@ -128,11 +115,29 @@ SLICE 3 — LSP (extend existing composer, NOT new system):
   3b [TODO]. Add lspServers+versions to ComposeInput + composeSandboxImage LSP layer + hash. Move LSP server install out of env-replicate/02 (lines 354-396). RISK: LSP servers need runtimes (02 currently adds node/python/etc. to the runtimes set when LSP selected); composed layer must self-install runtime deps or rely on env-template. Reconsider env-replicate/04 LSP verify. NOTE: LSP ALREADY reaches the agent sandbox today (composed builds ON the env-template that has the servers) → 3b is architectural cleanup, NOT a functional unblock. Weigh vs simplicity before doing.
   3c [DONE + COMMITTED/PUSHED 5ca82ac main, worker 1627 tests + tsc 0, live-verified]. Composed-image eviction. NEW sandbox/composed-image-reaper.ts: reapStaleComposedImages() — lists haive-sandbox:* (docker images filter), batched inspect ({{.Id}}|{{.Created}}|RepoTags, RFC3339→ms), protects images backing a running container (docker ps {{.Image}}, by tag OR id) + age threshold (HAIVE_COMPOSED_IMAGE_MAX_AGE_DAYS, default 14d); pure selectStaleComposedImages() unit-tested (7 tests, incl NaN-created kept, exact-age boundary). Removal via defaultDockerRunner.remove (-f still refuses running-container images). Wired at worker boot after reapOrphanEnvTemplates (boot-only like siblings; cli-exec/terminal containers already reaped just before → nothing composed mid-use). exported COMPOSED_IMAGE_REPO from image-composer. Live: 9 leaked images found on the box, pipeline (list+inspect+ps+parse+select) proven end-to-end via no-op-runner maxAge=0 run (selected all 9); real 14d boot run kept all (≈3d old) → reaped 0 silently. Removal safe: evicted tag a live task needs just rebuilds (cache miss).
   3d [TODO — user-driven live e2e]. Live-verify PHP LSP end-to-end on a Claude-family Drupal task: onboard/upgrade a php-extended repo, run 01b-install-plugins, confirm drupal-php-lsp installs + NO phpactor attempt + agent gets working intelephense LSP. Needs a real task + logged-in CLI (can't self-drive).
-SLICE 4 — Retrieval rewrite (rides slice 3):
+SLICE 4 — [IMPLEMENTED: current `_retrieval-guidance.ts`; historical instructions follow] Retrieval rewrite (rides slice 3):
   4a. Rewrite the ~8 prompt builders + rag_search desc from fallback-chain to discover→ground (LSP+grep together). Add lsp to workflow MCP/tooling set where available.
   4b. Stats: KEEP rag_query_log as-is (RAG hit% effectivity + kb/code/runbook/learning source split; logged per rag_search call incl zero-hit @ api/routes/rag.ts:165; schema/rag.ts:18; RagStatsPanel @ web tasks/[id]/page.tsx:2814). Do NOT add LSP/grep counters — LSP is CLI-plugin-internal (~30% visible), grep = fragile bash parse; both would key on ephemeral stream/bash surfaces we avoid. KB is NOT a separate channel (indexed INTO rag, reached only via rag_search). Only changes: (1) reframe RagStatsPanel copy so "effective X%" isn't read as "agent used RAG X%" — note grounding (LSP/grep) is unmeasured by design; (2) optionally render the panel on implement/validate phases too (rag_query_log is already per-step time-windowed; API supports it, web restricts to 03 discovery). NOTE: combined flow decouples RAG-miss from LSP/grep usage (LSP/grep now used on hits too), so do not relabel miss-rate as fallback-usage.
 
 Order: 1 ∥ 3 → 2 after 1 → 4 after 3.
+
+## Remaining LSP slice: implementation contract
+
+3b must extend the current composition/cache inputs, not replace the image builder from the old
+line-number table. Normalize the selected language/server/version map once, render only vetted
+install recipes with validated version tokens, and hash it together with base identity, provider,
+RTK and extras. Keep images built before this slice usable until their replacement exists; removing
+LSP installation from the generated env template alone strands existing templates. Resolve how
+stored templates are regenerated/upgraded before removing the old path, and preserve per-repo pins.
+A missing/unsupported selected server is reported explicitly, never advertised as installed. The
+Claude plugin mapping and actual binary must agree. Non-Claude universal LSP remains deferred.
+
+Verify identical inputs reuse a tag, changing a version/selection changes it, no LSP selection
+preserves the pre-feature image behavior, and rebuild failure keeps the previous image. 3d needs
+an actual composed-image build plus a PHP symbol/reference request through the selected CLI/plugin;
+a unit test or `command -v` alone proves neither plugin activation nor the protocol. A live test
+uses its own task and respects the worker activity/reload gate. Retrieval slice 4 is independent
+and already centralized; do not make 3b a prerequisite for rewriting it again.
 
 ## Open verifications (do at slice start, not blockers)
 - composed-image-cache.ts + reaper: do composed images survive teardown? (slice 3c)

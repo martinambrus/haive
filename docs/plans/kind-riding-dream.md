@@ -1,5 +1,11 @@
 # Deep Project Analysis — a resellable Haive module
 
+> **Not implemented; reviewed 2026-11-12 against `3426c8c34`.** The module/task-type foundations
+> now ship; use [Modules](../architecture/modules.md) and [Task types](../architecture/task-types.md)
+> as the implementation contracts. Snapshot mounts, guarded run-list spans, a module fix-loop
+> target and record-and-continue DAG outcomes remain prerequisites, not capabilities to assume.
+> The provider-refusal core change below has already landed; preserve it rather than rebuilding it.
+
 ## Context
 
 Haive's quality machinery is change-scoped: `08c`, `08c2` and `08d` review the diff a task produced,
@@ -21,7 +27,7 @@ it no longer fit a context window.
 **This plan ports the taxonomy and discards the loop.** It ships as `@haive-module/deep-analysis`, a
 paid module distributed through a private registry.
 
-**Executes only after** both modularity plans land: `serialized-chasing-thacker` (module system,
+**Foundations now shipped (2026-11-12).** The historical dependencies were: `serialized-chasing-thacker` (module system,
 incl. its distribution and module-contributed-steps rules) and `rippling-wibbling-puffin`
 (data-driven task types, incl. its module-step composition and dangling-reference rules). Neither is a runtime dependency of the other for this module — it needs `./steps` from
 the first and the composable catalog + task-type seed from the second.
@@ -50,8 +56,9 @@ and that revoking the entitlement stops the next image being built.
 - `./routes` — read API backing its dashboard, plus its one write: lifting an ignore (see
   `scan-triage`).
 
-The dashboard is worth calling out as product value, not decoration: **`review_findings` has no UI at
-all today** — nothing in `packages/web` or `packages/api` reads it. The module is its first consumer.
+The dashboard is worth calling out as product value, not decoration: the module would provide a repository scan dashboard, which core does not offer.
+Core gates/statistics already consume review findings; do not assume this module is the first
+reader or change their telemetry semantics.
 
 ## The pipeline
 
@@ -108,9 +115,10 @@ the whole project, one branch's changes, one commit or a range of commits (see S
 path scope (whole repo or subtree) that narrows any target, and a **budget** in agent invocations.
 
 **2 · `scan-analyze`** — `agentMining` fan-out, **one agent per selected dimension over the whole
-target** (not per component). Seventeen dimensions is at most seventeen invocations per slice — a
-target is one slice unless it is a diff too large for one prompt (see Scan targets) — drained 5 at a
-time by `MAX_PARALLEL_AGENTS_PER_TASK`; per-component splitting of a whole-tree read is a later
+target** (not per component). Seventeen dimensions is at most seventeen analysis invocations per slice — a
+target is one slice unless it is a diff too large for one prompt (see Scan targets) — queued
+under the configured per-task and global resource limits (5 is a historical cap, not promised
+parallelism); per-component splitting of a whole-tree read is a later
 refinement for a dimension that times out, not v1. Each agent returns structured findings (`path`,
 `line`, `severity`, `dimension`, `issue`, `fix`) and carries `REPO_IS_DATA_LINES` from
 `steps/_untrusted-repo.ts`.
@@ -130,22 +138,15 @@ elsewhere. The seat list is derived from the dimension set, never written out by
 the dimensions themselves follow — and reaches the seat picker through the module manifest (see
 Core changes).
 
-**Separate terminals are necessary, and today not sufficient.** The fan-out barrier fails the WHOLE
-step when any agent's row carries a fatal provider headline (`isFatalProviderFailure`, in
-`step-runner.ts`'s mining barrier), and `content_filter` became one of those classes on 2026-08-24
-(`8f09775d`), four days after the barrier was written (`59b67fe5`), without the barrier being
-touched — its comment still names only rate limits, auth and 5xx. So a refused security agent would
-fail `scan-analyze` with every other dimension's finished output left unread. That is read from the
-code, not observed: no run on the dev install has recorded a content-filter refusal (0 rows,
-2026-09-27). The first new core change below makes a refusal a per-agent outcome. With it, apply()
-folds every dimension that answered and records a refused one as REFUSED, naming its provider, in
-the coverage record — never as a dimension that found nothing — while `miningLossNote` carries it
-to the step banner. Recovery then needs nothing new: switch that dimension's seat to another CLI and
-use the fan-out Resume, which re-dispatches only the failed terminals, each in the seat its last
-dispatch recorded and so on the provider now picked, keeps every dimension that finished, and resets
-the steps that consumed the scan, as it does after any degraded fan-out. No refused prompt is
-re-sent as it stands: `shouldRetryMiningTerminalFailure` already vetoes that, since the same prompt
-is refused the same way.
+**As built before this module (verified 2026-11-12).** The mining barrier and
+`pickFatalProviderError` now use `isProviderOutage`, excluding a content-filter refusal. The DAG
+coder and fix/reviewer paths detect `PROVIDER_FATAL_HEADLINES.content_filter`, record
+`failed_unrecoverable`, and do not resend the refused prompt. `issueRefused` reads the classified
+invocation's `errorMessage`, not agent-controlled `concerns`. Reuse those paths. The separate
+record-and-continue policy this module needs is still absent: ordinary workflow DAGs correctly
+fail when a required issue failed. Apply folds the scan's completed dimensions, records a refused
+one as REFUSED and any other failed one as incomplete, never as clean. Resume must retain completed
+agents and invalidate downstream scan results before folding the changed wave again.
 
 **REFUSED is only as good as the classifier.** `CONTENT_FILTER_RE` holds the one refusal text
 measured so far. Any other CLI's refusal stays unclassified until it is measured and ends as an
@@ -175,12 +176,25 @@ dimensions x 3 members + 17 consolidators is 68 invocations per slice, drained 5
 fourteen serial batches. Multi-model is opt-in per run, and deselecting dimensions is the other
 lever on that number.
 
+**A durable budget, not just a scope-form number.** At scope approval persist a budget ledger
+with a reservation identity for each planned analysis, verifier, grouping, synthesis, retry and
+remediation invocation. Claim a reservation atomically before dispatch and reconcile it after
+crash/recovery; repeated apply must not spend it twice. The scope form must distinguish the scan
+budget from the remediation budget the person approves at triage. Reserve report/grouping
+capacity first. Each finding's three voters can dwarf the seventeen analysis calls; bound total
+findings, bytes and voters as well as findings per file. When verification cannot be afforded,
+record UNVERIFIED and carry the claim as unconfirmed, never count an absent voter as a negative.
+A fallback theme list is not constrained to twelve themes if seventeen dimensions survive: the
+normalization cap applies to the fallback too, preserving every finding in `Other`.
+
 **3 · `scan-verify`** — second mining wave via `MiningWaveError`, reusing the three-lens refuter
-panel built in `08c-code-review.ts`. **The default inverts here, deliberately.** In `08c` a finding
+panel built in `08c-code-review.ts`. **The dismissal quorum changes here, deliberately.** In `08c` a finding
 is kept unless unanimously disproved, because gate 2 auto-approves and a wrong dismissal ships a
 vulnerability. A scan report is read by a human and nothing auto-approves, so a false positive costs
-attention instead — the plugin's own reasoning, and the reason its verifiers default to
-FALSE_POSITIVE on a 2-of-3 quorum. Same machinery, opposite default, and the comment must say why.
+attention instead — the plugin's own reasoning, and the reason this module may dismiss on a 2-of-3 quorum. Without two affirmative,
+evidence-backed FALSE_POSITIVE votes, retain the finding as unconfirmed; never default missing,
+malformed, timed-out or refused votes to FALSE_POSITIVE. Require two voters to identify the
+**same claim** and its counter-evidence, not two unrelated reasons attached to one batch. Same machinery, different quorum, and the comment must say why.
 A refuter its provider refuses is an unreadable voter and so never counts toward a dismissal, and
 the refutation lenses are seats as in `08c` (`refuter:<lens>`), their CLIs chosen per lens like the
 analysis seats.
@@ -241,7 +255,7 @@ might assume otherwise. Consolidation reconciles drafts of one answer; refutatio
 against the code and demands a cited `file:line`. `purring-marinating-peacock`'s own caveat is
 explicit — consolidator contradiction-validation is "best-effort model judgement, NOT a correctness
 guarantee" — so consolidating three models' findings still yields findings nobody verified.
-Consolidate first, refute second, and keep the inverted 2-of-3 default.
+Consolidate first, refute second, and keep the 2-of-3 evidence quorum.
 
 **4 · `scan-record`** — deterministic. Dedups survivors by `findingFingerprint` against existing
 `review_findings` rows, writes them with `reviewerId = 'deep-scan:<dimension>'` (no core schema
@@ -303,7 +317,8 @@ theme: an unknown id is dropped, a finding named twice stays with the first them
 goes to a theme called `Other`, and past the cap the eleven largest stay and the rest join `Other`.
 A call that fails, is refused or returns nothing usable does not fail the scan: each dimension
 becomes one theme, and the coverage record says so. A list too long for one prompt is split by
-dimension, one call each, which means more themes and never a dropped finding. The first call is
+dimension, one call each, then globally normalized to the same twelve-theme cap, preserving
+every remaining finding in `Other`. This can yield broader themes, never dropped findings. The first call is
 reserved out of step 1's budget before any analysis agent runs, and a later one the budget cannot pay
 for takes the per-dimension fallback.
 
@@ -400,6 +415,17 @@ make. It is available only when the issue is single-dimension, which a theme doe
 guarantee, so it is a bonus gate and must not be turned into a requirement by making the grouping rule
 dimension-aware.
 
+**Remediation planning invariants.** Greedy levels are assigned over the actual issue parts,
+after splitting themes: a finding owning several paths is indivisible and carries all those
+paths into overlap checks. Each level is strictly later than every earlier issue with an
+intersecting path set. A simple “different level from the first collision” can still collide
+with a second issue. Test overlap chains (A: x, B: x+y, C: y) and one oversized paired finding.
+The accepted plan, scan-row associations and approved landing branch must commit atomically in
+the main database before any coder is queued, using the current task epoch/step ownership. Module
+DB ignore/config writes cannot share that transaction: use idempotent intents/reconciliation,
+not a fictional cross-database transaction. Store stable finding/scan identities and a snapshot
+hash so later reports do not infer lineage from fuzzy fingerprints or timestamps alone.
+
 **8 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
 **Reusing the executor needs no core change to find its plan:** `resolveDagPhase`
 (`step-engine/dag-executor.ts:1505`) loads its plan by `taskDagPlans.taskId`, not from `06b`, so the
@@ -458,6 +484,15 @@ transient fault as a verdict: an environment halt for a coder or a reviewer, an 
 crash, and a merge halt, whose conflict a person resolves with "Retry with LLM" once the automatic
 attempts are spent.
 
+**The custom fix target is a core prerequisite.** Current `routableFixLoopTarget` and module
+composition permit only `07-phase-2-implement`, even though a definition can store another id.
+Before seeding this type, add an explicit registered capability for a module step that consumes
+the core diagnosis/guidance and honors the same reset/epoch/ownership protocol. Validate it at
+composition, create and revival. A string in `fixLoop.targetStepId` does not implement that
+capability. Retain 07 as the only target for existing types and test an invalid/missing target
+fails before any rows reset. Guarded spans also need a new validated data contract and crash-
+resumable skip ownership; no arbitrary predicate code may be stored in an admin-authored type.
+
 **9 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
 (`rippling-wibbling-puffin`) refuse a composition whose loop emitters have no declared
@@ -505,8 +540,8 @@ themes ahead of `diminishing` ones and most severe first within each:
 - coherence findings left with no authoritative side, so recorded and never planned;
 - findings triage could offer no remediation for (a landing branch without the scanned commit, a
   read-only folder import, a detached HEAD), with the reason triage gave;
-- findings whose DAG issue did not merge: refused by the provider (the refusal marker in
-  `concerns`), failed, or cancelled, naming which;
+- findings whose DAG issue did not merge: refused by the provider (the Haive-classified `content_filter` headline in
+  `errorMessage`), failed, or cancelled, naming which;
 - findings whose DAG issue made no change (the no-change marker), as possibly already fixed on the
   landing tip and unconfirmed;
 - findings whose DAG issue merged, as remediation attempted and unconfirmed: a merge proves the
@@ -560,9 +595,10 @@ the default branch, the scan this plan described before it had targets.
   has usually moved on, and a diff against its tip counts A's later work, reversed, as B's.
 - **Commit** — what one commit changed: base its FIRST parent, read at the commit. A merge commit
   is what the merge brought in; a root commit diffs against the empty tree.
-- **Range** — what `from..to` changed: base `merge-base(from, to)`, read at `to`. The release
-  window is this case — `from` the last release tag, `to` the release branch — and the merge-base
-  keeps a `from` on another line of history from showing up as its own changes, reversed.
+- **Range** — the difference from `from` to `to`, read at `to`. For the release-window v1
+  contract, require `from` to be an ancestor of `to` and use `from` itself as base. Refuse an
+  unrelated/diverged pair with a message directing the user to Branch comparison. Silently
+  replacing `from` by `merge-base(from, to)` would scan a different window than the one named.
 
 **Names are checked before git sees them, and resolved once.** Every ref the person gave is
 validated in code before any git command runs — refused when it starts with `-` or breaks git's
@@ -734,7 +770,7 @@ see their sections):
   flags every rule that has an exception list, which is most of the good ones.
 - **Refutation asks a different question.** `scan-verify`'s lens here is not "does this defect exist
   in the code" but "do both quoted texts still say this, and does either state an exception that
-  covers the other". Same panel, same inverted 2-of-3 default, different check — and the prompt must
+  covers the other". Same panel, same 2-of-3 evidence quorum, different check — and the prompt must
   say so, or the refuters will look for a code defect and find none.
 - **Deduping needs a canonical side.** `findingFingerprint` hashes `(reviewerId, path, issue)`, so
   the same conflict reported with its sides swapped hashes differently and a re-scan calls it new.
@@ -840,7 +876,7 @@ Three things this dimension must get right:
   find-references where the tooling offers it, a grep for the bare symbol name otherwise, and an
   explicit look at the project's config, annotations and naming conventions — and the refutation
   lens is "does ANY reference exist, including a dynamic, configured or convention-matched one", not
-  "is this code wrong". Same panel, same inverted 2-of-3 default, different question, and the prompt
+  "is this code wrong". Same panel, same 2-of-3 evidence quorum, different question, and the prompt
   must say so. **Subtree scope narrows where findings are RAISED, never where references are
   SEARCHED**: a symbol unreferenced inside a subtree is routinely called from outside it, so a scan
   that searches only the subtree reports every one of its exports as dead. A diff target narrows the
@@ -881,29 +917,14 @@ Two are already written into the two modularity plans (`5aa4704`):
 - Module `composableSteps` union into `composable_step_catalog`, namespaced `module.<id>.<stepId>`.
 - Module-seeded task-type definitions, and the dangling-reference rule when a module is removed.
 
-Eight more follow from how the scan runs. The first, the insights reader's limit and the last
-stand on their own and can ship
-ahead of the module:
+The following contracts were proposed around the scan. Provider-refusal and refspec hardening
+now exist (`isProviderOutage` and `00a-sync-base`); snapshots, guarded spans, module fix targets
+and partial DAG completion still need explicit core work. Re-check every item before changing it:
 
-- **A provider's content-filter refusal is a per-agent outcome, not a dead provider.** The fan-out
-  barrier's fail-fast (`step-runner.ts`) and the DAG's `pickFatalProviderError` both key on
-  `isFatalProviderFailure`, which counts `content_filter`. Both were written for providers that stop
-  answering — rate limits, auth, 5xx — where every further call hits the same wall, so failing the
-  step, and in the DAG cancelling in-flight siblings, is right. A refusal concerns ONE prompt: its
-  siblings' prompts are not refused by it, and waiting changes nothing. Exclude `content_filter` at
-  those two sites. A refused mining agent then degrades like any failed agent, its refusal named in
-  `miningLossNote`. A refused DAG coder needs a third change: with the guard out of the way,
-  `classifyDagIssueFailure` (`dag-failure-class.ts`) calls a failure that was neither killed nor
-  environmental `genuine` and hands it to the advisor, whose `RETRY_APPROACH`/`RETRY_MODIFIED`
-  would re-send the refused content to the provider that refused it. Its issue ends
-  `failed_unrecoverable` with a refusal marker in `concerns`, the way `DAG_INFRA_EXHAUSTED_MARKER`
-  records an exhausted re-dispatch, and escalation and the level's failure rule both read that
-  marker: no advisor is dispatched for the issue, and it does not fail the level its siblings
-  finish. No new `dag_issue_outcome` value, since Postgres cannot drop one once added. Core's own
-  fan-outs change with it: a refused `08c` or `08d` seat — 08d's is where the refusal was
-  measured — fails the whole step today, and afterwards yields the synthetic "did not complete"
-  finding both steps already report for a dead agent (`didNotCompleteIssue`), so its silence is
-  still never read as approval.
+- **Provider refusal handling — already shipped.** Reuse `isProviderOutage`, `issueRefused`
+  and the DAG's explicit content-filter branches described under `scan-analyze`. Keep their
+  regression tests. The module still needs to classify coverage and opt in to partial DAG
+  completion; do not broaden workflow success semantics when adding that policy.
 - **A mining dispatch can mount a snapshot, and its row keeps it.** `AgentMiningDispatch` names
   the snapshot its agent is mounted on, and for a diff target the base tree bound beside it, and
   both join the requirements a mining row records (`dispatchRequirements` and
@@ -914,8 +935,9 @@ ahead of the module:
   `resolveInvocationRepoMount` honours the snapshot ahead of both repository branches — the
   read-only-folder one returns before it reads even the `worktreeRel` override DAG coders use — so
   a read-only folder import is scanned from its snapshot, never from the person's live checkout.
-  The mount is marked as a committed snapshot, and secret masking treats every file in it as
-  tracked, since each one is: `filterUntracked` (`secret-mask.ts`) reads a directory with no
+  The mount is marked as a committed snapshot, with a Haive-generated inventory of tracked
+  paths from the pinned tree (not a boolean supplied by an agent). Preserve the normal tracked-file
+  secret policy, and treat every file in that inventory as tracked, since each one is: `filterUntracked` (`secret-mask.ts`) reads a directory with no
   `.git` as all untracked and masks more, which would hide from the security dimension exactly
   the committed `.env` files and keys it exists to find. Such a finding names the file, the line
   and the kind of credential and never its value, the contract `07_7-secret-sweep` already
@@ -944,7 +966,7 @@ ahead of the module:
   failure and let the level merge its other
   issues, and so does the third, an accepted issue whose branch holds no change
   (`issueBranchHasChanges`), which is left unmerged with a no-change marker in `concerns`, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
-  `concerns` — no new `dag_issue_outcome` value, as with the refusal marker — and an environment
+  `concerns` — no new `dag_issue_outcome` value, without changing the existing refusal classification — and an environment
   halt, a merge halt and every other site `scan-remediate` lists as a fault still fail it.
 - **`loadUnactedInsights` takes a limit and can return what 08e picked.** It slices to
   `INSIGHTS_AT_GATE` (30) itself, which suits a gate row and not a report that lists everything,
@@ -966,6 +988,17 @@ through `ctx.db` (`review_findings`, `task_dag_*`, and `tasks.pre_answers` for t
 those are the intended extension points) but must **not add core tables**; its own schema goes in
 its own database via `ensure-schema`. The existing cross-cutting rule says the latter but not the
 former, and this module does both kinds of write.
+
+**Additional acceptance gates.** Module routes scope all core findings/tasks by the authenticated
+owner's repository; possession of a finding id alone grants nothing. Ignore/lift operations carry
+a revision precondition and an audit, and a material new severity/location/evidence is presented
+rather than silently matched to an obsolete ignore. Source-controlled rules are data under the
+existing prompt-containment policy; an archived `AGENTS.md` is not a way to override Haive's
+operator-approved rules. Build the read-only scan/report slice before remediation and ship its
+snapshot/coverage tests independently. Git/object/fetch and filesystem work has byte, entry,
+depth and wall-time bounds, including alternates and symlink cycles. Cleanup waits for scan
+invocations and recaps to settle; a retained failed task is resumable. Reports are paginated or
+streamed with complete counts: a per-file cap alone does not bound a whole repository's output.
 
 ## Critical files (reference, not modification)
 
@@ -1078,8 +1111,7 @@ former, and this module does both kinds of write.
   REFUSED with its provider while apply() folds the others; an unclassified failure is recorded as
   did-not-complete, never as REFUSED and never as a clean dimension.
 - Target resolution over a fixture repository holding a root commit, a merge and two branches:
-  branch → merge-base, commit → first parent (root commit → empty tree), range → merge-base of
-  `from` and `to`. A ref starting with `-` is refused before any git command runs, the fetch
+  branch → merge-base, commit → first parent (root commit → empty tree), range → `from` after proving ancestry to `to`; a diverged range refuses. A ref starting with `-` is refused before any git command runs, the fetch
   included, and every git argv carries a person's ref only after `--end-of-options`, inside a
   fully qualified refspec, so a branch named `+topic` is fetched as itself; a tag naming
   a tree is refused before any diff runs; a branch with no commits of its own, an empty range and
@@ -1181,10 +1213,10 @@ former, and this module does both kinds of write.
   to be placed. An `08d` fan-out with one refused seat ends degraded, carrying that seat's "did not
   complete" finding.
 - `pickFatalProviderError` returns nothing for a content-filter run, so no sibling coder is
-  cancelled; the refused issue ends `failed_unrecoverable` with the refusal marker and no advisor
+  cancelled; the refused issue ends `failed_unrecoverable` with that classified error and no advisor
   dispatch, and its siblings merge, with per-issue review on and with it off.
-- A mining dispatch naming a snapshot mounts it alone and read-only, with no secret mask over its
-  committed files and the base tree bound read-only outside the workdir, for a read-only folder
+- A mining dispatch naming a snapshot mounts it alone and read-only, with committed-file
+  masking equivalent to the pinned repository tree and the base tree bound read-only outside the workdir, for a read-only folder
   import as for a clone, and so does the same agent replayed from its row: a reserved agent a dead
   worker never sent, and a wave agent recovered through the retry path.
 - Completing or cancelling a repository task reaps its scratch workspace, snapshot included; a
@@ -1241,4 +1273,6 @@ former, and this module does both kinds of write.
    no token, and the module reaches `active` only on the loader's boot report.
 
 **Adversarial:** remove the module while a `deep_scan` definition exists — the definition must become
-non-selectable with a named reason, and an in-flight task must finish on its materialised run list.
+non-selectable with a named reason, and an in-flight task must honor the shipped lifecycle: missing steps mark it dead, never
+filter the snapshot or complete it; reinstall and boot revival resume only once dependencies
+resolve. Ordinary removal keeps data, and purge remains refused while a live/dead task uses it.

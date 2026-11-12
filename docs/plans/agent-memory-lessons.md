@@ -1,5 +1,6 @@
 # What Anthropic's agent-memory research offers Haive: close the learning loop, measure it, then consolidate
 
+> Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **Not started** (2026-11-11), apart from P0, which landed with T580 (`a3d71d4f7` and `dfa43bf68`).
 > Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
 > Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
@@ -97,6 +98,23 @@ Each adds a record and changes no behaviour, so none needs analysis first. Durab
    invocation, so per-step and per-model use must be joined by time window, which is ambiguous
    during a fan-out. Check first whether the rag MCP server can know the invocation that called it;
    if it cannot cheaply, keep the time-window join and say so in P2's report.
+
+**Record contract for P1.** Use one versioned reconcile event per apply attempt, keyed by task,
+step row, round and invocation; a crash/retry must not double-count it. Record proposed, parsed,
+rejected, approved and actually written counts separately, including partial write failures.
+Machine admission reasons and human edits are separate: most admission rules are prompt advice,
+so absence from a reply cannot be counted as a machine rejection. Avoid storing full learning
+bodies or transcripts in telemetry. Capture a bounded before/after identity/hash for provenance;
+updates retain the original origin as well as the new task/date, and legacy entries say unknown.
+Keep metadata out of both `learningExcerpt` and the indexed learning text, with tests of both.
+
+RAG attribution must use an invocation-bound credential issued by Haive (with task/step ownership
+checked server-side), never an invocation id supplied as an arbitrary tool argument. A time join
+can supply only ambiguous candidates during fan-out and is labelled unknown for per-model rates.
+Join the current `review_findings` recurrence key by reviewer/path as a repeat **candidate**, not
+proof of the same defect; use the fixture's stable trap ids for the outcome. Retrieval cost is
+not independently recoverable from CLI token totals: separate measured retrieval latency/calls,
+step-11 cost, and whole-task cost. Any allocation of prompt tokens to retrieval is an estimate.
 
 ## P2: measurements for the next benchmark round
 

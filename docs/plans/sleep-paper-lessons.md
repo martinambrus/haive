@@ -210,6 +210,18 @@ beat pooled once runs have 3 earlier matches, and does a scheduled learnings cle
 clean. `model_identity` is set on only 11 of 128 tasks, so a per-model study must join
 `cli_invocations`.
 
+P3 freezes an as-of dataset and derives the latest **eligible** estimate event before the
+prediction timestamp, respecting Retry history and `recordedEstimateHours` invalid-latest rules.
+A missing/nonpositive actual or prediction is unmeasured, never used in a log ratio. Resolve the
+estimator invocation through the estimate step/event, not an arbitrary task invocation's model.
+The “20 tasks” query is an eligibility heuristic: report usable same-path historical pairs, not
+just its task count. With only one repository, a repository-cluster bootstrap has one cluster and
+cannot estimate cross-repository uncertainty; report a descriptive backtest until enough independent
+clusters exist. Do not add a second model-cluster axis without enough independent models. Freeze
+seed, resampling unit and interval definition before comparing methods. This measures a
+counterfactual deterministic correction, not the LLM's response to a bias hint or a benefit of
+learnings consolidation; the latter needs its own store-quality/outcome evidence.
+
 ## Steps
 
 1. Before saving worker source: check no CLI run is in flight on the dev stack (a tsx reload of the

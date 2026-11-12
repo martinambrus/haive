@@ -1,5 +1,11 @@
 # Translator — a resellable Haive module
 
+> **Not implemented; reviewed 2026-11-12 against `3426c8c34`.** Module and repo-less task
+> foundations ship. The translation protocol, artifact upload/download ownership and checkpoint
+> scheme below remain to build; “no core changes” is a goal to verify, not an established result.
+> Use the current [Modules](../architecture/modules.md) and [Task types](../architecture/task-types.md)
+> contracts rather than the archived modularity plans.
+
 ## Context
 
 The user has a working PDF translation toolkit (`translator.zip`): Python extracts and chunks a PDF,
@@ -16,22 +22,25 @@ highest-value change here and may bring cheaper models into range.
 
 Ships as `@haive-module/translator`, distributed exactly like the deep-analysis module (private
 registry, BuildKit-secret token, `entitlementId`) per the distribution and module-step rules in
-`serialized-chasing-thacker.md` and `rippling-wibbling-puffin.md`. **Executes only after both land.**
+`serialized-chasing-thacker.md` and `rippling-wibbling-puffin.md`. **Both foundations have landed.**
 It inherits that plan's delivery answer too: a published-image install cannot rebuild api+worker, so
 a paying customer receives a per-customer api+worker image the VENDOR builds with this module in
 ("DECIDED — a published-image install gets PER-CUSTOMER images built by the vendor", 2026-09-07).
-Adding a second language therefore costs a rebuild of every entitled customer's image, not just a
-package publish — worth knowing before the two-language split below is treated as free.
+Adding a new language capability to module code therefore requires a new vendor channel build
+for entitled customers (including web only for compiled web parts), not just a package publish — worth knowing before the two-language split below is treated as free.
 
 ## Why it fits Haive better than it looks
 
 The toolkit is file-based (`chunks/` → `translated/`), which appears to need a per-task writable
 workspace Haive does not give repo-less tasks — `resolveTaskRepoMount` returns null without a
-repository. **Translation needs no workspace at all.** Chunk text goes into the prompt and the
+repository. **The LLM translation calls need no repository workspace.** Chunk text goes into the prompt and the
 translation comes back in the response, which is what every Haive LLM step already does. Deterministic
 work runs in the worker; chunks, glossary and translations live in the module's own database via
 `ensure-schema`. `tasks.repositoryId` is already optional at creation (only `onboarding_upgrade`
-demands one), so a document-only task is reachable today. **No core changes.**
+demands one), so a document-only task is reachable today. Validate the module seed's
+`requiresRepository=false` and its attachment access on that exact create path before promising
+no core changes. Deterministic extraction/rendering still needs bounded module-owned scratch
+space. No core file-write prompt step can be added to a repo-less type merely to get a directory.
 
 ## Consistency across a whole book — the hard part
 
@@ -49,9 +58,12 @@ translator than chapter 1. Four mechanisms, in order of importance:
    translated** chunk, so voice continues across the seam. The `loop` hook gives this free:
    `buildIterationPrompt` receives `previousIterations` (`step-definition.ts:339-353`). Take only the
    tail — passing every prior iteration would blow context by chunk 20.
-4. **Deterministic drift checks.** After each chunk, string-check that approved glossary terms were
-   actually used and that `terms_to_keep` were left alone; flag new capitalised terms absent from the
-   glossary. Mechanical, no model judgement, and it catches the drift the prompt merely asks for.
+4. **Deterministic drift checks.** After each chunk, check protected placeholders and `terms_to_keep` by stable ids, and flag likely glossary
+   drift or new capitalised terms. A literal target-term match cannot prove correctness in an
+   inflected language, and a glossary term not present in the source chunk need not appear in its
+   translation. Record these as review hints with source/target spans, never automatic meaning
+   failures. Completeness checks catch empty/truncated output and missing chunk/paragraph ids,
+   not semantic omissions; the independent bilingual review assesses those.
 
 Sequential by design: chunk N+1 needs chunk N's translation. A book translation is a long job and
 quality is the point. The **review** pass parallelises (reviews are independent); translation does not.
@@ -63,21 +75,51 @@ quality is the point. The **review** pass parallelises (reviews are independent)
    extraction + repair (`fix_split_words` / `fix_missing_spaces` / `fix_drop_caps`, kept as the
    toolkit's proven Python) and sentence segmentation, then assembles chunks on semantic boundaries in
    TS and stores them with the document structure in the module DB.
-2. **`tr-glossary`** — LLM proposes translations for frequency-extracted term candidates and marks
+2. **`tr-glossary`** — a pre-form LLM phase (`llm.preForm`) proposes translations for frequency-extracted term candidates and marks
    terms to keep (Sanskrit, Latin, names, ISBN, URLs); then a **form** where the human approves or
    edits. A wrong key term poisons every chunk, so this pause is worth it.
-3. **`tr-calibrate`** — translates one representative chunk and derives the **style card**, presented
-   in the same form pass for approval. Also the natural place to compare models cheaply before
+3. **`tr-calibrate`** — a pre-form LLM phase translates one representative chunk and derives the **style card**, presented
+   in that step's post-generation form for approval. Do not expect a normal form-before-LLM
+   phase to display output that has not been generated. Also the natural place to compare models cheaply before
    committing a whole book to one.
-4. **`tr-translate`** — `loop` over chunks, **three real passes per chunk** (accuracy → restructure →
-   polish), each a separate invocation seeing the previous output, all carrying glossary + style card
-   + rolling tail.
+4. **`tr-translate`** — a persisted `(documentRevision, chunkId, pass)` cursor, **three real passes per
+   chunk** (accuracy → restructure → polish). One loop iteration is one pass, one invocation;
+   the iteration after polish advances to the next chunk. Persist each accepted output under a
+   unique cursor key before advancing, and read the rolling tail from the preceding chunk's
+   accepted polish output, never from an accuracy/restructure draft. The runner's loop limit
+   defaults and editable range are too small for a 300-page book: prove a bounded, resumable
+   batching scheme (or add an explicitly reviewed long-loop capability) before using `loop`.
+   Never issue three model calls hidden inside a single `apply` or bypass CLI dispatch.
 5. **`tr-review`** — independent reviewers read source against translation and emit *specific
    corrections* (not rewrites), which are then applied. This is the translate-edit-proofread model, and
    the reason not to use `purring-marinating-peacock`'s consolidator here: merging three prose
    translations blends three voices, and a book needs one.
 6. **`tr-render`** — builds the output document (below).
 7. **`tr-deliver`** — output offered for download through the module's `./routes`.
+
+**Revision and retry contract.** Ingest hashes the source, extraction/chunker version and document
+structure; approval hashes the glossary and style card. Every translation/review row pins those
+hashes and invocation id. A changed glossary, style or source invalidates dependent outputs
+explicitly; Retry of an unchanged cursor reuses its saved output and does not pay again. A review
+correction is a proposed patch keyed by chunk and expected output hash; validate, show/approve
+through a form and apply atomically. Corrections at a seam re-check both adjacent chunks. The
+original three-pass rationale is a hypothesis; compare quality/cost on the calibration chunk
+before recommending a cheaper model, and retain every intermediate output for diagnosis.
+
+Source text, glossary candidates and model drafts are separately bounded/fenced data in prompts,
+with Haive's phase/output instructions outside. Preserve paragraph/chunk ids, citation/URL and
+markup placeholders and explicit response schemas; never concatenate arbitrary source HTML as
+instructions. A single oversized sentence is a named exceptional chunk (or a human-reviewed
+split), not an infinite chunking loop. Token budgets reserve space for source, glossary, tail and
+output in each provider's actual context window; a 300-word tail is not by itself a budget.
+
+**Artifacts and ownership.** Authorize attachment reads through the owning task/user, use
+`fs-safe` from the repository root when a repository exists, and define a worker-owned scratch
+anchor for a repo-less document. The API queues extraction/rendering; it never spawns tools.
+Module routes authorize every download and ignore user-supplied filesystem paths. Define size,
+retention and delete/cancel cleanup for source, intermediate blobs and final outputs; removing a
+module keeps data until explicit purge. Module DB references to core tasks have no cross-database
+FK: use idempotent cleanup and mark orphaned documents rather than assuming cascade deletion.
 
 ## The module's toolbox image — polyglot on purpose
 
@@ -96,14 +138,26 @@ carries both rather than accepting weaker JS equivalents to stay monolingual:
   gives RTL bidi, CJK line-breaking and ligatures free because it is a real text-layout engine. The
   worker has neither Chromium nor puppeteer-core (verified), so it ships here.
 
-Built on first use through the existing `docker-runner.ts` `build()` — the same machinery
-env-replicate's `createBuildImageStep` uses — so this needs no new core capability, and the core
+A worker-owned job builds or pulls a pinned toolbox image, reusing `docker-runner.ts`
+`build()` where appropriate. Persist its image identity and serialize builds per tag; a source
+module must ship its build context in its published artifacts (not only TypeScript dist).
+Validate this packaging and runtime admission before promising no new core capability. The core
 worker stays lean.
 
 **The split of responsibilities is the contract.** Orchestration, chunk assembly, glossary logic,
 drift checks and prompt building stay in TypeScript in the worker, where they belong. The image does
 extraction, segmentation and rendering, exchanging JSON on stdout the way `browser-check.js` already
 does. Anything requiring judgement or state stays in TS; the image is a pure function over bytes.
+
+Toolbox jobs run with no network, provider credentials or Docker socket, read-only source and
+bounded writable scratch, CPU/RAM/PID/output/time limits; timeout kills and awaits the container.
+HTML rendering disables external URL/file loads, scripts and source-controlled CSS fetches, and
+resolves assets only from the validated document set. PDF text extraction detects empty/scanned
+or bad reading-order input and asks for correction/OCR rather than returning a successful empty
+book. OCR is a separate optional feature. EPUB/DOCX extraction uses the existing archive bounds
+and held descriptors. Pin image/tool/font versions and verify redistribution licenses, including
+the chosen PDF library and fonts, before packaging; PDF reconstruction cannot promise original
+pagination or typography. Define an accessible text alternative to the generated PDF.
 
 **Costs, stated:** the image is large (Chromium + Python + fonts, roughly 1–1.5 GB) and built once per
 install, and the module becomes two languages with two test stories. Worth it for extraction quality;
