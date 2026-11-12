@@ -85,7 +85,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
-import { CONFIG_KEYS, logger } from '@haive/shared';
+import { CONFIG_KEYS, STOP_SETTLE_EVENTS, logger } from '@haive/shared';
 import {
   MODULE_DEPENDENTS_CAP,
   moduleManifestSchema,
@@ -1136,11 +1136,20 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
             .select()
             .from(schema.cliInvocations)
             .where(eq(schema.cliInvocations.taskId, id)),
-          events: await db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, id)),
+          events: await db
+            .select()
+            .from(schema.taskEvents)
+            .where(eq(schema.taskEvents.taskId, id))
+            .orderBy(schema.taskEvents.createdAt),
         })),
       );
     const stoppedEvents = () =>
       db.select().from(schema.taskEvents).where(eq(schema.taskEvents.eventType, 'task.stopped'));
+    // The Stop records its settlement request in the transaction that fails the task.
+    const requested = (task: { completedAt: Date | null } | undefined) => [
+      STOP_SETTLE_EVENTS.REQUESTED,
+      { failedAt: task!.completedAt!.toISOString() },
+    ];
     const completedAtOf = async (id: string) =>
       (await observe([id]))[0]!.task!.completedAt!.toISOString();
     const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
@@ -1234,6 +1243,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         { status: 'failed', errorMessage: 'Stopped by an administrator' },
       ]);
       expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        requested(after!.task),
         [
           'task.stopped',
           {
@@ -1270,6 +1280,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(after!.steps[0]!.idleMs).toBe(0);
       expect(after!.steps[0]!.carriedIdleMs).toBeGreaterThanOrEqual(89_000);
       expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toMatchObject([
+        requested(after!.task),
         ['task.stopped', { reason: 'module_deactivated' }],
       ]);
     });
@@ -1312,6 +1323,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       const failedAt = after!.task!.completedAt!.toISOString();
       expect(body.stopped.map((s) => s.failedAt)).toEqual([failedAt]);
       expect(after!.events.map((ev) => (ev.payload as { failedAt?: unknown }).failedAt)).toEqual([
+        failedAt,
         failedAt,
       ]);
     });
@@ -1566,6 +1578,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         errorMessage: 'Stopped by an administrator',
       });
       expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        requested(after!.task),
         [
           'task.stopped',
           {
@@ -1610,7 +1623,9 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         status: 'failed',
         errorMessage: 'Stopped by an administrator',
       });
-      expect(after!.events).toEqual([]);
+      expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        requested(after!.task),
+      ]);
       expect((await audits()).map((r) => r.metadata)).toEqual([
         { moduleId: 'alpha', mode: 'urgent' },
       ]);

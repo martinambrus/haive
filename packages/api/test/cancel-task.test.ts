@@ -208,7 +208,7 @@ describe('enqueueCancelJob', () => {
     expect(queueAdd).toHaveBeenCalledWith(
       'cancel-task',
       { taskId: 'task-1', userId: 'user-1' },
-      { removeOnComplete: 50, removeOnFail: 50 },
+      { deduplication: { id: 'cancel-task-1' }, removeOnComplete: 50, removeOnFail: 50 },
     );
   });
 });
