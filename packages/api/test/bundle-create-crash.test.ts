@@ -186,6 +186,16 @@ const post = async (url: string, body?: unknown) =>
 const complete = (id: string) => post(`/uploads/${id}/complete`);
 
 describe('bundle admission queue isolation', () => {
+  it('admits resync when only fetch metadata changes during the queue read', async () => {
+    seedGitBundle();
+    vi.spyOn(queue, 'getRanges').mockImplementation(async () => {
+      fake.patch(schema.customBundles, BUNDLE, { lastSyncCommit: 'refreshed-local-head' });
+      return [];
+    });
+    expect2xx(await post(`/${BUNDLE}/sync`));
+    expect(queue.jobs).toHaveLength(1);
+  });
+
   it.each(['replace', 'resync'])('%s opens no transaction while Redis is stalled', async (site) => {
     if (site === 'replace') {
       await seedZipBundle();
