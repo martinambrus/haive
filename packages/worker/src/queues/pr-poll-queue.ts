@@ -99,6 +99,7 @@ interface PrWaitTask {
   prFinalizeMode: string | null;
   prCredentialId: string | null;
   prRemoteUrl: string | null;
+  prPollError?: string | null;
 }
 
 export async function runPrPollTick(db: Database): Promise<void> {
@@ -125,29 +126,53 @@ export async function runPrPollTick(db: Database): Promise<void> {
       prFinalizeMode: true,
       prCredentialId: true,
       prRemoteUrl: true,
+      prPollError: true,
     },
   })) as PrWaitTask[];
   if (tasks.length === 0) return;
   for (let i = 0; i < tasks.length; i += POLL_CONCURRENCY) {
-    await Promise.allSettled(tasks.slice(i, i + POLL_CONCURRENCY).map((t) => pollTask(db, t)));
+    const batch = tasks.slice(i, i + POLL_CONCURRENCY);
+    const results = await Promise.allSettled(batch.map((t) => pollTask(db, t)));
+    for (const [index, result] of results.entries()) {
+      // pollTask records ordinary failures. Keep failures of that recovery path
+      // visible too, without interrupting this batch or the next one.
+      if (result.status === 'rejected') {
+        log.warn(
+          { taskId: batch[index]!.id, error: safeErrorMessage(result.reason) },
+          'pull-request poll task failed',
+        );
+      }
+    }
   }
 }
 
 async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
-  // Already merged (auto mode) but still parked — a prior auto-advance was lost; re-drive.
-  if (task.prState === 'merged') {
-    if (task.prFinalizeMode !== 'manual') await advancePrWaitStep(db, task);
-    return;
-  }
-  // Closed without merging is surfaced in the UI; the user decides. Nothing to poll.
-  if (task.prState === 'closed') return;
-
-  if (!task.repositoryId || !task.prNumber || !task.prCredentialId) {
-    await recordPollError(db, task.id, 'missing repository, PR number, or credential for polling');
-    return;
-  }
   let host = '';
   try {
+    // Already merged (auto mode) but still parked — a prior auto-advance was lost; re-drive.
+    if (task.prState === 'merged') {
+      if (task.prFinalizeMode !== 'manual') {
+        await advancePrWaitStep(db, task);
+        // A recovered re-drive clears the warning an earlier failed attempt saved.
+        if (task.prPollError)
+          await db
+            .update(schema.tasks)
+            .set({ prPollError: null, updatedAt: new Date() })
+            .where(and(eq(schema.tasks.id, task.id), isNotNull(schema.tasks.prPollError)));
+      }
+      return;
+    }
+    // Closed without merging is surfaced in the UI; the user decides. Nothing to poll.
+    if (task.prState === 'closed') return;
+
+    if (!task.repositoryId || !task.prNumber || !task.prCredentialId) {
+      await recordPollError(
+        db,
+        task.id,
+        'missing repository, PR number, or credential for polling',
+      );
+      return;
+    }
     const remoteUrl = task.prRemoteUrl
       ? gitRemoteIdentity(task.prRemoteUrl)
       : await legacyPrOrigin(db, task);

@@ -40,7 +40,8 @@ interface StreamJsonCollector {
    *  never summed with assistant usages), else the sum of the per-message
    *  assistant usages (amp emits no result usage). Either way peakPromptTokens is the
    *  largest single message's prompt, and contextWindow is the window the result's modelUsage
-   *  entry for the init/served model reports. Null when nothing reported. */
+   *  entry for the init/served model reports. Null when no usage is reported or the
+   *  assistant fallback is all zero (unknown on zai/muse, not a measured zero). */
   getTokenUsage: () => CliTokenUsage | null;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its usage). Null when no result event carried one. */
@@ -517,7 +518,9 @@ export function createStreamJsonCollector(
           (resultUsage.cacheCreationTokens ?? 0);
       }
       const base = resultUsage ?? assistantUsage;
-      if (!base) return null;
+      // zai/muse emit zero-valued assistant usage even after a paid reply. Without
+      // authoritative result usage, that placeholder means unknown, not measured zero.
+      if (!base || (!resultUsage && base.totalTokens === 0)) return null;
       return {
         ...base,
         ...(costUsd !== null ? { costUsd } : {}),
