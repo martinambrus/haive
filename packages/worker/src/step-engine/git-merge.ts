@@ -828,12 +828,7 @@ async function occupiedDirectories(
       },
     );
     if (entry?.kind !== 'directory') continue;
-    const inside = await readdirNoFollow(anchor, `${prefix}${p}`, {
-      rethrow: RESOURCE_LIMITS,
-    }).catch((err: unknown) => {
-      if (isResourceLimitError(err)) throw err;
-      return null;
-    });
+    const inside = await readdirNoFollow(anchor, `${prefix}${p}`).catch(() => null);
     if (inside === null || inside.length > 0) occupied.add(p);
   }
   return occupied;
