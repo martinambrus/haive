@@ -21,7 +21,7 @@ import {
   TERSENESS_LEVELS,
   computeEmailBlindIndex,
   configService,
-  decryptEmail,
+  tryDecryptEmail,
   encryptEmail,
   deriveAgentConcurrency,
   deriveAgentSafetyMb,
@@ -99,15 +99,20 @@ adminRoutes.get('/users', async (c) => {
     .from(schema.users)
     .orderBy(desc(schema.users.createdAt));
 
-  const users = rows.map((row) => ({
-    id: row.id,
-    email: decryptEmail(row.emailEncrypted, fieldKey),
-    role: row.role,
-    status: row.status,
-    tokenVersion: row.tokenVersion,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  }));
+  const users = rows.map((row) => {
+    const email = tryDecryptEmail(row.emailEncrypted, fieldKey);
+    if (email === null) log.warn({ userId: row.id }, 'Unreadable user email in admin list');
+    return {
+      id: row.id,
+      email,
+      emailReadable: email !== null,
+      role: row.role,
+      status: row.status,
+      tokenVersion: row.tokenVersion,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  });
 
   return c.json({ users });
 });
@@ -241,16 +246,24 @@ adminRoutes.get('/audit', async (c) => {
   const total = countRows[0]?.count ?? 0;
 
   const fieldKey = await configService.getEncryptionKey();
-  const events = rows.map((r) => ({
-    id: r.id,
-    actorUserId: r.actorUserId,
-    actorEmail: r.actorEmailEncrypted ? decryptEmail(r.actorEmailEncrypted, fieldKey) : null,
-    action: r.action,
-    targetType: r.targetType,
-    targetId: r.targetId,
-    metadata: r.metadata,
-    createdAt: r.createdAt.toISOString(),
-  }));
+  const events = rows.map((r) => {
+    const actorEmail =
+      r.actorEmailEncrypted === null ? null : tryDecryptEmail(r.actorEmailEncrypted, fieldKey);
+    if (r.actorEmailEncrypted !== null && actorEmail === null) {
+      log.warn({ userId: r.actorUserId }, 'Unreadable user email in audit list');
+    }
+    return {
+      id: r.id,
+      actorUserId: r.actorUserId,
+      actorEmail,
+      actorEmailReadable: r.actorEmailEncrypted === null ? null : actorEmail !== null,
+      action: r.action,
+      targetType: r.targetType,
+      targetId: r.targetId,
+      metadata: r.metadata,
+      createdAt: r.createdAt.toISOString(),
+    };
+  });
 
   // Distinct values for the filter dropdowns (data-driven, so new action types
   // appear without a code change). Cheap — both columns are indexed.

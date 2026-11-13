@@ -8,7 +8,7 @@ import {
   registerRequestSchema,
   computeEmailBlindIndex,
   encryptEmail,
-  decryptEmail,
+  tryDecryptEmail,
   CONFIG_KEYS,
   configService,
   logger,
@@ -318,10 +318,12 @@ authRoutes.post('/login', async (c) => {
   setAuthCookies(c, accessToken, refreshToken);
   await attempt.refund();
 
+  const email = tryDecryptEmail(user.emailEncrypted, fieldKey);
   return c.json({
     user: {
       id: user.id,
-      email: decryptEmail(user.emailEncrypted, fieldKey),
+      email,
+      emailReadable: email !== null,
       role: user.role,
       status: user.status,
       createdAt: user.createdAt.toISOString(),
@@ -415,10 +417,12 @@ authRoutes.get('/me', requireAuthAllowingPasswordChange, async (c) => {
     where: eq(schema.users.id, userId),
   });
   if (!user) throw new HttpError(404, 'User not found');
+  const email = tryDecryptEmail(user.emailEncrypted, fieldKey);
   return c.json({
     user: {
       id: user.id,
-      email: decryptEmail(user.emailEncrypted, fieldKey),
+      email,
+      emailReadable: email !== null,
       role: user.role,
       status: user.status,
       // The app layout already makes this call, so forcing a password change costs no extra

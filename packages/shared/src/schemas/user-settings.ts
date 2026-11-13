@@ -32,8 +32,11 @@ export type GitIdentityUpdate = z.infer<typeof gitIdentityUpdateSchema>;
 
 export const accountResponseSchema = z.object({
   name: z.string().nullable(),
+  // Null with its flag false when the row was written under a key this install no longer has.
   phone: z.string().nullable(),
-  email: emailSchema,
+  phoneReadable: z.boolean(),
+  email: emailSchema.nullable(),
+  emailReadable: z.boolean(),
 });
 
 export const gitIdentityResponseSchema = z.object({

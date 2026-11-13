@@ -860,7 +860,22 @@ ${MANIFEST_ARGS}      --install-dir /install \\
       --postgres-volume "\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}_postgres_data" \\
       --snapshot-host-dir "\${HAIVE_INSTALL_DIR_HOST}/snapshots" "\$@"
     ;;
-  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}" >&2; exit 2 ;;
+  recover-admin)
+    shift
+    ${LOAD_INSTALL_ENV}
+    DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
+    CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY:-}" \\
+    exec docker run --rm --log-driver none -i \\
+      --network "\${HAIVE_NETWORK:-\${HAIVE_INSTALL_ID:-haive}-network}" \\
+      -e HAIVE_INSTALL_ID="\${HAIVE_INSTALL_ID:-haive}" \\
+      -e DATABASE_URL \\
+      -e REDIS_URL="redis://redis:6379" \\
+      -e CONFIG_ENCRYPTION_KEY \\
+      --entrypoint node \\
+      "\${HAIVE_REGISTRY}/haive-updater:\${HAIVE_VERSION#v}" \\
+      packages/updater/dist/recover-admin-cli.js "\$@"
+    ;;
+  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>] [--force]" >&2; exit 2 ;;
 esac
 EOF
 chmod +x haive

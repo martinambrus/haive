@@ -11,8 +11,8 @@ import {
   passwordChangeSchema,
   configService,
   encrypt,
-  decrypt,
-  decryptEmail,
+  tryDecrypt,
+  tryDecryptEmail,
   logger,
 } from '@haive/shared';
 import { hashPassword, verifyPassword } from '../auth/password.js';
@@ -214,10 +214,14 @@ userSettingsRoutes.get('/account', async (c) => {
     columns: { name: true, phoneEncrypted: true, emailEncrypted: true },
   });
   if (!user) throw new HttpError(404, 'User not found');
+  const email = tryDecryptEmail(user.emailEncrypted, fieldKey);
+  const phone = user.phoneEncrypted === null ? null : tryDecrypt(user.phoneEncrypted, fieldKey);
   return c.json({
     name: user.name,
-    phone: user.phoneEncrypted ? decrypt(user.phoneEncrypted, fieldKey) : null,
-    email: decryptEmail(user.emailEncrypted, fieldKey),
+    phone,
+    phoneReadable: user.phoneEncrypted === null || phone !== null,
+    email,
+    emailReadable: email !== null,
   });
 });
 

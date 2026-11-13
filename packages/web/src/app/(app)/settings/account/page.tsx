@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type ApiError } from '@/lib/api-client';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
   Button,
@@ -18,7 +19,9 @@ import {
 interface AccountData {
   name: string | null;
   phone: string | null;
-  email: string;
+  email: string | null;
+  emailReadable?: boolean;
+  phoneReadable?: boolean;
 }
 
 export default function AccountPage() {
@@ -69,9 +72,21 @@ export default function AccountPage() {
     setProfileError(null);
     setProfileSuccess(null);
     try {
-      await api.put<{ ok: boolean }>('/user-settings/account', { name, phone });
+      // An empty field over an unreadable phone keeps it; any other value replaces or clears it.
+      const sendsPhone = !(account?.phoneReadable === false && phone === '');
+      await api.put<{ ok: boolean }>('/user-settings/account', {
+        name,
+        ...(sendsPhone ? { phone } : {}),
+      });
       setAccount((prev) =>
-        prev ? { ...prev, name: name.trim() || null, phone: phone.trim() || null } : prev,
+        prev
+          ? {
+              ...prev,
+              name: name.trim() || null,
+              phone: phone.trim() || null,
+              phoneReadable: sendsPhone ? true : prev.phoneReadable,
+            }
+          : prev,
       );
       setProfileSuccess('Profile saved.');
     } catch (err) {
@@ -141,8 +156,12 @@ export default function AccountPage() {
               <Label htmlFor="account-email">Email</Label>
               <Input
                 id="account-email"
-                type="email"
-                value={account?.email ?? ''}
+                type="text"
+                value={
+                  account?.emailReadable === false
+                    ? 'unreadable, needs relink'
+                    : (account?.email ?? '')
+                }
                 readOnly
                 disabled
               />
@@ -163,10 +182,15 @@ export default function AccountPage() {
                 id="account-phone"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="+1 555 555 5555"
+                placeholder={
+                  account?.phoneReadable === false ? 'unreadable, needs relink' : '+1 555 555 5555'
+                }
                 maxLength={32}
               />
             </div>
+            {account?.phoneReadable === false && (
+              <MarkdownView body="Phone: unreadable, needs relink. Enter a new phone number to replace it." />
+            )}
             <FormError message={profileError} />
             {profileSuccess && (
               <div className="rounded-md border border-emerald-900 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">

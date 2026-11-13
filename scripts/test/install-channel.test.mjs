@@ -76,8 +76,8 @@ for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
 case "$out" in *docker-compose*) printf 'services: {}\\n' > "$out" ;; esac
 exit 0
 `;
-// Only these secret-transport edits and the explicit PowerShell install-id reorder
-// are allowed to differ from the public baseline; all other bytes must still match.
+// Only these secret-transport edits, the recovery subcommand tested below and the
+// explicit PowerShell install-id reorder may differ from the public baseline.
 const publicSecretChanges = {
   sh: [
     [
@@ -301,6 +301,89 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  if (lang === 'sh') {
+    for (const publicInstall of [true, false]) {
+      check(
+        `recover-admin uses this install and forwards arguments (public=${publicInstall})`,
+        () => {
+          const f = fixture(lang, { publicInstall });
+          try {
+            assert.equal(f.install().status, 0);
+            const args = [
+              '--email',
+              'admin@example.com',
+              '--user-id',
+              '00000000-0000-4000-8000-000000000001',
+            ];
+            const result = f.invoke(join(f.dir, 'haive'), ['recover-admin', ...args]);
+            assert.equal(result.status, 0, result.stdout + result.stderr);
+            const argv = f.calls().trim().split('\n').at(-1).split('\t');
+            assert.deepEqual(argv.slice(-args.length), args);
+            for (const value of [
+              'unit-network',
+              'HAIVE_INSTALL_ID=unit',
+              'DATABASE_URL',
+              'REDIS_URL=redis://redis:6379',
+              'CONFIG_ENCRYPTION_KEY',
+              '--entrypoint',
+              'node',
+              'ghcr.io/martinambrus/haive-updater:9.9.9',
+              'packages/updater/dist/recover-admin-cli.js',
+            ])
+              assert.ok(argv.includes(value), value);
+            assert.ok(!argv.includes('-v'), 'recovery needs no host mounts');
+            assert.ok(
+              !argv.some(
+                (arg) =>
+                  arg.startsWith('DATABASE_URL=') || arg.startsWith('CONFIG_ENCRYPTION_KEY='),
+              ),
+              'secrets travel in the environment rather than argv',
+            );
+            const env = readFileSync(join(f.root, 'updater-env'), 'utf8');
+            assert.ok(env.startsWith('postgres://haive:'));
+            assert.ok(env.includes('@postgres:5432/haive\n'));
+            assert.ok(env.trim().split('\n')[1]);
+          } finally {
+            f.clean();
+          }
+        },
+      );
+    }
+  }
+  if (lang === 'sh') {
+    for (const [name, missingKey, required, forbidden] of [
+      ['allows a missing encryption key', true, [], []],
+      ['disables persistent container logs', false, ['--log-driver', 'none'], []],
+      ['runs without a TTY', false, ['-i'], ['-it', '-t']],
+    ]) {
+      check(`recover-admin ${name}`, () => {
+        const f = fixture(lang, { publicInstall: true });
+        try {
+          assert.equal(f.install().status, 0);
+          if (missingKey) {
+            const envPath = join(f.dir, '.env');
+            writeFileSync(
+              envPath,
+              readFileSync(envPath, 'utf8').replace(/^CONFIG_ENCRYPTION_KEY=.*\n/m, ''),
+            );
+          }
+          const result = f.invoke(join(f.dir, 'haive'), [
+            'recover-admin',
+            '--email',
+            'admin@example.com',
+          ]);
+          assert.equal(result.status, 0, result.stdout + result.stderr);
+          const argv = f.calls().trim().split('\n').at(-1).split('\t');
+          for (const value of required) assert.ok(argv.includes(value), value);
+          for (const value of forbidden) assert.ok(!argv.includes(value), value);
+          if (missingKey)
+            assert.ok(readFileSync(join(f.root, 'updater-env'), 'utf8').endsWith('\n\n'));
+        } finally {
+          f.clean();
+        }
+      });
+    }
+  }
   check('leftover fixture config and home cannot affect another run', () => {
     const leftover = fixture(lang);
     const current = fixture(lang);
@@ -1332,8 +1415,20 @@ for (const lang of ['sh', 'ps1']) {
       rmSync(f.dir, { recursive: true, force: true });
       const current = f.install();
       assert.equal(current.status, 0, current.stdout + current.stderr);
-      for (const name of names)
-        assert.deepEqual(readFileSync(join(f.dir, name)), expected[name], name);
+      for (const name of names) {
+        let actual = readFileSync(join(f.dir, name));
+        if (lang === 'sh' && name === 'haive') {
+          // The new branch has its own executable controls above. Keep the old
+          // helper and upgrade comparison exact everywhere outside that addition.
+          actual = Buffer.from(
+            actual
+              .toString()
+              .replace(/^  recover-admin\)\n[\s\S]*?^    ;;\n/m, '')
+              .replace('|recover-admin --email <addr> [--user-id <id>] [--force]', ''),
+          );
+        }
+        assert.deepEqual(actual, expected[name], name);
+      }
       assert.equal(f.invoke(join(f.dir, names[1]), upgradeArgs).status, 0);
       assert.equal(f.calls().trim().split('\n').at(-1), expectedArgv);
       assert.ok(!f.calls().includes('\tlogin\t'));

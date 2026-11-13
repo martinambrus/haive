@@ -11,7 +11,7 @@ import {
   CONTAINER_FAMILY,
   configService,
   containerName,
-  decryptEmail,
+  tryDecryptEmail,
   drainTaskStatuses,
   getHaiveVersion,
   installId,
@@ -274,10 +274,17 @@ maintenanceRoutes.get('/blocking', async (c) => {
     [...rows, ...parkedFetched].filter((r) => r.pausedAt).map((r) => r.id),
   );
   const parked = parkedFetched.slice(0, BLOCKING_LIST_CAP);
+  const ownerEmailFields = (encrypted: string | null, userId: string | null) => {
+    const ownerEmail = encrypted === null ? null : tryDecryptEmail(encrypted, fieldKey);
+    if (encrypted !== null && ownerEmail === null) {
+      log.warn({ userId }, 'Unreadable user email in maintenance list');
+    }
+    return { ownerEmail, ownerEmailReadable: encrypted === null ? null : ownerEmail !== null };
+  };
   const shape = ({ ownerEmailEncrypted, ...r }: (typeof rows)[number]) => ({
     ...r,
     pausedByAdmin: adminPaused.has(r.id),
-    ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+    ...ownerEmailFields(ownerEmailEncrypted, r.ownerId),
     hasLiveCli: withLiveCli.has(r.id),
   });
 
@@ -287,7 +294,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     parkedCapped: parkedFetched.length > BLOCKING_LIST_CAP,
     jobs: jobs.map(({ ownerEmailEncrypted, ...r }) => ({
       ...r,
-      ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+      ...ownerEmailFields(ownerEmailEncrypted, r.ownerId),
     })),
     total: rows.length + jobs.length,
     // The listing is capped; say so rather than letting an operator read a truncated list as the
