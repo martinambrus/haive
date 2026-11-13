@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
@@ -26,7 +26,8 @@ const skipPwsh = process.env.HAIVE_INSTALLER_SKIP_PWSH === '1';
 const skipBaseline = process.env.HAIVE_INSTALLER_SKIP_BASELINE === '1';
 if (process.env.CI && !skipPwsh)
   test('CI requires a PowerShell harness', () => assert.ok(hostPwsh || containerPwsh));
-const token = 'channel-test-secret';
+const token = randomBytes(24).toString('hex');
+const fixtureEntropy = randomBytes(32).toString('hex');
 const registry = '127.0.0.1:54321/vendor';
 const pins = Object.fromEntries(
   ['api', 'worker', 'web', 'builder'].map((host) => [
@@ -77,7 +78,7 @@ case "$out" in *docker-compose*) printf 'services: {}\\n' > "$out" ;; esac
 exit 0
 `;
 // Only these secret-transport edits, the recovery subcommand tested below and the
-// explicit PowerShell install-id reorder may differ from the public baseline.
+// explicit PowerShell install-id reorder and Mailpit env addition may differ from the public baseline.
 const publicSecretChanges = {
   sh: [
     [
@@ -146,7 +147,14 @@ exec /bin/${command} "$@"
 `,
       { mode: 0o755 },
     );
-  writeFileSync(join(bin, 'openssl'), '#!/bin/sh\nprintf 0123456789abcdef\n', { mode: 0o755 });
+  writeFileSync(
+    join(bin, 'openssl'),
+    `#!/bin/sh
+[ "$FAIL_AT" != mailpit-secret ] || [ "$3" != 24 ] || exit 0
+printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
+`,
+    { mode: 0o755 },
+  );
   writeFileSync(join(bin, 'date'), '#!/bin/sh\necho 2000-01-01T00:00:00Z\n', { mode: 0o755 });
   writeFileSync(join(bin, 'ss'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const script = join(root, `install.${lang}`);
@@ -167,7 +175,7 @@ exec /bin/${command} "$@"
     script,
     selected.replace(
       '[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)',
-      '$b[0] = 0',
+      `if ($env:FAIL_AT -eq 'mailpit-secret' -and $bytes -eq 24) { return '' }; [Array]::Copy([Convert]::FromHexString('${fixtureEntropy}'), $b, $b.Length)`,
     ),
   );
   const env = {
@@ -231,7 +239,7 @@ exec /bin/${command} "$@"
         'run',
         '--rm',
         '--name',
-        `t536-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
+        `rma-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
         '--pull',
         'never',
         '--network',
@@ -301,6 +309,36 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  for (const publicInstall of [true, false])
+    check(`Mailpit password and login summary (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall, start: true });
+      try {
+        const r = f.install();
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const env = readFileSync(join(f.dir, '.env'), 'utf8');
+        const password = env.match(/^MAILPIT_UI_PASSWORD=(.*)$/m)?.[1];
+        assert.ok(password && /^[0-9a-f]{48}$/.test(password), '24-byte hex Mailpit password');
+        const output = r.stdout + r.stderr;
+        assert.ok(!output.includes(password), 'Mailpit password must stay out of installer output');
+        assert.match(
+          output,
+          /Mail[^\n]*http:\/\/localhost:\d+[^\n]*haive[^\n]*MAILPIT_UI_PASSWORD[^\n]*\.env/,
+        );
+        if (lang === 'sh') assert.equal(statSync(join(f.dir, '.env')).mode & 0o777, 0o600);
+      } finally {
+        f.clean();
+      }
+    });
+  check('empty Mailpit password stops before writing env', () => {
+    const f = fixture(lang, { publicInstall: true, fail: 'mailpit-secret' });
+    try {
+      const r = f.install();
+      assert.notEqual(r.status, 0, 'empty Mailpit password must refuse installation');
+      assert.ok(!existsSync(join(f.dir, '.env')), 'no env with an empty Mailpit password');
+    } finally {
+      f.clean();
+    }
+  });
   if (lang === 'sh') {
     for (const publicInstall of [true, false]) {
       check(
@@ -1383,6 +1421,18 @@ for (const lang of ['sh', 'ps1']) {
             assert.notEqual(after, before);
             bytes = Buffer.from(after);
           }
+          if (name === '.env') {
+            // The Mailpit controls above cover this intentional addition; keep
+            // every existing generated key and helper in the baseline comparison.
+            bytes = Buffer.from(
+              bytes
+                .toString()
+                .replace(
+                  /^(POSTGRES_PASSWORD=.*)$/m,
+                  `$1\n# Mailpit UI login, user haive.\nMAILPIT_UI_PASSWORD=${fixtureEntropy.slice(0, 48)}`,
+                ),
+            );
+          }
           if (name === names[1]) bytes = Buffer.from(approvedPublicSecrets(lang, bytes.toString()));
           return [name, bytes];
         }),
@@ -1438,3 +1488,24 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
 }
+
+test('release Mailpit uses the dev overlay auth expression', () => {
+  const mailpit = (name) => {
+    const source = readFileSync(join(repo, name), 'utf8');
+    return source.match(/^  mailpit:\n(?:(?: {4}.*|)\n)*/m)?.[0] ?? '';
+  };
+  const auth = 'MP_UI_AUTH: "${MAILPIT_UI_PASSWORD:+haive:}${MAILPIT_UI_PASSWORD:-}"';
+  assert.ok(mailpit('docker-compose.dev.yml').includes(auth), 'dev precedent');
+  const release = mailpit('docker-compose.run.yml');
+  assert.ok(release.includes('    environment:\n'), 'release Mailpit environment');
+  assert.ok(release.includes(auth), 'release Mailpit auth matches dev');
+  assert.ok(release.includes("'${HAIVE_MAILPIT_PORT:-8025}:8025'"), 'published port preserved');
+});
+
+test('platform install env output redacts the Mailpit password', () => {
+  const source = readFileSync(join(repo, '.github/workflows/platform-checks.yml'), 'utf8');
+  const redact = source
+    .split('\n')
+    .find((line) => line.includes('sed -E') && line.includes('<elided>'));
+  assert.ok(redact?.includes('|MAILPIT_UI_PASSWORD)'), 'CI must redact the new install secret');
+});

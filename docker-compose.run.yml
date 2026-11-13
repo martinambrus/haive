@@ -129,5 +129,8 @@ services:
   # The install's own mail sink — password resets and notifications land here, so a self-hosted
   # user needs to be able to read it.
   mailpit:
+    environment:
+      # Installers generate this; raw compose CI/channel checks may leave it empty.
+      MP_UI_AUTH: "${MAILPIT_UI_PASSWORD:+haive:}${MAILPIT_UI_PASSWORD:-}"
     ports:
       - '${HAIVE_MAILPIT_PORT:-8025}:8025'

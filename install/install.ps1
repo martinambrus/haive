@@ -574,7 +574,8 @@ if (-not (Test-Path $envPath)) {
   $key  = New-HexSecret 32
   $jwt  = New-HexSecret 32
   $pgpw = New-HexSecret 16
-  if (-not $key -or -not $jwt -or -not $pgpw) { Die "could not generate secrets. Nothing was installed." }
+  $mailpitUiPassword = New-HexSecret 24
+  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
 
   # HOST_REPO_ROOT is written EXPLICITLY and this is the one Windows-specific hard requirement.
   # docker-compose.yml defaults that mount to ${HOME}, and PowerShell does not set HOME as an
@@ -600,6 +601,8 @@ if (-not (Test-Path $envPath)) {
     "CONFIG_ENCRYPTION_KEY=$key"
     "JWT_SECRET=$jwt"
     "POSTGRES_PASSWORD=$pgpw"
+    "# Mailpit UI login, user haive."
+    "MAILPIT_UI_PASSWORD=$mailpitUiPassword"
     ""
     "HAIVE_WEB_PORT=$webPort"
     "HAIVE_API_PORT=$apiPort"
@@ -1027,7 +1030,7 @@ Write-Host "  Haive $pinned is running." -ForegroundColor Green
 Write-Host ""
 Write-Host "    Web       http://localhost:$webPort"
 Write-Host "    API       http://localhost:$apiPort"
-Write-Host "    Mail      http://localhost:$mailpitPort"
+Write-Host "    Mail      http://localhost:$mailpitPort (user haive, MAILPIT_UI_PASSWORD from .env)"
 Write-Host "    Directory $Dir"
 Write-Host "    Install   $InstallId"
 Write-Host ""

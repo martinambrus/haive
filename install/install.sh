@@ -700,10 +700,11 @@ if [ ! -f .env ]; then
   KEY=$(rand_hex 32)
   JWT=$(rand_hex 32)
   PGPW=$(rand_hex 16)
+  MAILPIT_UI_PASSWORD=$(rand_hex 24)
   # Explicit, not `A && B && C || die`: that reads as if-then-else and is not one — shellcheck
   # says so as SC2015 — and the answer here has to be unambiguous, since the branch it guards is
   # the one that would otherwise write an install with an empty encryption key.
-  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ]; then
+  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ] || [ -z "$MAILPIT_UI_PASSWORD" ]; then
     die "could not generate secrets. Nothing was installed."
   fi
   umask 077
@@ -725,6 +726,8 @@ COMPOSE_PROJECT_NAME=${INSTALL_ID}
 CONFIG_ENCRYPTION_KEY=${KEY}
 JWT_SECRET=${JWT}
 POSTGRES_PASSWORD=${PGPW}
+# Mailpit UI login, user haive.
+MAILPIT_UI_PASSWORD=${MAILPIT_UI_PASSWORD}
 
 # Ports on the host. Change these if something already holds them.
 HAIVE_WEB_PORT=${WEB_PORT}
@@ -1177,7 +1180,7 @@ cat <<EOF
 
     Web       http://localhost:${WEB}
     API       http://localhost:${PORT}
-    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1)
+    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1) (user haive, MAILPIT_UI_PASSWORD from .env)
     Directory ${INSTALL_DIR}
     Install   ${INSTALL_ID}
 
