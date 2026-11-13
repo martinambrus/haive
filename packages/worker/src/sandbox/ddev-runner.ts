@@ -943,6 +943,8 @@ export async function ensureDdevRegistryCache(): Promise<void> {
         DDEV_REGISTRY_CONTAINER,
         '--label',
         'haive.role=ddev-registry-cache',
+        '--label',
+        installLabel(),
         '-e',
         'REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io',
         '-v',

@@ -215,6 +215,9 @@ services:
       args:
         RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-v1.0.1}
         RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436}
+      # The worker's superseded-core sweep removes only images stamped with this install.
+      labels:
+        haive.install: ${HAIVE_INSTALL_ID:-haive}
     image: ${HAIVE_INSTALL_ID:-haive}-cli-sandbox:latest
     profiles: ["sandbox"]
     command: ["true"]

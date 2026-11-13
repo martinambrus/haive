@@ -16,6 +16,8 @@ import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
   CONTAINER_FAMILY,
+  INSTALL_LABEL,
+  installId,
   containerPrefix,
   getCliProviderMetadata,
   logger,
@@ -357,6 +359,7 @@ export async function ensureShellContainer(
       Env: envList,
       HostConfig: hostConfig as never,
       Labels: {
+        [INSTALL_LABEL]: installId(),
         'haive.role': 'terminal-shell',
         'haive.scope': scope,
         'haive.user.id': userId,

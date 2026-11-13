@@ -174,6 +174,16 @@ volumes. S4 is pending evidence; unit guards alone do not close it. Every runtim
 repository editors) now stamps the install label; runners created before that do not, so
 “every container labelled” still holds only for containers created after the upgrade.
 
+S4 evidence (2026-11-13): the owner-approved run used two main checkouts (`haive` and
+`s4b`), rather than a published release. Runtime runners, login containers, CLI sandboxes,
+auth volumes and composed images passed isolation controls, and cleanup restored the pre-state;
+terminal shells and dangling cores crossed installs. The follow-up stamps shells, worker-built
+images and the DDEV registry cache with install ownership, scopes dangling-core cleanup by that
+label, and reads label-less image configs correctly. Stubbed Docker controls reproduce all four
+defects before the fixes and pass afterwards, including own/foreign/legacy shell ownership and
+in-use core retention. The cache has no role-based sweep; its ensure replaces only its own named
+stopped container. A live rerun of the corrected sweeps remains pending.
+
 ## Open questions
 
 - **`HOST_REPO_ROOT_REAL` on Windows.** The worker needs the DAEMON's view of the host path when it

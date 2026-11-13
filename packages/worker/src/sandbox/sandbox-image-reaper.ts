@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { Database } from '@haive/database';
-import { imageRepo, logger } from '@haive/shared';
+import { imageRepo, installLabel, logger } from '@haive/shared';
 import { removeOrphanedPreviousImage } from '../queues/cli-exec/images.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 import { CORE_IDENTITY_LABEL } from './sandbox-core-image.js';
@@ -109,6 +109,8 @@ const defaultCoreDeps: SupersededCoreReaperDeps = {
         'dangling=true',
         '--filter',
         `label=${CORE_IDENTITY_LABEL}`,
+        '--filter',
+        `label=${installLabel()}`,
         '--format',
         '{{.ID}}',
       ],
@@ -126,8 +128,10 @@ const defaultCoreDeps: SupersededCoreReaperDeps = {
   },
 };
 
-/** Remove the base images a rebuild superseded, on worker boot: untagged, and stamped by a build of
- *  the base (a per-CLI image built on one inherits the stamp). Without --force, so docker refuses
+/** Remove this install's base images a rebuild superseded, on worker boot: untagged, and stamped
+ *  with both the core identity and this install (a per-CLI image inherits the core stamp).
+ *  Unlabelled legacy images stay because a dangling image has lost its repository name, so its
+ *  owner cannot be proved. Without --force, docker refuses
  *  one that a container or an image built on it still uses, and a later boot takes it once neither
  *  does. The current base is tagged `:latest`, never dangling. Best-effort: never throws, returns
  *  the count removed. */

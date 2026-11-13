@@ -60,8 +60,10 @@ went on being served. Its next use builds it on the new base. A failed rebuild t
 failed build of a missing image does, so no per-CLI image is built on a base that is out of date
 and then tagged as current. The base a rebuild replaces stays while a container or a per-CLI image
 built on it still uses it; the boot sweep `reapSupersededSandboxCores`
-(`sandbox-image-reaper.ts`) removes it, without `--force`, once neither does. One built before the
-label carries none, so the sweep cannot tell it from any other untagged image, and it stays.
+(`sandbox-image-reaper.ts`) removes it, without `--force`, once neither does, and only when it also
+carries this install's `haive.install` label: on a daemon shared by two installs, a dangling image
+has lost the repository name that would say whose it is. One built before either label carries
+none, so the sweep cannot prove its owner, and it stays (about one base image per install).
 
 **rtk seeds a task's auth volume only with hooks the task's own image can run.**
 `seedRtkInTaskVolume` runs `rtk init -g` from the base image, but a task can run another rtk: an

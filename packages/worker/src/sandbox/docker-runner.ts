@@ -325,10 +325,14 @@ async function spawnAndCollect(
   });
 }
 
-/** `{{json .Config.Labels}}`: an object of strings, or `null` for an image that has none. */
+/** Read Labels from the whole config: Docker templates reject a missing Labels map key. */
 function parseImageLabels(json: string): Record<string, string> {
   try {
-    const parsed: unknown = JSON.parse(json);
+    const config: unknown = JSON.parse(json);
+    const parsed =
+      config && typeof config === 'object' && !Array.isArray(config)
+        ? (config as Record<string, unknown>).Labels
+        : undefined;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     return Object.fromEntries(
       Object.entries(parsed).filter(
@@ -347,7 +351,8 @@ export const defaultDockerRunner: DockerRunner = {
     // when piped into a non-TTY child stdio (the worker spawn case): verbose
     // dpkg output (e.g. apt-installing nano on a slow mirror) overflows the
     // pipe and the build hangs with no exit. Plain mode avoids the issue.
-    const args = ['build', '--progress=plain', '-t', opts.tag];
+    // Dangling images lose their repository name but retain build labels for the reaper.
+    const args = ['build', '--progress=plain', '--label', installLabel(), '-t', opts.tag];
     if (opts.dockerfilePath) {
       args.push('-f', opts.dockerfilePath);
     }
@@ -388,7 +393,7 @@ export const defaultDockerRunner: DockerRunner = {
   async inspect(tag) {
     const result = await spawnAndCollect(
       'docker',
-      ['image', 'inspect', '--format', '{{.Id}}|{{json .Config.Labels}}', tag],
+      ['image', 'inspect', '--format', '{{.Id}}|{{json .Config}}', tag],
       { timeoutMs: 15_000 },
     );
     if (result.exitCode === 0) {
