@@ -124,7 +124,6 @@ import { relinkGit, gitFailureText, verifyRelinkCheckout } from '../lib/relink-g
 import {
   markRemotePending,
   clearRemotePending,
-  reconcileRemoteOnRead,
   reconcileRemote,
   isRemoteConnectionError,
 } from '../lib/remote-reconcile.js';
@@ -900,7 +899,6 @@ repoRoutes.get('/:id', async (c) => {
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  await reconcileRemoteOnRead(repo);
   return c.json({
     repository: {
       ...repo,

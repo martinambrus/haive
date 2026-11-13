@@ -35,7 +35,6 @@ import {
   isRemoteConnectionError,
   markRemotePending,
   reconcileRemote,
-  reconcileRemoteOnRead,
   startRemoteReconcileSweep,
   REMOTE_SWEEP_BATCH,
   REMOTE_SWEEP_INTERVAL_MS,
@@ -153,20 +152,18 @@ it('keeps the intent when Git fails so the next sweep retries', async () => {
   await expect(reconcileRemote(id, userId)).rejects.toThrow('Could not reconcile');
   expect(h.remove).not.toHaveBeenCalled();
 });
-it('repairs a pending read once and leaves an unmanaged folder origin alone', async () => {
-  await reconcileRemoteOnRead(repo);
-  await reconcileRemoteOnRead(repo);
-  expect(h.fresh).toHaveBeenCalledOnce();
-  expect(info).toHaveBeenCalledOnce();
+it('leaves an unmanaged folder origin alone without an intent', async () => {
+  h.pending = false;
   fake.patch(schema.repositories, id, { remoteUrl: null });
-  await reconcileRemoteOnRead(repo);
-  expect(h.fresh).toHaveBeenCalledOnce();
+  await reconcileRemote(id, userId);
+  expect(h.git).not.toHaveBeenCalled();
+  expect(h.remove).not.toHaveBeenCalled();
 });
 it('refuses an unreadable intent instead of treating it as absence', async () => {
   h.stat.mockRejectedValueOnce(
     Object.assign(new Error('descriptor exhaustion'), { code: 'EMFILE' }),
   );
-  await expect(reconcileRemoteOnRead(repo)).rejects.toMatchObject({ status: 503 });
+  await expect(reconcileRemote(id, userId)).rejects.toMatchObject({ code: 'EMFILE' });
   expect(h.git).not.toHaveBeenCalled();
 });
 it('pins sweep defaults and rotates bounded pages without overlapping passes', async () => {

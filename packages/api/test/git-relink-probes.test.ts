@@ -33,6 +33,10 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import {
+  startRemoteReconcileSweep,
+  REMOTE_SWEEP_INTERVAL_MS,
+} from '../src/lib/remote-reconcile.js';
 import type { AppEnv } from '../src/context.js';
 
 const url = process.env.RELINK_DATABASE_URL;
@@ -223,9 +227,32 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     await exited;
     expect((await stored())?.remoteUrl).toBe(oldUrl);
     expect(await audits()).toHaveLength(0);
-    // A repository read after restart reconciles the interrupted relink.
+    // A detail read stays passive. The bounded sweep repairs the interrupted relink.
     h.db = db;
     expect((await app.request(`/${repository}`)).status).toBe(200);
+    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const schedule = globalThis.setTimeout;
+    let finished!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      ...args: Parameters<typeof setTimeout>
+    ) => {
+      const scheduled = schedule(...args);
+      if (args[1] === REMOTE_SWEEP_INTERVAL_MS) finished();
+      return scheduled;
+    }) as typeof setTimeout);
+    const stop = startRemoteReconcileSweep();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await done;
+    } finally {
+      stop();
+      timer.mockRestore();
+      vi.useRealTimers();
+    }
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(oldUrl);
   });
 });

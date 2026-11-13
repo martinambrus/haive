@@ -12,7 +12,6 @@ import {
 } from '@haive/shared/fs-safe';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
-import { HttpError } from '../context.js';
 import { boundedLockWait } from './repository-busy.js';
 import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js';
 
@@ -156,14 +155,13 @@ type RemoteRepo = {
   storagePath: string | null;
   localPath: string | null;
 };
-export async function reconcileRemoteOnRead(repo: RemoteRepo): Promise<void> {
+async function reconcilePendingRemote(repo: RemoteRepo): Promise<void> {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) return;
   try {
     if (await hasRemotePending(root)) await reconcileRemote(repo.id, repo.userId);
   } catch (err) {
     logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
-    throw new HttpError(503, 'Repository remote state is being reconciled; try again');
   }
 }
 
@@ -186,11 +184,7 @@ export function startRemoteReconcileSweep({
       cursor = repos.length === batchSize ? repos.at(-1)!.id : undefined;
       for (const repo of repos) {
         if (stopped) break;
-        try {
-          await reconcileRemoteOnRead(repo);
-        } catch {
-          /* Logged by the per-repository owner; retry on the next rotation. */
-        }
+        await reconcilePendingRemote(repo);
       }
     } catch (err) {
       logger.warn({ err }, 'remote reconciliation sweep deferred');
