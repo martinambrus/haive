@@ -12,6 +12,14 @@ vi.mock('node:child_process', async (original) => {
   const { promisify } = await import('node:util');
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: h.exec }) };
 });
+vi.mock('@haive/shared/fs-safe', async (original) => ({
+  ...(await original<typeof import('@haive/shared/fs-safe')>()),
+  lstatNoFollow: vi.fn(async () => null),
+}));
+vi.mock('../repo/worktree-permissions.js', () => ({
+  ensureSandboxWritableTree: vi.fn(async () => {}),
+}));
+vi.mock('./_browser-access.js', () => ({ resolveTaskDirectAccess: async () => false }));
 vi.mock('../db.js', () => ({
   getDb: () => ({
     query: { taskSteps: { findFirst: h.step } },
@@ -25,7 +33,7 @@ vi.mock('./runner-activity.js', async (original) => ({
   runnerExecLive: h.execLive,
 }));
 import { INSTALL_LABEL, RUNNER_SUBPATH_LABEL, installId } from '@haive/shared';
-import { rebuildDdevRunner, ensureDdevStarted } from './ddev-runner.js';
+import { rebuildDdevRunner, ensureDdevStarted, runnerHandleForTask } from './ddev-runner.js';
 import { RunnerProbeError } from './runner-probe.js';
 import { whileRunnerBusy } from './runner-activity.js';
 import { ddevRunnerName } from '@haive/shared';
@@ -47,6 +55,18 @@ beforeEach(() => {
   h.ensure.mockResolvedValue(undefined);
   h.exec.mockImplementation(async (_bin: string, args: string[]) => {
     if (args[0] === 'ps') return { stdout: presence, stderr: '' };
+    if (args[0] === 'inspect' && (args.includes('--format') || args.includes('-f')))
+      return {
+        stdout: args.at(-2)?.includes(RUNNER_SUBPATH_LABEL) ? workspace : '<no value>,<no value>',
+        stderr: '',
+      };
+    if (args[0] === 'exec')
+      return {
+        stdout: JSON.stringify({
+          raw: { status: 'running', primary_url: 'https://fixture.ddev.site' },
+        }),
+        stderr: '',
+      };
     if (args[0] === 'inspect')
       return {
         stdout: JSON.stringify([
@@ -152,7 +172,7 @@ it('serializes concurrent rebuilds and holds a new ensure until removal settles'
   expect(h.ensure).not.toHaveBeenCalled();
   release();
   await Promise.all([first, second]);
-  await expect(ensure).rejects.toThrow(); // the fake has no boot implementation
+  await expect(ensure).resolves.toEqual(runnerHandleForTask(task, workspace));
   expect(mutations()).toHaveLength(2);
 });
 
@@ -179,3 +199,45 @@ it('keeps the runner if an exec arrives while ownership is inspected', async () 
   expect(mutations()).toEqual([]);
   expect(h.ensure).not.toHaveBeenCalled();
 });
+
+it.each(['refused', 'failed'])(
+  'a step ensure queued mid-rebuild succeeds after it is %s',
+  async (kind) => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const base = h.exec.getMockImplementation()!;
+    let inspected = false;
+    h.exec.mockImplementation(async (...args) => {
+      if (args[1][0] === 'inspect' && !inspected) {
+        inspected = true;
+        entered();
+        await held;
+        if (kind === 'failed') throw new Error('inspection failed');
+        h.step.mockResolvedValueOnce({ id: 'newly-running-step' });
+      }
+      return base(...args);
+    });
+    const rebuilding = rebuild();
+    const outcome = expect(rebuilding).rejects.toThrow(
+      kind === 'failed' ? /Cannot determine/ : /busy/,
+    );
+    await started;
+    const onReady = vi.fn(async () => {});
+    const step = ensureDdevStarted(task, workspace, {
+      signal: new AbortController().signal,
+      onReady,
+    });
+    const observed = step.catch((error: unknown) => error);
+    release();
+    await outcome;
+    expect(await observed).toEqual(runnerHandleForTask(task, workspace));
+    expect(onReady).toHaveBeenCalledOnce();
+    expect(mutations()).toEqual([]);
+  },
+);
