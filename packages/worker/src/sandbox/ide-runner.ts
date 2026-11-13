@@ -1,3 +1,4 @@
+import { requireRunnerPresence } from './runner-probe.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -88,23 +89,12 @@ export interface IdeRunnerHandle {
 }
 
 async function containerExists(name: string): Promise<boolean> {
-  try {
-    await exec('docker', ['inspect', name], { timeout: 15_000 });
-    return true;
-  } catch {
-    return false;
-  }
+  return (await requireRunnerPresence(name)).state === 'present';
 }
 
 async function isRunning(name: string): Promise<boolean> {
-  try {
-    const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name], {
-      timeout: 15_000,
-    });
-    return stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
+  const presence = await requireRunnerPresence(name);
+  return presence.state === 'present' && presence.running;
 }
 
 // A container from before the label existed reads as empty, and so as stale; one docker cannot
@@ -526,7 +516,9 @@ async function setupIdeDebugging(db: Database, taskId: string, name: string): Pr
   }
   if (!task?.debugMode) return;
   await installXdebugExtension(taskId, name);
-  await setupIdeDebugForwards(taskId, name);
+  await setupIdeDebugForwards(taskId, name).catch((err: unknown) => {
+    log.warn({ taskId, err }, 'ide debug forwards skipped: runtime presence could not be read');
+  });
 }
 
 /** Install xdebug.php-debug into the per-user /ext volume (Open VSX is code-server's

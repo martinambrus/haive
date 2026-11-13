@@ -69,8 +69,13 @@ const h = vi.hoisted(() => {
     }
     if (verb === 'inspect') {
       const container = state.containers.get(last);
-      if (!container) throw new Error(`Error: No such object: ${last}`);
+      if (!container)
+        throw Object.assign(new Error('missing'), {
+          code: 1,
+          stderr: `Error response from daemon: No such container: ${last}\n`,
+        });
       if (rest[0] === '-f') {
+        if (rest[1] === '{{.State.Running}}') return out(String(container.running));
         const key = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(rest[1]!)?.[1];
         if (!key) throw new Error(`fake docker: unhandled inspect format ${rest[1]}`);
         return out(container.labels[key] ?? '');

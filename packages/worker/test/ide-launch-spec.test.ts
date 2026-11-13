@@ -3,9 +3,12 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   CODE_SERVER_IMAGE,
+  appRunnerName,
+  ddevRunnerName,
   IDE_IDLE_GRACE_MS,
   RUNNER_SUBPATH_LABEL,
   ideRunnerName,
+  ideUserDataVolumeName,
   ideSessionKey,
   repoIdeSessionId,
 } from '@haive/shared';
@@ -34,6 +37,10 @@ const h = vi.hoisted(() => {
     pullFails: false,
     prepFails: false,
     unreadableLabel: null as string | null,
+    probeFailure: null as Error | null,
+    failExistenceOnly: false,
+    probeReads: 0,
+    probeTarget: null as string | null,
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
   const docker = async (_command: string, args: string[], options?: { timeout?: number }) => {
@@ -52,7 +59,17 @@ const h = vi.hoisted(() => {
     if (verb === 'inspect') {
       const name = rest[rest.length - 1]!;
       const container = state.containers.get(name);
-      if (!container) throw new Error(`Error: No such object: ${name}`);
+      if (
+        state.probeFailure &&
+        (!state.probeTarget || state.probeTarget === name) &&
+        (!state.failExistenceOnly || ++state.probeReads > 1)
+      )
+        throw state.probeFailure;
+      if (!container)
+        throw Object.assign(new Error('missing'), {
+          code: 1,
+          stderr: `Error: No such object: ${name}\n`,
+        });
       if (rest[0] !== '-f') return out('[{}]');
       const format = rest[1]!;
       if (format === '{{.State.Running}}') return out(`${container.running}\n`);
@@ -123,6 +140,9 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/docker-runner.js')>()),
   defaultDockerRunner: {
     volumeExists: async () => true,
+    volumeRemove: async (name: string) => {
+      h.state.calls.push(`volume rm ${name}`);
+    },
     // The volume prep helper run.
     run: async () =>
       h.state.prepFails
@@ -131,7 +151,12 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   },
 }));
 
-import { ensureIdeRunnerStarted, ensureRepoIdeRunnerStarted } from '../src/sandbox/ide-runner.js';
+import {
+  ensureIdeRunnerStarted,
+  ensureRepoIdeRunnerStarted,
+  stopIdeRunner,
+  killRepoIdeRunner,
+} from '../src/sandbox/ide-runner.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -203,6 +228,10 @@ beforeEach(() => {
   h.state.pullFails = false;
   h.state.prepFails = false;
   h.state.unreadableLabel = null;
+  h.state.probeFailure = null;
+  h.state.failExistenceOnly = false;
+  h.state.probeReads = 0;
+  h.state.probeTarget = null;
 });
 
 /** A running container for the editor, mounting the right workspace unless `labels` say otherwise. */
@@ -573,4 +602,71 @@ describe('a task editor', () => {
       'haive.task.id': TASK,
     });
   });
+});
+
+describe('editor inspect failures', () => {
+  it.each([
+    [
+      'daemon failure',
+      Object.assign(new Error('daemon unavailable'), {
+        code: 1,
+        stderr: 'Cannot connect to the Docker daemon',
+      }),
+      false,
+    ],
+    ['spawn failure', Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }), false],
+    [
+      'timeout',
+      Object.assign(new Error('inspect timed out'), { killed: true, signal: 'SIGTERM' }),
+      false,
+    ],
+    ['existence failure after a stopped read', new Error('inspect unavailable'), true],
+  ])('preserves the editor on %s and allows Retry', async (_label, error, existenceOnly) => {
+    seed(repositoryEditor, { [SPEC_LABEL]: SPEC });
+    h.state.containers.get(ideRunnerName(repositoryEditor.session))!.running = !existenceOnly;
+    h.state.probeFailure = error;
+    h.state.failExistenceOnly = existenceOnly;
+
+    const errorRead = await repositoryEditor.ensure().catch((err: unknown) => err);
+    expect(mutations()).toEqual([]);
+    expect(errorRead).toBeInstanceOf(Error);
+    expect((errorRead as Error).message).toMatch(/Cannot determine.*Retry/);
+    expect(h.state.containers.has(ideRunnerName(repositoryEditor.session))).toBe(true);
+
+    h.state.probeFailure = null;
+    h.state.containers.get(ideRunnerName(repositoryEditor.session))!.running = true;
+    await expect(repositoryEditor.ensure()).resolves.toEqual({
+      container: ideRunnerName(repositoryEditor.session),
+    });
+  });
+});
+
+it('keeps the idle editor and its session when existence cannot be read', async () => {
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC });
+  h.state.probeFailure = new Error('inspect unavailable');
+  const result = await stopIdeRunner(repositoryEditor.session).catch((err: unknown) => err);
+  expect(result).toBeInstanceOf(Error);
+  expect(mutations()).toEqual([]);
+});
+
+it('skips persistent debug forwards when runtime presence is unknown', async () => {
+  h.state.containers.set(appRunnerName(DEBUG_TASK), { running: true, labels: {} });
+  h.state.probeTarget = ddevRunnerName(DEBUG_TASK);
+  h.state.probeFailure = new Error('inspect unavailable');
+  await expect(ensureIdeRunnerStarted(db, DEBUG_TASK, USER, '{}')).resolves.toEqual({
+    container: ideRunnerName(DEBUG_TASK),
+  });
+  expect(h.state.execs.filter((args) => args.includes('-d'))).toEqual([]);
+});
+
+it('preserves repository editor data when its runner presence is unknown', async () => {
+  h.state.probeFailure = new Error('inspect unavailable');
+  const result = await killRepoIdeRunner(REPO).catch((err: unknown) => err);
+  expect(mutations()).toEqual([]);
+  expect(result).toBeInstanceOf(Error);
+});
+
+it('removes repository editor data once its runner is confirmed absent', async () => {
+  await killRepoIdeRunner(REPO);
+  expect(mutations()).toEqual([`volume rm ${ideUserDataVolumeName(repositoryEditor.session)}`]);
 });

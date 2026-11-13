@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mock = vi.hoisted(() => ({ run: vi.fn(), acquire: vi.fn() }));
 vi.mock('node:child_process', async () => {
@@ -49,18 +49,30 @@ async function settled(p: Promise<unknown>, ms = 200): Promise<unknown> {
     () => 'resolved',
     (err: unknown) => err,
   );
-  return Promise.race([outcome, new Promise((r) => setTimeout(() => r('pending'), ms))]);
+  const race = Promise.race([outcome, new Promise((r) => setTimeout(() => r('pending'), ms))]);
+  await vi.advanceTimersByTimeAsync(ms);
+  return race;
 }
 
 let args: readonly [string, string, string];
 let taskSeq = 0;
 
 beforeEach(() => {
+  vi.useFakeTimers();
   args = [`task-${++taskSeq}`, 'ws/sub', 'img:tag'];
   mock.run.mockReset();
-  mock.run.mockRejectedValue(new Error('docker unavailable'));
+  mock.run.mockImplementation(async (_command: string, args: string[]) => {
+    if (args[0] === 'inspect')
+      throw Object.assign(new Error('missing'), {
+        code: 1,
+        stderr: `Error response from daemon: No such container: ${args.at(-1)}\n`,
+      });
+    throw new Error('docker unavailable');
+  });
   mock.acquire.mockReset();
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe('ensureAppRunnerStarted cancellation', () => {
   it('hands its signal to the slot gate and rejects when it aborts mid-wait', async () => {
@@ -123,6 +135,8 @@ describe('ensureAppRunnerStarted cancellation', () => {
     const first = ensureAppRunnerStarted(...args, undefined, { signal: stop.signal });
     await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(1));
     const other = ensureAppRunnerStarted(args[0], 'ws/other', args[2]);
+    // The fake clock can settle both callers before the assertion awaits this one.
+    void other.catch(() => {});
     expect(await settled(other)).toBe('pending');
     expect(mock.acquire).toHaveBeenCalledTimes(1);
     stop.abort();
@@ -137,6 +151,8 @@ describe('ensureAppRunnerStarted cancellation', () => {
     const first = ensureAppRunnerStarted(...args);
     await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(1));
     const other = ensureAppRunnerStarted(args[0], 'ws/other', args[2]);
+    // The fake clock can settle both callers before the assertion awaits this one.
+    void other.catch(() => {});
     gate.admit();
     expect(await settled(first)).toEqual(new Error('docker unavailable'));
     expect(await settled(other)).toEqual(new Error('docker unavailable'));

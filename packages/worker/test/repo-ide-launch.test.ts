@@ -34,7 +34,11 @@ const SUBPATH = `${USER}/${REPO}`;
 
 beforeEach(() => {
   h.exec.mockReset().mockImplementation(async (_command, args: string[]) => {
-    if (args[0] === 'inspect') throw new Error('container missing');
+    if (args[0] === 'inspect')
+      throw Object.assign(new Error('missing'), {
+        code: 1,
+        stderr: `Error response from daemon: No such container: ${args.at(-1)}\n`,
+      });
     return { stdout: '{"status":"alive"}', stderr: '' };
   });
   h.boundary.mockReset().mockResolvedValue({

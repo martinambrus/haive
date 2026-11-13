@@ -32,3 +32,22 @@ describe('repository editor idle cleanup', () => {
     expect(del).toHaveBeenCalledWith(key);
   });
 });
+
+it('retains an idle session after an unknown runner probe so the next sweep can retry', async () => {
+  const task = 'fixture-task';
+  const key = ideSessionKey(task);
+  const del = vi.fn(async () => 1);
+  const redis = {
+    scan: async () => ['0', [key]],
+    hgetall: async () => ({ refcount: '0', lastSeenAt: '1' }),
+    del,
+  } as unknown as Redis;
+  const reaper = new IdeSessionReaper({ redis });
+  stop.mockRejectedValueOnce(new Error('Cannot determine runner presence. Retry.'));
+
+  expect(await reaper.sweep()).toEqual({ scanned: 1, reaped: 0 });
+  expect(del).not.toHaveBeenCalled();
+
+  expect(await reaper.sweep()).toEqual({ scanned: 1, reaped: 1 });
+  expect(del).toHaveBeenCalledWith(key);
+});

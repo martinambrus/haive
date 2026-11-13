@@ -112,9 +112,8 @@ export class IdeSessionReaper {
     if (!entry || Object.keys(entry).length === 0) return false;
     if (ideSessionHeld(entry, this.graceMs)) return false;
     const taskId = key.slice(IDE_SESSION_PREFIX.length);
-    await stopIdeRunner(taskId).catch((err) => {
-      log.warn({ err, taskId }, 'ide stop failed during reap');
-    });
+    // An unknown existence read must leave the registry entry for the next sweep.
+    await stopIdeRunner(taskId);
     await this.redis.del(key);
     log.info({ key, taskId }, 'reaped idle ide session');
     return true;

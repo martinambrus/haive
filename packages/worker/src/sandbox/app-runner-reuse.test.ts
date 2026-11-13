@@ -8,6 +8,9 @@ const h = vi.hoisted(() => {
     containers: new Map<string, Record<string, string>>(),
     calls: [] as string[],
     unreadableLabel: null as string | null,
+    probeFailure: null as Error | null,
+    failExistenceOnly: false,
+    probeReads: 0,
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
   const docker = async (_command: string, args: string[]) => {
@@ -15,10 +18,16 @@ const h = vi.hoisted(() => {
     if (verb === 'inspect') {
       const name = rest[rest.length - 1]!;
       const labels = state.containers.get(name);
-      if (!labels) throw new Error(`Error: No such object: ${name}`);
+      if (state.probeFailure && (!state.failExistenceOnly || ++state.probeReads > 1))
+        throw state.probeFailure;
+      if (!labels)
+        throw Object.assign(new Error('missing'), {
+          code: 1,
+          stderr: `Error: No such object: ${name}\n`,
+        });
       if (rest[0] !== '-f') return out('[{}]');
       const format = rest[1]!;
-      if (format === '{{.State.Running}}') return out('true\n');
+      if (format === '{{.State.Running}}') return out(`${!state.failExistenceOnly}\n`);
       const label = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(format)?.[1];
       if (label === undefined) throw new Error(`fake docker: unhandled inspect format ${format}`);
       if (label === state.unreadableLabel) throw new Error('docker inspect timed out');
@@ -68,6 +77,9 @@ beforeEach(() => {
   h.state.containers.clear();
   h.state.calls.length = 0;
   h.state.unreadableLabel = null;
+  h.state.probeFailure = null;
+  h.state.failExistenceOnly = false;
+  h.state.probeReads = 0;
 });
 
 describe('ensureAppRunnerStarted with a runner already running', () => {
@@ -97,5 +109,46 @@ describe('ensureAppRunnerStarted with a runner already running', () => {
     await expect(ensure()).rejects.toThrow('cold boot reached');
 
     expect(h.state.calls).toEqual([`rm ${NAME}`, `run ${NAME}`]);
+  });
+});
+
+// Both probes used to turn an infrastructure failure into permission to remove a live runner.
+describe('app runner inspect failures', () => {
+  it.each([
+    [
+      'daemon failure',
+      Object.assign(new Error('daemon unavailable'), {
+        code: 1,
+        stderr: 'Cannot connect to the Docker daemon',
+      }),
+      false,
+    ],
+    ['spawn failure', Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }), false],
+    [
+      'timeout',
+      Object.assign(new Error('inspect timed out'), { killed: true, signal: 'SIGTERM' }),
+      false,
+    ],
+    ['existence failure after a stopped read', new Error('inspect unavailable'), true],
+  ])('preserves the runner on %s and allows Retry', async (_label, error, existenceOnly) => {
+    h.state.containers.set(NAME, { [RUNNER_SUBPATH_LABEL]: SUBPATH });
+    h.state.probeFailure = error;
+    h.state.failExistenceOnly = existenceOnly;
+
+    const errorRead = await ensure().catch((err: unknown) => err);
+    expect(h.state.calls).toEqual([]);
+    expect(errorRead).toBeInstanceOf(Error);
+    expect((errorRead as Error).message).toMatch(/Cannot determine.*Retry/);
+    expect(h.state.containers.has(NAME)).toBe(true);
+
+    h.state.probeFailure = null;
+    h.state.failExistenceOnly = false;
+    h.state.probeReads = 0;
+    await expect(ensure()).resolves.toEqual({ container: NAME, projectDir: `/repos/${SUBPATH}` });
+  });
+
+  it('creates a genuinely absent runner', async () => {
+    await expect(ensure()).rejects.toThrow('cold boot reached');
+    expect(h.state.calls).toEqual([`run ${NAME}`]);
   });
 });

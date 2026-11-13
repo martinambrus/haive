@@ -1,3 +1,4 @@
+import { requireRunnerPresence } from './runner-probe.js';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,23 +77,12 @@ function browserAssetsDir(): string {
 }
 
 async function containerExists(name: string): Promise<boolean> {
-  try {
-    await exec('docker', ['inspect', name], { timeout: 15_000 });
-    return true;
-  } catch {
-    return false;
-  }
+  return (await requireRunnerPresence(name)).state === 'present';
 }
 
 async function isRunning(name: string): Promise<boolean> {
-  try {
-    const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name], {
-      timeout: 15_000,
-    });
-    return stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
+  const presence = await requireRunnerPresence(name);
+  return presence.state === 'present' && presence.running;
 }
 
 /** Copy the headed-browser desktop launcher + probe scripts into the running
@@ -487,15 +477,19 @@ const BROWSER_DESKTOP_STOP_CMD =
  *  startBrowserDesktop brings it back up. */
 export async function stopBrowserDesktop(taskId: string): Promise<void> {
   const container = appRunnerName(taskId);
-  // Before the running check: a stopped runner must not stay on the surcharge list either.
-  await markBrowserDesktopDown(container);
-  if (!(await isRunning(container))) return;
+  // An unknown read must not clear the surcharge for a desktop that may still be up.
+  const running = await isRunning(container);
+  if (!running) {
+    await markBrowserDesktopDown(container);
+    return;
+  }
   try {
     await whileRunnerBusy(container, () =>
       exec('docker', ['exec', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {
         timeout: 20_000,
       }),
     );
+    await markBrowserDesktopDown(container);
   } catch (err) {
     logger.debug({ err, taskId }, 'stopBrowserDesktop (app-runner) best-effort failed');
   }
