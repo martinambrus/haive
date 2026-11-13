@@ -143,38 +143,6 @@ export async function provisionOllamaProvider(
   }
   const model = provider.model;
   try {
-    const owner = await db.query.users.findFirst({
-      where: eq(schema.users.id, provider.userId),
-      columns: { role: true },
-    });
-    if (owner?.role !== 'admin') {
-      const policy = {
-        embedModel: await configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
-        allowlist: null as string | null,
-      };
-      const from = provider.modelfile ? parseModelfile(provider.modelfile).from : undefined;
-      const models = [model, ...(from ? [from] : [])];
-      if (models.some((candidate) => !isOllamaModelAllowed(owner?.role, candidate, policy))) {
-        policy.allowlist = await configService.get(CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST);
-      }
-      const denied = models.find(
-        (candidate) => !isOllamaModelAllowed(owner?.role, candidate, policy),
-      );
-      if (denied) {
-        log.warn(
-          { providerId: provider.id, model: denied },
-          'skipping disallowed ollama model provisioning',
-        );
-        await setProvisionStatus(db, provider.id, 'failed', OLLAMA_MODEL_NOT_ALLOWED_MESSAGE);
-        return {
-          ok: false,
-          providerId: provider.id,
-          model,
-          error: OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
-        };
-      }
-    }
-    await setProvisionStatus(db, provider.id, 'provisioning', null);
     let present: Set<string>;
     try {
       present = await listOllamaModels(IN_STACK_OLLAMA_URL);
@@ -183,6 +151,40 @@ export async function provisionOllamaProvider(
       present = new Set();
     }
     if (!present.has(model)) {
+      const owner = await db.query.users.findFirst({
+        where: eq(schema.users.id, provider.userId),
+        columns: { role: true },
+      });
+      if (owner?.role !== 'admin') {
+        const policy = {
+          embedModel: await configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
+          allowlist: null as string | null,
+        };
+        const from = provider.modelfile ? parseModelfile(provider.modelfile).from : undefined;
+        const models = [model, ...(from ? [from] : [])];
+        if (models.some((candidate) => !isOllamaModelAllowed(owner?.role, candidate, policy))) {
+          policy.allowlist = await configService.get(CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST);
+        }
+        const denied = models.find(
+          (candidate) => !isOllamaModelAllowed(owner?.role, candidate, policy),
+        );
+        if (denied) {
+          log.warn(
+            { providerId: provider.id, model: denied },
+            'skipping disallowed ollama model provisioning',
+          );
+          // A policy skip attempted no provisioning. Keep it idle rather than
+          // persisting a failure that outlives the operator's policy decision.
+          await setProvisionStatus(db, provider.id, 'idle', null);
+          return {
+            ok: false,
+            providerId: provider.id,
+            model,
+            error: OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
+          };
+        }
+      }
+      await setProvisionStatus(db, provider.id, 'provisioning', null);
       if (provider.modelfile) {
         log.info({ model, providerId: provider.id }, 'building ollama model from Modelfile');
         await createOllamaModel(IN_STACK_OLLAMA_URL, model, provider.modelfile);

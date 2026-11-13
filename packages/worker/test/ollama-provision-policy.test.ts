@@ -65,23 +65,23 @@ it('boot skips a disallowed non-admin provider and continues provisioning the ad
   expect(warnings.join('\n')).toContain('blocked');
   expect(
     fake.rows(schema.cliProviders).find((row) => row.id === blocked.id)!.modelProvisionStatus,
-  ).toBe('failed');
+  ).toBe('idle');
 });
 it('checks a queued provider owner’s current role, including demotion', async () => {
   const row = provider('demoted', ADMIN);
   await fake.db.update(schema.users).set({ role: 'user' }).where(eq(schema.users.id, ADMIN));
   expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
-  expect(fetchFn).not.toHaveBeenCalled();
+  expect(fetchFn.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(['/api/tags']);
 });
 it('does not trust a missing owner', async () => {
   const row = provider('orphan', '00000000-0000-4000-8000-000000000099');
   expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
-  expect(fetchFn).not.toHaveBeenCalled();
+  expect(fetchFn.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(['/api/tags']);
 });
-it('checks the parsed FROM base before any daemon request', async () => {
+it('checks the parsed FROM base after listing and before creating', async () => {
   const row = provider('custom', USER, 'allowed', 'FROM blocked');
   expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
-  expect(fetchFn).not.toHaveBeenCalled();
+  expect(fetchFn.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(['/api/tags']);
 });
 it('continues to build an allowed model with an allowed FROM base', async () => {
   const row = provider('allowed', USER, 'allowed', 'FROM ALLOWED:latest');
@@ -105,4 +105,49 @@ it('keeps administrators independent of the policy store', async () => {
   const row = provider('admin', ADMIN, 'anything', 'FROM arbitrary-base');
   expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(true);
   expect(configService.get).not.toHaveBeenCalled();
+});
+
+it('keeps a resident legacy model ready without reading policy', async () => {
+  const row = provider('resident');
+  fetchFn.mockResolvedValue(Response.json({ models: [{ name: row.model }] }));
+  vi.mocked(configService.get).mockRejectedValue(new Error('policy store unavailable'));
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(true);
+  expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+    modelProvisionStatus: 'ready',
+    modelProvisionError: null,
+  });
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+  expect(configService.get).not.toHaveBeenCalled();
+});
+
+it('leaves a policy skip idle and can provision after the model is allowed', async () => {
+  const row = provider('later-allowed');
+  await fake.db
+    .update(schema.cliProviders)
+    .set({
+      modelProvisionStatus: 'failed',
+      modelProvisionError: 'old failure',
+    })
+    .where(eq(schema.cliProviders.id, row.id));
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
+  expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+    modelProvisionStatus: 'idle',
+    modelProvisionError: null,
+  });
+  expect(fetchFn.mock.calls.every(([url]) => url.endsWith('/api/tags'))).toBe(true);
+  vi.mocked(configService.get).mockImplementation(async (key) =>
+    key === CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST ? 'blocked' : null,
+  );
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(true);
+  expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+    modelProvisionStatus: 'ready',
+    modelProvisionError: null,
+  });
+});
+
+it('fails closed if listing models fails and the absent model is disallowed', async () => {
+  const row = provider('list-unavailable');
+  fetchFn.mockRejectedValue(new Error('tags unavailable'));
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
+  expect(fetchFn.mock.calls.every(([url]) => url.endsWith('/api/tags'))).toBe(true);
 });

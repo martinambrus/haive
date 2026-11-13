@@ -263,7 +263,7 @@ it.each([true, false])(
     const error = failure(bound);
     let writes = 0;
     fake.hooks.beforeUpdate = () => {
-      if (++writes === 2) throw error;
+      if (++writes === 1) throw error; // resident model: the first write is ready
     };
     const fetch = vi.fn(async () => Response.json({ models: [{ name: 'fixture-model' }] }));
     vi.stubGlobal('fetch', fetch);
@@ -274,7 +274,7 @@ it.each([true, false])(
       modelfile: null,
       envVars: null,
     });
-    expect(writes).toBe(3); // provisioning, failed ready write, failed status
+    expect(writes).toBe(2); // failed ready write, then failed status (no provisioning needed)
     expect(fetch).toHaveBeenCalledOnce();
     const stored = fake.rows(schema.cliProviders)[0]!;
     expect(stored.modelProvisionStatus).toBe('failed');
