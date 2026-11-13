@@ -305,6 +305,9 @@ const relinkSchema = z.object({ email: z.string().trim().toLowerCase().pipe(emai
 
 // Dedicated action: its required email payload and delivery result differ from the legacy actions.
 adminRoutes.post('/users/:id/relink', async (c) => {
+  if (c.req.param('id') === c.get('userId')) {
+    throw new HttpError(400, 'Cannot relink the calling admin');
+  }
   const { email } = relinkSchema.parse(await c.req.json());
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();

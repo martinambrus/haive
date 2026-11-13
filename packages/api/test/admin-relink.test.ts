@@ -101,7 +101,16 @@ it.each([
   expect(h.send).not.toHaveBeenCalled();
 });
 it('returns 404 for an unknown user', async () => {
-  expect((await post('00000000-0000-4000-8000-000000000099')).status).toBe(404);
+  const res = await post('00000000-0000-4000-8000-000000000099');
+  expect(res.status).toBe(404);
+  expect(await res.json()).toMatchObject({ error: 'User not found' });
+});
+it('refuses to relink the calling admin and changes nothing', async () => {
+  const before = structuredClone(fake.rows(schema.users));
+  const res = await post('00000000-0000-4000-8000-000000000001');
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({ error: 'Cannot relink the calling admin' });
+  expect(fake.rows(schema.users)).toEqual(before);
 });
 it('a held email refuses with a typed conflict and leaves all state intact', async () => {
   const row = await user();
