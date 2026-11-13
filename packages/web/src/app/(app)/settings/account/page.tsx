@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type ApiError } from '@/lib/api-client';
@@ -165,6 +166,11 @@ export default function AccountPage() {
                 readOnly
                 disabled
               />
+              {account?.emailReadable === false && (
+                <Link href="/admin/users#users" className="text-sm text-indigo-300 underline">
+                  Relink email (administrator)
+                </Link>
+              )}
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="account-name">Name</Label>

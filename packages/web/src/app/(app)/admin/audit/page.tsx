@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { api, listAuditEvents, type AdminUser, type AuditListResponse } from '@/lib/api-client';
 import { Button, Badge, Input, FormError } from '@/components/ui';
@@ -94,6 +95,7 @@ export default function AuditLogPage() {
   const rangeStart = total === 0 ? 0 : offset + 1;
   const rangeEnd = Math.min(offset + PAGE_SIZE, total);
   const hasFilters = Boolean(action || targetType || actorUserId || from || to);
+  const selectedActor = users.find((user) => user.id === actorUserId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -151,6 +153,11 @@ export default function AuditLogPage() {
               </option>
             ))}
           </select>
+          {selectedActor?.emailReadable === false && (
+            <Link href={`/admin/users#user-${selectedActor.id}`} className="underline">
+              Relink selected user
+            </Link>
+          )}
         </label>
 
         <label className="flex flex-col gap-1 text-xs text-neutral-400">
@@ -200,9 +207,13 @@ export default function AuditLogPage() {
                   {new Date(ev.createdAt).toLocaleString()}
                 </td>
                 <td className="px-3 py-2 text-neutral-200" title={ev.actorUserId}>
-                  {ev.actorEmailReadable === false
-                    ? 'unreadable, needs relink'
-                    : (ev.actorEmail ?? `${ev.actorUserId.slice(0, 8)}…`)}
+                  {ev.actorEmailReadable === false ? (
+                    <Link href={`/admin/users#user-${ev.actorUserId}`} className="underline">
+                      unreadable, needs relink
+                    </Link>
+                  ) : (
+                    (ev.actorEmail ?? `${ev.actorUserId.slice(0, 8)}…`)
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <Badge variant={actionVariant(ev.action)}>{ev.action}</Badge>

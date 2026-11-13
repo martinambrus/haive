@@ -348,7 +348,7 @@ export default function AdminUsersPage() {
         )}
       </Card>
 
-      <section>
+      <section id="users">
         {users === null ? (
           <p className="text-sm text-neutral-500">Loading...</p>
         ) : users.length === 0 ? (
@@ -356,7 +356,11 @@ export default function AdminUsersPage() {
         ) : (
           <div className="grid gap-3">
             {users.map((user) => (
-              <Card key={user.id}>
+              <Card
+                key={user.id}
+                id={`user-${user.id}`}
+                className="scroll-mt-6 target:border-indigo-400 target:ring-1 target:ring-indigo-400"
+              >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">

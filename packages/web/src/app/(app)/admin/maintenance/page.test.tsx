@@ -14,6 +14,9 @@ vi.mock('react', async (importOriginal) => ({
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
+vi.mock('next/link', () => ({
+  default: (props: import('react').ComponentProps<'a'>) => <a {...props} />,
+}));
 vi.mock('@/components/dialog', () => ({
   Dialog: ({ open, children }: { open: boolean; children: import('react').ReactNode }) =>
     open ? children : null,
@@ -35,6 +38,7 @@ let launchStartedAt: string | undefined;
 let holdState: { settle?: () => void } | null = null;
 let runs: Array<Record<string, unknown>> = [];
 let blockingTasks: Array<Record<string, unknown>> = [];
+let blockingJobs: Array<Record<string, unknown>> = [];
 let parkedTasks: Array<Record<string, unknown>> = [];
 let parkedCapped = false;
 let predatesParked = false;
@@ -78,7 +82,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   if (call === 'GET /admin/maintenance/blocking') {
     return reply(200, {
       tasks: structuredClone(blockingTasks),
-      jobs: [],
+      jobs: structuredClone(blockingJobs),
       total: blockingTasks.length,
       capped: false,
       ...(predatesParked ? {} : { parked: structuredClone(parkedTasks), parkedCapped }),
@@ -114,6 +118,7 @@ beforeEach(() => {
   holdState = null;
   runs = [];
   blockingTasks = [];
+  blockingJobs = [];
   parkedTasks = [];
   parkedCapped = false;
   predatesParked = false;
@@ -129,6 +134,50 @@ async function mount(): Promise<Renderer> {
 
 const stateButton = (view: Renderer, label: string) =>
   findAll(view.tree(), (h) => h.tag === 'button' && textOf(h).startsWith(label))[0]!;
+
+it.each(['task', 'parked task', 'job'])(
+  'links the unreadable owner of a %s to the matching users-page row',
+  async (kind) => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const owner = {
+      ownerId: 'orphan',
+      ownerName: null,
+      ownerEmail: null,
+      ownerEmailReadable: false,
+    };
+    const task = {
+      ...owner,
+      id: 'task-1',
+      title: 'Task',
+      type: 'workflow',
+      status: 'running',
+      pausedAt: null,
+      currentStepId: null,
+      updatedAt: '2026-11-13T00:00:00Z',
+      hasLiveCli: false,
+    };
+    if (kind === 'task') blockingTasks = [task];
+    else if (kind === 'parked task') parkedTasks = [{ ...task, status: 'waiting_form' }];
+    else
+      blockingJobs = [
+        {
+          ...owner,
+          id: 'job-1',
+          kind: 'repository',
+          name: 'Import',
+          status: 'running',
+          updatedAt: task.updatedAt,
+        },
+      ];
+    const view = await mount();
+    const links = findAll(
+      view.tree(),
+      (node) => node.tag === 'a' && textOf(node) === 'unreadable, needs relink',
+    );
+    expect(links).toHaveLength(1);
+    expect(links[0]!.props.href).toBe('/admin/users#user-orphan');
+  },
+);
 
 describe('maintenance page state', () => {
   it('keeps the state it set when an older poll read answers after its own re-read', async () => {

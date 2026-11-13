@@ -10,6 +10,9 @@ vi.mock('react', async (original) => ({
   ...(await import('../../../../test/render-tree')).reactHooks,
 }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
+vi.mock('next/link', () => ({
+  default: (props: import('react').ComponentProps<'a'>) => <a {...props} />,
+}));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {} }) }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => body,
@@ -71,6 +74,50 @@ async function mount(page: typeof UsersPage) {
 it('labels an unreadable user email in the admin list', async () => {
   const view = await mount(UsersPage);
   expect(textOf(view.tree())).toContain('unreadable, needs relink (12345678)');
+});
+it('gives the users list and each user a highlighted fragment target beside Relink', async () => {
+  const view = await mount(UsersPage);
+  expect(findAll(view.tree(), (node) => node.props.id === 'users')).toHaveLength(1);
+  const row = findAll(view.tree(), (node) => node.props.id === `user-${user.id}`)[0]!;
+  expect(row).toBeDefined();
+  expect(row.props.className).toContain('target:');
+  expect(findAll(row, (node) => node.tag === 'button' && textOf(node) === 'Relink')).toHaveLength(
+    1,
+  );
+});
+it('links an unreadable audit actor to that user on the users page', async () => {
+  const view = await mount(AuditPage);
+  const links = findAll(
+    view.tree(),
+    (node) => node.tag === 'a' && textOf(node) === 'unreadable, needs relink',
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0]!.props.href).toBe(`/admin/users#user-${user.id}`);
+});
+it('offers the administrator relink destination for an unreadable account email', async () => {
+  const view = await mount(AccountPage);
+  const links = findAll(
+    view.tree(),
+    (node) => node.tag === 'a' && textOf(node) === 'Relink email (administrator)',
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0]!.props.href).toBe('/admin/users#users');
+});
+it('links the selected unreadable actor even when there are no audit events', async () => {
+  h.audit.mockResolvedValue({ events: [], total: 0, facets: { actions: [], targetTypes: [] } });
+  const view = await mount(AuditPage);
+  const option = findAll(
+    view.tree(),
+    (node) => node.tag === 'option' && node.props.value === user.id,
+  )[0]!;
+  fire.type(option.parent!, user.id);
+  await view.flush();
+  const links = findAll(
+    view.tree(),
+    (node) => node.tag === 'a' && textOf(node) === 'Relink selected user',
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0]!.props.href).toBe(`/admin/users#user-${user.id}`);
 });
 it('labels an unreadable audit actor and its filter option', async () => {
   const view = await mount(AuditPage);
