@@ -904,10 +904,10 @@ PRE-EXISTING. Worker unless named.
 
 ### T642 · DDEV recovery cold-boots a live runner when its health exec fails
 
-status: open · kind: fix · found: #1127 driver and reviews 2026-11-13 · priority: P2
+status: done 2026-11-13 #1128 (10a97c011): recovery rebuilds a runner only on a definite answer (absent or stopped, another workspace, a working exec that finds no dockerd); a probe without an answer raises the retryable RunnerProbeError; a failed warm start keeps the runner and reports the DDEV output; lows in T643 items 6-8, rebuild action in T644 · kind: fix · found: #1127 driver and reviews 2026-11-13 · priority: P2
 PRE-EXISTING, consequential (data loss). Worker `sandbox/ddev-runner.ts`: `ensureDdevStartedInner` reads `ddev describe -j` (~:2210-2233); `runnerDockerdUp` (~:2090-2100) swallows any exec failure to `false`; `decideDdevRecovery` (~:2078-2086) then picks a cold boot, and `startDdevRunner` runs `docker rm -f -v` on the live runner (~:481), dropping its anonymous nested `/var/lib/docker` (images, project containers, database volumes). A daemon timeout during that exec is enough. Fix direction: the same present/absent/unknown split #1127 gave runner existence: an exec that gave no answer (`gitGaveNoAnswer`-style: timeout, no exit status) is unknown and holds the step for retry; only a definite "dockerd not up" answer may cold-boot. Controls: an exec timeout at each probe keeps the runner.
 
-### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+5)
+### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+8)
 
 status: open · kind: fix · found: #1127 reviews 2026-11-13 · priority: P4
 PRE-EXISTING unless marked. Worker `sandbox/`.
@@ -917,6 +917,14 @@ PRE-EXISTING unless marked. Worker `sandbox/`.
 3. `ide-runner.ts` ~:424 warm editor reuse never retries a debug setup that failed earlier. Minor.
 4. IDE user-data volumes (`ideUserDataVolumeName`, ide-runner.ts ~:669,687) have no orphan sweeper; any path that skips `killRepoIdeRunner` leaks one. Minor.
 5. `runner-probe.ts` ~:24 `RunnerProbeError.retryable` is read nowhere; retry is the user's step Retry or the next ensure. Keep it or drop it.
+6. `runner-probe.ts` ~:52 maps Docker `paused` to running; a runner paused outside the app (Haive never runs `docker pause`) then fails every exec, and DDEV recovery holds with "Retry when Docker is available", which retrying never clears. Name the pause in the error (Codex bot on #1128). Minor.
+7. Coverage: no test runs a failed DDEV warm start (`ddev start failed (runner ... kept;`) through the fix-loop failure classifier to show it still routes as an environment failure. (#1128 review)
+8. `ddev-runner.ts` `ddevFailureMessage` keeps only the last 8000 characters of DDEV output; an early root-cause line can be cut. Minor.
+
+### T644 · no in-app way to rebuild a DDEV runner
+
+status: open · kind: decision · found: #1128 review 2026-11-13 · priority: P4
+Since #1128 a failed warm start keeps the runner; its error names the container and says that removing it rebuilds from the last database snapshot and loses every change since. The only rebuild paths are removing the container by hand or the failed-task reaper (180 min). Owner decision: add a "Rebuild DDEV" action (confirming the loss), or keep the manual path.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
