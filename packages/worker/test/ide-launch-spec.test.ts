@@ -6,6 +6,7 @@ import {
   appRunnerName,
   ddevRunnerName,
   IDE_IDLE_GRACE_MS,
+  INSTALL_LABEL,
   RUNNER_SUBPATH_LABEL,
   ideRunnerName,
   ideUserDataVolumeName,
@@ -151,6 +152,7 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   },
 }));
 
+import { RunnerProbeError } from '../src/sandbox/runner-probe.js';
 import {
   ensureIdeRunnerStarted,
   ensureRepoIdeRunnerStarted,
@@ -669,4 +671,23 @@ it('preserves repository editor data when its runner presence is unknown', async
 it('removes repository editor data once its runner is confirmed absent', async () => {
   await killRepoIdeRunner(REPO);
   expect(mutations()).toEqual([`volume rm ${ideUserDataVolumeName(repositoryEditor.session)}`]);
+});
+
+it('keeps repository editor data when ownership inspection fails, then removes it on Retry', async () => {
+  const name = ideRunnerName(repositoryEditor.session);
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC });
+  h.state.unreadableLabel = INSTALL_LABEL;
+
+  await expect(killRepoIdeRunner(REPO)).rejects.toBeInstanceOf(RunnerProbeError);
+
+  expect(h.state.containers.has(name)).toBe(true);
+  expect(mutations()).toEqual([]);
+
+  h.state.unreadableLabel = null;
+  await killRepoIdeRunner(REPO);
+  expect(h.state.containers.has(name)).toBe(false);
+  expect(mutations()).toEqual([
+    `rm ${name}`,
+    `volume rm ${ideUserDataVolumeName(repositoryEditor.session)}`,
+  ]);
 });

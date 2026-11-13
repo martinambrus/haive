@@ -1,4 +1,4 @@
-import { requireRunnerPresence } from './runner-probe.js';
+import { requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -615,8 +615,10 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
       { timeout: 15_000 },
     );
     if (!(await ownsNamedIdeRunner(name, stdout.trim()))) return false;
-  } catch {
-    return false;
+  } catch (cause) {
+    // Existence was established, but ownership is still unknown. Let callers keep
+    // the idle-session key and repository user-data volume until a later retry.
+    throw new RunnerProbeError(name, cause);
   }
   await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 }).catch(() => {});
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});

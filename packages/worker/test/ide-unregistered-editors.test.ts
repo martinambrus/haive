@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import {
   IDE_IDLE_GRACE_MS,
   IDE_RUNNER_LABEL,
+  INSTALL_LABEL,
   ideRunnerName,
   ideSessionKey,
   repoIdeSessionId,
@@ -23,6 +24,7 @@ const h = vi.hoisted(() => {
     calls: [] as string[],
     psFails: false,
     hsetnxFails: false,
+    ownershipInspectFails: false,
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
   const docker = async (_command: string, args: string[]) => {
@@ -78,6 +80,8 @@ const h = vi.hoisted(() => {
       if (rest[0] === '-f') {
         const key = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(rest[1]!)?.[1];
         if (!key) throw new Error(`fake docker: unhandled inspect format ${rest[1]}`);
+        if (key === INSTALL_LABEL && state.ownershipInspectFails)
+          throw new Error('ownership inspect timed out');
         return out(container.labels[key] ?? '');
       }
       return out('[{}]');
@@ -190,6 +194,7 @@ beforeEach(() => {
   h.state.calls.length = 0;
   h.state.psFails = false;
   h.state.hsetnxFails = false;
+  h.state.ownershipInspectFails = false;
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(START);
 });
@@ -362,4 +367,21 @@ describe('a sweep that cannot register the running editors', () => {
     expect(h.state.containers.has(ideRunnerName(TASK))).toBe(false);
     expect(h.state.containers.has(ideRunnerName(REPO_SESSION))).toBe(true);
   });
+});
+
+it('keeps the idle session and editor after ownership inspection fails, then retries the next sweep', async () => {
+  await launchTaskEditor(TASK);
+  const entry = idleEntry();
+  h.state.registry.set(ideSessionKey(TASK), entry);
+  h.state.ownershipInspectFails = true;
+
+  expect(await reaper.sweep()).toEqual({ scanned: 1, reaped: 0 });
+  expect(registryOf(TASK)).toEqual(entry);
+  expect(h.state.calls).toEqual([]);
+  expect(h.state.containers.has(ideRunnerName(TASK))).toBe(true);
+
+  h.state.ownershipInspectFails = false;
+  expect(await reaper.sweep()).toEqual({ scanned: 1, reaped: 1 });
+  expect(registryOf(TASK)).toBeUndefined();
+  expect(h.state.containers.has(ideRunnerName(TASK))).toBe(false);
 });
