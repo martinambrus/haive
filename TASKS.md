@@ -928,11 +928,6 @@ PRE-EXISTING unless marked. Worker `sandbox/`.
 status: done 2026-11-13 #1132 (8bdb0f01a): confirmed Rebuild DDEV action (API, exclusive worker job, dialog); owed: a live rebuild of a real DDEV task in the browser (none on the dev install), see T647 item 3 · kind: decision · found: #1128 review 2026-11-13 · priority: P4
 Since #1128 a failed warm start keeps the runner; its error names the container and says that removing it rebuilds from the last database snapshot and loses every change since. The only rebuild paths are removing the container by hand or the failed-task reaper (180 min). OWNER DECISION 2026-11-13: add the in-app "Rebuild DDEV" action, confirming the loss.
 
-### T645 · security · sandboxed agents reach the in-stack Ollama admin API directly
-
-status: open · kind: design · found: T634 review 2026-11-13 · priority: P2
-PRE-EXISTING. A CLI sandbox backed by the in-stack Ollama joins the models network and reaches `ollama:11434` directly (worker `sandbox/sandbox-runner.ts` ~:454-456, `SANDBOX_MODELS_NETWORK`). A prompt-injected agent can call `/api/pull`, `/api/create`, `/api/delete` or `/api/copy` on the shared daemon, bypassing the api and worker pull policy (T634) and able to delete other users' models. Design: a filtering proxy on the models network that forwards only the inference endpoints the CLIs use (chat/generate/embeddings, OpenAI- and Anthropic-compatible paths, model show/tags as needed) and refuses the admin endpoints; or a separate read-only daemon. Measure which paths each Ollama-backed CLI calls before choosing.
-
 ### T646 · FNF[two-install-isolation] · S4 two-install check: two boot sweeps cross installs (+4)
 
 status: open · kind: fix · found: S4 two-install check 2026-11-13 · priority: P2
@@ -951,6 +946,24 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 1. PRE-EXISTING, low. `waitUntilFinished` with `removeOnComplete`/`removeOnFail: true` rejects for a job that already finished and was removed before the wait attached, and the access-urls, ensure-ide and runtime-ensure handlers (api `routes/tasks/browser-access.ts` ~:69, ~:99, ~:131, ~:219; `lib/ide-target.ts` ~:57) answer that as pending or unavailable. Return the outcome through a structural channel (a short-lived result key, or keep the job briefly) rather than reading a rejection.
 2. Low. A job result from an older worker lacks `removed`; the rebuild dialog reads undefined as "already absent". Only a mixed-version deploy hits it.
 3. OWED LIVE CHECK. Rebuild an owned DDEV task's runner from the task page: the runner is recreated and the newest snapshot restored; a click while a step runs gets 409 with the busy reason. No DDEV task with a runner existed on the dev install at merge.
+
+### T648 · upgrades never refresh the compose bundle (design)
+
+status: open · kind: design · found: #1136 review 2026-11-13 · priority: P2
+PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
+
+### T649 · security [verify-first] · dev override publishes daemon, postgres and redis ports a sandbox may reach
+
+status: open · kind: fix · found: #1136 review 2026-11-13 · priority: P2
+PRE-EXISTING, dev stack only, unverified. `docker-compose.dev.yml` ~:6-17 publishes ollama, postgres and redis on host ports. A sandbox under the `full` network policy runs on the default bridge with NAT, and may reach those ports via the host gateway or `host.docker.internal`, bypassing the models gate (T645) and the network separation that keeps the queues and DB away from agents. Verify from an owned throwaway container on the default bridge; if reachable, bind the published ports to 127.0.0.1 only on the WSL host side, or drop the ones nothing on the host needs.
+
+### T650 · FNF[ollama-gate-followups] · gate and release-doc leftovers (+3)
+
+status: open · kind: fix · found: #1136 reviews 2026-11-13 · priority: P4
+
+1. Low. `docker/ollama-gate/server.mjs` logs nothing, not even a refused admin call, and has no SIGTERM handler, so `docker stop` waits out the grace period. The sibling proxies (`ollama-thinking-proxy`, `openrouter-compat-proxy`) are the same. Log refusals (method and path only, never bodies) and close on SIGTERM in all three.
+2. Low, PRE-EXISTING. `docs/architecture/release.md` ~:9 and the `docker-compose.run.yml` header are stale about which images a release builds and publishes (now api, worker, web, updater, builder and three proxies).
+3. Low. `packages/worker/test/rootless-docker.test.ts` pins the compose `UPSTREAM_HOST` but not the `server.mjs` default (`ollama-daemon`); a bare `docker run` of the image with a changed default would dial the wrong name. Assert the two agree.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
@@ -1854,6 +1867,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T645 — sandboxes reach an `ollama-gate` holding the daemon's names on the models network; only inference and read-only endpoints pass (exact raw method+path), the daemon leaves that network and the gate dials it as `ollama-daemon`; live-checked: admin calls 403 and never reach the daemon, claude-code through the gate succeeds, worker/api embed and tags unchanged, model list unchanged — PR #1136 (f2b1bc8d0), 2026-11-13. Leftovers T648-T650.
 - T603 — plan-merge discard runs on its own transaction and commits its leftovers report before a second, re-checked teardown transaction; `integrateOrigin` keys its rethrow on an explicit phase; a busy revival warns; real-git and real-PostgreSQL controls — PR #1095 (d4df23f2c), 2026-11-12. Lows T623.
 - T606 — the fake database honours conflict `setWhere`/`<=` and throws on unsupported options; refresh run ordering needs evidence; hidden-tab poll pause; viewer-role read retry; shared trigger labels — PR #1096 (e914dee4a), 2026-11-12. Items 3, 5, 12 recorded in T623.
 - T608 — non-directory restore root is a conflict; one deduplicated, diagnosable re-sync warning; Refresh, 00a and Pull keep their outcome; settled count — PR #1097 (6dafbff3a), 2026-11-12. Items 5, 6 in T623.
