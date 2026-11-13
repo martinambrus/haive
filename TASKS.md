@@ -293,7 +293,7 @@ All editors share one editor origin, so script in one editor can request another
 
 ### T625 · design · re-drive an Undo whose re-sync failed after settling
 
-status: open · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
+status: done 2026-11-13 #1121 (5db613230): `merge.left_committed_resynced` records a finished re-sync; owed reports show a Retry (`POST /tasks/:id/merges/resync`) that re-syncs only, after a strict hand-back; lows in T637 · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
 Owner decision 2026-11-12: build the durable re-sync-owed marker with a visible Retry; P4 queue.
 An `undone` settlement whose projection re-sync then fails cannot be re-driven by the person, nor can a recovery still blocked after the queue's retry window (`worker/src/step-engine/undo-left-merge.ts`). The smallest fix needs new state: a durable "re-sync owed" marker on the settled report that the plan-mirror sweep or a person-visible Retry can drain. Needs an owner decision before any build.
 
@@ -847,6 +847,19 @@ Worker `sandbox/login-container-reaper.ts` and shared `cli-login-lease.ts` unles
 6. The lease relies on its caller's Redis command timeout (its only caller, the api's bounded client, has 2 s); an unbounded client would let a stalled renewal hang `stop()` and login teardown. Latent.
 7. Each timed-out reaper pass leaves one MGET in the worker client's unbounded offline queue while Redis stalls (worker-wide pattern).
 8. Coverage: the reaper's Redis-outage test models a rejection, not the worker client's hang; the fresh-login test never drives the api or auth lock; the lease's catch-past-deadline branch is untested; `login-container.ts` imports `@haive/shared` twice (nit).
+
+### T637 · FNF[undo-resync-lows] · Undo re-sync Retry lows (+7)
+
+status: open · kind: fix · found: #1121 reviews 2026-11-13 · priority: P4
+Worker `step-engine/undo-left-merge.ts`, web `task-left-merge-banner.tsx` unless named.
+
+1. MEDIUM, PRE-EXISTING: a settled retry finds the checkout to hand back from the report's directory only (~:556-566), while the first run may have moved the repository root (`holders[0]`, ~:592); when they differ, a retry skips the hand-back and still records completion, leaving root-owned files. Fix: derive the settled checkout from the repository's worktree holders.
+2. During every normal Undo, between the settle and the completion, the banner shows "not re-synced" with a live Retry for a few seconds (owed-and-running vs owed-and-exhausted are not told apart).
+3. An exhausted Retry leaves no visible reason (`recordUndoFailure` returns false for a settled report); the thrown text reaches only worker logs.
+4. A settled, owed report whose directory is unreadable, not contained, pushed or a host checkout throws the generic "cannot settle an already settled report" on every attempt (~:477). PRE-EXISTING.
+5. A `rev-parse HEAD` failure on a settled checkout still on its branch blocks the re-sync on every Retry until the repository is repaired. PRE-EXISTING.
+6. Event reads order by `createdAt` only, with no tie-break (~:94, api `merges.ts`); the reader is order-sensitive but fails safe (spurious owed).
+7. Coverage: the worker test stubs `inMergeDirLock` as a pass-through (no concurrent completion control); no worker case for a settled `moved`/`refused`; no first-run test of the strict hand-back.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
