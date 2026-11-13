@@ -131,6 +131,20 @@ export async function commitHaiveProjections(args: {
       if (tree.code !== 0)
         unreadable(new Error(`git plan entry read failed: ${tree.stderr || tree.stdout}`));
       if (tree.stdout) plan.remove.push(rel);
+      else {
+        // A prior Save may have committed this deletion without syncing the real index. The
+        // absent disk and HEAD copies no longer carry that intent; recover the exact staged name.
+        const indexed = await gitRun(gitPath, [
+          'ls-files',
+          '--cached',
+          '-z',
+          '--',
+          `:(literal)${rel}`,
+        ]).catch(unreadable);
+        if (indexed.code !== 0)
+          unreadable(new Error(`git plan index read failed: ${indexed.stderr || indexed.stdout}`));
+        if (indexed.stdout.split('\0').includes(rel)) plan.remove.push(rel);
+      }
     }
   }
   const warnings: string[] = [];
