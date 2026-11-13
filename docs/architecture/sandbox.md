@@ -328,7 +328,8 @@ the worker publishes are reachable from other tasks' sandboxes. They bind 127.0.
   switch is on (default), but its socat hop listens only when a task also sets `exposeDbPort`
   (`maybeExposeDdevDbPort`). The hop accepts DDEV's fixed `db`/`db` login (`ddevDbAccess`), so
   any `full`-policy sandbox, another task's included, can then read and write that task's
-  database. Turning the global switch off closes this today.
+  database. Turning the global switch off prevents new exposure; runners already exposed must
+  also be stopped or recreated to close their database hops.
 - The DDEV router, app and Mailpit ports are published only in the per-task external access mode
   with `BROWSER_DIRECT_ACCESS`, and nothing authenticates in front of them.
 
