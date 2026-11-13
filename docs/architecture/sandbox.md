@@ -431,10 +431,11 @@ a later connection reads eligibility again. Login containers use a separate life
 
 A disable that lands while a shell is still opening (its container ensure can build an image)
 finds no session to close. The worker therefore reads the provider again once the session is
-registered, after the container's reaper registry entry is written, and refuses the open if it
-is disabled or a close already removed the session; it never subscribes a removed session's
-channels. The refusal reply carries `closeCode` 4425, so the api closes that socket as it closes
-a live revocation, and every other failed open still closes with 1011.
+registered, after the container's reaper registry entry is written, so a refused container is
+still removed by the idle reaper after the grace. It refuses the open if the provider is
+disabled, and fails it if any close already removed the session; it never subscribes a removed
+session's channels. Only the provider-disabled refusal carries `closeCode` 4425, so the api
+closes that socket as it closes a live revocation; every other failed open closes with 1011.
 
 This detaches the clients, preserving the normal two-minute tmux/container grace. A publication
 failure is logged after commit and does not fail the PATCH or DELETE; existing sessions can then
