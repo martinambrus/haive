@@ -15,7 +15,11 @@ vi.mock('../src/db.js', () => ({ getDb: () => h.db, withFreshDatabase: h.fresh }
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   lstatNoFollow: h.stat,
-  removeFileIfNoFollow: h.remove,
+  removeFileIfIdentityNoFollow: h.remove,
+  openFileNoFollow: vi.fn(async () => ({
+    stat: async () => ({ dev: 1n, ino: 2n }),
+    close: async () => {},
+  })),
   writeFileNoFollow: h.write,
   ensureDirNoFollow: h.ensure,
 }));
@@ -54,7 +58,7 @@ beforeEach(() => {
   h.db = fake.db;
   h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(h.db));
   h.stat.mockImplementation(async (_root, rel) =>
-    rel === '.'
+    rel === '.' || rel === '.haive'
       ? { kind: 'directory', stats: { uid: 1000, gid: 1000 } }
       : h.pending
         ? { kind: 'file' }
@@ -200,6 +204,22 @@ it('retries a failed sweep read on the next timer tick', async () => {
   try {
     await vi.advanceTimersByTimeAsync(10);
     expect(pages).toHaveBeenCalledTimes(2);
+  } finally {
+    stop();
+  }
+});
+
+it('skips other non-regular marker entries without running git', async () => {
+  vi.useFakeTimers();
+  h.stat.mockImplementation(async (_root, rel) => ({
+    kind: rel === '.haive' ? 'directory' : 'other',
+  }));
+  h.db = { query: { repositories: { findMany: vi.fn().mockResolvedValue([repo]) } } };
+  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledOnce();
   } finally {
     stop();
   }

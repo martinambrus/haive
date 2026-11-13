@@ -4,8 +4,10 @@ import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import {
   ensureDirNoFollow,
   errno,
+  fileIdentity,
   lstatNoFollow,
-  removeFileIfNoFollow,
+  openFileNoFollow,
+  removeFileIfIdentityNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
@@ -31,17 +33,26 @@ export async function markRemotePending(root: string): Promise<void> {
 }
 
 export async function clearRemotePending(root: string): Promise<void> {
-  const outcome = await removeFileIfNoFollow(
-    root,
-    REMOTE_PENDING_PATH,
-    (data) => data.toString() === 'pending\n',
-    { maxBytes: 32 },
-  );
-  if (outcome === 'kept') throw new Error('Remote reconciliation intent changed');
+  const file = await openFileNoFollow(root, REMOTE_PENDING_PATH, 'read', { strict: true });
+  if (!file) return;
+  try {
+    const outcome = await removeFileIfIdentityNoFollow(
+      root,
+      REMOTE_PENDING_PATH,
+      await fileIdentity(file),
+    );
+    if (outcome === 'kept') throw new Error('Remote reconciliation intent changed');
+  } finally {
+    await file.close();
+  }
 }
 
 async function hasRemotePending(root: string): Promise<boolean> {
   try {
+    const directory = await lstatNoFollow(root, '.haive', { strict: true });
+    if (!directory) return false;
+    if (directory.kind !== 'directory')
+      throw new Error('Remote reconciliation directory is not a directory');
     const entry = await lstatNoFollow(root, REMOTE_PENDING_PATH, { strict: true });
     if (!entry) return false;
     if (entry.kind !== 'file') throw new Error('Remote reconciliation intent is not a file');
