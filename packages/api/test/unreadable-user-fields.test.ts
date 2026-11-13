@@ -1,5 +1,16 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, warn: vi.fn() }));
+vi.mock('@haive/shared', async (original) => {
+  const actual = await original<typeof import('@haive/shared')>();
+  return {
+    ...actual,
+    logger: {
+      ...actual.logger,
+      warn: h.warn,
+      child: () => ({ warn: h.warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: vi.fn() }) }));
 vi.mock('../src/lib/auth-throttle.js', () => ({
@@ -66,6 +77,7 @@ function joinedReads(results: unknown[][]) {
   h.db = { ...fake.db, select, selectDistinct: select };
 }
 beforeEach(() => {
+  h.warn.mockClear();
   vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue(key);
   vi.spyOn(configService, 'getFresh').mockResolvedValue('maintenance');
   vi.spyOn(secretsService, 'getEmailBlindIndexPepper').mockResolvedValue('pepper');
@@ -103,6 +115,10 @@ it('admin users returns an unreadable email without failing the list', async () 
   const res = await app.request('/admin/users');
   expect(res.status).toBe(200);
   expect(await res.json()).toMatchObject({ users: [{ id, email: null, emailReadable: false }] });
+  expect(h.warn).toHaveBeenCalledWith({ userId: id }, expect.any(String));
+  expect(JSON.stringify(h.warn.mock.calls)).not.toContain(
+    fake.rows(schema.users)[0]!.emailEncrypted,
+  );
 });
 it('audit distinguishes an unreadable actor from a missing actor', async () => {
   joinedReads([
@@ -125,6 +141,7 @@ it('audit distinguishes an unreadable actor from a missing actor', async () => {
   expect(await res.json()).toMatchObject({
     events: [{ actorEmail: null, actorEmailReadable: false }],
   });
+  expect(h.warn).toHaveBeenCalledWith({ userId: id }, expect.any(String));
 });
 it('auth me returns an unreadable email', async () => {
   const res = await app.request('/auth/me');
@@ -199,6 +216,7 @@ it('maintenance returns unreadable owners for tasks, parked tasks and background
   const res = await app.request('/admin/maintenance/blocking');
   expect(res.status).toBe(200);
   const data = (await res.json()) as { tasks: unknown[]; parked: unknown[]; jobs: unknown[] };
+  expect(h.warn).toHaveBeenCalledWith({ userId: id }, expect.any(String));
   for (const group of [data.tasks, data.parked, data.jobs]) {
     expect(group).not.toHaveLength(0);
     expect(group[0]).toMatchObject({ ownerEmail: null, ownerEmailReadable: false });

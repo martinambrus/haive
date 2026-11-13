@@ -101,6 +101,7 @@ adminRoutes.get('/users', async (c) => {
 
   const users = rows.map((row) => {
     const email = tryDecryptEmail(row.emailEncrypted, fieldKey);
+    if (email === null) log.warn({ userId: row.id }, 'Unreadable user email in admin list');
     return {
       id: row.id,
       email,
@@ -248,6 +249,9 @@ adminRoutes.get('/audit', async (c) => {
   const events = rows.map((r) => {
     const actorEmail =
       r.actorEmailEncrypted === null ? null : tryDecryptEmail(r.actorEmailEncrypted, fieldKey);
+    if (r.actorEmailEncrypted !== null && actorEmail === null) {
+      log.warn({ userId: r.actorUserId }, 'Unreadable user email in audit list');
+    }
     return {
       id: r.id,
       actorUserId: r.actorUserId,
