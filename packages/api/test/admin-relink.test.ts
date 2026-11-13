@@ -101,6 +101,18 @@ it('prevents caching the invitation reply carrying its one-time token', async ()
   expect(response.headers.get('Cache-Control')).toBe('no-store');
   expect(await response.json()).toMatchObject({ token: expect.any(String) });
 });
+it('prevents caching the reset reply carrying its temporary password', async () => {
+  h.hash.mockResolvedValue('hashed');
+  const row = await user(true);
+  const response = await app.request(`/admin/users/${row.id}/action`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'reset_password' }),
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get('Cache-Control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({ temporaryPassword: expect.any(String) });
+});
 it.each([
   [true, 'active', 'relink_not_orphaned'],
   [false, 'deactivated', 'relink_deactivated'],

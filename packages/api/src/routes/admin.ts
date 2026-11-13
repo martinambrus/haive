@@ -145,6 +145,7 @@ const createUserSchema = z.object({
 });
 
 adminRoutes.post('/users', async (c) => {
+  c.header('Cache-Control', 'no-store');
   const body = createUserSchema.parse(await c.req.json());
   const db = getDb();
   const fieldKey = await configService.getEncryptionKey();
@@ -426,6 +427,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
     });
     closeUserSockets(target.id);
     logAuditEvent(audit);
+    c.header('Cache-Control', 'no-store');
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }
 

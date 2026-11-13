@@ -305,6 +305,7 @@ describe.skipIf(!url)('a user who must change their password, on Postgres', () =
         body: { email, role: 'user' },
       });
       expect(create.status).toBe(201);
+      expect(create.headers.get('Cache-Control')).toBe('no-store');
       const body = await json(create);
       created.push(body.user.id);
       const temporaryPassword = body.temporaryPassword as string;
