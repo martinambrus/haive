@@ -140,7 +140,7 @@ export async function consumePasswordReset(
       });
       if (!candidate) throw invalid();
       const locked = await tx
-        .select({ id: schema.users.id })
+        .select({ id: schema.users.id, emailEncrypted: schema.users.emailEncrypted })
         .from(schema.users)
         .where(and(eq(schema.users.id, candidate.userId), eq(schema.users.status, 'active')))
         .for('no key update');
@@ -159,6 +159,7 @@ export async function consumePasswordReset(
       if (!claimed) throw invalid();
       let emailUpdate = {};
       if (claimed.claimEmailEncrypted !== null) {
+        if (tryDecryptEmail(locked[0]!.emailEncrypted, fieldKey) !== null) throw invalid();
         const email = tryDecryptEmail(claimed.claimEmailEncrypted, fieldKey);
         if (email === null) throw invalid();
         const emailBlindIndex = computeEmailBlindIndex(email, pepper);

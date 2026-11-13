@@ -319,6 +319,50 @@ describe.skipIf(!url)('password resets on Postgres', () => {
     });
     expect(reset!.consumedAt).toBeNull();
   });
+  it('refuses a claim whose target email became readable after issuance', async () => {
+    const row = await user();
+    const token = await issuePasswordReset(db, row.id, encryptEmail(row.email, key));
+    const repairedEmail = `repaired-${row.email}`;
+    const emailEncrypted = encryptEmail(repairedEmail, key);
+    const emailBlindIndex = computeEmailBlindIndex(repairedEmail, pepper);
+    await db
+      .update(schema.users)
+      .set({ emailEncrypted, emailBlindIndex })
+      .where(eq(schema.users.id, row.id));
+    await db.insert(schema.refreshTokens).values({
+      userId: row.id,
+      tokenHash: randomUUID(),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const response = await post('reset-password', { token, newPassword: 'new-password-long' });
+    expect(response.status).toBe(400);
+    const unknown = await post('reset-password', {
+      token: 'unknown',
+      newPassword: 'new-password-long',
+    });
+    expect(await response.text()).toBe(await unknown.text());
+    expect(await db.query.users.findFirst({ where: eq(schema.users.id, row.id) })).toMatchObject({
+      emailEncrypted,
+      emailBlindIndex,
+      passwordHash: 'old-hash',
+      tokenVersion: 0,
+      mustChangePassword: true,
+    });
+    expect(
+      (await db.query.passwordResets.findFirst({
+        where: eq(schema.passwordResets.userId, row.id),
+      }))!.consumedAt,
+    ).toBeNull();
+    expect(
+      (await db.query.refreshTokens.findFirst({
+        where: eq(schema.refreshTokens.userId, row.id),
+      }))!.revokedAt,
+    ).toBeNull();
+    const audits = await db.query.auditEvents.findMany({
+      where: eq(schema.auditEvents.targetId, row.id),
+    });
+    expect(audits.some((a) => a.action === 'auth.password_reset.complete')).toBe(false);
+  });
   it('an audit failure rolls the entire reset back', async () => {
     const row = await user();
     const token = await issuePasswordReset(db, row.id);
