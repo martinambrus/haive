@@ -950,3 +950,25 @@ it.each(['SIGTERM', 'SIGKILL'])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it('does not clear a newer relink intent during a restore after the lock was released', async () => {
+  let marker: string | null = null;
+  h.mark.mockImplementation(async () => {
+    marker = 'first request';
+  });
+  h.clear.mockImplementation(async () => {
+    marker = null;
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    await transaction(fn);
+    // A second relink acquired the released lock and wrote its intent.
+    marker = 'newer request';
+    throw new Error('ordinary commit failure');
+  });
+  expect((await link()).status).toBe(500);
+  expect(h.git.mock.calls.at(-1)![1]).toEqual(hardenGitArgs(['remote', 'remove', 'origin']));
+  expect(marker).toBe('newer request');
+  expect(h.clear).not.toHaveBeenCalled();
+});

@@ -2747,7 +2747,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   let restore: (() => Promise<void>) | undefined;
   let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
-  const restoreRemote = async (err: unknown): Promise<never> => {
+  const restoreRemote = async (err: unknown, lockHeld = true): Promise<never> => {
     // A restore that failed is the answer even when the transaction then rejects with
     // another error, such as the lost connection that made the outer catch run.
     if (restoreFailure) throw restoreFailure;
@@ -2771,7 +2771,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
     // Without a successful undo, a signalled first write may already have
     // changed Git. Leave the intent so reconciliation can settle that outcome.
-    if (intentWritten && restored) {
+    if (intentWritten && restored && lockHeld) {
       await clearRemotePending(root);
       intentWritten = false;
     }
@@ -2783,6 +2783,8 @@ repoRoutes.post('/:id/remote', async (c) => {
   // Git while that row is still locked, before a queued relink can snapshot it.
   // A connection error has an unknown outcome: reconcile on a fresh connection.
   // The durable intent also survives process death between the Git write and COMMIT.
+  // Other COMMIT failures may restore after the lock is released: a concurrent
+  // relink can still race that Git fallback. Never clear its possibly newer intent.
   let callbackSettled: Promise<void> | undefined;
   try {
     await db.transaction(async (tx) => {
@@ -2946,7 +2948,7 @@ repoRoutes.post('/:id/remote', async (c) => {
         'Remote update lost its database connection; the remote was reconciled to the saved repository state',
       );
     }
-    await restoreRemote(err);
+    await restoreRemote(err, false);
   }
   logAuditEvent(event!);
 
