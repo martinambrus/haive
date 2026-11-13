@@ -659,6 +659,7 @@ jobs:
           api test/account-security-audit-db.test.ts ACCOUNT_SECURITY_AUDIT_TEST_URL account_security_audit_test pg
           api test/login-audit-db.test.ts LOGIN_AUDIT_TEST_URL login_audit_test pg
           api test/password-resets-db.test.ts PASSWORD_RESETS_TEST_URL fpw_test pg
+          api test/admin-relink-db.test.ts ADMIN_RELINK_TEST_URL rlk_test pg
           api test/repository-security-audit-db.test.ts REPOSITORY_SECURITY_AUDIT_TEST_URL repository_security_audit_test pg
           api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
           api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg

@@ -1587,6 +1587,9 @@ export interface AdminUser {
   id: string;
   email: string | null;
   emailReadable?: boolean;
+  name?: string | null;
+  gitName?: string | null;
+  gitEmail?: string | null;
   role: 'admin' | 'user';
   status: 'active' | 'deactivated';
   tokenVersion: number;
@@ -1595,6 +1598,9 @@ export interface AdminUser {
 }
 
 export type AdminUserAction = 'deactivate' | 'activate' | 'reset_password' | 'set_role';
+
+export type AdminRelinkResponse =
+  { ok: true; delivery: 'mailed' } | { ok: true; delivery: 'manual' | 'failed'; link: string };
 
 export interface AdminUserActionRequest {
   action: AdminUserAction;

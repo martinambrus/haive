@@ -12,6 +12,7 @@ import {
   type AdminUserActionResponse,
 } from '@/lib/api-client';
 import { inviteStatus, inviteStatusVariant, isRevocable } from '@/lib/invite-status';
+import { AdminRelinkDialog } from '@/components/admin-relink-dialog';
 import {
   Badge,
   Button,
@@ -52,6 +53,7 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [relinkUser, setRelinkUser] = useState<AdminUser | null>(null);
   const [tempPassword, setTempPassword] = useState<{ userId: string; value: string } | null>(null);
 
   const [newEmail, setNewEmail] = useState('');
@@ -368,6 +370,16 @@ export default function AdminUsersPage() {
                         {user.status}
                       </Badge>
                     </div>
+                    {user.emailReadable === false && (
+                      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 text-sm text-neutral-400">
+                        <dt>Name</dt>
+                        <dd>{user.name ?? '—'}</dd>
+                        <dt>Git name</dt>
+                        <dd>{user.gitName ?? '—'}</dd>
+                        <dt>Git email</dt>
+                        <dd>{user.gitEmail ?? '—'}</dd>
+                      </dl>
+                    )}
                     <p className="mt-1 text-xs text-neutral-500">
                       Created {new Date(user.createdAt).toLocaleString()} - token version{' '}
                       {user.tokenVersion}
@@ -380,6 +392,16 @@ export default function AdminUsersPage() {
                     )}
                   </div>
                   <div className="flex flex-shrink-0 flex-wrap gap-2">
+                    {user.emailReadable === false && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyUserId === user.id || user.status !== 'active'}
+                        onClick={() => setRelinkUser(user)}
+                      >
+                        Relink
+                      </Button>
+                    )}
                     {user.status === 'active' ? (
                       <Button
                         size="sm"
@@ -433,6 +455,13 @@ export default function AdminUsersPage() {
           </div>
         )}
       </section>
+      {relinkUser && (
+        <AdminRelinkDialog
+          user={relinkUser}
+          onClose={() => setRelinkUser(null)}
+          onRelinked={load}
+        />
+      )}
     </div>
   );
 }
