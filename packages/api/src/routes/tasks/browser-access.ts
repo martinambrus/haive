@@ -14,6 +14,7 @@ import { ideTarget, targetBelongsToUser, ensureIde } from '../../lib/ide-target.
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../../queues.js';
+import { addOrRefuse } from '../../lib/queue-bounded.js';
 
 // Direct browser access: the user opens a task's running app in their OWN browser
 // (localhost + *.ddev.site URLs) instead of the VNC pixel stream. The worker
@@ -30,6 +31,8 @@ const DDEV_CA_PATH = process.env.DDEV_CA_PATH || '/var/lib/haive/ddev-ca/rootCA.
 /** Bound wait for a runtime cold boot, sized like the VNC ensure so a slow DDEV
  *  start bridges in one shot rather than erroring early. */
 const ACCESS_ENSURE_TIMEOUT_MS = 180_000;
+/** Wait only for removal and recovery enqueue, never for the cold boot. */
+const DDEV_REBUILD_WAIT_MS = 30_000;
 async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
   const db = getDb();
   const row = await db.query.tasks.findFirst({
@@ -155,12 +158,30 @@ browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
   });
   if (step || cli)
     throw new HttpError(409, 'The task is busy. Stop its activity before rebuilding DDEV.');
-  await getRuntimeEnsureQueue().add(
-    RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV,
-    { taskId, userId } satisfies RuntimeEnsurePayload,
-    { jobId: `ddev-rebuild-${taskId}`, removeOnComplete: true, removeOnFail: true },
+  const job = await addOrRefuse(
+    () =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `ddev-rebuild-${taskId}`, removeOnComplete: true, removeOnFail: true },
+      ),
+    'DDEV rebuild',
+    { taskId },
   );
-  return c.json({ ok: true }, 202);
+  try {
+    const result = (await job.waitUntilFinished(
+      getRuntimeEnsureQueueEvents(),
+      DDEV_REBUILD_WAIT_MS,
+    )) as RuntimeEnsureResult;
+    if (result?.rebuildRefusal) {
+      const { reason, message, retryable } = result.rebuildRefusal;
+      return c.json({ ok: false, error: message, reason, retryable }, 409);
+    }
+    if (result?.ok) return c.json({ ok: true }, 202);
+  } catch {
+    // A bounded wait can expire while the coalesced job is still active.
+  }
+  return c.json({ ok: false, pending: true }, 202);
 });
 
 /** Ensure the task's browser IDE (code-server) is up before the Editor tab loads

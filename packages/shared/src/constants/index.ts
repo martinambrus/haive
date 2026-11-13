@@ -283,6 +283,13 @@ export interface RuntimeEnsurePayload {
   userId: string;
 }
 
+/** A refusal before rebuild removal; carried as a completed job result for the API. */
+export interface DdevRebuildRefusal {
+  reason: 'busy' | 'probe-unknown' | 'foreign-runner' | 'workspace-mismatch' | 'no-ddev';
+  message: string;
+  retryable: boolean;
+}
+
 /** Result the worker returns for a runtime-ensure job. `mode='none'` means no
  *  runtime is recorded for the task (nothing to bring up). */
 export interface RuntimeEnsureResult {
@@ -294,6 +301,7 @@ export interface RuntimeEnsureResult {
    *  published ports. Empty/absent when direct access is disabled or no port is
    *  published. See `TaskAccessEndpoint`. */
   accessUrls?: TaskAccessEndpoint[];
+  rebuildRefusal?: DdevRebuildRefusal;
 }
 
 export const DDEV_CONTROL_JOB_NAMES = {

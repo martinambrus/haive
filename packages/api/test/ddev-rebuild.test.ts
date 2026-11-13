@@ -3,7 +3,13 @@ import { Hono } from 'hono';
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { AppEnv } from '../src/context.js';
-const h = vi.hoisted(() => ({ task: vi.fn(), step: vi.fn(), cli: vi.fn(), add: vi.fn() }));
+const h = vi.hoisted(() => ({
+  task: vi.fn(),
+  step: vi.fn(),
+  cli: vi.fn(),
+  add: vi.fn(),
+  wait: vi.fn(),
+}));
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
     query: {
@@ -32,6 +38,8 @@ beforeEach(() => {
   h.task.mockResolvedValue({ id: 'task' });
   h.step.mockResolvedValue(undefined);
   h.cli.mockResolvedValue(undefined);
+  h.add.mockResolvedValue({ waitUntilFinished: h.wait });
+  h.wait.mockResolvedValue({ ok: true, mode: 'ddev', url: null });
 });
 it('hides another user’s task and enqueues nothing', async () => {
   h.task.mockResolvedValue(undefined);
@@ -70,4 +78,55 @@ it('accepts an idle task and coalesces repeated requests', async () => {
     ),
     columns: { id: true },
   });
+});
+
+it.each([
+  ['busy', 'The task runner is busy.', true],
+  ['probe-unknown', 'Docker could not be probed. Retry when available.', true],
+  ['foreign-runner', 'Runner ownership is unproven.', false],
+  ['workspace-mismatch', 'Runner workspace does not match.', false],
+  ['no-ddev', 'This task has no DDEV runtime.', false],
+])('returns a worker %s refusal to the user', async (reason, message, retryable) => {
+  h.wait.mockResolvedValue({
+    ok: false,
+    mode: 'ddev',
+    url: null,
+    rebuildRefusal: { reason, message, retryable },
+  });
+  const response = await request();
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ error: message, reason, retryable });
+});
+it('does not answer success until removal and enqueue finish', async () => {
+  let finish!: (value: unknown) => void;
+  h.wait.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  let answered = false;
+  const response = Promise.resolve(request()).then((value) => {
+    answered = true;
+    return value;
+  });
+  for (let i = 0; i < 30 && h.wait.mock.calls.length === 0; i++) await Promise.resolve();
+  expect(h.wait).toHaveBeenCalledOnce();
+  expect(answered).toBe(false);
+  expect(h.wait.mock.calls[0]?.[1]).toBe(30_000);
+  finish({ ok: true, mode: 'ddev', url: null });
+  expect(await (await response).json()).toEqual({ ok: true });
+});
+it('returns pending when the bounded removal wait expires', async () => {
+  h.wait.mockRejectedValue(new Error('wait expired'));
+  const response = await request();
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ ok: false, pending: true });
+});
+it('refuses when the rebuild could not be queued', async () => {
+  h.add.mockRejectedValueOnce(new Error('queue unavailable'));
+  const response = await request();
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: 'queue_unavailable' });
+  expect(h.wait).not.toHaveBeenCalled();
 });

@@ -2434,11 +2434,9 @@ export default function TaskDetailPage() {
       <DdevRebuildDialog
         taskId={rebuildDdevOpen ? id : null}
         onClose={() => setRebuildDdevOpen(false)}
-        onQueued={() => {
+        onQueued={(notice) => {
           setRebuildDdevOpen(false);
-          setRebuildDdevNotice(
-            'DDEV rebuild requested. A failed step stays failed; Retry it after the runtime is ready.',
-          );
+          setRebuildDdevNotice(notice);
         }}
       />
       <PostLoginRetryDialog

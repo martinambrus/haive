@@ -35,7 +35,7 @@ export function DdevRebuildDialog({
 }: {
   taskId: string | null;
   onClose: () => void;
-  onQueued: () => void;
+  onQueued: (notice: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,8 +48,15 @@ export function DdevRebuildDialog({
     setBusy(true);
     setError(null);
     try {
-      await api.post(`/tasks/${taskId}/ddev/rebuild`, {});
-      onQueued();
+      const result = await api.post<{ ok: boolean; pending?: boolean }>(
+        `/tasks/${taskId}/ddev/rebuild`,
+        {},
+      );
+      onQueued(
+        result.pending
+          ? 'DDEV rebuild is still pending; removal is not yet confirmed. Check task history for the outcome.'
+          : 'DDEV runner removed; recovery is queued. A failed step stays failed; Retry it after the runtime is ready.',
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to queue DDEV rebuild');
     } finally {

@@ -28,7 +28,10 @@ vi.mock('../db.js', () => ({
   }),
 }));
 vi.mock('../step-engine/steps/workflow/_app-runtime.js', () => ({ classifyRuntime: h.classify }));
-vi.mock('../sandbox/ddev-runner.js', () => ({ rebuildDdevRunner: h.rebuild }));
+vi.mock('../sandbox/ddev-runner.js', async (original) => ({
+  ...(await original<typeof import('../sandbox/ddev-runner.js')>()),
+  rebuildDdevRunner: h.rebuild,
+}));
 vi.mock('./safe-processor.js', () => ({ safeProcessor: (fn: unknown) => fn }));
 import { rebuildDdevForTask, startRuntimeEnsureWorker } from './runtime-ensure-queue.js';
 const payload = { taskId: 'task', userId: 'owner' };
@@ -55,14 +58,31 @@ it('dispatches the dedicated rebuild job and enqueues ordinary ensure without jo
   });
   expect(h.close).toHaveBeenCalledOnce();
 });
-it('does not enqueue after a runner refusal', async () => {
-  h.rebuild.mockRejectedValue(new Error('busy'));
-  await expect(rebuildDdevForTask(payload)).rejects.toThrow('busy');
+it.each([
+  ['busy', true],
+  ['foreign-runner', false],
+  ['workspace-mismatch', false],
+] as const)('returns a %s refusal without enqueueing', async (reason, retryable) => {
+  const { DdevRebuildRefusedError } = await import('../sandbox/ddev-runner.js');
+  h.rebuild.mockRejectedValue(
+    new DdevRebuildRefusedError({ reason, message: 'refused', retryable }),
+  );
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+    ok: false,
+    rebuildRefusal: { reason, message: 'refused', retryable },
+  });
   expect(h.add).not.toHaveBeenCalled();
 });
 it('rejects a non-DDEV task without removal', async () => {
   h.classify.mockResolvedValue({ mode: 'app-runner' });
-  await expect(rebuildDdevForTask(payload)).rejects.toThrow(/no DDEV/);
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+    ok: false,
+    rebuildRefusal: {
+      reason: 'no-ddev',
+      retryable: false,
+      message: expect.stringMatching(/no DDEV/),
+    },
+  });
   expect(h.rebuild).not.toHaveBeenCalled();
 });
 it('fails the job if ensure could not be queued, and closes the queue', async () => {
@@ -76,4 +96,14 @@ it('never coalesces a later rebuild recovery into an earlier rebuild’s finishi
   await rebuildDdevForTask(payload);
   const ids = h.add.mock.calls.map((call) => call[2].jobId);
   expect(new Set(ids).size).toBe(2);
+});
+
+it('returns an unknown probe as a retryable refusal', async () => {
+  const { RunnerProbeError } = await import('../sandbox/runner-probe.js');
+  h.rebuild.mockRejectedValueOnce(new RunnerProbeError('runner', new Error('timeout')));
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+    ok: false,
+    rebuildRefusal: { reason: 'probe-unknown', retryable: true },
+  });
+  expect(h.add).not.toHaveBeenCalled();
 });

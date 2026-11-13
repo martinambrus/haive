@@ -24,6 +24,7 @@ import {
   startBrowserDesktop as startDdevBrowserDesktop,
   ddevAccessUrls,
   rebuildDdevRunner,
+  DdevRebuildRefusedError,
   ddevMailpitUrls,
   runnerExec,
 } from '../sandbox/ddev-runner.js';
@@ -32,6 +33,7 @@ import {
   appRunnerAccessUrls,
   appRunnerExec,
 } from '../sandbox/app-runner.js';
+import { RunnerProbeError } from '../sandbox/runner-probe.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
 
 // The worker side of the VNC "ensure runtime" handshake. The api enqueues a job
@@ -171,23 +173,56 @@ export async function rebuildDdevForTask(
   payload: RuntimeEnsurePayload,
 ): Promise<RuntimeEnsureResult> {
   const ctx = await runtimeContext(payload.taskId);
-  if (!ctx) throw new Error('No DDEV workspace for this task.');
+  if (!ctx)
+    return {
+      ok: false,
+      url: null,
+      mode: 'none',
+      rebuildRefusal: {
+        reason: 'no-ddev',
+        message: 'No DDEV workspace for this task.',
+        retryable: false,
+      },
+    };
   const spec = await classifyRuntime(ctx);
-  if (spec.mode !== 'ddev' || !spec.repoSubpath) throw new Error('This task has no DDEV runtime.');
-  await rebuildDdevRunner(payload.taskId, spec.repoSubpath, payload.userId, async () => {
-    const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
-      connection: getBullRedis(),
-    });
-    try {
-      await queue.add(RUNTIME_ENSURE_JOB_NAMES.ENSURE, payload, {
-        jobId: `ensure-rebuild-${payload.taskId}-${randomUUID()}`,
-        removeOnComplete: true,
-        removeOnFail: true,
+  if (spec.mode !== 'ddev' || !spec.repoSubpath)
+    return {
+      ok: false,
+      url: null,
+      mode: 'none',
+      rebuildRefusal: {
+        reason: 'no-ddev',
+        message: 'This task has no DDEV runtime.',
+        retryable: false,
+      },
+    };
+  try {
+    await rebuildDdevRunner(payload.taskId, spec.repoSubpath, payload.userId, async () => {
+      const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
+        connection: getBullRedis(),
       });
-    } finally {
-      await queue.close();
-    }
-  });
+      try {
+        await queue.add(RUNTIME_ENSURE_JOB_NAMES.ENSURE, payload, {
+          jobId: `ensure-rebuild-${payload.taskId}-${randomUUID()}`,
+          removeOnComplete: true,
+          removeOnFail: true,
+        });
+      } finally {
+        await queue.close();
+      }
+    });
+  } catch (error) {
+    if (error instanceof DdevRebuildRefusedError)
+      return { ok: false, url: null, mode: 'ddev', rebuildRefusal: error.refusal };
+    if (error instanceof RunnerProbeError)
+      return {
+        ok: false,
+        url: null,
+        mode: 'ddev',
+        rebuildRefusal: { reason: 'probe-unknown', message: error.message, retryable: true },
+      };
+    throw error;
+  }
   return { ok: true, url: null, mode: 'ddev' };
 }
 

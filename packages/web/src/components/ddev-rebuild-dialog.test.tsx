@@ -11,12 +11,19 @@ afterEach(() => {
 });
 function Fixture() {
   const [open, setOpen] = useState(true);
+  const [notice, setNotice] = useState('');
   return (
-    <DdevRebuildDialog
-      taskId={open ? 'task' : null}
-      onClose={() => setOpen(false)}
-      onQueued={() => setOpen(false)}
-    />
+    <>
+      <p>{notice}</p>
+      <DdevRebuildDialog
+        taskId={open ? 'task' : null}
+        onClose={() => setOpen(false)}
+        onQueued={(message: string) => {
+          setNotice(message);
+          setOpen(false);
+        }}
+      />
+    </>
   );
 }
 it('states removal, snapshot restoration, loss, and Retry of a failed step', () => {
@@ -75,3 +82,23 @@ it('recognizes DDEV detected after the initial runtime step', () => {
     ]),
   ).toBe(false);
 });
+
+it.each([
+  [{ ok: true }, /removed.*recovery.*queued/i],
+  [{ ok: false, pending: true }, /still pending.*not.*confirmed/i],
+])('shows the API rebuild outcome %j', async (reply, text) => {
+  h.post.mockResolvedValueOnce(reply);
+  render(<Fixture />);
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild DDEV' }));
+  expect(await screen.findByText(text)).toBeTruthy();
+});
+it.each(['busy', 'unknown Docker probe; retry', 'foreign runner', 'no DDEV runtime'])(
+  'shows the API refusal: %s',
+  async (reason) => {
+    h.post.mockRejectedValueOnce(new Error(reason));
+    render(<Fixture />);
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild DDEV' }));
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+  },
+);

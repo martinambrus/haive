@@ -21,6 +21,7 @@ import {
   installLabel,
   taskHostPort,
   type TaskAccessEndpoint,
+  type DdevRebuildRefusal,
   volumeName,
 } from '@haive/shared';
 import {
@@ -2159,6 +2160,13 @@ async function probeDdevRecovery(
  *  to the dev. */
 const ddevBoots = new DdevBoots<DdevRunnerHandle>();
 
+export class DdevRebuildRefusedError extends Error {
+  constructor(readonly refusal: DdevRebuildRefusal) {
+    super(refusal.message);
+    this.name = 'DdevRebuildRefusedError';
+  }
+}
+
 /** Explicit user-confirmed rebuild. Share the boot entry with ensure, fence new execs,
  * prove presence and ownership, and remove by immutable ID. The callback only enqueues
  * the existing cold-boot path; it must not await that boot while this entry is held. */
@@ -2181,7 +2189,11 @@ export async function rebuildDdevRunner(
           columns: { id: true },
         });
         if (step || taskRunnerBusy(taskId) || (await hasLiveCliInvocation(db, taskId)) || !idle()) {
-          throw new Error('The task runner is busy. Stop its activity before rebuilding DDEV.');
+          throw new DdevRebuildRefusedError({
+            reason: 'busy',
+            message: 'The task runner is busy. Stop its activity before rebuilding DDEV.',
+            retryable: true,
+          });
         }
       };
       await requireIdle();
@@ -2198,13 +2210,25 @@ export async function rebuildDdevRunner(
           throw new RunnerProbeError(handle.container, cause);
         }
         if (!(await ownsTaskRunner(info.Id, info.Config.Labels[INSTALL_LABEL], taskId, db))) {
-          throw new Error('Cannot rebuild DDEV: runner ownership is unproven.');
+          throw new DdevRebuildRefusedError({
+            reason: 'foreign-runner',
+            message: 'Cannot rebuild DDEV: runner ownership is unproven.',
+            retryable: false,
+          });
         }
         if (info.Config.Labels[RUNNER_SUBPATH_LABEL] !== repoSubpath) {
-          throw new Error('Cannot rebuild DDEV: runner workspace does not match this task.');
+          throw new DdevRebuildRefusedError({
+            reason: 'workspace-mismatch',
+            message: 'Cannot rebuild DDEV: runner workspace does not match this task.',
+            retryable: false,
+          });
         }
         if (await runnerExecLive(taskId))
-          throw new Error('The task runner is busy. Retry after its operation finishes.');
+          throw new DdevRebuildRefusedError({
+            reason: 'busy',
+            message: 'The task runner is busy. Retry after its operation finishes.',
+            retryable: true,
+          });
         await requireIdle();
         await exec('docker', ['rm', '-f', '-v', info.Id], { timeout: 90_000 });
         // Required evidence, never best-effort: a failed event write fails the job.

@@ -93,7 +93,7 @@ it.each(['cli', 'step', 'orphaned exec'])('refuses a busy %s', async (kind) => {
   if (kind === 'cli') h.live.mockResolvedValue(true);
   if (kind === 'step') h.step.mockResolvedValue({ id: 'running' });
   if (kind === 'orphaned exec') h.execLive.mockResolvedValue(true);
-  await expect(rebuild()).rejects.toThrow(/busy/i);
+  await expect(rebuild()).rejects.toMatchObject({ refusal: { reason: 'busy', retryable: true } });
   expect(mutations()).toEqual([]);
   expect(h.ensure).not.toHaveBeenCalled();
 });
@@ -106,7 +106,12 @@ it('an unknown presence raises RunnerProbeError and removes nothing', async () =
 it.each(['install', 'workspace'])('refuses a foreign %s', async (kind) => {
   if (kind === 'install') install = 'foreign';
   else subpath = 'user/other-repo';
-  await expect(rebuild()).rejects.toThrow(/ownership|workspace/i);
+  await expect(rebuild()).rejects.toMatchObject({
+    refusal: {
+      reason: kind === 'install' ? 'foreign-runner' : 'workspace-mismatch',
+      retryable: false,
+    },
+  });
   expect(mutations()).toEqual([]);
   expect(h.ensure).not.toHaveBeenCalled();
 });
