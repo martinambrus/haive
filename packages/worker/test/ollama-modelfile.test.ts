@@ -42,4 +42,13 @@ describe('parseModelfile', () => {
     expect(p.system).toBeUndefined();
     expect(p.parameters).toEqual({});
   });
+
+  it('reads a PARAMETER value after any whitespace and skips one holding a line terminator', () => {
+    const p = parseModelfile(
+      ['PARAMETER t \t 0.5', 'PARAMETER only', 'PARAMETER bad x\u2028y', 'PARAMETER k v'].join(
+        '\n',
+      ),
+    );
+    expect(p.parameters).toEqual({ t: 0.5, k: 'v' });
+  });
 });

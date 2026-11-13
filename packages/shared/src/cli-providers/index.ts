@@ -15,3 +15,6 @@ export * from './provider-secret.js';
 export * from './default-provider.js';
 
 export * from './login-candidate.js';
+
+export * from './ollama-pull-policy.js';
+export * from './ollama-modelfile.js';
