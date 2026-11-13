@@ -281,6 +281,28 @@ export async function stagedChanges(
   return changed.filter((p) => named.has(p));
 }
 
+/** Compare only exact owned names with a captured commit, never an implicit, moving HEAD. */
+async function staleIndexPaths(
+  run: (args: string[]) => Promise<{ stdout: string }>,
+  head: string,
+  paths: readonly string[],
+): Promise<string[]> {
+  if (paths.length === 0) return [];
+  const named = new Set(paths);
+  const listed = await run([
+    'diff-index',
+    '--cached',
+    '--name-only',
+    '--no-renames',
+    '-z',
+    head,
+    '--',
+    ...literal(paths),
+  ]);
+  // A pathspec also reaches below a name that became a directory. Those children are not owned.
+  return listed.stdout.split('\0').filter((p) => named.has(p));
+}
+
 /** Stage `add` and `remove` into a private index built from HEAD and commit what that changes among
  *  those names. The real index is never read for them, so a blob another writer stages there in the
  *  meantime cannot enter the commit; afterwards the real index agrees with HEAD for the committed
@@ -404,20 +426,7 @@ export async function commitRecorded(
         // Only inspect the real index here. An already-clean no-op needs no index lock.
         // A pathspec reaches into a directory standing at a named path (and, with none, into
         // everything staged); only the names themselves are repaired, never what the person staged.
-        const stale = (
-          await run([
-            'diff-index',
-            '--cached',
-            '--name-only',
-            '--no-renames',
-            '-z',
-            parent,
-            '--',
-            ...literal([...named]),
-          ])
-        ).stdout
-          .split('\0')
-          .filter((p) => named.has(p));
+        const stale = await staleIndexPaths(run, parent, [...named]);
         if (stale.length === 0) return [];
         let synced = false;
         for (let attempt = 0; attempt < 6 && !synced; attempt++) {
@@ -443,16 +452,25 @@ export async function commitRecorded(
     onCommitted?.(commit);
     // The commit has landed; a real index another writer holds locked is retried, then reported.
     let synced = false;
+    let syncPaths = changed;
     for (let attempt = 0; attempt < 6 && !synced; attempt += 1) {
       if (attempt > 0) await waitForIndexRetry(100 * 2 ** attempt);
-      synced = await syncRealIndex(run, commit, changed).then(
+      synced = await (async () => {
+        // A committing Save must also repair owned names left stale by an earlier sync failure.
+        // Recompute on each retry against the commit we hold; syncRealIndex follows newer HEADs.
+        if (options.repairUnchangedIndex)
+          syncPaths = [
+            ...new Set([...changed, ...(await staleIndexPaths(run, commit, [...named]))]),
+          ];
+        await syncRealIndex(run, commit, syncPaths);
+      })().then(
         () => true,
         () => false,
       );
     }
     if (!synced) {
       warnings?.push(
-        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.length} paths: ${changed.slice(0, 10).join(', ')}`,
+        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${syncPaths.length} paths: ${syncPaths.slice(0, 10).join(', ')}`,
       );
     }
     return changed;
