@@ -824,15 +824,16 @@ All in worker `repo/bundle-orphan-sweep.ts` unless named. Low.
 
 ### T634 · design · Ollama model check on provider save and boot provisioning
 
-status: open · kind: design · found: #1119 review 2026-11-13 · priority: P3
+status: done 2026-11-13 #1130 (b78611d5a): one shared policy in `@haive/shared` checked at provider create, PATCH, duplicate and boot provisioning, Modelfile FROM base included, owner role rechecked, resident model matched by resolved name; also fixed the Modelfile PARAMETER parser's polynomial regex (CodeQL); lows in T635 · kind: design · found: #1119 review 2026-11-13 · priority: P3
 #1119 checks only `POST /tooling/pull-ollama-model`. An in-stack Ollama provider's create, PATCH and duplicate, and the boot re-pull (`ensure`), still provision their model, and a custom Modelfile's `FROM` base, without the pull check, so a non-admin can still make the shared daemon pull an arbitrary model through a provider save. `provisionOllamaProvider` also does not recheck the owner's role. Documented as a known limit in `docs/architecture/api-auth.md` ("Who may make Ollama pull a model"). OWNER DECISION 2026-11-13: same check everywhere. Provider create, PATCH and duplicate refuse a disallowed model (and Modelfile `FROM` base) with a clear message; the boot re-pull skips it with a warning; `provisionOllamaProvider` re-checks the owner's role.
 
-### T635 · FNF[ollama-pull-policy-lows] · Ollama pull policy lows (+2)
+### T635 · FNF[ollama-pull-policy-lows] · Ollama pull policy lows (+3)
 
 status: open · kind: fix · found: #1119 reviews 2026-11-13 · priority: P4
 
 1. An allowlist entry that fails validation when read back (a stored value edited outside the PUT) makes the whole list fail closed with no log or admin-visible reason (api `lib/ollama-pull-policy.ts`). Low.
 2. `api/test/probe-targets.test.ts` ~:192 waits on real timers; convert to fake timers (testing.md rule). Low.
+3. From #1130: a worker policy skip at boot leaves the provider `idle` with no error text, and the provider form hides the idle state, so the owner sees no reason their model never provisioned (worker `sandbox/ollama-provision.ts`, web provider form). Show the skip reason. Low.
 
 ### T636 · FNF[login-lease-reaper-lows] · CLI login lease and reaper lows (+8)
 
