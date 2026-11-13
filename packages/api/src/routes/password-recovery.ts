@@ -77,7 +77,7 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
         const result = await sendMail({
           to: recipient.to,
           subject: 'Reset your Haive password',
-          text: `Open this link to choose a new password:\n\n${link.href}\n\nThis link expires in 30 minutes. A newer request replaces it. If you did not request it, ignore this email.`,
+          text: `Open this link to choose a new password:\n\n${link.href}\n\nThis link expires in 30 minutes. A new request made more than two minutes later replaces it. If you did not request it, ignore this email.`,
         });
         if (!result.ok) log.warn({ code: result.code }, 'Password recovery mail was not delivered');
       })().catch(() => {

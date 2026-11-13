@@ -51,7 +51,7 @@ export function PasswordRecoveryForm({
       <MarkdownView
         body={
           sent
-            ? 'If an account can be recovered, a reset link will be emailed. Check your inbox. The link expires in 30 minutes; a newer request replaces it.'
+            ? 'If an account can be recovered, a reset link will be emailed. Check your inbox. The link expires in 30 minutes; a new request made more than two minutes later replaces it.'
             : forgot
               ? 'Enter your email to request a password reset link.'
               : token
