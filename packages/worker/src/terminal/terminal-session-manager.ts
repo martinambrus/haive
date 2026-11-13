@@ -60,6 +60,8 @@ interface SessionState {
   outChannel: string;
   /** The turn sequence at this session's attach, before its exec, to tell whether a restart ended it. */
   attachedAt: number;
+  /** Revocation owns the exit notification, including any late PTY end. */
+  providerDisabled?: boolean;
 }
 
 export interface TerminalSessionManagerOptions {
@@ -191,6 +193,25 @@ export class TerminalSessionManager {
           await this.teardownSession(session, 'manager-stop').catch(() => undefined);
         }
         await this.redis.publish(replyChannel, JSON.stringify(refused));
+        return;
+      }
+      if (req.op === 'close-provider') {
+        await Promise.all(
+          [...this.sessions.values()]
+            .filter(
+              (session) =>
+                session.userId === req.userId && session.providerId === req.cliProviderId,
+            )
+            .map(async (session) => {
+              // teardown removes the input routing synchronously, before any Redis wait.
+              session.providerDisabled = true;
+              const teardown = this.teardownSession(session, 'provider-disabled');
+              const exit = JSON.stringify({ type: 'exit', reason: 'provider_disabled' });
+              await Promise.all([teardown, this.publishExit(session, exit)]).catch((err) =>
+                log.warn({ err, sessionId: session.sessionId }, 'provider shell closure failed'),
+              );
+            }),
+        );
         return;
       }
       if (req.op === 'close') {
@@ -527,15 +548,13 @@ export class TerminalSessionManager {
       void this.redis.publish(outChannel, chunk.toString('utf8'));
     });
     ptyStream.on('end', () => {
+      // Revocation owns its exit reason; a late PTY end must not overwrite it.
+      if (session.providerDisabled) return;
       const restarted = (this.restartedAt.get(session.containerName) ?? -1) > session.attachedAt;
       const exit = JSON.stringify(
         restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' },
       );
-      void this.redis
-        .set(`${TERMINAL_EXIT_KEY_PREFIX}${sessionId}`, exit, 'EX', TERMINAL_EXIT_KEY_TTL_SECONDS)
-        .catch(() => undefined)
-        .then(() => this.redis.publish(outChannel, exit))
-        .catch(() => undefined);
+      void this.publishExit(session, exit).catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
     });
     ptyStream.on('error', (err) => {
@@ -641,6 +660,18 @@ export class TerminalSessionManager {
     return { exitCode: info.ExitCode ?? -1, output };
   }
 
+  private async publishExit(session: SessionState, exit: string): Promise<void> {
+    await this.redis
+      .set(
+        `${TERMINAL_EXIT_KEY_PREFIX}${session.sessionId}`,
+        exit,
+        'EX',
+        TERMINAL_EXIT_KEY_TTL_SECONDS,
+      )
+      .catch(() => undefined);
+    await this.redis.publish(session.outChannel, exit);
+  }
+
   private async teardownSession(session: SessionState, reason: string): Promise<void> {
     if (!this.sessions.has(session.sessionId)) return;
     this.sessions.delete(session.sessionId);
@@ -669,6 +700,15 @@ function parseRequest(raw: string): TerminalRequest | null {
       if (scope === 'repo' && obj.repositoryId) return obj as unknown as TerminalRequest;
       if (scope === 'task' && obj.taskId) return obj as unknown as TerminalRequest;
       return null;
+    }
+    if (
+      obj.op === 'close-provider' &&
+      typeof obj.userId === 'string' &&
+      obj.userId.length > 0 &&
+      typeof obj.cliProviderId === 'string' &&
+      obj.cliProviderId.length > 0
+    ) {
+      return obj as unknown as TerminalRequest;
     }
     if (obj.op === 'close' && obj.sessionId) {
       return obj as unknown as TerminalRequest;

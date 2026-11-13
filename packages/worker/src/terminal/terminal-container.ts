@@ -16,6 +16,7 @@ import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
   CONTAINER_FAMILY,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   INSTALL_LABEL,
   installId,
   containerPrefix,
@@ -194,7 +195,7 @@ export async function ensureShellContainer(
   if (!provider) throw new Error(`cli provider ${providerId} not found`);
   if (provider.userId !== userId) throw new Error('cli provider does not belong to user');
   if (!provider.enabled) {
-    throw new Error('The CLI provider is disabled. Enable it before opening a terminal.');
+    throw new Error(TERMINAL_PROVIDER_DISABLED_MESSAGE);
   }
 
   // Resolve the same composed sandbox image cli-exec-queue uses so the

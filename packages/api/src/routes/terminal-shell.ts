@@ -8,6 +8,7 @@ import { schema } from '@haive/database';
 import {
   TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
@@ -341,9 +342,13 @@ export async function runScopedShellSession(
     if (exited) return;
     exited = true;
     const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
+    const providerDisabled = raw === JSON.stringify({ type: 'exit', reason: 'provider_disabled' });
     sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
     try {
-      ws.close(1000, 'pty_ended');
+      ws.close(
+        providerDisabled ? TERMINAL_CLOSE_CODES.PROVIDER_DISABLED : 1000,
+        providerDisabled ? TERMINAL_PROVIDER_DISABLED_MESSAGE : 'pty_ended',
+      );
     } catch {
       // ignore
     }

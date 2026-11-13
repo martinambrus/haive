@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Redis } from 'ioredis';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_CLOSE_CODES,
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
@@ -173,6 +174,7 @@ class FakeWs extends EventEmitter {
   readyState = FakeWs.OPEN;
   sent: string[] = [];
   pingCount = 0;
+  closeArgs: [number | undefined, string | undefined] | undefined;
 
   send(data: string): void {
     this.sent.push(data);
@@ -182,6 +184,7 @@ class FakeWs extends EventEmitter {
   }
   close(_code?: number, _reason?: string): void {
     if (this.readyState === FakeWs.CLOSED) return;
+    this.closeArgs = [_code, _reason];
     this.readyState = FakeWs.CLOSED;
     // Real ws emits 'close' asynchronously via socket teardown — mirror
     // that with a queueMicrotask so the close handler doesn't run before
@@ -531,6 +534,36 @@ describe('shell start directory and restart', () => {
     publisherFake.duplicates[0]!.emitOutput(`${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`, raw);
     await new Promise((r) => setImmediate(r));
     expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'exit')).toEqual(frame);
+  });
+
+  it.each(['task', 'repo'] as const)(
+    'closes a live %s shell with the disabled-provider refusal',
+    async (scope) => {
+      const ws = await connect(scope);
+      publisherFake.duplicates[0]!.emitOutput(
+        `${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`,
+        JSON.stringify({ type: 'exit', reason: 'provider_disabled' }),
+      );
+      await new Promise((r) => setImmediate(r));
+      expect(ws.closeArgs).toEqual([
+        TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+        'The CLI provider is disabled. Enable it before opening a terminal.',
+      ]);
+      expect(
+        publisherFake
+          .storeFor(`${TERMINAL_SESSION_PREFIX}u1:${scope === 'repo' ? 'repo:' : ''}t1:p1`)
+          ?.get('refcount'),
+      ).toBe('0');
+    },
+  );
+
+  it('retains the disabled-provider refusal when it arrives before subscription', async () => {
+    publisherFake.kv.set(
+      `${TERMINAL_EXIT_KEY_PREFIX}sess-1`,
+      JSON.stringify({ type: 'exit', reason: 'provider_disabled' }),
+    );
+    const ws = await connect('task');
+    expect(ws.closeArgs?.[0]).toBe(TERMINAL_CLOSE_CODES.PROVIDER_DISABLED);
   });
 
   it('relays the end of a shell that ended before the subscribe', async () => {

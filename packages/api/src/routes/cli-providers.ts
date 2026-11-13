@@ -6,6 +6,8 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  TERMINAL_REQUEST_CHANNEL,
+  type TerminalCloseProviderRequest,
   VERSION_REFRESH_KIND,
   CLI_POLLABLE_JOB_OPTS,
   CLI_INSTALL_METADATA,
@@ -244,6 +246,20 @@ async function enqueueOllamaProvisionForProvider(
 
 export const cliProviderRoutes = new Hono<AppEnv>();
 const log = logger.child({ module: 'cli-providers' });
+
+/** State and audit have already committed; a transport outage must not undo their answer. */
+async function closeProviderShells(userId: string, providerId: string): Promise<void> {
+  const request: TerminalCloseProviderRequest = {
+    op: 'close-provider',
+    userId,
+    cliProviderId: providerId,
+  };
+  try {
+    await getRedis().publish(TERMINAL_REQUEST_CHANNEL, JSON.stringify(request));
+  } catch (err) {
+    log.warn({ err, userId, providerId }, 'could not publish provider shell closure');
+  }
+}
 
 /** `rulesInherited` lets the provider form show the live default, which follows template edits,
  *  instead of the possibly stale copy of it stored on the row. */
@@ -739,6 +755,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     }),
   );
   const updatedRow = updated.rows[0]!;
+  if (body.enabled === false) await closeProviderShells(userId, id);
   if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
 
@@ -782,6 +799,7 @@ cliProviderRoutes.delete('/:id', async (c) => {
     return result;
   });
   logAuditEvent(event);
+  await closeProviderShells(userId, id);
   const imageTag = result[0]!.imageTag;
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
