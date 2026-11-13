@@ -13,7 +13,6 @@ const h = vi.hoisted(() => ({
   reconcile: vi.fn(),
   mark: vi.fn(),
   clear: vi.fn(),
-  onRead: vi.fn(),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
@@ -23,7 +22,6 @@ vi.mock('../src/lib/remote-reconcile.js', async (original) => ({
   ...(await original<typeof import('../src/lib/remote-reconcile.js')>()),
   markRemotePending: h.mark,
   clearRemotePending: h.clear,
-  reconcileRemoteOnRead: h.onRead,
   reconcileRemote: h.reconcile,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -72,7 +70,6 @@ beforeEach(() => {
   h.reconcile.mockReset().mockResolvedValue(undefined);
   h.mark.mockReset().mockResolvedValue(undefined);
   h.clear.mockReset().mockResolvedValue(undefined);
-  h.onRead.mockReset().mockResolvedValue(undefined);
 });
 const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
@@ -937,7 +934,6 @@ it.each(['EACCES', 'EROFS', 'EPATHCONTAINMENT', 'ELOOP'])(
 it('serves repository details without starting remote repair or writing state', async () => {
   const transaction = vi.spyOn(fake.db, 'transaction');
   expect((await app.request(`/${REPO}`)).status).toBe(200);
-  expect(h.onRead).not.toHaveBeenCalled();
   expect(h.reconcile).not.toHaveBeenCalled();
   expect(h.git).not.toHaveBeenCalled();
   expect(h.mark).not.toHaveBeenCalled();
