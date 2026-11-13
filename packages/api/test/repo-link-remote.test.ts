@@ -937,6 +937,28 @@ it('serves repository details without starting remote repair or writing state', 
   expect(transaction).not.toHaveBeenCalled();
 });
 
+it.each(['add', 'snapshot', 'clear'])(
+  'clears intent when git refuses the %s stage with a known exit',
+  async (stage) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    if (stage !== 'add') h.git.mockRejectedValueOnce(fail(3, 'origin exists'));
+    if (stage === 'clear') {
+      h.git.mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' });
+      h.git.mockResolvedValueOnce({ stdout: 'https://push.test/r', stderr: '' });
+    }
+    h.git.mockRejectedValueOnce(fail(128, 'refused'));
+    expect((await link()).status).toBe(409);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).toHaveBeenCalledOnce();
+    expect(h.clear.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.git.mock.invocationCallOrder.at(-1)!,
+    );
+    expect(h.git).toHaveBeenCalledTimes(stage === 'add' ? 2 : stage === 'snapshot' ? 3 : 5);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
 it.each(['SIGTERM', 'SIGKILL'])(
   'keeps the intent when the first git mutation ended with %s',
   async (signal) => {

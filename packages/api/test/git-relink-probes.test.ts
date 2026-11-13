@@ -1,6 +1,6 @@
 import { fork, execFile, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { cp, lstat, mkdtemp, rm } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +67,34 @@ const audits = () =>
       ),
     );
 
+async function sweepOnce() {
+  let initialTick!: () => void;
+  const inertTimer = { unref() {} } as NodeJS.Timeout;
+  let finished!: () => void;
+  const done = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  const schedule = ((...args: Parameters<typeof setTimeout>) => {
+    // Fake only the sweep clock: postgres.js startup needs its own real timers.
+    if (args[1] === 0) {
+      initialTick = args[0] as () => void;
+      return inertTimer;
+    }
+    if (args[1] === REMOTE_SWEEP_INTERVAL_MS) {
+      finished();
+      return inertTimer;
+    }
+    throw new Error('Unexpected sweep delay');
+  }) as typeof setTimeout;
+  const stop = startRemoteReconcileSweep({ schedule });
+  try {
+    initialTick();
+    await done;
+  } finally {
+    stop();
+  }
+}
+
 probe('remote relink at real PostgreSQL commit and process-death boundaries', () => {
   beforeAll(async () => {
     const target = new URL(url!);
@@ -116,6 +144,46 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       .returning();
     repository = repo!.id;
   }
+
+  it.each([false, true])(
+    'preserves origin and push URLs after a locked-config refusal and a sweep (managed=%s)',
+    async (managed) => {
+      await fixture();
+      h.db = db;
+      if (!managed)
+        await db
+          .update(schema.repositories)
+          .set({ remoteUrl: null })
+          .where(eq(schema.repositories.id, repository));
+      await git(root, [
+        'config',
+        '--local',
+        'remote.origin.pushurl',
+        'https://push.example.test/repo',
+      ]);
+      const remotes = await git(root, ['remote', '-v']);
+      const lock = join(root, '.git/config.lock');
+      await writeFile(lock, '', { flag: 'wx' });
+      try {
+        const response = await app.request(`/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remoteUrl: newUrl }),
+        });
+        expect(response.status).toBe(409);
+        expect(await response.text()).toContain("Could not clear the remote's push URLs");
+      } finally {
+        await rm(lock);
+      }
+      await sweepOnce();
+      expect(await git(root, ['remote', '-v'])).toBe(remotes);
+      expect((await stored())?.remoteUrl).toBe(managed ? oldUrl : null);
+      expect(await audits()).toHaveLength(0);
+      await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
 
   it('keeps Git aligned with a committed row when the actual COMMIT acknowledgement is lost', async () => {
     await fixture();
@@ -233,31 +301,7 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     h.db = db;
     expect((await app.request(`/${repository}`)).status).toBe(200);
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
-    let initialTick!: () => void;
-    const inertTimer = { unref() {} } as NodeJS.Timeout;
-    let finished!: () => void;
-    const done = new Promise<void>((resolve) => {
-      finished = resolve;
-    });
-    const schedule = ((...args: Parameters<typeof setTimeout>) => {
-      // Fake only the sweep clock: postgres.js startup needs its own real timers.
-      if (args[1] === 0) {
-        initialTick = args[0] as () => void;
-        return inertTimer;
-      }
-      if (args[1] === REMOTE_SWEEP_INTERVAL_MS) {
-        finished();
-        return inertTimer;
-      }
-      throw new Error('Unexpected sweep delay');
-    }) as typeof setTimeout;
-    const stop = startRemoteReconcileSweep({ schedule });
-    try {
-      initialTick();
-      await done;
-    } finally {
-      stop();
-    }
+    await sweepOnce();
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(oldUrl);
     await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
   });

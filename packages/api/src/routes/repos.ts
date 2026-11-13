@@ -2852,16 +2852,26 @@ repoRoutes.post('/:id/remote', async (c) => {
             };
           if (!added.ok) {
             if (added.code !== 3) {
+              // A known refusal with no armed undo leaves Git unchanged.
+              if (!restore && added.code >= 0) {
+                await clearRemotePending(root);
+                intentWritten = false;
+              }
               throw new HttpError(409, `Could not add the remote: ${gitFailureText(added)}`);
             }
             const previous: [string, string[]][] = [];
             for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
               const read = await git(['config', '--local', '--get-all', key]);
-              if (!read.ok && read.code !== 1)
+              if (!read.ok && read.code !== 1) {
+                if (!restore && read.code >= 0) {
+                  await clearRemotePending(root);
+                  intentWritten = false;
+                }
                 throw new HttpError(
                   409,
                   `Could not read the previous remote: ${gitFailureText(read)}`,
                 );
+              }
               previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
             }
             const restoreExisting = async () => {
@@ -2889,6 +2899,10 @@ repoRoutes.post('/:id/remote', async (c) => {
             ]);
             if (cleared.exitedClean || cleared.code === 5) restore = restoreExisting;
             if (!cleared.ok && cleared.code !== 5) {
+              if (!restore && cleared.code >= 0) {
+                await clearRemotePending(root);
+                intentWritten = false;
+              }
               throw new HttpError(
                 409,
                 `Could not clear the remote's push URLs: ${gitFailureText(cleared)}`,
