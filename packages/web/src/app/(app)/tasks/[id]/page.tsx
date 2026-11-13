@@ -507,6 +507,10 @@ function isResumableStep(
   return step.status === 'failed' && (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0);
 }
 
+function resumesSavedReplies(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'>): boolean {
+  return (step.agentCounts?.done ?? 0) > 0 && step.iterationCount <= 0;
+}
+
 function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'>): string {
   const failed = step.agentCounts?.failed ?? 0;
   if (failed > 0) {
@@ -515,7 +519,7 @@ function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'
       ? `Resume (keep ${kept} of ${kept + failed} terminals)`
       : `Re-run ${failed} failed terminal${failed === 1 ? '' : 's'}`;
   }
-  if ((step.agentCounts?.done ?? 0) > 0) return 'Resume (apply saved replies)';
+  if (resumesSavedReplies(step)) return 'Resume (apply saved replies)';
   return step.iterationCount > 0
     ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
     : 'Resume (new CLI)';
@@ -1416,7 +1420,7 @@ export default function TaskDetailPage() {
                         ? ` ${downstreamCount} downstream step(s) will also be reset and re-run.`
                         : ''
                     }`
-                  : (step.agentCounts?.done ?? 0) > 0
+                  : resumesSavedReplies(step)
                     ? 'Apply the saved agent replies again? Any missing replies will be re-run.'
                     : step.iterationCount > 0
                       ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`

@@ -1282,7 +1282,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const reply = a.output ?? a.rawOutput;
       return reply == null || (typeof reply === 'string' && reply.trim() === '');
     });
-    const reapplySaved = step.status === 'failed' && settledAgents.some((a) => a.status === 'done');
+    // A fan-out loop with completed passes resumes its failed pass through the loop arm,
+    // preserving that arm's invocation sweep and iteration response.
+    const reapplySaved =
+      step.status === 'failed' &&
+      step.iterationCount <= 0 &&
+      settledAgents.some((a) => a.status === 'done');
     if (failedAgents.length > 0 || reapplySaved) {
       const now = new Date();
       // A step that DEGRADED ended `done` and the task moved past it, so whatever consumed its

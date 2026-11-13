@@ -150,6 +150,56 @@ describe('Resume after mining replies were saved', () => {
     ).toMatchObject({ retriedAgents: 0 });
   });
 
+  it.each(['09_5-skill-generation', '07b-phase-4-validate'])(
+    'keeps the loop Resume arm for %s after fan-out replies have landed',
+    async (loop) => {
+      const iterations = [{ pass: 1 }, { pass: 2 }];
+      const fake = setup(
+        'failed',
+        { stepId: loop, iterationCount: 2, iterations, formValues: { approved: true } },
+        { status: 'done', rawOutput: 'Saved reply', userRetryRequestedAt: null },
+      );
+      for (const [index, exitCode] of [0, 1].entries()) {
+        fake.insert(schema.cliInvocations, {
+          id: `00000000-0000-4000-8000-00000000000${index + 5}`,
+          taskId: TASK,
+          taskStepId: STEP_ROW,
+          endedAt: new Date(),
+          exitCode,
+          consumedAt: null,
+          supersededAt: null,
+        });
+      }
+      const response = await app.request(`/${TASK}/steps/${loop}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'resume', round: 0 }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ resumedFromIteration: 2 });
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject({
+        status: 'running',
+        iterationCount: 2,
+        iterations,
+        formValues: { approved: true },
+      });
+      expect(fake.rows(schema.cliInvocations).every((r) => r.supersededAt instanceof Date)).toBe(
+        true,
+      );
+      expect(fake.rows(schema.taskStepAgentMinings)[0]).toMatchObject({
+        status: 'done',
+        rawOutput: 'Saved reply',
+        userRetryRequestedAt: null,
+      });
+      expect(fake.rows(schema.taskEvents)[0]?.payload).toMatchObject({ fromIteration: 2 });
+      expect(h.add).toHaveBeenCalledWith(
+        'advance-step',
+        expect.objectContaining({ stepId: loop, epoch: 4 }),
+        expect.anything(),
+      );
+    },
+  );
+
   it.each([null, '', '  \n '])(
     'marks a done row with missing reply %j for re-dispatch',
     async (rawOutput) => {

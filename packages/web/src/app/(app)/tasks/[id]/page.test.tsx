@@ -717,6 +717,34 @@ describe('task page: round labels', () => {
 });
 
 describe('saved mining reply recovery', () => {
+  it.each([null, [{ id: 'generator', label: 'Generator' }]])(
+    'keeps loop recovery copy with roles %j when a fan-out loop has saved replies',
+    async (cliRoles) => {
+      const confirmResume = vi.fn(() => false);
+      vi.stubGlobal('confirm', confirmResume);
+      const view = await mount(
+        { status: 'failed', pausedAt: null, currentStepId: '09_5-skill-generation' },
+        [
+          {
+            ...stepRow(),
+            stepId: '09_5-skill-generation',
+            status: 'failed',
+            cliRoles,
+            iterationCount: 2,
+            agentCounts: { done: 2, failed: 0, inFlight: 0 },
+          },
+        ],
+      );
+      const resume = buttons(view.tree(), 'resume (keep 2 passes)');
+      expect(resume).toHaveLength(1);
+      expect(buttons(view.tree(), 'resume (apply saved replies)')).toHaveLength(0);
+      fire.click(resume[0]!);
+      expect(confirmResume).toHaveBeenCalledWith(
+        'Resume this step from the last completed pass (2 kept) with the currently-selected CLI?',
+      );
+    },
+  );
+
   it('offers Resume for a failed apply with only done agents', async () => {
     const view = await mount({ status: 'failed', pausedAt: null, currentStepId: '07-implement' }, [
       {
