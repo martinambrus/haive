@@ -39,13 +39,14 @@ vi.mock('@haive/shared', async (original) => ({
 import { authRoutes } from '../src/routes/auth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HTTPException } from 'hono/http-exception';
-import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+import { AUTH_ACCOUNT_LIMIT, AuthThrottleError } from '../src/lib/auth-throttle.js';
 import {
   issuePasswordReset,
   PASSWORD_RESET_TTL_MS,
   PASSWORD_RESET_COOLDOWN_MS,
 } from '../src/lib/password-resets.js';
 import type { AppEnv } from '../src/context.js';
+import { hashInviteToken } from '../src/lib/invites.js';
 
 const KEY = 'ab'.repeat(32);
 const EMAIL = 'person@example.test';
@@ -85,6 +86,28 @@ async function discard() {
     action: 'config.discard_unreadable_secrets',
     targetType: 'system',
   });
+}
+function throttleRedis() {
+  // Fake the Redis command seam, preserving independent buckets and SET NX audit slots.
+  const counts = new Map<string, number>();
+  const slots = new Set<string>();
+  h.redis = {
+    status: 'ready',
+    eval: async (_script: string, n: number, ...args: Array<string | number>) => {
+      const keys = args.slice(0, n) as string[];
+      for (const [i, key] of keys.entries()) {
+        if ((counts.get(key) ?? 0) >= Number(args[n + 4 + i])) return [0, 60_000, key];
+      }
+      for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+      return [1, 0];
+    },
+    set: async (key: string) => {
+      if (slots.has(key)) return null;
+      slots.add(key);
+      return 'OK';
+    },
+  };
+  return counts;
 }
 beforeEach(() => {
   vi.useFakeTimers();
@@ -160,25 +183,7 @@ describe('forgot password', () => {
     expect(await fake.db.query.passwordResets!.findMany()).toEqual(first);
   });
   it('recovery spam leaves login admission and its throttle audit slot untouched', async () => {
-    // Fake the Redis command seam, preserving independent buckets and SET NX audit slots.
-    const counts = new Map<string, number>();
-    const slots = new Set<string>();
-    h.redis = {
-      status: 'ready',
-      eval: async (_script: string, n: number, ...args: Array<string | number>) => {
-        const keys = args.slice(0, n) as string[];
-        for (const [i, key] of keys.entries()) {
-          if ((counts.get(key) ?? 0) >= Number(args[n + 4 + i])) return [0, 60_000, key];
-        }
-        for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
-        return [1, 0];
-      },
-      set: async (key: string) => {
-        if (slots.has(key)) return null;
-        slots.add(key);
-        return 'OK';
-      },
-    };
+    throttleRedis();
     const real = await vi.importActual<typeof import('../src/lib/auth-throttle.js')>(
       '../src/lib/auth-throttle.js',
     );
@@ -283,6 +288,33 @@ describe('forgot password', () => {
 });
 
 describe('reset password admission', () => {
+  it.each([undefined, '172.20.0.1', '8.8.8.8'])(
+    'bounds one token independently of other tokens (peer: %s)',
+    async (address) => {
+      const counts = throttleRedis();
+      const real = await vi.importActual<typeof import('../src/lib/auth-throttle.js')>(
+        '../src/lib/auth-throttle.js',
+      );
+      h.reserve.mockImplementation(real.reserveAuthAttempt);
+      vi.spyOn(fake.db.query.passwordResets!, 'findFirst').mockResolvedValue(undefined);
+      const token = 'unknown-reset-token';
+      const reset = (value: string) =>
+        post('reset-password', { token: value, newPassword: 'new-password-long' }, address);
+      for (let i = 0; i < AUTH_ACCOUNT_LIMIT; i++) expect((await reset(token)).status).toBe(400);
+      const refused = await reset(token);
+      expect(refused.status).toBe(429);
+      expect(await refused.json()).toMatchObject({ code: 'rate_limited' });
+      expect((await reset('another-reset-token')).status).toBe(400);
+      expect(h.hash).not.toHaveBeenCalled();
+      expect([...counts.keys()].sort()).toEqual(
+        [
+          'haive:auth-throttle:reset:acct:' + hashInviteToken(token),
+          'haive:auth-throttle:reset:acct:' + hashInviteToken('another-reset-token'),
+          ...(address === '8.8.8.8' ? ['haive:auth-throttle:reset:ip:8.8.8.8'] : []),
+        ].sort(),
+      );
+    },
+  );
   it('rejects an unknown token without hashing the replacement password', async () => {
     // SQL expiry and consumption predicates are exercised against PostgreSQL.
     vi.spyOn(fake.db.query.passwordResets!, 'findFirst').mockResolvedValue(undefined);
@@ -305,6 +337,6 @@ describe('reset password admission', () => {
     expect(response.status).toBe(429);
     expect(await response.json()).toEqual({ code: 'rate_limited' });
     expect(h.hash).not.toHaveBeenCalled();
-    expect(h.reserve).toHaveBeenCalledWith(expect.anything(), 'reset');
+    expect(h.reserve).toHaveBeenCalledWith(expect.anything(), 'reset', hashInviteToken(token!));
   });
 });

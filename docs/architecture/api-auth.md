@@ -85,15 +85,16 @@ role check in api source outside its allowlist, so an admin route gated some oth
 (the email's blind index) holds
 fewer than `AUTH_ACCOUNT_LIMIT` (10) and an address bucket fewer than `AUTH_IP_LIMIT` (30) attempts in the
 last `AUTH_THROTTLE_WINDOW_MS` (60 s); `login`, `register` and `recover` have separate budgets.
-`POST /auth/reset-password` reserves only an address bucket in its own `reset` scope. `PUT /user-settings/password`
+`POST /auth/reset-password` reserves an account bucket keyed by the token's SHA-256 and, when
+present, an address bucket in its own `reset` scope. A token's exhausted bucket affects only
+that token, so knowing an email cannot spend its owner's reset-token budget. `PUT /user-settings/password`
 checks the current password against the sign-in budget (scope `login`, keyed by the account's stored blind
 index, same address rules), so the two password checks share one budget. It reads the user row to find that
 index, then reserves before bcrypt, and refunds as soon as the current password verifies, even when the change
 is then refused (`password_unchanged`, a conflict). A wrong current password answers 400
 `current_password_incorrect`, not 401: the web client retries any other 401 once after a silent refresh, and a
 retried wrong password would spend two attempts and write two rows. The buckets are
-sorted sets, `haive:auth-throttle:<login|register|recover>:acct|ip:<key>` and
-`haive:auth-throttle:reset:ip:<key>`, and one Lua script checks every
+sorted sets, `haive:auth-throttle:<login|register|recover|reset>:acct|ip:<key>`, and one Lua script checks every
 bucket and reserves a member in all of them or in none, so parallel attempts cannot all pass before any
 is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; login,
 registration and reset answer 429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
@@ -103,7 +104,7 @@ change has also read its user row, for the key). A successful login or registrat
 recovery and reset attempts keep theirs. Only failures cost login and registration budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
 throttle runs after the body is validated and before any bcrypt or account lookup (the password change reads the
-user row first, for the key). Reset-password reserves its address bucket before an unlocked live-token lookup and
+user row first, for the key). Reset-password reserves its token and available address buckets before an unlocked live-token lookup and
 runs bcrypt only when that lookup finds an unconsumed, unexpired token. If Redis is not ready,
 rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: a login that
 waits on a stalled Redis is worse than an unthrottled one. A reservation that still lands after the bound is
@@ -423,7 +424,7 @@ link and the same 202. After the cooldown a new link invalidates the user's earl
 Issuance commits its required `auth.password_reset.request` audit row with the token.
 
 `POST /auth/reset-password {token, newPassword}` applies the change-password policy. It reserves its
-separate `reset` address bucket before any token lookup or bcrypt; a throttle refusal answers 429
+separate `reset` token bucket and any counted address bucket before any token lookup or bcrypt; a throttle refusal answers 429
 without hashing. An unlocked SELECT by token hash refuses unknown, consumed or expired tokens with
 the generic 400 before bcrypt. The transaction's guarded UPDATE remains the authority if that hint races.
 One transaction requires an active user under its lock, consumes an unexpired, unconsumed token,

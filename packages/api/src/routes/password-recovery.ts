@@ -24,6 +24,7 @@ import {
 } from '../lib/password-resets.js';
 import { webOrigin } from '../lib/request-origin.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
+import { hashInviteToken } from '../lib/invites.js';
 import type { AppEnv } from '../context.js';
 
 const log = logger.child({ module: 'password-recovery' });
@@ -118,9 +119,11 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
 
 passwordRecoveryRoutes.post('/reset-password', async (c) => {
   const body = resetSchema.parse(await c.req.json());
-  await reserveAuthAttempt(c, 'reset');
+  const tokenHash = hashInviteToken(body.token);
+  // A private bridge peer has no address bucket; each token still has its own budget.
+  await reserveAuthAttempt(c, 'reset', tokenHash);
   const db = getDb();
-  await assertPasswordResetLive(db, body.token);
+  await assertPasswordResetLive(db, tokenHash);
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const userId = await consumePasswordReset(db, body.token, body.newPassword, fieldKey, pepper);
