@@ -604,7 +604,9 @@ async function startIdeForward(
  *  code-server time to flush hot-exit backups) and remove it. The per-user
  *  extensions and per-task user-data volumes are intentionally left intact, so a
  *  later reopen restores extensions, settings, and unsaved buffers. Used by the
- *  idle-grace reaper. Returns true when a container was stopped. */
+ *  idle-grace reaper. Returns true when a container was stopped. Throws
+ *  `RunnerProbeError` when whether the container exists, or whose it is, cannot
+ *  be read, so a caller keeps the session and its volumes for a later retry. */
 export async function stopIdeRunner(taskId: string): Promise<boolean> {
   const name = ideRunnerName(taskId);
   if (!(await containerExists(name))) return false;

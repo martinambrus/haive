@@ -184,7 +184,15 @@ had; the removal itself waits until the volumes and mounts are ready, right befo
 editor holding another workspace is still recreated at once, whatever its use or image. A workspace
 label that cannot be read (the `docker inspect` failed, `runnerSubpathVerdict` `'absent'`) is not
 another workspace: the editor is kept, as the app runner is (both reuse on anything but `'other'`, a
-different or empty label), and the next ensure whose inspect succeeds decides. `lastSeenAt`
+different or empty label), and the next ensure whose inspect succeeds decides. Whether an app runner, an editor or the DDEV registry mirror exists, and runs, is read by
+`probeRunner` (`runner-probe.ts`): one `docker ps -a --no-trunc --filter name=^/<name>$ --format
+{{.State}}`, where exit 0 with no output is absent, one known state is present, and anything else
+(a non-zero exit, a timeout, an unknown state, more than one line) is unknown. No Docker error text
+is read, so a reworded message cannot turn a failure into "absent" (MEASURED on Docker 29.9.2 and
+29.9.3: an exact name prints its state, a missing or partial name prints nothing, all exit 0). An
+unknown answer never recreates or removes a runner, never clears its browser surcharge, and keeps
+editor sessions, their user-data volumes and a repository's cleanup row for a later retry; the
+same holds when the editor's ownership label cannot be read. `lastSeenAt`
 is written by the api on attach and detach and by the worker on every ensure (task and repository)
 and before every launch, so a task editor no socket ever reached is reaped as well. The reaper's sweep also lists this
 install's running editors (`listIdeRunnerSessions`: `label=haive.ide`, the session id read off the
