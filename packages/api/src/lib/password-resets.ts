@@ -2,6 +2,7 @@ import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 import { isUniqueViolationOf, schema, type Database } from '@haive/database';
 import { computeEmailBlindIndex, encryptEmail, tryDecryptEmail } from '@haive/shared';
 import { HttpError } from '../context.js';
+import { hashPassword, verifyPassword } from '../auth/password.js';
 import {
   ANONYMOUS_AUDIT_ACTOR,
   insertAuditEvent,
@@ -125,7 +126,7 @@ export async function assertPasswordResetLive(db: Database, token: string): Prom
 export async function consumePasswordReset(
   db: Database,
   token: string,
-  passwordHash: string,
+  newPassword: string,
   fieldKey: string,
   pepper: string,
   now?: Date,
@@ -140,7 +141,12 @@ export async function consumePasswordReset(
       });
       if (!candidate) throw invalid();
       const locked = await tx
-        .select({ id: schema.users.id, emailEncrypted: schema.users.emailEncrypted })
+        .select({
+          id: schema.users.id,
+          emailEncrypted: schema.users.emailEncrypted,
+          passwordHash: schema.users.passwordHash,
+          mustChangePassword: schema.users.mustChangePassword,
+        })
         .from(schema.users)
         .where(and(eq(schema.users.id, candidate.userId), eq(schema.users.status, 'active')))
         .for('no key update');
@@ -157,6 +163,21 @@ export async function consumePasswordReset(
         )
         .returning();
       if (!claimed) throw invalid();
+      const user = locked[0]!;
+      // Compare only after the guarded live-token claim, using the locked current password.
+      // Throwing rolls consumption back so the same link can choose a different password.
+      if (
+        user.mustChangePassword &&
+        user.passwordHash !== null &&
+        (await verifyPassword(newPassword, user.passwordHash))
+      ) {
+        throw new HttpError(
+          400,
+          'Choose a password different from the one you were given',
+          'password_unchanged',
+        );
+      }
+      const passwordHash = await hashPassword(newPassword);
       let emailUpdate = {};
       if (claimed.claimEmailEncrypted !== null) {
         if (tryDecryptEmail(locked[0]!.emailEncrypted, fieldKey) !== null) throw invalid();

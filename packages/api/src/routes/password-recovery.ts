@@ -12,7 +12,6 @@ import {
   logger,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { hashPassword } from '../auth/password.js';
 import { clearAuthCookies } from '../auth/cookies.js';
 import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { ANONYMOUS_AUDIT_ACTOR, recordAuditEvent } from '../lib/audit.js';
@@ -124,8 +123,7 @@ passwordRecoveryRoutes.post('/reset-password', async (c) => {
   await assertPasswordResetLive(db, body.token);
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
-  const passwordHash = await hashPassword(body.newPassword);
-  const userId = await consumePasswordReset(db, body.token, passwordHash, fieldKey, pepper);
+  const userId = await consumePasswordReset(db, body.token, body.newPassword, fieldKey, pepper);
   closeUserSockets(userId);
   clearAuthCookies(c);
   return c.json({ ok: true });

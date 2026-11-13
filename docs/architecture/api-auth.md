@@ -28,7 +28,10 @@ requests every registered route with a flagged session, the twin of `anonymous-r
 `routes/user-settings.ts` on purpose: Hono answers a route registered before a wildcard `use()`
 without running it (MEASURED against 4.13). A flagged user cannot "change" to the same password (400
 `password_unchanged`), or the minted secret would stay in place and the flag would be cleared by a
-no-op; an ordinary user still can, and it still signs their other devices out. The redirect in
+no-op; an ordinary user still can, and it still signs their other devices out. Password-reset
+redemption enforces the same forced-change refusal by comparing the proposed password to the
+locked user's current hash after the guarded live-token claim. A refusal rolls the transaction
+back, leaving the token unconsumed and the password, flag and sessions unchanged. The redirect in
 the web (`ForcedPasswordGuard`) is now the UX and the api is the boundary, so the account page treats
 the 403 as the expected state and shows only its Password card. Nothing in the app clears the flag for
 someone else; an administrator who set it by mistake runs

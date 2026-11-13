@@ -14,7 +14,12 @@ import {
 const url = process.env.PASSWORD_RESETS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/fpw_test'))
   throw new Error('Use a dedicated fpw_test database');
-const h = vi.hoisted(() => ({ db: undefined as unknown, close: vi.fn() }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  close: vi.fn(),
+  hash: vi.fn(async () => 'new-hash'),
+  verify: vi.fn(async (password: string, hash: string) => password === hash),
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
 vi.mock('../src/lib/auth-throttle.js', () => ({
@@ -22,8 +27,8 @@ vi.mock('../src/lib/auth-throttle.js', () => ({
 }));
 // SQL, atomicity and constraints are under test; bcrypt cost is covered by password.test.ts.
 vi.mock('../src/auth/password.js', () => ({
-  hashPassword: async () => 'new-hash',
-  verifyPassword: async (password: string, hash: string) => password === hash,
+  hashPassword: h.hash,
+  verifyPassword: h.verify,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -130,9 +135,62 @@ describe.skipIf(!url)('password resets on Postgres', () => {
     expect(audit.some((a) => a.action === 'auth.password_reset.complete')).toBe(true);
     expect(JSON.stringify(audit)).not.toContain(token);
   });
+  it.each([true, false])(
+    'an unchanged password is refused only for a forced change (%s), without consuming the link',
+    async (forced) => {
+      const row = await user();
+      const password = 'temporary-password-long';
+      await db
+        .update(schema.users)
+        .set({ passwordHash: password, mustChangePassword: forced })
+        .where(eq(schema.users.id, row.id));
+      await db.insert(schema.refreshTokens).values({
+        userId: row.id,
+        tokenHash: randomUUID(),
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const token = await issuePasswordReset(db, row.id);
+      const response = await post('reset-password', { token, newPassword: password });
+      expect(response.status).toBe(forced ? 400 : 200);
+      if (!forced) return;
+      expect(await response.json()).toEqual({
+        error: 'Choose a password different from the one you were given',
+        code: 'password_unchanged',
+      });
+      expect(response.headers.getSetCookie()).toEqual([]);
+      expect(await db.query.users.findFirst({ where: eq(schema.users.id, row.id) })).toMatchObject({
+        passwordHash: password,
+        tokenVersion: 0,
+        mustChangePassword: true,
+      });
+      expect(
+        (await db.query.passwordResets.findFirst({
+          where: eq(schema.passwordResets.userId, row.id),
+        }))!.consumedAt,
+      ).toBeNull();
+      expect(
+        (await db.query.refreshTokens.findFirst({
+          where: eq(schema.refreshTokens.userId, row.id),
+        }))!.revokedAt,
+      ).toBeNull();
+      const audits = await db.query.auditEvents.findMany({
+        where: eq(schema.auditEvents.targetId, row.id),
+      });
+      expect(audits.some((a) => a.action === 'auth.password_reset.complete')).toBe(false);
+      expect(
+        (await post('reset-password', { token, newPassword: 'different-password-long' })).status,
+      ).toBe(200);
+    },
+  );
   it('expiry uses an injected clock and superseded links have the same refusal', async () => {
     const row = await user();
     const expired = await issuePasswordReset(db, row.id, null, { now: new Date('2000-01-01') });
+    h.hash.mockClear();
+    h.verify.mockClear();
+    // Also bypass the HTTP admission hint: the transactional claim must reject before bcrypt.
+    await expect(
+      consumePasswordReset(db, expired!, 'new-password-long', key, pepper),
+    ).rejects.toThrow('That reset link is invalid or expired. Request a new one.');
     const first = await post('reset-password', {
       token: expired,
       newPassword: 'new-password-long',
@@ -154,6 +212,8 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       expect(malformed.status).toBe(400);
       expect(await malformed.text()).toBe(unknownBody);
     }
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.verify).not.toHaveBeenCalled();
   });
   it('serializes the cooldown and preserves the first token until its boundary', async () => {
     const row = await user();
@@ -223,7 +283,9 @@ describe.skipIf(!url)('password resets on Postgres', () => {
     });
     expect(resets[0]!.consumedAt).toBeNull();
     await db.delete(schema.users).where(eq(schema.users.id, holder.id));
-    await expect(consumePasswordReset(db, token!, 'new-hash', key, pepper)).resolves.toBe(row.id);
+    await expect(consumePasswordReset(db, token!, 'new-password-long', key, pepper)).resolves.toBe(
+      row.id,
+    );
   });
   it.each(['issuance', 'redemption'])(
     '%s permits a refresh-shaped transaction under the held user lock',
@@ -292,7 +354,7 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       const result =
         operation === 'issuance'
           ? issuePasswordReset(wrapped, row.id)
-          : consumePasswordReset(wrapped, token!, 'new-hash', key, pepper);
+          : consumePasswordReset(wrapped, token!, 'new-password-long', key, pepper);
       if (operation === 'issuance') await expect(result).resolves.toBeNull();
       else await expect(result).resolves.toBe(row.id);
       expect(checked).toBe(true);
@@ -390,9 +452,9 @@ describe.skipIf(!url)('password resets on Postgres', () => {
         return typeof v === 'function' ? v.bind(target) : v;
       },
     });
-    await expect(consumePasswordReset(broken, token!, 'new-hash', key, pepper)).rejects.toThrow(
-      'synthetic audit failure',
-    );
+    await expect(
+      consumePasswordReset(broken, token!, 'new-password-long', key, pepper),
+    ).rejects.toThrow('synthetic audit failure');
     expect(
       (await db.query.passwordResets.findFirst({
         where: eq(schema.passwordResets.userId, row.id),
