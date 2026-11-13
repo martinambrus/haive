@@ -1051,6 +1051,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     agentRulesOverride: _rules,
     onboardingTooling: _tooling,
     onboardingEnvironment: _environment,
+    remoteRelinkIntent: _intent,
     ...rest
   } = updated[0]!;
   return c.json({
