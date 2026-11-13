@@ -74,6 +74,7 @@ beforeEach(() => {
     refreshTokens: schema.refreshTokens,
     passwordResets: schema.passwordResets,
     auditEvents: schema.auditEvents,
+    userInvites: schema.userInvites,
   });
   h.db = fake.db;
   h.role = 'admin';
@@ -89,6 +90,16 @@ it('refuses a signed-in non-admin before reaching the handler', async () => {
   h.role = 'user';
   expect((await post('00000000-0000-4000-8000-000000000099')).status).toBe(403);
   expect(h.hash).not.toHaveBeenCalled();
+});
+it('prevents caching the invitation reply carrying its one-time token', async () => {
+  const response = await app.request('/admin/invites', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ role: 'user' }),
+  });
+  expect(response.status).toBe(201);
+  expect(response.headers.get('Cache-Control')).toBe('no-store');
+  expect(await response.json()).toMatchObject({ token: expect.any(String) });
 });
 it.each([
   [true, 'active', 'relink_not_orphaned'],
@@ -208,6 +219,7 @@ it.each(['disabled', 'failed', 'throw', 'config-outage'])(
     const row = await user();
     const res = await post(String(row.id));
     expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('no-store');
     expect(await res.json()).toMatchObject({
       ok: true,
       delivery: kind === 'disabled' ? 'manual' : 'failed',
