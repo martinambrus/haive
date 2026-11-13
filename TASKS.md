@@ -582,6 +582,14 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
+### T656 · FNF[ci-flakes-2026-11] · two required CI checks failed once and passed on rerun (+2)
+
+status: open · kind: fix · found: #1147, #1149 CI 2026-11-13 · priority: P3
+Each failed on a PR that does not touch it, passed on a rerun of the failed job only, and passes on main.
+
+1. `Lint, Typecheck, Scripts` / Module scripts, run 43502969783 (#1147): `dev.sh names the node_modules volumes the way compose names the project` > `a name in the environment, which wins over .env targets env_*` asserted exit 0 and got the "Full rebuild" path. Suspect an environment variable leaking into the fake dev.sh run (e.g. `COMPOSE_PROJECT_NAME` or `HAIVE_INSTALL_ID` set on the runner or by an earlier test in the same process). Find the leak; pin the test's env explicitly.
+2. `Production image build (web)` / "The built production web image boots and enforces anonymous routing", run 43508836017 (#1149): `scripts/check-web-image.mjs` ~:42 `await fetch(`${base}/login`)` never settled and Node exited 13 ("unsettled top-level await"): no timeout on the fetch, and probably a readiness race. Give every fetch an AbortSignal timeout and retry until the server is ready within a bound, failing with a clear message.
+
 ### T655 · upgrade postgres.js to v4 and drop the local patch
 
 status: open · kind: fix · found: PGF driver 2026-11-13 · priority: P2
