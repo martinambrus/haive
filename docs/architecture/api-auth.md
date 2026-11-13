@@ -98,8 +98,8 @@ sorted sets, `haive:auth-throttle:<login|register|recover|reset>:acct|ip:<key>`,
 bucket and reserves a member in all of them or in none, so parallel attempts cannot all pass before any
 is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; login,
 registration and reset answer 429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
-verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and has
-run no bcrypt; its only database work is the audit row below, written after the answer (a refused password
+verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and have
+run no bcrypt; their only database work is the audit row below, written after the answer (a refused password
 change has also read its user row, for the key). A successful login or registration removes its own member;
 recovery and reset attempts keep theirs. Only failures cost login and registration budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
@@ -159,8 +159,9 @@ Accepted limits. Someone who knows an email can keep its bucket full for as long
 owner then gets 429 even with the right password; behind the default bridge there is no address to tell the
 senders apart, so the account bucket is the only brake there. Anyone holding a valid access cookie can also spend the
 account's sign-in budget through the password change, and its 429 says "sign-in attempts" because the budget
-is the sign-in one. The window is measured by the api's clock, one api
-instance per install. The limits are the constants above; the unused `RATE_LIMIT_*` config keys were removed.
+is the sign-in one. Anyone who knows an email can also fill its separate `recover` bucket, silently
+dropping the owner's recovery request while still answering the same 202. The window is measured by
+the api's clock, one api instance per install. The limits are the constants above; the unused `RATE_LIMIT_*` config keys were removed.
 
 **A caller who is not an administrator cannot aim the probe routes at a blocked address.**
 `POST /tooling/test-postgres`, `/tooling/test-ollama`, `/tooling/ollama-model-capabilities`, the
@@ -409,7 +410,8 @@ the mail commit; unused config keys are harmless.
 and address throttle buckets and a separate once-per-window throttled audit slot, and
 always answers the same 202, for unknown accounts, disabled mail, throttle refusals and delivery
 failures alike. Lookup, issuance and SMTP delivery run in-process after the reply, so the raw link
-never sits in Redis or a queue. Failure logs carry fixed codes, never the address, token or SMTP text.
+never sits in Redis or a queue. Failure logs carry fixed codes, the error class and, when present, a short
+five-character error code (a SQLSTATE, or an errno such as `EPIPE`), never the address, token or SMTP text.
 
 A readable blind-index match gets a reset link at its stored address only while the user is active;
 a deactivated match sends nothing. A claim is allowed only after a `config.discard_unreadable_secrets`
@@ -419,7 +421,8 @@ case-insensitive). The typed address is stored encrypted on the reset row and th
 Zero or several matches send nothing; those rows are relinked by an administrator.
 
 Tokens are 32 random bytes; only their SHA-256 is stored in `password_resets`. A link expires after
-30 minutes. Issuance serializes on the active user row; an unexpired, unconsumed link issued less than
+30 minutes. Issuance, cooldown and both redemption expiry checks use the application clock.
+Issuance serializes on the active user row; an unexpired, unconsumed link issued less than
 `PASSWORD_RESET_COOLDOWN_MS` (2 minutes) ago makes a request issue and send nothing, preserving that
 link and the same 202. After the cooldown a new link invalidates the user's earlier unconsumed links.
 Issuance commits its required `auth.password_reset.request` audit row with the token.
@@ -432,7 +435,8 @@ One transaction requires an active user under its lock, consumes an unexpired, u
 rechecks that a claim target's email still fails `tryDecryptEmail`, and repairs the email and blind index for a
 claim, sets the password, clears `must_change_password`, bumps `token_version`, revokes refresh
 tokens and writes `auth.password_reset.complete`. If another user holds the claimed index it answers
-409 and rolls everything back, consumption included. Invalid, expired, superseded and consumed tokens
+409 and rolls everything back, consumption included. The claim recheck and that holder check run before any
+bcrypt work; the unique email index still decides a holder that appears after the check. Invalid, expired, superseded and consumed tokens
 share one 400, as do a deactivated user and a claim whose target email is readable now; refusal rolls
 back consumption and all changes. Both issuance and redemption lock the user `FOR NO KEY UPDATE`,
 which permits refresh's FK key-share lock; redemption revokes refresh rows before a claim's unique
@@ -455,12 +459,14 @@ blind index, replaces the password with a bcrypt hash of 32 random bytes, sets
 revoked before the unique email-index update, following password redemption's lock order.
 The same transaction uses the shared reset issuance helper to supersede prior links and issue a
 plain reset, bypassing the two-minute self-service cooldown so a recent claim cannot block the
-administrator. Both required audit rows and the reset commit together; a failure undoes all writes.
+administrator. Both required audit rows name that administrator as actor, and they commit together
+with the reset; a failure undoes all writes.
 After commit, the user's API sockets close and mail is sent to the new address with a reset link
 at the configured web origin. Success returns `delivery: 'mailed'`; disabled mail returns
 `delivery: 'manual'` and the link. Every delivery error, including a configuration outage, returns
 `delivery: 'failed'` and the link for manual handoff. The dialog shows that link once with a copy
-button. While the request is in flight the dialog cannot be closed, and once a link is shown only
+button. The reply uses `Cache-Control: no-store`, as does the one-time invite-token reply.
+While the request is in flight the dialog cannot be closed, and once a link is shown only
 Escape or Close dismisses it, since the relink has already committed and the link exists nowhere
 else. A lost link cannot be re-requested through Relink, because the email is now readable: use
 **Reset password** for a temporary password, or forgot-password when mail is enabled. Links and

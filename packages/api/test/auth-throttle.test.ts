@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Redis } from 'ioredis';
 import { eq } from 'drizzle-orm';
+import { Hono } from 'hono';
 
 const h = vi.hoisted(() => {
   process.env.CONFIG_ENCRYPTION_KEY = 'ab'.repeat(32);
@@ -25,13 +26,11 @@ vi.mock('../src/redis.js', () => ({
   getRedis: () => h.redis(),
   getBullRedis: () => h.redis(),
 }));
-vi.mock('../src/auth/password.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../src/auth/password.js')>();
-  return {
-    hashPassword: vi.fn(real.hashPassword),
-    verifyPassword: vi.fn(real.verifyPassword),
-  };
-});
+// Redis admission and bcrypt call ordering are under test; password.test.ts covers bcrypt itself.
+vi.mock('../src/auth/password.js', () => ({
+  hashPassword: vi.fn(async (password: string) => `hashed:${password}`),
+  verifyPassword: vi.fn(async (password: string, hash: string) => hash === `hashed:${password}`),
+}));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
   const log: object = new Proxy(
@@ -63,7 +62,12 @@ import { createFakeDb } from '@haive/database/testing';
 import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/shared';
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { createApiApp } from '../src/index.js';
-import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+import {
+  AuthThrottleError,
+  AUTH_ACCOUNT_LIMIT,
+  reserveAuthAttempt,
+} from '../src/lib/auth-throttle.js';
+import { hashInviteToken } from '../src/lib/invites.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 
@@ -72,8 +76,8 @@ new AuthThrottleError(new Response(null, { status: 429 }), true);
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
-const PASSWORD = 'correct horse battery staple';
-const WRONG = 'definitely not the password';
+const PASSWORD = randomBytes(24).toString('hex');
+const WRONG = randomBytes(24).toString('hex');
 const PREFIX = 'haive:auth-throttle:';
 
 type Scope = 'login' | 'register';
@@ -274,12 +278,47 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     at(0);
   });
 
+  it.each(['recover', 'reset'] as const)(
+    'keeps the real Redis %s budget isolated and bounds its audit slot',
+    async (scope) => {
+      const account =
+        scope === 'reset'
+          ? hashInviteToken(randomUUID())
+          : computeEmailBlindIndex(mail(scope), PEPPER);
+      const refused: AuthThrottleError[] = [];
+      const admission = new Hono().get('/', async (c) => {
+        try {
+          await reserveAuthAttempt(c, scope, c.req.query('account') ?? account);
+          return c.json({ ok: true });
+        } catch (error) {
+          if (!(error instanceof AuthThrottleError)) throw error;
+          refused.push(error);
+          return error.res;
+        }
+      });
+      for (let i = 0; i < AUTH_ACCOUNT_LIMIT; i++)
+        expect((await admission.request('/')).status).toBe(200);
+      for (let i = 0; i < 2; i++) expect((await admission.request('/')).status).toBe(429);
+      expect(refused.map((error) => error.auditAllowed)).toEqual(
+        scope === 'recover' ? [true, false] : [false, false],
+      );
+      expect(refused.every((error) => error.limiter === 'account')).toBe(true);
+      const key = `${PREFIX}${scope}:acct:${account}`;
+      expect(await client.zcard(key)).toBe(AUTH_ACCOUNT_LIMIT);
+      expect(await client.pttl(key)).toBeGreaterThan(0);
+      expect((await admission.request('/?account=' + randomUUID())).status).toBe(200);
+      expect((await login(mail(scope), WRONG)).status).toBe(401);
+      expect(await client.zcard(acctKey('login', mail(scope)))).toBe(1);
+      expect(await client.exists(key + ':audit')).toBe(scope === 'recover' ? 1 : 0);
+    },
+  );
+
   describe('password-change oracle', () => {
     async function change(
       email: string,
       currentPassword = WRONG,
       address?: string,
-      newPassword = 'a different synthetic password',
+      newPassword = randomBytes(24).toString('hex'),
     ) {
       const user = fake
         .rows(schema.users)

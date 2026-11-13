@@ -23,6 +23,7 @@ interface IssueOptions {
   cooldownMs?: number;
   /** An administrator relinking an orphan must supersede even a just-issued claim. */
   bypassCooldown?: boolean;
+  actorUserId?: string;
 }
 
 /** Shared issuance seam: serialize issuance/redemption on the user before touching resets. */
@@ -41,6 +42,18 @@ export async function issuePasswordReset(
 }
 
 /** Same issuance policy inside a caller's transaction. The caller logs the event after commit. */
+export function issuePasswordResetInTransaction(
+  tx: ResetTransaction,
+  userId: string,
+  claimEmailEncrypted: string | null,
+  options: IssueOptions & { bypassCooldown: true },
+): Promise<{ token: string; event: AuditEvent }>;
+export function issuePasswordResetInTransaction(
+  tx: ResetTransaction,
+  userId: string,
+  claimEmailEncrypted?: string | null,
+  options?: IssueOptions,
+): Promise<{ token: string; event: AuditEvent } | null>;
 export async function issuePasswordResetInTransaction(
   tx: ResetTransaction,
   userId: string,
@@ -50,11 +63,12 @@ export async function issuePasswordResetInTransaction(
     ttlMs = PASSWORD_RESET_TTL_MS,
     cooldownMs = PASSWORD_RESET_COOLDOWN_MS,
     bypassCooldown = false,
+    actorUserId = ANONYMOUS_AUDIT_ACTOR,
   }: IssueOptions = {},
 ): Promise<{ token: string; event: AuditEvent } | null> {
   const token = generateInviteToken();
   const event: AuditEvent = {
-    actorUserId: ANONYMOUS_AUDIT_ACTOR,
+    actorUserId,
     action: 'auth.password_reset.request',
     targetType: 'user',
     targetId: userId,
@@ -128,12 +142,16 @@ export async function findPasswordResetRecipient(
 }
 
 /** Admission hint only: the guarded consume in the transaction remains authoritative. */
-export async function assertPasswordResetLive(db: Database, tokenHash: string): Promise<void> {
+export async function assertPasswordResetLive(
+  db: Database,
+  tokenHash: string,
+  now = new Date(),
+): Promise<void> {
   const candidate = await db.query.passwordResets.findFirst({
     where: and(
       eq(schema.passwordResets.tokenHash, tokenHash),
       isNull(schema.passwordResets.consumedAt),
-      gt(schema.passwordResets.expiresAt, sql`now()`),
+      gt(schema.passwordResets.expiresAt, now),
     ),
     columns: { id: true },
   });
@@ -149,7 +167,7 @@ export async function consumePasswordReset(
   now?: Date,
 ): Promise<string> {
   const tokenHash = hashInviteToken(token);
-  const changedAt = now ?? sql`now()`;
+  const changedAt = now ?? new Date();
   let event: AuditEvent | undefined;
   try {
     const userId = await db.transaction(async (tx) => {
@@ -181,20 +199,6 @@ export async function consumePasswordReset(
         .returning();
       if (!claimed) throw invalid();
       const user = locked[0]!;
-      // Compare only after the guarded live-token claim, using the locked current password.
-      // Throwing rolls consumption back so the same link can choose a different password.
-      if (
-        user.mustChangePassword &&
-        user.passwordHash !== null &&
-        (await verifyPassword(newPassword, user.passwordHash))
-      ) {
-        throw new HttpError(
-          400,
-          'Choose a password different from the one you were given',
-          'password_unchanged',
-        );
-      }
-      const passwordHash = await hashPassword(newPassword);
       let emailUpdate = {};
       if (claimed.claimEmailEncrypted !== null) {
         if (tryDecryptEmail(locked[0]!.emailEncrypted, fieldKey) !== null) throw invalid();
@@ -211,6 +215,20 @@ export async function consumePasswordReset(
         if (holder) throw new HttpError(409, 'That email is already linked to another account.');
         emailUpdate = { emailEncrypted: encryptEmail(email, fieldKey), emailBlindIndex };
       }
+      // Compare only after the guarded live-token claim, using the locked current password.
+      // Throwing rolls consumption back so the same link can choose a different password.
+      if (
+        user.mustChangePassword &&
+        user.passwordHash !== null &&
+        (await verifyPassword(newPassword, user.passwordHash))
+      ) {
+        throw new HttpError(
+          400,
+          'Choose a password different from the one you were given',
+          'password_unchanged',
+        );
+      }
+      const passwordHash = await hashPassword(newPassword);
       // Refresh revokes its old row before inserting a successor (FK key-share on users).
       // Take those rows before a claim's unique email-index change upgrades the user lock.
       await tx

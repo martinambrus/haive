@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { Hono } from 'hono';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { eq } from 'drizzle-orm';
@@ -225,7 +227,13 @@ describe('forgot password', () => {
       h.send.mockRejectedValue(error);
       expect((await post('forgot-password', { email: EMAIL })).status).toBe(202);
       await vi.runAllTimersAsync();
-      expect(h.warn).toHaveBeenCalled();
+      expect(h.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'password_recovery_failed',
+          errorName: error.constructor.name,
+        }),
+        'Password recovery could not be completed',
+      );
       expect(h.send).toHaveBeenCalledOnce();
       expect(JSON.stringify(h.warn.mock.calls)).not.toMatch(/person@|secret@|token=secret/);
     },
@@ -236,6 +244,28 @@ describe('forgot password', () => {
     await post('forgot-password', { email: EMAIL });
     await vi.runAllTimersAsync();
     expect(h.warn).toHaveBeenCalled();
+  });
+  it('logs only the error class and SQLSTATE from a deferred bound-query failure', async () => {
+    await user();
+    const token = randomBytes(32).toString('hex');
+    const error = new DrizzleQueryError(
+      'insert into password_resets values ($1, $2)',
+      [EMAIL, token],
+      Object.assign(new Error(`${EMAIL} ${token}`), { code: '42P01', detail: token }),
+    );
+    h.send.mockRejectedValue(error);
+    expect((await post('forgot-password', { email: EMAIL })).status).toBe(202);
+    await vi.runAllTimersAsync();
+    expect(h.warn).toHaveBeenCalledWith(
+      {
+        code: 'password_recovery_failed',
+        errorName: 'DrizzleQueryError',
+        errorCode: '42P01',
+      },
+      'Password recovery could not be completed',
+    );
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain(EMAIL);
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain(token);
   });
   it.each([true, false])('sends nothing to a deactivated user (readable: %s)', async (readable) => {
     const row = await user(readable);

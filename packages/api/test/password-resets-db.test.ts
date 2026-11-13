@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -102,6 +102,17 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, gate!.id));
     }
   });
+  it('refuses direct issuance for a deactivated user at the SQL user lock', async () => {
+    const row = await user();
+    await db.update(schema.users).set({ status: 'deactivated' }).where(eq(schema.users.id, row.id));
+    await expect(issuePasswordReset(db, row.id)).rejects.toMatchObject({ status: 400 });
+    expect(
+      await db.query.passwordResets.findMany({ where: eq(schema.passwordResets.userId, row.id) }),
+    ).toEqual([]);
+    expect(
+      await db.query.auditEvents.findMany({ where: eq(schema.auditEvents.targetId, row.id) }),
+    ).toEqual([]);
+  });
   it('atomically consumes once, revokes refresh tokens, bumps the version, and audits', async () => {
     const row = await user();
     await db.insert(schema.refreshTokens).values({
@@ -182,6 +193,21 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       ).toBe(200);
     },
   );
+  it('uses the application clock for issuance and both redemption checks', async () => {
+    const row = await user();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2000-01-01'));
+    try {
+      const token = await issuePasswordReset(db, row.id);
+      const response = await post('reset-password', {
+        token,
+        newPassword: randomBytes(24).toString('hex'),
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('expiry uses an injected clock and superseded links have the same refusal', async () => {
     const row = await user();
     const expired = await issuePasswordReset(db, row.id, null, { now: new Date('2000-01-01') });
@@ -270,9 +296,13 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       .set({ emailBlindIndex: computeEmailBlindIndex(row.email, pepper) })
       .where(eq(schema.users.id, holder.id));
     const token = await issuePasswordReset(db, row.id, encryptEmail(row.email, key));
+    h.hash.mockClear();
+    h.verify.mockClear();
     expect((await post('reset-password', { token, newPassword: 'new-password-long' })).status).toBe(
       409,
     );
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.verify).not.toHaveBeenCalled();
     expect(await db.query.users.findFirst({ where: eq(schema.users.id, row.id) })).toMatchObject({
       passwordHash: 'old-hash',
       tokenVersion: 0,
@@ -396,8 +426,12 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       tokenHash: randomUUID(),
       expiresAt: new Date(Date.now() + 60_000),
     });
+    h.hash.mockClear();
+    h.verify.mockClear();
     const response = await post('reset-password', { token, newPassword: 'new-password-long' });
     expect(response.status).toBe(400);
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.verify).not.toHaveBeenCalled();
     const unknown = await post('reset-password', {
       token: 'unknown',
       newPassword: 'new-password-long',

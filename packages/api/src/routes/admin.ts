@@ -145,6 +145,7 @@ const createUserSchema = z.object({
 });
 
 adminRoutes.post('/users', async (c) => {
+  c.header('Cache-Control', 'no-store');
   const body = createUserSchema.parse(await c.req.json());
   const db = getDb();
   const fieldKey = await configService.getEncryptionKey();
@@ -305,6 +306,7 @@ const relinkSchema = z.object({ email: z.string().trim().toLowerCase().pipe(emai
 
 // Dedicated action: its required email payload and delivery result differ from the legacy actions.
 adminRoutes.post('/users/:id/relink', async (c) => {
+  c.header('Cache-Control', 'no-store');
   const { email } = relinkSchema.parse(await c.req.json());
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
@@ -425,6 +427,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
     });
     closeUserSockets(target.id);
     logAuditEvent(audit);
+    c.header('Cache-Control', 'no-store');
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }
 
@@ -1504,6 +1507,7 @@ const createInviteSchema = z.object({
  * links.
  */
 adminRoutes.post('/invites', async (c) => {
+  c.header('Cache-Control', 'no-store');
   const body = createInviteSchema.parse(await c.req.json());
   const db = getDb();
   const token = generateInviteToken();
