@@ -864,7 +864,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
     shift
     ${LOAD_INSTALL_ENV}
     DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
-    CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY}" \\
+    CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY:-}" \\
     exec docker run --rm -it \\
       --network "\${HAIVE_NETWORK:-\${HAIVE_INSTALL_ID:-haive}-network}" \\
       -e HAIVE_INSTALL_ID="\${HAIVE_INSTALL_ID:-haive}" \\

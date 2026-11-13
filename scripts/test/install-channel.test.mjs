@@ -350,6 +350,38 @@ for (const lang of ['sh', 'ps1']) {
       );
     }
   }
+  if (lang === 'sh') {
+    for (const [name, missingKey, required, forbidden] of [
+      ['allows a missing encryption key', true, [], []],
+    ]) {
+      check(`recover-admin ${name}`, () => {
+        const f = fixture(lang, { publicInstall: true });
+        try {
+          assert.equal(f.install().status, 0);
+          if (missingKey) {
+            const envPath = join(f.dir, '.env');
+            writeFileSync(
+              envPath,
+              readFileSync(envPath, 'utf8').replace(/^CONFIG_ENCRYPTION_KEY=.*\n/m, ''),
+            );
+          }
+          const result = f.invoke(join(f.dir, 'haive'), [
+            'recover-admin',
+            '--email',
+            'admin@example.com',
+          ]);
+          assert.equal(result.status, 0, result.stdout + result.stderr);
+          const argv = f.calls().trim().split('\n').at(-1).split('\t');
+          for (const value of required) assert.ok(argv.includes(value), value);
+          for (const value of forbidden) assert.ok(!argv.includes(value), value);
+          if (missingKey)
+            assert.ok(readFileSync(join(f.root, 'updater-env'), 'utf8').endsWith('\n\n'));
+        } finally {
+          f.clean();
+        }
+      });
+    }
+  }
   check('leftover fixture config and home cannot affect another run', () => {
     const leftover = fixture(lang);
     const current = fixture(lang);
