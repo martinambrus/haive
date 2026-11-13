@@ -42,6 +42,7 @@ export async function resetStepAndDownstream(
   targetStepId: string,
   round: number,
   expectedEpoch?: number,
+  recovery = false,
 ): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
@@ -132,10 +133,11 @@ export async function resetStepAndDownstream(
           .update(schema.taskSteps)
           .set({
             status: 'pending',
-            detectOutput: null,
-            formSchema: null,
-            formValues: null,
+            detectOutput: recovery && r.applyReceipt ? r.detectOutput : null,
+            formSchema: recovery && r.applyReceipt ? r.formSchema : null,
+            formValues: recovery && r.applyReceipt ? r.formValues : null,
             output: null,
+            ...(recovery ? {} : { applyReceipt: null }),
             // The recap describes the run being discarded; left behind it reads as the new
             // run's recap the moment the step goes green again.
             summary: null,

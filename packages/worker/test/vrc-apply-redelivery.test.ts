@@ -1,0 +1,271 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { eq } from 'drizzle-orm';
+import type { StepContext } from '../src/step-engine/step-definition.js';
+import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
+import { createBuildImageStep } from '../src/step-engine/steps/env-replicate/03-build-image.js';
+import { dbMigrateStep } from '../src/step-engine/steps/workflow/06a-db-migrate.js';
+import { saveDatabaseStep } from '../src/step-engine/steps/workflow/11g-save-database.js';
+import { fakeDockerRunner } from './fake-docker-runner.js';
+
+const h = vi.hoisted(() => ({ exec: vi.fn(), snapshot: vi.fn() }));
+vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
+  ensureDdevWithProgress: async () => ({ container: 'vrc-fake', projectDir: '/workspace' }),
+  withDdevProgress: async (_ctx: unknown, _label: string, fn: (line: () => void) => unknown) =>
+    fn(() => {}),
+}));
+vi.mock('../src/sandbox/ddev-runner.js', async (original) => ({
+  ...(await original<typeof import('../src/sandbox/ddev-runner.js')>()),
+  ddevExec: h.exec,
+  ddevSnapshot: h.snapshot,
+}));
+
+function context(): StepContext {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    envTemplates: schema.envTemplates,
+  });
+  fake.insert(schema.tasks, {
+    id: '11111111-1111-4111-8111-111111111111',
+    status: 'running',
+    orchestrationEpoch: 3,
+  });
+  fake.insert(schema.taskSteps, { id: '22222222-2222-4222-8222-222222222222', status: 'running' });
+  return {
+    taskId: '11111111-1111-4111-8111-111111111111',
+    taskStepId: '22222222-2222-4222-8222-222222222222',
+    userId: '33333333-3333-4333-8333-333333333333',
+    repoPath: '',
+    workspacePath: '',
+    sandboxWorkdir: '/workspace',
+    cliProviderId: null,
+    db: fake.db as unknown as Database,
+    logger: logger.child({ test: 'vrc-apply-redelivery' }),
+    round: 0,
+    signal: new AbortController().signal,
+    emitProgress: async () => {},
+    throwIfCancelled() {},
+  };
+}
+
+/** Simulate loss of a handler after its external effect, before its done write. The real
+ * stalled sweep receives the stale running-row candidate and queues its successor. SQL
+ * selection/fencing is the seam here (covered by stalled-redrive-running-db.test.ts).
+ * The enqueue seam delivers the cached apply arguments, as step-runner.ts:2953 does.
+ */
+async function redeliver(ctx: StepContext, stepId: string, apply: () => Promise<unknown>) {
+  const candidate = {
+    taskId: ctx.taskId,
+    userId: ctx.userId,
+    stepId,
+    round: 0,
+    epoch: 3,
+    taskStatus: 'running',
+    rowId: ctx.taskStepId,
+    rowStatus: 'running',
+    rowWaitingStartedAt: null,
+    rowError: null,
+  };
+  const db = {
+    select: () => ({
+      from: () => ({
+        leftJoin: () => ({ where: async () => [candidate] }),
+        innerJoin: () => ({ where: async () => [] }),
+        where: async () => [],
+      }),
+    }),
+    transaction: async () => ({ epoch: 4 }),
+  } as unknown as Database;
+  const delivered: number[] = [];
+  const count = await redriveStalledTasks(
+    db,
+    {
+      enqueueAdvance: async (_task, _user, _step, _round, epoch) => {
+        delivered.push(epoch);
+        await apply();
+      },
+      failTask: async () => false,
+      enqueueStart: async () => {},
+      queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+      queuedInvocationIds: async () => new Set(),
+      stepHeld: () => false,
+      redriveRetryDelaysMs: [],
+    },
+    { staleMs: 300_000 },
+  );
+  expect(count).toBe(1);
+  expect(delivered).toEqual([4]);
+}
+
+describe('deterministic apply redelivery', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('does not rebuild an image whose first build completed before the lost done write', async () => {
+    const build = vi.fn(
+      async (_opts: import('../src/sandbox/docker-runner.js').DockerBuildOpts) => ({
+        exitCode: 0,
+        imageTag: 'vrc-probe:latest',
+        imageId: 'sha256:vrc',
+        durationMs: 0,
+        stderr: '',
+        timedOut: false,
+      }),
+    );
+    const step = createBuildImageStep(
+      fakeDockerRunner({
+        build,
+        inspect: async () => ({
+          exists: true,
+          imageId: 'sha256:vrc',
+          labels: build.mock.calls[0]?.[0]?.labels,
+        }),
+      }),
+    );
+    const ctx = context();
+    const args = {
+      detected: {
+        envTemplateId: '66666666-6666-4666-8666-666666666666',
+        name: 'vrc',
+        baseImage: 'scratch',
+        dockerfile: 'FROM scratch',
+        currentImageId: null,
+        status: 'pending',
+      },
+      formValues: { imageTag: 'vrc-probe:latest', forceRebuild: false },
+      iteration: 0,
+      previousIterations: [],
+    };
+    const apply = () => step.apply(ctx, args);
+    await apply();
+    await redeliver(ctx, step.metadata.id, apply);
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'reconciles Docker completion before metadata was written (force=%s)',
+    async (forceRebuild) => {
+      let labels: Record<string, string> | undefined;
+      const build = vi.fn(
+        async (opts: import('../src/sandbox/docker-runner.js').DockerBuildOpts) => {
+          labels = opts.labels;
+          throw new Error('worker lost after Docker committed the image');
+        },
+      );
+      const step = createBuildImageStep(
+        fakeDockerRunner({
+          build,
+          inspect: async () => ({ exists: true, imageId: 'sha256:completed', labels }),
+        }),
+      );
+      const ctx = context();
+      const args = {
+        detected: {
+          envTemplateId: '66666666-6666-4666-8666-666666666666',
+          name: 'image',
+          baseImage: 'scratch',
+          dockerfile: 'FROM scratch',
+          currentImageId: null,
+          status: 'pending',
+        },
+        formValues: { imageTag: 'recovery:latest', forceRebuild },
+        iteration: 0,
+        previousIterations: [],
+      };
+      await expect(step.apply(ctx, args)).rejects.toThrow('worker lost');
+      await redeliver(ctx, step.metadata.id, async () => {
+        await expect(step.apply(ctx, args)).resolves.toMatchObject({
+          imageId: 'sha256:completed',
+          skipped: true,
+        });
+      });
+      expect(build).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not repeat an approved custom migration after its external effect succeeded', async () => {
+    let appliedDataChanges = 0;
+    h.exec.mockImplementation(async () => {
+      appliedDataChanges++;
+      return { exitCode: 0, output: 'migration applied' };
+    });
+    h.snapshot.mockResolvedValue({ exitCode: 0, output: '' });
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'unknown' as const,
+        migrationCommand: 'node migrate-data.js',
+        repoSubpath: 'vrc',
+      },
+      formValues: { runMigration: true, migrationCommand: 'node migrate-data.js' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    const apply = () => dbMigrateStep.apply(ctx, args);
+    await apply();
+    await redeliver(ctx, dbMigrateStep.metadata.id, apply);
+    expect(appliedDataChanges).toBe(1);
+  });
+
+  it('keeps a published database save decision when recovery advances the epoch', async () => {
+    const ctx = context();
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      taskDatabaseStates: schema.taskDatabaseStates,
+      repositoryDatabaseStates: schema.repositoryDatabaseStates,
+      databaseSnapshots: schema.databaseSnapshots,
+    });
+    const repositoryId = '44444444-4444-4444-8444-444444444444';
+    const snapshotId = '55555555-5555-4555-8555-555555555555';
+    fake.insert(schema.tasks, {
+      id: ctx.taskId,
+      userId: ctx.userId,
+      repositoryId,
+      status: 'running',
+      orchestrationEpoch: 3,
+    });
+    fake.insert(schema.taskSteps, { id: ctx.taskStepId, taskId: ctx.taskId, status: 'running' });
+    // Publication already committed; only the step's done write was lost.
+    fake.insert(schema.taskDatabaseStates, {
+      taskId: ctx.taskId,
+      repositoryId,
+      outcome: 'saved',
+      decisionEpoch: 3,
+      baseRevision: 1,
+      candidateSnapshotId: snapshotId,
+      candidateStepId: ctx.taskStepId,
+      exportError: null,
+    });
+    fake.insert(schema.repositoryDatabaseStates, { repositoryId, revision: 1, snapshotId });
+    fake.insert(schema.databaseSnapshots, {
+      id: snapshotId,
+      repositoryId,
+      userId: ctx.userId,
+      sourceTaskId: ctx.taskId,
+      status: 'ready',
+    });
+    ctx.db = fake.db as unknown as Database;
+    const apply = () =>
+      saveDatabaseStep.apply(ctx, {
+        detected: null,
+        formValues: { action: 'save:0' },
+        iteration: 0,
+        previousIterations: [],
+      });
+    await expect(apply()).resolves.toEqual({ outcome: 'saved' });
+    let recovered: unknown;
+    await redeliver(ctx, saveDatabaseStep.metadata.id, async () => {
+      // Mirror the fence's epoch write in the apply database; no upstream step was retried.
+      await ctx.db
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: 4 })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      recovered = await apply().catch((error: unknown) => error);
+    });
+    expect(recovered).toEqual({ outcome: 'saved' });
+    expect(h.exec).not.toHaveBeenCalled();
+  });
+});

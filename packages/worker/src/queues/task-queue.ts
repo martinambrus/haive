@@ -4312,7 +4312,7 @@ export async function reconcileOrphanedSteps(
       // stale when it is redelivered; re-drive at that new epoch.
       // At the epoch this pass read, like the fence above: a Retry the api took during boot keeps
       // the task.
-      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round, s.epoch);
+      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round, s.epoch, true);
       if (!reset || reset === 'superseded') continue;
       await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
       logger.info(

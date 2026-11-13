@@ -1,3 +1,4 @@
+import { beginApplyEffect, finishApplyEffect } from '../../apply-receipt.js';
 import { imageRepo } from '@haive/shared';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -152,6 +153,43 @@ export function createBuildImageStep(
         };
       }
 
+      const { receipt, fresh } = await beginApplyEffect(
+        ctx,
+        'image-build',
+        JSON.stringify({
+          envTemplateId: detected.envTemplateId,
+          imageTag,
+          dockerfile: detected.dockerfile,
+          forceRebuild,
+        }),
+      );
+      // Docker commits the tag and label together. A crash before either Postgres write
+      // can therefore be reconciled without trusting an unrelated image at that tag.
+      if (!fresh) {
+        const image = await runner.inspect(imageTag);
+        if (image.exists && image.imageId && image.labels?.['haive.apply-id'] === receipt.id) {
+          await ctx.db
+            .update(schema.envTemplates)
+            .set({
+              status: 'ready',
+              imageTag,
+              builtImageId: image.imageId,
+              lastBuiltAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.envTemplates.id, detected.envTemplateId));
+          const result = {
+            envTemplateId: detected.envTemplateId,
+            imageTag,
+            imageId: image.imageId,
+            skipped: true,
+            durationMs: 0,
+          };
+          await finishApplyEffect(ctx, receipt, result);
+          return result;
+        }
+      }
+
       await ctx.db
         .update(schema.envTemplates)
         .set({ status: 'building', updatedAt: new Date() })
@@ -196,6 +234,7 @@ export function createBuildImageStep(
           contextDir,
           dockerfilePath,
           tag: imageTag,
+          labels: { 'haive.apply-id': receipt.id },
           onStdoutChunk: (chunk) => {
             ctx.logger.debug({ chunk }, 'docker stdout');
             trackLine(chunk);
@@ -226,6 +265,7 @@ export function createBuildImageStep(
             updatedAt: new Date(),
           })
           .where(eq(schema.envTemplates.id, detected.envTemplateId));
+        await finishApplyEffect(ctx, receipt, { imageId: buildResult.imageId });
         ctx.logger.info(
           {
             envTemplateId: detected.envTemplateId,

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { createBuildImageStep } from '../src/step-engine/steps/env-replicate/03-build-image.js';
@@ -14,7 +15,11 @@ import { fakeDockerRunner } from './fake-docker-runner.js';
 
 function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] } {
   const updates: Record<string, unknown>[] = [];
+  const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+  fake.insert(schema.tasks, { id: '11111111-2222-3333-4444-555555555555', status: 'running' });
+  fake.insert(schema.taskSteps, { id: '22222222-2222-4222-8222-222222222222', status: 'running' });
   const db = {
+    transaction: fake.db.transaction.bind(fake.db),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
@@ -26,7 +31,7 @@ function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] }
   return {
     ctx: {
       taskId: '11111111-2222-3333-4444-555555555555',
-      taskStepId: 'step-1',
+      taskStepId: '22222222-2222-4222-8222-222222222222',
       userId: 'user-1',
       repoPath: '/tmp/repo',
       workspacePath: '/tmp/repo',
@@ -170,7 +175,7 @@ describe('createBuildImageStep.detect', () => {
     } as unknown as Database;
     return {
       taskId: '11111111-2222-3333-4444-555555555555',
-      taskStepId: 'step-1',
+      taskStepId: '22222222-2222-4222-8222-222222222222',
       userId: 'user-1',
       repoPath: '/tmp/repo',
       workspacePath: '/tmp/repo',
