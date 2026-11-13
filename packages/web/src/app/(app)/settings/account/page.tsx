@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type ApiError } from '@/lib/api-client';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
@@ -165,6 +166,12 @@ export default function AccountPage() {
                 readOnly
                 disabled
               />
+              {account?.emailReadable === false && (
+                <InlineMarkdown
+                  body="Ask an administrator to relink this email."
+                  className="text-sm text-neutral-400"
+                />
+              )}
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="account-name">Name</Label>

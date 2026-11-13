@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { parseUpgradeInstant } from '@/lib/upgrade-time';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -88,7 +89,16 @@ function TaskRow({
         <div className="mt-1 text-xs text-neutral-500">
           {t.ownerName ??
             t.ownerEmail ??
-            (t.ownerEmailReadable === false ? 'unreadable, needs relink' : 'unknown owner')}
+            (t.ownerEmailReadable === false ? (
+              <Link
+                href={t.ownerId ? `/admin/users#user-${t.ownerId}` : '/admin/users#users'}
+                className="text-indigo-300 underline"
+              >
+                unreadable, needs relink
+              </Link>
+            ) : (
+              'unknown owner'
+            ))}
           {t.currentStepId ? ` · ${t.currentStepId}` : ''} · {shortTime(t.updatedAt)}
         </div>
       </div>
@@ -354,9 +364,16 @@ export default function MaintenancePage() {
                   <div className="mt-1 text-xs text-neutral-500">
                     {j.ownerName ??
                       j.ownerEmail ??
-                      (j.ownerEmailReadable === false
-                        ? 'unreadable, needs relink'
-                        : 'unknown owner')}{' '}
+                      (j.ownerEmailReadable === false ? (
+                        <Link
+                          href={j.ownerId ? `/admin/users#user-${j.ownerId}` : '/admin/users#users'}
+                          className="text-indigo-300 underline"
+                        >
+                          unreadable, needs relink
+                        </Link>
+                      ) : (
+                        'unknown owner'
+                      ))}{' '}
                     · {shortTime(j.updatedAt)}
                   </div>
                 </div>

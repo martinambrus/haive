@@ -3,7 +3,6 @@ import {
   decideRouteAccess,
   SESSION_EXPIRED_PARAM,
   SESSION_EXPIRED_VALUE,
-  PUBLIC_PATHS,
 } from '@/lib/route-access';
 import { resolveApiOrigin, resolveEditorOrigin, runtimeApiConfig } from '@/lib/api-origin';
 import { browserHostname, contentSecurityPolicy } from '@/lib/content-security-policy';
@@ -31,12 +30,18 @@ export async function proxy(request: NextRequest) {
 
   const sessionRejected =
     request.nextUrl.searchParams.get(SESSION_EXPIRED_PARAM) === SESSION_EXPIRED_VALUE;
+  const routeRequest = {
+    path: request.nextUrl.pathname,
+    hasAccessCookie: request.cookies.has(ACCESS_COOKIE),
+    hasRefreshCookie: request.cookies.has(REFRESH_COOKIE),
+    sessionRejected,
+  };
   let sessionAuthenticated = false;
   if (
-    PUBLIC_PATHS.has(request.nextUrl.pathname) &&
-    request.cookies.has(ACCESS_COOKIE) &&
-    !sessionRejected
+    routeRequest.hasAccessCookie &&
+    decideRouteAccess({ ...routeRequest, sessionAuthenticated: true }).action === 'redirect'
   ) {
+    // Only probe when a verified session would change this request's routing.
     // Public onward navigation cannot trust retained cookies. A stale cookie must still allow
     // setup, registration and invitations; a live session keeps the ordinary dashboard redirect.
     // This probe is read-only: rotation stays in the browser, where cookies can be installed.
@@ -53,10 +58,7 @@ export async function proxy(request: NextRequest) {
     }
   }
   const decision = decideRouteAccess({
-    path: request.nextUrl.pathname,
-    hasAccessCookie: request.cookies.has(ACCESS_COOKIE),
-    hasRefreshCookie: request.cookies.has(REFRESH_COOKIE),
-    sessionRejected,
+    ...routeRequest,
     sessionAuthenticated,
   });
 

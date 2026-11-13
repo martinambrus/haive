@@ -138,3 +138,62 @@ it.each(['/ide/id/', '/api/haive/ide/id/', '/api/haive/%69de/id/'])(
     expect(response.headers.get('x-middleware-rewrite')).toBeNull();
   },
 );
+
+// Map the paths, cookie hints, recovery marker and upstream outcomes independently.
+const routingCases = [
+  '/login',
+  '/register',
+  '/setup',
+  '/forgot-password',
+  '/reset-password',
+  '/dashboard',
+].flatMap((path) =>
+  [
+    '',
+    'haive_access=retained',
+    'haive_refresh=retained',
+    'haive_access=retained; haive_refresh=retained',
+  ].flatMap((cookie) =>
+    [false, true].flatMap((rejected) =>
+      [200, 401, 503, 'unavailable' as const].map((upstream) => ({
+        path,
+        cookie,
+        rejected,
+        upstream,
+      })),
+    ),
+  ),
+);
+it.each(routingCases)(
+  'routes $path with cookie=$cookie rejected=$rejected upstream=$upstream',
+  async ({ path, cookie, rejected, upstream }) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://fixture-api.invalid');
+    const fetcher = vi.fn(() =>
+      upstream === 'unavailable'
+        ? Promise.reject(new Error('unavailable'))
+        : Promise.resolve(new Response(null, { status: upstream })),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    const probes =
+      ['/login', '/register', '/setup'].includes(path) &&
+      cookie.includes('haive_access=') &&
+      !rejected;
+    const destination =
+      probes && upstream === 200
+        ? '/dashboard'
+        : path === '/dashboard' && !cookie
+          ? '/login'
+          : null;
+    const response = await proxy(request(`${path}${rejected ? '?session=expired' : ''}`, cookie));
+    expect(fetcher).toHaveBeenCalledTimes(probes ? 1 : 0);
+    expect(response.status).toBe(destination ? 307 : 200);
+    expect(response.headers.get('location')).toBe(
+      destination ? `http://localhost:3000${destination}` : null,
+    );
+    expect(response.headers.get('set-cookie')).toBeNull();
+    if (!destination) {
+      expect(response.headers.get('x-middleware-next')).toBe('1');
+      expect(response.headers.get('content-security-policy')).toContain("img-src 'self'");
+    }
+  },
+);

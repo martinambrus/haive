@@ -51,6 +51,7 @@ const selectClass =
 export default function AdminUsersPage() {
   usePageTitle('Users');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
+  const [highlightedUserId, setHighlightedUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [relinkUser, setRelinkUser] = useState<AdminUser | null>(null);
@@ -88,6 +89,18 @@ export default function AdminUsersPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (users === null || typeof window === 'undefined') return;
+    const highlightHashRow = () => {
+      const user = users.find((candidate) => window.location.hash === `#user-${candidate.id}`);
+      setHighlightedUserId(user?.id ?? null);
+      if (user) document.getElementById(`user-${user.id}`)?.scrollIntoView({ block: 'start' });
+    };
+    highlightHashRow();
+    window.addEventListener('hashchange', highlightHashRow);
+    return () => window.removeEventListener('hashchange', highlightHashRow);
+  }, [users]);
 
   async function runAction(user: AdminUser, action: AdminUserAction, role?: 'admin' | 'user') {
     const payload: { action: AdminUserAction; role?: 'admin' | 'user' } = { action };
@@ -348,7 +361,7 @@ export default function AdminUsersPage() {
         )}
       </Card>
 
-      <section>
+      <section id="users">
         {users === null ? (
           <p className="text-sm text-neutral-500">Loading...</p>
         ) : users.length === 0 ? (
@@ -356,7 +369,12 @@ export default function AdminUsersPage() {
         ) : (
           <div className="grid gap-3">
             {users.map((user) => (
-              <Card key={user.id}>
+              <Card
+                key={user.id}
+                id={`user-${user.id}`}
+                data-highlighted={highlightedUserId === user.id || undefined}
+                className={`scroll-mt-6${highlightedUserId === user.id ? ' border-indigo-400 ring-1 ring-indigo-400' : ''}`}
+              >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">

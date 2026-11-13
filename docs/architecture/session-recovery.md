@@ -46,7 +46,9 @@ sessionStorage is unavailable it also offers retry instead of an automatic reloa
 
 `/login?session=expired` permits the login form despite cookie presence. It never deletes cookies:
 the navigation may be a delayed result from an old request after another tab has recovered. The
-proxy checks `/auth/me` read-only before redirecting an unmarked public page to the dashboard.
+proxy checks `/auth/me` read-only only when a verified session can change the route decision:
+unmarked login, registration and setup pages with an access cookie. Forgot-password and reset-password
+pages always remain reachable and need no probe.
 Cookie presence alone is insufficient: retaining invalid access cookies must still permit bare
 `/setup`, `/register`, direct invitations and public navigation onward from the login form.
 A valid authenticated session keeps its dashboard redirect. A failed or uncertain probe permits
