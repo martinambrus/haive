@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
 
@@ -32,5 +33,64 @@ describe('rootless docker support', () => {
     expect(readme).toMatch(/Rootless Docker/);
     expect(readme).toMatch(/DOCKER_SOCKET=\/run\/user\//);
     expect(readme).toMatch(/dockerd-rootless-setuptool\.sh/);
+  });
+});
+
+describe('sandbox models network', () => {
+  it('exposes only the filtering gate under the daemon names', async () => {
+    const { services, networks } = parse(await readRepoFile('docker-compose.yml'));
+    expect(services.ollama.networks).not.toContain('haive-models');
+    expect(services.ollama.networks).toEqual(['haive-network']);
+    expect(services['ollama-gate'].networks).toEqual({
+      'haive-network': null,
+      'haive-models': { aliases: ['ollama', '${HAIVE_INSTALL_ID:-haive}-ollama'] },
+    });
+    expect(networks['haive-models'].internal).toBe(true);
+  });
+
+  it('ships the gate as a release image without a source build', async () => {
+    const compose = parse(await readRepoFile('docker-compose.run.yml'), {
+      customTags: [{ tag: '!reset', resolve: () => null }],
+    });
+    expect(compose.services['ollama-gate']).toEqual({
+      build: null,
+      image:
+        '${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-ollama-gate:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}',
+    });
+  });
+
+  it.each(['dev', 'gpu', 'vulkan'])(
+    '%s overlay keeps Ollama off the models network',
+    async (overlay) => {
+      const compose = parse(await readRepoFile(`docker-compose.${overlay}.yml`));
+      expect(compose.services.ollama.networks).toBeUndefined();
+    },
+  );
+});
+
+describe('published sidecars', () => {
+  it('publishes every runtime build in both release matrices and tracks its Docker base', async () => {
+    const base = parse(await readRepoFile('docker-compose.yml'));
+    const overlay = parse(await readRepoFile('docker-compose.run.yml'), {
+      customTags: [{ tag: '!reset', resolve: () => null }],
+    });
+    const release = parse(await readRepoFile('.github/workflows/release.yml'));
+    const dependabot = parse(await readRepoFile('.github/dependabot.yml'));
+    const directories = dependabot.updates
+      .filter((entry: { 'package-ecosystem': string }) => entry['package-ecosystem'] === 'docker')
+      .flatMap((entry: { directories: string[] }) => entry.directories);
+    for (const [name, service] of Object.entries(base.services) as [
+      string,
+      { build?: { context: string }; profiles?: string[] },
+    ][]) {
+      if (!service.build || service.profiles?.length) continue;
+      for (const job of ['build', 'merge'])
+        expect(release.jobs[job].strategy.matrix.service).toContain(name);
+      expect(overlay.services[name].build).toBeNull();
+      if (service.build.context.startsWith('./docker/')) {
+        expect(overlay.services[name].image).toContain(`/haive-${name}:`);
+        expect(directories).toContain(service.build.context.slice(1));
+      }
+    }
   });
 });

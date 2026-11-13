@@ -273,6 +273,28 @@ same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access`, `haive_
 plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` still reach the browser. This
 removes the credentials from the container's reach; the editor's own authority is the scoped session above.
 
+## In-stack model access
+
+An Ollama-backed CLI joins the internal `haive-models` network, where `ollama` and
+`${HAIVE_INSTALL_ID:-haive}-ollama` resolve to `ollama-gate:11434`, not the daemon.
+The daemon is only on `haive-network`; the api and worker retain direct access there
+for embeddings, model listing and policy-controlled provisioning. The gate joins both
+networks and streams requests and responses without buffering, including SSE.
+
+The gate permits `POST` inference at `/v1/messages`, `/v1/messages/count_tokens`,
+`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/api/chat`, `/api/generate`,
+`/api/embed` and `/api/embeddings`, plus read-only `POST /api/show`. `GET` and `HEAD`
+are permitted only for `/`, `/api/version`, `/api/tags`, `/api/ps`, `/api/hello`,
+`/v1/models` and `/v1/models/<name>` (one literal segment). The measured Claude Code
+2.1.323 traffic was `POST /v1/messages?beta=true` and `HEAD /api/hello`.
+
+Everything else receives 403 before the upstream is contacted: pull, push, create,
+delete, copy, blobs and future endpoints stay unavailable to sandboxed code. Matching
+uses the exact method and raw pathname, without decoding or normalization; queries
+are forwarded unchanged. Traversal, encoded path, trailing-slash and case variants
+are refused, and method-override headers are removed. This closes direct mutation of
+shared models by sandboxed agents while keeping provider URLs unchanged.
+
 ## Container attachment startup
 
 The container WebSocket routes (`api/src/routes/terminal.ts` and `cli-login-banner.ts`) own

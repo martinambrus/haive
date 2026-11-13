@@ -24,7 +24,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-haive} -d ${POSTGRES_DB:-haive}"]
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-haive} -d ${POSTGRES_DB:-haive}']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -47,7 +47,7 @@ services:
     command:
       - redis-server
       - --appendonly
-      - "yes"
+      - 'yes'
       - --maxmemory
       - 256mb
       - --maxmemory-policy
@@ -55,7 +55,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -77,6 +77,7 @@ services:
     networks:
       - haive-network
 
+  # The daemon is reachable only on the stack network. Sandboxes use ollama-gate.
   ollama:
     image: ollama/ollama:latest
     container_name: ${HAIVE_INSTALL_ID:-haive}-ollama
@@ -84,16 +85,13 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ['CMD', 'ollama', 'list']
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
     networks:
       - haive-network
-      # Shared with per-task sandboxes so an Ollama-backed CLI can reach the
-      # daemon directly; postgres/redis are not on this network.
-      - haive-models
 
   api:
     build:
@@ -214,8 +212,8 @@ services:
         RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-v1.0.1}
         RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436}
     image: ${HAIVE_INSTALL_ID:-haive}-cli-sandbox:latest
-    profiles: ["sandbox"]
-    command: ["true"]
+    profiles: ['sandbox']
+    command: ['true']
 
   web:
     build:
@@ -242,6 +240,24 @@ services:
       HAIVE_EDITOR_ORIGIN: ${HAIVE_EDITOR_ORIGIN:-}
     networks:
       - haive-network
+
+  # Sandboxes resolve the daemon's existing names to this inference/read-only
+  # gate on haive-models. Only the gate reaches the daemon on haive-network.
+  ollama-gate:
+    build:
+      context: ./docker/ollama-gate
+      dockerfile: Dockerfile
+    container_name: ${HAIVE_INSTALL_ID:-haive}-ollama-gate
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      haive-network:
+      haive-models:
+        aliases:
+          - ollama
+          - ${HAIVE_INSTALL_ID:-haive}-ollama
 
   # Injects thinking:{type:"disabled"} into Ollama Cloud /v1/messages requests for
   # providers with the per-provider "Disable model thinking" toggle on. Dual-homed
@@ -278,18 +294,17 @@ networks:
   haive-network:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-network
-  # Sandbox<->API only: the api and the per-task sandboxes join this; postgres,
-  # redis, etc. do NOT, so agent code can reach rag_search but not the queues/DB.
-  # internal = no NAT/internet, so it provides ONLY api access — internet is
-  # governed by the sandbox's policy network (default bridge / squid / none).
+  # Sandbox<->API and cloud compatibility proxies: postgres/redis do NOT join,
+  # so agent code can reach rag_search and those proxies but not the queues/DB.
+  # internal = no NAT/internet; other internet access is governed by the
+  # sandbox's policy network (default bridge / squid / none).
   haive-sandbox:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-sandbox
     internal: true
-  # Sandbox<->Ollama only: the ollama service and the per-task sandboxes join
-  # this; postgres/redis do NOT, so a local Ollama-backed CLI reaches the daemon
-  # at http://ollama:11434 without widening the sandbox's reach. internal = no
-  # NAT/internet (the model is in-stack).
+  # Sandbox<->Ollama gate only: the daemon, postgres and redis do NOT join.
+  # The gate owns the daemon's names here and forwards only inference/read-only
+  # endpoints, preventing sandboxes from changing shared models. No NAT/internet.
   haive-models:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-models

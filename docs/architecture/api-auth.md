@@ -192,7 +192,7 @@ stays open to them because the settings page and the status panel run it on load
 - For a Modelfile provider the `FROM` base is what gets pulled; its own model name is a `/api/create` target and is not checked.
 - The worker re-reads the owner's current role and applies the policy just before it would pull or create, at provisioning and at the boot re-pull. A model that is already resident stays `ready`. A disallowed one is skipped with a warn and settles `idle` with no error, and boot goes on.
 
-Names compare as Ollama resolves them: registry `registry.ollama.ai`, namespace `library` and tag `latest` by default, case-insensitive, distinct tags distinct. A digest or a URL is refused. External Ollama endpoints are not gated: they pull on someone else's daemon. Known limit: a sandboxed agent on the models network can still reach the daemon's own admin API directly.
+Names compare as Ollama resolves them: registry `registry.ollama.ai`, namespace `library` and tag `latest` by default, case-insensitive, distinct tags distinct. A digest or a URL is refused. External Ollama endpoints are not gated: they pull on someone else's daemon. Sandboxed agents reach only the inference/read-only [Ollama gate](sandbox.md#in-stack-model-access) on the models network; the daemon is not attached there.
 
 **What an administrator types is dialled unguarded, by decision.** The guard protects the install from users who
 are not administrators; an administrator already controls the install, so the dials only an administrator can
