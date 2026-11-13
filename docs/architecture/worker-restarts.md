@@ -49,11 +49,19 @@ made it. A move never counts toward
   like the parked ones. Without agent work it is reset and re-run. That recovery reset keeps durable
   `apply_receipt` records and their approved detect/form inputs; explicit Retry or an
   upstream rerun clears receipts, including a pending downstream row that holds one.
+  Explicit resets also advance a pending downstream `11g-save-database` row's generation:
+  its durable decision lives outside the step row and has no apply receipt. A pristine
+  pending save row is reset too, avoiding a separate read that could race publication.
+  This applies to step/task Retry, fan-out and loop Resume, Retry with AI, provider
+  switches, Skip's task move, and worker recheck/fix-loop/revise resets. The task move
+  includes only pending durable rows downstream in the same round; a task restart
+  through START settles pending save rows as well. Recovery preserves their generations.
   Only explicit resets increment `rerun_generation`;
   recovery's epoch bump fences old jobs without declaring new work. Environment-image
   builds reconcile a completed tag carrying their `haive.apply-id` label. Custom
-  migrations reuse a recorded outcome and fail with inspect/Retry/Skip guidance when
-  their outcome is unknown, rather than executing again.
+  migrations reuse a recorded success only after its durability snapshot was recorded
+  complete, and fail with inspect/Retry/Skip guidance when their outcome or durability
+  is unknown, rather than executing again.
 
 Rollback: revert the code and keep the columns (0233 and 0234 are additive). Old Retry paths
 do not clear receipts, so before rolling forward again run

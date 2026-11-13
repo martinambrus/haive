@@ -117,8 +117,13 @@ unsubmitted, genuinely waiting gates, preserving their evidence and all human de
 **Custom migration approvals survive recovery.** `06a-db-migrate` writes a durable
 `task_steps.apply_receipt` with a unique run identity immediately before execution,
 after DDEV startup and the Drupal connection probe, and records the command's outcome before the optional durability snapshot. A replay reuses a known
-result and still takes the non-fatal migrated-database durability snapshot. A missing
-result means the command may have run: the step fails with a clear
+result only when the receipt also records completion of its post-success durability
+snapshot, then still takes the non-fatal migrated-database snapshot. A successful
+command without that completion marker cannot prove its changes survived a cold
+restore; the step fails before any command or snapshot, including on a warm replay
+or an older receipt without the marker. Existing custom receipts bypass the Drupal
+pre-flight skip so an older restored database cannot hide an unconfirmed execution.
+A missing result likewise means the command may have run: the step fails with a clear
 sentence asking the user to inspect the database before choosing Retry or Skip. Retry
 and Retry with AI clear the receipt and authorize a fresh run; Retry with AI keeps
 the save-decision generation and approved form values. Edited commands, including commands
