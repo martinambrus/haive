@@ -2,7 +2,7 @@
 
 **A user who must change their password is refused by the api, not only by the web.**
 `users.must_change_password` is set where a password the holder did not choose is minted
-(`POST /admin/users`, `reset_password`) and cleared by exactly one writer, `PUT /user-settings/password`.
+(`POST /admin/users`, `reset_password`) and cleared by `PUT /user-settings/password` and by a completed password reset (`POST /auth/reset-password`, below).
 While it is set `requireAuth` (`middleware/auth.ts`) answers 403 `must_change_password` on every route
 it guards, an administrator included. `requireAuthAllowingPasswordChange` guards exactly two routes,
 `GET /auth/me` (the app layout reads the flag there) and `PUT /user-settings/password`; login, register,
@@ -387,4 +387,31 @@ seed fields. All seeds use SET NX: existing administrator choices win on restart
 already lives in the base Compose file (`axllent/mailpit:latest`, persistent `mailpit_data`);
 the dev override publishes its SMTP and web ports. The Nodemailer dependency and lockfile change
 require `pnpm docker rebuild` when this branch is deployed to a dev stack. Roll back by reverting
-the mail commit; unused config keys are harmless. No recovery routes are added by this feature.
+the mail commit; unused config keys are harmless.
+
+## Password recovery
+
+`GET /auth/forgot-password/available` reports whether SMTP mail is enabled; the login page shows
+**Forgot password?** only then. `POST /auth/forgot-password {email}` shares the login throttle and
+always answers the same 202, for unknown accounts, disabled mail, throttle refusals and delivery
+failures alike. Lookup, issuance and SMTP delivery run in-process after the reply, so the raw link
+never sits in Redis or a queue. Failure logs carry fixed codes, never the address, token or SMTP text.
+
+A readable blind-index match gets a reset link at its stored address. Otherwise a claim is allowed
+only after a `config.discard_unreadable_secrets` audit row exists, and only when exactly one user whose
+email fails `tryDecryptEmail` has a plaintext `git_email` equal to the typed one (trimmed,
+case-insensitive). The typed address is stored encrypted on the reset row and the link goes to it.
+Zero or several matches send nothing; those rows are relinked by an administrator.
+
+Tokens are 32 random bytes; only their SHA-256 is stored in `password_resets`. A link expires after
+30 minutes, and a new request invalidates the user's earlier unconsumed links. Issuance serializes on
+the user row and commits its required `auth.password_reset.request` audit row with the token.
+
+`POST /auth/reset-password {token, newPassword}` applies the change-password policy. One transaction
+consumes an unexpired, unconsumed token, repairs the claimed email and blind index when it is a
+claim, sets the password, clears `must_change_password`, bumps `token_version`, revokes refresh
+tokens and writes `auth.password_reset.complete`. If another user holds the claimed index it answers
+409 and rolls everything back, consumption included. Invalid, expired, superseded and consumed tokens
+share one 400. After commit the user's API sockets close and the browser's auth cookies are cleared;
+the web returns to login with a notice. Rollback: revert the feature; `password_resets` stays unused
+or a later migration drops it. Passwords already reset are not undone by a revert.
