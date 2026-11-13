@@ -141,6 +141,14 @@ const startChild = (command: string, args: string[], options: ExecFileOptions, c
   child = run.child;
   return run;
 };
+// Git creates config.lock before installing its tempfile signal handler. The later
+// blocking FIFO open proves that cleanup is armed before the fake deadline fires.
+async function waitForConfigFifo(config: string): Promise<void> {
+  await until('git blocked opening its config FIFO for reading (wait_for_partner)', () => {
+    if (!child?.pid || !existsSync(`${config}.lock`)) return false;
+    return readFileSync(`/proc/${child.pid}/wchan`, 'utf8').trim() === 'wait_for_partner';
+  });
+}
 const alive = (c: ChildProcess) => c.exitCode === null && c.signalCode === null;
 const running = (pid: number) => {
   try {
@@ -444,7 +452,7 @@ it('stops a timed-out git write with SIGTERM, so git removes its own lock file',
   const response = Promise.resolve(
     link('https://synthetic-user:synthetic-password@example.test/r'),
   );
-  await until('git took its lock', () => existsSync(`${config}.lock`));
+  await waitForConfigFifo(config);
   await vi.advanceTimersByTimeAsync(DEADLINE_MS);
   const answer = await answeredWithin(3_000, response);
   expect(answer.status).toBe(409);
@@ -643,7 +651,7 @@ it.each([false, true])(
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const response = Promise.resolve(link(submitted));
-      await until('git took its lock', () => existsSync(`${config}.lock`));
+      await waitForConfigFifo(config);
       await vi.advanceTimersByTimeAsync(DEADLINE_MS);
       const answer = await answeredWithin(3_000, response);
       expect(answer.status).toBe(restoreFails ? 500 : 409);
