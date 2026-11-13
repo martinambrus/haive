@@ -387,6 +387,16 @@ covers 08e's writes and quick_bugfix's 08b; a leftover untracked file trips it t
 ms per fingerprint on a 90-file change. A capped file list is attributed to the check it was given to
 ("the validator" or "the code review").
 
+## Author task failure and cancellation
+
+`reconcileKbAuthorEntryOnTaskEnd` is shared by ordinary worker failure, Stop settlement and
+Cancel teardown. Failure (including Stop alone) marks a skeleton or enriching entry failed and
+keeps it for retry. Cancel removes skeleton, enriching and failed entries, so a later Cancel also
+removes an entry that Stop or a worker failure already marked failed. The write matches both the
+source task and its user, refuses an entry carrying an enforcement approval, and leaves draft,
+active and archived articles alone. A disabled store or another task type does nothing; store
+failures keep the existing best-effort teardown behaviour.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a
