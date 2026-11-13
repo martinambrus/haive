@@ -35,7 +35,8 @@ export function DdevRebuildDialog({
 }: {
   taskId: string | null;
   onClose: () => void;
-  onQueued: (notice: string) => void;
+  /** `forTaskId` is the task the request was for; the page may have moved on by the reply. */
+  onQueued: (notice: string, forTaskId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +46,7 @@ export function DdevRebuildDialog({
   }
   async function confirm() {
     if (!taskId || busy) return;
+    const forTaskId = taskId;
     setBusy(true);
     setError(null);
     try {
@@ -58,6 +60,7 @@ export function DdevRebuildDialog({
           : result.removed === true
             ? 'DDEV runner removed; recovery is queued. A failed step stays failed; Retry it after the runtime is ready.'
             : 'DDEV recovery is queued for an already absent runner. A failed step stays failed; Retry it after the runtime is ready.',
+        forTaskId,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to queue DDEV rebuild');

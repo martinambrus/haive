@@ -720,6 +720,8 @@ export default function TaskDetailPage() {
   const [runningCallCount, setRunningCallCount] = useState(0);
   const [rebuildDdevOpen, setRebuildDdevOpen] = useState(false);
   const [rebuildDdevNotice, setRebuildDdevNotice] = useState<string | null>(null);
+  const currentTaskId = useRef(id);
+  currentTaskId.current = id;
   const [finishedRunsRevision, setFinishedRunsRevision] = useState('');
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
@@ -2462,7 +2464,9 @@ export default function TaskDetailPage() {
       <DdevRebuildDialog
         taskId={rebuildDdevOpen ? id : null}
         onClose={() => setRebuildDdevOpen(false)}
-        onQueued={(notice) => {
+        onQueued={(notice, forTaskId) => {
+          // The reply can arrive after the page moved to another task.
+          if (forTaskId !== currentTaskId.current) return;
           setRebuildDdevOpen(false);
           setRebuildDdevNotice(notice);
         }}

@@ -41,12 +41,17 @@ vi.mock('@/components/ddev-rebuild-dialog', async (original) => ({
     onQueued,
   }: {
     taskId: string | null;
-    onQueued: (notice: string) => void;
+    onQueued: (notice: string, forTaskId: string) => void;
   }) =>
     taskId ? (
-      <button onClick={() => onQueued('DDEV rebuild requested for this test.')}>
-        Confirm test rebuild
-      </button>
+      <>
+        <button onClick={() => onQueued('DDEV rebuild requested for this test.', taskId)}>
+          Confirm test rebuild
+        </button>
+        <button onClick={() => onQueued('DDEV rebuild requested for this test.', 'other-task')}>
+          Confirm stale rebuild
+        </button>
+      </>
     ) : null,
 }));
 vi.mock('@/lib/use-cli-login', () => ({
@@ -324,6 +329,28 @@ describe('task page: DDEV rebuild notice', () => {
       expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
     },
   );
+  it('ignores a rebuild result that belongs to another task', async () => {
+    const view = await mount({ status: 'failed', pausedAt: null }, [
+      {
+        ...stepRow(),
+        stepId: '01c-ddev-env',
+        status: 'failed',
+        detectOutput: { ddevConfigured: true },
+      },
+    ]);
+    await menuLabels(view);
+    fire.click(
+      findAll(
+        view.tree(),
+        (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Rebuild DDEV',
+      )[0]!,
+    );
+    await view.flush();
+    fire.click(buttons(view.tree(), /confirm stale rebuild/i)[0]!);
+    await view.flush();
+    expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
+  });
+
   it('lets the user dismiss the notice', async () => {
     const view = await requested();
     const dismiss = findAll(
