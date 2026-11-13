@@ -1713,15 +1713,6 @@ Split from T499/T500/T519 so correctness work does not automatically authorize t
 
 10. From T519 item5: worker queues/usage-poll-queue.ts: provider-recovery polling pays up to four seconds per refused task, serially. Consider a bounded batch if measured latency matters.
 
-### T526 · FNF[save-index-candidates] · verify stale staging and plan-deletion index-repair retries
-
-status: open (VERIFIED 2026-11-13, opt-in controls `GIT_PROBES=1` on branch `verify/git-probes` (worktree sec-GIT), red on main 9eb52c34e, re-run by the session: `worker/test/git-save-index-probes.test.ts`, all CONSEQUENTIAL. 1: after an index-lock failure a later committing Save reports synced but keeps an older owned blob staged, and an ordinary commit reverts the setting (expected `2`, got `1`); repair every owned stale name at `_stage-paths.ts` ~:448, keeping unrelated staging. 2 and 3: a repeat Save after a failed index sync reports success while `plan.json` / `plan.md` deletion stays unstaged, and an ordinary commit resurrects them; recover deletion intent from the index at `project-state/commit.ts` ~:128) · executable: 1, 2 · priority: P2
-Split from T521 items1/2, 2026-11-01. Establish a current supported reproduction and preserve unrelated staged changes before implementation; do not expand to generic Git/index cleanup.
-
-1. From T521 item1: onboarding/_stage-paths.ts known-path staging can retain stale index entries during a committing-path save. Recompute the owned path set and compare held HEAD before declaring index sync complete.
-
-2. From T521 item2: project-state/commit.ts plan-file removal/no-op repair (~:105) rebuilds deletion intent from current disk and HEAD, so a prior removed projection can be absent from both after an index-sync failure; verify plan.json/plan.md removal retries separately from the fixed state-record case.
-
 ### T527 · FNF[save-index-guard-gap] · a concurrent HEAD move can follow the index-sync completion guard
 
 status: parked · reason: diminishing returns · user confirmed routine/theoretical work stays parked, 2026-11-01 · priority: P4
@@ -1877,6 +1868,7 @@ All low unless marked.
 
 ## Done
 
+- T526 — Save syncs committed names into the index first and repairs stale owned names separately (bounded, reported via warning and `indexSynced:false`); a staged plan deletion is recovered as a deletion intent — PR #1152 (6a3541ffc), 2026-11-13
 - T472 — onboarding reset also takes back unsynced git-data claim files the codec classes as canonical claims, under an entry and byte cap, reporting what it skipped; unknown files stay; lows in T657 — PR #1151 (ee2258d78), 2026-11-13
 - T597 — owner decision: Resume on a failed mining step whose agents all finished re-runs only the apply from the saved replies (no agent bought again); a done row with no saved reply is marked failed in the same fenced write and re-dispatched; Retry keeps the full re-run; a fan-out loop step (`iterationCount > 0`) keeps the loop Resume arm; web shows "Resume (apply saved replies)" on structural columns only. Not live-checked: the only eligible steps on the dev install belong to cancelled tasks — PR #1149 (f3ce0c2aa), 2026-11-13.
 - T532 — owner decision: module install sources are git-only (API body, client type, admin dialog); stored registry rows stay readable as unsupported, deletable with token and audit, fetch refused with 400 `module_source_kind_unsupported`; `module_sources` CHECK constraints kept for a later two-phase cleanup (migrate or delete remaining registry rows, then tighten in a new migration); api, worker and web reloaded — PR #1147 (548013da4), 2026-11-13.
