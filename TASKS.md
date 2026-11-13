@@ -875,6 +875,11 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 status: done 2026-11-13 #1126 (6f1e2223e): the shared boundary lookup uses fs-safe strict mode; only ENOENT/ENOTDIR read as absent, every other failure (EACCES, EIO, a link in the path) refuses the run before a container starts; an IDE boot refuses a worktree subpath with a link or non-directory parent; lows in T641 · kind: fix · found: #1125 review 2026-11-13 · priority: P2
 PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
 
+### T658 · FNF[ci-flakes-2] · relink SIGTERM lock-file assertion flakes in CI
+
+status: open · kind: fix · found: PR #1150 CI 2026-11-13 (run 43513569849, job 132189652198) · priority: P3
+PRE-EXISTING. `packages/api/test/repo-link-remote.test.ts` ~:433 "stops a timed-out git write with SIGTERM, so git removes its own lock file" failed once with `existsSync(config.lock)` true after the 409 answer; unrelated PR (worker-only diff), rerun of the failed job only. Likely cause: the route answers before the SIGTERMed git child has exited (git removes `config.lock` in its signal handler), so the assertion races the child's exit. Find the real cause first (does the relink wait for the child's `exit`/`close` before answering? `relink-git.ts` on the open T508 branch reshapes this path), then make the test deterministic (await the child's exit, not wall time) or make the route wait for the child; no CI change, no retry.
+
 ### T657 · FNF[reset-claim-sweep-lows] · onboarding reset claim sweep lows, after #1151 (+4)
 
 status: open · kind: fix · found: #1151 review 2026-11-13 · priority: P4
