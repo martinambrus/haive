@@ -30,6 +30,7 @@ import {
   discardDatabaseSnapshot,
   sweepDatabaseSnapshots,
   withSnapshotStep,
+  saveGeneration,
 } from '../../../repo/database-snapshots.js';
 
 type Detected = Awaited<ReturnType<typeof loadDatabaseSnapshotState>>;
@@ -219,6 +220,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
                 candidateSnapshotId: null,
                 candidateStepId: null,
                 decisionEpoch: d.epoch,
+                decisionGeneration: await saveGeneration(tx, ctx.taskStepId),
               })
               .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
           });

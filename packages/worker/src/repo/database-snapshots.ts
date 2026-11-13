@@ -176,7 +176,7 @@ export async function withSnapshotStep<T>(
     .catch(snapshotLockFailure);
 }
 
-async function saveGeneration(tx: DbTx, taskStepId: string) {
+export async function saveGeneration(tx: DbTx, taskStepId: string) {
   const step = await tx.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, taskStepId) });
   if (!step) throw new StepSupersededError(taskStepId);
   return step.rerunGeneration ?? 0;

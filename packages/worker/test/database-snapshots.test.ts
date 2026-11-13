@@ -36,6 +36,7 @@ import {
 } from '../src/repo/database-snapshots.js';
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
+import * as taskMeta from '../src/step-engine/steps/workflow/_task-meta.js';
 
 const runtime = vi.hoisted(() => ({ import: vi.fn(), config: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
@@ -392,6 +393,31 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     iteration: 0,
     previousIterations: [],
   });
+  it('keeps an export error on the reopened form after an explicit generation reset', async () => {
+    const ctx = await task('retried export');
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 2 })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    const workspace = vi.spyOn(taskMeta, 'resolveDdevWorkspace').mockResolvedValueOnce(null);
+    try {
+      await expect(saveDatabaseStep.apply(ctx, saveArgs('save:0'))).rejects.toThrow(
+        'Database export failed',
+      );
+    } finally {
+      workspace.mockRestore();
+    }
+    const detected = await loadDatabaseSnapshotState(ctx);
+    expect(detected!.state).toMatchObject({
+      outcome: 'pending',
+      exportError: 'No DDEV workspace is available',
+      decisionGeneration: 2,
+    });
+    expect(databaseSaveForm(detected)?.description).toContain(
+      'Database export failed: No DDEV workspace is available',
+    );
+  });
+
   it('requires explicit approval before saving even with a ready candidate', async () => {
     const a = await task('manual decision');
     const saved = await candidate(a);
