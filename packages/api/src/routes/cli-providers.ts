@@ -16,6 +16,9 @@ import {
   DEFAULT_AGENT_RULES,
   inheritsDefaultRules,
   isOllamaCloudModel,
+  isInStackOllamaBaseUrl,
+  parseModelfile,
+  OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
   isRunnableCliVersion,
   logger,
   normalizeCliArgsArray,
@@ -36,6 +39,7 @@ import {
   type SandboxImageBuildJobPayload,
   type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
+import { mayPullOllamaModel } from '../lib/ollama-pull-policy.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { z } from 'zod';
 import {
@@ -196,12 +200,32 @@ async function enqueueBuildForProvider(providerId: string, userId: string): Prom
   });
 }
 
-/** True when a provider has an in-stack Ollama model worth provisioning. Cloud
- *  (-cloud) models run on ollama.com and external remote daemons aren't ours to
- *  build, so both are skipped (the worker also re-checks and settles those to
- *  'idle'). */
+/** Cloud models are never provisioned. External endpoints retain their queued
+ * no-op: the worker recognizes them by hostname and settles their status to idle. */
 function shouldProvisionOllamaModel(p: { name: string; model: string | null }): boolean {
   return p.name === 'ollama' && !!p.model && !isOllamaCloudModel(p.model);
+}
+
+async function assertOllamaSaveAllowed(
+  role: string,
+  provider: {
+    name: string;
+    model: string | null;
+    modelfile?: string | null;
+    envVars?: Record<string, string> | null;
+  },
+): Promise<void> {
+  if (
+    !shouldProvisionOllamaModel(provider) ||
+    !isInStackOllamaBaseUrl(provider.envVars?.ANTHROPIC_BASE_URL)
+  )
+    return;
+  const from = provider.modelfile ? parseModelfile(provider.modelfile).from : undefined;
+  for (const model of [provider.model!, ...(from ? [from] : [])]) {
+    if (!(await mayPullOllamaModel(role, model))) {
+      throw new HttpError(403, OLLAMA_MODEL_NOT_ALLOWED_MESSAGE, 'ollama_model_not_allowed');
+    }
+  }
 }
 
 /** Enqueue the worker job that pulls (or builds, when a Modelfile is set) a provider's
@@ -399,7 +423,9 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   );
   const split = body.envVars ? splitSecretLikeEnv(body.envVars) : null;
   const model = body.model?.trim() || null;
-  const provisioningModel = shouldProvisionOllamaModel({ name: body.name, model });
+  const candidate = { name: body.name, model, modelfile: body.modelfile, envVars: split?.envVars };
+  await assertOllamaSaveAllowed(c.get('userRole'), candidate);
+  const provisioningModel = shouldProvisionOllamaModel(candidate);
   let secretEvent: AuditEvent | undefined;
   const inserted = await db.transaction(async (tx) => {
     await admitNewWork(tx);
@@ -567,9 +593,17 @@ cliProviderRoutes.patch('/:id', async (c) => {
   // themselves are written by the worker from observed failures, never by the client.
   if (body.clearModelLimits) updates.modelLimits = null;
 
-  const model = updates.model === undefined ? existing.model : updates.model;
-  const provisioningModel =
-    modelInputsChanged && shouldProvisionOllamaModel({ name: existing.name, model });
+  const candidate = { ...existing, ...updates };
+  // Moving an external endpoint back into the shared daemon also needs provisioning.
+  if (
+    updates.envVars !== undefined &&
+    updates.envVars?.ANTHROPIC_BASE_URL !== existing.envVars?.ANTHROPIC_BASE_URL &&
+    isInStackOllamaBaseUrl(candidate.envVars?.ANTHROPIC_BASE_URL)
+  ) {
+    modelInputsChanged = true;
+  }
+  await assertOllamaSaveAllowed(c.get('userRole'), candidate);
+  const provisioningModel = modelInputsChanged && shouldProvisionOllamaModel(candidate);
   const startsJob = imageInputsChanged || provisioningModel;
   if (startsJob) {
     await assertNewWorkAllowed();
@@ -623,6 +657,20 @@ cliProviderRoutes.patch('/:id', async (c) => {
         .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
         .for('no key update');
       if (!current) throw new HttpError(404, 'CLI provider not found');
+      // Policy reads happen before the transaction (ConfigService uses Redis).
+      // A concurrent save must not substitute unchecked model inputs afterward.
+      if (
+        existing.name === 'ollama' &&
+        (current.model !== existing.model ||
+          current.modelfile !== existing.modelfile ||
+          !isDeepStrictEqual(current.envVars, existing.envVars))
+      ) {
+        throw new HttpError(
+          409,
+          'Ollama provider settings changed. Reload and try again.',
+          'ollama_provider_changed',
+        );
+      }
       // A concurrent PATCH may have committed between our read and lock acquisition.
       // Refuse rather than write under a lock for settings the row no longer has.
       if (
@@ -920,6 +968,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   });
   if (!source) throw new HttpError(404, 'CLI provider not found');
   assertOllamaHasModel(source.name, source.model);
+  await assertOllamaSaveAllowed(c.get('userRole'), source);
 
   const newLabel = await nextAvailableCloneLabel(db, userId, source.label);
 

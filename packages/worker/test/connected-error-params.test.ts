@@ -252,7 +252,8 @@ it.each([true, false])(
 it.each([true, false])(
   'Ollama provisioning stores and returns a safe ready-write failure (bound: %s)',
   async (bound) => {
-    const fake = createFakeDb({ cliProviders: schema.cliProviders });
+    const fake = createFakeDb({ cliProviders: schema.cliProviders, users: schema.users });
+    fake.insert(schema.users, { id: USER, role: 'admin' });
     fake.insert(schema.cliProviders, {
       id: PROVIDER,
       userId: USER,
@@ -268,6 +269,7 @@ it.each([true, false])(
     vi.stubGlobal('fetch', fetch);
     const result = await provisionOllamaProvider(fake.db as unknown as Database, {
       id: PROVIDER,
+      userId: USER,
       model: 'fixture-model',
       modelfile: null,
       envVars: null,

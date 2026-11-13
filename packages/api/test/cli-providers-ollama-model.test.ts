@@ -10,6 +10,7 @@ vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
+    c.set('userRole', 'admin');
     await next();
   },
 }));

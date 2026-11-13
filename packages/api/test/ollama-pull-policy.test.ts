@@ -87,13 +87,14 @@ describe('Ollama pull authorization before the stream and upstream request', () 
     const res = await pull('unlisted:70b');
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({
-      error: expect.stringMatching(/provider.*Global KB.*administrator/i),
+      error: expect.stringMatching(/Global KB.*administrator/i),
     });
     expect(h.fetchFn).not.toHaveBeenCalled();
   });
-  it('allows a model in the caller’s provider config', async () => {
+  it('does not authorize a model solely from the caller’s provider config', async () => {
     fake.insert(schema.cliProviders, { userId: USER, name: 'ollama', model: 'qwen3:8b' });
-    await allowed('qwen3:8b');
+    expect((await pull('qwen3:8b')).status).toBe(403);
+    expect(h.fetchFn).not.toHaveBeenCalled();
   });
   it('does not borrow another user’s provider model', async () => {
     fake.insert(schema.cliProviders, { userId: OTHER, name: 'ollama', model: 'private:8b' });
@@ -106,6 +107,13 @@ describe('Ollama pull authorization before the stream and upstream request', () 
   });
   it('keeps the onboarding embedding default pullable after the Global KB model changes', async () => {
     stored.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'nomic-embed-text');
+    await allowed(DEFAULT_EMBED_MODEL);
+  });
+  it('keeps embedding models pullable without reading an unavailable allowlist', async () => {
+    vi.mocked(configService.get).mockImplementation(async (key) => {
+      if (key === KEY) throw new Error('allowlist store down');
+      return null;
+    });
     await allowed(DEFAULT_EMBED_MODEL);
   });
   it('allows the effective Global KB default without a stored key', async () => {
