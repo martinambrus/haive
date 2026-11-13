@@ -8,6 +8,7 @@ import { logger } from '@haive/shared';
 import { usableCheckout } from '../src/repo/refresh.js';
 import { failGit, noGit, type FakeGit } from './support/fake-git.js';
 import { killGit } from './support/kill-git.js';
+import { gitTemplate } from './support/git-template.js';
 
 /** Reads that fail with EIO. fs-safe's rule for an errno other than absence: null from a lenient
  *  read, a throw from a strict one. Root cannot make a real EACCES, so this stands in for it. */
@@ -52,6 +53,12 @@ async function cdupExit(dir: string): Promise<number> {
 }
 /** git exited non-zero, no structure proves the checkout dead, and only a repair changes that. */
 const needsRepair = { unknown: expect.any(String), repairNeeded: true };
+const intactTemplate = gitTemplate(async (dir) => {
+  await git(dir, ['init', '-b', 'main']);
+  await writeFile(path.join(dir, 'a.txt'), 'x\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'a']);
+});
 
 describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   const dirs: string[] = [];
@@ -76,11 +83,8 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   }
 
   async function intact(): Promise<string> {
-    const dir = await tmp();
-    await git(dir, ['init', '-b', 'main']);
-    await writeFile(path.join(dir, 'a.txt'), 'x\n', 'utf8');
-    await git(dir, ['add', '-A']);
-    await git(dir, ['commit', '-m', 'a']);
+    const { dir } = await intactTemplate.copy();
+    dirs.push(dir);
     return dir;
   }
 
@@ -110,13 +114,13 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('ENOENT') });
   });
 
-  it('a HEAD read that exits 128 is unknown, one that exits 1 is unusable', async () => {
+  it('HEAD exits 128 and 1 stay unknown while the branch ref exists', async () => {
     const dir = await intact();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 128 });
     expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 128', repairNeeded: true });
     await shim.restore();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 1 });
-    expect(await usableCheckout(dir)).toBe('unusable');
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   // Display only: what git said is for whoever reads the log; nothing branches on it.
@@ -146,13 +150,13 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     );
   });
 
-  it('a HEAD read that exits 1 is an answer, and says nothing', async () => {
+  it('a HEAD read that exits 1 cannot prove unborn while the branch ref exists', async () => {
     const dir = await intact();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], {
       exit: 1,
       stderr: 'fatal: not logged\n',
     });
-    expect(await usableCheckout(dir)).toBe('unusable');
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
     expect(warn).not.toHaveBeenCalled();
   });
 

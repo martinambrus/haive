@@ -45,6 +45,7 @@ import { lockProjectState, recoverProjectStateWrite } from '../project-state/wri
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GitOperationUnreadableError } from './git-operation.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
+import { provesUnbornHead } from './unborn-head.js';
 import {
   buildCredentialHelper,
   detectOrigin,
@@ -110,16 +111,16 @@ const REPAIR_ADVICE =
   'Retry cannot help until the checkout is repaired. Removing the repository deletes this checkout, including any commit that was never pushed.';
 
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on.
- *  `unusable`: a different top level, HEAD exit 1, `dest` itself absent or not a directory when git
- *  gave no answer, or, after `--show-cdup` exited non-zero, a `.git` that strict no-follow reads
+ *  `unusable`: a different top level, a positively unborn branch, `dest` itself absent or not a
+ *  directory when git gave no answer, or, after `--show-cdup` exited non-zero, a `.git` that strict no-follow reads
  *  prove is not what git requires: absent; a directory without HEAD, with a HEAD that is neither a
  *  `ref:` line nor an object id, or without objects/ or refs/ (unless a commondir names their
  *  home); a file that does not start with `gitdir: `; or a file naming a gitdir inside `dest` that
  *  is absent.
  *  `unknown`: git gave no answer while `dest` is a directory, or exited non-zero over a `.git` those
  *  reads cannot prove dead (a corrupt config, unreadable, linked or external metadata), or a HEAD
- *  read other than exit 0 or 1. `repairNeeded` marks the ones where git answered with an exit
- *  status of its own.
+ *  read other than exit 0, unless an exit 1 is positively unborn. `repairNeeded` marks the ones
+ *  where git answered with an exit status of its own.
  *  An ordinary refresh never rebuilds unknown metadata; explicit recovery may retain it aside. */
 export async function usableCheckout(
   dest: string,
@@ -197,7 +198,13 @@ export async function usableCheckout(
   if (cdup.stdout.trim() !== '') return 'unusable';
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (head.code === 0) return 'usable';
-  if (head.code === 1) return 'unusable';
+  if (head.code === 1) {
+    if (await provesUnbornHead(dest)) return 'unusable';
+    return {
+      unknown: 'HEAD is unresolved and an unborn branch could not be proved',
+      repairNeeded: true,
+    };
+  }
   if (gitGaveNoAnswer(head)) return { unknown: whyNoAnswer(head) };
   // For the reader of the log only: nothing branches on git's words.
   logger.warn(

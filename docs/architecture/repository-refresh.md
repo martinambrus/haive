@@ -21,7 +21,7 @@ the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for t
 here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and
 the rebuild renames; what it can cost is a git lock collision that fails one side, which a Retry
 clears. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. A rebuild needs proof that the checkout is unusable at its own top level. Exit 1 of the quiet HEAD
-probe proves no commit; a failed top-level probe needs strict no-follow structural reads proving
+probe is not proof alone, since a broken branch ref exits 1 too: `provesUnbornHead` needs HEAD to name a branch and a clean, empty enumeration of it; a failed top-level probe needs strict no-follow structural reads proving
 missing or invalid metadata before it can justify a rebuild. A corrupt config, unreadable metadata,
 external git dir or a command that gave no answer is unknown. That path ends in `error`, moves
 nothing and does not import mirrors from an unchecked tree. When git returned an error status, the

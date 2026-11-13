@@ -14,8 +14,15 @@ import {
 } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { killGit, type KilledGit } from './support/kill-git.js';
+import { gitTemplate } from './support/git-template.js';
 
 const run = promisify(execFile);
+const emptyRepository = gitTemplate(async (repo) => {
+  await run('git', ['-C', repo, 'init', '-q']);
+  await run('git', ['-C', repo, 'config', 'user.email', 't@example.com']);
+  await run('git', ['-C', repo, 'config', 'user.name', 'T']);
+  await run('git', ['-C', repo, 'config', 'gc.auto', '0']);
+});
 
 describe('appliedWrittenPaths', () => {
   it('drops git data aliases from every persisted path list', () => {
@@ -99,11 +106,7 @@ describe('headLacksImport', () => {
   let shim: KilledGit | null = null;
 
   beforeEach(async () => {
-    repo = await mkdtemp(join(tmpdir(), 'haive-upgrade-commit-'));
-    await run('git', ['-C', repo, 'init', '-q']);
-    await run('git', ['-C', repo, 'config', 'user.email', 't@example.com']);
-    await run('git', ['-C', repo, 'config', 'user.name', 'T']);
-    await run('git', ['-C', repo, 'config', 'gc.auto', '0']);
+    ({ dir: repo } = await emptyRepository.copy());
   });
 
   afterEach(async () => {
@@ -141,10 +144,10 @@ describe('headLacksImport', () => {
     expect(await headLacksImport(repo, 'CLAUDE.md')).toBe(false);
   });
 
-  it('is true in a directory that is not a repository yet', async () => {
+  it('cannot prove an import missing outside a repository', async () => {
     const bare = await mkdtemp(join(tmpdir(), 'haive-upgrade-norepo-'));
     try {
-      expect(await headLacksImport(bare, 'CLAUDE.md')).toBe(true);
+      expect(await headLacksImport(bare, 'CLAUDE.md')).toBe(false);
     } finally {
       await rm(bare, { recursive: true, force: true });
     }
@@ -171,11 +174,7 @@ describe('agentsRulesVerdict', () => {
   let shim: KilledGit | null = null;
 
   beforeEach(async () => {
-    repo = await mkdtemp(join(tmpdir(), 'haive-agents-verdict-'));
-    await run('git', ['-C', repo, 'init', '-q']);
-    await run('git', ['-C', repo, 'config', 'user.email', 't@example.com']);
-    await run('git', ['-C', repo, 'config', 'user.name', 'T']);
-    await run('git', ['-C', repo, 'config', 'gc.auto', '0']);
+    ({ dir: repo } = await emptyRepository.copy());
   });
 
   afterEach(async () => {
@@ -197,11 +196,14 @@ describe('agentsRulesVerdict', () => {
     expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
   });
 
-  it('stages a rules block in a directory that is not a repository yet', async () => {
+  it('cannot compare rules outside a repository', async () => {
     const bare = await mkdtemp(join(tmpdir(), 'haive-agents-norepo-'));
     try {
       await writeFile(join(bare, 'AGENTS.md'), RULES('- rule one'));
-      expect(await agentsRulesVerdict(bare)).toEqual({ verdict: 'stage' });
+      expect(await agentsRulesVerdict(bare)).toEqual({
+        verdict: 'unknown',
+        reason: expect.any(String),
+      });
     } finally {
       await rm(bare, { recursive: true, force: true });
     }
