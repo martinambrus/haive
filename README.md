@@ -144,14 +144,12 @@ pnpm docker:down
 These are the fixed ports `docker-compose.dev.yml` publishes for the source build. A release
 install probes for free ports instead and writes what it chose into its own `.env`.
 
-| Service      | Host port | Container port | URL / DSN                                 |
-| ------------ | --------- | -------------- | ----------------------------------------- |
-| Web (Next)   | 3000      | 3000           | http://localhost:3000                     |
-| API (Hono)   | 3001      | 3001           | http://localhost:3001/health              |
-| PostgreSQL   | 5432      | 5432           | postgres://haive:...@localhost:5432/haive |
-| Redis        | 6379      | 6379           | redis://localhost:6379                    |
-| Mailpit SMTP | 1085      | 1025           | smtp://localhost:1085                     |
-| Mailpit UI   | 8085      | 8025           | http://localhost:8085                     |
+| Service    | Host port | Container port | URL / DSN                                 |
+| ---------- | --------- | -------------- | ----------------------------------------- |
+| Web (Next) | 3000      | 3000           | http://localhost:3000                     |
+| API (Hono) | 3001      | 3001           | http://localhost:3001/health              |
+| PostgreSQL | 5432      | 5432           | postgres://haive:...@localhost:5432/haive |
+| Mailpit UI | 8085      | 8025           | http://localhost:8085                     |
 
 Mailpit ports are shifted from the upstream defaults (1025/8025) because ddev binds those on many developer machines. If you do not run ddev, you may safely move them back in `docker-compose.dev.yml`.
 

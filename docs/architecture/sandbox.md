@@ -298,6 +298,15 @@ are forwarded unchanged. Traversal, encoded path, trailing-slash and case varian
 are refused, and method-override headers are removed. This closes direct mutation of
 shared models by sandboxed agents while keeping provider URLs unchanged.
 
+On the dev stack, a published port bypasses all of this. A sandbox under the `full` policy
+(every provider's default) is on Docker's default bridge and reaches any published port: through the
+bridge gateway when it binds all interfaces, and on Docker Desktop through `host.docker.internal`
+even when it binds 127.0.0.1 (MEASURED, Docker Desktop 29.9.2: a 127.0.0.1-bound port refused
+`172.17.0.1` and answered `host.docker.internal`). `docker-compose.dev.yml` therefore publishes
+no Redis, Ollama or Mailpit SMTP port, and only Postgres and the Mailpit UI on the loopback, for
+host tools. Those two stay reachable from a sandbox on Docker Desktop until they require a
+credential the sandbox does not hold.
+
 Only installs whose compose bundle carries the gate have it. `haive upgrade` swaps
 images and keeps the compose bundle it was installed with, so an install upgraded from
 an earlier release keeps the daemon on `haive-models` with no gate until its compose bundle is

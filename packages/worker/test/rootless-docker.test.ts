@@ -69,7 +69,7 @@ describe('sandbox models network', () => {
     '%s overlay keeps Ollama off the models network',
     async (overlay) => {
       const compose = parse(await readRepoFile(`docker-compose.${overlay}.yml`));
-      expect(compose.services.ollama.networks).toBeUndefined();
+      expect(compose.services?.ollama?.networks).toBeUndefined();
     },
   );
 });
@@ -98,5 +98,25 @@ describe('published sidecars', () => {
         expect(directories).toContain(service.build.context.slice(1));
       }
     }
+  });
+});
+
+describe('dev stack published ports', () => {
+  // A sandbox under the default `full` policy sits on Docker's default bridge and reaches
+  // every port published on all interfaces through the bridge gateway. Only the browser-facing
+  // api and web may listen there; the infrastructure ports are for host tools only.
+  const browserFacing = new Set(['api', 'web']);
+
+  it('publishes only host-used infrastructure ports, on the loopback', async () => {
+    const { services } = parse(await readRepoFile('docker-compose.dev.yml'));
+    const published = Object.entries(services as Record<string, { ports?: string[] }>)
+      .filter(([name, svc]) => !browserFacing.has(name) && svc.ports)
+      .flatMap(([name, svc]) => svc.ports!.map((port) => `${name} ${port}`));
+    // Redis, the Ollama daemon and Mailpit SMTP have no host user: published at all, a
+    // sandbox reaches them (on Docker Desktop through host.docker.internal, loopback or not).
+    expect(published.sort()).toEqual([
+      'mailpit 127.0.0.1:8085:8025',
+      'postgres 127.0.0.1:5432:5432',
+    ]);
   });
 });
