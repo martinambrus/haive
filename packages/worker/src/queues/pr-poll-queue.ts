@@ -99,6 +99,7 @@ interface PrWaitTask {
   prFinalizeMode: string | null;
   prCredentialId: string | null;
   prRemoteUrl: string | null;
+  prPollError?: string | null;
 }
 
 export async function runPrPollTick(db: Database): Promise<void> {
@@ -125,6 +126,7 @@ export async function runPrPollTick(db: Database): Promise<void> {
       prFinalizeMode: true,
       prCredentialId: true,
       prRemoteUrl: true,
+      prPollError: true,
     },
   })) as PrWaitTask[];
   if (tasks.length === 0) return;
@@ -149,7 +151,15 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
   try {
     // Already merged (auto mode) but still parked — a prior auto-advance was lost; re-drive.
     if (task.prState === 'merged') {
-      if (task.prFinalizeMode !== 'manual') await advancePrWaitStep(db, task);
+      if (task.prFinalizeMode !== 'manual') {
+        await advancePrWaitStep(db, task);
+        // A recovered re-drive clears the warning an earlier failed attempt saved.
+        if (task.prPollError)
+          await db
+            .update(schema.tasks)
+            .set({ prPollError: null, updatedAt: new Date() })
+            .where(and(eq(schema.tasks.id, task.id), isNotNull(schema.tasks.prPollError)));
+      }
       return;
     }
     // Closed without merging is surfaced in the UI; the user decides. Nothing to poll.

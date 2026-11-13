@@ -49,6 +49,41 @@ describe('merged-PR recovery visibility', () => {
       ]),
     );
   });
+  it('clears a saved poll error once a merged re-drive succeeds', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    const taskId = '11111111-1111-4111-8111-111111111111';
+    const writes: Record<string, unknown>[] = [];
+    const findFirst = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('step lookup unavailable'))
+      .mockResolvedValue(undefined);
+    const db = {
+      update: () => ({
+        set: (values: Record<string, unknown>) => {
+          writes.push(values);
+          return { where: async () => undefined };
+        },
+      }),
+      query: {
+        tasks: {
+          findMany: async () => [
+            {
+              id: taskId,
+              prState: 'merged',
+              prFinalizeMode: 'auto',
+              prPollError: (writes.at(-1)?.prPollError as string | undefined) ?? null,
+            },
+          ],
+        },
+        taskSteps: { findFirst },
+      },
+    } as unknown as Database;
+
+    await runPrPollTick(db);
+    expect(writes.at(-1)).toMatchObject({ prPollError: 'step lookup unavailable' });
+    await runPrPollTick(db);
+    expect(writes.at(-1)).toMatchObject({ prPollError: null });
+  });
   it('logs a sanitized settled rejection when persisting a poll error also fails', async () => {
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     const taskId = '11111111-1111-4111-8111-111111111111';
