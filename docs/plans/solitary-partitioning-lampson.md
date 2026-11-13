@@ -165,12 +165,14 @@ S4's runbook must allocate distinct install IDs, Compose project names, publishe
 scratch stores, with a manifest of every created resource and its ownership label before either
 worker boots. Use `pnpm docker` for the dev stack lifecycle and the generated wrapper for the
 published install. Compare positive controls (own orphan reaped) and negative controls (other
-install's running and orphan resources kept), including the default install's legacy unlabeled
-rule. Inspect task activity before restarting any worker; the test must never sweep real dev
+install's running and orphan resources kept), including the legacy unlabeled rules: the default install
+claims an unlabeled CLI sandbox (`ownsLabelValue`), while a runtime runner without the label is
+this install's only when its task (a repository editor: its repository) exists in this database,
+and the by-name editor paths accept an unlabeled editor whose install-scoped name matches. Inspect task activity before restarting any worker; the test must never sweep real dev
 resources. Clean up only resources recorded as created by this run, retaining all existing data
-volumes. S4 is pending evidence; unit guards alone do not close it. The current IDE legacy label
-exception is documented in [Sandbox](../architecture/sandbox.md), so “every container labelled”
-is a target invariant to check, not proof that every creator already stamps it.
+volumes. S4 is pending evidence; unit guards alone do not close it. Every runtime runner creator (DDEV, app, task and
+repository editors) now stamps the install label; runners created before that do not, so
+“every container labelled” still holds only for containers created after the upgrade.
 
 ## Open questions
 
