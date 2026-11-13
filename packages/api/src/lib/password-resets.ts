@@ -142,12 +142,16 @@ export async function findPasswordResetRecipient(
 }
 
 /** Admission hint only: the guarded consume in the transaction remains authoritative. */
-export async function assertPasswordResetLive(db: Database, tokenHash: string): Promise<void> {
+export async function assertPasswordResetLive(
+  db: Database,
+  tokenHash: string,
+  now = new Date(),
+): Promise<void> {
   const candidate = await db.query.passwordResets.findFirst({
     where: and(
       eq(schema.passwordResets.tokenHash, tokenHash),
       isNull(schema.passwordResets.consumedAt),
-      gt(schema.passwordResets.expiresAt, sql`now()`),
+      gt(schema.passwordResets.expiresAt, now),
     ),
     columns: { id: true },
   });
@@ -163,7 +167,7 @@ export async function consumePasswordReset(
   now?: Date,
 ): Promise<string> {
   const tokenHash = hashInviteToken(token);
-  const changedAt = now ?? sql`now()`;
+  const changedAt = now ?? new Date();
   let event: AuditEvent | undefined;
   try {
     const userId = await db.transaction(async (tx) => {

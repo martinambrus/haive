@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -182,6 +182,21 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       ).toBe(200);
     },
   );
+  it('uses the application clock for issuance and both redemption checks', async () => {
+    const row = await user();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2000-01-01'));
+    try {
+      const token = await issuePasswordReset(db, row.id);
+      const response = await post('reset-password', {
+        token,
+        newPassword: randomBytes(24).toString('hex'),
+      });
+      expect(response.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('expiry uses an injected clock and superseded links have the same refusal', async () => {
     const row = await user();
     const expired = await issuePasswordReset(db, row.id, null, { now: new Date('2000-01-01') });

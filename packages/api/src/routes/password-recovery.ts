@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { safeErrorDetails } from '@haive/shared/logger';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { z } from 'zod';
@@ -80,10 +81,17 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
           text: `Open this link to choose a new password:\n\n${link.href}\n\nThis link expires in 30 minutes. A new request made more than two minutes later replaces it. If you did not request it, ignore this email.`,
         });
         if (!result.ok) log.warn({ code: result.code }, 'Password recovery mail was not delivered');
-      })().catch(() => {
-        // Includes sendMail's ConfigUnavailableError. Neither errors nor SMTP text can be logged:
-        // they may contain a clear address, the raw link, or bound SQL values.
-        log.warn({ code: 'password_recovery_failed' }, 'Password recovery could not be completed');
+      })().catch((error: unknown) => {
+        // Keep only the class and SQLSTATE, never messages, query values or SMTP text.
+        const { name, code } = safeErrorDetails(error);
+        log.warn(
+          {
+            code: 'password_recovery_failed',
+            errorName: name,
+            ...(typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? { sqlState: code } : {}),
+          },
+          'Password recovery could not be completed',
+        );
       });
     });
   } catch (error) {
