@@ -874,7 +874,7 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 
 ### T639 · sandbox `.git` boundary reads every other failed lookup as no `.git`
 
-status: open · kind: fix · found: #1125 review 2026-11-13 · priority: P2
+status: done 2026-11-13 #1126 (6f1e2223e): the shared boundary lookup uses fs-safe strict mode; only ENOENT/ENOTDIR read as absent, every other failure (EACCES, EIO, a link in the path) refuses the run before a container starts; an IDE boot refuses a worktree subpath with a link or non-directory parent; lows in T641 · kind: fix · found: #1125 review 2026-11-13 · priority: P2
 PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
 
 ### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+9)
@@ -891,6 +891,16 @@ PRE-EXISTING unless marked. Worker unless named.
 7. `readTextNoFollow` / `readLinkNoFollow` lenient callers were not in the #1125 audit (it covered lstat, readdir, readFile, openFile).
 8. (from T510 item 2) api bundle file listing bounds files, depth and descriptors but not directory count.
 9. (from T510 item 5) shared `readdirNoFollow` `maxEntries` overflow is a plain `Error` known by wording; give it a code when a caller appears. Coverage: `branch-revert-unknown-reads.test.ts` template copy has no isolation guard.
+
+### T641 · FNF[stored-failure-paths] · raw storage paths persist in stored failure text (+3)
+
+status: open · kind: fix · found: #1126 driver and review 2026-11-13 · priority: P3
+PRE-EXISTING. Worker unless named.
+
+1. Consequential: `queues/cli-exec/handlers.ts` ~:468 stores `safeErrorMessage(err)` in `cli_invocations.error_message` and the mining row; a filesystem failure (now thrown by the sandbox boundaries on EACCES/EIO/EMFILE) carries the worker storage path `/var/lib/haive/repos/<userId>/<repoId>`, shown in the task UI. Route filesystem failures through `scrubErrorPaths` there (error-diagnostics.md rule).
+2. Consequential: `step-engine/step-runner.ts` ~:3813 stores the same raw text in `task_steps.error_message` for step-command and `01b-install-plugins` failures.
+3. Minor: `queues/safe-processor.ts` ~:12 keeps raw filesystem errors in the IDE ensure queue transport (the browser answer is already generic).
+4. Coverage: `step-command`, `01b-install-plugins` and the IDE ensure path have no errno-refusal control at the boundary lookup; the ENOTDIR absent controls inject at the leaf lstat, which real fs-safe never reaches.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
