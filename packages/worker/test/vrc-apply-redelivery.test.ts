@@ -118,6 +118,47 @@ describe('deterministic apply redelivery', () => {
   });
   afterEach(() => vi.resetAllMocks());
 
+  it.each([false, true])(
+    'handles a pending downstream receipt during reset (recovery=%s)',
+    async (recovery) => {
+      const ctx = context();
+      const [downstream] = await ctx.db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: 'later',
+          stepIndex: 2,
+          round: 0,
+          title: 'Later apply',
+          status: 'pending',
+          rerunGeneration: 2,
+          applyReceipt: { id: 'recovered-apply', kind: 'custom-migration', input: 'old-input' },
+          formValues: { prior: true },
+        })
+        .returning();
+      await resetStepAndDownstream(
+        ctx.db,
+        ctx.taskId,
+        dbMigrateStep.metadata.id,
+        ctx.round,
+        undefined,
+        recovery,
+      );
+      const row = await ctx.db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, downstream!.id),
+      });
+      expect(row).toMatchObject(
+        recovery
+          ? {
+              applyReceipt: { id: 'recovered-apply' },
+              rerunGeneration: 2,
+              formValues: { prior: true },
+            }
+          : { applyReceipt: null, rerunGeneration: 3, formValues: null },
+      );
+    },
+  );
+
   it('does not rebuild an image whose first build completed before the lost done write', async () => {
     const build = vi.fn(
       async (_opts: import('../src/sandbox/docker-runner.js').DockerBuildOpts) => ({

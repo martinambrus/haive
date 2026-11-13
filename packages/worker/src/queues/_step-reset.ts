@@ -28,6 +28,7 @@ class ReviveBlocked extends Error {
 }
 
 /** Reset `targetStepId` and every non-pending downstream row (same round) to `pending`,
+ *  including pending rows with receipts when an explicit rerun invalidates their inputs,
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
@@ -75,7 +76,9 @@ export async function resetStepAndDownstream(
           : gt(schema.taskSteps.stepIndex, target.stepIndex),
       ),
     );
-  const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
+  const downstreamToReset = downstream
+    .filter((r) => r.status !== 'pending' || (!recovery && r.applyReceipt != null))
+    .map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 
   let newEpoch = 0;

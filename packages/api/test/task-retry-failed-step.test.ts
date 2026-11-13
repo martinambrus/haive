@@ -108,6 +108,73 @@ function setup(target: Record<string, unknown>) {
 const queued = () => h.add.mock.calls.map(([name, data]) => ({ name, data }));
 
 describe('a task Retry re-runs the step the task stopped on', () => {
+  it('task retry clears a current pending receipt when recovery left no park marker', async () => {
+    const t = setup({
+      status: 'pending',
+      waitingStartedAt: null,
+      rerunGeneration: 2,
+      applyReceipt: { id: 'recovered-current', kind: 'custom-migration', input: 'old-input' },
+    });
+    expect((await t.retry()).status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({ applyReceipt: null, rerunGeneration: 3 });
+  });
+
+  it.each(['task retry', 'step retry', 'fanout resume'] as const)(
+    '%s invalidates a downstream pending receipt left by recovery',
+    async (action) => {
+      const t = setup({ status: action === 'fanout resume' ? 'done' : 'failed' });
+      t.fake.patch(schema.taskSteps, LATER_ROW, {
+        applyReceipt: { id: 'recovered-apply', kind: 'custom-migration', input: 'old-input' },
+        rerunGeneration: 2,
+        detectOutput: { prior: true },
+        formValues: { prior: true },
+      });
+      const fresh = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-d',
+        round: 0,
+        stepIndex: 4,
+        runSeq: 4,
+        status: 'pending',
+        rerunGeneration: 0,
+      });
+      const history = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-c',
+        round: 1,
+        stepIndex: 3,
+        runSeq: 3,
+        status: 'pending',
+        applyReceipt: { id: 'other-round', kind: 'custom-migration', input: 'other' },
+      });
+      if (action === 'fanout resume')
+        t.fake.insert(schema.taskStepAgentMinings, {
+          taskStepId: TARGET_ROW,
+          agentId: 'reviewer',
+          agentTitle: 'Reviewer',
+          status: 'failed',
+        });
+      const res =
+        action === 'task retry'
+          ? await t.retry()
+          : await app.request(`/${TASK}/steps/step-b/action`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: action === 'step retry' ? 'retry' : 'resume' }),
+            });
+      expect(res.status).toBe(200);
+      expect(t.step(LATER_ROW)).toMatchObject({
+        status: 'pending',
+        applyReceipt: null,
+        rerunGeneration: 3,
+        detectOutput: null,
+        formValues: null,
+      });
+      expect(t.step(fresh.id as string)).toMatchObject({ applyReceipt: null, rerunGeneration: 0 });
+      expect(t.step(history.id as string).applyReceipt).toMatchObject({ id: 'other-round' });
+    },
+  );
+
   it.each(['reoffer', 'settle'] as const)(
     '%s clears receipts when reoffering a parked form',
     async (writer) => {

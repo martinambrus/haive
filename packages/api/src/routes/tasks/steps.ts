@@ -448,14 +448,18 @@ export async function retryTaskAtStep(
   const downstream = rows.filter(
     (r) =>
       r.round === target.round &&
-      r.status !== 'pending' &&
+      (r.status !== 'pending' || r.applyReceipt != null) &&
       (target.runSeq != null
         ? r.runSeq != null && r.runSeq > target.runSeq
         : r.stepIndex > target.stepIndex),
   );
   const cascade = new Set([target.id, ...downstream.map((r) => r.id)]);
   const reset = [
-    ...(target.status === 'failed' || isLive(target) ? [target] : []),
+    ...(target.status === 'failed' ||
+    isLive(target) ||
+    (target.status === 'pending' && target.waitingStartedAt == null && target.applyReceipt != null)
+      ? [target]
+      : []),
     ...downstream,
     ...rows.filter((r) => !cascade.has(r.id) && isLive(r)),
   ];
@@ -1110,7 +1114,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       const now = new Date();
-      const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
+      // Recovery can leave approved apply inputs on a pending row. An explicit
+      // upstream rerun invalidates that receipt just as it invalidates a done row.
+      const downstreamToReset = downstream.filter(
+        (r) => r.status !== 'pending' || r.applyReceipt != null,
+      );
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
       // reset blanks and why. Mirrors resetStepAndDownstream in the worker. A row still active
       // outside that set is reset with it: the retry moves the task away from it.
@@ -1313,7 +1321,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
                 ),
               )
           : [];
-      const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
+      const downstreamToReset = downstream.filter(
+        (r) => r.status !== 'pending' || r.applyReceipt != null,
+      );
       const leftActive = rowsLeftActive(
         await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
         [step.id, ...downstream.map((r) => r.id)],
