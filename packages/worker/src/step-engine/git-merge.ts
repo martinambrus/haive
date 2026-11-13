@@ -787,8 +787,9 @@ async function missingParents(anchor: string, prefix: string, paths: string[]): 
       seen.add(parent);
       if (
         (await lstatNoFollow(anchor, `${prefix}${parent}`, { rethrow: RESOURCE_LIMITS }).catch(
-          (err: unknown) => {
-            if (isResourceLimitError(err)) throw err;
+          () => {
+            // Unknown is not missing: never hand back a parent we did not create. This can
+            // run after files moved, while their original modes still live only in memory.
             return undefined;
           },
         )) === null
@@ -823,7 +824,9 @@ async function occupiedDirectories(
   for (const p of paths) {
     const entry = await lstatNoFollow(anchor, `${prefix}${p}`, { rethrow: RESOURCE_LIMITS }).catch(
       (err: unknown) => {
-        if (isResourceLimitError(err)) throw err;
+        // Once files moved we must finish reapplying their modes. An unread path cannot
+        // authorize restoring over whatever may still stand there.
+        if (isResourceLimitError(err)) occupied.add(p);
         return null;
       },
     );
@@ -1083,9 +1086,16 @@ export async function relocateFixerChanges(
       const was = await lstatNoFollow(root, `${prefix}${c.path}`, {
         rethrow: RESOURCE_LIMITS,
       }).catch((err: unknown) => {
-        if (isResourceLimitError(err)) throw err;
+        if (isResourceLimitError(err)) return undefined;
         return null;
       });
+      if (was === undefined) {
+        left.push({
+          path: c.path,
+          reason: 'its mode could not be read, so it was left in place',
+        });
+        continue;
+      }
       try {
         await renameNoFollow(root, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
           noReplace: true,
