@@ -181,20 +181,6 @@ export async function consumePasswordReset(
         .returning();
       if (!claimed) throw invalid();
       const user = locked[0]!;
-      // Compare only after the guarded live-token claim, using the locked current password.
-      // Throwing rolls consumption back so the same link can choose a different password.
-      if (
-        user.mustChangePassword &&
-        user.passwordHash !== null &&
-        (await verifyPassword(newPassword, user.passwordHash))
-      ) {
-        throw new HttpError(
-          400,
-          'Choose a password different from the one you were given',
-          'password_unchanged',
-        );
-      }
-      const passwordHash = await hashPassword(newPassword);
       let emailUpdate = {};
       if (claimed.claimEmailEncrypted !== null) {
         if (tryDecryptEmail(locked[0]!.emailEncrypted, fieldKey) !== null) throw invalid();
@@ -211,6 +197,20 @@ export async function consumePasswordReset(
         if (holder) throw new HttpError(409, 'That email is already linked to another account.');
         emailUpdate = { emailEncrypted: encryptEmail(email, fieldKey), emailBlindIndex };
       }
+      // Compare only after the guarded live-token claim, using the locked current password.
+      // Throwing rolls consumption back so the same link can choose a different password.
+      if (
+        user.mustChangePassword &&
+        user.passwordHash !== null &&
+        (await verifyPassword(newPassword, user.passwordHash))
+      ) {
+        throw new HttpError(
+          400,
+          'Choose a password different from the one you were given',
+          'password_unchanged',
+        );
+      }
+      const passwordHash = await hashPassword(newPassword);
       // Refresh revokes its old row before inserting a successor (FK key-share on users).
       // Take those rows before a claim's unique email-index change upgrades the user lock.
       await tx

@@ -270,9 +270,13 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       .set({ emailBlindIndex: computeEmailBlindIndex(row.email, pepper) })
       .where(eq(schema.users.id, holder.id));
     const token = await issuePasswordReset(db, row.id, encryptEmail(row.email, key));
+    h.hash.mockClear();
+    h.verify.mockClear();
     expect((await post('reset-password', { token, newPassword: 'new-password-long' })).status).toBe(
       409,
     );
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.verify).not.toHaveBeenCalled();
     expect(await db.query.users.findFirst({ where: eq(schema.users.id, row.id) })).toMatchObject({
       passwordHash: 'old-hash',
       tokenVersion: 0,
@@ -396,8 +400,12 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       tokenHash: randomUUID(),
       expiresAt: new Date(Date.now() + 60_000),
     });
+    h.hash.mockClear();
+    h.verify.mockClear();
     const response = await post('reset-password', { token, newPassword: 'new-password-long' });
     expect(response.status).toBe(400);
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.verify).not.toHaveBeenCalled();
     const unknown = await post('reset-password', {
       token: 'unknown',
       newPassword: 'new-password-long',
