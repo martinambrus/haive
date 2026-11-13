@@ -125,9 +125,14 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  const fake = createFakeDb({ users: schema.users, repositories: schema.repositories });
+  const fake = createFakeDb({
+    users: schema.users,
+    repositories: schema.repositories,
+    cliProviders: schema.cliProviders,
+  });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
+  fake.insert(schema.cliProviders, { userId: USER, name: 'ollama', model: 'm' });
   h.db = fake.db;
   h.fake = fake;
   h.open = false;

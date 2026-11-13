@@ -138,6 +138,8 @@ export const CONFIG_KEYS = {
    *  reach: one entry per line or comma-separated, each an IP, a CIDR or a hostname. Empty means
    *  none. Read per dial off the ~30s config cache. */
   PRIVATE_ENDPOINT_ALLOWLIST: 'config:security:privateEndpointAllowlist',
+  // Missing means no additional models beyond the caller's providers and Global KB.
+  OLLAMA_MODEL_ALLOWLIST: 'config:security:ollamaModelAllowlist',
 
   // Catch-up for commits that reached a repository without Haive making them. Off makes
   // 01e-external-kb-sync and 01f-external-plan-sync self-skip, which restores byte-identical

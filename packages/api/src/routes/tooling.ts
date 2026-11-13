@@ -9,6 +9,7 @@ import {
   isJsonObject,
   requireJsonObject,
 } from '../lib/json-object.js';
+import { mayPullOllamaModel } from '../lib/ollama-pull-policy.js';
 import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
@@ -222,14 +223,34 @@ tooling.post('/ollama-model-capabilities', async (c) => {
 const activePulls = new Map<string, AbortController>();
 
 tooling.post('/pull-ollama-model', async (c) => {
+  let raw: unknown;
+  let invalidJson = false;
+  try {
+    raw = await c.req.json();
+  } catch {
+    invalidJson = true;
+  }
+  // Refuse before SSE commits the 200 headers or any request reaches the daemon.
+  if (
+    isJsonObject(raw) &&
+    typeof raw.model === 'string' &&
+    raw.model &&
+    !(await mayPullOllamaModel(c.get('userId'), c.get('userRole'), raw.model))
+  ) {
+    return c.json(
+      {
+        error:
+          'This model is not configured in your providers or Global KB. Ask an administrator to add it to the Ollama model allowlist.',
+        code: 'ollama_model_not_allowed',
+      },
+      403,
+    );
+  }
   const { fetchFn } = await probeEgressFor(c);
   const pullId = crypto.randomUUID();
 
   return streamSSE(c, async (stream) => {
-    let raw: unknown;
-    try {
-      raw = await c.req.json();
-    } catch {
+    if (invalidJson) {
       await stream.writeSSE({
         data: JSON.stringify({ error: 'Invalid JSON body' }),
         event: 'error',
@@ -248,7 +269,7 @@ tooling.post('/pull-ollama-model', async (c) => {
 
     const url = body.ollamaUrl;
     const model = body.model;
-    if (!url || !model) {
+    if (!url || typeof url !== 'string' || !model || typeof model !== 'string') {
       await stream.writeSSE({
         data: JSON.stringify({ error: 'ollamaUrl and model are required' }),
         event: 'error',

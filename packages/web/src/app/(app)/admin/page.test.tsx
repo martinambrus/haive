@@ -56,6 +56,7 @@ const GETS: Record<string, unknown> = {
   '/admin/config/task-types': { customEnabled: false, moduleEnabled: false },
   '/admin/config/registration-mode': { mode: 'open' },
   '/admin/config/private-endpoint-allowlist': { allowlist: '' },
+  '/admin/config/ollama-model-allowlist': { allowlist: 'qwen3:8b' },
   '/admin/config/debug-mode': on,
   '/admin/config/browser-access': on,
   '/admin/config/db-access': on,
@@ -301,11 +302,19 @@ describe('admin page: private endpoint allowlist card', () => {
 
   async function typeAndSave(view: Renderer): Promise<void> {
     openTabWith(view, /Private endpoint allowlist/);
-    const box = findAll(view.tree(), (host) => host.tag === 'textarea')[0]!;
+    const box = findAll(
+      view.tree(),
+      (host) =>
+        host.tag === 'textarea' && host.props['aria-label'] === 'Private endpoint allowlist',
+    )[0]!;
     fire.type(box, TYPED);
     view.draw();
     net.calls = [];
-    const card = findAll(view.tree(), (host) => host.tag === 'textarea')[0]!.parent!;
+    const card = findAll(
+      view.tree(),
+      (host) =>
+        host.tag === 'textarea' && host.props['aria-label'] === 'Private endpoint allowlist',
+    )[0]!.parent!;
     fire.click(buttons(view.tree(), /^save$/, card)[0]!);
     view.draw();
     await view.flush();
@@ -343,4 +352,65 @@ describe('admin page: private endpoint allowlist card', () => {
     view.draw();
     expect(textOf(view.tree())).toContain('bad host!');
   });
+});
+
+describe('admin page: Ollama model allowlist card', () => {
+  const PATH = '/admin/config/ollama-model-allowlist';
+  async function save(view: Renderer) {
+    openTabWith(view, /Ollama model allowlist/);
+    const box = findAll(
+      view.tree(),
+      (host) => host.tag === 'textarea' && host.props['aria-label'] === 'Ollama model allowlist',
+    )[0]!;
+    expect(box.props.value).toBe('qwen3:8b');
+    fire.type(box, 'qwen3\nnomic-embed-text');
+    view.draw();
+    const edited = findAll(
+      view.tree(),
+      (host) => host.tag === 'textarea' && host.props['aria-label'] === 'Ollama model allowlist',
+    )[0]!;
+    fire.click(buttons(view.tree(), /^save$/i, edited.parent!)[0]!);
+    await view.flush();
+  }
+  it('renders the stored list and saves the edited list', async () => {
+    const view = await mount({ enabled: true });
+    await save(view);
+    expect(net.calls.filter((call) => call.method === 'PUT')).toEqual([
+      { method: 'PUT', path: PATH, body: { allowlist: 'qwen3\nnomic-embed-text' } },
+    ]);
+    expect(textOf(view.tree())).toContain('Administrators can pull any model');
+  });
+  it('displays a refused save', async () => {
+    net.refused[PATH] = 'Invalid model name';
+    const view = await mount({ enabled: true });
+    await save(view);
+    view.draw();
+    expect(textOf(view.tree())).toContain('Invalid model name');
+  });
+});
+
+describe('admin page: allowlist editors during a save', () => {
+  for (const [label, PATH] of [
+    ['Ollama model allowlist', '/admin/config/ollama-model-allowlist'],
+    ['Private endpoint allowlist', '/admin/config/private-endpoint-allowlist'],
+  ] as const) {
+    it(`locks the ${label} text while its save is in flight`, async () => {
+      const view = await mount({ enabled: true });
+      openTabWith(view, new RegExp(label));
+      const box = () =>
+        findAll(
+          view.tree(),
+          (host) => host.tag === 'textarea' && host.props['aria-label'] === label,
+        )[0]!;
+      fire.type(box(), 'typed');
+      view.draw();
+      fire.click(buttons(view.tree(), /^save$/i, box().parent!)[0]!);
+      view.draw();
+      expect(box().props.disabled).toBe(true);
+      await view.flush();
+      view.draw();
+      expect(box().props.disabled).toBe(false);
+      expect(net.calls.some((call) => call.method === 'PUT' && call.path === PATH)).toBe(true);
+    });
+  }
 });
