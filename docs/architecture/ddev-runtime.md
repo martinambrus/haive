@@ -69,6 +69,18 @@ that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to t
 slot only after creation succeeds; interrupted partial copies never count as recovery points.
 The replacement restores that exact committed slot, without re-selecting by file times.
 
+Recovery rebuilds a
+runner (`docker rm -f -v`, which drops the nested `/var/lib/docker` and its databases, then a
+restore from the last snapshot) only on a definite answer: the runner is absent or stopped, it
+mounts another workspace, or a working exec found no `dockerd` process (`DDEV_DOCKERD_PROBE`,
+`pgrep` exit 1). A project that describes as running is reused without asking dockerd; one that
+does not (describe failed, unparseable, or stopped) is warm-started in place when dockerd is up.
+A probe that gave no answer (timeout, signal, a failed exec, an unknown reply) raises
+`RunnerProbeError` and changes nothing. A failed warm start keeps the runner and its database too,
+and its error carries the DDEV output, as a cold boot's does, so the fix loop still classifies it;
+the message names the container, whose removal is the only rebuild, besides the failed-task reaper after its grace, until an explicit rebuild
+action exists.
+
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
 records `runtimeSmoke.passed: null` for a 4xx without a runtime-error signature; an explicit
