@@ -37,7 +37,6 @@ import { ideSessionHeld } from './ide-session.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 import { listOwnedTaskRunnerIds, ownsRuntimeRunner } from './runtime-runner-ownership.js';
-import { getDb } from '../db.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
 // ONLY workspace folder. It mirrors the app-runner's lifecycle (long-lived
@@ -623,7 +622,7 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
       ['inspect', '-f', `{{index .Config.Labels "${INSTALL_LABEL}"}}`, name],
       { timeout: 15_000 },
     );
-    if (!(await ownsIdeRunner(name, stdout.trim(), taskId))) return false;
+    if (!(await ownsNamedIdeRunner(name, stdout.trim()))) return false;
   } catch {
     return false;
   }
@@ -633,23 +632,14 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
   return true;
 }
 
-function ownsIdeRunner(id: string, label: string | undefined, sessionId: string): Promise<boolean> {
-  return ownsRuntimeRunner(id, label, async () => {
-    const repositoryId = sessionId.startsWith('repo-') ? sessionId.slice(5) : null;
-    return repositoryId
-      ? !!(await getDb().query.repositories.findFirst({
-          where: eq(schema.repositories.id, repositoryId),
-          columns: { id: true },
-        }))
-      : !!(await getDb().query.tasks.findFirst({
-          where: eq(schema.tasks.id, sessionId),
-          columns: { id: true },
-        }));
-  });
+/** Only called for an exact ideRunnerName match. That install-scoped name proves legacy
+ *  ownership even after the owner row is deleted; an explicit foreign label still wins. */
+function ownsNamedIdeRunner(id: string, label: string | undefined): Promise<boolean> {
+  return ownsRuntimeRunner(id, label, async () => true);
 }
 
-/** Session ids of this install's running editors. A legacy editor needs its task/repository
- *  row as ownership evidence; the deterministic name also scopes the later stop by name. */
+/** Session ids of running editors with this install's exact deterministic name and no
+ *  foreign install label. Discovery must also recover legacy editors without owner rows. */
 export async function listIdeRunnerSessions(): Promise<string[]> {
   const { stdout } = await exec(
     'docker',
@@ -669,7 +659,7 @@ export async function listIdeRunnerSessions(): Promise<string[]> {
     if (
       sessionId &&
       ideRunnerName(sessionId) === name &&
-      (await ownsIdeRunner(name!, install, sessionId))
+      (await ownsNamedIdeRunner(name!, install))
     )
       sessions.push(sessionId);
   }

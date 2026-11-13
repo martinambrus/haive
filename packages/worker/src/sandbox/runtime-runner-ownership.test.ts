@@ -6,6 +6,7 @@ import {
   INSTALL_LABEL,
   configService,
   ideRunnerName,
+  ideUserDataVolumeName,
   installId,
   repoIdeSessionId,
 } from '@haive/shared';
@@ -21,6 +22,7 @@ const h = vi.hoisted(() => ({
   task: undefined as Record<string, unknown> | undefined,
   repository: undefined as Record<string, unknown> | undefined,
   findTask: vi.fn(),
+  volumeRemove: vi.fn(),
   info: vi.fn(),
 }));
 
@@ -113,7 +115,7 @@ vi.mock('./runner-activity.js', () => ({
 }));
 vi.mock('./docker-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./docker-runner.js')>()),
-  defaultDockerRunner: { volumeRemove: async () => ({ ok: true }) },
+  defaultDockerRunner: { volumeRemove: h.volumeRemove },
 }));
 
 import { RuntimeRunnerReaper } from './runtime-runner-reaper.js';
@@ -121,6 +123,7 @@ import { killTaskDdevRunners, startDdevRunner } from './ddev-runner.js';
 import { killTaskAppRunners, startAppRunner } from './app-runner.js';
 import {
   killTaskIdeContainers,
+  killRepoIdeRunner,
   listIdeRunnerSessions,
   startIdeRunner,
   stopIdeRunner,
@@ -153,6 +156,7 @@ beforeEach(() => {
   h.task = undefined;
   h.repository = undefined;
   h.findTask.mockReset().mockImplementation(async () => h.task);
+  h.volumeRemove.mockReset().mockImplementation(async () => ({ ok: true }));
   vi.spyOn(configService, 'getNumber').mockResolvedValue(180);
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
 });
@@ -279,13 +283,13 @@ it('stamps every runtime creator with the current install label', async () => {
 });
 
 it.each(['task', 'repository'])(
-  'IDE discovery and idle-stop refuse foreign and unknown legacy %s sessions',
+  'IDE discovery and idle-stop accept named legacy %s sessions and refuse foreign labels',
   async (kind) => {
     const session = kind === 'task' ? TASK : repoIdeSessionId(REPO);
     const name = ideRunnerName(session);
     for (const [label, known, owned] of [
       ['elsewhere', true, false],
-      [undefined, false, false],
+      [undefined, false, true],
       [undefined, true, true],
       ['rio', false, true],
     ] as const) {
@@ -304,3 +308,23 @@ it.each(['task', 'repository'])(
     }
   },
 );
+
+it('repository deletion stops a named legacy editor before removing its user-data volume', async () => {
+  const session = repoIdeSessionId(REPO);
+  const name = ideRunnerName(session);
+  h.repository = undefined;
+  h.containers.set(name, {
+    running: true,
+    labels: { [IDE_RUNNER_LABEL]: '1', 'haive.repo.id': REPO },
+  });
+  h.volumeRemove.mockImplementation(async () => {
+    expect(h.containers.has(name)).toBe(false);
+    return { ok: true };
+  });
+
+  await killRepoIdeRunner(REPO);
+
+  expect(h.calls).toContainEqual(['stop', '--time', '10', name]);
+  expect(h.calls).toContainEqual(['rm', '-f', '-v', name]);
+  expect(h.volumeRemove).toHaveBeenCalledWith(ideUserDataVolumeName(session));
+});
