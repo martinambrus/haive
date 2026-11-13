@@ -2827,7 +2827,15 @@ repoRoutes.post('/:id/remote', async (c) => {
         };
         await insertAuditEvent(tx, event);
         try {
-          await markRemotePending(root);
+          try {
+            await markRemotePending(root);
+          } catch (err) {
+            logger.warn({ err, repositoryId: id }, 'could not record remote update intent');
+            throw new HttpError(
+              409,
+              'Could not record the remote update intent; make .haive writable and remove links before retrying',
+            );
+          }
           intentWritten = true;
           // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
           // so both directions use the address being persisted to the repository row.

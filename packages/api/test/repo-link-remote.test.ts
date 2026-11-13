@@ -11,6 +11,8 @@ const h = vi.hoisted(() => ({
   git: vi.fn(),
   entry: vi.fn(),
   reconcile: vi.fn(),
+  mark: vi.fn(),
+  clear: vi.fn(),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
@@ -18,8 +20,8 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
 }));
 vi.mock('../src/lib/remote-reconcile.js', async (original) => ({
   ...(await original<typeof import('../src/lib/remote-reconcile.js')>()),
-  markRemotePending: vi.fn(),
-  clearRemotePending: vi.fn(),
+  markRemotePending: h.mark,
+  clearRemotePending: h.clear,
   reconcileRemoteOnRead: vi.fn(),
   reconcileRemote: h.reconcile,
 }));
@@ -67,6 +69,8 @@ beforeEach(() => {
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
   h.reconcile.mockReset().mockResolvedValue(undefined);
+  h.mark.mockReset().mockResolvedValue(undefined);
+  h.clear.mockReset().mockResolvedValue(undefined);
 });
 const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
@@ -904,3 +908,18 @@ it('keeps an unmanaged origin when the connection fails before the transaction c
   expect(h.reconcile).not.toHaveBeenCalled();
   expect(h.git).toHaveBeenCalledTimes(1);
 });
+
+it.each(['EACCES', 'EROFS', 'EPATHCONTAINMENT', 'ELOOP'])(
+  'refuses an unusable intent with 409 before changing git (%s)',
+  async (code) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.mark.mockRejectedValueOnce(Object.assign(new Error('unsafe path'), { code }));
+    const response = await link();
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('Could not record the remote update intent');
+    expect(h.git).toHaveBeenCalledTimes(1);
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
