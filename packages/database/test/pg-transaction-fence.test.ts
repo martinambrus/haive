@@ -83,6 +83,58 @@ describe.skipIf(!url)('postgres transaction handles stay fenced', () => {
       }
     });
 
+    it(`${build}: committed transaction and savepoint handles cannot write after pool reuse`, async () => {
+      const sql = driver(url!, { max: 1, onnotice: () => {} });
+      const table = `tx_commit_${randomBytes(6).toString('hex')}`;
+      const kept: postgres.TransactionSql[] = [];
+      const errors: unknown[] = [];
+      try {
+        await sql`create table ${sql(table)} (value text)`;
+        await sql`insert into ${sql(table)} values ('main')`;
+        await sql.begin(async (tx) => {
+          kept.push(tx);
+          await tx.savepoint(async (nested) => {
+            kept.push(nested);
+            await nested.savepoint(async (deep) => {
+              kept.push(deep);
+              expect((await deep`select 1 as ok`)[0]!.ok).toBe(1);
+            });
+          });
+          expect((await tx`select 1 as ok`)[0]!.ok).toBe(1);
+        });
+        const result = await sql.begin((tx) => [tx`select 2 as ok`, tx`select 3 as ok`]);
+        expect(result.map((rows) => rows[0]!.ok)).toEqual([2, 3]);
+        // The pooled connection has moved on to somebody else's live transaction.
+        await sql.begin(async (tx) => {
+          for (const old of kept) {
+            for (const query of [
+              old`update ${old(table)} set value = 'escaped'`,
+              old.unsafe(`update ${table} set value = 'escaped'`),
+            ]) {
+              errors.push(
+                await query.then(
+                  () => undefined,
+                  (error: unknown) => error,
+                ),
+              );
+            }
+          }
+          expect((await tx`select value from ${tx(table)}`)[0]!.value).toBe('main');
+        });
+        expect(errors).toHaveLength(6);
+        for (const error of errors) expect(error).toHaveProperty('code', 'UNSAFE_TRANSACTION');
+        const reserved = await sql.reserve();
+        try {
+          expect((await reserved`select value from ${reserved(table)}`)[0]!.value).toBe('main');
+        } finally {
+          reserved.release();
+        }
+      } finally {
+        await sql`drop table if exists ${sql(table)}`;
+        await sql.end({ timeout: 0 });
+      }
+    });
+
     it(`${build}: callback rejection fences the old handle and preserves savepoint recovery`, async () => {
       const sql = driver(url!, { max: 1 });
       let old: postgres.TransactionSql | undefined;
