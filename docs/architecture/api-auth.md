@@ -77,26 +77,31 @@ WebSocket handshakes read the session cookie with the same parser. Two sweeps ke
 `installModules`) with a signed-in non-admin and requires 403 with no handler reached, and a ratchet fails a
 role check in api source outside its allowlist, so an admin route gated some other way cannot escape the sweep.
 
-**Sign-in and registration are rate limited.** `lib/auth-throttle.ts` admits an attempt on
-`POST /auth/login` and `POST /auth/register` only while an account bucket (the email's blind index) holds
+**Sign-in, registration and password recovery are rate limited.** `lib/auth-throttle.ts` admits an attempt on
+`POST /auth/login`, `POST /auth/register` and `POST /auth/forgot-password` only while an account bucket
+(the email's blind index) holds
 fewer than `AUTH_ACCOUNT_LIMIT` (10) and an address bucket fewer than `AUTH_IP_LIMIT` (30) attempts in the
-last `AUTH_THROTTLE_WINDOW_MS` (60 s); login and registration have separate budgets. `PUT /user-settings/password`
+last `AUTH_THROTTLE_WINDOW_MS` (60 s); `login`, `register` and `recover` have separate budgets.
+`POST /auth/reset-password` reserves only an address bucket in its own `reset` scope. `PUT /user-settings/password`
 checks the current password against the sign-in budget (scope `login`, keyed by the account's stored blind
 index, same address rules), so the two password checks share one budget. It reads the user row to find that
 index, then reserves before bcrypt, and refunds as soon as the current password verifies, even when the change
 is then refused (`password_unchanged`, a conflict). A wrong current password answers 400
 `current_password_incorrect`, not 401: the web client retries any other 401 once after a silent refresh, and a
 retried wrong password would spend two attempts and write two rows. The buckets are
-sorted sets, `haive:auth-throttle:<login|register>:acct|ip:<key>`, and one Lua script checks every
+sorted sets, `haive:auth-throttle:<login|register|recover>:acct|ip:<key>` and
+`haive:auth-throttle:reset:ip:<key>`, and one Lua script checks every
 bucket and reserves a member in all of them or in none, so parallel attempts cannot all pass before any
-is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; it answers
-429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
+is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; login,
+registration and reset answer 429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
 verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and has
 run no bcrypt; its only database work is the audit row below, written after the answer (a refused password
-change has also read its user row, for the key). A success removes its own member: only failures cost budget, because the e2e suite
+change has also read its user row, for the key). A successful login or registration removes its own member;
+recovery and reset attempts keep theirs. Only failures cost login and registration budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
-throttle runs after the body is validated and before any bcrypt or database work (the password change reads the
-user row first, for the key). If Redis is not ready,
+throttle runs after the body is validated and before any bcrypt or account lookup (the password change reads the
+user row first, for the key). Reset-password reserves its address bucket before an unlocked live-token lookup and
+runs bcrypt only when that lookup finds an unconsumed, unexpired token. If Redis is not ready,
 rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: a login that
 waits on a stalled Redis is worse than an unthrottled one. A reservation that still lands after the bound is
 released when it does, and so is one the shared client rejected at its own 2 s command deadline, since that
@@ -141,7 +146,10 @@ whose bucket refused it, and names the account only when the account limiter ref
 once per refused bucket per window (a `SET NX` key `<bucket>:audit` that expires with the window) and never
 makes the 429 wait: the lookup and the insert run after the answer, and a failure is logged (`failed to audit
 throttled sign-in`), not raised, because a stalled database must not slow a refusal. A refused registration
-writes no row.
+writes no row. A throttled recovery request writes `auth.password_reset.throttled` after the same 202,
+with the same limiter metadata and account-target rule, at most once per refused bucket per window.
+Its `recover` bucket and audit slot are separate from sign-in and password change, so recovery cannot
+spend their admission budget or suppress their throttled audit row.
 
 Accepted limits. Someone who knows an email can keep its bucket full for as long as they keep sending, and the
 owner then gets 429 even with the right password; behind the default bridge there is no address to tell the
@@ -392,26 +400,38 @@ the mail commit; unused config keys are harmless.
 ## Password recovery
 
 `GET /auth/forgot-password/available` reports whether SMTP mail is enabled; the login page shows
-**Forgot password?** only then. `POST /auth/forgot-password {email}` shares the login throttle and
+**Forgot password?** only then. `POST /auth/forgot-password {email}` uses separate `recover` account
+and address throttle buckets and a separate once-per-window throttled audit slot, and
 always answers the same 202, for unknown accounts, disabled mail, throttle refusals and delivery
 failures alike. Lookup, issuance and SMTP delivery run in-process after the reply, so the raw link
 never sits in Redis or a queue. Failure logs carry fixed codes, never the address, token or SMTP text.
 
-A readable blind-index match gets a reset link at its stored address. Otherwise a claim is allowed
-only after a `config.discard_unreadable_secrets` audit row exists, and only when exactly one user whose
-email fails `tryDecryptEmail` has a plaintext `git_email` equal to the typed one (trimmed,
+A readable blind-index match gets a reset link at its stored address only while the user is active;
+a deactivated match sends nothing. A claim is allowed only after a `config.discard_unreadable_secrets`
+audit row exists, and only when exactly one active user whose email fails `tryDecryptEmail` has a
+plaintext `git_email` equal to the typed one (trimmed,
 case-insensitive). The typed address is stored encrypted on the reset row and the link goes to it.
 Zero or several matches send nothing; those rows are relinked by an administrator.
 
 Tokens are 32 random bytes; only their SHA-256 is stored in `password_resets`. A link expires after
-30 minutes, and a new request invalidates the user's earlier unconsumed links. Issuance serializes on
-the user row and commits its required `auth.password_reset.request` audit row with the token.
+30 minutes. Issuance serializes on the active user row; an unexpired, unconsumed link issued less than
+`PASSWORD_RESET_COOLDOWN_MS` (2 minutes) ago makes a request issue and send nothing, preserving that
+link and the same 202. After the cooldown a new link invalidates the user's earlier unconsumed links.
+Issuance commits its required `auth.password_reset.request` audit row with the token.
 
-`POST /auth/reset-password {token, newPassword}` applies the change-password policy. One transaction
-consumes an unexpired, unconsumed token, repairs the claimed email and blind index when it is a
+`POST /auth/reset-password {token, newPassword}` applies the change-password policy. It reserves its
+separate `reset` address bucket before any token lookup or bcrypt; a throttle refusal answers 429
+without hashing. An unlocked SELECT by token hash refuses unknown, consumed or expired tokens with
+the generic 400 before bcrypt. The transaction's guarded UPDATE remains the authority if that hint races.
+One transaction requires an active user under its lock, consumes an unexpired, unconsumed token,
+rechecks that a claim target's email still fails `tryDecryptEmail`, and repairs the email and blind index for a
 claim, sets the password, clears `must_change_password`, bumps `token_version`, revokes refresh
 tokens and writes `auth.password_reset.complete`. If another user holds the claimed index it answers
 409 and rolls everything back, consumption included. Invalid, expired, superseded and consumed tokens
-share one 400. After commit the user's API sockets close and the browser's auth cookies are cleared;
+share one 400, as do a deactivated user and a claim whose target email is readable now; refusal rolls
+back consumption and all changes. Both issuance and redemption lock the user `FOR NO KEY UPDATE`,
+which permits refresh's FK key-share lock; redemption revokes refresh rows before a claim's unique
+email-index update can upgrade the user lock. After commit the user's API sockets close and the browser's
+auth cookies are cleared;
 the web returns to login with a notice. Rollback: revert the feature; `password_resets` stays unused
 or a later migration drops it. Passwords already reset are not undone by a revert.

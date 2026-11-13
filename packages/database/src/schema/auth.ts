@@ -40,7 +40,7 @@ export const users = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
     // Set wherever a password this account's holder did not choose is minted for them, cleared by
-    // PUT /user-settings/password. See migration 0154.
+    // PUT /user-settings/password or POST /auth/reset-password. See migration 0154.
     //
     // LAST, after the timestamps, because `ALTER TABLE ADD COLUMN` appends and `drizzle-kit push`
     // builds the table in THIS order — the schema-parity job diffs the two and a column declared
