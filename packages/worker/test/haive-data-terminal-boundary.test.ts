@@ -109,12 +109,15 @@ describe('the terminals are human surfaces', () => {
         scope: 'task',
         taskId: 'task-1',
       });
-      h.error = Object.assign(new Error('injected boundary lookup failure'), { code });
+      h.error = Object.assign(
+        new Error(`${code}: too many open files, open '${storageRoot}/${SUBPATH}'`),
+        { code },
+      );
       await mgr.handleSubscriberMessage(TERMINAL_REQUEST_CHANNEL, request);
       expect(h.ensure).not.toHaveBeenCalled();
       expect(h.publish).toHaveBeenLastCalledWith(
         `${TERMINAL_REPLY_CHANNEL_PREFIX}c1`,
-        JSON.stringify({ ok: false, error: 'injected boundary lookup failure' }),
+        JSON.stringify({ ok: false, error: `${code}: too many open files, open '[path]'` }),
       );
 
       h.error = null;
