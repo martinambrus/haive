@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { safeProcessor } from './safe-processor.js';
-import { Worker, type Job } from 'bullmq';
+import { Queue, Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -13,6 +14,7 @@ import {
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  classifyRuntime,
   ensureAppServing,
   resolveDdevDbAccess,
   type AppRuntimeCtx,
@@ -21,6 +23,7 @@ import {
 import {
   startBrowserDesktop as startDdevBrowserDesktop,
   ddevAccessUrls,
+  rebuildDdevRunner,
   ddevMailpitUrls,
   runnerExec,
 } from '../sandbox/ddev-runner.js';
@@ -80,10 +83,9 @@ function navigateDesktopToApp(runtime: ServingRuntime, taskId: string): Promise<
   return navigateDesktopTo(runtime, taskId, runtime.url);
 }
 
-/** The task's serving runtime, or null when the task has no repository to serve. Reads the
- *  repo path the same way the task worker builds a step context, then delegates to the
- *  shared ensureAppServing primitive. Idempotent. */
-async function resolveServingRuntime(taskId: string): Promise<ServingRuntime | null> {
+/** Resolve the same repository context for classification and ordinary serving recovery.
+ *  Merely reading this context never starts a runtime. */
+async function runtimeContext(taskId: string): Promise<AppRuntimeCtx | null> {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -97,7 +99,12 @@ async function resolveServingRuntime(taskId: string): Promise<ServingRuntime | n
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath) return null;
   const ctx: AppRuntimeCtx = { db, taskId, repoPath, logger: log };
-  return ensureAppServing(ctx);
+  return ctx;
+}
+
+async function resolveServingRuntime(taskId: string): Promise<ServingRuntime | null> {
+  const ctx = await runtimeContext(taskId);
+  return ctx ? ensureAppServing(ctx) : null;
 }
 
 /** Ensure the task's app is serving and its headed-browser desktop is up. Idempotent.
@@ -157,10 +164,40 @@ async function navigateDesktopToMailpit(taskId: string): Promise<RuntimeEnsureRe
   return { ok: true, url: mailpit.http, mode: runtime.mode };
 }
 
+/** Removal is followed by the normal ensure job, which owns admission, wiring and
+ * snapshot recovery. A fresh ID prevents coalescing into an older ensure that
+ * already resolved its handle before this removal. */
+export async function rebuildDdevForTask(
+  payload: RuntimeEnsurePayload,
+): Promise<RuntimeEnsureResult> {
+  const ctx = await runtimeContext(payload.taskId);
+  if (!ctx) throw new Error('No DDEV workspace for this task.');
+  const spec = await classifyRuntime(ctx);
+  if (spec.mode !== 'ddev' || !spec.repoSubpath) throw new Error('This task has no DDEV runtime.');
+  await rebuildDdevRunner(payload.taskId, spec.repoSubpath, payload.userId, async () => {
+    const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
+      connection: getBullRedis(),
+    });
+    try {
+      await queue.add(RUNTIME_ENSURE_JOB_NAMES.ENSURE, payload, {
+        jobId: `ensure-rebuild-${payload.taskId}-${randomUUID()}`,
+        removeOnComplete: true,
+        removeOnFail: true,
+      });
+    } finally {
+      await queue.close();
+    }
+  });
+  return { ok: true, url: null, mode: 'ddev' };
+}
+
 export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, RuntimeEnsureResult> {
   const worker = new Worker<RuntimeEnsurePayload, RuntimeEnsureResult>(
     QUEUE_NAMES.RUNTIME_ENSURE,
     safeProcessor(async (job: Job<RuntimeEnsurePayload>) => {
+      if (job.name === RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV) {
+        return rebuildDdevForTask(job.data);
+      }
       if (job.name === RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT) {
         return navigateDesktopToMailpit(job.data.taskId);
       }

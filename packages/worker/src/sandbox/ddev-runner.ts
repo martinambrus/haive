@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import {
   CONFIG_KEYS,
+  INSTALL_LABEL,
   RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   configService,
@@ -59,7 +60,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { splitRepoSubpath, splitUploadPath } from '../repo/worktree-paths.js';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { buildMountArgs, type DockerVolumeMount } from './docker-runner.js';
@@ -68,8 +69,14 @@ import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
 import { shellQuote } from './shell-quote.js';
-import { whileRunnerBusy } from './runner-activity.js';
-import { listOwnedTaskRunnerIds } from './runtime-runner-ownership.js';
+import {
+  runnerExecLive,
+  taskRunnerBusy,
+  whileRunnerBusy,
+  withRunnersFenced,
+} from './runner-activity.js';
+import { hasLiveCliInvocation } from '../orchestrator/pause.js';
+import { listOwnedTaskRunnerIds, ownsTaskRunner } from './runtime-runner-ownership.js';
 import {
   DdevBootAbortedError,
   DdevBoots,
@@ -2152,6 +2159,68 @@ async function probeDdevRecovery(
  *  to the dev. */
 const ddevBoots = new DdevBoots<DdevRunnerHandle>();
 
+/** Explicit user-confirmed rebuild. Share the boot entry with ensure, fence new execs,
+ * prove presence and ownership, and remove by immutable ID. The callback only enqueues
+ * the existing cold-boot path; it must not await that boot while this entry is held. */
+export async function rebuildDdevRunner(
+  taskId: string,
+  repoSubpath: string,
+  userId: string,
+  enqueueEnsure: () => Promise<unknown>,
+): Promise<void> {
+  await ddevBoots.exclusive(taskId, async () => {
+    const handle = runnerHandleForTask(taskId, repoSubpath);
+    const db = getDb();
+    await withRunnersFenced(taskId, async (idle) => {
+      const requireIdle = async (): Promise<void> => {
+        const step = await db.query.taskSteps.findFirst({
+          where: and(
+            eq(schema.taskSteps.taskId, taskId),
+            inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+          ),
+          columns: { id: true },
+        });
+        if (step || taskRunnerBusy(taskId) || (await hasLiveCliInvocation(db, taskId)) || !idle()) {
+          throw new Error('The task runner is busy. Stop its activity before rebuilding DDEV.');
+        }
+      };
+      await requireIdle();
+      const presence = await requireRunnerPresence(handle.container);
+      if (presence.state === 'present') {
+        let info: { Id: string; Config: { Labels: Record<string, string> } };
+        try {
+          const { stdout } = await exec('docker', ['inspect', handle.container], {
+            timeout: 15_000,
+          });
+          [info] = JSON.parse(stdout);
+          if (!info?.Id || !info.Config?.Labels) throw new Error('Invalid runner inspection');
+        } catch (cause) {
+          throw new RunnerProbeError(handle.container, cause);
+        }
+        if (!(await ownsTaskRunner(info.Id, info.Config.Labels[INSTALL_LABEL], taskId, db))) {
+          throw new Error('Cannot rebuild DDEV: runner ownership is unproven.');
+        }
+        if (info.Config.Labels[RUNNER_SUBPATH_LABEL] !== repoSubpath) {
+          throw new Error('Cannot rebuild DDEV: runner workspace does not match this task.');
+        }
+        if (await runnerExecLive(taskId))
+          throw new Error('The task runner is busy. Retry after its operation finishes.');
+        await requireIdle();
+        await exec('docker', ['rm', '-f', '-v', info.Id], { timeout: 90_000 });
+        // Required evidence, never best-effort: a failed event write fails the job.
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          eventType: 'ddev_rebuild',
+          payload: { userId, containerId: info.Id },
+        });
+        await markBrowserDesktopDown(handle.container);
+      }
+      await enqueueEnsure();
+    });
+    return handle;
+  });
+}
+
 export async function ensureDdevStarted(
   taskId: string,
   repoSubpath: string,
@@ -2341,7 +2410,7 @@ async function ensureDdevStartedInner(
       throw new Error(
         await ddevFailureMessage(
           existing,
-          `ddev start failed (runner ${existing.container} and its database kept; removing that container rebuilds it from the last database snapshot, if one exists, and loses every change made since)`,
+          `ddev start failed (runner ${existing.container} and its database kept; use Rebuild DDEV in the task action menu to rebuild from the last database snapshot, if one exists, losing every change made since)`,
           warm.output,
         ),
       );

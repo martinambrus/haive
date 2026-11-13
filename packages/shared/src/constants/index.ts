@@ -262,6 +262,8 @@ export interface GlobalKbSyncJobPayload {
 
 export const RUNTIME_ENSURE_JOB_NAMES = {
   ENSURE: 'ensure-runtime',
+  /** Explicit, user-confirmed removal followed by the ordinary runtime ensure. */
+  REBUILD_DDEV: 'rebuild-ddev',
   /** Point the task's headed-browser desktop at the DDEV project's Mailpit UI. Its own
    *  job name rather than a field on ENSURE because every ENSURE enqueue shares
    *  `jobId: ensure-<taskId>`, and BullMQ coalesces on that: a second add returns the
@@ -270,7 +272,8 @@ export const RUNTIME_ENSURE_JOB_NAMES = {
   NAVIGATE_MAILPIT: 'navigate-mailpit',
 } as const;
 
-/** Payload for `RUNTIME_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this (e.g. when
+/** Payload for runtime ensure, Mailpit navigation and explicit DDEV rebuild jobs.
+ *  The api enqueues this (e.g. when
  *  the live Browser/VNC panel opens) and the worker ensures the task's app is
  *  serving — boots DDEV / relaunches a restart-killed app-runner dev server — then
  *  starts the headed-browser desktop the VNC bridge attaches to. The api can't do

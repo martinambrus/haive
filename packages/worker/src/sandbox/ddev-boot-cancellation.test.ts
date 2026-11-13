@@ -287,3 +287,61 @@ describe('DDEV cold-boot cancellation', () => {
     expect(other).not.toHaveBeenCalled();
   });
 });
+
+describe('exclusive DDEV lifecycle operations', () => {
+  it('waits for an existing boot and holds later ensures until rebuild finishes', async () => {
+    const boots = new DdevBoots<string>();
+    let endBoot!: (value: string) => void;
+    let endRebuild!: (value: string) => void;
+    let rebuildStarted!: () => void;
+    const rebuilding = new Promise<void>((resolve) => {
+      rebuildStarted = resolve;
+    });
+    const original = boots.ensure(
+      'task',
+      undefined,
+      () =>
+        new Promise<string>((resolve) => {
+          endBoot = resolve;
+        }),
+      'workspace',
+    );
+    await Promise.resolve();
+    const rebuild = vi.fn(() => {
+      rebuildStarted();
+      return new Promise<string>((resolve) => {
+        endRebuild = resolve;
+      });
+    });
+    const exclusive = boots.exclusive('task', rebuild);
+    expect(rebuild).not.toHaveBeenCalled();
+    endBoot('old');
+    await original;
+    await rebuilding;
+    const fresh = vi.fn(async () => 'new');
+    const later = boots.ensure('task', undefined, fresh, 'workspace');
+    expect(fresh).not.toHaveBeenCalled();
+    endRebuild('removed');
+    await expect(exclusive).resolves.toBe('removed');
+    await expect(later).resolves.toBe('new');
+  });
+  it('allows an explicit rebuild after the warm boot it waited for fails', async () => {
+    const boots = new DdevBoots<string>();
+    let fail!: (error: Error) => void;
+    const original = boots.ensure(
+      'task',
+      undefined,
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          fail = reject;
+        }),
+      'workspace',
+    );
+    const observed = expect(original).rejects.toThrow('warm start failed');
+    await Promise.resolve();
+    const rebuild = boots.exclusive('task', async () => 'removed');
+    fail(new Error('warm start failed'));
+    await observed;
+    await expect(rebuild).resolves.toBe('removed');
+  });
+});

@@ -17,14 +17,25 @@ export interface DdevBootScope {
 export class DdevBoots<T> {
   private readonly inFlight = new Map<
     string,
-    { controller: AbortController; promise: Promise<T>; subpath: string | undefined }
+    { controller: AbortController; promise: Promise<T>; subpath: string | symbol | undefined }
   >();
+
+  /** Reserve the same task entry for a destructive lifecycle operation. Unlike an
+   * ensure, it must run after an earlier boot, including one that failed warm. */
+  async exclusive(taskId: string, run: () => Promise<T>): Promise<T> {
+    const entry = this.inFlight.get(taskId);
+    if (entry) {
+      await entry.promise.catch(() => {});
+      return this.exclusive(taskId, run);
+    }
+    return this.ensure(taskId, undefined, run, Symbol('exclusive'));
+  }
 
   async ensure(
     taskId: string,
     signal: AbortSignal | undefined,
     boot: (signal: AbortSignal) => Promise<T>,
-    subpath?: string,
+    subpath?: string | symbol,
   ): Promise<T> {
     if (signal?.aborted) throw new DdevBootAbortedError();
     let entry = this.inFlight.get(taskId);

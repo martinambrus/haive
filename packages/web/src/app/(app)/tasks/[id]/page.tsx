@@ -38,6 +38,7 @@ import {
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ActionMenu } from '@/components/action-menu';
+import { DdevRebuildDialog, canRebuildDdev } from '@/components/ddev-rebuild-dialog';
 import { TaskHistoryBell, TaskHistoryPanel, useTaskHistory } from '@/components/task-history';
 import {
   ArrowLeft,
@@ -717,6 +718,8 @@ export default function TaskDetailPage() {
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
+  const [rebuildDdevOpen, setRebuildDdevOpen] = useState(false);
+  const [rebuildDdevNotice, setRebuildDdevNotice] = useState<string | null>(null);
   const [finishedRunsRevision, setFinishedRunsRevision] = useState('');
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
@@ -1997,6 +2000,13 @@ export default function TaskDetailPage() {
                   title:
                     'Stop the current step. Keeps the environment; the task stays open and restartable.',
                 },
+                canRebuildDdev(steps) && {
+                  key: 'rebuild-ddev',
+                  label: 'Rebuild DDEV',
+                  icon: RefreshCw,
+                  danger: true,
+                  onClick: () => setRebuildDdevOpen(true),
+                },
                 menu.includes('cancel') && {
                   key: 'cancel',
                   label: 'Cancel',
@@ -2016,6 +2026,7 @@ export default function TaskDetailPage() {
             {!titleStripVisible && <TaskHistoryBell history={history} />}
           </div>
         </div>
+        {rebuildDdevNotice && <MarkdownView body={rebuildDdevNotice} />}
         {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
         {task.description && <TaskDescription text={task.description} />}
         {task.status === 'failed' && task.errorMessage && (
@@ -2420,6 +2431,16 @@ export default function TaskDetailPage() {
         </div>
       )}
 
+      <DdevRebuildDialog
+        taskId={rebuildDdevOpen ? id : null}
+        onClose={() => setRebuildDdevOpen(false)}
+        onQueued={() => {
+          setRebuildDdevOpen(false);
+          setRebuildDdevNotice(
+            'DDEV rebuild requested. A failed step stays failed; Retry it after the runtime is ready.',
+          );
+        }}
+      />
       <PostLoginRetryDialog
         stepId={pendingLoginRetry?.stepId ?? null}
         onClose={() => setPendingLoginRetry(null)}

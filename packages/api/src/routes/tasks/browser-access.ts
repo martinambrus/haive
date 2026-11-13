@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -128,6 +128,39 @@ browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
   } catch {
     return c.json({ ok: false, pending: true }, 202);
   }
+});
+
+/** An explicit destructive rebuild. Ownership is checked before reading activity, and the
+ * worker rechecks activity under its runner fence before removing anything. */
+browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  await requireOwnedTask(taskId, userId);
+  const db = getDb();
+  const step = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+    ),
+    columns: { id: true },
+  });
+  const cli = await db.query.cliInvocations.findFirst({
+    where: and(
+      eq(schema.cliInvocations.taskId, taskId),
+      isNotNull(schema.cliInvocations.startedAt),
+      isNull(schema.cliInvocations.endedAt),
+      isNull(schema.cliInvocations.supersededAt),
+    ),
+    columns: { id: true },
+  });
+  if (step || cli)
+    throw new HttpError(409, 'The task is busy. Stop its activity before rebuilding DDEV.');
+  await getRuntimeEnsureQueue().add(
+    RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV,
+    { taskId, userId } satisfies RuntimeEnsurePayload,
+    { jobId: `ddev-rebuild-${taskId}`, removeOnComplete: true, removeOnFail: true },
+  );
+  return c.json({ ok: true }, 202);
 });
 
 /** Ensure the task's browser IDE (code-server) is up before the Editor tab loads

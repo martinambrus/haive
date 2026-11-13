@@ -78,8 +78,18 @@ does not (describe failed, unparseable, or stopped) is warm-started in place whe
 A probe that gave no answer (timeout, signal, a failed exec, an unknown reply) raises
 `RunnerProbeError` and changes nothing. A failed warm start keeps the runner and its database too,
 and its error carries the DDEV output, as a cold boot's does, so the fix loop still classifies it;
-the message names the container, whose removal is the only rebuild, besides the failed-task reaper after its grace, until an explicit rebuild
-action exists.
+the message names the container and points to **Rebuild DDEV** in the task action menu.
+That action confirms removal, restoration from the last snapshot if one exists, and the loss
+of every later database change. Failed steps stay failed: Retry them after recovery.
+`POST /tasks/:id/ddev/rebuild` requires ownership and refuses running steps or live CLI
+invocations. Its dedicated, coalesced job reserves the same `ddevBoots` entry as ensure,
+fences new execs, refuses busy runners (including surviving attached Docker execs), requires
+a definite presence answer and matching install ownership and workspace labels, then removes
+the immutable container ID with `docker rm -f -v` and records the requesting user in a task
+event. An unknown probe or foreign runner is kept. An absent runner needs no removal.
+Recovery is the ordinary ENSURE job, with its existing admission and newest snapshot restore;
+a fresh recovery job ID for each rebuild avoids joining an older ensure that already resolved
+its handle.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
