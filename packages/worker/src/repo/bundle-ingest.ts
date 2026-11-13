@@ -4,6 +4,7 @@ import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
 import {
   ensureDirNoFollow,
+  RESOURCE_LIMITS,
   lstatNoFollow,
   removeNoFollow,
   writeFileNoFollow,
@@ -412,7 +413,10 @@ export async function handleResyncGit(
     // An `lstat` answers the question the name asks, so a healthy clone now takes the FETCH path —
     // which is what this function's own contract says it does.
     const dirRel = bundleDirRel(payload.userId, bundle.id);
-    const exists = (await lstatNoFollow(bundleStorageRoot, `${dirRel}/extracted/.git`)) !== null;
+    const exists =
+      (await lstatNoFollow(bundleStorageRoot, `${dirRel}/extracted/.git`, {
+        rethrow: RESOURCE_LIMITS,
+      })) !== null;
     if (!exists) {
       // Working tree missing — re-clone instead of pull; handleIngestGit owns the dir wipe.
       await handleIngestGit(payload, db, bundleStorageRoot);

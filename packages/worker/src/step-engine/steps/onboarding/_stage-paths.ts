@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { lstatNoFollow, relUnder, toSafeRel } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, lstatNoFollow, relUnder, toSafeRel } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
 import { namesGitData } from '@haive/shared/project-state';
 import { LEGACY_IMPORT_SUBDIR } from './_kb-legacy.js';
@@ -76,11 +76,12 @@ async function collectLegacyMoves(repoPath: string, plan: StagePlan): Promise<vo
     for (const srcRel of tree.stdout.split('\0')) {
       const src = repoRel(srcRel);
       if (src === null || !src.startsWith(`${from}/`)) continue;
-      if ((await lstatNoFollow(repoPath, src)) !== null) continue;
+      if ((await lstatNoFollow(repoPath, src, { rethrow: RESOURCE_LIMITS })) !== null) continue;
       plan.remove.push(src);
       const rel = src.slice(from.length + 1);
       for (const dest of [`${to}/${LEGACY_IMPORT_SUBDIR}/${rel}`, `${to}/${rel}`]) {
-        if ((await lstatNoFollow(repoPath, dest))?.kind === 'file') plan.add.push(dest);
+        if ((await lstatNoFollow(repoPath, dest, { rethrow: RESOURCE_LIMITS }))?.kind === 'file')
+          plan.add.push(dest);
       }
     }
   }
@@ -112,7 +113,8 @@ async function collectRepairRemovals(
       for (const srcRel of tree.stdout.split('\0')) {
         const src = repoRel(srcRel);
         if (src === null || !src.startsWith(`${dir}/${id}/`)) continue;
-        if ((await lstatNoFollow(repoPath, src)) === null) plan.remove.push(src);
+        if ((await lstatNoFollow(repoPath, src, { rethrow: RESOURCE_LIMITS })) === null)
+          plan.remove.push(src);
       }
     }
   }
@@ -235,6 +237,7 @@ export async function stageNamed(
   for (const rel of add) {
     const entry = await lstatNoFollow(anchor, relUnder(anchor, path.join(repoPath, rel)), {
       strict: options.filesystemAnchor !== undefined,
+      rethrow: RESOURCE_LIMITS,
     });
     if (entry && (entry.kind === 'file' || entry.kind === 'symlink')) files.push(rel);
   }
@@ -376,6 +379,7 @@ export async function commitRecorded(
       if (
         (await lstatNoFollow(anchor, relUnder(anchor, path.join(repoPath, rel)), {
           strict: options.filesystemAnchor !== undefined,
+          rethrow: RESOURCE_LIMITS,
         })) !== null
       )
         recreated.push(rel);

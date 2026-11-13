@@ -14,6 +14,7 @@ import {
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
+  isResourceLimitError,
   openFileNoFollow,
   readdirSizesNoFollow,
   readFileNoFollow,
@@ -253,6 +254,7 @@ export async function openEditableKnowledgeFile(
       throw new HttpError(403, 'Cannot verify the file path');
     }
     if (isPathContainmentError(err)) throw new HttpError(403, 'Path is outside the task workspace');
+    if (isResourceLimitError(err)) throw err;
     throw new HttpError(400, 'File cannot be opened for editing');
   }
   if (fh === null) throw new HttpError(404, 'File no longer exists');

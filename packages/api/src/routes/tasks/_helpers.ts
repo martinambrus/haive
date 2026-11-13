@@ -15,7 +15,7 @@ import {
   type CliRoleDescriptor,
   type CliTokenUsage,
 } from '@haive/shared';
-import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { summarizeThroughput, type ThroughputSummary } from '@haive/shared/stats';
 import {
   providerBreakdownWhere,
@@ -1107,7 +1107,9 @@ export async function resolveWorkspaceRoot(
     throw new HttpError(409, 'Task workspace is not inside its repository');
   }
   if (decision.kind === 'worktree' && worktreePath) {
-    const entry = await lstatNoFollow(anchor, relUnder(anchor, resolve(worktreePath)));
+    const entry = await lstatNoFollow(anchor, relUnder(anchor, resolve(worktreePath)), {
+      rethrow: RESOURCE_LIMITS,
+    });
     if (entry === null) {
       throw new HttpError(
         409,

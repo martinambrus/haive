@@ -296,7 +296,7 @@ async function walkDir(
 const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
 /** Running out of descriptors is the process's condition, not a fact about the entry being read, so
  *  a listing that took it for absence would come back short without saying so. */
-const RESOURCE_LIMITS: ReadonlySet<string> = new Set(['EMFILE', 'ENFILE']);
+export const RESOURCE_LIMITS: ReadonlySet<string> = new Set(['EMFILE', 'ENFILE']);
 
 /** Whether `err` is the process running out of descriptors: a fact about this process, never a
  *  fact about the path it was reading. */
@@ -330,6 +330,8 @@ async function readResult<T>(
 export interface StrictOption {
   /** Throw containment refusals instead of folding them into `null`. Absence stays `null`. */
   strict?: boolean;
+  /** Throw these errnos even when lenient; all other refusal and absence rules stay unchanged. */
+  rethrow?: ReadonlySet<string>;
 }
 
 export type OpenMode = 'read' | 'read-write';
@@ -394,7 +396,7 @@ export async function openFileNoFollow(
 ): Promise<FileHandle | null> {
   if (mode === 'create-exclusive') return createExclusive(anchor, rel, opts);
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, () => openVerified(anchor, safe, mode));
+  return readResult(opts.strict, () => openVerified(anchor, safe, mode), opts.rethrow);
 }
 
 /** A readable descriptor on the DIRECTORY at `<anchor>/<rel>`, opened without following anything
@@ -460,27 +462,31 @@ export async function readFileNoFollow(
   opts: ReadOptions = {},
 ): Promise<ReadResult | null> {
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, async () => {
-    const fh = await openVerified(anchor, safe, 'read');
-    try {
-      const size = (await fh.stat()).size;
-      const want = Math.min(size, opts.maxBytes ?? Number.POSITIVE_INFINITY);
-      const buf = Buffer.allocUnsafe(want);
-      let filled = 0;
-      while (filled < want) {
-        const { bytesRead } = await fh.read(buf, filled, want - filled, filled);
-        if (bytesRead === 0) break;
-        filled += bytesRead;
+  return readResult(
+    opts.strict,
+    async () => {
+      const fh = await openVerified(anchor, safe, 'read');
+      try {
+        const size = (await fh.stat()).size;
+        const want = Math.min(size, opts.maxBytes ?? Number.POSITIVE_INFINITY);
+        const buf = Buffer.allocUnsafe(want);
+        let filled = 0;
+        while (filled < want) {
+          const { bytesRead } = await fh.read(buf, filled, want - filled, filled);
+          if (bytesRead === 0) break;
+          filled += bytesRead;
+        }
+        return {
+          data: filled === want ? buf : buf.subarray(0, filled),
+          size,
+          truncated: size > want,
+        };
+      } finally {
+        await closeQuietly(fh);
       }
-      return {
-        data: filled === want ? buf : buf.subarray(0, filled),
-        size,
-        truncated: size > want,
-      };
-    } finally {
-      await closeQuietly(fh);
-    }
-  });
+    },
+    opts.rethrow,
+  );
 }
 
 export async function readTextNoFollow(
@@ -513,26 +519,32 @@ export async function readdirNoFollow(
   ) {
     throw new RangeError('maxEntries must be a nonnegative safe integer');
   }
-  return readResult(opts.strict, async () => {
-    const dir = await walkDir(anchor, safe, segments(safe));
-    try {
-      if (opts.maxEntries !== undefined) {
-        const entries: Dirent[] = [];
-        const listing = await opendir(fdPath(dir.fh.fd), { bufferSize: 32 });
-        // The async iterator closes the listing on completion, early return, or throw.
-        for await (const entry of listing) {
-          if (entries.length === opts.maxEntries) {
-            throw new Error(`Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`);
+  return readResult(
+    opts.strict,
+    async () => {
+      const dir = await walkDir(anchor, safe, segments(safe));
+      try {
+        if (opts.maxEntries !== undefined) {
+          const entries: Dirent[] = [];
+          const listing = await opendir(fdPath(dir.fh.fd), { bufferSize: 32 });
+          // The async iterator closes the listing on completion, early return, or throw.
+          for await (const entry of listing) {
+            if (entries.length === opts.maxEntries) {
+              throw new Error(
+                `Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`,
+              );
+            }
+            entries.push(entry);
           }
-          entries.push(entry);
+          return entries;
         }
-        return entries;
+        return await readdir(fdPath(dir.fh.fd), { withFileTypes: true });
+      } finally {
+        await closeQuietly(dir.fh);
       }
-      return await readdir(fdPath(dir.fh.fd), { withFileTypes: true });
-    } finally {
-      await closeQuietly(dir.fh);
-    }
-  });
+    },
+    opts.rethrow,
+  );
 }
 
 export interface WalkFilesOptions {
@@ -715,16 +727,22 @@ export async function lstatNoFollow(
   opts: StrictOption = {},
 ): Promise<EntryInfo | null> {
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, async () => {
-    const segs = segments(safe);
-    const leaf = segs.pop();
-    const dir = await walkDir(anchor, safe, segs);
-    try {
-      return describe(leaf === undefined ? await dir.fh.stat() : await lstat(at(dir.fh.fd, leaf)));
-    } finally {
-      await closeQuietly(dir.fh);
-    }
-  });
+  return readResult(
+    opts.strict,
+    async () => {
+      const segs = segments(safe);
+      const leaf = segs.pop();
+      const dir = await walkDir(anchor, safe, segs);
+      try {
+        return describe(
+          leaf === undefined ? await dir.fh.stat() : await lstat(at(dir.fh.fd, leaf)),
+        );
+      } finally {
+        await closeQuietly(dir.fh);
+      }
+    },
+    opts.rethrow,
+  );
 }
 
 /**
@@ -2674,17 +2692,21 @@ export async function readLinkNoFollow(
   opts: StrictOption = {},
 ): Promise<string | null> {
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, async () => {
-    const segs = segments(safe);
-    const leaf = segs.pop();
-    if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, rel, '');
-    const dir = await walkDir(anchor, safe, segs);
-    try {
-      const st = await lstat(at(dir.fh.fd, leaf));
-      if (!st.isSymbolicLink()) return null;
-      return await readlink(at(dir.fh.fd, leaf));
-    } finally {
-      await closeQuietly(dir.fh);
-    }
-  });
+  return readResult(
+    opts.strict,
+    async () => {
+      const segs = segments(safe);
+      const leaf = segs.pop();
+      if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, rel, '');
+      const dir = await walkDir(anchor, safe, segs);
+      try {
+        const st = await lstat(at(dir.fh.fd, leaf));
+        if (!st.isSymbolicLink()) return null;
+        return await readlink(at(dir.fh.fd, leaf));
+      } finally {
+        await closeQuietly(dir.fh);
+      }
+    },
+    opts.rethrow,
+  );
 }

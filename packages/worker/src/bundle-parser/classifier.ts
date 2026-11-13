@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readdirNoFollow } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, readdirNoFollow } from '@haive/shared/fs-safe';
 import type { CustomBundleItemSourceFormat } from '@haive/shared';
 
 const SKIP_DIRS = new Set([
@@ -66,7 +66,7 @@ async function walk(
   async function visit(anchorRel: string, rel: string): Promise<void> {
     // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
     // directory should be — contributes nothing, which is exactly what the `catch` here did.
-    const entries = await readdirNoFollow(anchor, anchorRel);
+    const entries = await readdirNoFollow(anchor, anchorRel, { rethrow: RESOURCE_LIMITS });
     if (entries === null) return;
     for (const entry of entries) {
       const childAnchorRel = anchorRel === '' ? entry.name : `${anchorRel}/${entry.name}`;

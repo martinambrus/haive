@@ -1,12 +1,25 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { failGit, type FakeGit } from '../../test/support/fake-git.js';
+import { gitTemplate } from '../../test/support/git-template.js';
 import { listBranchProjectionEdits, revertHaiveProjectionsOnBranch } from './branch-revert.js';
+
+const resourceFault = vi.hoisted(() => ({ leaf: '', error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (resourceFault.error && String(args[0]).endsWith('/' + resourceFault.leaf))
+        throw resourceFault.error;
+      return real.lstat(...args);
+    },
+  };
+});
 
 const exec = promisify(execFile);
 const IDENTITY = {
@@ -29,6 +42,7 @@ const verify = (spec: string) => ['rev-parse', '-q', '--verify', spec];
 const dirs: string[] = [];
 let shim: FakeGit | null = null;
 afterEach(async () => {
+  resourceFault.error = null;
   await shim?.restore();
   shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 5 });
@@ -43,16 +57,23 @@ async function commit(dir: string, files: Record<string, string>, message: strin
   await git(dir, ['commit', '-qm', message]);
 }
 
-/** A repository on `main` holding the record `"fork"`, and a `feature/x` worktree. */
-async function fixture(): Promise<{ parent: string; wt: string }> {
-  const parent = await mkdtemp(path.join(tmpdir(), 'br-unknown-'));
-  dirs.push(parent);
+const template = gitTemplate(async (parent) => {
   await git(parent, ['init', '-q', '-b', 'main']);
   await git(parent, ['config', 'gc.auto', '0']);
   await commit(parent, { 'base.txt': 'base\n', [FILE]: '"fork"\n' }, 'initial');
   const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
   await mkdir(path.dirname(wt), { recursive: true });
   await git(parent, ['worktree', 'add', '-q', '-b', 'feature/x', wt, 'main']);
+});
+
+/** A repository on `main` holding the record `"fork"`, and a `feature/x` worktree. */
+async function fixture(): Promise<{ parent: string; wt: string }> {
+  const { dir: parent } = await template.copy();
+  dirs.push(parent);
+  const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
+  // A linked worktree records absolute paths in both directions; neither copy may use the template.
+  await writeFile(path.join(wt, '.git'), `gitdir: ${parent}/.git/worktrees/feature-x\n`);
+  await writeFile(path.join(parent, '.git/worktrees/feature-x/gitdir'), `${wt}/.git\n`);
   return { parent, wt };
 }
 
@@ -199,4 +220,22 @@ describe('a failed ref read in branch-revert is unknown, not absent', () => {
     expect(h.events).toHaveLength(1);
     expect((await git(parent, ['show', `feature/x:${FILE}`])).trim()).toBe('"fork"');
   });
+});
+
+it('does not mark an unread worktree synced or move its branch on a descriptor shortage', async () => {
+  const { parent, wt } = await fixture();
+  await commit(wt, { [FILE]: '"agent"\n' }, 'agent edit');
+  const before = await revOf(wt);
+  const h = stubDb();
+  for (const leaf of ['.haive-data', 'feature-x']) {
+    for (const code of ['EMFILE', 'ENFILE']) {
+      resourceFault.leaf = leaf;
+      const err = Object.assign(new Error('injected'), { code });
+      resourceFault.error = err;
+      await expect(revert(parent, wt, h.db)).rejects.toBe(err);
+      resourceFault.error = null;
+      expect(await revOf(wt)).toBe(before);
+      expect(h.events).toEqual([]);
+    }
+  }
 });

@@ -9,7 +9,7 @@ import {
 import { skillTargetDirs } from '@haive/shared/project-state';
 import { isRtkChoiceRecorded } from '@haive/shared/project-state';
 import { redactGitUrl } from '@haive/shared/schemas';
-import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type {
@@ -947,13 +947,15 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     const existingPaths: string[] = [];
     for (const rel of plan.add) {
       if (leftAsIs.has(rel)) continue;
-      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingPaths.push(rel);
+      if ((await lstatNoFollow(ctx.repoPath, rel, { rethrow: RESOURCE_LIMITS })) !== null)
+        existingPaths.push(rel);
     }
     // A removal has nothing on disk to name, and only while the path is still absent.
     const removedPaths: string[] = [];
     for (const rel of plan.remove) {
       if (leftAsIs.has(rel)) continue;
-      if ((await lstatNoFollow(ctx.repoPath, rel)) === null) removedPaths.push(rel);
+      if ((await lstatNoFollow(ctx.repoPath, rel, { rethrow: RESOURCE_LIMITS })) === null)
+        removedPaths.push(rel);
     }
 
     if (existingPaths.length === 0 && removedPaths.length === 0) {

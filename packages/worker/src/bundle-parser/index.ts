@@ -1,4 +1,4 @@
-import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -97,7 +97,7 @@ function canonicalJson(value: unknown): string {
 }
 
 async function readFrontmatterName(anchor: string, rel: string): Promise<string | null> {
-  const raw = await readTextNoFollow(anchor, rel);
+  const raw = await readTextNoFollow(anchor, rel, { rethrow: RESOURCE_LIMITS });
   if (raw === null) return null;
   const { frontmatter } = splitFrontmatter(raw);
   const name = frontmatter.name?.trim();
@@ -105,7 +105,7 @@ async function readFrontmatterName(anchor: string, rel: string): Promise<string 
 }
 
 async function readTomlNameField(anchor: string, rel: string): Promise<string | null> {
-  const raw = await readTextNoFollow(anchor, rel);
+  const raw = await readTextNoFollow(anchor, rel, { rethrow: RESOURCE_LIMITS });
   if (raw === null) return null;
   const match = raw.match(/^\s*name\s*=\s*"([^"]+)"\s*$/m);
   return match ? match[1]! : null;
@@ -263,7 +263,9 @@ export async function parseBundle(
     }
     // `null` covers absent, unreadable and refused alike — the same three outcomes the `catch` it
     // replaces folded together, which is why the warn no longer carries an `err`.
-    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`);
+    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`, {
+      rethrow: RESOURCE_LIMITS,
+    });
     if (content === null) {
       logger.warn({ file: keep.sourcePath }, 'bundle-parser: failed to read agent file');
       dropped.push({ sourcePath: keep.sourcePath, reason: 'read failed' });
@@ -305,7 +307,9 @@ export async function parseBundle(
         reason: `duplicate skill ${id} — kept ${keep.sourceFormat} (${keep.sourcePath})`,
       });
     }
-    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`);
+    const content = await readTextNoFollow(anchor, `${rootRel}/${keep.sourcePath}`, {
+      rethrow: RESOURCE_LIMITS,
+    });
     if (content === null) {
       logger.warn({ file: keep.sourcePath }, 'bundle-parser: failed to read SKILL.md');
       dropped.push({ sourcePath: keep.sourcePath, reason: 'read failed' });
@@ -313,7 +317,9 @@ export async function parseBundle(
     }
     const subSkillContents: { sourcePath: string; content: string }[] = [];
     for (const sub of keep.subSkillFiles) {
-      const subContent = await readTextNoFollow(anchor, `${rootRel}/${sub.sourcePath}`);
+      const subContent = await readTextNoFollow(anchor, `${rootRel}/${sub.sourcePath}`, {
+        rethrow: RESOURCE_LIMITS,
+      });
       if (subContent === null) {
         logger.warn({ file: sub.sourcePath }, 'bundle-parser: failed to read sub-skill');
         continue;
