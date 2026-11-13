@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, openSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -144,11 +144,19 @@ const startChild = (command: string, args: string[], options: ExecFileOptions, c
 };
 // Git creates config.lock before installing its tempfile signal handler. The later
 // blocking FIFO open proves that cleanup is armed before the fake deadline fires.
-async function waitForConfigFifo(config: string): Promise<void> {
-  await until('git blocked opening its config FIFO for reading (wait_for_partner)', () => {
-    if (!child?.pid || !existsSync(`${config}.lock`)) return false;
-    return readFileSync(`/proc/${child.pid}/wchan`, 'utf8').trim() === 'wait_for_partner';
+async function waitForConfigFifo(config: string): Promise<number> {
+  let writer: number | undefined;
+  await until('git opened its config FIFO for reading after creating config.lock', () => {
+    if (!existsSync(`${config}.lock`)) return false;
+    try {
+      writer = openSync(config, constants.O_WRONLY | constants.O_NONBLOCK);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENXIO') return false;
+      throw new Error('Could not establish the git config FIFO reader handshake', { cause: err });
+    }
   });
+  return writer!;
 }
 const alive = (c: ChildProcess) => c.exitCode === null && c.signalCode === null;
 const running = (pid: number) => {
@@ -453,18 +461,23 @@ it('stops a timed-out git write with SIGTERM, so git removes its own lock file',
   const response = Promise.resolve(
     link('https://synthetic-user:synthetic-password@example.test/r'),
   );
-  await waitForConfigFifo(config);
-  await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-  const answer = await answeredWithin(3_000, response);
-  expect(answer.status).toBe(409);
-  const text = await answer.text();
-  expect(text).not.toMatch(
-    /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
-  );
-  expect(text).toContain('SIGTERM');
-  expect(existsSync(`${config}.lock`)).toBe(false);
-  expect(child!.signalCode).toBe('SIGTERM');
-  expect(vi.getTimerCount()).toBe(0);
+  let writer: number | undefined;
+  try {
+    writer = await waitForConfigFifo(config);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    const answer = await answeredWithin(3_000, response);
+    expect(answer.status).toBe(409);
+    const text = await answer.text();
+    expect(text).not.toMatch(
+      /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+    );
+    expect(text).toContain('SIGTERM');
+    expect(existsSync(`${config}.lock`)).toBe(false);
+    expect(child!.signalCode).toBe('SIGTERM');
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    if (writer !== undefined) closeSync(writer);
+  }
 });
 
 it('kills a git child that traps SIGTERM once the grace after the deadline is over', async () => {
@@ -650,9 +663,10 @@ it.each([false, true])(
     });
     const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let writer: number | undefined;
     try {
       const response = Promise.resolve(link(submitted));
-      await waitForConfigFifo(config);
+      writer = await waitForConfigFifo(config);
       await vi.advanceTimersByTimeAsync(DEADLINE_MS);
       const answer = await answeredWithin(3_000, response);
       expect(answer.status).toBe(restoreFails ? 500 : 409);
@@ -670,6 +684,7 @@ it.each([false, true])(
       if (!restoreFails) expect(text).toContain('SIGTERM');
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      if (writer !== undefined) closeSync(writer);
       errors.mockRestore();
     }
   },
