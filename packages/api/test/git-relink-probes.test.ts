@@ -204,6 +204,49 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     },
   );
 
+  it('passes over a repository a relink holds instead of acting on its intent afterwards', async () => {
+    await fixture();
+    h.db = db;
+    // A folder import mid-relink: its intent is committed and its row is locked.
+    await db
+      .update(schema.repositories)
+      .set({ remoteUrl: null, remoteRelinkIntent: '00000000-0000-4000-8000-0000000000aa' })
+      .where(eq(schema.repositories.id, repository));
+    const before = await git(root, ['remote', '-v']);
+    let release!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((resolve) => (locked = resolve));
+    const relink = db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repository))
+        .for('no key update');
+      locked();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await held;
+    let swept = false;
+    const sweep = sweepOnce().then(() => {
+      swept = true;
+    });
+    // Either the sweep finishes, or a backend waits on the row lock (the old behaviour).
+    for (let i = 0; !swept; i++) {
+      const [waiting] = await db.$client<{ n: number }[]>`
+        select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'`;
+      if (waiting!.n > 0) break;
+      if (i > 300) throw new Error('the sweep neither finished nor waited on the row lock');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The relink ends in a refusal and rolls back; it settles its own intent afterwards.
+    release();
+    await relink;
+    await sweep;
+    expect(await git(root, ['remote', '-v'])).toBe(before);
+    expect((await stored())?.remoteRelinkIntent).toBe('00000000-0000-4000-8000-0000000000aa');
+  });
+
   it('keeps Git aligned with a committed row when the actual COMMIT acknowledgement is lost', async () => {
     await fixture();
     const upstream = new URL(url!);

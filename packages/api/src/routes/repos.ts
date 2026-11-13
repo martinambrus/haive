@@ -311,6 +311,8 @@ repoRoutes.get('/', async (c) => {
       agentRulesOverride: false,
       onboardingTooling: false,
       onboardingEnvironment: false,
+      // An internal repair token; nothing a client sends or reads.
+      remoteRelinkIntent: false,
     },
   });
 
@@ -896,6 +898,8 @@ repoRoutes.get('/:id', async (c) => {
       agentRulesOverride: false,
       onboardingTooling: false,
       onboardingEnvironment: false,
+      // An internal repair token; nothing a client sends or reads.
+      remoteRelinkIntent: false,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -2748,7 +2752,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     intent = await markRemoteIntent(id, userId);
   } catch (err) {
     logger.warn({ err, repositoryId: id }, 'could not record remote update intent');
-    if (err instanceof HttpError && err.status === 409) throw err;
+    if (err instanceof HttpError && (err.status === 409 || err.status === 404)) throw err;
     throw new HttpError(
       409,
       'Could not record the remote update intent; retry when the database is available',

@@ -45,7 +45,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
-import type { AppEnv } from '../src/context.js';
+import { HttpError, type AppEnv } from '../src/context.js';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -949,6 +949,21 @@ it.each(['ECONNREFUSED', 'CONNECTION_CLOSED', '55P03'])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it('answers 404 when the repository is deleted before its intent is recorded', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.mark.mockRejectedValueOnce(new HttpError(404, 'Repository not found'));
+  expect((await link()).status).toBe(404);
+  expect(h.git).toHaveBeenCalledTimes(1);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+
+it('keeps the internal repair token out of repository reads', async () => {
+  const body = (await (await app.request(`/${REPO}`)).json()) as {
+    repository: Record<string, unknown>;
+  };
+  expect(body.repository).not.toHaveProperty('remoteRelinkIntent');
+});
 
 it('serves repository details without starting remote repair or writing state', async () => {
   const transaction = vi.spyOn(fake.db, 'transaction');

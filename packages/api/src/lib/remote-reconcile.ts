@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
+import { HttpError } from '../context.js';
 import { boundedLockWait } from './repository-busy.js';
 import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js';
 
@@ -22,7 +23,7 @@ export async function markRemoteIntent(id: string, userId: string) {
           .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
           .for('no key update'),
       );
-      if (!repo) throw new Error('Repository not found');
+      if (!repo) throw new HttpError(404, 'Repository not found');
       const token = randomUUID();
       await tx
         .update(schema.repositories)
@@ -85,8 +86,14 @@ export function isRemoteConnectionError(err: unknown): boolean {
   return false;
 }
 
-/** A fresh locked read is the authority, never the route's pre-transaction snapshot. */
-export async function reconcileRemote(id: string, userId: string): Promise<void> {
+/** A fresh locked read is the authority, never the route's pre-transaction snapshot.
+ *  `skipLocked` (the sweep) passes over a row a relink holds instead of waiting for it: that
+ *  request settles its own intent after it releases the row, and the next tick sees the rest. */
+export async function reconcileRemote(
+  id: string,
+  userId: string,
+  { skipLocked = false }: { skipLocked?: boolean } = {},
+): Promise<void> {
   await withFreshDatabase(async (db) => {
     await db.transaction(async (tx) => {
       const [repo] = await boundedLockWait(tx, () =>
@@ -94,9 +101,10 @@ export async function reconcileRemote(id: string, userId: string): Promise<void>
           .select()
           .from(schema.repositories)
           .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-          .for('no key update'),
+          .for('no key update', skipLocked ? { skipLocked: true } : undefined),
       );
-      if (!repo?.remoteRelinkIntent) return; // A delete won the lock; do not touch its former checkout.
+      // A delete won the lock (do not touch its former checkout), or a relink holds the row.
+      if (!repo?.remoteRelinkIntent) return;
       const root = repo.storagePath ?? repo.localPath;
       if (!root) throw new Error('Repository has no path for remote reconciliation');
       await verifyRelinkCheckout(root);
@@ -163,7 +171,7 @@ export function startRemoteReconcileSweep({
       for (const repo of repos) {
         if (stopped) break;
         try {
-          await reconcileRemote(repo.id, repo.userId);
+          await reconcileRemote(repo.id, repo.userId, { skipLocked: true });
         } catch (err) {
           logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
         }
