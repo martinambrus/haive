@@ -96,7 +96,7 @@ beforeEach(async () => {
 });
 
 describe('the terminals are human surfaces', () => {
-  it.each(['EMFILE', 'ENFILE'])(
+  it.each(['EMFILE', 'ENFILE', 'EACCES', 'EIO'])(
     'answers a normal terminal error without starting a container on %s, then allows retry',
     async (code) => {
       const mgr = manager();
@@ -110,14 +110,14 @@ describe('the terminals are human surfaces', () => {
         taskId: 'task-1',
       });
       h.error = Object.assign(
-        new Error(`${code}: too many open files, open '${storageRoot}/${SUBPATH}'`),
+        new Error(`${code}: lookup failed, lstat '${storageRoot}/${SUBPATH}'`),
         { code },
       );
       await mgr.handleSubscriberMessage(TERMINAL_REQUEST_CHANNEL, request);
       expect(h.ensure).not.toHaveBeenCalled();
       expect(h.publish).toHaveBeenLastCalledWith(
         `${TERMINAL_REPLY_CHANNEL_PREFIX}c1`,
-        JSON.stringify({ ok: false, error: `${code}: too many open files, open '[path]'` }),
+        JSON.stringify({ ok: false, error: `${code}: lookup failed, lstat '[path]'` }),
       );
 
       h.error = null;
@@ -131,6 +131,13 @@ describe('the terminals are human surfaces', () => {
       });
     },
   );
+
+  it.each(['ENOENT', 'ENOTDIR'])('starts a task shell without a .git mount on %s', async (code) => {
+    h.error = Object.assign(new Error('injected absent lookup'), { code });
+    await expect(open('task')).rejects.toThrow('not started in this test');
+    expect(h.ensure).toHaveBeenCalledTimes(1);
+    expect(h.ensure.mock.calls[0]![0].nestedMounts).toEqual([]);
+  });
 
   it('gives the task shell the read-only .git it always had, and no .haive-data mount', async () => {
     await expect(open('task')).rejects.toThrow('not started in this test');
