@@ -71,10 +71,14 @@ export function parseModelfile(text: string): ParsedModelfile {
         result.template = readBlock();
         break;
       case 'PARAMETER': {
-        const m = rest.match(/^(\S+)\s+(.*)$/);
-        if (!m) break;
-        const key = m[1]!;
-        const value = coerceParamValue(m[2]!);
+        // Split by hand: `^(\S+)\s+(.*)$` backtracks quadratically when a line terminator
+        // follows a long whitespace run. Same result: a value holding a line terminator is skipped.
+        const keyEnd = rest.search(/\s/);
+        if (keyEnd <= 0) break;
+        const rawValue = rest.slice(keyEnd).trimStart();
+        if (/[\n\r\u2028\u2029]/.test(rawValue)) break;
+        const key = rest.slice(0, keyEnd);
+        const value = coerceParamValue(rawValue);
         const existing = parameters[key];
         if (existing === undefined) parameters[key] = value;
         else if (Array.isArray(existing)) existing.push(value);

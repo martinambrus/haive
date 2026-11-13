@@ -42,4 +42,20 @@ describe('parseModelfile', () => {
     expect(p.system).toBeUndefined();
     expect(p.parameters).toEqual({});
   });
+  it('reads a PARAMETER value after any whitespace and skips one holding a line terminator', () => {
+    const p = parseModelfile(
+      ['PARAMETER t \t 0.5', 'PARAMETER only', 'PARAMETER bad x\u2028y', 'PARAMETER k v'].join(
+        '\n',
+      ),
+    );
+    expect(p.parameters).toEqual({ t: 0.5, k: 'v' });
+  });
+
+  it('parses a long whitespace run before a line terminator in linear time', () => {
+    const started = performance.now();
+    const p = parseModelfile('PARAMETER k ' + '\t\t'.repeat(40_000) + 'x\u2028y');
+    // The old pattern took about 4 s here; the bound only has to separate linear from quadratic.
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(p.parameters).toEqual({});
+  });
 });
