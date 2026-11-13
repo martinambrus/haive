@@ -17,6 +17,9 @@ import {
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   DISPLAY_CURRENCIES,
   REGISTRATION_MODES,
+  SECRET_KEYS,
+  MAIL_DEFAULTS,
+  mailSettingsSchema,
   SPEC_VIEW_MODES,
   TERSENESS_LEVELS,
   computeEmailBlindIndex,
@@ -48,6 +51,7 @@ import { isUuid } from '../lib/uuid.js';
 import { ollamaModelAllowlistSchema } from '../lib/ollama-pull-policy.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
+import { MAIL_FIELDS, readMailSettings, sendMail } from '../lib/mailer.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -495,11 +499,16 @@ function lockBusyError(err: unknown): never {
   throw err;
 }
 
-/** Saves a config switch and audits its before and after values; no credential belongs here. */
+/** Saves configuration with its audit row. Private fields record only presence, and an optional
+ * secret is encrypted in the same transaction as the audit, never included in metadata. */
 async function saveConfig(
   userId: string,
   route: string,
   fields: Record<string, ConfigField>,
+  options?: {
+    privateFields?: readonly string[];
+    secret?: { key: string; value: string; description: string };
+  },
 ): Promise<void> {
   const entries = Object.entries(fields);
   const lockName =
@@ -517,15 +526,22 @@ async function saveConfig(
         return { name, from, to: value ?? from };
       });
       const event = (rows: typeof changes, extra?: { partial: true }): AuditEvent => {
+        const publicValue = (row: (typeof rows)[number], which: 'from' | 'to') =>
+          options?.privateFields?.includes(row.name) ? Boolean(row[which]) : row[which];
         const side = (which: 'from' | 'to') =>
           entries.length === 1
-            ? rows[0]![which]
-            : Object.fromEntries(rows.map((row) => [row.name, row[which]]));
+            ? publicValue(rows[0]!, which)
+            : Object.fromEntries(rows.map((row) => [row.name, publicValue(row, which)]));
         return {
           actorUserId: userId,
           action: `config.${route.replaceAll('-', '_')}`,
           targetType: 'system',
-          metadata: { from: side('from'), to: side('to'), ...extra },
+          metadata: {
+            from: side('from'),
+            to: side('to'),
+            ...(options ? { passwordChanged: Boolean(options.secret) && !extra } : {}),
+            ...extra,
+          },
         };
       };
       const full = event(changes);
@@ -535,6 +551,10 @@ async function saveConfig(
         await tx.transaction(async (savepoint) => {
           // A write that fails after the first takes the full row back with the savepoint.
           await insertAuditEvent(savepoint, full);
+          if (options?.secret) {
+            const { key, value, description } = options.secret;
+            await secretsService.set(key, value, description, savepoint);
+          }
           // One key after another in the order given: six handlers wrote theirs in sequence before this.
           for (const [i, [, [key, value]]] of entries.entries()) {
             if (value === undefined) continue;
@@ -555,6 +575,61 @@ async function saveConfig(
   logAuditEvent(outcome.event);
   if ('error' in outcome) throw outcome.error;
 }
+
+const mailUpdateSchema = mailSettingsSchema.and(
+  z.object({ password: z.string().max(4096).optional() }),
+);
+
+adminRoutes.get('/mail', async (c) => {
+  const settings = await readMailSettings();
+  const passwordSet = Boolean(await secretsService.getFresh(SECRET_KEYS.MAIL_SMTP_PASSWORD));
+  return c.json({ ...settings, passwordSet });
+});
+
+adminRoutes.put('/mail', async (c) => {
+  const { password, ...settings } = mailUpdateSchema.parse(await c.req.json());
+  const fields = Object.fromEntries(
+    Object.entries(MAIL_FIELDS).map(([name, key]) => [
+      name,
+      [key, settings[name as keyof typeof settings], MAIL_DEFAULTS[name as keyof typeof settings]],
+    ]),
+  ) as Record<string, ConfigField>;
+  await saveConfig(c.get('userId'), 'mail', fields, {
+    privateFields: ['user'],
+    ...(password?.trim()
+      ? {
+          secret: {
+            key: SECRET_KEYS.MAIL_SMTP_PASSWORD,
+            value: password,
+            description: 'SMTP mail password',
+          },
+        }
+      : {}),
+  });
+  return c.json({
+    ...settings,
+    passwordSet: Boolean(await secretsService.getFresh(SECRET_KEYS.MAIL_SMTP_PASSWORD)),
+  });
+});
+
+adminRoutes.post('/mail/test', async (c) => {
+  const { to } = z.object({ to: z.email() }).parse(await c.req.json());
+  const event: AuditEvent = {
+    actorUserId: c.get('userId'),
+    action: 'mail.test',
+    targetType: 'system',
+  };
+  // Commit the required attempt audit before SMTP; never hold a DB connection during delivery.
+  await getDb().transaction((tx) => insertAuditEvent(tx, event));
+  logAuditEvent(event);
+  return c.json(
+    await sendMail({
+      to,
+      subject: 'Haive test mail',
+      text: 'Your Haive mail settings are working.',
+    }),
+  );
+});
 
 const concurrencySchema = z.object({
   // 0 = auto (sized from the host budget the runtime pool leaves free); a positive value pins

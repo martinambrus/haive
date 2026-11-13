@@ -357,3 +357,34 @@ empty value count as equal. The current provider is read under its
 Secret environment writes keep their existing strict `cli_provider.secret.set`
 row in that same transaction. Both logs follow commit; unchanged settings
 add no update row.
+
+## Administrator SMTP mail
+
+`GET`/`PUT /admin/mail` and `POST /admin/mail/test {to}` use the existing admin guard;
+mutations also pass the app's origin check. The Mail card is on **Admin → Data & access**.
+Settings live in ConfigService under `config:mail:{enabled,smtpHost,smtpPort,secure,user,from,fromName}`.
+The password is encrypted by SecretsService as `mail_smtp_password`: reads return only
+`passwordSet`, and a blank or absent password on a save keeps the stored value. The retired
+`config:email:*` keys and `smtp_password` stay retired. Saves write `config.mail` audit rows
+(with password-change and username-presence flags only); tests commit a required `mail.test`
+attempt row before sending, and return `{ok: true}` or a typed `{ok: false, code, error}`.
+No SMTP transcript, credential, or recipient goes into the response diagnostics or audit metadata.
+
+`api/src/lib/mailer.ts` exports `sendMail({to, subject, text, html?})` for future recovery mail.
+It rereads settings and the password on each call and creates a fresh Nodemailer transport.
+Connection and greeting timeouts are each 10 seconds; socket inactivity is bounded at 30 seconds
+(the limits are injectable for controls). `secure` selects TLS on connect, normally on port 465;
+otherwise Nodemailer uses STARTTLS when offered. Certificate checks remain enabled. Disabled
+mail returns `mail_disabled` without connecting. A configuration-store outage retains its
+retryable API 503 instead of being mistaken for an incomplete setup. Internal SMTP relays are allowed: only
+administrators can choose the endpoint, so the administrator-trusted outbound policy above applies.
+
+Production seeds disabled mail and an empty host/from. The dev override seeds enabled SMTP at
+`mailpit:1025`, no TLS on connect, from `haive@example.test`, through `HAIVE_MAIL_ENABLED`,
+`HAIVE_MAIL_SMTP_HOST`, `HAIVE_MAIL_SMTP_PORT`, `HAIVE_MAIL_SECURE` and `HAIVE_MAIL_FROM` in both
+API and worker environments. Optional `HAIVE_MAIL_USER` and `HAIVE_MAIL_FROM_NAME` complete the
+seed fields. All seeds use SET NX: existing administrator choices win on restart. Mailpit itself
+already lives in the base Compose file (`axllent/mailpit:latest`, persistent `mailpit_data`);
+the dev override publishes its SMTP and web ports. The Nodemailer dependency and lockfile change
+require `pnpm docker rebuild` when this branch is deployed to a dev stack. Roll back by reverting
+the mail commit; unused config keys are harmless. No recovery routes are added by this feature.

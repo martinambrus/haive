@@ -38,6 +38,16 @@ const CUSTOM_TOOLS_CARD = /custom\s+(mcp\s+)?tools?/i;
 const on = { enabled: true };
 
 const GETS: Record<string, unknown> = {
+  '/admin/mail': {
+    enabled: false,
+    smtpHost: '',
+    smtpPort: 587,
+    secure: false,
+    user: '',
+    from: '',
+    fromName: 'Haive',
+    passwordSet: false,
+  },
   '/admin/health': {
     users: { total: 1, active: 1, deactivated: 0, admins: 1 },
     tasks: {},

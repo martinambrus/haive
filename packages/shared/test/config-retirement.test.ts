@@ -116,6 +116,39 @@ describe('retired Redis configuration on boot', () => {
     expect(logger.info).not.toHaveBeenCalledWith({ key: expect.any(String) }, expect.any(String));
   });
 
+  it('seeds disabled mail in production and preserves administrator choices', async () => {
+    await boot();
+    expect(redis.store.get('config:mail:enabled')).toBe('false');
+    expect(redis.store.get('config:mail:smtpHost')).toBe('');
+    redis.store.set('config:mail:smtpHost', 'chosen.internal');
+    vi.stubEnv('HAIVE_MAIL_SMTP_HOST', 'mailpit');
+    vi.stubEnv('HAIVE_MAIL_ENABLED', 'true');
+    vi.stubEnv('HAIVE_MAIL_FROM', 'haive@example.test');
+    await boot();
+    expect(redis.store.get('config:mail:smtpHost')).toBe('chosen.internal');
+    expect(redis.store.get('config:mail:enabled')).toBe('false');
+  });
+
+  it('seeds validated environment defaults on first boot for dev Mailpit', async () => {
+    vi.stubEnv('HAIVE_MAIL_SMTP_HOST', 'mailpit');
+    vi.stubEnv('HAIVE_MAIL_SMTP_PORT', '1025');
+    vi.stubEnv('HAIVE_MAIL_ENABLED', 'true');
+    vi.stubEnv('HAIVE_MAIL_SECURE', 'false');
+    vi.stubEnv('HAIVE_MAIL_FROM', 'haive@example.test');
+    await boot();
+    expect(redis.store.get('config:mail:smtpHost')).toBe('mailpit');
+    expect(redis.store.get('config:mail:smtpPort')).toBe('1025');
+    expect(redis.store.get('config:mail:enabled')).toBe('true');
+    expect(redis.store.get('config:mail:secure')).toBe('false');
+    expect(redis.store.get('config:mail:from')).toBe('haive@example.test');
+  });
+
+  it('refuses an invalid environment seed', async () => {
+    vi.stubEnv('HAIVE_MAIL_SMTP_PORT', 'not-a-port');
+    await expect(boot()).rejects.toThrow();
+    expect(redis.store.has('config:mail:enabled')).toBe(false);
+  });
+
   it('fails boot with the typed outage and retries cleanup on the same instance', async () => {
     redis.store.set(RETIRED[0]!, 'old value');
     redis.failDelete = true;
@@ -171,6 +204,18 @@ describe('retired system secrets on boot', () => {
     expect(await service.listKeys()).toEqual([rows.get(SECRET_KEYS.JWT_SECRET)]);
     expect(Object.values(SECRET_KEYS)).not.toContain('smtp_password');
     expect(logger.info).toHaveBeenCalledWith({ key: 'smtp_password' }, expect.any(String));
+  });
+
+  it('preserves the new mail password while deleting the retired SMTP password', async () => {
+    rows.set(SECRET_KEYS.MAIL_SMTP_PASSWORD, {
+      key: SECRET_KEYS.MAIL_SMTP_PASSWORD,
+      description: null,
+      updatedAt: new Date(),
+    });
+    const service = new SecretsService();
+    await service.initialize(db);
+    expect(removed).toEqual(['smtp_password']);
+    expect(await service.listKeys()).toContainEqual(rows.get(SECRET_KEYS.MAIL_SMTP_PASSWORD));
   });
 
   it('does not remove or log any secret on the next boot', async () => {
