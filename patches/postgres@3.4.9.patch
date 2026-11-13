@@ -55,6 +55,54 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..52e22ef8102586716d56ab546d4574b7
        initial = null
        return
      }
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+index f09c61c7e998f411560b95c9a8e1ed6a97972c11..f11eb40004054f56b34d468928ec95deadf85a66 100644
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -237,15 +237,32 @@ function Postgres(a, b) {
+     let savepoints = 0
+       , connection
+       , prepare = null
++      , transactionEnded = false
++      , transactionError
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = error => {
++          rejectTransaction(error)
++          reject(error)
++        })
+       ])
+     } catch (error) {
++      rejectTransaction(error)
+       throw error
++    } finally {
++      transactionEnded = true
++    }
++
++    function rejectTransaction(error) {
++      // The callback may still be waiting on external work when onclose rejects
++      // begin. Its handles must never execute on this connection after reuse.
++      transactionEnded = true
++      transactionError = error
++      while (queries.length)
++        queries.shift().reject(error)
+     }
+ 
+     async function scope(c, fn, name) {
+@@ -290,6 +307,9 @@ function Postgres(a, b) {
+ 
+       function handler(q) {
+         q.catch(e => uncaughtError || (uncaughtError = e))
++        if (transactionEnded)
++          return q.reject(transactionError || Errors.generic('UNSAFE_TRANSACTION', 'Cannot execute a query on a settled transaction'))
++
+         c.queue === full
+           ? queries.push(q)
+           : c.execute(q) || move(c, full)
 diff --git a/src/connection.js b/src/connection.js
 index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..4c2f2bf1c7808ae3392a0d34fc001cedf8d19eb1 100644
 --- a/src/connection.js
@@ -112,3 +160,51 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..4c2f2bf1c7808ae3392a0d34fc001ced
        initial = null
        return
      }
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..a55deef174125abfc076fd21805f29e5c072cb3d 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -237,15 +237,32 @@ function Postgres(a, b) {
+     let savepoints = 0
+       , connection
+       , prepare = null
++      , transactionEnded = false
++      , transactionError
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = error => {
++          rejectTransaction(error)
++          reject(error)
++        })
+       ])
+     } catch (error) {
++      rejectTransaction(error)
+       throw error
++    } finally {
++      transactionEnded = true
++    }
++
++    function rejectTransaction(error) {
++      // The callback may still be waiting on external work when onclose rejects
++      // begin. Its handles must never execute on this connection after reuse.
++      transactionEnded = true
++      transactionError = error
++      while (queries.length)
++        queries.shift().reject(error)
+     }
+ 
+     async function scope(c, fn, name) {
+@@ -290,6 +307,9 @@ function Postgres(a, b) {
+ 
+       function handler(q) {
+         q.catch(e => uncaughtError || (uncaughtError = e))
++        if (transactionEnded)
++          return q.reject(transactionError || Errors.generic('UNSAFE_TRANSACTION', 'Cannot execute a query on a settled transaction'))
++
+         c.queue === full
+           ? queries.push(q)
+           : c.execute(q) || move(c, full)
