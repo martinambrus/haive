@@ -439,3 +439,28 @@ email-index update can upgrade the user lock. After commit the user's API socket
 auth cookies are cleared;
 the web returns to login with a notice. Rollback: revert the feature; `password_resets` stays unused
 or a later migration drops it. Passwords already reset are not undone by a revert.
+
+## Admin relink
+
+For accounts whose email is unreadable, an administrator uses **Relink** on the users page.
+`POST /admin/users/:id/relink {email}` uses the admin and app-origin guards and refuses the calling
+administrator with 400, as deactivate and role changes do. It normalizes the
+address like sign-in and refuses a readable or deactivated account with a typed 409, an unknown
+user with 404, and an address held by another account with 409 `relink_email_taken`, including a
+unique-index race. Under a `FOR NO KEY UPDATE` user lock, one transaction repairs the email and
+blind index, replaces the password with a bcrypt hash of 32 random bytes, sets
+`must_change_password`, increments `token_version`, revokes refresh tokens and records the required
+`user.relink` audit (administrator actor and target id, no address or password). Refresh tokens are
+revoked before the unique email-index update, following password redemption's lock order.
+The same transaction uses the shared reset issuance helper to supersede prior links and issue a
+plain reset, bypassing the two-minute self-service cooldown so a recent claim cannot block the
+administrator. Both required audit rows and the reset commit together; a failure undoes all writes.
+After commit, the user's API sockets close and mail is sent to the new address with a reset link
+at the configured web origin. Success returns `delivery: 'mailed'`; disabled mail returns
+`delivery: 'manual'` and the link. Every delivery error, including a configuration outage, returns
+`delivery: 'failed'` and the link for manual handoff. The dialog shows that link once with a copy
+button. While the request is in flight the dialog cannot be closed, and once a link is shown only
+Escape or Close dismisses it, since the relink has already committed and the link exists nowhere
+else. A lost link cannot be re-requested through Relink, because the email is now readable: use
+**Reset password** for a temporary password, or forgot-password when mail is enabled. Links and
+tokens are never logged. Rollback: revert the feature; no schema change.

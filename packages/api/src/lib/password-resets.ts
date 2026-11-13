@@ -16,18 +16,42 @@ export const PASSWORD_RESET_COOLDOWN_MS = 2 * 60_000;
 const invalid = () =>
   new HttpError(400, 'That reset link is invalid or expired. Request a new one.');
 
-/** Shared issuance seam: a later administrator relink can choose the user explicitly. Lock the
- * user before touching resets so simultaneous issuance/redemption always uses the same lock order. */
+type ResetTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+interface IssueOptions {
+  now?: Date;
+  ttlMs?: number;
+  cooldownMs?: number;
+  /** An administrator relinking an orphan must supersede even a just-issued claim. */
+  bypassCooldown?: boolean;
+}
+
+/** Shared issuance seam: serialize issuance/redemption on the user before touching resets. */
 export async function issuePasswordReset(
   db: Database,
+  userId: string,
+  claimEmailEncrypted: string | null = null,
+  options: IssueOptions = {},
+): Promise<string | null> {
+  const issued = await db.transaction((tx) =>
+    issuePasswordResetInTransaction(tx, userId, claimEmailEncrypted, options),
+  );
+  if (!issued) return null;
+  logAuditEvent(issued.event);
+  return issued.token;
+}
+
+/** Same issuance policy inside a caller's transaction. The caller logs the event after commit. */
+export async function issuePasswordResetInTransaction(
+  tx: ResetTransaction,
   userId: string,
   claimEmailEncrypted: string | null = null,
   {
     now = new Date(),
     ttlMs = PASSWORD_RESET_TTL_MS,
     cooldownMs = PASSWORD_RESET_COOLDOWN_MS,
-  }: { now?: Date; ttlMs?: number; cooldownMs?: number } = {},
-): Promise<string | null> {
+    bypassCooldown = false,
+  }: IssueOptions = {},
+): Promise<{ token: string; event: AuditEvent } | null> {
   const token = generateInviteToken();
   const event: AuditEvent = {
     actorUserId: ANONYMOUS_AUDIT_ACTOR,
@@ -36,42 +60,35 @@ export async function issuePasswordReset(
     targetId: userId,
     metadata: { claim: claimEmailEncrypted !== null },
   };
-  const issued = await db.transaction(async (tx) => {
-    const locked = await tx
-      .select({ id: schema.users.id })
-      .from(schema.users)
-      .where(and(eq(schema.users.id, userId), eq(schema.users.status, 'active')))
-      .for('no key update');
-    if (!locked.length) throw invalid();
-    const recent = await tx.query.passwordResets.findFirst({
-      where: and(
-        eq(schema.passwordResets.userId, userId),
-        isNull(schema.passwordResets.consumedAt),
-        gt(schema.passwordResets.expiresAt, now),
-        gt(schema.passwordResets.createdAt, new Date(now.getTime() - cooldownMs)),
-      ),
-      columns: { id: true },
-    });
-    if (recent) return false;
-    await tx
-      .update(schema.passwordResets)
-      .set({ consumedAt: now })
-      .where(
-        and(eq(schema.passwordResets.userId, userId), isNull(schema.passwordResets.consumedAt)),
-      );
-    await tx.insert(schema.passwordResets).values({
-      userId,
-      claimEmailEncrypted,
-      tokenHash: hashInviteToken(token),
-      expiresAt: new Date(now.getTime() + ttlMs),
-      createdAt: now,
-    });
-    await insertAuditEvent(tx, event);
-    return true;
+  const locked = await tx
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .where(and(eq(schema.users.id, userId), eq(schema.users.status, 'active')))
+    .for('no key update');
+  if (!locked.length) throw invalid();
+  const recent = await tx.query.passwordResets.findFirst({
+    where: and(
+      eq(schema.passwordResets.userId, userId),
+      isNull(schema.passwordResets.consumedAt),
+      gt(schema.passwordResets.expiresAt, now),
+      gt(schema.passwordResets.createdAt, new Date(now.getTime() - cooldownMs)),
+    ),
+    columns: { id: true },
   });
-  if (!issued) return null;
-  logAuditEvent(event);
-  return token;
+  if (recent && !bypassCooldown) return null;
+  await tx
+    .update(schema.passwordResets)
+    .set({ consumedAt: now })
+    .where(and(eq(schema.passwordResets.userId, userId), isNull(schema.passwordResets.consumedAt)));
+  await tx.insert(schema.passwordResets).values({
+    userId,
+    claimEmailEncrypted,
+    tokenHash: hashInviteToken(token),
+    expiresAt: new Date(now.getTime() + ttlMs),
+    createdAt: now,
+  });
+  await insertAuditEvent(tx, event);
+  return { token, event };
 }
 
 /** Lookup and decrypt happen after the HTTP answer, including writes on the successful path. */

@@ -26,6 +26,7 @@ import {
   configService,
   tryDecryptEmail,
   encryptEmail,
+  emailSchema,
   deriveAgentConcurrency,
   deriveAgentSafetyMb,
   deriveRuntimeCaps,
@@ -52,6 +53,8 @@ import { ollamaModelAllowlistSchema } from '../lib/ollama-pull-policy.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 import { MAIL_FIELDS, readStoredMailSettings, sendMail } from '../lib/mailer.js';
+import { relinkUser } from '../lib/admin-relink.js';
+import { webOrigin } from '../lib/request-origin.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -94,6 +97,9 @@ adminRoutes.get('/users', async (c) => {
     .select({
       id: schema.users.id,
       emailEncrypted: schema.users.emailEncrypted,
+      name: schema.users.name,
+      gitName: schema.users.gitName,
+      gitEmail: schema.users.gitEmail,
       role: schema.users.role,
       status: schema.users.status,
       tokenVersion: schema.users.tokenVersion,
@@ -110,6 +116,9 @@ adminRoutes.get('/users', async (c) => {
       id: row.id,
       email,
       emailReadable: email !== null,
+      name: row.name,
+      gitName: row.gitName,
+      gitEmail: row.gitEmail,
       role: row.role,
       status: row.status,
       tokenVersion: row.tokenVersion,
@@ -290,6 +299,41 @@ adminRoutes.get('/audit', async (c) => {
       targetTypes: typeFacets.map((r) => r.targetType),
     },
   });
+});
+
+const relinkSchema = z.object({ email: z.string().trim().toLowerCase().pipe(emailSchema) });
+
+// Dedicated action: its required email payload and delivery result differ from the legacy actions.
+adminRoutes.post('/users/:id/relink', async (c) => {
+  const { email } = relinkSchema.parse(await c.req.json());
+  const fieldKey = await configService.getEncryptionKey();
+  const pepper = await secretsService.getEmailBlindIndexPepper();
+  // Resolve the configured destination before changing the account, never from request headers.
+  const link = new URL('/reset-password', webOrigin());
+  const result = await relinkUser(
+    getDb(),
+    c.req.param('id'),
+    c.get('userId'),
+    email,
+    fieldKey,
+    pepper,
+  );
+  closeUserSockets(result.userId);
+  link.searchParams.set('token', result.token);
+  try {
+    const delivery = await sendMail({
+      to: email,
+      subject: 'Reset your Haive password',
+      text: `An administrator has relinked your Haive account. Choose a new password:\n\n${link.href}\n\nThis link expires in 30 minutes.`,
+    });
+    if (delivery.ok) return c.json({ ok: true, delivery: 'mailed' });
+    if (delivery.code === 'mail_disabled')
+      return c.json({ ok: true, delivery: 'manual', link: link.href });
+  } catch {
+    // Includes ConfigUnavailableError; SMTP errors may contain the address or reset token.
+    log.warn({ code: 'relink_mail_failed' }, 'Relink mail was not delivered');
+  }
+  return c.json({ ok: true, delivery: 'failed', link: link.href });
 });
 
 adminRoutes.post('/users/:id/action', async (c) => {
