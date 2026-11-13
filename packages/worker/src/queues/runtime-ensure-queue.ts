@@ -7,6 +7,7 @@ import {
   QUEUE_NAMES,
   RUNTIME_ENSURE_JOB_NAMES,
   logger,
+  type DdevRebuildRefusal,
   type RuntimeEnsurePayload,
   type RuntimeEnsureResult,
   type TaskAccessEndpoint,
@@ -166,6 +167,15 @@ async function navigateDesktopToMailpit(taskId: string): Promise<RuntimeEnsureRe
   return { ok: true, url: mailpit.http, mode: runtime.mode };
 }
 
+function refuseDdevRebuild(
+  taskId: string,
+  mode: RuntimeEnsureResult['mode'],
+  refusal: DdevRebuildRefusal,
+): RuntimeEnsureResult {
+  log.info({ taskId, reason: refusal.reason }, 'DDEV rebuild refused');
+  return { ok: false, url: null, mode, rebuildRefusal: refusal };
+}
+
 /** Removal is followed by the normal ensure job, which owns admission, wiring and
  * snapshot recovery. A fresh ID prevents coalescing into an older ensure that
  * already resolved its handle before this removal. */
@@ -175,28 +185,18 @@ export async function rebuildDdevForTask(
   try {
     const ctx = await runtimeContext(payload.taskId);
     if (!ctx)
-      return {
-        ok: false,
-        url: null,
-        mode: 'none',
-        rebuildRefusal: {
-          reason: 'no-ddev',
-          message: 'No DDEV workspace for this task.',
-          retryable: false,
-        },
-      };
+      return refuseDdevRebuild(payload.taskId, 'none', {
+        reason: 'no-ddev',
+        message: 'No DDEV workspace for this task.',
+        retryable: false,
+      });
     const spec = await classifyRuntime(ctx);
     if (spec.mode !== 'ddev' || !spec.repoSubpath)
-      return {
-        ok: false,
-        url: null,
-        mode: 'none',
-        rebuildRefusal: {
-          reason: 'no-ddev',
-          message: 'This task has no DDEV runtime.',
-          retryable: false,
-        },
-      };
+      return refuseDdevRebuild(payload.taskId, 'none', {
+        reason: 'no-ddev',
+        message: 'This task has no DDEV runtime.',
+        retryable: false,
+      });
     const { removed } = await rebuildDdevRunner(
       payload.taskId,
       spec.repoSubpath,
@@ -219,14 +219,13 @@ export async function rebuildDdevForTask(
     return { ok: true, url: null, mode: 'ddev', removed };
   } catch (error) {
     if (error instanceof DdevRebuildRefusedError)
-      return { ok: false, url: null, mode: 'ddev', rebuildRefusal: error.refusal };
+      return refuseDdevRebuild(payload.taskId, 'ddev', error.refusal);
     if (error instanceof RunnerProbeError)
-      return {
-        ok: false,
-        url: null,
-        mode: 'ddev',
-        rebuildRefusal: { reason: 'probe-unknown', message: error.message, retryable: true },
-      };
+      return refuseDdevRebuild(payload.taskId, 'ddev', {
+        reason: 'probe-unknown',
+        message: error.message,
+        retryable: true,
+      });
     // Complete with a typed outcome so the API cannot mistake a finished failure
     // for BullMQ's bounded-wait rejection. Keep private diagnostics in the log.
     log.error({ taskId: payload.taskId, err: error }, 'DDEV rebuild failed');

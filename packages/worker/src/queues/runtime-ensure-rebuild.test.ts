@@ -6,10 +6,12 @@ const h = vi.hoisted(() => ({
   close: vi.fn(),
   worker: vi.fn(),
   error: vi.fn(),
+  info: vi.fn(),
+  task: vi.fn(),
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
-  logger: { child: () => ({ error: h.error, warn: vi.fn() }) },
+  logger: { child: () => ({ error: h.error, info: h.info, warn: vi.fn() }) },
 }));
 vi.mock('bullmq', () => ({
   Queue: class {
@@ -27,7 +29,7 @@ vi.mock('../redis.js', () => ({ getBullRedis: () => ({}) }));
 vi.mock('../db.js', () => ({
   getDb: () => ({
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: 'repo' }) },
+      tasks: { findFirst: h.task },
       repositories: { findFirst: async () => ({ storagePath: '/repos/user/repo' }) },
     },
   }),
@@ -42,6 +44,7 @@ import { rebuildDdevForTask, startRuntimeEnsureWorker } from './runtime-ensure-q
 const payload = { taskId: 'task', userId: 'owner' };
 beforeEach(() => {
   vi.clearAllMocks();
+  h.task.mockResolvedValue({ repositoryId: 'repo' });
   h.classify.mockResolvedValue({ mode: 'ddev', repoSubpath: 'user/repo' });
   h.rebuild.mockImplementation(async (_task, _workspace, _user, enqueue) => {
     await enqueue();
@@ -66,6 +69,7 @@ it('dispatches the dedicated rebuild job and enqueues ordinary ensure without jo
     removeOnFail: true,
   });
   expect(h.close).toHaveBeenCalledOnce();
+  expect(h.info).not.toHaveBeenCalled();
 });
 it('carries the already absent runner outcome through the job result', async () => {
   h.rebuild.mockImplementationOnce(async (_task, _workspace, _user, enqueue) => {
@@ -89,19 +93,33 @@ it.each([
     rebuildRefusal: { reason, message: 'refused', retryable },
   });
   expect(h.add).not.toHaveBeenCalled();
+  expect(h.info).toHaveBeenCalledExactlyOnceWith(
+    { taskId: 'task', reason },
+    'DDEV rebuild refused',
+  );
+  expect(h.error).not.toHaveBeenCalled();
 });
-it('rejects a non-DDEV task without removal', async () => {
-  h.classify.mockResolvedValue({ mode: 'app-runner' });
-  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
-    ok: false,
-    rebuildRefusal: {
-      reason: 'no-ddev',
-      retryable: false,
-      message: expect.stringMatching(/no DDEV/),
-    },
-  });
-  expect(h.rebuild).not.toHaveBeenCalled();
-});
+it.each(['missing workspace', 'non-DDEV runtime'])(
+  'refuses a %s without removal',
+  async (source) => {
+    if (source === 'missing workspace') h.task.mockResolvedValueOnce(undefined);
+    else h.classify.mockResolvedValue({ mode: 'app-runner' });
+    await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+      ok: false,
+      rebuildRefusal: {
+        reason: 'no-ddev',
+        retryable: false,
+        message: expect.stringMatching(/DDEV/),
+      },
+    });
+    expect(h.rebuild).not.toHaveBeenCalled();
+    expect(h.info).toHaveBeenCalledExactlyOnceWith(
+      { taskId: 'task', reason: 'no-ddev' },
+      'DDEV rebuild refused',
+    );
+    expect(h.error).not.toHaveBeenCalled();
+  },
+);
 it.each(['rm', 'audit-insert', 'enqueue', 'context'] as const)(
   'returns a typed failure and logs an error when %s fails',
   async (source) => {
@@ -116,6 +134,7 @@ it.each(['rm', 'audit-insert', 'enqueue', 'context'] as const)(
       rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
     });
     expect(h.error).toHaveBeenCalledWith({ taskId: 'task', err: error }, 'DDEV rebuild failed');
+    expect(h.info).not.toHaveBeenCalled();
     if (source === 'enqueue') expect(h.close).toHaveBeenCalledOnce();
   },
 );
@@ -135,4 +154,9 @@ it('returns an unknown probe as a retryable refusal', async () => {
     rebuildRefusal: { reason: 'probe-unknown', retryable: true },
   });
   expect(h.add).not.toHaveBeenCalled();
+  expect(h.info).toHaveBeenCalledExactlyOnceWith(
+    { taskId: 'task', reason: 'probe-unknown' },
+    'DDEV rebuild refused',
+  );
+  expect(h.error).not.toHaveBeenCalled();
 });
