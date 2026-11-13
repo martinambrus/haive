@@ -1481,12 +1481,16 @@ From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385
 
 Executable verification scope: Only members3/4: Stop-failed state overwritten and live run left after enqueue failure. Members1/2/5 moved to parked T525. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
-### T501 · FNF[redrive-apply-idempotence] [verify-first] · is apply() idempotent for a re-driven running deterministic step?
+### T660 · FNF[apply-receipt-lows] · apply receipt and save generation lows, after #1155 (+5)
 
-status: open (VERIFIED 2026-11-13, opt-in controls `VRC_PROBES=1` in `worker/test/vrc-apply-redelivery.test.ts`, red on 4a7ac4b55, branch `verify/recovery-probes` worktree sec-VRC: three apply paths re-run unsafely when recovery redelivers a step whose side effect landed before its done write. (a) `env-replicate/03-build-image.ts` ~:138 builds the image twice (expected 1 build call, got 2); reconcile a completed build before executing. (b) `workflow/06a-db-migrate.ts` ~:230 runs an approved custom migration command twice (external data changed twice); give a migration an identity and reconcile before replay. CONSEQUENTIAL. (c) `repo/database-snapshots.ts` ~:75: recovery's epoch bump voids an already-published save decision (`ReopenStepFormError` instead of `saved`); tell recovery apart from an upstream rerun. Minor. Source-only inventory of all 51 applies (44 stateful, 14 more UNSAFE by reading, unprobed) at `.claude/tmp/codex-run/VRC-S/codex-1/apply-safety.md`; those 14 stay unverified) · executable members: a, b, c · priority: P2
-From the T385/T348 driver (2026-10-31). Unaudited: the stalled sweep (T348), BullMQ stalled redelivery and the boot reset can all run a deterministic step's `apply()` a second time. Audit the steps whose apply writes files, commits or external state, and record which are safe; fix or fence the rest.
+status: open · kind: fix · found: #1155 reviews 2026-11-13 · priority: P4
 
-Execution fence 2026-11-01: Bound verification to at most three current apply paths with meaningful external/file/commit side effects and a real redelivery producer. Do not audit every step speculatively.
+1. `06a-db-migrate.ts` ~:286-298: a project with no DB service (`ddevConfigOmitsDatabase`) gets a non-zero `ddev snapshot`, so its success receipt stays unmarked and a lost-done-write redelivery fails "outcome unknown" instead of replaying. Safe direction; distinguish "no database" from "snapshot failed".
+2. `06a` ~:294: the marker write is not retried; a transient DB error after a long migration + snapshot leaves the receipt unmarked, so recovery is a Retry that re-runs the command. Rare.
+3. The literal `'11g-save-database'` is repeated in `api/routes/tasks/steps.ts` ~:339, `api/lib/task-control.ts` ~:288 and `worker/queues/_step-reset.ts` ~:86; the worker exports `DATABASE_SAVE_STEP_ID`. Move one constant to `@haive/shared`.
+4. `GET /:id/steps` returns raw rows, so `apply_receipt` (up to 2000 chars of command output) ships on every poll (`steps.ts` ~:652). PRE-EXISTING payload shape; project the column out.
+5. Coverage: a receipt written between DDEV start and the Drupal probe is unpinned.
+6. Related first-party, UNVERIFIED: `07c-ddev-reconcile.ts` ~:474 (`ddev utility migrate-database`) is the same class of external apply with no receipt; check its redelivery safety.
 
 ### T502 · FNF[ci-step-limits-rest] · six more CI jobs bound a hang only by their job limit; helper scripts are not scanned for swallowed failures (+3)
 
@@ -1857,6 +1861,7 @@ All low unless marked.
 
 ## Done
 
+- T501 — redelivery-safe deterministic applies (receipts, durable-snapshot replay gate, save generations) — PR #1155 (9fbfad0cc), 2026-11-14
 - T519 — PR poller catches each task's poll on its own and logs settled rejections; a failed merged-task re-drive saves prPollError and a later success clears it; member 3 invalid (held by `holdStepAdvance`) — PR #1150 (7c13cd38a), 2026-11-13
 - T656 — CI flakes: dev.sh test stub drains psql stdin and pins its env; check-web-image uses referenced, budget-capped request timers — PR #1154 (969cddc24), 2026-11-13
 - T526 — Save syncs committed names into the index first and repairs stale owned names separately (bounded, reported via warning and `indexSynced:false`); a staged plan deletion is recovered as a deletion intent — PR #1152 (6a3541ffc), 2026-11-13
