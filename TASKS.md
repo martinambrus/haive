@@ -593,13 +593,12 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
-### T552 · disabled provider in task terminal shells (design)
+### T654 · design · an open task shell outlives its provider being disabled
 
-status: open · kind: design · priority: P3
-Owner decision 2026-11-10: block in the server: refuse a task terminal for a disabled provider; the web follows.
-PRE-EXISTING, from T406 item 2. The shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:495-531; worker terminal-container.ts ~:173-196), while web deliberately keeps a disabled task-bound CLI in its terminal (web page-cli-fallback.test.tsx ~:353, tasks/[id]/page.tsx ~:2677). Decide whether a disabled provider may still open a task terminal; then enforce it server-side or document the web-only rule.
+status: open · kind: design · found: #1145 review 2026-11-13 · priority: P3
+PRE-EXISTING, from T552. Since #1145 a disabled provider's terminal or task shell is refused at connect (close 4425), but a shell already attached keeps taking input after the PATCH to `enabled=false`: the session manager has no provider-change signal (worker `terminal-session-manager.ts` ~:203). The 2-minute tmux grace and the reconnect re-check bound only new attaches. Direction: on a provider PATCH that disables it, publish a close to the matching `terminalSessionKey`s (api cli-providers.ts PATCH), and have the worker close them with 4425.
 
-### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold
+### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold (+2)
 
 status: open · kind: fix · priority: P3
 From the T406/T408 build (2026-11-07).
@@ -610,7 +609,9 @@ From the T406/T408 build (2026-11-07).
 4. A step held on a disabled provider shows "usage not connected": the usage poll covers enabled providers only (worker usage-poll-queue.ts ~:424). PRE-EXISTING, widened.
 5. The recap filters `summaryCliProviderId` to enabled only and falls to the step CLI; a recap whose resolved CLI is a disabled explicit pick is skipped silently (worker step-runner.ts ~:3999-4000). PRE-EXISTING.
 6. The module-schema-wins precedence of the hold is untested.
-7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
+7. From #1145 review: a disable that races an open gets the generic 1011 copy instead of 4425's sentence. Minor.
+8. From #1145 review: the web task page loads providers once (`tasks/[id]/page.tsx` ~:1220), so a provider disabled in another tab leaves the shell picker stale until the server refuses the next connect. PRE-EXISTING, minor.
+9. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
@@ -1883,6 +1884,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T552 — owner decision: the server refuses a terminal or task shell for a disabled CLI provider (api and worker, close 4425 with a sentence to enable it); the web offers only enabled providers. Live: api, worker and web reloaded clean; refusal not probed live (no disabled provider on the dev install) — PR #1145 (477c2e00d), 2026-11-13. Open-shell revocation T654; lows T553.
 - T653 — owner decision: error lines are not prose, FormError stays plain text; rule stated in markdown-rendering.md — PR #1144 (40233d3f4), 2026-11-13.
 - T646 — terminal shells, built sandbox cores, the DDEV registry cache and the cli-sandbox base image carry `haive.install`; the core reaper filters on it and `runner.inspect` handles label-less images; live: worker reloaded, sweeps start clean — PR #1140 (97049b4c1), 2026-11-13. Lows T651.
 - T645 — sandboxes reach an `ollama-gate` holding the daemon's names on the models network; only inference and read-only endpoints pass (exact raw method+path), the daemon leaves that network and the gate dials it as `ollama-daemon`; live-checked: admin calls 403 and never reach the daemon, claude-code through the gate succeeds, worker/api embed and tags unchanged, model list unchanged — PR #1136 (f2b1bc8d0), 2026-11-13. Leftovers T648-T650.
