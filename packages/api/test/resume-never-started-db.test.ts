@@ -190,6 +190,79 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
     await db.$client.end({ timeout: 5 });
   });
 
+  it('reopens a failed mining apply with all replies saved, without marking or creating a run', async () => {
+    const task = await seedTask('failed');
+    const stepId = '11d-skill-sync';
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: stepId })
+      .where(eq(schema.tasks.id, task.id));
+    const row = await seedRow(task.id, {
+      stepId,
+      detectOutput: { detected: true },
+      formValues: { approved: true },
+    });
+    await db.insert(schema.taskStepAgentMinings).values({
+      taskStepId: row.id,
+      agentId: 'skill-author',
+      status: 'done',
+      rawOutput: 'Saved reply',
+    });
+
+    const res = await post(`/tasks/${task.id}/steps/${stepId}/action`, {
+      action: 'resume',
+      round: 0,
+    });
+
+    expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+    expect(await res.json()).toMatchObject({ retriedAgents: 0 });
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'running',
+      detectOutput: { detected: true },
+      formValues: { approved: true },
+    });
+    expect(
+      await db.query.taskStepAgentMinings.findFirst({
+        where: eq(schema.taskStepAgentMinings.taskStepId, row.id),
+      }),
+    ).toMatchObject({ status: 'done', rawOutput: 'Saved reply', userRetryRequestedAt: null });
+    expect(
+      await db.query.cliInvocations.findMany({
+        where: eq(schema.cliInvocations.taskStepId, row.id),
+      }),
+    ).toHaveLength(0);
+    expect(h.queued).toMatchObject([
+      {
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        payload: { taskId: task.id, stepId, round: 0, epoch: 4 },
+      },
+    ]);
+  });
+
+  it('marks a missing done reply failed for re-dispatch and keeps a saved sibling', async () => {
+    const task = await seedTask('failed');
+    const row = await seedRow(task.id);
+    await db.insert(schema.taskStepAgentMinings).values([
+      { taskStepId: row.id, agentId: 'saved', status: 'done', rawOutput: 'Saved reply' },
+      { taskStepId: row.id, agentId: 'missing', status: 'done', rawOutput: null },
+    ]);
+
+    expect(await act(task.id, 'resume')).toMatchObject({ retriedAgents: 1 });
+
+    const agents = await db.query.taskStepAgentMinings.findMany({
+      where: eq(schema.taskStepAgentMinings.taskStepId, row.id),
+    });
+    expect(agents.find((a) => a.agentId === 'saved')).toMatchObject({
+      status: 'done',
+      rawOutput: 'Saved reply',
+      userRetryRequestedAt: null,
+    });
+    expect(agents.find((a) => a.agentId === 'missing')).toMatchObject({
+      status: 'failed',
+      userRetryRequestedAt: expect.any(Date),
+    });
+  });
+
   describe.each([
     { arm: 'the loop Resume', action: 'resume' as const, fanOut: false },
     { arm: 'retry_ai', action: 'retry_ai' as const, fanOut: false },
@@ -203,7 +276,12 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
       const row = await seedRow(taskId, over);
       if (fanOut) {
         await db.insert(schema.taskStepAgentMinings).values([
-          { taskStepId: row.id, agentId: 'peer-reviewer', status: 'done' },
+          {
+            taskStepId: row.id,
+            agentId: 'peer-reviewer',
+            status: 'done',
+            rawOutput: 'Saved reply',
+          },
           { taskStepId: row.id, agentId: 'security-reviewer', status: 'failed' },
         ]);
       }

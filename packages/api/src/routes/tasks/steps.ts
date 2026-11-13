@@ -108,7 +108,7 @@ function formNotWaiting(what: 'form submission' | 'clarification', stepId: strin
 function notResumable(): HttpError {
   return new HttpError(
     409,
-    'Resume is only available for a multi-iteration step — use Retry instead',
+    'Resume requires saved agent work or a resumable pass — use Retry instead',
     'not_resumable',
   );
 }
@@ -1232,18 +1232,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // resumable — supersede the failed invocation and re-dispatch pass 0 with the
     // newly-picked CLI. A non-loop step (no cliRoles) at iterationCount 0 has
     // nothing to preserve — use Retry.
-    // Fan-out arm, checked BEFORE the loop gate below. A step whose CONCURRENT agent terminals
-    // (08c runs a peer reviewer, a security reviewer and extra lenses side by side) include at
-    // least one failed row. Resume's promise — keep what finished, redo what did not — was only
-    // ever built for SEQUENTIAL passes, so every fan-out step fell through to the 409 below and
-    // the sole recovery was Retry, which deletes every agent row and re-buys the reviewers that
-    // had already succeeded.
+    // Fan-out arm, checked BEFORE the loop gate below. Keep every saved reply and redo only
+    // failed agents, or done agents whose reply is missing. A failed apply can leave ALL agent
+    // rows done: reopen it with no retry markers so the worker folds those saved replies again.
+    // A done step with no failed agents has already applied and must not be reopened here.
     //
-    // The re-dispatch itself is the worker's job: partial re-dispatch is reachable ONLY through
-    // retryMiningAgents, because the fan-out barrier returns early whenever any mining row
-    // exists and so never re-runs selectAgents. This marks the failed rows and hands over.
-    // Deleting them instead would be worse than doing nothing — miningOutcome would then report
-    // `absent`, which 08c reads as "this lens was never asked for" and silently approves.
+    // Re-dispatch is the worker's job: retryMiningAgents honours the per-row marker even without
+    // automatic retry budget. Never delete a missing row: consumers distinguish failed from absent.
     //
     // Refused while the fan-out is still in progress, BEFORE anything is written or killed. A
     // resume here is not "redo what died": `liveInCascade` below reads this step's own
@@ -1264,16 +1259,31 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         ),
       );
     refuseLiveFanout(liveAgents.length);
-    const failedAgents = await db
-      .select({ id: schema.taskStepAgentMinings.id })
+    const settledAgents = await db
+      .select({
+        id: schema.taskStepAgentMinings.id,
+        status: schema.taskStepAgentMinings.status,
+        output: schema.taskStepAgentMinings.output,
+        rawOutput: schema.taskStepAgentMinings.rawOutput,
+        cliInvocationId: schema.taskStepAgentMinings.cliInvocationId,
+      })
       .from(schema.taskStepAgentMinings)
       .where(
         and(
           eq(schema.taskStepAgentMinings.taskStepId, step.id),
-          eq(schema.taskStepAgentMinings.status, 'failed'),
+          inArray(schema.taskStepAgentMinings.status, ['done', 'failed']),
         ),
       );
-    if (failedAgents.length > 0) {
+    const failedAgents = settledAgents.filter((a) => a.status === 'failed');
+    // The parsed payload takes precedence, just as it does for mining consumers. Empty prose
+    // is not a saved reply; a structured payload is, even without a raw copy.
+    const agentsToRetry = settledAgents.filter((a) => {
+      if (a.status === 'failed') return true;
+      const reply = a.output ?? a.rawOutput;
+      return reply == null || (typeof reply === 'string' && reply.trim() === '');
+    });
+    const reapplySaved = step.status === 'failed' && settledAgents.some((a) => a.status === 'done');
+    if (failedAgents.length > 0 || reapplySaved) {
       const now = new Date();
       // A step that DEGRADED ended `done` and the task moved past it, so whatever consumed its
       // verdict (08c2, gate 2) must be invalidated — that verdict is about to change. A step
@@ -1311,19 +1321,28 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         // rows: a Retry's sweep takes the runs and then deletes the agent rows, so holding an agent
         // row while waiting for a run closes a cycle with it.
         await supersedeBlockingInvocation(tx, step.id, now);
-        const marked = await tx
-          .update(schema.taskStepAgentMinings)
-          .set({ userRetryRequestedAt: now, updatedAt: now })
-          .where(
-            and(
-              inArray(
-                schema.taskStepAgentMinings.id,
-                failedAgents.map((a) => a.id),
-              ),
-              eq(schema.taskStepAgentMinings.status, 'failed'),
-            ),
-          )
-          .returning({ id: schema.taskStepAgentMinings.id });
+        const marked =
+          agentsToRetry.length === 0
+            ? []
+            : await tx
+                .update(schema.taskStepAgentMinings)
+                // Missing replies are failed work, even if a retained prompt can no longer be
+                // recovered. They must never reach apply as an empty successful reply.
+                .set({ status: 'failed', userRetryRequestedAt: now, updatedAt: now })
+                .where(
+                  or(
+                    ...agentsToRetry.map((a) =>
+                      and(
+                        eq(schema.taskStepAgentMinings.id, a.id),
+                        eq(schema.taskStepAgentMinings.status, a.status),
+                        a.cliInvocationId
+                          ? eq(schema.taskStepAgentMinings.cliInvocationId, a.cliInvocationId)
+                          : isNull(schema.taskStepAgentMinings.cliInvocationId),
+                      ),
+                    ),
+                  ),
+                )
+                .returning({ id: schema.taskStepAgentMinings.id });
         // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
@@ -1337,17 +1356,22 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         if (!held) throw new HttpError(404, 'Step not found');
         // The cascade was selected for this status (a degraded done row resets downstream).
         // Recheck the fan-out after the batch's lock too: a peer may have restarted its agents.
-        const liveNow = await tx
-          .select({ id: schema.taskStepAgentMinings.id })
+        const agentsNow = await tx
+          .select({
+            id: schema.taskStepAgentMinings.id,
+            status: schema.taskStepAgentMinings.status,
+          })
           .from(schema.taskStepAgentMinings)
-          .where(
-            and(
-              eq(schema.taskStepAgentMinings.taskStepId, step.id),
-              inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
-            ),
-          );
-        refuseLiveFanout(liveNow.length);
-        if (held.status !== step.status || marked.length === 0) throw notResumable();
+          .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
+        refuseLiveFanout(
+          agentsNow.filter((a) => a.status === 'pending' || a.status === 'running').length,
+        );
+        const canReapply =
+          held.status === 'failed' &&
+          agentsToRetry.length === 0 &&
+          agentsNow.some((a) => a.status === 'done');
+        if (held.status !== step.status || (marked.length === 0 && !canReapply))
+          throw notResumable();
         retriedAgents = marked.length;
         await tx
           .update(schema.taskSteps)

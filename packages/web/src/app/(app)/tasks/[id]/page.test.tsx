@@ -715,3 +715,34 @@ describe('task page: round labels', () => {
     expect(text).not.toContain('Fix loop #3');
   });
 });
+
+describe('saved mining reply recovery', () => {
+  it('offers Resume for a failed apply with only done agents', async () => {
+    const view = await mount({ status: 'failed', pausedAt: null, currentStepId: '07-implement' }, [
+      {
+        ...stepRow(),
+        status: 'failed',
+        iterationCount: 0,
+        agentCounts: { done: 2, failed: 0, inFlight: 0 },
+      },
+    ]);
+    expect(buttons(view.tree(), 'resume (apply saved replies)')).toHaveLength(1);
+  });
+
+  it.each([
+    { status: 'done', done: 2, inFlight: 0 },
+    { status: 'failed', done: 0, inFlight: 0 },
+    { status: 'failed', done: 2, inFlight: 1 },
+  ])('hides saved-reply Resume for %j regardless of stale error copy', async (state) => {
+    const view = await mount({ status: 'failed', pausedAt: null, currentStepId: '07-implement' }, [
+      {
+        ...stepRow(),
+        status: state.status,
+        iterationCount: 0,
+        errorMessage: 'Apply failed after all replies were saved',
+        agentCounts: { done: state.done, failed: 0, inFlight: state.inFlight },
+      },
+    ]);
+    expect(buttons(view.tree(), 'resume (apply saved replies)')).toHaveLength(0);
+  });
+});
