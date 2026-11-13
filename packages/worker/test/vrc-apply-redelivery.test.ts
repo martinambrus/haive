@@ -10,9 +10,9 @@ import { dbMigrateStep } from '../src/step-engine/steps/workflow/06a-db-migrate.
 import { saveDatabaseStep } from '../src/step-engine/steps/workflow/11g-save-database.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
 
-const h = vi.hoisted(() => ({ exec: vi.fn(), snapshot: vi.fn() }));
+const h = vi.hoisted(() => ({ exec: vi.fn(), snapshot: vi.fn(), ensure: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
-  ensureDdevWithProgress: async () => ({ container: 'vrc-fake', projectDir: '/workspace' }),
+  ensureDdevWithProgress: h.ensure,
   withDdevProgress: async (_ctx: unknown, _label: string, fn: (line: () => void) => unknown) =>
     fn(() => {}),
 }));
@@ -101,7 +101,10 @@ async function redeliver(ctx: StepContext, stepId: string, apply: () => Promise<
 }
 
 describe('deterministic apply redelivery', () => {
-  beforeEach(() => h.snapshot.mockResolvedValue({ exitCode: 0, output: '' }));
+  beforeEach(() => {
+    h.snapshot.mockResolvedValue({ exitCode: 0, output: '' });
+    h.ensure.mockResolvedValue({ container: 'vrc-fake', projectDir: '/workspace' });
+  });
   afterEach(() => vi.resetAllMocks());
 
   it('does not rebuild an image whose first build completed before the lost done write', async () => {
@@ -208,6 +211,53 @@ describe('deterministic apply redelivery', () => {
     await apply();
     await redeliver(ctx, dbMigrateStep.metadata.id, apply);
     expect(appliedDataChanges).toBe(1);
+  });
+
+  it('does not claim a custom migration ran when DDEV startup failed', async () => {
+    h.ensure.mockRejectedValueOnce(new Error('DDEV configuration needs repair'));
+    h.exec.mockResolvedValue({ exitCode: 0, output: 'done' });
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'unknown' as const,
+        migrationCommand: 'node migrate.js',
+        repoSubpath: 'repo',
+      },
+      formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('DDEV configuration');
+    expect(h.exec).not.toHaveBeenCalled();
+    await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({ passed: true });
+    expect(h.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-executes a failed custom command after the explicit AI retry receipt reset', async () => {
+    h.exec.mockResolvedValueOnce({ exitCode: 1, output: 'column missing' });
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'unknown' as const,
+        migrationCommand: 'node migrate.js',
+        repoSubpath: 'repo',
+      },
+      formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('column missing');
+    // The retry_ai route contract is exercised by task-retry-failed-step.test.ts.
+    await ctx.db
+      .update(schema.taskSteps)
+      .set({ applyReceipt: null })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    h.exec.mockResolvedValue({ exitCode: 0, output: 'repaired' });
+    await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({
+      passed: true,
+      output: 'repaired',
+    });
+    expect(h.exec).toHaveBeenCalledTimes(2);
   });
 
   it('holds an interrupted custom migration until the user explicitly retries', async () => {

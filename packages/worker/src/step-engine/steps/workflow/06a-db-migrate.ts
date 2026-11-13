@@ -191,25 +191,6 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     // Drupal, Laravel, Doctrine, Django, Rails, WordPress core and Prisma deploy.
     // An edited command (even on a known framework) has no such guarantee.
     const custom = d.framework === 'unknown' || command !== commandFor(d.framework);
-    const effect = custom
-      ? await beginApplyEffect(
-          ctx,
-          'custom-migration',
-          JSON.stringify({ command, repoSubpath: d.repoSubpath }),
-        )
-      : null;
-    if (effect && !effect.fresh) {
-      const result = effect.receipt.result;
-      if (!result) {
-        throw new Error(
-          'The previous custom migration may have run, but its outcome is unknown. Inspect the database before choosing Retry to run it again, or Skip to continue.',
-        );
-      }
-      if (result.exitCode !== 0)
-        throw new Error(`migration failed (${command}): ${String(result.output)}`);
-      return { ran: true, skipped: false, passed: true, command, output: String(result.output) };
-    }
-
     // The runner can be gone since 01c; a handle rebuilt from the task id execs into nothing,
     // which the Drupal probe below would read as an uninstalled site.
     const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
@@ -246,6 +227,25 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
             'migratable database, set the DDEV project type to "drupal" and import the database, then retry.',
         };
       }
+    }
+
+    const effect = custom
+      ? await beginApplyEffect(
+          ctx,
+          'custom-migration',
+          JSON.stringify({ command, repoSubpath: d.repoSubpath }),
+        )
+      : null;
+    if (effect && !effect.fresh) {
+      const result = effect.receipt.result;
+      if (!result) {
+        throw new Error(
+          'The previous custom migration may have run, but its outcome is unknown. Inspect the database before choosing Retry to run it again, or Skip to continue.',
+        );
+      }
+      if (result.exitCode !== 0)
+        throw new Error(`migration failed (${command}): ${String(result.output)}`);
+      return { ran: true, skipped: false, passed: true, command, output: String(result.output) };
     }
 
     const res = await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>

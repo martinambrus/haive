@@ -1628,6 +1628,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .update(schema.taskSteps)
         .set({
           status: 'running',
+          // Explicit approval to execute apply again after the AI repairs the repository.
+          // Keep the save-decision generation: this reopens the same approved form.
+          applyReceipt: null,
           errorMessage: null,
           errorHint: null,
           endedAt: null,

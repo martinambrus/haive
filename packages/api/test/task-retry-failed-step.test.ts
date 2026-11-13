@@ -106,6 +106,37 @@ function setup(target: Record<string, unknown>) {
 const queued = () => h.add.mock.calls.map(([name, data]) => ({ name, data }));
 
 describe('a task Retry re-runs the step the task stopped on', () => {
+  it('AI retry clears the failed apply receipt without voiding the save generation or approved inputs', async () => {
+    const inputs = { runMigration: true, migrationCommand: 'node migrate.js' };
+    const t = setup({
+      status: 'failed',
+      errorMessage: 'column missing',
+      applyReceipt: {
+        id: 'failed-command',
+        kind: 'custom-migration',
+        input: 'command',
+        result: { exitCode: 1 },
+      },
+      rerunGeneration: 4,
+      detectOutput: { framework: 'unknown' },
+      formValues: inputs,
+    });
+    const res = await app.request(`/${TASK}/steps/step-b/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'retry_ai' }),
+    });
+    expect(res.status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({
+      status: 'running',
+      applyReceipt: null,
+      rerunGeneration: 4,
+      detectOutput: { framework: 'unknown' },
+      formValues: inputs,
+      aiFixContext: { priorError: 'column missing' },
+    });
+  });
+
   it('resets the failed row and advances to it at a new epoch, with no START', async () => {
     const t = setup({
       status: 'failed',
