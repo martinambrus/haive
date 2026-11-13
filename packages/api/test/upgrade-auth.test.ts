@@ -3,6 +3,7 @@ vi.mock('@haive/database', async (original) => ({
   tryCliAuthLock: async () => Object.assign(async () => {}, { assertHeld: async () => {} }),
 }));
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import net, { type AddressInfo, type Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
@@ -11,8 +12,8 @@ import { PassThrough } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { schema } from '@haive/database';
-import { secretsService, terminalSessionKey } from '@haive/shared';
+import { schema, type Database } from '@haive/database';
+import { configService, encryptEmail, secretsService, terminalSessionKey } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
@@ -41,6 +42,10 @@ const USER = 'abcdefab-0000-4000-8000-000000000001';
 const ADMIN = '00000000-0000-4000-8000-000000000002';
 const ID = '00000000-0000-4000-8000-000000000003';
 const BANNER = '00000000-0000-4000-8000-000000000004';
+const FIELD_KEY = randomBytes(32).toString('hex');
+const PEPPER = randomBytes(32).toString('hex');
+const OLD_PASSWORD = randomBytes(24).toString('hex');
+const NEW_PASSWORD = randomBytes(24).toString('hex');
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', async (original) => ({
   ...(await original<typeof import('../src/auth/jwt.js')>()),
@@ -58,6 +63,9 @@ vi.mock('../src/auth/jwt.js', async (original) => ({
 vi.mock('../src/auth/password.js', () => ({
   hashPassword: async () => 'hash',
   verifyPassword: async () => true,
+}));
+vi.mock('../src/lib/mailer.js', () => ({
+  sendMail: async () => ({ ok: false, code: 'mail_disabled' }),
 }));
 vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({
@@ -179,6 +187,8 @@ import { signEditorSession, editorCookieName } from '../src/auth/editor-session.
 import { installIdeWebSocket } from '../src/routes/ide.js';
 import { adminRoutes } from '../src/routes/admin.js';
 import { userSettingsRoutes } from '../src/routes/user-settings.js';
+import { passwordRecoveryRoutes } from '../src/routes/password-recovery.js';
+import { issuePasswordReset } from '../src/lib/password-resets.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { closeUserSockets } from '../src/lib/user-sockets.js';
 import { upgradeListenerFiles } from './helpers/upgrade-listeners.js';
@@ -215,6 +225,7 @@ const tables = {
   terminalSessions: schema.terminalSessions,
   auditEvents: schema.auditEvents,
   refreshTokens: schema.refreshTokens,
+  passwordResets: schema.passwordResets,
 };
 let fake: ReturnType<typeof createFakeDb<typeof tables>>;
 let server: Server;
@@ -229,6 +240,8 @@ beforeEach(() => {
   vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
   vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
   vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-session-key');
+  vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue(FIELD_KEY);
+  vi.spyOn(secretsService, 'getEmailBlindIndexPepper').mockResolvedValue(PEPPER);
   h.invalidJwt = false;
   h.redisConnectWait = null;
   h.loginReady = false;
@@ -246,6 +259,7 @@ beforeEach(() => {
     status: 'active',
     tokenVersion: 0,
     mustChangePassword: false,
+    emailEncrypted: encryptEmail('owner@example.test', randomBytes(32).toString('hex')),
   });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.tasks, { id: ID, userId: USER, status: 'running' });
@@ -487,15 +501,33 @@ const app = new Hono<AppEnv>();
 app.onError(errorHandler);
 app.route('/admin', adminRoutes);
 app.route('/user-settings', userSettingsRoutes);
+app.route('/auth', passwordRecoveryRoutes);
 
 describe('session writers close established sockets on all surfaces', () => {
   for (const { action, editorSessions } of [false, true].flatMap((editorSessions) =>
-    ['deactivate', 'reset_password', 'password'].map((action) => ({ action, editorSessions })),
+    ['deactivate', 'reset_password', 'password', 'reset_claim', 'relink'].map((action) => ({
+      action,
+      editorSessions,
+    })),
   )) {
     it(`${action} (editor sessions: ${editorSessions})`, async () => {
       const { sockets, unaffected, port, upstreamWss } = await openAll({ editorSessions });
+      const token =
+        action === 'reset_claim'
+          ? await issuePasswordReset(
+              fake.db as unknown as Database,
+              USER,
+              encryptEmail('owner@example.test', FIELD_KEY),
+            )
+          : undefined;
       const response = await app.request(
-        action === 'password' ? '/user-settings/password' : `/admin/users/${USER}/action`,
+        action === 'password'
+          ? '/user-settings/password'
+          : action === 'reset_claim'
+            ? '/auth/reset-password'
+            : action === 'relink'
+              ? `/admin/users/${USER}/relink`
+              : `/admin/users/${USER}/action`,
         {
           method: action === 'password' ? 'PUT' : 'POST',
           headers: {
@@ -505,8 +537,12 @@ describe('session writers close established sockets on all surfaces', () => {
           },
           body: JSON.stringify(
             action === 'password'
-              ? { currentPassword: 'Old-password-1!', newPassword: 'New-password-2!' }
-              : { action },
+              ? { currentPassword: OLD_PASSWORD, newPassword: NEW_PASSWORD }
+              : action === 'reset_claim'
+                ? { token, newPassword: NEW_PASSWORD }
+                : action === 'relink'
+                  ? { email: 'owner@example.test' }
+                  : { action },
           ),
         },
       );
