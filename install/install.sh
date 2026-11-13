@@ -662,6 +662,13 @@ cd "$INSTALL_DIR"
 # The compose bundle is fetched AT THE TAG, so it always matches the images being pinned.
 fetch "${RAW}/${TAG}/docker-compose.yml"     docker-compose.yml
 fetch "${RAW}/${TAG}/docker-compose.run.yml" docker-compose.run.yml
+# A release older than its installer may not pass the generated password to Mailpit; the
+# summary then says the inbox is open rather than promise a login it does not have.
+if grep -q '^[[:space:]]*MP_UI_AUTH:' docker-compose.run.yml; then
+  MAIL_LOGIN="(user haive, MAILPIT_UI_PASSWORD from .env)"
+else
+  MAIL_LOGIN="(no login in this release: anyone who can reach this port can read its mail)"
+fi
 say "  compose bundle    docker-compose.yml + docker-compose.run.yml"
 
 # GPU layering, mirroring scripts/dev.sh so a RUN-IT host makes the same choice a dev host does.
@@ -1180,7 +1187,7 @@ cat <<EOF
 
     Web       http://localhost:${WEB}
     API       http://localhost:${PORT}
-    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1) (user haive, MAILPIT_UI_PASSWORD from .env)
+    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1) ${MAIL_LOGIN}
     Directory ${INSTALL_DIR}
     Install   ${INSTALL_ID}
 

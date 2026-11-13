@@ -556,6 +556,13 @@ Push-Location $Dir
 
 Get-Bundle "$Raw/$tag/docker-compose.yml"     (Join-Path $Dir 'docker-compose.yml')
 Get-Bundle "$Raw/$tag/docker-compose.run.yml" (Join-Path $Dir 'docker-compose.run.yml')
+# A release older than its installer may not pass the generated password to Mailpit; the
+# summary then says the inbox is open rather than promise a login it does not have.
+$mailLogin = if (Select-String -LiteralPath (Join-Path $Dir 'docker-compose.run.yml') -Pattern '^\s*MP_UI_AUTH:' -Quiet) {
+  '(user haive, MAILPIT_UI_PASSWORD from .env)'
+} else {
+  '(no login in this release: anyone who can reach this port can read its mail)'
+}
 Write-Note "compose bundle    docker-compose.yml + docker-compose.run.yml"
 
 # No GPU overlay on Windows. Docker Desktop can pass an NVIDIA GPU through on some setups, but the
@@ -1030,7 +1037,7 @@ Write-Host "  Haive $pinned is running." -ForegroundColor Green
 Write-Host ""
 Write-Host "    Web       http://localhost:$webPort"
 Write-Host "    API       http://localhost:$apiPort"
-Write-Host "    Mail      http://localhost:$mailpitPort (user haive, MAILPIT_UI_PASSWORD from .env)"
+Write-Host "    Mail      http://localhost:$mailpitPort $mailLogin"
 Write-Host "    Directory $Dir"
 Write-Host "    Install   $InstallId"
 Write-Host ""
