@@ -29,6 +29,7 @@ import { safeDiskRel } from './02-upgrade-apply.js';
 import { detectOrigin } from '../../../repo/git-push.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
+import { provesUnbornHead } from '../../../repo/unborn-head.js';
 
 const DEFAULT_COMMIT_MESSAGE = [
   'chore: apply Haive onboarding upgrade',
@@ -91,7 +92,9 @@ export function appliedImportStubs(applyOutput: unknown): { file: string; link: 
 export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
   const head = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
   if (gitGaveNoAnswer(head)) return false;
-  if (head.code !== 0) return true;
+  // Exit 1 also comes from a broken branch ref, so it needs the positive unborn proof.
+  if (head.code === 1) return provesUnbornHead(repoPath);
+  if (head.code !== 0) return false;
   try {
     await gitExec(['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
       cwd: repoPath,
@@ -114,7 +117,12 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
   if (disk.region === null) return { verdict: 'current' };
   const probe = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
   if (gitGaveNoAnswer(probe)) return { verdict: 'unknown', reason: probe.noExit ?? 'timed out' };
-  if (probe.code !== 0) return { verdict: 'stage' };
+  if (probe.code === 1) {
+    return (await provesUnbornHead(repoPath))
+      ? { verdict: 'stage' }
+      : { verdict: 'unknown', reason: 'HEAD could not be resolved and is not proven unborn' };
+  }
+  if (probe.code !== 0) return { verdict: 'unknown', reason: `git exited ${probe.code}` };
   try {
     const { stdout: entry } = await gitExec(['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH], {
       cwd: repoPath,
@@ -280,6 +288,9 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     }
 
     const applied = await loadPreviousStepOutput(ctx.db, ctx.taskId, '02-upgrade-apply');
+    // A missing .git is proved independently of a failed HEAD read. This supported
+    // initial-commit path intentionally includes the existing project files.
+    const noGit = (await gitWorkspaceStatus(ctx.repoPath)) === 'absent';
     const stubPaths: string[] = [];
     // `hasWorkspaceEntry` refuses every link, so a link to AGENTS.md is re-checked and staged
     // on its own; adding an already committed one changes nothing.
@@ -288,11 +299,13 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     for (const stub of stubs) {
       if (stub.link) {
         if (await isLinkToAgentsMd(ctx.repoPath, stub.file)) linkPaths.push(stub.file);
-      } else if (await headLacksImport(ctx.repoPath, stub.file)) {
+      } else if (noGit || (await headLacksImport(ctx.repoPath, stub.file))) {
         stubPaths.push(stub.file);
       }
     }
-    const agentsRules = await agentsRulesVerdict(ctx.repoPath);
+    const agentsRules: AgentsRulesVerdict = noGit
+      ? { verdict: 'stage' }
+      : await agentsRulesVerdict(ctx.repoPath);
     if (agentsRules.verdict === 'unknown') {
       warnings.push(
         `AGENTS.md was not compared with HEAD (${agentsRules.reason}), so it is staged only if the upgrade wrote it`,

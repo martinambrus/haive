@@ -1495,7 +1495,7 @@ async function handleProvisionOllamaModelJob(
 ): Promise<OllamaProvisionResult> {
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
-    columns: { id: true, name: true, model: true, modelfile: true, envVars: true },
+    columns: { id: true, userId: true, name: true, model: true, modelfile: true, envVars: true },
   });
   if (!provider) {
     return { ok: false, providerId: payload.providerId, error: 'provider not found' };

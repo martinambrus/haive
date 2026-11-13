@@ -9,6 +9,7 @@ import {
   isJsonObject,
   requireJsonObject,
 } from '../lib/json-object.js';
+import { OLLAMA_MODEL_NOT_ALLOWED_MESSAGE } from '@haive/shared';
 import { mayPullOllamaModel } from '../lib/ollama-pull-policy.js';
 import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -235,12 +236,11 @@ tooling.post('/pull-ollama-model', async (c) => {
     isJsonObject(raw) &&
     typeof raw.model === 'string' &&
     raw.model &&
-    !(await mayPullOllamaModel(c.get('userId'), c.get('userRole'), raw.model))
+    !(await mayPullOllamaModel(c.get('userRole'), raw.model))
   ) {
     return c.json(
       {
-        error:
-          'This model is not configured in your providers or Global KB. Ask an administrator to add it to the Ollama model allowlist.',
+        error: OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
         code: 'ollama_model_not_allowed',
       },
       403,
