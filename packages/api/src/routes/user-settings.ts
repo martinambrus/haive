@@ -18,12 +18,7 @@ import {
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import { signAccessToken, signRefreshToken, hashRefreshToken } from '../auth/jwt.js';
 import { setAuthCookies } from '../auth/cookies.js';
-import {
-  lstatNoFollow,
-  openFileNoFollow,
-  removeNoFollow,
-  writeFileNoFollow,
-} from '@haive/shared/fs-safe';
+import { openFileNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import {
@@ -549,15 +544,20 @@ userSettingsRoutes.get('/notifications/sound', async (c) => {
   const anchor = uploadsStorageRoot();
   const soundRel = uploadFileRel(userId, row.soundPath);
   if (!soundRel) throw new HttpError(404, 'Sound file missing on disk');
-  const info = await lstatNoFollow(anchor, soundRel);
-  if (!info || info.kind !== 'file') throw new HttpError(404, 'Sound file missing on disk');
   const fh = await openFileNoFollow(anchor, soundRel, 'read', { strict: true }).catch(
     (err: unknown) => containmentHttpError(err, 'Sound path is outside the uploads directory'),
   );
   if (!fh) throw new HttpError(404, 'Sound file missing on disk');
+  let size: number;
+  try {
+    size = (await fh.stat()).size;
+  } catch (err) {
+    await fh.close();
+    throw err;
+  }
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Content-Type', row.soundMime ?? 'application/octet-stream');
-  c.header('Content-Length', String(info.stats.size));
+  c.header('Content-Length', String(size));
   c.header('Cache-Control', 'no-store');
   // Streamed from the verified descriptor, and NOT closed here: the stream is the response body, so
   // closing behind Hono would truncate it. MEASURED on node v26.7.0 for PR 8 — such a stream closes

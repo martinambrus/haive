@@ -14,6 +14,8 @@ import {
   chmodNoFollow,
   isPathContainmentError,
   chownNoFollow,
+  RESOURCE_LIMITS,
+  isResourceLimitError,
   lstatNoFollow,
   readdirNoFollow,
   readLinkNoFollow,
@@ -783,7 +785,15 @@ async function missingParents(anchor: string, prefix: string, paths: string[]): 
       const parent = parts.slice(0, i).join('/');
       if (seen.has(parent)) continue;
       seen.add(parent);
-      if ((await lstatNoFollow(anchor, `${prefix}${parent}`).catch(() => undefined)) === null) {
+      if (
+        (await lstatNoFollow(anchor, `${prefix}${parent}`, { rethrow: RESOURCE_LIMITS }).catch(
+          () => {
+            // Unknown is not missing: never hand back a parent we did not create. This can
+            // run after files moved, while their original modes still live only in memory.
+            return undefined;
+          },
+        )) === null
+      ) {
         missing.push(parent);
       }
     }
@@ -803,19 +813,28 @@ async function leftEntry(
   return target === null ? { path: p, reason } : { path: p, reason, target };
 }
 
-/** The paths to put back where a directory now stands that still holds something. git replaces
- *  such a directory with the file and takes what is in it along. */
+/** The paths not to put back, with why: a directory now stands there that still holds something
+ *  (git replaces such a directory with the file and takes what is in it along), or the path could
+ *  not be read. */
 async function occupiedDirectories(
   anchor: string,
   prefix: string,
   paths: string[],
-): Promise<Set<string>> {
-  const occupied = new Set<string>();
+): Promise<Map<string, string>> {
+  const occupied = new Map<string, string>();
+  const standing = 'not put back: a directory stands in its place, holding what could not be moved';
   for (const p of paths) {
-    const entry = await lstatNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+    const entry = await lstatNoFollow(anchor, `${prefix}${p}`, { rethrow: RESOURCE_LIMITS }).catch(
+      (err: unknown) => {
+        // Once files moved we must finish reapplying their modes. An unread path cannot
+        // authorize restoring over whatever may still stand there.
+        if (isResourceLimitError(err)) occupied.set(p, 'not put back: its path could not be read');
+        return null;
+      },
+    );
     if (entry?.kind !== 'directory') continue;
     const inside = await readdirNoFollow(anchor, `${prefix}${p}`).catch(() => null);
-    if (inside === null || inside.length > 0) occupied.add(p);
+    if (inside === null || inside.length > 0) occupied.set(p, standing);
   }
   return occupied;
 }
@@ -948,7 +967,12 @@ export async function relocateFixerChanges(
   }
   // A retry of one run keeps the attempt before it, reported or not.
   const folder =
-    (await lstatNoFollow(root, `${base}/manifest.json`).catch(() => undefined)) === null
+    (await lstatNoFollow(root, `${base}/manifest.json`, { rethrow: RESOURCE_LIMITS }).catch(
+      (err: unknown) => {
+        if (isResourceLimitError(err)) throw err;
+        return undefined;
+      },
+    )) === null
       ? base
       : `${base}-${randomUUID().slice(0, 8)}`;
   const nothingChecked = (reason: string): FixerLeftovers => ({
@@ -1061,7 +1085,19 @@ export async function relocateFixerChanges(
   const replacedModes = new Map<string, number>();
   for (const c of toMove) {
     if (c.status !== 'D') {
-      const was = await lstatNoFollow(root, `${prefix}${c.path}`).catch(() => null);
+      const was = await lstatNoFollow(root, `${prefix}${c.path}`, {
+        rethrow: RESOURCE_LIMITS,
+      }).catch((err: unknown) => {
+        if (isResourceLimitError(err)) return undefined;
+        return null;
+      });
+      if (was === undefined) {
+        left.push({
+          path: c.path,
+          reason: 'its mode could not be read, so it was left in place',
+        });
+        continue;
+      }
       try {
         await renameNoFollow(root, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
           noReplace: true,
@@ -1080,12 +1116,7 @@ export async function relocateFixerChanges(
     if (c.status !== 'A') restore.push(c.path);
   }
   const occupied = await occupiedDirectories(root, prefix, restore);
-  for (const p of occupied) {
-    left.push({
-      path: p,
-      reason: 'not put back: a directory stands in its place, holding what could not be moved',
-    });
-  }
+  for (const [p, reason] of occupied) left.push({ path: p, reason });
   const putBack = restore.filter((p) => !occupied.has(p));
   const restored: string[] = [];
   if (!('error' in changed)) {

@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { lstatNoFollow, type EntryInfo } from '@haive/shared/fs-safe';
+import { lstatNoFollow, RESOURCE_LIMITS, type EntryInfo } from '@haive/shared/fs-safe';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../../repo/worktree-git-boundary.js';
@@ -55,7 +55,7 @@ export async function lookupInRepoMount(
 ): Promise<{ anchor: string; rel: string; entry: EntryInfo | null }> {
   const { anchor, rel: mountRel } = splitRepoSubpath(WORKER_REPO_STORAGE_ROOT, subpath);
   const rel = [mountRel, name].filter((part) => part !== '').join('/');
-  return { anchor, rel, entry: await lstatNoFollow(anchor, rel) };
+  return { anchor, rel, entry: await lstatNoFollow(anchor, rel, { rethrow: RESOURCE_LIMITS }) };
 }
 
 /**

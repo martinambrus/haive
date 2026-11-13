@@ -1,7 +1,7 @@
 import { and, eq, lt, or } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import { logger } from '@haive/shared';
-import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { RESOURCE_LIMITS, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { HttpError } from '../context.js';
 import type { Database } from '../db.js';
 
@@ -172,6 +172,6 @@ export async function cancelUploadSession(
 
 /** A regular file of exactly `size` bytes; a link there fails rather than report its target. */
 export async function isWholeFile(anchor: string, rel: string, size: number): Promise<boolean> {
-  const info = await lstatNoFollow(anchor, rel);
+  const info = await lstatNoFollow(anchor, rel, { rethrow: RESOURCE_LIMITS });
   return info?.kind === 'file' && info.stats.size === size;
 }

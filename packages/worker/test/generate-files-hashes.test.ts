@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
@@ -28,6 +28,22 @@ import {
  * whole api-side suite would still pass while the gate quietly stopped firing.
  */
 
+const fault = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (fault.error && String(args[0]).endsWith('/workflow-config.json')) {
+        const error = fault.error;
+        fault.error = null;
+        throw error;
+      }
+      return real.lstat(...args);
+    },
+  };
+});
+
 let repo: string;
 
 beforeEach(async () => {
@@ -35,6 +51,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  fault.error = null;
   await rm(repo, { recursive: true, force: true }).catch(() => {});
 });
 
@@ -251,3 +268,22 @@ describe('generateFilesStep.apply — recorded write hashes', () => {
     expect(out.wroteFileHashes?.['AGENTS.md']).toBeUndefined();
   });
 });
+
+it.each(['EMFILE', 'ENFILE'])(
+  'never overwrites a user file after its existence probe fails with %s',
+  async (code) => {
+    await mkdir(path.join(repo, '.claude'), { recursive: true });
+    await writeFile(path.join(repo, CONFIG), '{"mine":true}');
+    const err = Object.assign(new Error('injected'), { code });
+    fault.error = err;
+    await expect(
+      generateFilesStep.apply(ctx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detect(),
+        formValues: {},
+      }),
+    ).rejects.toBe(err);
+    expect(await readFile(path.join(repo, CONFIG), 'utf8')).toBe('{"mine":true}');
+  },
+);

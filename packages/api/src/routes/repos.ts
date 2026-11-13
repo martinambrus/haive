@@ -33,6 +33,7 @@ import {
   decodeUtf8Strict,
   isNotUtf8Error,
   NotUtf8Error,
+  RESOURCE_LIMITS,
   lstatNoFollow,
   ParkedFileError,
   openFileNoFollow,
@@ -2192,7 +2193,13 @@ export async function resetOnboardingArtifacts(
         { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
       // A save that took the name back while the old file was judged is the person's file.
-      const retaken = result === 'removed' && (await lstatNoFollow(root, rel)) !== null;
+      // An unreadable name after the unlink is reported as skipped, but the tree already changed.
+      const retaken =
+        result === 'removed' &&
+        (await lstatNoFollow(root, rel, { rethrow: RESOURCE_LIMITS }).catch((err: unknown) => {
+          partialRemovals += 1;
+          throw err;
+        })) !== null;
       if (result === 'removed' && !retaken) {
         removed.push(rel);
         vacatedPaths.add(rel);

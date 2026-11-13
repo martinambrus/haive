@@ -1,7 +1,7 @@
 import { lstat, mkdir, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService, type CliExecInvocationKind, type CliExecJobPayload } from '@haive/shared';
 
 // WORKER_REPO_STORAGE_ROOT is read from the environment once, at import time, so the
@@ -11,8 +11,23 @@ process.env.REPO_STORAGE_ROOT = storageRoot;
 
 const stubs = vi.hoisted(() => ({
   runInSandbox: vi.fn(),
+  error: null as Error | null,
   invocation: { repoMount: null as unknown, hasWorktree: false, hasRepo: true },
 }));
+
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (stubs.error && String(args[0]).endsWith('/.git')) throw stubs.error;
+      return real.lstat(...args);
+    },
+  };
+});
+afterEach(() => {
+  stubs.error = null;
+});
 
 vi.mock('../src/sandbox/sandbox-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/sandbox-runner.js')>()),
@@ -160,6 +175,18 @@ const KINDS: CliExecInvocationKind[] = [
 ];
 
 describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox gets', (kind) => {
+  it.each(['EMFILE', 'ENFILE'])(
+    'starts no container when the .git lookup fails with %s',
+    async (code) => {
+      const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
+      stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
+      const err = Object.assign(new Error('injected boundary lookup failure'), { code });
+      stubs.error = err;
+      await expect(executeByKind(db, payloadFor(kind), {} as never, {})).rejects.toBe(err);
+      expect(stubs.runInSandbox).not.toHaveBeenCalled();
+    },
+  );
+
   it('mounts .git, .haive-data and .haive/worktrees under the repository root, ahead of the repository mount', async () => {
     const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
     stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };

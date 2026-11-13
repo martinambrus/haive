@@ -15,6 +15,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import {
   isNotUtf8Error,
   isPathContainmentError,
+  RESOURCE_LIMITS,
   lstatNoFollow,
   readFileNoFollow,
   readdirNoFollow,
@@ -715,7 +716,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     ];
     const existingFiles: string[] = [];
     for (const rel of candidates) {
-      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingFiles.push(rel);
+      if ((await lstatNoFollow(ctx.repoPath, rel, { rethrow: RESOURCE_LIMITS })) !== null)
+        existingFiles.push(rel);
     }
 
     const taskRows = await ctx.db
@@ -856,7 +858,10 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
       // DANGLING one as absent — so the exists check could pass and the write then land on whatever
       // the link names. replace-atomic (the default) because every file here is machine-parsed.
-      if ((await lstatNoFollow(ctx.repoPath, rel)) !== null && !overwrite) {
+      if (
+        (await lstatNoFollow(ctx.repoPath, rel, { rethrow: RESOURCE_LIMITS })) !== null &&
+        !overwrite
+      ) {
         skippedFiles.push(rel);
         // A file already holding this render is not the person's (an interrupted earlier apply).
         if (!(await holdsRender(rel, contents))) leftAsIs.push(rel);

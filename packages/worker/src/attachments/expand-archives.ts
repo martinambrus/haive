@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import {
   applyTreeNoFollow,
   ensureDirNoFollow,
+  RESOURCE_LIMITS,
+  isResourceLimitError,
   lstatNoFollow,
   readdirNoFollow,
   removeNoFollow,
@@ -151,7 +153,9 @@ async function walkRegularFiles(
   baseRel: string,
   rel = '',
 ): Promise<{ files: WalkedFile[]; skipped: number }> {
-  const entries = await readdirNoFollow(anchor, rel === '' ? baseRel : `${baseRel}/${rel}`);
+  const entries = await readdirNoFollow(anchor, rel === '' ? baseRel : `${baseRel}/${rel}`, {
+    rethrow: RESOURCE_LIMITS,
+  });
   // Absent or refused: the extraction tree should be there, so count it rather than
   // throwing — the caller already reports what the walk could not take.
   if (entries === null) return { files: [], skipped: 1 };
@@ -161,7 +165,7 @@ async function walkRegularFiles(
     const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
     // lstat, not the dirent alone: what matters is that the entry is not a
     // symlink, and that is the question lstat answers about the entry itself.
-    const st = await lstatNoFollow(anchor, `${baseRel}/${childRel}`);
+    const st = await lstatNoFollow(anchor, `${baseRel}/${childRel}`, { rethrow: RESOURCE_LIMITS });
     if (!st) {
       skipped += 1;
       continue;
@@ -380,7 +384,9 @@ async function stageTree(
   // is not the layout the api writes is then reported as missing instead of being probed at a
   // guessed path.
   const rowSplit = splitAttachmentStoredPath(archive, taskId);
-  const onDisk = rowSplit ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel) : null;
+  const onDisk = rowSplit
+    ? await lstatNoFollow(rowSplit.anchor, rowSplit.rel, { rethrow: RESOURCE_LIMITS })
+    : null;
   if (rowSplit === null || onDisk?.kind !== 'file') {
     return 'the archive file is missing from the task workspace';
   }
@@ -662,6 +668,11 @@ export async function ensureArchivesExpanded(
       staged = await stageTree(anchor, stagingRel, archive, taskId);
     } catch (err) {
       log.warn({ err, taskId, archive: archive.filename }, 'archive expansion failed');
+      // A process fault says nothing about this archive; leave it eligible for the next call.
+      if (isResourceLimitError(err)) {
+        await discardStaging(anchor, stagingRel);
+        continue;
+      }
       staged = `could not be expanded: ${expansionErrorLine(err, anchor)}`;
     }
     if (typeof staged === 'string') {

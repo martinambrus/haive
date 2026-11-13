@@ -2,6 +2,7 @@ import path from 'node:path';
 import { namesGitData } from '@haive/shared/project-state';
 import { LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
 import {
+  RESOURCE_LIMITS,
   lstatNoFollow,
   readdirNoFollow,
   removeNoFollow,
@@ -128,13 +129,13 @@ export async function migrateLegacyKnowledge(
 }
 
 async function isDirectory(root: string, rel: string): Promise<boolean> {
-  return (await lstatNoFollow(root, rel))?.kind === 'directory';
+  return (await lstatNoFollow(root, rel, { rethrow: RESOURCE_LIMITS }))?.kind === 'directory';
 }
 
 /** Whether ANYTHING occupies `rel` — a link included, which is the point: a planted link at a
  *  destination counts as taken rather than as free space to move onto. */
 async function exists(root: string, rel: string): Promise<boolean> {
-  return (await lstatNoFollow(root, rel)) !== null;
+  return (await lstatNoFollow(root, rel, { rethrow: RESOURCE_LIMITS })) !== null;
 }
 
 /** Every file under `<root>/<prefix>`, relative to `prefix`, recursing into subdirectories.
@@ -143,7 +144,9 @@ async function exists(root: string, rel: string): Promise<boolean> {
  *  would have thrown out of the caller's loop. */
 async function listFiles(root: string, prefix: string, sub = ''): Promise<string[]> {
   const out: string[] = [];
-  const entries = await readdirNoFollow(root, sub === '' ? prefix : `${prefix}/${sub}`);
+  const entries = await readdirNoFollow(root, sub === '' ? prefix : `${prefix}/${sub}`, {
+    rethrow: RESOURCE_LIMITS,
+  });
   if (entries === null) return out;
   for (const entry of entries) {
     const rel = sub === '' ? entry.name : `${sub}/${entry.name}`;

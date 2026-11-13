@@ -872,6 +872,26 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 4. Admission counts every runner on the daemon while the reaper can now reclaim only its own, so on a shared daemon a waiter can park behind the other install's runners (documented in runtime-capacity.md).
 5. Coverage: no control for an exited runner, nor for the real `docker ps` rendering of a missing label (mocked as ''). The real two-install S4 check is pending (docs/plans/solitary-partitioning-lampson.md).
 
+### T639 · sandbox `.git` boundary reads every other failed lookup as no `.git`
+
+status: open · kind: fix · found: #1125 review 2026-11-13 · priority: P2
+PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
+
+### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+9)
+
+status: open · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
+PRE-EXISTING unless marked. Worker unless named.
+
+1. Consequential: `queues/cli-exec/ddev-generated-mask.ts` ~:120 skips the `#ddev-generated` protections when a read fails.
+2. Potentially consequential: `step-engine/steps/_citation-scrub.ts` ~:280 `repoHoldsCitation` keeps repository-specific blocks when a read fails; downstream consequence untraced.
+3. `step-engine/git-merge.ts` relocation: the final `chmodNoFollow` (~:1144) and `giveBack` (~:850) swallow EMFILE, so a replaced 0600 file can stay at git's 0644 or a restored file root-owned, unreported; and a path deferred as occupied (directory stands, or unread since #1125) loses its saved mode, so a later relocation restores it 0644 (Codex P1 on #1125: mode drift only, the baseline blob is already 0444 in `.git/objects`). Fix direction: bounded retry on resource errors, else report "mode not restored"; carry saved modes in the manifest.
+4. `sandbox/task-worktree.ts` ~:77: a descriptor shortage can report a worktree as removed. Minor.
+5. api `routes/tasks/files.ts` ~:258: other host faults (EIO, ESTALE) still answer 400 "cannot be opened for editing". Minor.
+6. `queues/cli-exec/agent-definition-mask.ts` ~:127 fails open by design (C2); revisit only with item 1.
+7. `readTextNoFollow` / `readLinkNoFollow` lenient callers were not in the #1125 audit (it covered lstat, readdir, readFile, openFile).
+8. (from T510 item 2) api bundle file listing bounds files, depth and descriptors but not directory count.
+9. (from T510 item 5) shared `readdirNoFollow` `maxEntries` overflow is a plain `Error` known by wording; give it a code when a caller appears. Coverage: `branch-revert-unknown-reads.test.ts` template copy has no isolation guard.
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
@@ -1435,7 +1455,7 @@ The swallow rule in scripts/test/shell-source.mjs (`swallowedFailure`) rejects a
 
 ### T510 · FNF[fs-safe-resource-errors] · lenient fs-safe reads take running out of descriptors for an absent entry (+4)
 
-status: open · gate: bounded verification · priority: P2
+status: done 2026-11-13 #1125 (d62ed5e57): items 1, 3, 4; 31 consequential lenient reads rethrow EMFILE/ENFILE (default unchanged), four api routes and fs-http answer host faults 500, sandbox boundary lookups refuse the run, merge relocation never throws after a move, terminal refusal scrubbed; items 2 and 5 moved to T640 · gate: bounded verification · priority: P2
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING.
 
 1. Consequential but silent: `readResult` (packages/shared/src/fs-safe.ts ~:304-319) returns `null` in lenient mode for every errno that is not a containment refusal, EMFILE and ENFILE included, unless the caller passes a `rethrow` set (only the T365 walks do). So `openFileNoFollow`, `readFileNoFollow`, `readdirNoFollow` and `lstatNoFollow`, called leniently by many worker steps, read a descriptor shortage as "the entry is not there" and act on it. Needs a caller audit before the default flips: list the lenient callers, decide per caller whether a resource error should throw, then make `RESOURCE_LIMITS` rethrow by default.

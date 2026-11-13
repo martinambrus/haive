@@ -5,6 +5,7 @@ import { admitWatchedRepository } from '../project-state/watch-admission.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
+  RESOURCE_LIMITS,
   readFileNoFollow,
   removeNoFollow,
   removeFileIfNoFollow,
@@ -91,6 +92,7 @@ const PLAN_TOO_LARGE = `the committed plan snapshot is larger than ${PLAN_JSON_M
 async function readPlanJson(anchor: string): Promise<Buffer | 'too-large' | null> {
   const read = await readFileNoFollow(anchor, HAIVE_DATA_FILES.plan, {
     maxBytes: PLAN_JSON_MAX_BYTES,
+    rethrow: RESOURCE_LIMITS,
   });
   if (read === null) return null;
   return read.truncated ? 'too-large' : read.data;
