@@ -999,13 +999,6 @@ PRE-EXISTING, unmeasured. `recordFailedStepHint` awaits `enqueueUsagePollTick()`
 status: open · kind: fix · found: T546 run 2026-11-08 · priority: P4
 PRE-EXISTING. `markHeld` (worker queues/cli-exec/agent-reserve.ts ~:133, set ~:414) is not cleared when "agent reserve defer failed; allowing job" falls open (~:346, ~:431); only its TTL prunes it. Also trivial while there: the header comment ~:35 still says "fail-open on everything", and handlers.ts ~:1317-1341 holds an orphaned pause-gate doc block above the `LIGHT_JOB_LANE` doc.
 
-### T532 · D4b · registry-kind install sources cannot be fetched (design)
-
-status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
-`@haive-module/<id>` registry packages ship `dist` only, while the own-module builder rebuilds from sources, so T337 refuses registry fetch with 409 `registry_fetch_unsupported` (api modules/sources.ts ~:174). Options: publish sources in the package (a `files` change in the packaging script), teach the builder to accept prebuilt dist packages, or drop the registry kind from the form.
-
-User decision 2026-11-05: Drop the registry kind (form, api, schema); git sources cover the need. Re-add it only when a customer asks.
-
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
 status: parked · kind: design · was modular #146 · reason: diminishing returns (2026-11-01 scan): Bundle concerns merge efficiency, stale wiring, helper cleanup, and orphan-directory hygiene; resume when resume when measured overhead or stale wiring disrupts invocations · priority: P4
@@ -1880,6 +1873,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T532 — owner decision: module install sources are git-only (API body, client type, admin dialog); stored registry rows stay readable as unsupported, deletable with token and audit, fetch refused with 400 `module_source_kind_unsupported`; `module_sources` CHECK constraints kept for a later two-phase cleanup (migrate or delete remaining registry rows, then tighten in a new migration); api, worker and web reloaded — PR #1147 (548013da4), 2026-11-13.
 - T541 — Cancel deletes the task's own skeleton, enriching or failed kb_author entry (Stop or a worker failure alone keeps it failed); both writes match the source task and user and skip approved entries; worker reloaded — PR #1148 (fccc9866a), 2026-11-13. Vector leftover in T582.
 - T312 — verified 2026-11-13: detection already checks candidate directories (`01-env-detect.ts` ~:948, commit 257ca270d) and the own-code consumers ignore a missing include; inventory of the dev install (every stored `customCodePaths.include`, checked in the worker filesystem) found none missing. No change needed.
 - T552 — owner decision: the server refuses a terminal or task shell for a disabled CLI provider (api and worker, close 4425 with a sentence to enable it); the web offers only enabled providers. Live: api, worker and web reloaded clean; refusal not probed live (no disabled provider on the dev install) — PR #1145 (477c2e00d), 2026-11-13. Open-shell revocation T654; lows T553.
