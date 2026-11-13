@@ -7,6 +7,7 @@ import {
   IN_STACK_OLLAMA_URL,
   isInStackOllamaBaseUrl,
   isOllamaModelAllowed,
+  normalizeOllamaModel,
   parseModelfile,
   configService,
   CONFIG_KEYS,
@@ -150,7 +151,12 @@ export async function provisionOllamaProvider(
       log.warn({ err }, 'could not list ollama models; attempting provisioning anyway');
       present = new Set();
     }
-    if (!present.has(model)) {
+    // /api/tags reports `llama3:latest` for a provider saved as `llama3`: compare resolved names.
+    const wanted = normalizeOllamaModel(model);
+    const resident = [...present].some(
+      (name) => wanted !== null && normalizeOllamaModel(name) === wanted,
+    );
+    if (!resident) {
       const owner = await db.query.users.findFirst({
         where: eq(schema.users.id, provider.userId),
         columns: { role: true },

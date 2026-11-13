@@ -120,6 +120,15 @@ it('keeps a resident legacy model ready without reading policy', async () => {
   expect(configService.get).not.toHaveBeenCalled();
 });
 
+it('keeps a resident model ready when the provider names it without its tag', async () => {
+  const row = provider('resident-tagless', USER, 'llama3');
+  fetchFn.mockResolvedValue(Response.json({ models: [{ name: 'llama3:latest' }] }));
+  vi.mocked(configService.get).mockRejectedValue(new Error('policy store unavailable'));
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(true);
+  expect(fake.rows(schema.cliProviders)[0]).toMatchObject({ modelProvisionStatus: 'ready' });
+  expect(configService.get).not.toHaveBeenCalled();
+});
+
 it('leaves a policy skip idle and can provision after the model is allowed', async () => {
   const row = provider('later-allowed');
   await fake.db
