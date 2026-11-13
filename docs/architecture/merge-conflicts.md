@@ -177,7 +177,11 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   its default mode, so each keeps the permission bits of the file it replaced, never wider than git
   wrote it, the executable bits following git where reading is allowed: a person's own 0600 file
   came back 0644. A deletion there is put back too, and reported like a move, since at a same-branch
-  root it can be the person's own. The commit then
+  root it can be the person's own. Those permission bits live only in memory until the put-back ends, so once
+  anything has moved nothing in the relocation throws on running out of descriptors (a throw lost
+  them, and a Retry put a 0600 file back 0644): a file whose mode cannot be read is left in place,
+  a path that cannot be read is not put back, and an unread parent counts as existing, each reported
+  as a leftover. Only the manifest probe, which runs before any move, rethrows. The commit then
   stages only the paths the fixer was sent to resolve, so neither a stray nor a person's own
   uncommitted work at a same-branch root is swept into it, where `add -A` took both. What a fixer
   staged itself outside those paths is put back in the index as the merge had it, byte for byte so a
