@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import { z } from 'zod';
 import {
   CONFIG_KEYS,
@@ -12,7 +14,8 @@ import {
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { clearAuthCookies } from '../auth/cookies.js';
-import { reserveAuthAttempt } from '../lib/auth-throttle.js';
+import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
+import { ANONYMOUS_AUDIT_ACTOR, recordAuditEvent } from '../lib/audit.js';
 import { sendMail } from '../lib/mailer.js';
 import {
   assertPasswordResetLive,
@@ -57,8 +60,7 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
   try {
     const pepper = await secretsService.getEmailBlindIndexPepper();
     const blindIndex = computeEmailBlindIndex(email, pepper);
-    // Keep every request in the login budget; a request has proved no password to refund.
-    await reserveAuthAttempt(c, 'login', blindIndex);
+    await reserveAuthAttempt(c, 'recover', blindIndex);
     setImmediate(() => {
       void (async () => {
         if (!(await available())) return;
@@ -67,6 +69,7 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
         const recipient = await findPasswordResetRecipient(db, email, blindIndex, fieldKey);
         if (!recipient) return;
         const token = await issuePasswordReset(db, recipient.userId, recipient.claimEmailEncrypted);
+        if (token === null) return;
         // Invites use window.location.origin. The server counterpart is the configured WEB_ORIGIN,
         // never an untrusted Host/Origin header. The raw link stays only in this process and SMTP.
         const link = new URL('/reset-password', webOrigin());
@@ -83,7 +86,31 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
         log.warn({ code: 'password_recovery_failed' }, 'Password recovery could not be completed');
       });
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthThrottleError && error.auditAllowed) {
+      setImmediate(() => {
+        void (async () => {
+          const db = getDb();
+          const pepper = await secretsService.getEmailBlindIndexPepper();
+          const existing =
+            error.limiter === 'account'
+              ? await db.query.users.findFirst({
+                  where: eq(schema.users.emailBlindIndex, computeEmailBlindIndex(email, pepper)),
+                  columns: { id: true },
+                })
+              : undefined;
+          await recordAuditEvent(db, {
+            actorUserId: ANONYMOUS_AUDIT_ACTOR,
+            action: 'auth.password_reset.throttled',
+            targetType: 'user',
+            targetId: existing?.id ?? null,
+            metadata: { reason: 'throttled', limiter: error.limiter },
+          });
+        })().catch(() => {
+          log.warn({ code: 'password_recovery_audit_failed' }, 'Password recovery audit failed');
+        });
+      });
+    }
     // Throttling and configuration failures preserve the same non-enumerating response.
     log.warn({ code: 'password_recovery_refused' }, 'Password recovery request was not admitted');
   }

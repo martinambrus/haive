@@ -10,17 +10,22 @@ const h = vi.hoisted(() => ({
   send: vi.fn(),
   reserve: vi.fn(),
   hash: vi.fn(),
+  redis: undefined as unknown,
   close: vi.fn(),
   warn: vi.fn(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => h.redis }));
 vi.mock('../src/lib/mailer.js', () => ({ sendMail: h.send }));
 vi.mock('../src/lib/auth-throttle.js', async (original) => ({
   ...(await original<typeof import('../src/lib/auth-throttle.js')>()),
   reserveAuthAttempt: h.reserve,
 }));
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
-vi.mock('../src/auth/password.js', () => ({ hashPassword: h.hash }));
+vi.mock('../src/auth/password.js', () => ({
+  hashPassword: h.hash,
+  verifyPassword: async () => false,
+}));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: {
@@ -33,19 +38,28 @@ vi.mock('@haive/shared', async (original) => ({
 import { authRoutes } from '../src/routes/auth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HTTPException } from 'hono/http-exception';
-import { issuePasswordReset, PASSWORD_RESET_TTL_MS } from '../src/lib/password-resets.js';
+import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+import {
+  issuePasswordReset,
+  PASSWORD_RESET_TTL_MS,
+  PASSWORD_RESET_COOLDOWN_MS,
+} from '../src/lib/password-resets.js';
 import type { AppEnv } from '../src/context.js';
 
 const KEY = 'ab'.repeat(32);
 const EMAIL = 'person@example.test';
 const blind = (email: string) => computeEmailBlindIndex(email, 'ef'.repeat(32));
 const app = new Hono<AppEnv>().onError(errorHandler).route('/auth', authRoutes);
-const post = (path: string, body: unknown) =>
-  app.request(`/auth/${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+const post = (path: string, body: unknown, address?: string) =>
+  app.request(
+    `/auth/${path}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    address ? { incoming: { socket: { remoteAddress: address } } } : undefined,
+  );
 let fake: ReturnType<typeof createFakeDb>;
 let candidates: Array<typeof schema.users.$inferSelect>;
 async function user(readable = true, email = EMAIL) {
@@ -118,7 +132,7 @@ describe('forgot password', () => {
       await vi.runAllTimersAsync();
       const sends = kind === 'readable' || kind === 'claim' ? 1 : 0;
       expect(h.send).toHaveBeenCalledTimes(sends);
-      expect(h.reserve).toHaveBeenCalledWith(expect.anything(), 'login', blind(EMAIL));
+      expect(h.reserve).toHaveBeenCalledWith(expect.anything(), 'recover', blind(EMAIL));
       const tokens = await fake.db.query.passwordResets!.findMany();
       expect(tokens).toHaveLength(sends);
       if (sends) {
@@ -132,6 +146,71 @@ describe('forgot password', () => {
   );
   it('pins the production lifetime', () => {
     expect(PASSWORD_RESET_TTL_MS).toBe(30 * 60_000);
+    expect(PASSWORD_RESET_COOLDOWN_MS).toBe(2 * 60_000);
+  });
+  it('keeps the first link and sends no second mail during the issuance cooldown', async () => {
+    await user();
+    await post('forgot-password', { email: EMAIL });
+    await vi.runAllTimersAsync();
+    const first = await fake.db.query.passwordResets!.findMany();
+    await post('forgot-password', { email: EMAIL });
+    await vi.runAllTimersAsync();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(await fake.db.query.passwordResets!.findMany()).toEqual(first);
+  });
+  it('recovery spam leaves login admission and its throttle audit slot untouched', async () => {
+    // Fake the Redis command seam, preserving independent buckets and SET NX audit slots.
+    const counts = new Map<string, number>();
+    const slots = new Set<string>();
+    h.redis = {
+      status: 'ready',
+      eval: async (_script: string, n: number, ...args: Array<string | number>) => {
+        const keys = args.slice(0, n) as string[];
+        for (const [i, key] of keys.entries()) {
+          if ((counts.get(key) ?? 0) >= Number(args[n + 4 + i])) return [0, 60_000, key];
+        }
+        for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+        return [1, 0];
+      },
+      set: async (key: string) => {
+        if (slots.has(key)) return null;
+        slots.add(key);
+        return 'OK';
+      },
+    };
+    const real = await vi.importActual<typeof import('../src/lib/auth-throttle.js')>(
+      '../src/lib/auth-throttle.js',
+    );
+    h.reserve.mockImplementation(real.reserveAuthAttempt);
+    await user();
+    for (let i = 0; i < 12; i++)
+      expect((await post('forgot-password', { email: EMAIL }, '8.8.8.8')).status).toBe(202);
+    expect(
+      (await post('login', { email: EMAIL, password: 'wrong-password-long' }, '8.8.8.8')).status,
+    ).toBe(401);
+    for (let i = 0; i < 10; i++)
+      await post('login', { email: EMAIL, password: 'wrong-password-long' }, '8.8.8.8');
+    await vi.runAllTimersAsync();
+    const events = await fake.db.query.auditEvents!.findMany();
+    expect(events.filter((e) => e.action === 'auth.password_reset.throttled')).toHaveLength(1);
+    expect(events.filter((e) => e.action === 'auth.login.throttled')).toHaveLength(1);
+  });
+  it.each([true, false])('honors the recovery throttle audit slot (%s)', async (auditAllowed) => {
+    const row = await user();
+    h.reserve.mockRejectedValue(
+      new AuthThrottleError(new Response(null, { status: 429 }), auditAllowed, 'account'),
+    );
+    expect((await post('forgot-password', { email: EMAIL })).status).toBe(202);
+    await vi.runAllTimersAsync();
+    const events = await fake.db.query.auditEvents!.findMany();
+    expect(events).toHaveLength(auditAllowed ? 1 : 0);
+    if (auditAllowed)
+      expect(events[0]).toMatchObject({
+        action: 'auth.password_reset.throttled',
+        targetId: row.id,
+        metadata: { reason: 'throttled', limiter: 'account' },
+      });
+    expect(h.send).not.toHaveBeenCalled();
   });
   it.each([new Error('secret@example.test token=secret'), new ConfigUnavailableError('test')])(
     'contains mail exceptions without logging plaintext',
@@ -202,7 +281,7 @@ describe('reset password admission', () => {
   });
   it('answers a throttled address before hashing even a live token', async () => {
     const row = await user();
-    const token = await issuePasswordReset(fake.db as unknown as Database, row.id);
+    const token = await issuePasswordReset(fake.db as unknown as Database, String(row.id));
     h.reserve.mockRejectedValue(
       new HTTPException(429, {
         res: Response.json({ code: 'rate_limited' }, { status: 429 }),

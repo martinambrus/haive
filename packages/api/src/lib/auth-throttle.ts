@@ -43,7 +43,7 @@ end
 return {1, 0}
 `;
 
-type Scope = 'login' | 'register' | 'reset';
+type Scope = 'login' | 'register' | 'reset' | 'recover';
 
 export interface AuthAttempt {
   refund(): Promise<void>;
@@ -184,7 +184,13 @@ function refused(
 ): AuthThrottleError {
   const seconds = Math.min(Math.max(1, Math.ceil(waitMs / 1000)), AUTH_THROTTLE_WINDOW_MS / 1000);
   const what =
-    scope === 'login' ? 'sign-in' : scope === 'register' ? 'registration' : 'password reset';
+    scope === 'login'
+      ? 'sign-in'
+      : scope === 'register'
+        ? 'registration'
+        : scope === 'recover'
+          ? 'password recovery'
+          : 'password reset';
   const res = Response.json(
     {
       error: `Too many ${what} attempts. Try again in ${seconds} seconds.`,
@@ -246,7 +252,7 @@ export async function reserveAuthAttempt(
   const [admitted, waitMs, rejectedKey] = outcome as [number, number, string?];
   if (Number(admitted) !== 1) {
     let auditAllowed = false;
-    if (scope === 'login' && rejectedKey && keys.includes(rejectedKey)) {
+    if ((scope === 'login' || scope === 'recover') && rejectedKey && keys.includes(rejectedKey)) {
       try {
         auditAllowed =
           (await bounded(

@@ -8,6 +8,7 @@ import {
   issuePasswordReset,
   consumePasswordReset,
   findPasswordResetRecipient,
+  PASSWORD_RESET_COOLDOWN_MS,
 } from '../src/lib/password-resets.js';
 
 const url = process.env.PASSWORD_RESETS_TEST_URL;
@@ -136,7 +137,9 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       token: expired,
       newPassword: 'new-password-long',
     });
-    const old = await issuePasswordReset(db, row.id);
+    const old = await issuePasswordReset(db, row.id, null, {
+      now: new Date(Date.now() - PASSWORD_RESET_COOLDOWN_MS),
+    });
     await issuePasswordReset(db, row.id);
     const second = await post('reset-password', { token: old, newPassword: 'new-password-long' });
     const unknown = await post('reset-password', {
@@ -151,6 +154,42 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       expect(malformed.status).toBe(400);
       expect(await malformed.text()).toBe(unknownBody);
     }
+  });
+  it('serializes the cooldown and preserves the first token until its boundary', async () => {
+    const row = await user();
+    const now = new Date('2026-11-13T12:00:00Z');
+    const options = { now, cooldownMs: 10 };
+    const tokens = await Promise.all([
+      issuePasswordReset(db, row.id, null, options),
+      issuePasswordReset(db, row.id, null, options),
+    ]);
+    expect(tokens.filter((t) => t !== null)).toHaveLength(1);
+    expect(tokens.filter((t) => t === null)).toHaveLength(1);
+    const first = await db.query.passwordResets.findMany({
+      where: eq(schema.passwordResets.userId, row.id),
+    });
+    expect(first).toHaveLength(1);
+    expect(first[0]!.consumedAt).toBeNull();
+    expect(
+      await issuePasswordReset(db, row.id, null, {
+        now: new Date(now.getTime() + 9),
+        cooldownMs: 10,
+      }),
+    ).toBeNull();
+    expect(
+      await issuePasswordReset(db, row.id, null, {
+        now: new Date(now.getTime() + 10),
+        cooldownMs: 10,
+      }),
+    ).toBeTypeOf('string');
+    const superseded = await db.query.passwordResets.findFirst({
+      where: eq(schema.passwordResets.id, first[0]!.id),
+    });
+    expect(superseded!.consumedAt).not.toBeNull();
+    const audits = await db.query.auditEvents.findMany({
+      where: eq(schema.auditEvents.targetId, row.id),
+    });
+    expect(audits.filter((a) => a.action === 'auth.password_reset.request')).toHaveLength(2);
   });
   it('a claim repairs the email and index and can log in with that email', async () => {
     const row = await user();
@@ -184,7 +223,7 @@ describe.skipIf(!url)('password resets on Postgres', () => {
     });
     expect(resets[0]!.consumedAt).toBeNull();
     await db.delete(schema.users).where(eq(schema.users.id, holder.id));
-    await expect(consumePasswordReset(db, token, 'new-hash', key, pepper)).resolves.toBe(row.id);
+    await expect(consumePasswordReset(db, token!, 'new-hash', key, pepper)).resolves.toBe(row.id);
   });
   it.each(['issuance', 'redemption'])(
     '%s permits a refresh-shaped transaction under the held user lock',
@@ -253,8 +292,9 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       const result =
         operation === 'issuance'
           ? issuePasswordReset(wrapped, row.id)
-          : consumePasswordReset(wrapped, token, 'new-hash', key, pepper);
-      await expect(result).resolves.toBeTypeOf('string');
+          : consumePasswordReset(wrapped, token!, 'new-hash', key, pepper);
+      if (operation === 'issuance') await expect(result).resolves.toBeNull();
+      else await expect(result).resolves.toBe(row.id);
       expect(checked).toBe(true);
     },
   );
@@ -285,7 +325,7 @@ describe.skipIf(!url)('password resets on Postgres', () => {
         return typeof v === 'function' ? v.bind(target) : v;
       },
     });
-    await expect(consumePasswordReset(broken, token, 'new-hash', key, pepper)).rejects.toThrow(
+    await expect(consumePasswordReset(broken, token!, 'new-hash', key, pepper)).rejects.toThrow(
       'synthetic audit failure',
     );
     expect(

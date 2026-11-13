@@ -11,6 +11,7 @@ import {
 import { generateInviteToken, hashInviteToken } from './invites.js';
 
 export const PASSWORD_RESET_TTL_MS = 30 * 60_000;
+export const PASSWORD_RESET_COOLDOWN_MS = 2 * 60_000;
 const invalid = () =>
   new HttpError(400, 'That reset link is invalid or expired. Request a new one.');
 
@@ -20,8 +21,12 @@ export async function issuePasswordReset(
   db: Database,
   userId: string,
   claimEmailEncrypted: string | null = null,
-  { now = new Date(), ttlMs = PASSWORD_RESET_TTL_MS }: { now?: Date; ttlMs?: number } = {},
-): Promise<string> {
+  {
+    now = new Date(),
+    ttlMs = PASSWORD_RESET_TTL_MS,
+    cooldownMs = PASSWORD_RESET_COOLDOWN_MS,
+  }: { now?: Date; ttlMs?: number; cooldownMs?: number } = {},
+): Promise<string | null> {
   const token = generateInviteToken();
   const event: AuditEvent = {
     actorUserId: ANONYMOUS_AUDIT_ACTOR,
@@ -30,13 +35,23 @@ export async function issuePasswordReset(
     targetId: userId,
     metadata: { claim: claimEmailEncrypted !== null },
   };
-  await db.transaction(async (tx) => {
+  const issued = await db.transaction(async (tx) => {
     const locked = await tx
       .select({ id: schema.users.id })
       .from(schema.users)
       .where(eq(schema.users.id, userId))
       .for('no key update');
     if (!locked.length) throw invalid();
+    const recent = await tx.query.passwordResets.findFirst({
+      where: and(
+        eq(schema.passwordResets.userId, userId),
+        isNull(schema.passwordResets.consumedAt),
+        gt(schema.passwordResets.expiresAt, now),
+        gt(schema.passwordResets.createdAt, new Date(now.getTime() - cooldownMs)),
+      ),
+      columns: { id: true },
+    });
+    if (recent) return false;
     await tx
       .update(schema.passwordResets)
       .set({ consumedAt: now })
@@ -48,9 +63,12 @@ export async function issuePasswordReset(
       claimEmailEncrypted,
       tokenHash: hashInviteToken(token),
       expiresAt: new Date(now.getTime() + ttlMs),
+      createdAt: now,
     });
     await insertAuditEvent(tx, event);
+    return true;
   });
+  if (!issued) return null;
   logAuditEvent(event);
   return token;
 }
