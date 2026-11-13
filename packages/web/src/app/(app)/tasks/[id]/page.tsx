@@ -727,6 +727,22 @@ export default function TaskDetailPage() {
   const [planNodeCount, setPlanNodeCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
+  // A rebuild notice describes this task/attempt state, not every later poll.
+  // Ignore display copy and object identity so unchanged polling keeps it visible.
+  const rebuildDdevState = JSON.stringify([
+    task?.status,
+    task?.currentStepId,
+    steps.map((s) => [
+      s.id,
+      s.status,
+      s.runSeq,
+      s.round,
+      s.startedAt,
+      s.endedAt,
+      s.waitingStartedAt,
+    ]),
+  ]);
+  useEffect(() => setRebuildDdevNotice(null), [id, rebuildDdevState]);
   const [deadSteps, setDeadSteps] = useState<DeadStepRow[]>([]);
   const [stop, setStop] = useState<TaskStopRow | null>(null);
   const history = useTaskHistory(id, steps);
@@ -2026,7 +2042,19 @@ export default function TaskDetailPage() {
             {!titleStripVisible && <TaskHistoryBell history={history} />}
           </div>
         </div>
-        {rebuildDdevNotice && <MarkdownView body={rebuildDdevNotice} />}
+        {rebuildDdevNotice && (
+          <div role="status" className="flex items-start gap-2">
+            <MarkdownView body={rebuildDdevNotice} />
+            <button
+              type="button"
+              aria-label="Dismiss DDEV rebuild notice"
+              className="shrink-0 text-sm text-neutral-400 underline"
+              onClick={() => setRebuildDdevNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
         {task.description && <TaskDescription text={task.description} />}
         {task.status === 'failed' && task.errorMessage && (

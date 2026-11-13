@@ -2234,7 +2234,7 @@ export async function rebuildDdevRunner(
         // erase who authorized it. A failed audit write must keep the runner.
         await db.insert(schema.taskEvents).values({
           taskId,
-          eventType: 'ddev_rebuild',
+          eventType: 'ddev.rebuild.requested',
           payload: { userId, containerId: info.Id, action: 'requested' },
         });
         // The audit write yielded; activity arriving behind the fence still wins.

@@ -82,6 +82,12 @@ beforeEach(() => {
   });
 });
 const rebuild = () => rebuildDdevRunner(task, workspace, 'owner', h.ensure);
+it('uses the dotted name for the rebuild request event', async () => {
+  await rebuild();
+  expect(h.event).toHaveBeenCalledWith(
+    expect.objectContaining({ eventType: 'ddev.rebuild.requested' }),
+  );
+});
 it('refuses an in-process exec without removing its runner', async () => {
   await whileRunnerBusy(ddevRunnerName(task), async () => {
     await expect(rebuild()).rejects.toThrow(/busy/i);
@@ -128,7 +134,7 @@ it('records the requesting user before removing an owned runner and ensuring rec
   expect(h.event).toHaveBeenCalledWith(
     expect.objectContaining({
       taskId: task,
-      eventType: 'ddev_rebuild',
+      eventType: 'ddev.rebuild.requested',
       payload: expect.objectContaining({ userId: 'owner', action: 'requested' }),
     }),
   );
