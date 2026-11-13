@@ -8,6 +8,7 @@ import {
   deleteModuleSource,
   type ApiError,
   type ModuleInstallSource,
+  type ModuleSourceInput,
 } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
@@ -29,11 +30,10 @@ export function ModuleSourceDialog({
 }) {
   const source = target.source;
   const deleting = target.mode === 'delete';
-  const [kind, setKind] = useState<'git' | 'registry'>(source?.kind ?? 'git');
+  const unsupported = !!source && source.kind !== 'git';
   const [moduleId, setModuleId] = useState(source?.moduleId ?? '');
   const [url, setUrl] = useState(source?.url ?? '');
   const [ref, setRef] = useState(source?.ref ?? 'main');
-  const [version, setVersion] = useState(source?.version ?? '');
   const [token, setToken] = useState('');
   const [clearToken, setClearToken] = useState(false);
   const [running, setRunning] = useState(false);
@@ -41,18 +41,17 @@ export function ModuleSourceDialog({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (running) return;
+    if (running || (unsupported && !deleting)) return;
     setRunning(true);
     setError(null);
     try {
       if (deleting && source) await deleteModuleSource(source.id);
       else {
-        const body = {
-          kind,
+        const body: ModuleSourceInput = {
+          kind: 'git',
           moduleId,
-          ...(kind === 'git'
-            ? { url, ref }
-            : { packageName: '@haive-module/' + moduleId, version }),
+          url,
+          ref,
           ...(token ? { token } : {}),
           ...(clearToken ? { clearToken: true } : {}),
         };
@@ -93,19 +92,13 @@ export function ModuleSourceDialog({
               className="text-sm text-neutral-300"
               body="Delete this source and its stored access token? The installed module and its data are kept."
             />
+          ) : unsupported ? (
+            <InlineMarkdown
+              className="text-sm text-neutral-300"
+              body="Unsupported source kind. Delete this source and add a Git repository."
+            />
           ) : (
             <>
-              <Label htmlFor="source-kind">Source kind</Label>
-              <select
-                id="source-kind"
-                value={kind}
-                disabled={running}
-                className="rounded-md border border-neutral-800 bg-neutral-950 p-2 text-sm"
-                onChange={(event) => setKind(event.target.value as 'git' | 'registry')}
-              >
-                <option value="git">Git repository</option>
-                <option value="registry">Registry package</option>
-              </select>
               <Label htmlFor="source-module-id">Module id</Label>
               <Input
                 id="source-module-id"
@@ -117,41 +110,23 @@ export function ModuleSourceDialog({
                 disabled={running}
                 onChange={(event) => setModuleId(event.target.value)}
               />
-              {kind === 'git' ? (
-                <>
-                  <Label htmlFor="source-url">HTTPS repository URL</Label>
-                  <Input
-                    id="source-url"
-                    type="url"
-                    value={url}
-                    required
-                    disabled={running}
-                    onChange={(event) => setUrl(event.target.value)}
-                  />
-                  <Label htmlFor="source-ref">Requested git ref</Label>
-                  <Input
-                    id="source-ref"
-                    value={ref}
-                    required
-                    disabled={running}
-                    onChange={(event) => setRef(event.target.value)}
-                  />
-                </>
-              ) : (
-                <>
-                  <Label htmlFor="source-package">Package name</Label>
-                  <Input id="source-package" value={'@haive-module/' + moduleId} readOnly />
-                  <Label htmlFor="source-version">Exact version</Label>
-                  <Input
-                    id="source-version"
-                    value={version}
-                    required
-                    disabled={running}
-                    placeholder="1.2.3"
-                    onChange={(event) => setVersion(event.target.value)}
-                  />
-                </>
-              )}
+              <Label htmlFor="source-url">HTTPS repository URL</Label>
+              <Input
+                id="source-url"
+                type="url"
+                value={url}
+                required
+                disabled={running}
+                onChange={(event) => setUrl(event.target.value)}
+              />
+              <Label htmlFor="source-ref">Requested git ref</Label>
+              <Input
+                id="source-ref"
+                value={ref}
+                required
+                disabled={running}
+                onChange={(event) => setRef(event.target.value)}
+              />
               <Label htmlFor="source-token">Access token</Label>
               <Input
                 id="source-token"
@@ -190,7 +165,11 @@ export function ModuleSourceDialog({
             <Button type="button" variant="secondary" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" variant={deleting ? 'destructive' : 'primary'} disabled={running}>
+            <Button
+              type="submit"
+              variant={deleting ? 'destructive' : 'primary'}
+              disabled={running || (unsupported && !deleting)}
+            >
               {running ? 'Saving…' : deleting ? 'Delete source' : 'Save source'}
             </Button>
           </div>

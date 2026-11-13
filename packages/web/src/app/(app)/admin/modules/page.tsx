@@ -414,7 +414,17 @@ export default function ModulesPage() {
                     <td className="p-2 font-mono">{source.ref ?? source.version}</td>
                     <td className="p-2">{source.hasToken ? 'Stored' : 'None'}</td>
                     <td className="p-2">
-                      <span>{source.fetchStatus ?? 'Not fetched'}</span>
+                      <span>
+                        {source.kind === 'git'
+                          ? (source.fetchStatus ?? 'Not fetched')
+                          : 'Unsupported'}
+                      </span>
+                      {source.kind !== 'git' && (
+                        <InlineMarkdown
+                          className="text-sm text-text-secondary"
+                          body="Unsupported source kind. Delete this source and add a Git repository."
+                        />
+                      )}
                       {source.resolvedSha && <code className="block">{source.resolvedSha}</code>}
                       {source.fetchedAt && <span className="block">{when(source.fetchedAt)}</span>}
                       {source.fetchStatus === 'failed' && source.lastError && (
@@ -438,14 +448,10 @@ export default function ModulesPage() {
                           >
                             Fetch
                           </Button>
-                          {(source.kind === 'registry' || !sources.fetchConfigured) && (
+                          {source.kind === 'git' && !sources.fetchConfigured && (
                             <InlineMarkdown
                               className="text-sm text-text-secondary"
-                              body={
-                                source.kind === 'registry'
-                                  ? 'Registry fetch requires rebuildable sources and is unavailable.'
-                                  : 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'
-                              }
+                              body="Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch."
                             />
                           )}
                           {source.kind === 'git' && source.resolvedSha && (
@@ -467,6 +473,7 @@ export default function ModulesPage() {
                             variant="secondary"
                             size="sm"
                             disabled={
+                              source.kind !== 'git' ||
                               sourcePending.has(source.id) ||
                               source.fetchStatus === 'queued' ||
                               source.fetchStatus === 'fetching'
@@ -480,8 +487,9 @@ export default function ModulesPage() {
                             size="sm"
                             disabled={
                               sourcePending.has(source.id) ||
-                              source.fetchStatus === 'queued' ||
-                              source.fetchStatus === 'fetching'
+                              (source.kind === 'git' &&
+                                (source.fetchStatus === 'queued' ||
+                                  source.fetchStatus === 'fetching'))
                             }
                             onClick={() => setSourceTarget({ mode: 'delete', source })}
                           >

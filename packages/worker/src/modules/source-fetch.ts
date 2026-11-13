@@ -163,8 +163,7 @@ export async function fetchModuleSource(
     throw new Error(
       'HAIVE_OWN_MODULES_HOST_DIR must name an absolute daemon directory without commas',
     );
-  if (source.kind !== 'git')
-    throw new Error('Registry fetch is unavailable: the builder requires rebuildable sources');
+  if (source.kind !== 'git') throw new Error('Unsupported module source kind');
   if (!MODULE_ID_PATTERN.test(source.moduleId)) throw new Error('Invalid module id');
   const ref = source.ref;
   if (

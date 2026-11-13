@@ -688,9 +688,13 @@ else, so a source checkout gets 409 `source_checkout` on every write and the pag
 note pointing at `pnpm module add`. Saving or fetching never builds or swaps an image: a pinned
 module applies at the next upgrade or an explicit build of the one-shot above.
 
-- A row is a git source (https URL without userinfo, query or fragment; a bare branch, tag or
-  40-hex SHA as ref) or a registry source (`@haive-module/<id>` at an exact version). The module id
-  is unique.
+- New and edited rows are git sources only (https URL without userinfo, query or fragment; a bare
+  branch, tag or 40-hex SHA as ref). The module id is unique. Registry install sources are no longer
+  offered or accepted; git sources cover this use. Stored registry rows remain readable, show as
+  unsupported, and can be deleted with their token, even if their old fetch state is queued or fetching.
+  They cannot be edited or fetched from the page. Fetching an unsupported stored kind returns 400
+  `module_source_kind_unsupported`. This does not change registry package installation through
+  `pnpm module`, generated module provenance, or channel packaging.
 - The access token is install-wide per source, stored by `SecretsService` in `system_secrets`
   under `module_source:<id>:token`, and never returned: responses carry `hasToken`. A blank token
   on edit keeps the stored one; an explicit clear removes it. Every add, edit, delete, fetch and
@@ -728,8 +732,12 @@ module applies at the next upgrade or an explicit build of the one-shot above.
   validation applies), failing the row with "Module tree exceeds entry limit". A single
   directory is listed whole before its entries are counted, so the entry poll is bounded by one
   directory listing rather than one interval.
-- Registry fetch is refused with 409 `registry_fetch_unsupported`: published packages ship `dist`
-  only, which the own-module builder cannot rebuild. Use a git source.
+- The storage CHECK constraints and legacy package/version columns remain for compatibility with
+  stored registry rows; this change has no database migration. Rollback reverts the application
+  change. A later cleanup must first inventory and migrate or delete remaining registry rows and
+  tokens, then tighten the `module_sources` kind and fields CHECK constraints with a new guarded numbered
+  migration (never `modules_source_check`, which records module provenance); restore those
+  constraints before rolling that later cleanup back.
 - The worker never resolves the host directory by name. It streams the validated tree (no nested
   `.git`, links or special files; depth, entry and size limits) as tar into a helper container run
   from the worker's own image (`--pull never`) with the directory bind-mounted, which stages it,

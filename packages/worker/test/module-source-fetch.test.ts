@@ -63,6 +63,18 @@ function setup() {
   });
 }
 describe('fetch and pin a module source', () => {
+  it('refuses an unsupported stored source before image resolution or git', async () => {
+    setup();
+    image.mockClear();
+    const pin = vi.fn();
+    await expect(fetchSmall({ ...source, kind: 'registry' }, null, pin)).rejects.toThrow(
+      'Unsupported module source kind',
+    );
+    expect(image).not.toHaveBeenCalled();
+    expect(git).not.toHaveBeenCalled();
+    expect(pin).not.toHaveBeenCalled();
+  });
+
   it.each(['fetch', 'checkout'])(
     'aborts an entry-heavy %s while it is still running',
     async (phase) => {
