@@ -236,6 +236,7 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
           JSON.stringify({ command, repoSubpath: d.repoSubpath }),
         )
       : null;
+    let replayed: { exitCode: number; output: string } | undefined;
     if (effect && !effect.fresh) {
       const result = effect.receipt.result;
       if (!result) {
@@ -245,15 +246,17 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
       }
       if (result.exitCode !== 0)
         throw new Error(`migration failed (${command}): ${String(result.output)}`);
-      return { ran: true, skipped: false, passed: true, command, output: String(result.output) };
+      replayed = { exitCode: 0, output: String(result.output) };
     }
 
-    const res = await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>
-      ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000, onLine }),
-    );
+    const res =
+      replayed ??
+      (await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>
+        ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000, onLine }),
+      ));
     // Record the command's outcome before the optional runtime snapshot or done write.
     // A death before this write leaves an unknown outcome and never replays silently.
-    if (effect)
+    if (effect?.fresh)
       await finishApplyEffect(ctx, effect.receipt, {
         exitCode: res.exitCode,
         output: res.output.slice(-2000),

@@ -213,6 +213,32 @@ describe('deterministic apply redelivery', () => {
     expect(appliedDataChanges).toBe(1);
   });
 
+  it('retries the durability snapshot after replaying a recorded command success', async () => {
+    h.exec.mockResolvedValue({ exitCode: 0, output: 'migration applied' });
+    h.snapshot.mockRejectedValueOnce(new Error('worker lost during snapshot'));
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'unknown' as const,
+        migrationCommand: 'node migrate.js',
+        repoSubpath: 'repo',
+      },
+      formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('worker lost during snapshot');
+    h.snapshot.mockResolvedValue({ exitCode: 1, output: 'snapshot unavailable' });
+    await redeliver(ctx, dbMigrateStep.metadata.id, async () => {
+      await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({
+        passed: true,
+        output: 'migration applied',
+      });
+    });
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    expect(h.snapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('does not claim a custom migration ran when DDEV startup failed', async () => {
     h.ensure.mockRejectedValueOnce(new Error('DDEV configuration needs repair'));
     h.exec.mockResolvedValue({ exitCode: 0, output: 'done' });
