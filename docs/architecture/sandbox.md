@@ -319,6 +319,29 @@ images and keeps the compose bundle it was installed with, so an install upgrade
 an earlier release keeps the daemon on `haive-models` with no gate until its compose bundle is
 replaced by one from this release or later.
 
+KNOWN SECURITY GAP, accepted for local single-user use (owner decision 2026-11-13): per-task ports
+the worker publishes are reachable from other tasks' sandboxes. They bind 127.0.0.1, which
+`host.docker.internal` reaches on Docker Desktop (MEASURED: ephemeral `127.0.0.1::port` and fixed
+`127.0.0.1:port:port` both answered another container). Each is opt-in per task:
+
+- The DDEV database port is reserved on every runner while the global `config:sandbox:dbDirectAccess`
+  switch is on (default), but its socat hop listens only when a task also sets `exposeDbPort`
+  (`maybeExposeDdevDbPort`). The hop accepts DDEV's fixed `db`/`db` login (`ddevDbAccess`), so
+  any `full`-policy sandbox, another task's included, can then read and write that task's
+  database. Turning the global switch off prevents new exposure; runners already exposed must
+  also be stopped or recreated to close their database hops.
+- The DDEV router, app and Mailpit ports are published only in the per-task external access mode
+  with `BROWSER_DIRECT_ACCESS`, and nothing authenticates in front of them.
+
+This MUST be closed before Haive is reachable over the web or shared by several users. Options
+recorded then:
+
+- a per-exposure random database role, which also requires refusing `db`/`db` through the hop
+  without breaking DDEV's own app connection (unproven);
+- an auth layer in front of the router and app ports;
+- the root fix: stop sandboxes from reaching the host gateway at all, which on Docker Desktop needs
+  egress filtering rather than a DNS override, since the gateway address stays reachable directly.
+
 ## Container attachment startup
 
 The container WebSocket routes (`api/src/routes/terminal.ts` and `cli-login-banner.ts`) own
