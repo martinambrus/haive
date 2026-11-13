@@ -883,6 +883,16 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 status: done 2026-11-13 #1126 (6f1e2223e): the shared boundary lookup uses fs-safe strict mode; only ENOENT/ENOTDIR read as absent, every other failure (EACCES, EIO, a link in the path) refuses the run before a container starts; an IDE boot refuses a worktree subpath with a link or non-directory parent; lows in T641 · kind: fix · found: #1125 review 2026-11-13 · priority: P2
 PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
 
+### T657 · FNF[reset-claim-sweep-lows] · onboarding reset claim sweep lows, after #1151 (+4)
+
+status: open · kind: fix · found: #1151 review 2026-11-13 · priority: P4
+api `routes/repos.ts` `resetOnboardingArtifacts`. All minor.
+
+1. Own change: a canonical git-data claim over `maxFileBytes` survives with no log and no `skipped` entry (~:2606 `if (read.truncated) return;`). Safe to keep, but silent. Fix: push a `skipped` entry when the file cap, not the byte budget, truncated it.
+2. Own change: the "byte limit reached" warning is pushed when the last scanned file reaches `maxTotalBytes` with nothing left (~:2634-2639). Over-reports, harmless. Fix: report only when another candidate remains.
+3. Coverage: no case for a FIFO or other special file at a canonical claim name (code is safe: `entry.isFile()` plus `lstat` before open).
+4. PRE-EXISTING: the other reset listings are uncapped, `readdirNoFollow(root, dir, { strict: true })` at ~:2353, ~:2419, ~:2493 on `.claude` and CLI dirs; a planted tree makes the reset allocate an unbounded listing. Fix: the same entry cap the claim sweep uses.
+
 ### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+9)
 
 status: open · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
@@ -1294,15 +1304,6 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor conservative rollback refusal depends on retired legacy import markers; resume when resume when a retired marker blocks a needed rollback · priority: P4
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
-
-### T472 · FNF[git-data-claim-sweep] [verify-first] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
-
-status: open (VERIFIED 2026-11-13, opt-in controls `GIT_PROBES=1` on branch `verify/git-probes` (worktree sec-GIT), red on main 9eb52c34e, re-run by the session: `api/test/git-reset-claim-probes.test.ts`: a real git merge brings a codec-valid legacy claim in before the next sync; reset leaves it and the record reads `invalid` ("format.json is missing") instead of absent. A base-owned claim with an unknown neighbour is handled (passing control). Fix: the codec-validated, capped claim sweep in the direction below, at `repos.ts` ~:2561, keeping unknown files) · executable · priority: P2
-From the T469 review (2026-10-31). PRE-EXISTING, minor (narrow window).
-
-api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop) takes back the claim files a live row, a retired git-data row (`supersededGitDataPaths`, T421) or a git-data claim in the sync base (`baseGitDataPaths`, T469) names. A git-data claim file that reached the checkout after the last sync (or that `applyRebase` dropped from the base, sync.ts ~:1131, until the next sync re-adds it) is in none of them, so it stays, and the record then reads `refused` ("format.json is missing") until someone removes it by hand: the sync cannot read it in once the reset removed `format.json`. Measured by the T469 driver (C4a/C4b). Direction (a decision, since it adds a read path to a destructive route): list `artifacts/` through the fs-safe primitives under a cap and take back each file the codec itself classes as a git-data claim (a canonical path that names git data and `claimFileName(path)` equal to the file name, codec.ts ~:374-379).
-
-Executable verification scope: Reproduce the recorded unsynced-claim reset refusal; cleanup must recognize owned codec-valid claims and preserve unknown files. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T475 · FNF[ci-unit-tests-job] [design] · a format or typecheck failure skips the unit tests in lint-typecheck-test
 
@@ -1876,6 +1877,7 @@ All low unless marked.
 
 ## Done
 
+- T472 — onboarding reset also takes back unsynced git-data claim files the codec classes as canonical claims, under an entry and byte cap, reporting what it skipped; unknown files stay; lows in T657 — PR #1151 (ee2258d78), 2026-11-13
 - T597 — owner decision: Resume on a failed mining step whose agents all finished re-runs only the apply from the saved replies (no agent bought again); a done row with no saved reply is marked failed in the same fenced write and re-dispatched; Retry keeps the full re-run; a fan-out loop step (`iterationCount > 0`) keeps the loop Resume arm; web shows "Resume (apply saved replies)" on structural columns only. Not live-checked: the only eligible steps on the dev install belong to cancelled tasks — PR #1149 (f3ce0c2aa), 2026-11-13.
 - T532 — owner decision: module install sources are git-only (API body, client type, admin dialog); stored registry rows stay readable as unsupported, deletable with token and audit, fetch refused with 400 `module_source_kind_unsupported`; `module_sources` CHECK constraints kept for a later two-phase cleanup (migrate or delete remaining registry rows, then tighten in a new migration); api, worker and web reloaded — PR #1147 (548013da4), 2026-11-13.
 - T541 — Cancel deletes the task's own skeleton, enriching or failed kb_author entry (Stop or a worker failure alone keeps it failed); both writes match the source task and user and skip approved entries; worker reloaded — PR #1148 (fccc9866a), 2026-11-13. Vector leftover in T582.
