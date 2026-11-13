@@ -176,6 +176,7 @@ it.each(['task', 'parked task', 'job'])(
     );
     expect(links).toHaveLength(1);
     expect(links[0]!.props.href).toBe('/admin/users#user-orphan');
+    expect(String(links[0]!.props.className).split(' ')).toContain('text-indigo-300');
   },
 );
 

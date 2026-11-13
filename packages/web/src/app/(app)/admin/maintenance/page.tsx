@@ -92,7 +92,7 @@ function TaskRow({
             (t.ownerEmailReadable === false ? (
               <Link
                 href={t.ownerId ? `/admin/users#user-${t.ownerId}` : '/admin/users#users'}
-                className="underline"
+                className="text-indigo-300 underline"
               >
                 unreadable, needs relink
               </Link>
@@ -367,7 +367,7 @@ export default function MaintenancePage() {
                       (j.ownerEmailReadable === false ? (
                         <Link
                           href={j.ownerId ? `/admin/users#user-${j.ownerId}` : '/admin/users#users'}
-                          className="underline"
+                          className="text-indigo-300 underline"
                         >
                           unreadable, needs relink
                         </Link>
