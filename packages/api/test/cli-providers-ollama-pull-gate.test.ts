@@ -92,13 +92,17 @@ describe('in-stack Ollama provider save policy', () => {
   it.each(['create', 'patch', 'clone'])(
     'refuses a disallowed model on %s before any write or queue',
     async (operation) => {
-      const fake = setup(operation === 'create' ? undefined : { name: 'ollama', model: 'blocked' });
+      const fake = setup(
+        operation === 'create'
+          ? undefined
+          : { name: 'ollama', model: operation === 'patch' ? 'allowed' : 'blocked' },
+      );
       const before = structuredClone(fake.rows(schema.cliProviders));
       const res =
         operation === 'create'
           ? await post({ name: 'ollama', model: 'blocked' })
           : operation === 'patch'
-            ? await patch({ label: 'edited' })
+            ? await patch({ model: 'blocked' })
             : await app.request(`/${PROVIDER}/clone`, { method: 'POST' });
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({
@@ -115,7 +119,11 @@ describe('in-stack Ollama provider save policy', () => {
     'refuses a disallowed FROM on %s before any write or queue',
     async (operation) => {
       const values = { name: 'ollama', model: 'allowed', modelfile: 'FROM blocked' };
-      const fake = setup(operation === 'create' ? undefined : values);
+      const fake = setup(
+        operation === 'create'
+          ? undefined
+          : { ...values, modelfile: operation === 'patch' ? 'FROM allowed' : values.modelfile },
+      );
       const before = structuredClone(fake.rows(schema.cliProviders));
       const res =
         operation === 'create'
@@ -130,6 +138,31 @@ describe('in-stack Ollama provider save policy', () => {
       expect(h.add).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    { label: 'edited', model: 'blocked' },
+    { name: 'ollama', label: 'renamed' },
+    { enabled: false },
+  ])('allows a legacy provider metadata PATCH without provisioning: %j', async (body) => {
+    const fake = setup({ name: 'ollama', model: 'blocked' });
+    expect((await patch(body)).status).toBe(200);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject(body);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('allows deleting a legacy provider without provisioning', async () => {
+    const fake = setup({ name: 'ollama', model: 'blocked' });
+    expect((await app.request(`/${PROVIDER}`, { method: 'DELETE' })).status).toBe(200);
+    expect(fake.rows(schema.cliProviders)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('allows changing Modelfile parameters with the same checked inputs', async () => {
+    setup({ name: 'ollama', model: 'blocked', modelfile: 'FROM blocked-base' });
+    expect((await patch({ modelfile: 'FROM blocked-base\nPARAMETER num_ctx 32' })).status).toBe(
+      200,
+    );
+  });
 
   it('refuses replacing an allowed model with a disallowed model', async () => {
     const fake = setup({ name: 'ollama', model: 'allowed' });
@@ -184,7 +217,7 @@ describe('in-stack Ollama provider save policy', () => {
         .where(eq(schema.cliProviders.id, PROVIDER));
       return key === CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST ? 'allowed' : null;
     });
-    const res = await patch({ label: 'edited' });
+    const res = await patch({ model: 'allowed:latest' });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'ollama_provider_changed' });
     expect(fake.rows(schema.cliProviders)[0]!.label).toBe('p');

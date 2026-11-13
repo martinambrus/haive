@@ -597,12 +597,22 @@ cliProviderRoutes.patch('/:id', async (c) => {
   // Moving an external endpoint back into the shared daemon also needs provisioning.
   if (
     updates.envVars !== undefined &&
-    updates.envVars?.ANTHROPIC_BASE_URL !== existing.envVars?.ANTHROPIC_BASE_URL &&
+    !isInStackOllamaBaseUrl(existing.envVars?.ANTHROPIC_BASE_URL) &&
     isInStackOllamaBaseUrl(candidate.envVars?.ANTHROPIC_BASE_URL)
   ) {
     modelInputsChanged = true;
   }
-  await assertOllamaSaveAllowed(c.get('userRole'), candidate);
+  // Relabels and unchanged form inputs grant no pull authority. Only changed
+  // model/base inputs or a move into the shared daemon need the save policy.
+  const from = (modelfile: string | null) =>
+    modelfile ? parseModelfile(modelfile).from : undefined;
+  const policyInputsChanged =
+    candidate.model !== existing.model ||
+    from(candidate.modelfile) !== from(existing.modelfile) ||
+    !!candidate.modelfile !== !!existing.modelfile ||
+    (!isInStackOllamaBaseUrl(existing.envVars?.ANTHROPIC_BASE_URL) &&
+      isInStackOllamaBaseUrl(candidate.envVars?.ANTHROPIC_BASE_URL));
+  if (policyInputsChanged) await assertOllamaSaveAllowed(c.get('userRole'), candidate);
   const provisioningModel = modelInputsChanged && shouldProvisionOllamaModel(candidate);
   const startsJob = imageInputsChanged || provisioningModel;
   if (startsJob) {
