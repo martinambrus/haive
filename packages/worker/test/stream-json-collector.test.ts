@@ -486,10 +486,10 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(c.getTokenUsage()?.peakPromptTokens).toBe(5010);
   });
 
-  it('leaves the peak absent for one zero-usage message and no result', () => {
+  it('keeps usage unknown for one zero-usage message and no result', () => {
     const c = createStreamJsonCollector();
     feed(c, [zeroMsg('msg_z')]);
-    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+    expect(c.getTokenUsage()).toBeNull();
   });
 
   it('leaves the peak absent when the result prompt is 0', () => {
