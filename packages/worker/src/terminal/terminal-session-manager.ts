@@ -11,7 +11,7 @@ import {
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_EXIT_KEY_TTL_SECONDS,
   TERMINAL_REPLY_CHANNEL_PREFIX,
-  TERMINAL_PROVIDER_DISABLED_MESSAGE,
+  TERMINAL_CLOSE_CODES,
   TERMINAL_REQUEST_CHANNEL,
   terminalSessionKey,
   logger,
@@ -25,6 +25,7 @@ import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { ensureShellContainer, seedShellTrust } from './terminal-container.js';
+import { TerminalProviderDisabledError } from './provider-disabled-error.js';
 import {
   resolveRepoMount,
   resolveTaskRepoMount,
@@ -184,6 +185,9 @@ export class TerminalSessionManager {
         const reply = await this.openSession(req).catch((err): TerminalOpenResult => ({
           ok: false,
           error: scrubErrorPaths(err),
+          ...(err instanceof TerminalProviderDisabledError
+            ? { closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED }
+            : {}),
         }));
         if (this.started) {
           await this.redis.publish(replyChannel, JSON.stringify(reply));
@@ -563,16 +567,6 @@ export class TerminalSessionManager {
     });
 
     try {
-      // A close-provider handled while the ensure above ran (it may build an image) found no
-      // session to close. The session is registered now, so a later close finds it; this read
-      // catches an earlier one, since the api publishes only after its commit.
-      const provider = await this.db.query.cliProviders.findFirst({
-        where: eq(schema.cliProviders.id, providerId),
-        columns: { enabled: true },
-      });
-      if (!provider?.enabled) throw new Error(TERMINAL_PROVIDER_DISABLED_MESSAGE);
-      await this.subscriber.subscribe(inChannel, ctlChannel);
-
       // Registry entry: worker writes container metadata only (HSETNX-style for
       // startedAt so reuses don't overwrite). API alone owns `refcount` via
       // HINCRBY +/-1 on WS attach/detach, and updates `lastSeenAt` on detach
@@ -596,6 +590,19 @@ export class TerminalSessionManager {
       await this.redis.hsetnx(key, 'startedAt', String(now));
       await this.redis.hsetnx(key, 'lastSeenAt', String(now));
       await this.redis.hsetnx(key, 'refcount', '0');
+
+      // A close-provider handled while the ensure above ran (it may build an image) found no
+      // session to close. The session is registered now, so a later close finds it; this read
+      // catches an earlier one, since the api publishes only after its commit. The registry
+      // entry above is written first so the reaper still removes a container refused here.
+      const provider = await this.db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, providerId),
+        columns: { enabled: true },
+      });
+      if (!provider?.enabled || session.providerDisabled) throw new TerminalProviderDisabledError();
+      // A close that ran during the read has already unsubscribed; subscribing now would leak.
+      if (!this.sessions.has(sessionId)) throw new Error('the shell ended while it was opening');
+      await this.subscriber.subscribe(inChannel, ctlChannel);
     } catch (err) {
       await this.teardownSession(session, 'open-failed').catch(() => undefined);
       throw err;

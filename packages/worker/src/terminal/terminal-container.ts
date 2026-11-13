@@ -16,7 +16,6 @@ import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
   CONTAINER_FAMILY,
-  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   INSTALL_LABEL,
   installId,
   containerPrefix,
@@ -27,6 +26,7 @@ import {
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
+import { TerminalProviderDisabledError } from './provider-disabled-error.js';
 
 const log = logger.child({ module: 'terminal-container' });
 
@@ -195,7 +195,7 @@ export async function ensureShellContainer(
   if (!provider) throw new Error(`cli provider ${providerId} not found`);
   if (provider.userId !== userId) throw new Error('cli provider does not belong to user');
   if (!provider.enabled) {
-    throw new Error(TERMINAL_PROVIDER_DISABLED_MESSAGE);
+    throw new TerminalProviderDisabledError();
   }
 
   // Resolve the same composed sandbox image cli-exec-queue uses so the

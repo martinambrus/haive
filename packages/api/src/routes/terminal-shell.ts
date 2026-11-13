@@ -277,13 +277,16 @@ export async function runScopedShellSession(
     cliProviderId,
   }).catch((err) => {
     log.warn({ err, scope, scopeId, cliProviderId, correlationId }, 'open-session request failed');
-    return { ok: false as const, error: safeErrorMessage(err) };
+    return { ok: false as const, error: safeErrorMessage(err) } satisfies TerminalOpenResult;
   });
 
   if (!reply.ok) {
     if (!cleanupRan) sendJson(ws, { type: 'error', message: reply.error });
     try {
-      ws.close(1011, 'open_failed');
+      // A close reason is capped at 123 bytes.
+      if ('closeCode' in reply && reply.closeCode !== undefined)
+        ws.close(reply.closeCode, reply.error.slice(0, 120));
+      else ws.close(1011, 'open_failed');
     } catch {
       // ignore
     }

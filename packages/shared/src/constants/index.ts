@@ -1134,6 +1134,8 @@ export interface TerminalWorkdirMismatch {
 export interface TerminalOpenError {
   ok: false;
   error: string;
+  /** WebSocket close code for a known refusal, such as a disabled provider (4425). */
+  closeCode?: number;
 }
 
 export type TerminalOpenResult = TerminalOpenReply | TerminalOpenError;

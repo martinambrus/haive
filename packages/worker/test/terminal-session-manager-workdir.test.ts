@@ -1,6 +1,7 @@
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
+  TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
@@ -25,6 +26,7 @@ vi.mock('../src/terminal/terminal-container.js', () => ({
 
 import { TerminalSessionManager } from '../src/terminal/terminal-session-manager.js';
 import { ensureShellContainer, seedShellTrust } from '../src/terminal/terminal-container.js';
+import { TerminalProviderDisabledError } from '../src/terminal/provider-disabled-error.js';
 import { resolveTaskSandboxWorkdir } from '../src/queues/cli-exec-queue.js';
 
 const WORKTREE = '/haive/workdir/.haive-worktrees/task-1';
@@ -591,6 +593,63 @@ describe('provider shell revocation', () => {
     });
     await expect(h.openRepo()).rejects.toThrow(TERMINAL_PROVIDER_DISABLED_MESSAGE);
     expect(h.attaches[0]!.destroyed).toBe(true);
+    const mgr = h.mgr as unknown as {
+      redis: { hset: Mock };
+      subscriber: { subscribe: Mock };
+    };
+    // The refused container is registered, so the idle reaper still removes it.
+    expect(mgr.redis.hset).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ containerName: 'haive-shell-1' }),
+    );
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('does not subscribe a session that a close-provider removed during the provider read', async () => {
+    const h = harness(ROOT);
+    const mgr = h.mgr as unknown as {
+      db: { query: { cliProviders: { findFirst: () => Promise<unknown> } } };
+      subscriber: { subscribe: Mock };
+    };
+    // The read saw the database before the disable committed.
+    mgr.db.query.cliProviders.findFirst = async () => {
+      await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+      return { enabled: true };
+    };
+    await expect(h.openRepo()).rejects.toThrow(TERMINAL_PROVIDER_DISABLED_MESSAGE);
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('answers a refused open with the provider-disabled close code', async () => {
+    const h = harness(ROOT);
+    await h.mgr.start();
+    h.provider.enabled = false;
+    vi.mocked(ensureShellContainer).mockImplementationOnce(async () => {
+      throw new TerminalProviderDisabledError();
+    });
+    await h.sendRequest({
+      op: 'open',
+      correlationId: 'c-off',
+      userId: 'user-1',
+      cliProviderId: 'prov-1',
+      scope: 'repo',
+      repositoryId: 'repo-1',
+    });
+    const reply = h
+      .published()
+      .map((raw) => {
+        try {
+          return JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((m) => m?.ok === false);
+    expect(reply).toEqual({
+      ok: false,
+      error: TERMINAL_PROVIDER_DISABLED_MESSAGE,
+      closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+    });
   });
 
   it('ignores incomplete provider revocation requests', async () => {

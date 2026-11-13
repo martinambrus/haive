@@ -4,6 +4,7 @@ import type { Redis } from 'ioredis';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_CLOSE_CODES,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
@@ -397,6 +398,36 @@ describe('runShellSession refcount lifecycle', () => {
     const errorFrame = ws.sent.map((s) => JSON.parse(s)).find((f) => f.type === 'error');
     expect(errorFrame).toEqual({ type: 'error', message: 'no provider auth' });
     expect(sub.quitCalled).toBe(true);
+  });
+
+  it('closes an open the worker refused for a disabled provider with its close code', async () => {
+    const ws = new FakeWs();
+    const sessionPromise = runShellSession(ws as never, 'u1', 't1', 'p1');
+    const sub = await waitForOpenInFlight();
+    const { replyChannel } = captureCorrelationId();
+
+    sub.emitReply(replyChannel, {
+      ok: false,
+      error: TERMINAL_PROVIDER_DISABLED_MESSAGE,
+      closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+    });
+    await sessionPromise;
+
+    expect(ws.closeArgs).toEqual([
+      TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+      TERMINAL_PROVIDER_DISABLED_MESSAGE,
+    ]);
+    expect(refcountIncrements()).toEqual([]);
+  });
+
+  it('closes any other failed open with 1011', async () => {
+    const ws = new FakeWs();
+    const sessionPromise = runShellSession(ws as never, 'u1', 't1', 'p1');
+    const sub = await waitForOpenInFlight();
+    const { replyChannel } = captureCorrelationId();
+    sub.emitReply(replyChannel, { ok: false, error: 'no provider auth' });
+    await sessionPromise;
+    expect(ws.closeArgs).toEqual([1011, 'open_failed']);
   });
 
   it('subscriber.quit during pending openSession does NOT crash the process', async () => {
