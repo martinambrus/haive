@@ -147,6 +147,17 @@ export function installTerminalShellWebSocket(
           );
           return;
         }
+        if (!ownership.providerEnabled) {
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+          );
+          return;
+        }
         if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
           if (!auth.session.accept(ws)) return;
@@ -499,6 +510,7 @@ function openSession(args: OpenSessionArgs): Promise<TerminalOpenResult> {
 
 interface OwnershipResult {
   taskTerminal: boolean;
+  providerEnabled: boolean;
 }
 
 async function verifyOwnership(
@@ -514,7 +526,7 @@ async function verifyOwnership(
   if (!task || task.userId !== userId) return null;
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, cliProviderId),
-    columns: { userId: true },
+    columns: { userId: true, enabled: true },
   });
   if (!provider || provider.userId !== userId) return null;
   // Enabled on 'failed': only a definitive end (completed/cancelled) reaps the worktree,
@@ -524,7 +536,7 @@ async function verifyOwnership(
   // (terminal-session-manager.openSession) and the web tab (tasks/[id]/page.tsx) already
   // read it this way, and a 'failed' here rejected the handshake 409 before either ran.
   const terminalDisabled = task.status === 'completed' || task.status === 'cancelled';
-  return { taskTerminal: !terminalDisabled };
+  return { taskTerminal: !terminalDisabled, providerEnabled: provider.enabled };
 }
 
 type RepoOwnershipResult = { ok: true } | { ok: false } | { ok: false; closeCode: number };
@@ -546,7 +558,7 @@ async function verifyRepoOwnership(
   if (!repo || repo.userId !== userId) return { ok: false };
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, cliProviderId),
-    columns: { userId: true },
+    columns: { userId: true, enabled: true },
   });
   if (!provider || provider.userId !== userId) {
     return { ok: false };
@@ -562,6 +574,9 @@ async function verifyRepoOwnership(
       ok: false,
       closeCode: TERMINAL_CLOSE_CODES.REPO_NOT_READY,
     };
+  }
+  if (!provider.enabled) {
+    return { ok: false, closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED };
   }
   return { ok: true };
 }

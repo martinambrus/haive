@@ -38,7 +38,9 @@ vi.mock('@/components/terminal/BrowserVncPanel', () => ({ BrowserVncPanel: () =>
 vi.mock('@/components/terminal/BrowserDirectPanel', () => ({ BrowserDirectPanel: () => null }));
 vi.mock('@/components/terminal/DatabaseAccessPanel', () => ({ DatabaseAccessPanel: () => null }));
 vi.mock('@/components/terminal/InteractiveShell', () => ({
-  InteractiveShell: () => null,
+  InteractiveShell: ({ cliProviderId }: { cliProviderId: string }) => (
+    <div data-shell-provider={cliProviderId} />
+  ),
   ShellUnavailable: () => null,
 }));
 
@@ -350,7 +352,7 @@ describe('terminal provider preselect', () => {
   });
 });
 
-it('keeps a disabled CLI already bound to the task in its terminal', async () => {
+it('offers only enabled terminal providers when the task is bound to a disabled CLI', async () => {
   net.providers = [
     { ...providerRow('disabled', 'codex', 'Disabled'), enabled: false },
     providerRow('enabled', 'codex', 'Enabled'),
@@ -362,14 +364,34 @@ it('keeps a disabled CLI already bound to the task in its terminal', async () =>
     await view.flush();
     const select = findAll(
       view.tree(),
-      (h) => h.tag === 'select' && h.props.value === 'disabled',
+      (h) => h.tag === 'select' && h.props.value === 'enabled',
     )[0];
     expect(select).toBeDefined();
     expect(
       findAll(select!, (h) => h.tag === 'option' && h.props.value === 'disabled'),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+    expect(findAll(view.tree(), (h) => h.props['data-shell-provider'] === 'disabled')).toHaveLength(
+      0,
+    );
+    expect(findAll(view.tree(), (h) => h.props['data-shell-provider'] === 'enabled')).toHaveLength(
+      1,
+    );
   } finally {
     net.providers = null;
     net.defaultProviderId = null;
+  }
+});
+
+it('does not open a terminal when the task-bound provider is the only provider and disabled', async () => {
+  net.providers = [{ ...providerRow('disabled', 'codex', 'Disabled'), enabled: false }];
+  net.defaultProviderId = null;
+  try {
+    const view = await mount({ type: 'onboarding', cliProviderId: 'disabled' });
+    fire.click(buttons(view.tree(), 'terminal')[0]!);
+    await view.flush();
+    expect(textOf(view.tree())).toContain('Every CLI provider is disabled.');
+    expect(findAll(view.tree(), (h) => h.props['data-shell-provider'] != null)).toHaveLength(0);
+  } finally {
+    net.providers = null;
   }
 });

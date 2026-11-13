@@ -111,6 +111,7 @@ const provider = {
   id: 'prov-1',
   userId: USER,
   name: 'claude-code',
+  enabled: true,
   cliVersion: null,
   sandboxDockerfileExtra: null,
   authMode: 'subscription',

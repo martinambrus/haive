@@ -9,13 +9,19 @@ const h = vi.hoisted(() => ({
   userId: 'owner',
   owner: 'owner',
   providerOwner: 'owner',
+  providerEnabled: true,
   containerStatus: 'stopped',
   dockerId: 'docker-id' as string | null,
   taskStatus: 'running',
   repoStatus: 'ready',
   source: 'upload',
   writable: true,
-  redis: { scan: vi.fn(async () => ['0', []]) },
+  redis: {
+    scan: vi.fn(async () => ['0', []]),
+    duplicate: vi.fn(() => {
+      throw new Error('refusal must not start a shell');
+    }),
+  },
 }));
 vi.mock('../src/auth/jwt.js', () => ({
   verifyAccessToken: async () => ({ sub: h.userId, tv: 0 }),
@@ -26,7 +32,9 @@ vi.mock('../src/db.js', () => ({
     query: {
       users: { findFirst: async () => ({ id: h.userId, status: 'active', tokenVersion: 0 }) },
       tasks: { findFirst: async () => ({ userId: h.owner, status: h.taskStatus }) },
-      cliProviders: { findFirst: async () => ({ userId: h.providerOwner }) },
+      cliProviders: {
+        findFirst: async () => ({ userId: h.providerOwner, enabled: h.providerEnabled }),
+      },
       repositories: {
         findFirst: async () => ({
           userId: h.owner,
@@ -59,6 +67,7 @@ beforeEach(async () => {
     userId: 'owner',
     owner: 'owner',
     providerOwner: 'owner',
+    providerEnabled: true,
     containerStatus: 'stopped',
     dockerId: 'docker-id',
     taskStatus: 'running',
@@ -66,6 +75,7 @@ beforeEach(async () => {
     source: 'upload',
     writable: true,
   });
+  h.redis.duplicate.mockClear();
   server = createServer();
   server.on('connection', (peer) => {
     peers.add(peer);
@@ -119,6 +129,21 @@ describe('terminal refusal transport', () => {
     h.taskStatus = status;
     expect(await connect(taskPath)).toEqual({ accepted: true, code: 4422 });
   });
+  it.each([taskPath, repoPath])(
+    'allows an enabled provider to request worker work: %s',
+    async (path) => {
+      expect(await connect(path)).toEqual({ accepted: true, code: 1011 });
+      expect(h.redis.duplicate).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([taskPath, repoPath])(
+    'refuses a disabled provider with 4425 before worker work: %s',
+    async (path) => {
+      h.providerEnabled = false;
+      expect(await connect(path)).toEqual({ accepted: true, code: 4425 });
+      expect(h.redis.duplicate).not.toHaveBeenCalled();
+    },
+  );
   it('accepts then closes a read-only repository with 4423', async () => {
     h.source = 'local_path';
     h.writable = false;
@@ -146,6 +171,7 @@ describe('terminal refusal transport', () => {
   for (const path of [taskPath, repoPath]) {
     it(`checks provider ownership before disclosing eligibility ${path}`, async () => {
       h.providerOwner = 'someone-else';
+      h.providerEnabled = false;
       h.taskStatus = 'completed';
       h.repoStatus = 'cloning';
       expect(await connect(path)).toEqual({ accepted: false, code: 404 });

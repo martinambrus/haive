@@ -17,8 +17,11 @@ resource the user owns (a container that is not running, a finished task, a repo
 ready, a busy login) cannot be read by a browser as a refused upgrade's status, so once origin, auth
 and ownership have passed the handler accepts and closes at once with a 4000-4999 code through the
 one helper `closeRefused` (`lib/upgrade-auth.ts`): `CLI_LOGIN_CLOSE_CODES` (4409-4411) and
-`TERMINAL_CLOSE_CODES` (4420-4424, `@haive/shared/constants`); the client keys its sentence on the
-code. Origin, auth and ownership refusals stay HTTP and are sent before any accept, so a foreign page
+`TERMINAL_CLOSE_CODES` (4420-4425, `@haive/shared/constants`); the client keys its sentence on the
+code. Code 4425 means "The CLI provider is disabled. Enable it before opening a terminal."
+Task and repository shells check the requested provider after ownership, before asking the worker
+to open a shell; the worker checks again before image resolution or container reuse.
+Origin, auth and ownership refusals stay HTTP and are sent before any accept, so a foreign page
 or another user learns nothing. Two tests keep this
 structural rather than remembered: `session-flag-drift.test.ts` fails when a file calls
 `verifyAccessToken(` without reading the flag (`maintenance.ts` is the one listed exception: it reads

@@ -503,6 +503,7 @@ export const TERMINAL_CLOSE_CODES = {
   TASK_TERMINAL_DISABLED: 4422,
   REPO_READ_ONLY: 4423,
   REPO_NOT_READY: 4424,
+  PROVIDER_DISABLED: 4425,
 } as const;
 
 /** Maximum time from enqueue before a sign-out must acquire its auth scope and start. */
