@@ -9,6 +9,7 @@ import {
   SHARED_VOLUME,
   appRunnerName,
   logger,
+  installLabel,
   type TaskAccessEndpoint,
   volumeName,
 } from '@haive/shared';
@@ -35,6 +36,7 @@ import {
 } from './runtime-admission.js';
 import { shellQuote } from './shell-quote.js';
 import { whileRunnerBusy } from './runner-activity.js';
+import { listOwnedTaskRunnerIds } from './runtime-runner-ownership.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -193,6 +195,8 @@ export async function startAppRunner(params: {
       '--init',
       '--name',
       name,
+      '--label',
+      installLabel(),
       '--label',
       `haive.task.id=${params.taskId}`,
       '--label',
@@ -559,19 +563,7 @@ export function parsePublishedPort(dockerPortStdout: string): number | null {
 export async function killTaskAppRunners(taskId: string): Promise<number> {
   let ids: string[] = [];
   try {
-    const { stdout } = await exec(
-      'docker',
-      [
-        'ps',
-        '-aq',
-        '--filter',
-        `label=${APP_RUNNER_LABEL}=1`,
-        '--filter',
-        `label=haive.task.id=${taskId}`,
-      ],
-      { timeout: 15_000 },
-    );
-    ids = stdout.split(/\s+/).filter((s) => s.length > 0);
+    ids = await listOwnedTaskRunnerIds(APP_RUNNER_LABEL, taskId);
   } catch {
     return 0;
   }

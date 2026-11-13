@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { ConfigUnavailableError, configService } from '@haive/shared';
+import { ConfigUnavailableError, configService, installId } from '@haive/shared';
 import {
   reapDecision,
   pickPreemptibleRunner,
@@ -453,8 +453,8 @@ describe('RuntimeRunnerReaper.sweep: the idle grace and a configuration store ou
   });
 
   it.each([
-    ['an exited runner', runner({ running: false }), undefined],
-    ['an orphan runner', runner({ taskId: null }), undefined],
+    ['an exited runner', runner({ running: false, install: installId() }), undefined],
+    ['an orphan runner', runner({ taskId: null, install: installId() }), undefined],
     ['a completed task’s runner', runner(), { ...failedLongAgo, status: 'completed' }],
   ])('still reaps %s while the grace cannot be read', async (_name, container, task) => {
     storeIsDown();

@@ -43,6 +43,9 @@ import {
 } from '@haive/database';
 import {
   archiveFormatSchema,
+  APP_RUNNER_LABEL,
+  IDE_RUNNER_LABEL,
+  INSTALL_LABEL,
   CLI_EXEC_JOB_NAMES,
   CLI_POLLABLE_JOB_OPTS,
   CONFIG_KEYS,
@@ -54,6 +57,7 @@ import {
   ideSessionKey,
   repoIdeSessionId,
   logger,
+  ownsLabelValue,
   OPEN_TASK_STATUSES,
   parseAllowanceWatchMode,
   type CliExecJobPayload,
@@ -132,6 +136,7 @@ import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/san
 import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
+import { ownsTaskRunner } from '../sandbox/runtime-runner-ownership.js';
 import {
   ensureTaskScratchWorkspace,
   cleanupTaskScratchWorkspace,
@@ -1481,24 +1486,40 @@ export async function killSandboxContainersByTaskLabel(taskId: string): Promise<
   const { spawn } = await import('node:child_process');
   const list = await new Promise<string>((resolve) => {
     let stdout = '';
-    const child = spawn('docker', ['ps', '-q', '--filter', `label=haive.task.id=${taskId}`]);
+    const child = spawn('docker', [
+      'ps',
+      '--filter',
+      `label=haive.task.id=${taskId}`,
+      '--format',
+      `{{.ID}}\t{{.Label "${INSTALL_LABEL}"}}\t{{.Label "haive.ddev"}}\t{{.Label "${APP_RUNNER_LABEL}"}}\t{{.Label "${IDE_RUNNER_LABEL}"}}`,
+    ]);
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      resolve(stdout);
+      // Partial output may end inside an install label or before a runner marker.
+      resolve('');
     }, 10_000);
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
-    child.on('close', () => {
+    child.on('close', (code) => {
       clearTimeout(timer);
-      resolve(stdout);
+      resolve(code === 0 ? stdout : '');
     });
     child.on('error', () => {
       clearTimeout(timer);
       resolve('');
     });
   });
-  const ids = list.split(/\s+/).filter((s) => s.length > 0);
+  const ids: string[] = [];
+  for (const line of list.split('\n')) {
+    const [id, install, ddev, app, ide] = line.split('\t');
+    if (!id) continue;
+    // The task label is daemon-global. Runners need DB proof for a legacy container;
+    // CLI sandboxes retain the default install's existing unlabeled compatibility rule.
+    const owned =
+      ddev || app || ide ? await ownsTaskRunner(id, install, taskId) : ownsLabelValue(install);
+    if (owned) ids.push(id);
+  }
   if (ids.length === 0) return 0;
   await new Promise<void>((resolve) => {
     const child = spawn('docker', ['rm', '-f', ...ids]);

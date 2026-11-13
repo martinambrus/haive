@@ -6,12 +6,14 @@ import {
   APP_RUNNER_LABEL,
   CONFIG_KEYS,
   ConfigUnavailableError,
+  INSTALL_LABEL,
   configService,
   logger,
 } from '@haive/shared';
 import { hasLiveCliInvocation } from '../orchestrator/pause.js';
 import { runnerExecLive, taskRunnerBusy, withRunnersFenced } from './runner-activity.js';
 import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
+import { ownsRuntimeRunner, ownsTaskRunner } from './runtime-runner-ownership.js';
 
 const exec = promisify(execFile);
 const log = logger.child({ module: 'runtime-runner-reaper' });
@@ -119,6 +121,7 @@ export async function runnerSettled(
 
 export interface RunnerContainer {
   id: string;
+  install?: string | null;
   taskId: string | null;
   running: boolean;
   startedAtMs: number | null;
@@ -394,6 +397,7 @@ export class RuntimeRunnerReaper {
     }
     const containers = await this.listRunnerContainers();
     const taskById = new Map<string, ReaperTask>();
+    const lookupFailed = new Set<string>();
     for (const c of containers) {
       if (!c.running || !c.taskId || taskById.has(c.taskId)) continue;
       try {
@@ -424,9 +428,18 @@ export class RuntimeRunnerReaper {
         // A DB hiccup on one lookup just leaves that runner out of the candidate set
         // (fail-safe: an un-looked-up runner is never preempted).
         log.warn({ err, taskId: c.taskId }, 'preemption task lookup failed; skipping runner');
+        lookupFailed.add(c.taskId);
       }
     }
-    const pick = pickPreemptibleRunner(containers, taskById, scoreTier);
+    const candidates = containers.filter((c) => !c.taskId || !lookupFailed.has(c.taskId));
+    const eligible: RunnerContainer[] = [];
+    for (const c of candidates) {
+      if (
+        await ownsRuntimeRunner(c.id, c.install, async () => !!c.taskId && taskById.has(c.taskId))
+      )
+        eligible.push(c);
+    }
+    const pick = pickPreemptibleRunner(eligible, taskById, scoreTier);
     if (!pick) {
       // Nothing takeable. The usual reason under the score tier is that every outscored holder is
       // mid-CLI-run, and `settled` (rightly) refuses to pull an environment out from under a
@@ -435,7 +448,7 @@ export class RuntimeRunnerReaper {
       // but a waiter that only wants an ENVIRONMENT generates no agent demand, so on a quiet
       // machine it could park forever. After the threshold, force the window: evict the holder's
       // agent (budget-free, re-dispatches cleanly) and take the runner on the next pass.
-      await this.forceSettledWindow(scoreTier, waitedMs, containers, taskById);
+      await this.forceSettledWindow(scoreTier, waitedMs, eligible, taskById);
       return false;
     }
     // Re-verify immediately before reaping: a `failed` task may have been retried, or a paused
@@ -450,6 +463,7 @@ export class RuntimeRunnerReaper {
             where: eq(schema.tasks.id, taskId),
             columns: { status: true, pausedAt: true, deadAt: true, voteScore: true },
           });
+          if (!(await ownsRuntimeRunner(pick.id, pick.install, async () => !!t))) return false;
           // Still a valid target if it is dead, or still held or outscored AND settled. The
           // settled re-check is the important half: the holder may have started an agent or an
           // exec since we listed, and taking its environment then is what tiers 2 and 3 must
@@ -506,7 +520,11 @@ export class RuntimeRunnerReaper {
    *  the runner (null) rather than risk reaping a live task's runtime. */
   private async reapReason(c: RunnerContainer, failedGraceMs: number): Promise<ReapReason | null> {
     // Short-circuit before the DB round-trip for the container-only verdicts.
-    if (!c.running || !c.taskId) return reapDecision(c, undefined, failedGraceMs);
+    if (!c.running || !c.taskId) {
+      return (await ownsTaskRunner(c.id, c.install, c.taskId, this.db))
+        ? reapDecision(c, undefined, failedGraceMs)
+        : null;
+    }
     let task: ReaperTask | undefined;
     try {
       const row = await this.db.query.tasks.findFirst({
@@ -525,14 +543,21 @@ export class RuntimeRunnerReaper {
       log.warn({ err, taskId: c.taskId }, 'runtime reaper task lookup failed; keeping runner');
       return null; // fail-safe: never reap a live task's runtime on a DB hiccup
     }
-    return reapDecision(c, task, failedGraceMs);
+    return (await ownsRuntimeRunner(c.id, c.install, async () => !!task))
+      ? reapDecision(c, task, failedGraceMs)
+      : null;
   }
 
   private async listRunnerContainers(): Promise<RunnerContainer[]> {
     const [ddev, app] = await Promise.all([this.psIds('haive.ddev'), this.psIds(APP_RUNNER_LABEL)]);
     const ids = Array.from(new Set([...ddev, ...app]));
     const infos = await Promise.all(ids.map((id) => this.inspect(id)));
-    return infos.filter((i): i is RunnerContainer => i !== null);
+    const owned: RunnerContainer[] = [];
+    for (const info of infos) {
+      if (info && (await ownsTaskRunner(info.id, info.install, info.taskId, this.db)))
+        owned.push(info);
+    }
+    return owned;
   }
 
   private psIds(label: string): Promise<string[]> {
@@ -548,15 +573,16 @@ export class RuntimeRunnerReaper {
         [
           'inspect',
           '-f',
-          '{{.State.Running}}|{{.State.StartedAt}}|{{index .Config.Labels "haive.task.id"}}',
+          `{{.State.Running}}|{{.State.StartedAt}}|{{index .Config.Labels "haive.task.id"}}|{{index .Config.Labels "${INSTALL_LABEL}"}}`,
           id,
         ],
         { timeout: 8_000 },
       );
-      const [running, startedAt, taskId] = stdout.trim().split('|');
+      const [running, startedAt, taskId, install] = stdout.trim().split('|');
       const ms = Date.parse(startedAt ?? '');
       return {
         id,
+        install: install && install !== '<no value>' ? install : null,
         running: running === 'true',
         startedAtMs: Number.isNaN(ms) ? null : ms,
         taskId: taskId && taskId !== '<no value>' ? taskId : null,

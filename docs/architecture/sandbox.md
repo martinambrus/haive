@@ -189,7 +189,8 @@ is written by the api on attach and detach and by the worker on every ensure (ta
 and before every launch, so a task editor no socket ever reached is reaped as well. The reaper's sweep also lists this
 install's running editors (`listIdeRunnerSessions`: `label=haive.ide`, the session id read off the
 `haive.task.id` or `haive.repo.id` label, kept only where `ideRunnerName(session)` is the container's
-own name, since editors carry no install label and the name keeps 8 characters of a task id) and
+own name, since the name keeps 8 characters of a task id and an editor from before the install label
+has none) and
 writes `lastSeenAt` = now (`HSETNX`) for each without one: an editor with no entry is held one grace
 and then reaped by the same `ideSessionHeld` rule, never read as idle for lacking an entry. One
 launched before the spec label is stale, so it keeps its launch for that grace too. On boot the api

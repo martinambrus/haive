@@ -9,6 +9,7 @@ import {
   IDE_IDLE_GRACE_MS,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
+  INSTALL_LABEL,
   RUNNER_SUBPATH_LABEL,
   SHARED_VOLUME,
   appRunnerName,
@@ -18,6 +19,7 @@ import {
   ideSessionKey,
   ideUserDataVolumeName,
   logger,
+  installLabel,
   repoIdeSessionId,
   volumeName,
 } from '@haive/shared';
@@ -34,6 +36,7 @@ import { runnerSubpathVerdict } from './app-runner.js';
 import { ideSessionHeld } from './ide-session.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
+import { listOwnedTaskRunnerIds, ownsRuntimeRunner } from './runtime-runner-ownership.js';
 
 // Per-task browser IDE: a code-server container serving the task's worktree as its
 // ONLY workspace folder. It mirrors the app-runner's lifecycle (long-lived
@@ -265,6 +268,8 @@ export async function startIdeRunner(params: {
       '-d',
       '--name',
       name,
+      '--label',
+      installLabel(),
       '--label',
       params.repositoryId
         ? `haive.repo.id=${params.repositoryId}`
@@ -611,15 +616,30 @@ async function startIdeForward(
 export async function stopIdeRunner(taskId: string): Promise<boolean> {
   const name = ideRunnerName(taskId);
   if (!(await containerExists(name))) return false;
+  try {
+    const { stdout } = await exec(
+      'docker',
+      ['inspect', '-f', `{{index .Config.Labels "${INSTALL_LABEL}"}}`, name],
+      { timeout: 15_000 },
+    );
+    if (!(await ownsNamedIdeRunner(name, stdout.trim()))) return false;
+  } catch {
+    return false;
+  }
   await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 }).catch(() => {});
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   log.info({ taskId, container: name }, 'ide runner stopped (idle grace)');
   return true;
 }
 
-/** Session ids of this install's running editors, from the labels `startIdeRunner` stamps (a name
- *  keeps 8 characters of a task id). Editors carry no install label, so a row counts only when its
- *  session's `ideRunnerName` is its own name. Throws when docker fails. */
+/** Only called for an exact ideRunnerName match. That install-scoped name proves legacy
+ *  ownership even after the owner row is deleted; an explicit foreign label still wins. */
+function ownsNamedIdeRunner(id: string, label: string | undefined): Promise<boolean> {
+  return ownsRuntimeRunner(id, label, async () => true);
+}
+
+/** Session ids of running editors with this install's exact deterministic name and no
+ *  foreign install label. Discovery must also recover legacy editors without owner rows. */
 export async function listIdeRunnerSessions(): Promise<string[]> {
   const { stdout } = await exec(
     'docker',
@@ -628,15 +648,20 @@ export async function listIdeRunnerSessions(): Promise<string[]> {
       '--filter',
       `label=${IDE_RUNNER_LABEL}`,
       '--format',
-      '{{.Names}}\t{{.Label "haive.task.id"}}\t{{.Label "haive.repo.id"}}',
+      `{{.Names}}\t{{.Label "haive.task.id"}}\t{{.Label "haive.repo.id"}}\t{{.Label "${INSTALL_LABEL}"}}`,
     ],
     { timeout: 15_000 },
   );
   const sessions: string[] = [];
   for (const line of stdout.split('\n')) {
-    const [name, taskId, repositoryId] = line.split('\t');
+    const [name, taskId, repositoryId, install] = line.split('\t');
     const sessionId = repositoryId ? repoIdeSessionId(repositoryId) : taskId;
-    if (sessionId && ideRunnerName(sessionId) === name) sessions.push(sessionId);
+    if (
+      sessionId &&
+      ideRunnerName(sessionId) === name &&
+      (await ownsNamedIdeRunner(name!, install))
+    )
+      sessions.push(sessionId);
   }
   return sessions;
 }
@@ -657,19 +682,7 @@ export async function killRepoIdeRunner(repositoryId: string): Promise<void> {
 export async function killTaskIdeContainers(taskId: string): Promise<number> {
   let ids: string[] = [];
   try {
-    const { stdout } = await exec(
-      'docker',
-      [
-        'ps',
-        '-aq',
-        '--filter',
-        `label=${IDE_RUNNER_LABEL}=1`,
-        '--filter',
-        `label=haive.task.id=${taskId}`,
-      ],
-      { timeout: 15_000 },
-    );
-    ids = stdout.split(/\s+/).filter((s) => s.length > 0);
+    ids = await listOwnedTaskRunnerIds(IDE_RUNNER_LABEL, taskId);
   } catch {
     ids = [];
   }
