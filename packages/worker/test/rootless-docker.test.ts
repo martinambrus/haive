@@ -122,4 +122,17 @@ describe('dev stack published ports', () => {
     expect(services.api.ports).toEqual(['3001:3001']);
     expect(services.web.ports).toEqual(['3000:3000']);
   });
+
+  // scripts/dev.sh layers these under the dev override; a port published in any of them would
+  // escape the assertion above.
+  it.each(['docker-compose.yml', 'docker-compose.gpu.yml', 'docker-compose.vulkan.yml'])(
+    '%s publishes no ports',
+    async (file) => {
+      const { services } = parse(await readRepoFile(file));
+      const withPorts = Object.entries(services as Record<string, { ports?: unknown }>)
+        .filter(([, svc]) => svc?.ports !== undefined)
+        .map(([name]) => name);
+      expect(withPorts).toEqual([]);
+    },
+  );
 });
