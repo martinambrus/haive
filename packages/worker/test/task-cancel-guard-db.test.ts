@@ -42,6 +42,8 @@ const h = vi.hoisted(() => {
   return {
     db: undefined as unknown,
     realMergeReport: false,
+    /** Results the next re-syncs return, in order; empty means success. */
+    resyncResults: [] as boolean[],
     /** In call order: every teardown seam the job reached (`<seam>:<task id>`), child process it started and job it queued. */
     calls,
     seen: (seam: string, taskId: string): void => {
@@ -163,7 +165,7 @@ vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
   resyncAfterTaskEnd: async (_db: unknown, taskId: string) => h.seen('resyncAfterTaskEnd', taskId),
   resyncHaiveProjections: async (_db: unknown, _repo: string, _path: string, taskId: string) => {
     h.seen('resyncHaiveProjections', taskId);
-    return true;
+    return h.resyncResults.shift() ?? true;
   },
 }));
 vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => {
@@ -349,6 +351,7 @@ describe.skipIf(!url)(
     beforeEach(async () => {
       h.calls.length = 0;
       h.realMergeReport = false;
+      h.resyncResults = [];
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     });
 
@@ -899,11 +902,14 @@ describe.skipIf(!url)(
       ).toBeNull();
     });
 
-    it('Undo redelivery leaves recovery pending while another root claim is live', async () => {
+    it('Undo redelivery leaves an owed re-sync pending while another root claim is live', async () => {
       const f = await undoFixture();
-      await f.undo();
+      h.resyncResults = [false];
+      await expect(f.undo()).rejects.toThrow('not re-synced yet');
       const syncs = () => h.calls.filter((call) => call === `resyncHaiveProjections:${f.taskId}`);
+      const completions = () => eventsOfType(f.taskId, 'merge.left_committed_resynced');
       expect(syncs()).toHaveLength(1);
+      expect(await completions()).toHaveLength(0);
       const root = await acquireRootClaim(peer, repositoryId, 'refresh', userId);
       expect(root).not.toBeNull();
       try {
@@ -916,7 +922,18 @@ describe.skipIf(!url)(
       }
       await f.undo();
       expect(syncs()).toHaveLength(2);
+      expect(await completions()).toHaveLength(1);
       expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toHaveLength(1);
+      // Nothing is owed any more: a redelivery beside a live root claim neither waits nor re-syncs.
+      const again = await acquireRootClaim(peer, repositoryId, 'refresh', userId);
+      expect(again).not.toBeNull();
+      try {
+        await f.undo();
+        expect(syncs()).toHaveLength(2);
+        expect(await completions()).toHaveLength(1);
+      } finally {
+        await again?.release();
+      }
     });
 
     it.each(['directory', 'root', 'checkout'])(
