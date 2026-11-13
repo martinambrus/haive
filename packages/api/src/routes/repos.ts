@@ -92,6 +92,10 @@ import {
   PORTABLE_SETTING_NAMES,
   TOOLING_UNIT_NAME,
   PROJECT_STATE_DIR,
+  PROJECT_STATE_FORMAT,
+  PROJECT_STATE_LIMITS,
+  parseProjectState,
+  type ProjectStateLimits,
   bundleFileName,
   claimFileName,
   isCanonicalRepoPath,
@@ -2098,10 +2102,12 @@ export interface OnboardingResetProvenance {
 export async function resetOnboardingArtifacts(
   root: string,
   provenance: OnboardingResetProvenance,
+  options: { claimSweepLimits?: ProjectStateLimits } = {},
   // `vacatedPaths` is deliberately NOT part of `OnboardingResetOutcome`: that interface is the
   // JSON the route returns, and this set exists to retire rows, not to be read by a person.
 ): Promise<OnboardingResetOutcome & { vacatedPaths: Set<string> }> {
   const { writtenHashes, haiveDirs, haiveEntries } = provenance;
+  const claimSweepLimits = options.claimSweepLimits ?? PROJECT_STATE_LIMITS;
   const removed: string[] = [];
   const cleaned: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
@@ -2542,7 +2548,13 @@ export async function resetOnboardingArtifacts(
   // is untouched.
   const removeIfEmpty = (rel: string) =>
     guard(rel, async () => {
-      const left = await readdirNoFollow(root, rel, { strict: true });
+      // Only emptiness matters. Never allocate an unbounded second listing after the claim sweep.
+      const left = await readdirNoFollow(root, rel, { strict: true, maxEntries: 0 }).catch(
+        (err: unknown) => {
+          if (errno(err) === 'EDIRENTRYLIMIT') return null;
+          throw err;
+        },
+      );
       if (left !== null && left.length === 0 && (await removeNoFollow(root, rel))) {
         removed.push(rel);
       }
@@ -2566,6 +2578,65 @@ export async function resetOnboardingArtifacts(
     if (isCanonicalRepoPath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
   }
+  // A user merge can bring an older release's git-data claim in after the last sync: no
+  // ledger row or base names it yet. Judge each file with the codec, independently of the
+  // rest of the record (whose format file the reset already removed). No target path in a
+  // claim becomes a file-removal claim: only its own artifacts/<hash>.json can go.
+  const claimsDir = `${PROJECT_STATE_DIR}/artifacts`;
+  await guard(claimsDir, async () => {
+    const entries = await readdirNoFollow(root, claimsDir, {
+      strict: true,
+      maxEntries: claimSweepLimits.maxEntries,
+    }).catch((err: unknown) => {
+      if (errno(err) !== 'EDIRENTRYLIMIT') throw err;
+      const reason = `claim sweep exceeds the ${claimSweepLimits.maxEntries}-entry limit; unlisted claims kept`;
+      logger.warn({ path: claimsDir, maxEntries: claimSweepLimits.maxEntries }, reason);
+      skipped.push({ path: claimsDir, reason });
+      return null;
+    });
+    let bytes = 0;
+    for (const entry of entries ?? []) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const file = `artifacts/${entry.name}`;
+      const rel = `${PROJECT_STATE_DIR}/${file}`;
+      await guard(rel, async () => {
+        const read = await readFileNoFollow(root, rel, {
+          strict: true,
+          maxBytes: Math.min(claimSweepLimits.maxFileBytes, claimSweepLimits.maxTotalBytes - bytes),
+        });
+        if (read === null) return;
+        bytes += read.data.length;
+        if (read.truncated) return;
+        const text = decodeUtf8Strict(read.data);
+        if (text === null) return;
+        const parsed = parseProjectState(
+          new Map([
+            ['format.json', JSON.stringify({ schemaVersion: PROJECT_STATE_FORMAT })],
+            [file, text],
+          ]),
+        );
+        if (!parsed.ok || parsed.gitDataClaims.length !== 1) return;
+        // Judge the actual removed inode too: a replacement no longer holding the recognized
+        // bytes stays, including a link or non-file installed since the listing.
+        const result = await removeFileIfNoFollow(root, rel, (data) => data.equals(read.data), {
+          maxBytes: claimSweepLimits.maxFileBytes,
+          repairPermissions: true,
+        });
+        if (result === 'removed') {
+          removed.push(rel);
+          vacatedPaths.add(rel);
+        } else if (result === 'kept') {
+          skipped.push({ path: rel, reason: 'claim file changed or was replaced during reset' });
+        }
+      });
+      if (bytes >= claimSweepLimits.maxTotalBytes) {
+        const reason = `claim sweep reached the ${claimSweepLimits.maxTotalBytes}-byte limit; remaining claims kept`;
+        logger.warn({ path: claimsDir, maxTotalBytes: claimSweepLimits.maxTotalBytes }, reason);
+        skipped.push({ path: claimsDir, reason });
+        break;
+      }
+    }
+  });
   for (const source of provenance.bundleSources ?? []) {
     await remove(`${PROJECT_STATE_DIR}/${bundleFileName(source)}`, false);
   }

@@ -176,6 +176,11 @@ describe('fs-safe reads', () => {
       await expect(readdirNoFollow(root, '', { maxEntries: 1, strict: true })).rejects.toThrow(
         'exceeds the 1-entry limit',
       );
+      await expect(
+        readdirNoFollow(root, '', { maxEntries: 1, strict: true }),
+      ).rejects.toMatchObject({
+        code: 'EDIRENTRYLIMIT',
+      });
       expect(await readdirNoFollow(root, '', { maxEntries: 1 })).toBeNull();
       await mkdir(path.join(root, 'empty'));
       expect(await readdirNoFollow(root, 'empty', { maxEntries: 0, strict: true })).toEqual([]);
