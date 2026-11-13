@@ -1,3 +1,4 @@
+import { beginApplyEffect, finishApplyEffect } from '../../apply-receipt.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -186,6 +187,29 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
       throw new Error('06a-db-migrate: task has no repository');
     }
 
+    // The exact framework defaults consult their own migration/version ledgers:
+    // Drupal, Laravel, Doctrine, Django, Rails, WordPress core and Prisma deploy.
+    // An edited command (even on a known framework) has no such guarantee.
+    const custom = d.framework === 'unknown' || command !== commandFor(d.framework);
+    const effect = custom
+      ? await beginApplyEffect(
+          ctx,
+          'custom-migration',
+          JSON.stringify({ command, repoSubpath: d.repoSubpath }),
+        )
+      : null;
+    if (effect && !effect.fresh) {
+      const result = effect.receipt.result;
+      if (!result) {
+        throw new Error(
+          'The previous custom migration may have run, but its outcome is unknown. Inspect the database before choosing Retry to run it again, or Skip to continue.',
+        );
+      }
+      if (result.exitCode !== 0)
+        throw new Error(`migration failed (${command}): ${String(result.output)}`);
+      return { ran: true, skipped: false, passed: true, command, output: String(result.output) };
+    }
+
     // The runner can be gone since 01c; a handle rebuilt from the task id execs into nothing,
     // which the Drupal probe below would read as an uninstalled site.
     const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
@@ -227,6 +251,13 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     const res = await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>
       ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000, onLine }),
     );
+    // Record the command's outcome before the optional runtime snapshot or done write.
+    // A death before this write leaves an unknown outcome and never replays silently.
+    if (effect)
+      await finishApplyEffect(ctx, effect.receipt, {
+        exitCode: res.exitCode,
+        output: res.output.slice(-2000),
+      });
     if (res.exitCode !== 0) {
       // Block the pipeline — the recovery options (retry / retry-with-AI / skip)
       // are surfaced on the failed step.

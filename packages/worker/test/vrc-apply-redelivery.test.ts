@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -101,7 +101,8 @@ async function redeliver(ctx: StepContext, stepId: string, apply: () => Promise<
 }
 
 describe('deterministic apply redelivery', () => {
-  afterEach(() => vi.clearAllMocks());
+  beforeEach(() => h.snapshot.mockResolvedValue({ exitCode: 0, output: '' }));
+  afterEach(() => vi.resetAllMocks());
 
   it('does not rebuild an image whose first build completed before the lost done write', async () => {
     const build = vi.fn(
@@ -208,6 +209,82 @@ describe('deterministic apply redelivery', () => {
     await redeliver(ctx, dbMigrateStep.metadata.id, apply);
     expect(appliedDataChanges).toBe(1);
   });
+
+  it('holds an interrupted custom migration until the user explicitly retries', async () => {
+    h.exec.mockRejectedValue(new Error('worker lost during command'));
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'unknown' as const,
+        migrationCommand: 'node migrate.js',
+        repoSubpath: 'repo',
+      },
+      formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('worker lost');
+    await redeliver(ctx, dbMigrateStep.metadata.id, async () => {
+      await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('outcome is unknown');
+    });
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    // The explicit Retry reset clears the receipt, unlike recovery and Resume.
+    await ctx.db
+      .update(schema.taskSteps)
+      .set({ applyReceipt: null })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    h.exec.mockResolvedValue({ exitCode: 0, output: 'done' });
+    await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({ passed: true });
+    expect(h.exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats an edited framework command as custom and preserves a known failure', async () => {
+    h.exec.mockResolvedValue({ exitCode: 1, output: 'partial data update' });
+    const ctx = context();
+    const args = {
+      detected: {
+        framework: 'laravel' as const,
+        migrationCommand: 'php artisan migrate --force',
+        repoSubpath: 'repo',
+      },
+      formValues: {
+        runMigration: true,
+        migrationCommand: 'php artisan migrate --force && node repair-data.js',
+      },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('partial data update');
+    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('partial data update');
+    expect(h.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['drupal', 'drush updatedb -y'],
+    ['laravel', 'php artisan migrate --force'],
+    ['symfony', 'php bin/console doctrine:migrations:migrate --no-interaction'],
+    ['django', 'python manage.py migrate --noinput'],
+    ['rails', 'bin/rails db:migrate'],
+    ['wordpress', 'wp core update-db'],
+    ['prisma', 'npx prisma migrate deploy'],
+  ] as const)(
+    'keeps the ledger-backed %s default replayable',
+    async (framework, migrationCommand) => {
+      h.exec.mockResolvedValue({ exitCode: 0, output: 'Connected; no pending migrations' });
+      const ctx = context();
+      const args = {
+        detected: { framework, migrationCommand, repoSubpath: 'repo' },
+        formValues: { runMigration: true, migrationCommand },
+        iteration: 0,
+        previousIterations: [],
+      };
+      await dbMigrateStep.apply(ctx, args);
+      await dbMigrateStep.apply(ctx, args);
+      expect(
+        h.exec.mock.calls.filter((call) => call[1] === `exec ${migrationCommand}`),
+      ).toHaveLength(2);
+    },
+  );
 
   it('keeps a published database save decision when recovery advances the epoch', async () => {
     const ctx = context();
