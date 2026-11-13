@@ -1,65 +1,56 @@
-import { and, asc, eq, gt } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, asc, eq, gt, isNotNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
-import {
-  ensureDirNoFollow,
-  errno,
-  fileIdentity,
-  lstatNoFollow,
-  openFileNoFollow,
-  removeFileIfIdentityNoFollow,
-  writeFileNoFollow,
-} from '@haive/shared/fs-safe';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
 import { boundedLockWait } from './repository-busy.js';
 import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js';
 
-// Only an attempted relink makes Git's origin database-managed. Folder imports may
-// legitimately have an origin and no remote_url, so never sweep those indiscriminately.
-export const REMOTE_PENDING_PATH = '.haive/remote-relink-pending';
+// Only trusted database intent authorizes reconciliation; repository files are untrusted.
 export const REMOTE_SWEEP_BATCH = 25;
 export const REMOTE_SWEEP_INTERVAL_MS = 30_000;
 
-export async function markRemotePending(root: string): Promise<void> {
-  const owner = await lstatNoFollow(root, '.', { strict: true });
-  if (!owner) throw new Error('Repository root is unavailable');
-  await ensureDirNoFollow(root, '.haive', { owner: owner.stats });
-  await writeFileNoFollow(root, REMOTE_PENDING_PATH, 'pending\n', {
-    durable: true,
-    fileMode: 0o600,
-  });
+/** Commit intent separately before the relink transaction or any Git mutation. */
+export async function markRemoteIntent(id: string, userId: string) {
+  return withFreshDatabase((db) =>
+    db.transaction(async (tx) => {
+      const [repo] = await boundedLockWait(tx, () =>
+        tx
+          .select()
+          .from(schema.repositories)
+          .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+          .for('no key update'),
+      );
+      if (!repo) throw new Error('Repository not found');
+      const token = randomUUID();
+      await tx
+        .update(schema.repositories)
+        .set({ remoteRelinkIntent: token })
+        .where(eq(schema.repositories.id, id));
+      // Replace the token, but inherit a predecessor's unresolved need for repair.
+      return { token, created: !repo.remoteRelinkIntent };
+    }),
+  );
 }
 
-export async function clearRemotePending(root: string): Promise<void> {
-  const file = await openFileNoFollow(root, REMOTE_PENDING_PATH, 'read', { strict: true });
-  if (!file) return;
-  try {
-    const outcome = await removeFileIfIdentityNoFollow(
-      root,
-      REMOTE_PENDING_PATH,
-      await fileIdentity(file),
-    );
-    if (outcome === 'kept') throw new Error('Remote reconciliation intent changed');
-  } finally {
-    await file.close();
+export async function clearRemoteIntent(
+  id: string,
+  token: string,
+  executor?: Pick<ReturnType<typeof getDb>, 'update'>,
+): Promise<void> {
+  const clear = (db: Pick<ReturnType<typeof getDb>, 'update'>) =>
+    db
+      .update(schema.repositories)
+      .set({ remoteRelinkIntent: null })
+      .where(
+        and(eq(schema.repositories.id, id), eq(schema.repositories.remoteRelinkIntent, token)),
+      );
+  if (executor) {
+    await clear(executor);
+    return;
   }
-}
-
-async function hasRemotePending(root: string): Promise<boolean> {
-  try {
-    const directory = await lstatNoFollow(root, '.haive', { strict: true });
-    if (!directory) return false;
-    if (directory.kind !== 'directory')
-      throw new Error('Remote reconciliation directory is not a directory');
-    const entry = await lstatNoFollow(root, REMOTE_PENDING_PATH, { strict: true });
-    if (!entry) return false;
-    if (entry.kind !== 'file') throw new Error('Remote reconciliation intent is not a file');
-    return true;
-  } catch (err) {
-    if (errno(err) === 'ENOENT' || errno(err) === 'ENOTDIR') return false;
-    throw err;
-  }
+  await withFreshDatabase((db) => db.transaction((tx) => boundedLockWait(tx, () => clear(tx))));
 }
 
 /** Driver, socket and PostgreSQL connection/shutdown errors, including Drizzle causes. */
@@ -105,10 +96,9 @@ export async function reconcileRemote(id: string, userId: string): Promise<void>
           .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
           .for('no key update'),
       );
-      if (!repo) return; // A delete won the lock; do not touch its former checkout.
+      if (!repo?.remoteRelinkIntent) return; // A delete won the lock; do not touch its former checkout.
       const root = repo.storagePath ?? repo.localPath;
       if (!root) throw new Error('Repository has no path for remote reconciliation');
-      if (!(await hasRemotePending(root))) return;
       await verifyRelinkCheckout(root);
       // A legacy stored URL may still contain credentials. Never copy those to Git.
       let remote: string | null = null;
@@ -143,26 +133,10 @@ export async function reconcileRemote(id: string, userId: string): Promise<void>
             throw new Error(`Could not reconcile remote URL: ${gitFailureText(updated)}`);
         }
       }
-      await clearRemotePending(root);
+      await clearRemoteIntent(id, repo.remoteRelinkIntent, tx);
       logger.info({ repositoryId: id }, 'reconciled repository remote to the database');
     });
   });
-}
-
-type RemoteRepo = {
-  id: string;
-  userId: string;
-  storagePath: string | null;
-  localPath: string | null;
-};
-async function reconcilePendingRemote(repo: RemoteRepo): Promise<void> {
-  const root = repo.storagePath ?? repo.localPath;
-  if (!root) return;
-  try {
-    if (await hasRemotePending(root)) await reconcileRemote(repo.id, repo.userId);
-  } catch (err) {
-    logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
-  }
 }
 
 /** One bounded page per tick, rotating through IDs. No request-pool connection spans Git. */
@@ -177,15 +151,22 @@ export function startRemoteReconcileSweep({
   const tick = async () => {
     try {
       const repos = await getDb().query.repositories.findMany({
-        where: cursor ? gt(schema.repositories.id, cursor) : undefined,
+        where: and(
+          isNotNull(schema.repositories.remoteRelinkIntent),
+          cursor ? gt(schema.repositories.id, cursor) : undefined,
+        ),
         orderBy: [asc(schema.repositories.id)],
         limit: batchSize,
-        columns: { id: true, userId: true, storagePath: true, localPath: true },
+        columns: { id: true, userId: true },
       });
       cursor = repos.length === batchSize ? repos.at(-1)!.id : undefined;
       for (const repo of repos) {
         if (stopped) break;
-        await reconcilePendingRemote(repo);
+        try {
+          await reconcileRemote(repo.id, repo.userId);
+        } catch (err) {
+          logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
+        }
       }
     } catch (err) {
       logger.warn({ err }, 'remote reconciliation sweep deferred');

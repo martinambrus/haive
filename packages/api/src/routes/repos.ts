@@ -122,8 +122,8 @@ import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } f
 import { getDb } from '../db.js';
 import { relinkGit, gitFailureText, verifyRelinkCheckout } from '../lib/relink-git.js';
 import {
-  markRemotePending,
-  clearRemotePending,
+  markRemoteIntent,
+  clearRemoteIntent,
   reconcileRemote,
   isRemoteConnectionError,
 } from '../lib/remote-reconcile.js';
@@ -2743,7 +2743,27 @@ repoRoutes.post('/:id/remote', async (c) => {
   const git = (args: string[]) => relinkGit(root, args);
   await verifyRelinkCheckout(root);
 
-  let intentWritten = false;
+  let intent: Awaited<ReturnType<typeof markRemoteIntent>>;
+  try {
+    intent = await markRemoteIntent(id, userId);
+  } catch (err) {
+    logger.warn({ err, repositoryId: id }, 'could not record remote update intent');
+    if (err instanceof HttpError && err.status === 409) throw err;
+    throw new HttpError(
+      409,
+      'Could not record the remote update intent; retry when the database is available',
+    );
+  }
+  let intentWritten = true;
+  let clearIntent = false;
+  let gitStarted = false;
+  const settleOwnIntent = () => {
+    if (intent.created) {
+      // Clear after rollback, outside the transaction that holds the repository row.
+      clearIntent = true;
+      intentWritten = false;
+    }
+  };
   let restore: (() => Promise<void>) | undefined;
   let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
@@ -2772,8 +2792,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     // Without a successful undo, a signalled first write may already have
     // changed Git. Leave the intent so reconciliation can settle that outcome.
     if (intentWritten && restored && lockHeld) {
-      await clearRemotePending(root);
-      intentWritten = false;
+      settleOwnIntent();
     }
     throw err;
   };
@@ -2801,6 +2820,9 @@ repoRoutes.post('/:id/remote', async (c) => {
             .for('no key update'),
         );
         if (!stored) throw new HttpError(404, 'Repository not found');
+        // The sweep may have settled the autocommitted intent before we took this lock.
+        if (stored.remoteRelinkIntent !== intent.token)
+          throw new HttpError(409, 'Remote update intent was settled; retry the request');
         await requireFittingCredential(
           tx,
           body.credentialsId === undefined ? stored.credentialsSecretId : body.credentialsId,
@@ -2831,16 +2853,7 @@ repoRoutes.post('/:id/remote', async (c) => {
         };
         await insertAuditEvent(tx, event);
         try {
-          try {
-            await markRemotePending(root);
-          } catch (err) {
-            logger.warn({ err, repositoryId: id }, 'could not record remote update intent');
-            throw new HttpError(
-              409,
-              'Could not record the remote update intent; make .haive writable and remove links before retrying',
-            );
-          }
-          intentWritten = true;
+          gitStarted = true;
           // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
           // so both directions use the address being persisted to the repository row.
           const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
@@ -2854,8 +2867,7 @@ repoRoutes.post('/:id/remote', async (c) => {
             if (added.code !== 3) {
               // A known refusal with no armed undo leaves Git unchanged.
               if (!restore && added.code >= 0) {
-                await clearRemotePending(root);
-                intentWritten = false;
+                settleOwnIntent();
               }
               throw new HttpError(409, `Could not add the remote: ${gitFailureText(added)}`);
             }
@@ -2864,8 +2876,7 @@ repoRoutes.post('/:id/remote', async (c) => {
               const read = await git(['config', '--local', '--get-all', key]);
               if (!read.ok && read.code !== 1) {
                 if (!restore && read.code >= 0) {
-                  await clearRemotePending(root);
-                  intentWritten = false;
+                  settleOwnIntent();
                 }
                 throw new HttpError(
                   409,
@@ -2900,8 +2911,7 @@ repoRoutes.post('/:id/remote', async (c) => {
             if (cleared.exitedClean || cleared.code === 5) restore = restoreExisting;
             if (!cleared.ok && cleared.code !== 5) {
               if (!restore && cleared.code >= 0) {
-                await clearRemotePending(root);
-                intentWritten = false;
+                settleOwnIntent();
               }
               throw new HttpError(
                 409,
@@ -2939,6 +2949,8 @@ repoRoutes.post('/:id/remote', async (c) => {
     // postgres.js can reject on connection close while the callback still awaits Git.
     // Let its last write and any in-callback restore finish before the fallback runs.
     await callbackSettled;
+    if (!gitStarted) settleOwnIntent();
+    if (clearIntent) await clearRemoteIntent(id, intent.token);
     if (isRemoteConnectionError(err)) {
       if (!intentWritten) throw err;
       try {

@@ -3,26 +3,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   fresh: vi.fn(),
-  pending: true,
-  stat: vi.fn(),
-  remove: vi.fn(),
-  write: vi.fn(),
-  ensure: vi.fn(),
   git: vi.fn(),
   verify: vi.fn(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db, withFreshDatabase: h.fresh }));
-vi.mock('@haive/shared/fs-safe', async (original) => ({
-  ...(await original<typeof import('@haive/shared/fs-safe')>()),
-  lstatNoFollow: h.stat,
-  removeFileIfIdentityNoFollow: h.remove,
-  openFileNoFollow: vi.fn(async () => ({
-    stat: async () => ({ dev: 1n, ino: 2n }),
-    close: async () => {},
-  })),
-  writeFileNoFollow: h.write,
-  ensureDirNoFollow: h.ensure,
-}));
 vi.mock('../src/lib/relink-git.js', () => ({
   relinkGit: h.git,
   verifyRelinkCheckout: h.verify,
@@ -33,7 +17,8 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   isRemoteConnectionError,
-  markRemotePending,
+  markRemoteIntent,
+  clearRemoteIntent,
   reconcileRemote,
   startRemoteReconcileSweep,
   REMOTE_SWEEP_BATCH,
@@ -47,26 +32,15 @@ let fake: ReturnType<typeof createFakeDb>;
 let info: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   vi.resetAllMocks();
-  h.pending = true;
   fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
     ...repo,
     name: 'owned',
     remoteUrl: 'https://saved.test/repo',
+    remoteRelinkIntent: '00000000-0000-4000-8000-000000000003',
   });
   h.db = fake.db;
-  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(h.db));
-  h.stat.mockImplementation(async (_root, rel) =>
-    rel === '.' || rel === '.haive'
-      ? { kind: 'directory', stats: { uid: 1000, gid: 1000 } }
-      : h.pending
-        ? { kind: 'file' }
-        : null,
-  );
-  h.remove.mockImplementation(async () => {
-    h.pending = false;
-    return 'removed';
-  });
+  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(fake.db));
   h.git.mockImplementation(async (_root, args: string[]) => ({
     ok: !args.includes('add'),
     exitedClean: !args.includes('add'),
@@ -99,21 +73,28 @@ it('keeps ordinary failures on the restore path and terminates cyclic causes', (
   expect(isRemoteConnectionError(cycle)).toBe(false);
   expect(isRemoteConnectionError(new Error('connection closed'))).toBe(false);
 });
-it('records no remote or credential in its durable intent and preserves directory ownership', async () => {
-  await markRemotePending(root);
-  expect(h.write).toHaveBeenCalledWith(
-    root,
-    expect.any(String),
-    'pending\n',
-    expect.objectContaining({ durable: true }),
-  );
-  expect(h.ensure).toHaveBeenCalledWith(root, '.haive', { owner: { uid: 1000, gid: 1000 } });
+const pending = () => fake.rows(schema.repositories)[0]!.remoteRelinkIntent as string | null;
+it('commits a fresh intent token and inherits a predecessor repair', async () => {
+  const previous = pending();
+  const inherited = await markRemoteIntent(id, userId);
+  expect(inherited.created).toBe(false);
+  expect(inherited.token).not.toBe(previous);
+  expect(pending()).toBe(inherited.token);
+  fake.patch(schema.repositories, id, { remoteRelinkIntent: null });
+  expect((await markRemoteIntent(id, userId)).created).toBe(true);
+});
+it('never clears another request token', async () => {
+  const previous = pending();
+  await clearRemoteIntent(id, '00000000-0000-4000-8000-000000000099');
+  expect(pending()).toBe(previous);
+  await clearRemoteIntent(id, previous!);
+  expect(pending()).toBeNull();
 });
 it('leaves Git and the intent untouched when the fresh database read fails', async () => {
   h.fresh.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'ECONNREFUSED' }));
   await expect(reconcileRemote(id, userId)).rejects.toThrow('unavailable');
   expect(h.git).not.toHaveBeenCalled();
-  expect(h.remove).not.toHaveBeenCalled();
+  expect(pending()).toBeTruthy();
 });
 it('reads the committed destination under the ownership lock and clears push overrides', async () => {
   await reconcileRemote(id, userId);
@@ -122,13 +103,13 @@ it('reads the committed destination under the ownership lock and clears push ove
     ['config', '--local', '--unset-all', 'remote.origin.pushurl'],
     ['config', '--local', '--replace-all', 'remote.origin.url', 'https://saved.test/repo'],
   ]);
-  expect(h.remove).toHaveBeenCalledOnce();
+  expect(pending()).toBeNull();
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://saved.test/repo');
 });
 it('does not touch a deleted or foreign-owned repository', async () => {
   await reconcileRemote(id, '00000000-0000-4000-8000-000000000099');
   expect(h.git).not.toHaveBeenCalled();
-  expect(h.remove).not.toHaveBeenCalled();
+  expect(pending()).toBeTruthy();
 });
 it('removes an uncommitted first origin when the committed row has no remote', async () => {
   fake.patch(schema.repositories, id, { remoteUrl: null });
@@ -150,27 +131,20 @@ it('never writes legacy credentials or URL secrets to Git or the repair log', as
 it('keeps the intent when Git fails so the next sweep retries', async () => {
   h.git.mockResolvedValueOnce({ ok: false, code: 128, stderr: '' });
   await expect(reconcileRemote(id, userId)).rejects.toThrow('Could not reconcile');
-  expect(h.remove).not.toHaveBeenCalled();
+  expect(pending()).toBeTruthy();
 });
 it('leaves an unmanaged folder origin alone without an intent', async () => {
-  h.pending = false;
+  fake.patch(schema.repositories, id, { remoteRelinkIntent: null });
   fake.patch(schema.repositories, id, { remoteUrl: null });
   await reconcileRemote(id, userId);
   expect(h.git).not.toHaveBeenCalled();
-  expect(h.remove).not.toHaveBeenCalled();
-});
-it('refuses an unreadable intent instead of treating it as absence', async () => {
-  h.stat.mockRejectedValueOnce(
-    Object.assign(new Error('descriptor exhaustion'), { code: 'EMFILE' }),
-  );
-  await expect(reconcileRemote(id, userId)).rejects.toMatchObject({ code: 'EMFILE' });
-  expect(h.git).not.toHaveBeenCalled();
+  expect(pending()).toBeNull();
 });
 it('pins sweep defaults and rotates bounded pages without overlapping passes', async () => {
   vi.useFakeTimers();
   expect(REMOTE_SWEEP_BATCH).toBe(25);
   expect(REMOTE_SWEEP_INTERVAL_MS).toBe(30_000);
-  h.pending = false;
+  fake.patch(schema.repositories, id, { remoteRelinkIntent: null });
   const pages = vi
     .fn()
     .mockResolvedValueOnce([repo])
@@ -181,12 +155,12 @@ it('pins sweep defaults and rotates bounded pages without overlapping passes', a
   try {
     await vi.advanceTimersByTimeAsync(0);
     expect(pages).toHaveBeenCalledTimes(1);
-    expect(pages.mock.calls[0]![0]).toMatchObject({ limit: 1, where: undefined });
+    expect(pages.mock.calls[0]![0]).toMatchObject({ limit: 1, where: expect.anything() });
     await vi.advanceTimersByTimeAsync(10);
     expect(pages.mock.calls[1]![0].where).toBeDefined();
     await vi.advanceTimersByTimeAsync(10);
-    expect(pages.mock.calls[2]![0].where).toBeUndefined();
-    expect(h.fresh).not.toHaveBeenCalled();
+    expect(pages.mock.calls[2]![0].where).toEqual(pages.mock.calls[0]![0].where);
+    expect(h.git).not.toHaveBeenCalled();
   } finally {
     stop();
   }
@@ -206,22 +180,6 @@ it('retries a failed sweep read on the next timer tick', async () => {
   }
 });
 
-it('skips other non-regular marker entries without running git', async () => {
-  vi.useFakeTimers();
-  h.stat.mockImplementation(async (_root, rel) => ({
-    kind: rel === '.haive' ? 'directory' : 'other',
-  }));
-  h.db = { query: { repositories: { findMany: vi.fn().mockResolvedValue([repo]) } } };
-  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
-  try {
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.git).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledOnce();
-  } finally {
-    stop();
-  }
-});
-
 it('reconciles a pending repository from a sweep and clears its intent before stopping', async () => {
   vi.useFakeTimers();
   const pages = vi
@@ -230,11 +188,7 @@ it('reconciles a pending repository from a sweep and clears its intent before st
   const stop = startRemoteReconcileSweep({ intervalMs: 10 });
   await vi.advanceTimersByTimeAsync(0);
   expect(h.git).toHaveBeenCalled();
-  expect(h.remove).toHaveBeenCalledOnce();
-  expect(h.pending).toBe(false);
-  expect(h.remove.mock.invocationCallOrder[0]).toBeGreaterThan(
-    h.git.mock.invocationCallOrder.at(-1)!,
-  );
+  expect(pending()).toBeNull();
   stop();
   await vi.advanceTimersByTimeAsync(100);
   expect(pages).toHaveBeenCalledOnce();

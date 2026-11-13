@@ -20,8 +20,8 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
 }));
 vi.mock('../src/lib/remote-reconcile.js', async (original) => ({
   ...(await original<typeof import('../src/lib/remote-reconcile.js')>()),
-  markRemotePending: h.mark,
-  clearRemotePending: h.clear,
+  markRemoteIntent: h.mark,
+  clearRemoteIntent: h.clear,
   reconcileRemote: h.reconcile,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -68,7 +68,11 @@ beforeEach(() => {
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
   h.reconcile.mockReset().mockResolvedValue(undefined);
-  h.mark.mockReset().mockResolvedValue(undefined);
+  h.mark.mockReset().mockImplementation(async () => {
+    const intent = { token: 'request-token', created: true };
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: intent.token });
+    return intent;
+  });
   h.clear.mockReset().mockResolvedValue(undefined);
 });
 const link = (remoteUrl = 'https://example.test/r') =>
@@ -916,11 +920,11 @@ it('keeps an unmanaged origin when the connection fails before the transaction c
   expect(h.git).toHaveBeenCalledTimes(1);
 });
 
-it.each(['EACCES', 'EROFS', 'EPATHCONTAINMENT', 'ELOOP'])(
+it.each(['ECONNREFUSED', 'CONNECTION_CLOSED', '55P03'])(
   'refuses an unusable intent with 409 before changing git (%s)',
   async (code) => {
     h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
-    h.mark.mockRejectedValueOnce(Object.assign(new Error('unsafe path'), { code }));
+    h.mark.mockRejectedValueOnce(Object.assign(new Error('database unavailable'), { code }));
     const response = await link();
     expect(response.status).toBe(409);
     expect(await response.text()).toContain('Could not record the remote update intent');
@@ -981,6 +985,8 @@ it('does not clear a newer relink intent during a restore after the lock was rel
   let marker: string | null = null;
   h.mark.mockImplementation(async () => {
     marker = 'first request';
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: marker });
+    return { token: marker, created: true };
   });
   h.clear.mockImplementation(async () => {
     marker = null;
@@ -1045,3 +1051,23 @@ it.each([false, true])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it('keeps a predecessor intent after a clean refusal', async () => {
+  h.mark.mockImplementationOnce(async () => {
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: 'predecessor' });
+    return { token: 'predecessor', created: false };
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.git.mockRejectedValueOnce(fail(128, 'refused'));
+  expect((await link()).status).toBe(409);
+  expect(h.clear).not.toHaveBeenCalled();
+});
+
+it('refuses before git when the sweep settled this request intent before its lock', async () => {
+  h.mark.mockResolvedValueOnce({ token: 'already-settled', created: true });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  expect((await link()).status).toBe(409);
+  expect(h.git).toHaveBeenCalledTimes(1);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect(h.clear).toHaveBeenCalledWith(REPO, 'already-settled');
+});

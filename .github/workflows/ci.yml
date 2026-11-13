@@ -383,8 +383,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 149 rows × 10 s (measured) + 120 s setup = 1610 s green; 1.5 × row time = 2235 s.
-    # 40 minutes covers the 38-minute check plus setup and leaves 790 s over green.
+    # 150 rows × 10 s (measured) + 120 s setup = 1620 s green; 1.5 × row time = 2250 s.
+    # 40 minutes covers the 38-minute check plus setup and leaves 780 s over green.
     timeout-minutes: 40
     services:
       postgres:

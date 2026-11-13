@@ -1,6 +1,6 @@
 import { fork, execFile, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { cp, lstat, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,7 +36,6 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import {
   startRemoteReconcileSweep,
   REMOTE_SWEEP_INTERVAL_MS,
-  REMOTE_PENDING_PATH,
 } from '../src/lib/remote-reconcile.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -179,9 +178,29 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       expect(await git(root, ['remote', '-v'])).toBe(remotes);
       expect((await stored())?.remoteUrl).toBe(managed ? oldUrl : null);
       expect(await audits()).toHaveLength(0);
-      await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
+      expect((await stored())?.remoteRelinkIntent).toBeNull();
+    },
+  );
+
+  it.each([false, true])(
+    'ignores a sandbox-planted marker with no DB intent (managed=%s)',
+    async (managed) => {
+      await fixture();
+      h.db = db;
+      if (!managed)
+        await db
+          .update(schema.repositories)
+          .set({ remoteUrl: null })
+          .where(eq(schema.repositories.id, repository));
+      // Keep Git different from the managed row so a forbidden rewrite is visible too.
+      await git(root, ['remote', 'set-url', 'origin', newUrl]);
+      await mkdir(join(root, '.haive'));
+      await writeFile(join(root, '.haive/remote-relink-pending'), 'pending\n');
+      const before = await git(root, ['remote', '-v']);
+      await sweepOnce();
+      expect(await git(root, ['remote', '-v'])).toBe(before);
+      expect((await stored())?.remoteRelinkIntent).toBeNull();
+      expect(await audits()).toHaveLength(0);
     },
   );
 
@@ -266,43 +285,55 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     }
   });
 
-  it('reconciles Git after the API dies after the real git write and before COMMIT', async () => {
-    await fixture();
-    child = fork(
-      fileURLToPath(new URL('./fixtures/git-relink-probe-child.ts', import.meta.url)),
-      [url!, actor, repository, newUrl],
-      {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      },
-    );
-    let output = '';
-    child.stderr?.on('data', (chunk: Buffer) => {
-      output += chunk.toString();
-    });
-    await new Promise<void>((resolve, reject) => {
-      child!.once('message', (message) => {
-        if (message === 'before_commit') resolve();
-        else reject(new Error(`Unexpected child phase: ${String(message)}`));
-      });
-      child!.once('error', reject);
-      child!.once('exit', () =>
-        reject(new Error(`Child exited before the commit boundary: ${output}`)),
+  it.each([false, true])(
+    'reconciles Git after API death before COMMIT (managed=%s)',
+    async (managed) => {
+      await fixture();
+      if (!managed) {
+        await git(root, ['remote', 'remove', 'origin']);
+        await db
+          .update(schema.repositories)
+          .set({ remoteUrl: null })
+          .where(eq(schema.repositories.id, repository));
+      }
+      child = fork(
+        fileURLToPath(new URL('./fixtures/git-relink-probe-child.ts', import.meta.url)),
+        [url!, actor, repository, newUrl],
+        {
+          execArgv: ['--import', 'tsx'],
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        },
       );
-    });
-    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
-    const exited = once(child, 'exit');
-    child.kill('SIGKILL');
-    await exited;
-    expect((await stored())?.remoteUrl).toBe(oldUrl);
-    expect(await audits()).toHaveLength(0);
-    expect((await lstat(join(root, REMOTE_PENDING_PATH))).isFile()).toBe(true);
-    // A detail read stays passive. The bounded sweep repairs the interrupted relink.
-    h.db = db;
-    expect((await app.request(`/${repository}`)).status).toBe(200);
-    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
-    await sweepOnce();
-    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(oldUrl);
-    await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+      let output = '';
+      child.stderr?.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      await new Promise<void>((resolve, reject) => {
+        child!.once('message', (message) => {
+          if (message === 'before_commit') resolve();
+          else reject(new Error(`Unexpected child phase: ${String(message)}`));
+        });
+        child!.once('error', reject);
+        child!.once('exit', () =>
+          reject(new Error(`Child exited before the commit boundary: ${output}`)),
+        );
+      });
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+      const exited = once(child, 'exit');
+      child.kill('SIGKILL');
+      await exited;
+      expect((await stored())?.remoteUrl).toBe(managed ? oldUrl : null);
+      expect(await audits()).toHaveLength(0);
+      expect((await stored())?.remoteRelinkIntent).toBeTruthy();
+      // A detail read stays passive. The bounded sweep repairs the interrupted relink.
+      h.db = db;
+      expect((await app.request(`/${repository}`)).status).toBe(200);
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+      await sweepOnce();
+      expect(await git(root, ['remote', '-v'])).toBe(
+        managed ? `origin\t${oldUrl} (fetch)\norigin\t${oldUrl} (push)` : '',
+      );
+      expect((await stored())?.remoteRelinkIntent).toBeNull();
+    },
+  );
 });

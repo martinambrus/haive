@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, symlink, rm, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -13,7 +13,7 @@ vi.mock('../src/lib/relink-git.js', () => ({
   verifyRelinkCheckout: vi.fn(),
   gitFailureText: () => 'git failed',
 }));
-import { REMOTE_PENDING_PATH, startRemoteReconcileSweep } from '../src/lib/remote-reconcile.js';
+import { startRemoteReconcileSweep } from '../src/lib/remote-reconcile.js';
 
 let root: string;
 let stop: (() => void) | undefined;
@@ -48,10 +48,11 @@ beforeEach(async () => {
     name: 'pending',
     storagePath: root,
     localPath: null,
-    remoteUrl: 'https://saved.test/repo',
+    remoteUrl: null,
+    remoteRelinkIntent: null,
   };
   fake.insert(schema.repositories, repo);
-  h.db = { query: { repositories: { findMany: vi.fn().mockResolvedValue([repo]) } } };
+  h.db = fake.db;
   h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(fake.db));
   h.git.mockResolvedValue({ ok: true, exitedClean: true, code: 0, stdout: '', stderr: '' });
   vi.spyOn(logger, 'warn').mockImplementation(() => {});
@@ -65,43 +66,12 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-it.each(['pending\n', 'x', '', 'x'.repeat(100)])(
-  'settles and removes a regular marker regardless of its bytes (case %#)',
-  async (content) => {
-    await mkdir(join(root, '.haive'));
-    await writeFile(join(root, REMOTE_PENDING_PATH), content);
-    vi.useFakeTimers();
-    stop = startRemoteReconcileSweep({ intervalMs: 10, schedule });
-    await pass(0);
-    expect(h.git).toHaveBeenCalledOnce();
-    await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
-    await pass(10);
-    expect(h.git).toHaveBeenCalledOnce();
-    expect(logger.warn).not.toHaveBeenCalled();
-  },
-);
-
-it.each(['marker directory', 'marker symlink', 'haive symlink', 'haive file'])(
-  'warns once per pass and skips git for %s',
-  async (shape) => {
-    const target = join(root, 'target');
-    await mkdir(target);
-    await writeFile(join(target, 'kept'), 'outside marker');
-    if (shape === 'haive symlink') await symlink(target, join(root, '.haive'));
-    else if (shape === 'haive file') await writeFile(join(root, '.haive'), 'kept');
-    else {
-      await mkdir(join(root, '.haive'));
-      if (shape === 'marker directory') await mkdir(join(root, REMOTE_PENDING_PATH));
-      else await symlink(join(target, 'kept'), join(root, REMOTE_PENDING_PATH));
-    }
-    vi.useFakeTimers();
-    stop = startRemoteReconcileSweep({ intervalMs: 10, schedule });
-    await pass(0);
-    expect(h.git).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    await pass(10);
-    expect(logger.warn).toHaveBeenCalledTimes(2);
-    expect(h.git).not.toHaveBeenCalled();
-    expect(await lstat(join(target, 'kept'))).toBeDefined();
-  },
-);
+it('ignores a sandbox-planted marker without database intent during a sweep', async () => {
+  await mkdir(join(root, '.haive'));
+  await writeFile(join(root, '.haive/remote-relink-pending'), 'pending\n');
+  vi.useFakeTimers();
+  stop = startRemoteReconcileSweep({ intervalMs: 10, schedule });
+  await pass(0);
+  expect(h.git).not.toHaveBeenCalled();
+  expect(h.fresh).not.toHaveBeenCalled();
+});

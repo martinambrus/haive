@@ -4,12 +4,12 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, freshDb: undefined as unknown }));
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 vi.mock('../src/db.js', () => ({
   getDb: () => h.db,
-  withFreshDatabase: (run: (db: unknown) => Promise<unknown>) => run(h.db),
+  withFreshDatabase: (run: (db: unknown) => Promise<unknown>) => run(h.freshDb),
 }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
@@ -58,6 +58,7 @@ async function setup(nested = false) {
     return query;
   };
   h.db = { ...fake.db, select: noRows };
+  h.freshDb = fake.db;
   const app = new Hono<AppEnv>();
   app.route('/', repoRoutes);
   app.onError(errorHandler);
