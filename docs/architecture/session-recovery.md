@@ -14,7 +14,8 @@ preferences and modules using the same authenticated cookie header. There is no 
 parameter or internal authentication header.
 
 `withBrowserSessionLock` coordinates every browser session cookie writer: recovery, API 401
-retry, keepalive, login, registration, logout and own-password change. They use one Web Lock per
+retry, keepalive, login, registration, logout, own-password change and
+password reset. They use one Web Lock per
 app origin. Fetch construction and cookie selection happen inside that lock, and it is held
 through response headers: a refresh may have committed while its replacement cookies are still
 in flight. A later logout must present the installed successor, and a later login or password

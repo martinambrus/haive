@@ -57,6 +57,9 @@ const UUID = '00000000-0000-4000-8000-000000000001';
 const NO_ROUTE = 'x-no-route';
 
 const PUBLIC: Record<string, string> = {
+  'POST /auth/forgot-password': 'requests an email proof of account ownership before sign-in',
+  'POST /auth/reset-password': 'redeems an expiring single-use reset token instead of a session',
+  'GET /auth/forgot-password/available': 'the login page offers recovery only when mail is enabled',
   'ALL /ide/:id': 'credential-independent canonical redirect to the editor cookie path',
   'ALL /ide/repos/:id': 'credential-independent canonical redirect to the editor cookie path',
   'POST /ide/_handshake': 'redeems a single-use editor grant; it does not use the app session',

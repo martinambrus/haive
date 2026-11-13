@@ -229,8 +229,10 @@ the user changes; a refused audit undoes the recovery. A clearance row records o
 a digest of its ciphertext and the resulting token version. A rerun reissues the administrator's
 password but leaves already-cleared orphan rows alone while those markers still match. Repaired
 admin email ciphertext is retained on a rerun with the same address. Recovery does not restore old
-phone ciphertext or other encrypted secrets. Forgot-password email and admin relinking are later
-work; this command restores one administrator independently of them. Rollback: revert the code
+phone ciphertext or other encrypted secrets. With mail enabled, an active user whose email is unreadable can
+claim their account through forgot-password only when the typed address matches exactly one active orphan's
+`git_email` (see Password recovery in `api-auth.md`); admin relinking is later work. This command restores
+one administrator without mail or a matching `git_email`. Rollback: revert the code
 change; no schema migration is needed. Committed password resets cannot be undone by a code revert.
 
 The api answers `ConfigUnavailableError` with 503

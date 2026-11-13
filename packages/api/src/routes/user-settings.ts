@@ -174,7 +174,7 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
       .set({
         passwordHash: newHash,
         tokenVersion: newTokenVersion,
-        // The one writer that clears it: the account holder has chosen a new password.
+        // Like reset-password, clear it once the account holder has chosen a new password.
         mustChangePassword: false,
         updatedAt: new Date(),
       })

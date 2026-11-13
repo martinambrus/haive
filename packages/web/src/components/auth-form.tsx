@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { api, type ApiError, type RegistrationStatus, type User } from '@/lib/api-client';
 import {
   Button,
@@ -31,9 +32,17 @@ interface AuthFormProps {
    * other two entry points leave it out.
    */
   initialInviteToken?: string | null;
+  recoveryAvailable?: boolean;
+  passwordReset?: boolean;
 }
 
-export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormProps) {
+export function AuthForm({
+  mode,
+  initialStatus,
+  initialInviteToken,
+  recoveryAvailable = false,
+  passwordReset = false,
+}: AuthFormProps) {
   const router = useRouter();
   // Not state: it comes from the URL the page was rendered for and never changes under us.
   const inviteToken = initialInviteToken ?? '';
@@ -139,6 +148,9 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
                   : 'Pick an email and a long password (12+ characters)'}
         </CardDescription>
       </CardHeader>
+      {isLogin && passwordReset && (
+        <MarkdownView body="Your password has been reset. Sign in with your new password." />
+      )}
       {needsInvite && (
         <p className="text-sm text-neutral-400">
           Accounts here are created by an administrator, or by following an invitation link they
@@ -196,6 +208,14 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
                   : 'Create account'}
           </Button>
         </form>
+      )}
+      {isLogin && recoveryAvailable && (
+        <Link
+          href="/forgot-password"
+          className="mt-4 block text-center text-sm text-indigo-400 hover:underline"
+        >
+          Forgot password?
+        </Link>
       )}
       {/* No footer link during setup: there is nothing to sign in to yet, and offering "create an
           account" beside a form that creates the account reads as two different things. */}

@@ -25,3 +25,16 @@ export async function fetchRegistrationStatus(): Promise<RegistrationStatus | nu
     return null;
   }
 }
+
+/** Fail closed: a failed probe must not offer a recovery action the install cannot deliver. */
+export async function fetchPasswordRecoveryAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${resolveServerApiBase()}/auth/forgot-password/available`, {
+      cache: 'no-store',
+    });
+    if (!res.ok) return false;
+    return (await res.json()).available === true;
+  } catch {
+    return false;
+  }
+}
