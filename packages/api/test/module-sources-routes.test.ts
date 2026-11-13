@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -51,7 +52,8 @@ const registry = {
   packageName: '@haive-module/beta',
   version: '1.2.3',
 };
-const token = 't337-secret-never-return';
+const token = randomBytes(24).toString('hex');
+const replacementToken = randomBytes(24).toString('hex');
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
@@ -87,7 +89,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     db = connection;
     close = () => connection.$client.end({ timeout: 5 });
     h.db = db;
-    vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue('33'.repeat(32));
+    vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue(randomBytes(32).toString('hex'));
     await secretsService.initialize(db);
     await db
       .insert(schema.users)
@@ -151,7 +153,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     expect(h.enqueue).not.toHaveBeenCalled();
     expect(await db.select().from(schema.moduleSources)).toMatchObject([{ fetchStatus: null }]);
   });
-  it('requires admin and a published install, and rejects foreign origins and registry fetch', async () => {
+  it('requires admin and a published install, and rejects foreign origins', async () => {
     const source = await add();
     h.role = 'user';
     expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(403);
@@ -168,8 +170,6 @@ describe.skipIf(!url)('module install sources (real database)', () => {
         })
       ).status,
     ).toBe(403);
-    const other = await add(registry);
-    expect((await send('POST', '/' + other.id + '/fetch', {})).status).toBe(409);
     expect(h.enqueue).not.toHaveBeenCalled();
   });
   it.each(['GET', 'POST', 'PUT', 'DELETE'])('refuses a normal user: %s', async (method) => {
@@ -221,37 +221,63 @@ describe.skipIf(!url)('module install sources (real database)', () => {
   });
   it('replaces and explicitly clears a token without returning it', async () => {
     const source = await add();
-    const res = await send('PUT', '/' + source.id, { ...git, token: 'replacement' });
+    const res = await send('PUT', '/' + source.id, { ...git, token: replacementToken });
     expect(res.status).toBe(200);
-    expect(await res.text()).not.toContain('replacement');
+    expect(await res.text()).not.toContain(replacementToken);
     const cleared = await send('PUT', '/' + source.id, { ...git, clearToken: true });
     expect(cleared.status).toBe(200);
     expect(await cleared.json()).toMatchObject({ hasToken: false });
     expect(await secretsService.getFresh(key(source.id))).toBeNull();
   });
-  it('records a registry source', async () => {
-    expect(await add(registry)).toMatchObject({ ...registry, hasToken: false });
+  it('refuses creating and updating registry sources with 400', async () => {
+    const source = await add();
+    expect((await send('POST', '', registry)).status).toBe(400);
+    expect((await send('PUT', '/' + source.id, registry)).status).toBe(400);
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([{ kind: 'git' }]);
+  });
+  it('lists and deletes a stored registry source with its token and audit', async () => {
+    const [source] = await db
+      .insert(schema.moduleSources)
+      .values({
+        ...registry,
+        kind: 'registry',
+        hasToken: true,
+        fetchStatus: 'queued',
+      })
+      .returning();
+    await secretsService.set(key(source!.id), token, 'Module source access token');
+    const res = await send('GET');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ sources: [{ ...registry, id: source!.id }] });
+    const fetch = await send('POST', '/' + source!.id + '/fetch', {});
+    expect(fetch.status).toBe(400);
+    expect(await fetch.json()).toMatchObject({ code: 'module_source_kind_unsupported' });
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect((await send('DELETE', '/' + source!.id)).status).toBe(200);
+    expect(await db.select().from(schema.moduleSources)).toEqual([]);
+    expect(await secretsService.getFresh(key(source!.id))).toBeNull();
+    expect(
+      await db.query.auditEvents.findFirst({
+        where: eq(schema.auditEvents.targetId, source!.id),
+      }),
+    ).toMatchObject({
+      action: 'module_source.delete',
+      metadata: { moduleId: 'beta', kind: 'registry' },
+    });
   });
   it.each([
     { ...git, moduleId: 'Bad' },
     { ...git, moduleId: 'alpha\n' },
     { ...git, moduleId: 'a'.repeat(24) },
     { ...git, url: 'http://example.com/a' },
-    { ...git, url: 'https://user:pass@example.com/a' },
-    { ...git, url: 'https://example.com/a?token=oops' },
+    { ...git, url: `https://user:${encodeURIComponent(token)}@example.com/a` },
+    { ...git, url: `https://example.com/a?token=${token}` },
     { ...git, url: 'https://example.com/a#ref' },
     { ...git, url: 'https://example.com/a?' },
     { ...git, url: 'https://example.com/a#' },
     { ...git, ref: '' },
     { ...git, version: '1.0.0' },
-    { ...registry, packageName: '@haive-module/other' },
-    { ...registry, packageName: '@haive/module-beta' },
-    { ...registry, packageName: '@haive-module/beta\n' },
-    { ...registry, version: '^1.2.3' },
-    { ...registry, version: '01.2.3' },
-    { ...registry, version: '1.2.3-01' },
-    { ...registry, url: git.url },
-    { ...git, token: 'x', clearToken: true },
+    { ...git, token, clearToken: true },
   ])('rejects invalid source %#', async (body) => {
     expect((await send('POST', '', body)).status).toBe(400);
   });
@@ -313,18 +339,20 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       lastError: 'old fetch diagnostic',
     };
     it.each([
-      ['kind', git, { ...registry, moduleId: 'alpha', packageName: '@haive-module/alpha' }],
+      ['kind', registry, git],
       ['moduleId', git, { ...git, moduleId: 'gamma' }],
       ['url', git, { ...git, url: 'https://example.com/other.git' }],
       ['ref', git, { ...git, ref: 'feature/x' }],
-      [
-        'packageName',
-        registry,
-        { ...registry, moduleId: 'gamma', packageName: '@haive-module/gamma' },
-      ],
-      ['version', registry, { ...registry, version: '2.0.0' }],
     ])('clears fetch state when %s changes', async (_field, initial, changed) => {
-      const source = await add(initial);
+      const source =
+        initial.kind === 'registry'
+          ? (
+              await db
+                .insert(schema.moduleSources)
+                .values({ ...registry, kind: 'registry' })
+                .returning()
+            )[0]!
+          : await add(initial);
       await db.update(schema.moduleSources).set(pin).where(eq(schema.moduleSources.id, source.id));
       const res = await send('PUT', '/' + source.id, changed);
       expect(res.status).toBe(200);
@@ -337,7 +365,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
         lastError: null,
       });
     });
-    it.each([{}, { token: '' }, { token: 'replacement' }, { clearToken: true }])(
+    it.each([{}, { token: '' }, { token: replacementToken }, { clearToken: true }])(
       'preserves fetch state for an unchanged source with token edit %j',
       async (edit) => {
         const source = await add();
@@ -353,7 +381,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
   });
   it('refuses duplicate ids on create and edit', async () => {
     await add();
-    const second = await add(registry);
+    const second = await add({ ...git, moduleId: 'beta' });
     expect((await send('POST', '', git)).status).toBe(409);
     expect((await send('PUT', '/' + second.id, git)).status).toBe(409);
   });
@@ -375,13 +403,13 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     it.each([{}, { token: '' }, { clearToken: true }])(
       'records creation without a token using %j',
       async (edit) => {
-        const source = await add({ ...registry, ...edit });
+        const source = await add({ ...git, ...edit });
         const audit = await db.query.auditEvents.findFirst({
           where: eq(schema.auditEvents.targetId, source.id),
         });
         expect(audit?.metadata).toEqual({
-          moduleId: registry.moduleId,
-          kind: registry.kind,
+          moduleId: git.moduleId,
+          kind: git.kind,
           tokenSet: false,
           tokenCleared: 'clearToken' in edit,
         });
@@ -389,7 +417,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     );
     it('records token changes and deleted source identity without secret metadata', async () => {
       const source = await add();
-      for (const edit of [{}, { token: '' }, { token: 'replacement' }, { clearToken: true }]) {
+      for (const edit of [{}, { token: '' }, { token: replacementToken }, { clearToken: true }]) {
         const res = await send('PUT', '/' + source.id, { ...git, moduleId: 'gamma', ...edit });
         expect(res.status).toBe(200);
       }
@@ -419,7 +447,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
         { action: 'module_source.delete', metadata: { moduleId: 'gamma', kind: 'git' } },
       ]);
       expect(JSON.stringify(audits)).not.toContain(token);
-      expect(JSON.stringify(audits)).not.toContain('replacement');
+      expect(JSON.stringify(audits)).not.toContain(replacementToken);
       expect(await (await send('GET')).json()).toMatchObject({ sources: [] });
     });
   });

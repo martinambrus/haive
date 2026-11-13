@@ -150,6 +150,11 @@ async function mount() {
       (element.props as { onClick: () => void }).onClick();
       draw();
     },
+    disabled: (label: string) =>
+      (
+        flatten(tree).find((e) => textOf(e.props.children) === label && 'onClick' in e.props)!
+          .props as { disabled?: boolean }
+      ).disabled,
     notice: () => flatten(tree).find((e) => e.props.role === 'status'),
     error: () => flatten(tree).find((e) => e.type === FormError)?.props.message,
     deactivate: async (id: string) => {
@@ -204,8 +209,36 @@ describe('Modules page preflight', () => {
     await flush();
     expect(api.fetchModuleSource).toHaveBeenCalledWith('s1', true);
   });
+  it('marks a stored registry source unsupported and allows deletion even with stale queued state', async () => {
+    api.getModuleSources.mockResolvedValue({
+      writable: true,
+      fetchConfigured: true,
+      sources: [
+        {
+          id: 's1',
+          moduleId: 'alpha',
+          kind: 'registry',
+          packageName: '@haive-module/alpha',
+          version: '1.2.3',
+          fetchStatus: 'queued',
+        },
+      ],
+    });
+    const page = await mount();
+    expect(page.text()).toContain('Unsupported');
+    expect(page.text()).toContain('@haive-module/alpha');
+    expect(page.text()).toContain('1.2.3');
+    expect(page.disabled('Fetch')).toBe(true);
+    expect(page.disabled('Edit')).toBe(true);
+    expect(page.disabled('Delete')).toBe(false);
+    page.click('Delete');
+    expect(page.sourcesDialog()?.props.target).toMatchObject({
+      mode: 'delete',
+      source: { id: 's1', kind: 'registry' },
+    });
+  });
   it.each([
-    ['registry', true, 'Registry fetch requires rebuildable sources and is unavailable.'],
+    ['registry', true, 'Unsupported source kind. Delete this source and add a Git repository.'],
     ['git', false, 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'],
   ])('shows the %s fetch refusal as visible copy', async (kind, fetchConfigured, reason) => {
     api.getModuleSources.mockResolvedValue({

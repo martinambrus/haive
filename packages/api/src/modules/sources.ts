@@ -12,90 +12,53 @@ import { requireAdmin } from '../middleware/auth.js';
 import { isUuid } from '../lib/uuid.js';
 import { getModuleSourceQueue } from '../queues.js';
 
-const registryPrefix = '@haive-module/';
 const moduleId = z.string().refine((value) => MODULE_ID_PATTERN.test(value));
-const numeric = '(?:0|[1-9][0-9]*)';
-const prerelease = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
-const semver = new RegExp(
-  '^' +
-    numeric +
-    '\\.' +
-    numeric +
-    '\\.' +
-    numeric +
-    '(?:-' +
-    prerelease +
-    '(?:\\.' +
-    prerelease +
-    ')*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$',
-);
 const tokenFields = {
   token: z.string().max(16384).optional(),
   clearToken: z.boolean().optional(),
 };
 const sourceBody = z
-  .discriminatedUnion('kind', [
-    z
-      .object({
-        kind: z.literal('git'),
-        moduleId,
-        url: z
-          .string()
-          .max(2048)
-          .refine((value) => {
-            try {
-              const url = new URL(value);
-              const authority = value.slice(8).split('/')[0]!;
-              return (
-                value.startsWith('https://') &&
-                url.protocol === 'https:' &&
-                authority.length > 0 &&
-                !!url.hostname &&
-                !url.username &&
-                !url.password &&
-                !/[?#\s\\]/.test(value) &&
-                !authority.includes('@')
-              );
-            } catch {
-              return false;
-            }
-          }, 'Use an HTTPS URL without userinfo, query or fragment')
-          .transform((value) => new URL(value).href),
-        ref: z
-          .string()
-          .min(1)
-          .max(256)
-          .refine(
-            (value) =>
-              isBranchName(value) &&
-              !value.startsWith('+') &&
-              !value.startsWith('refs/') &&
-              !/\s/.test(value),
-            'Use a bare branch or tag name',
-          ),
-        ...tokenFields,
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal('registry'),
-        moduleId,
-        packageName: z.string(),
-        version: z
-          .string()
-          .max(256)
-          .refine((value) => semver.exec(value)?.[0] === value, 'Use an exact semver version'),
-        ...tokenFields,
-      })
-      .strict(),
-  ])
+  .object({
+    kind: z.literal('git'),
+    moduleId,
+    url: z
+      .string()
+      .max(2048)
+      .refine((value) => {
+        try {
+          const url = new URL(value);
+          const authority = value.slice(8).split('/')[0]!;
+          return (
+            value.startsWith('https://') &&
+            url.protocol === 'https:' &&
+            authority.length > 0 &&
+            !!url.hostname &&
+            !url.username &&
+            !url.password &&
+            !/[?#\s\\]/.test(value) &&
+            !authority.includes('@')
+          );
+        } catch {
+          return false;
+        }
+      }, 'Use an HTTPS URL without userinfo, query or fragment')
+      .transform((value) => new URL(value).href),
+    ref: z
+      .string()
+      .min(1)
+      .max(256)
+      .refine(
+        (value) =>
+          isBranchName(value) &&
+          !value.startsWith('+') &&
+          !value.startsWith('refs/') &&
+          !/\s/.test(value),
+        'Use a bare branch or tag name',
+      ),
+    ...tokenFields,
+  })
+  .strict()
   .superRefine((body, ctx) => {
-    if (body.kind === 'registry' && body.packageName !== registryPrefix + body.moduleId)
-      ctx.addIssue({
-        code: 'custom',
-        path: ['packageName'],
-        message: 'Package must be @haive-module/<moduleId>',
-      });
     if (body.clearToken && body.token)
       ctx.addIssue({
         code: 'custom',
@@ -169,9 +132,9 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
         if (!row) throw new HttpError(404, 'Module source not found');
         if (row.kind !== 'git')
           throw new HttpError(
-            409,
-            'Registry fetch is unavailable: the builder requires rebuildable sources',
-            'registry_fetch_unsupported',
+            400,
+            'Unsupported module source kind',
+            'module_source_kind_unsupported',
           );
         if (fetching(row.fetchStatus))
           throw new HttpError(409, 'This source is already being fetched', 'module_source_busy');
@@ -242,10 +205,10 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           const values = {
             kind: body.kind,
             moduleId: body.moduleId,
-            url: body.kind === 'git' ? body.url : null,
-            ref: body.kind === 'git' ? body.ref : null,
-            packageName: body.kind === 'registry' ? body.packageName : null,
-            version: body.kind === 'registry' ? body.version : null,
+            url: body.url,
+            ref: body.ref,
+            packageName: null,
+            version: null,
             hasToken: body.clearToken ? false : !!body.token || previous?.hasToken || false,
             updatedAt: new Date(),
           };
@@ -311,7 +274,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           .from(schema.moduleSources)
           .where(eq(schema.moduleSources.id, id))
           .for('update');
-        if (fetching(previous?.fetchStatus))
+        if (previous?.kind === 'git' && fetching(previous.fetchStatus))
           throw new HttpError(409, 'This source is being fetched', 'module_source_busy');
         const [row] = await tx
           .delete(schema.moduleSources)

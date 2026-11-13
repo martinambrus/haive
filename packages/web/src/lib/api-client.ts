@@ -2981,12 +2981,10 @@ export interface ModuleInstallSource {
   updatedAt: string;
 }
 export interface ModuleSourceInput {
-  kind: 'git' | 'registry';
+  kind: 'git';
   moduleId: string;
-  url?: string;
-  ref?: string;
-  packageName?: string;
-  version?: string;
+  url: string;
+  ref: string;
   token?: string;
   clearToken?: boolean;
 }

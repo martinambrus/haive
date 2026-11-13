@@ -86,20 +86,19 @@ describe('install source dialog with real React and DOM events', () => {
     );
     expect(api.updateModuleSource.mock.calls[0]![1]).not.toHaveProperty('token');
   });
-  it('records the exact registry package and replacement token', async () => {
+  it('offers only a Git repository when adding a source', async () => {
     mount({ mode: 'add' });
-    change('Source kind', 'registry');
+    expect(screen.queryByRole('option', { name: 'Registry package' })).toBeNull();
+    expect(screen.queryByLabelText('Exact version')).toBeNull();
     change('Module id', 'beta');
-    change('Exact version', '1.2.3');
-    change('Access token', 'new-token');
+    change('HTTPS repository URL', 'https://example.com/beta.git');
     submit();
     await waitFor(() =>
       expect(api.createModuleSource).toHaveBeenCalledWith({
-        kind: 'registry',
+        kind: 'git',
         moduleId: 'beta',
-        packageName: '@haive-module/beta',
-        version: '1.2.3',
-        token: 'new-token',
+        url: 'https://example.com/beta.git',
+        ref: 'main',
       }),
     );
   });
@@ -110,6 +109,30 @@ describe('install source dialog with real React and DOM events', () => {
     expect(view.onClose).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole('button', { name: 'Delete source' }));
     await waitFor(() => expect(api.deleteModuleSource).toHaveBeenCalledWith('s1'));
+  });
+  it('deletes an unsupported stored registry source without rendering edit fields', async () => {
+    mount({
+      mode: 'delete',
+      source: {
+        ...source,
+        kind: 'registry',
+        url: null,
+        ref: null,
+        packageName: '@haive-module/alpha',
+        version: '1.2.3',
+      },
+    });
+    expect(screen.queryByLabelText('HTTPS repository URL')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete source' }));
+    await waitFor(() => expect(api.deleteModuleSource).toHaveBeenCalledWith('s1'));
+  });
+  it('refuses editing an unsupported stored registry source', () => {
+    mount({ mode: 'edit', source: { ...source, kind: 'registry' } });
+    expect(screen.getByText(/Unsupported source kind/)).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Save source' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.queryByLabelText('HTTPS repository URL')).toBeNull();
   });
   it('keeps a failed save open and shows the error', async () => {
     api.updateModuleSource.mockRejectedValue(new Error('A source already exists'));
