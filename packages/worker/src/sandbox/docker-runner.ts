@@ -347,7 +347,8 @@ export const defaultDockerRunner: DockerRunner = {
     // when piped into a non-TTY child stdio (the worker spawn case): verbose
     // dpkg output (e.g. apt-installing nano on a slow mirror) overflows the
     // pipe and the build hangs with no exit. Plain mode avoids the issue.
-    const args = ['build', '--progress=plain', '-t', opts.tag];
+    // Dangling images lose their repository name but retain build labels for the reaper.
+    const args = ['build', '--progress=plain', '--label', installLabel(), '-t', opts.tag];
     if (opts.dockerfilePath) {
       args.push('-f', opts.dockerfilePath);
     }
