@@ -736,9 +736,10 @@ export async function clearTaskPromotedDrafts(
 }
 
 /** When a kb_author enrich task ends without producing a real article, reconcile its
- *  linked global KB entry (only while still `skeleton`/`enriching`): a FAILED task marks
- *  the entry `failed` (kept so the user can retry from the KB view); a CANCELLED task
- *  deletes it (the user abandoned it, so the orphan row is removed). No-op for a
+ *  linked global KB entry: a FAILED task marks a `skeleton`/`enriching` entry `failed`
+ *  (kept so the user can retry from the KB view); a CANCELLED task deletes those
+ *  entries and an already `failed` entry (the user abandoned it). Only this task's
+ *  own user's entries without an approval are touched; articles are kept. No-op for a
  *  non-kb_author task or a disabled global KB. Best-effort: never throws — it runs
  *  inside task teardown and must not break it. */
 export async function reconcileKbAuthorEntryOnTaskEnd(
@@ -750,7 +751,7 @@ export async function reconcileKbAuthorEntryOnTaskEnd(
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
-      columns: { type: true },
+      columns: { type: true, userId: true },
     });
     if (task?.type !== 'kb_author') return;
     const settings = await resolveGlobalKbSettings();
@@ -758,7 +759,12 @@ export async function reconcileKbAuthorEntryOnTaskEnd(
     await withGlobalKb(db, async ({ db: gdb }) => {
       const where = and(
         eq(globalKbEntries.sourceTaskId, taskId),
-        inArray(globalKbEntries.status, ['skeleton', 'enriching']),
+        eq(globalKbEntries.userId, task.userId),
+        isNull(globalKbEntries.enforcedHash),
+        inArray(
+          globalKbEntries.status,
+          outcome === 'cancelled' ? ['skeleton', 'enriching', 'failed'] : ['skeleton', 'enriching'],
+        ),
       );
       if (outcome === 'cancelled') {
         const removed = await gdb
