@@ -111,7 +111,10 @@ const run = (t, args, { buildFails = false, gpu = false, stub = {}, script = dev
   });
   // Credential ordering has its own behavioural controls in dev-credentials.test.mjs.
   const lines = (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []).filter(
-    (line) => !line.includes('up -d --wait') && !line.includes('exec -T postgres'),
+    (line) =>
+      !line.includes('up -d --wait') &&
+      !line.includes('exec -T postgres') &&
+      !line.includes('ps --services'),
   );
 
   return { out, calls: lines.map(kind), lines };

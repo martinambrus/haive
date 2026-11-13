@@ -91,6 +91,9 @@ env_value() {
 write_credential() {
   local key="$1" value="$2" file
   file=$(mktemp .env.XXXXXX)
+  # The temporary file holds the new secret: never leave it behind untracked.
+  CREDENTIAL_TMP="$file"
+  trap 'rm -f "$CREDENTIAL_TMP"' EXIT
   CREDENTIAL_VALUE="$value" OLD_PASSWORD="${3:-haive_dev_password}" awk -v key="$key" '
     BEGIN { value=ENVIRON["CREDENTIAL_VALUE"] }
     key == "POSTGRES_PASSWORD" && /^[[:space:]]*(export[[:space:]]+)?DATABASE_URL[[:space:]]*=/ {
@@ -111,12 +114,29 @@ write_credential() {
     { print }
     END { if (!found) print key "=" value }
   ' .env > "$file"
-  chmod --reference=.env "$file"
+  # The file now holds generated secrets; no host user but the owner needs it.
+  chmod 600 "$file"
   mv -f "$file" .env
+  trap - EXIT
+}
+
+# The first character of a key's raw value. Compose reads only a single-quoted
+# value literally: elsewhere it expands $VAR and, in double quotes, backslash escapes.
+env_quote() {
+  awk -v key="$1" '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+      v=$0; sub(/^[^=]*=[[:space:]]*/, "", v); q=substr(v,1,1)
+    }
+    END { printf "%s", q }
+  ' .env
 }
 
 ensure_credentials() {
   local key value old
+  # Two commands started together must not each generate a different password:
+  # the second waits here, then reads the value the first one wrote.
+  exec 9<.
+  flock 9
   if [ ! -e .env ]; then (umask 077; : > .env); fi
   for key in POSTGRES_PASSWORD MAILPIT_UI_PASSWORD; do
     value=$(env_value "$key")
@@ -128,11 +148,18 @@ ensure_credentials() {
       # cannot leave a new key beside a URL still carrying the public password.
       write_credential "$key" "$value" "$old"
       say "Generated $key; read it in .env. Update host clients with that credential."
+    elif [[ "$value" == *[\\\$]* ]] && [ "$(env_quote "$key")" != "'" ]; then
+      # dev.sh reads values literally; syncing one compose reads differently would
+      # give the role a password no service sends.
+      say "$key in .env contains \\ or \$ outside single quotes, which compose reads differently."
+      say "Wrap it in single quotes or choose another value; no services were changed."
+      return 1
     fi
     # Compose normally gives a shell export precedence over .env. Pin both the
     # ALTER and compose to the persisted value so an old export cannot undo it.
     export "$key=$value"
   done
+  flock -u 9
 }
 
 sync_credentials() {
@@ -158,15 +185,25 @@ sync_credentials() {
   fi
 }
 
+# After a sync, a running app service may still hold the old password. A plain
+# up recreates only those whose configuration changed, so a no-op sync leaves
+# every container (the worker's live CLIs included) untouched. Stopped services
+# read .env when they next start.
+reconcile_running() {
+  local listed running=()
+  # A crash-looping service (restarting) is the one most likely to hold the old password.
+  listed=$(dc ps --services --status running --status restarting) || return 1
+  mapfile -t running < <(grep -xE 'api|worker|web|mailpit' <<<"$listed" || true)
+  if [ "${#running[@]}" -gt 0 ]; then dc up -d --no-deps "${running[@]}"; fi
+}
+
 start_services() {
   sync_credentials
-  # Reconcile ALL consumers even for `restart worker`: compose recreates those
-  # whose environment changed. Doing this every time also heals interrupted runs.
-  if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --force-recreate ]; }; then
-    # No service selection means the ENTIRE stack, including model services.
-    dc up -d "$@"
-  else
-    dc up -d "$@" api worker web db-migrate mailpit
+  # A selection (`up worker`, `restart worker`) acts on the named services only,
+  # then reconciles the other running ones without forcing a recreate.
+  if ! dc up -d "$@" || { [ "$#" -gt 0 ] && [ "$*" != --force-recreate ] && ! reconcile_running; }; then
+    say "Not every service started; fix the cause and re-run \`pnpm docker up\`, which also finishes any credential sync."
+    return 1
   fi
 }
 
@@ -350,12 +387,12 @@ case "$cmd" in
   down)          dc down ;;
   logs)          dc logs -f "$@" ;;
   status|ps)     dc ps ;;
-  libs)          sync_credentials; dc up -d api worker web db-migrate mailpit; build_libs ;;
+  libs)          sync_credentials; reconcile_running; build_libs ;;
   restart)       gpu_guard "$cmd"; restart_stack "$@" ;;
   rebuild)       gpu_guard "$cmd"; if [ "$#" -eq 0 ]; then rebuild_all; else rebuild_services "$@"; fi ;;
   reset)         gpu_guard "$cmd"; reset_stack ;;
   sandbox-build) dc --profile sandbox build cli-sandbox ;;
-  migrate)       sync_credentials; dc up -d api worker web db-migrate mailpit; dc run --rm db-migrate ;;
+  migrate)       sync_credentials; reconcile_running; dc run --rm db-migrate ;;
   help|-h|--help) usage ;;
   *)             say "unknown command: $cmd"; echo; usage; exit 1 ;;
 esac

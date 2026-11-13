@@ -142,9 +142,11 @@ pnpm docker:down
 
 `scripts/dev.sh` generates private `POSTGRES_PASSWORD` and `MAILPIT_UI_PASSWORD` values in
 `.env` before starting services, replacing the former public database password. Keep `.env`
-private (a newly created file has mode 600). Existing non-default passwords stay unchanged.
-The script waits for Postgres, syncs the role password through its local socket, then reconciles
-api, worker, web, db-migrate and Mailpit even on a partial restart. An interrupted sync is retried
+private (dev.sh writes it with mode 600 whenever it stores a credential). Existing non-default passwords stay unchanged; one containing `\` or `$` must be single-quoted, since compose expands those elsewhere.
+The script waits for Postgres, syncs the role password through its local socket, then starts the
+services asked for and recreates any other running app service whose environment changed (the
+first rotation therefore recreates a running worker once, on any command); a one-shot such as
+db-migrate picks up the new value when it next runs. An interrupted sync is retried
 on the next start; a failed sync stops database dependants and prints recovery instructions.
 
 For a host database client, use host `localhost`, port `5432`, database `POSTGRES_DB` (default
@@ -165,6 +167,10 @@ printf "%s\n" "ALTER ROLE haive PASSWORD 'haive_dev_password';" |
     psql -X -v ON_ERROR_STOP=1 -U haive -d haive
 pnpm docker restart
 ```
+
+Saved database clients and the Mailpit login then need the old credentials again. Reverting the
+commit alone and keeping the generated values in `.env` also works: the role already holds that
+password and the reverted compose files still read `.env`.
 
 This changes credentials only; no data or volumes are removed.
 
