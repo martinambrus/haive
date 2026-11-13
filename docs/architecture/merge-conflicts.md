@@ -323,7 +323,8 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   own job id, so a press while that job waits or runs joins it. On a settled report the job only
   re-syncs: it repeats no git write and does not recreate the feature branch, so a branch the
   person deleted after the Undo stays deleted. It hands the moved files back to the sandbox user
-  first, but only while the checkout is still on the branch at `baseShaBefore`; after a switch,
+  first, strictly (a chown that fails keeps the report owed), but only while the checkout is still
+  on the branch at `baseShaBefore`; after a switch,
   detach or new commit those files are the person's. A report settled `undone` before the
   completion event existed reads as owed once; one Retry re-syncs and clears it. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`

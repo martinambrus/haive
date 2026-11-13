@@ -104,7 +104,8 @@ it('hands back a settled checkout before re-sync without git writes and complete
   expect(h.sync).toHaveBeenCalledTimes(1);
   expect(h.git.mock.calls).toEqual([[payload.dir, ['symbolic-ref', '-q', 'HEAD']]]);
   expect(h.revParse).toHaveBeenCalledExactlyOnceWith(payload.dir, 'HEAD');
-  expect(h.handBack).toHaveBeenCalledExactlyOnceWith(payload.dir, payload.baseShaAfter);
+  // Strict: a chown that fails must throw, so the completion is not recorded over root-owned files.
+  expect(h.handBack).toHaveBeenCalledExactlyOnceWith(payload.dir, payload.baseShaAfter, true);
   expect(h.handBack.mock.invocationCallOrder[0]).toBeLessThan(h.sync.mock.invocationCallOrder[0]!);
   expect(events.filter((e) => e.eventType === 'merge.left_committed_resynced')).toHaveLength(1);
   expect(leftCommittedMerges(events)[0]?.resyncOwed).toBe(false);

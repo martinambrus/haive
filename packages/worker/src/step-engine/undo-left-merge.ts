@@ -869,7 +869,9 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
   } finally {
     try {
       if (needsSync) {
-        if (movedCheckout) await handBackAfterMove(movedCheckout, initial.baseShaAfter);
+        // Strict: a failed chown throws, so the re-sync is not recorded as complete over files
+        // the sandbox user cannot write; the report stays owed and Retry stays offered.
+        if (movedCheckout) await handBackAfterMove(movedCheckout, initial.baseShaAfter, true);
         if (!(await resyncHaiveProjections(db, task.repositoryId, initial.repoPath, taskId)))
           throw new Error("Haive's project files were not re-synced yet; the job will retry");
         // Re-sync owns its transactions. Journal its success afterwards under the report's
