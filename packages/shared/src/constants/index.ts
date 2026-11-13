@@ -262,6 +262,8 @@ export interface GlobalKbSyncJobPayload {
 
 export const RUNTIME_ENSURE_JOB_NAMES = {
   ENSURE: 'ensure-runtime',
+  /** Explicit, user-confirmed removal followed by the ordinary runtime ensure. */
+  REBUILD_DDEV: 'rebuild-ddev',
   /** Point the task's headed-browser desktop at the DDEV project's Mailpit UI. Its own
    *  job name rather than a field on ENSURE because every ENSURE enqueue shares
    *  `jobId: ensure-<taskId>`, and BullMQ coalesces on that: a second add returns the
@@ -270,7 +272,8 @@ export const RUNTIME_ENSURE_JOB_NAMES = {
   NAVIGATE_MAILPIT: 'navigate-mailpit',
 } as const;
 
-/** Payload for `RUNTIME_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this (e.g. when
+/** Payload for runtime ensure, Mailpit navigation and explicit DDEV rebuild jobs.
+ *  The api enqueues this (e.g. when
  *  the live Browser/VNC panel opens) and the worker ensures the task's app is
  *  serving — boots DDEV / relaunches a restart-killed app-runner dev server — then
  *  starts the headed-browser desktop the VNC bridge attaches to. The api can't do
@@ -278,6 +281,13 @@ export const RUNTIME_ENSURE_JOB_NAMES = {
 export interface RuntimeEnsurePayload {
   taskId: string;
   userId: string;
+}
+
+/** A refusal before rebuild removal; carried as a completed job result for the API. */
+export interface DdevRebuildRefusal {
+  reason: 'busy' | 'probe-unknown' | 'foreign-runner' | 'workspace-mismatch' | 'no-ddev';
+  message: string;
+  retryable: boolean;
 }
 
 /** Result the worker returns for a runtime-ensure job. `mode='none'` means no
@@ -291,6 +301,11 @@ export interface RuntimeEnsureResult {
    *  published ports. Empty/absent when direct access is disabled or no port is
    *  published. See `TaskAccessEndpoint`. */
   accessUrls?: TaskAccessEndpoint[];
+  rebuildRefusal?: DdevRebuildRefusal;
+  /** A finished rebuild failure, distinct from a wait whose outcome is unknown. */
+  rebuildFailure?: { message: string };
+  /** Successful rebuilds distinguish removal from recovery of an already absent runner. */
+  removed?: boolean;
 }
 
 export const DDEV_CONTROL_JOB_NAMES = {

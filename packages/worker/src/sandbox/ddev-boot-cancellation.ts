@@ -12,23 +12,55 @@ export interface DdevBootScope {
   created(containerId: string): void;
 }
 
+type ExclusiveOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+type BootEntry<T> =
+  | {
+      exclusive: false;
+      controller: AbortController;
+      promise: Promise<T>;
+      subpath: string | symbol | undefined;
+    }
+  | { exclusive: true; promise: Promise<ExclusiveOutcome<T>> };
+
 /** A caller at a newer epoch, or for another subpath, waits out the old boot and then gets its own.
  * Successful concurrent ensures still share one runner, as the runtime/VNC paths require. */
 export class DdevBoots<T> {
-  private readonly inFlight = new Map<
-    string,
-    { controller: AbortController; promise: Promise<T>; subpath: string | undefined }
-  >();
+  private readonly inFlight = new Map<string, BootEntry<T>>();
+
+  /** Reserve the same task entry for a destructive lifecycle operation. Unlike an
+   * ensure, it must run after an earlier boot, including one that failed warm. */
+  async exclusive(taskId: string, run: () => Promise<T>): Promise<T> {
+    const entry = this.inFlight.get(taskId);
+    if (entry) {
+      await entry.promise.catch(() => {});
+      return this.exclusive(taskId, run);
+    }
+    // Waiters need only the end of this operation. Its refusal/failure belongs to
+    // the exclusive caller; a later ensure probes the runner for itself.
+    const promise = Promise.resolve()
+      .then(async (): Promise<ExclusiveOutcome<T>> => {
+        try {
+          return { ok: true, value: await run() };
+        } catch (error) {
+          return { ok: false, error };
+        }
+      })
+      .finally(() => this.inFlight.delete(taskId));
+    this.inFlight.set(taskId, { exclusive: true, promise });
+    const outcome = await promise;
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
 
   async ensure(
     taskId: string,
     signal: AbortSignal | undefined,
     boot: (signal: AbortSignal) => Promise<T>,
-    subpath?: string,
+    subpath?: string | symbol,
   ): Promise<T> {
     if (signal?.aborted) throw new DdevBootAbortedError();
     let entry = this.inFlight.get(taskId);
-    if (entry && entry.subpath !== subpath) {
+    if (entry && (entry.exclusive || entry.subpath !== subpath)) {
       await settledOrAborted(entry.promise, signal);
       return this.ensure(taskId, signal, boot, subpath);
     }
@@ -42,7 +74,7 @@ export class DdevBoots<T> {
         .finally(() => {
           this.inFlight.delete(taskId);
         });
-      entry = { controller, promise, subpath };
+      entry = { exclusive: false, controller, promise, subpath };
       this.inFlight.set(taskId, entry);
     }
     const held = entry;

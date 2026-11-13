@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -14,6 +14,7 @@ import { ideTarget, targetBelongsToUser, ensureIde } from '../../lib/ide-target.
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../../queues.js';
+import { addOrRefuse } from '../../lib/queue-bounded.js';
 
 // Direct browser access: the user opens a task's running app in their OWN browser
 // (localhost + *.ddev.site URLs) instead of the VNC pixel stream. The worker
@@ -30,6 +31,8 @@ const DDEV_CA_PATH = process.env.DDEV_CA_PATH || '/var/lib/haive/ddev-ca/rootCA.
 /** Bound wait for a runtime cold boot, sized like the VNC ensure so a slow DDEV
  *  start bridges in one shot rather than erroring early. */
 const ACCESS_ENSURE_TIMEOUT_MS = 180_000;
+/** Wait only for removal and recovery enqueue, never for the cold boot. */
+const DDEV_REBUILD_WAIT_MS = 30_000;
 async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
   const db = getDb();
   const row = await db.query.tasks.findFirst({
@@ -128,6 +131,69 @@ browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
   } catch {
     return c.json({ ok: false, pending: true }, 202);
   }
+});
+
+/** An explicit destructive rebuild. Ownership is checked before reading activity, and the
+ * worker rechecks activity under its runner fence before removing anything. */
+browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  await requireOwnedTask(taskId, userId);
+  const db = getDb();
+  const step = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+    ),
+    columns: { id: true },
+  });
+  const cli = await db.query.cliInvocations.findFirst({
+    where: and(
+      eq(schema.cliInvocations.taskId, taskId),
+      isNotNull(schema.cliInvocations.startedAt),
+      isNull(schema.cliInvocations.endedAt),
+      isNull(schema.cliInvocations.supersededAt),
+    ),
+    columns: { id: true },
+  });
+  // Same shape as the worker's busy refusal, so a client reads one contract.
+  if (step || cli)
+    return c.json(
+      {
+        ok: false,
+        error: 'The task is busy. Stop its activity before rebuilding DDEV.',
+        reason: 'busy',
+        retryable: true,
+      },
+      409,
+    );
+  const job = await addOrRefuse(
+    () =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `ddev-rebuild-${taskId}`, removeOnComplete: true, removeOnFail: true },
+      ),
+    'DDEV rebuild',
+    { taskId },
+  );
+  try {
+    const result = (await job.waitUntilFinished(
+      getRuntimeEnsureQueueEvents(),
+      DDEV_REBUILD_WAIT_MS,
+    )) as RuntimeEnsureResult;
+    if (result?.rebuildRefusal) {
+      const { reason, message, retryable } = result.rebuildRefusal;
+      return c.json({ ok: false, error: message, reason, retryable }, 409);
+    }
+    if (result?.rebuildFailure)
+      return c.json({ ok: false, error: result.rebuildFailure.message }, 500);
+    if (result?.ok) return c.json({ ok: true, removed: result.removed }, 202);
+  } catch {
+    // Rebuild failures complete with rebuildFailure above. A rejected wait has
+    // no known outcome: it may have expired or missed an already removed job.
+  }
+  return c.json({ ok: false, pending: true }, 202);
 });
 
 /** Ensure the task's browser IDE (code-server) is up before the Editor tab loads

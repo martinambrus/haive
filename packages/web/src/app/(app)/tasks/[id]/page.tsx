@@ -38,6 +38,7 @@ import {
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ActionMenu } from '@/components/action-menu';
+import { DdevRebuildDialog, canRebuildDdev } from '@/components/ddev-rebuild-dialog';
 import { TaskHistoryBell, TaskHistoryPanel, useTaskHistory } from '@/components/task-history';
 import {
   ArrowLeft,
@@ -717,6 +718,10 @@ export default function TaskDetailPage() {
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
+  const [rebuildDdevOpen, setRebuildDdevOpen] = useState(false);
+  const [rebuildDdevNotice, setRebuildDdevNotice] = useState<string | null>(null);
+  const currentTaskId = useRef(id);
+  currentTaskId.current = id;
   const [finishedRunsRevision, setFinishedRunsRevision] = useState('');
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
@@ -724,6 +729,22 @@ export default function TaskDetailPage() {
   const [planNodeCount, setPlanNodeCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
+  // A rebuild notice describes this task/attempt state, not every later poll.
+  // Ignore display copy and object identity so unchanged polling keeps it visible.
+  const rebuildDdevState = JSON.stringify([
+    task?.status,
+    task?.currentStepId,
+    steps.map((s) => [
+      s.id,
+      s.status,
+      s.runSeq,
+      s.round,
+      s.startedAt,
+      s.endedAt,
+      s.waitingStartedAt,
+    ]),
+  ]);
+  useEffect(() => setRebuildDdevNotice(null), [id, rebuildDdevState]);
   const [deadSteps, setDeadSteps] = useState<DeadStepRow[]>([]);
   const [stop, setStop] = useState<TaskStopRow | null>(null);
   const history = useTaskHistory(id, steps);
@@ -1997,6 +2018,13 @@ export default function TaskDetailPage() {
                   title:
                     'Stop the current step. Keeps the environment; the task stays open and restartable.',
                 },
+                canRebuildDdev(steps) && {
+                  key: 'rebuild-ddev',
+                  label: 'Rebuild DDEV',
+                  icon: RefreshCw,
+                  danger: true,
+                  onClick: () => setRebuildDdevOpen(true),
+                },
                 menu.includes('cancel') && {
                   key: 'cancel',
                   label: 'Cancel',
@@ -2016,6 +2044,19 @@ export default function TaskDetailPage() {
             {!titleStripVisible && <TaskHistoryBell history={history} />}
           </div>
         </div>
+        {rebuildDdevNotice && (
+          <div role="status" className="flex items-start gap-2">
+            <MarkdownView body={rebuildDdevNotice} />
+            <button
+              type="button"
+              aria-label="Dismiss DDEV rebuild notice"
+              className="shrink-0 text-sm text-neutral-400 underline"
+              onClick={() => setRebuildDdevNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
         {task.description && <TaskDescription text={task.description} />}
         {task.status === 'failed' && task.errorMessage && (
@@ -2420,6 +2461,16 @@ export default function TaskDetailPage() {
         </div>
       )}
 
+      <DdevRebuildDialog
+        taskId={rebuildDdevOpen ? id : null}
+        onClose={() => setRebuildDdevOpen(false)}
+        onQueued={(notice, forTaskId) => {
+          // The reply can arrive after the page moved to another task.
+          if (forTaskId !== currentTaskId.current) return;
+          setRebuildDdevOpen(false);
+          setRebuildDdevNotice(notice);
+        }}
+      />
       <PostLoginRetryDialog
         stepId={pendingLoginRetry?.stepId ?? null}
         onClose={() => setPendingLoginRetry(null)}
