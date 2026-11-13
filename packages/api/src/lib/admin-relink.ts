@@ -86,8 +86,8 @@ export async function relinkUser(
       const issued = await issuePasswordResetInTransaction(tx, user.id, null, {
         now,
         bypassCooldown: true,
+        actorUserId,
       });
-      if (!issued) throw new Error('Relink reset issuance was refused');
       return { userId: user.id, issued, audit };
     });
     logAuditEvent(result.audit);

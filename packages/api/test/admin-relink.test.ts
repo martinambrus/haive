@@ -182,6 +182,13 @@ it('relinks, revokes before the key update, audits, and sends only after commit 
       targetId: row.id,
     }),
   );
+  expect(fake.rows(schema.auditEvents)).toContainEqual(
+    expect.objectContaining({
+      action: 'auth.password_reset.request',
+      actorUserId: '00000000-0000-4000-8000-000000000001',
+      targetId: row.id,
+    }),
+  );
   expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain(EMAIL);
   expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain(
     link.searchParams.get('token'),

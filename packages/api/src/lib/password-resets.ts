@@ -23,6 +23,7 @@ interface IssueOptions {
   cooldownMs?: number;
   /** An administrator relinking an orphan must supersede even a just-issued claim. */
   bypassCooldown?: boolean;
+  actorUserId?: string;
 }
 
 /** Shared issuance seam: serialize issuance/redemption on the user before touching resets. */
@@ -41,6 +42,18 @@ export async function issuePasswordReset(
 }
 
 /** Same issuance policy inside a caller's transaction. The caller logs the event after commit. */
+export function issuePasswordResetInTransaction(
+  tx: ResetTransaction,
+  userId: string,
+  claimEmailEncrypted: string | null,
+  options: IssueOptions & { bypassCooldown: true },
+): Promise<{ token: string; event: AuditEvent }>;
+export function issuePasswordResetInTransaction(
+  tx: ResetTransaction,
+  userId: string,
+  claimEmailEncrypted?: string | null,
+  options?: IssueOptions,
+): Promise<{ token: string; event: AuditEvent } | null>;
 export async function issuePasswordResetInTransaction(
   tx: ResetTransaction,
   userId: string,
@@ -50,11 +63,12 @@ export async function issuePasswordResetInTransaction(
     ttlMs = PASSWORD_RESET_TTL_MS,
     cooldownMs = PASSWORD_RESET_COOLDOWN_MS,
     bypassCooldown = false,
+    actorUserId = ANONYMOUS_AUDIT_ACTOR,
   }: IssueOptions = {},
 ): Promise<{ token: string; event: AuditEvent } | null> {
   const token = generateInviteToken();
   const event: AuditEvent = {
-    actorUserId: ANONYMOUS_AUDIT_ACTOR,
+    actorUserId,
     action: 'auth.password_reset.request',
     targetType: 'user',
     targetId: userId,
