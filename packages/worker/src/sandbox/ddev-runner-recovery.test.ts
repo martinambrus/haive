@@ -178,6 +178,14 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
     expect(mutations()).toEqual([]);
   });
 
+  it('cold-boots when describe fails and a working exec finds no dockerd', async () => {
+    failAt = 'describe';
+    failure = Object.assign(new Error('describe failed'), { code: 1 });
+    dockerd = 'down';
+    await expect(ensureDdevStarted(task, subpath)).rejects.toBe(coldReached);
+    expect(mutations().map(([, args]) => args[0])).toContain('rm');
+  });
+
   it('reuses a serving project without asking dockerd', async () => {
     failAt = 'dockerd';
     failure = Object.assign(new Error('docker info timed out'), { killed: true });
@@ -202,7 +210,7 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
     async (state) => {
       if (state === 'absent') {
         presence = '';
-        // The old implementation first tries describe/info even when the runner is gone.
+        // An absent runner is decided by the listing; no exec probe is reached.
         failAt = 'dockerd';
         failure = Object.assign(new Error('no runner'), { code: 1 });
         status = 'stopped';

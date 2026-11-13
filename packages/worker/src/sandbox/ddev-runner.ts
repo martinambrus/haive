@@ -2141,10 +2141,12 @@ async function probeDdevRecovery(
  *  Idempotent: returns the existing handle when DDEV is already running (so a
  *  prior `import-db` is preserved). Recovery has three paths (decideDdevRecovery):
  *  `reuse` (already serving), `warm-start` (runner container + nested dockerd
- *  alive but the project is down — restart in place: no image re-pull, and NO
- *  snapshot restore so the live nested DB is kept), or `cold-boot` (runner gone —
- *  rebuild + restore the durability snapshot into the fresh, empty nested DB).
- *  THROWS if the cold-boot `ddev start` fails. Callers treat a throw as a step
+ *  alive but the project is not serving — restart in place: no image re-pull, and NO
+ *  snapshot restore so the live nested DB is kept), or `cold-boot` (runner absent or
+ *  stopped, another workspace, or no dockerd process — rebuild + restore the
+ *  durability snapshot into the fresh, empty nested DB). A probe that gave no answer
+ *  throws `RunnerProbeError` and changes nothing. THROWS if the cold-boot or the
+ *  warm `ddev start` fails; a failed warm start keeps the runner and its DB. Callers treat a throw as a step
  *  failure — e.g. a task that just implemented `.ddev` (01c skipped early), where
  *  the browser-verify step boots the new config and a boot failure routes back
  *  to the dev. */
@@ -2339,7 +2341,7 @@ async function ensureDdevStartedInner(
       throw new Error(
         await ddevFailureMessage(
           existing,
-          `ddev start failed (runner ${existing.container} and its database kept; removing that container rebuilds it from the last database snapshot)`,
+          `ddev start failed (runner ${existing.container} and its database kept; removing that container rebuilds it from the last database snapshot, if one exists, and loses every change made since)`,
           warm.output,
         ),
       );
