@@ -387,6 +387,21 @@ a command that starts its own server on the app's port gets `EADDRINUSE`. Playwr
 `reuseExistingServer` reuses the forwarded app instead. No base-URL env var is set, since one could
 override a value a project chose on purpose.
 
+## Provider eligibility for interactive shells
+
+A task or repository shell uses the provider named in its WebSocket URL; it need not be the
+task's configured CLI. The task page initially selects that CLI only when enabled, otherwise
+the server's enabled default, and offers enabled providers only. Opening a shell checks
+provider ownership before eligibility. A disabled provider is refused with
+`TERMINAL_CLOSE_CODES.PROVIDER_DISABLED` (4425), mapped by both terminal clients to
+"The CLI provider is disabled. Enable it before opening a terminal." The worker also checks
+the current provider before image resolution and before reusing or creating a container, so
+a direct worker request cannot bypass the gate.
+
+Disabling a provider does not revoke an already open shell. There is no provider-change
+notification to the terminal registry; revocation would require a separate lifecycle change.
+A reconnect reads eligibility again.
+
 ## The task's current worktree
 
 `tasks.worktree_branch` and `worktree_path` are written once, by 01-worktree-setup, and kept as an
