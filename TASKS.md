@@ -875,6 +875,11 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 status: done 2026-11-13 #1126 (6f1e2223e): the shared boundary lookup uses fs-safe strict mode; only ENOENT/ENOTDIR read as absent, every other failure (EACCES, EIO, a link in the path) refuses the run before a container starts; an IDE boot refuses a worktree subpath with a link or non-directory parent; lows in T641 · kind: fix · found: #1125 review 2026-11-13 · priority: P2
 PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
 
+### T659 · FNF[ci-flakes-2] · plan-canvas smoke three-way reconcile check flakes in CI
+
+status: open · kind: fix · found: PR #1157 CI 2026-11-13 (run 43519214885) · priority: P3
+PRE-EXISTING. `smoke:plan-canvas` failed once with check "three-way: an edge a canvas patch inserted during the reconcile keeps its note and holds the reconcile" (detail `{"edging":"merged","depends":[{"note":"from the canvas"}]}`); unrelated PR (updater-only diff), rerun of the failed job passed. The check races a canvas patch against the reconcile; find what orders them (`plan/mirror.ts` reconcile, the smoke's hold point) and make the smoke wait on a structural signal, not timing. No CI change, no retry.
+
 ### T658 · FNF[ci-flakes-2] · relink SIGTERM lock-file assertion flakes in CI
 
 status: open · kind: fix · found: PR #1150 CI 2026-11-13 (run 43513569849, job 132189652198) · priority: P3
@@ -959,7 +964,7 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 ### T648 · upgrades never refresh the compose bundle (design)
 
-status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open) · kind: design · found: #1136 review 2026-11-13 · priority: P2
+status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan drafted in `.claude/tmp/codex-run/T648-plan-draft.md`, awaiting owner approval) · kind: design · found: #1136 review 2026-11-13 · priority: P2
 PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
 Also from #1139: an existing install whose bundle predates MP_UI_AUTH keeps an open Mailpit UI after any upgrade, and a refreshed bundle installed over an `.env` with no `MAILPIT_UI_PASSWORD` fails open (empty value = no auth). Whatever refreshes the bundle must also generate missing keys it needs.
 
