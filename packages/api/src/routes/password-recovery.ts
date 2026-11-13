@@ -15,6 +15,7 @@ import { clearAuthCookies } from '../auth/cookies.js';
 import { reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { sendMail } from '../lib/mailer.js';
 import {
+  assertPasswordResetLive,
   consumePasswordReset,
   findPasswordResetRecipient,
   issuePasswordReset,
@@ -91,10 +92,13 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
 
 passwordRecoveryRoutes.post('/reset-password', async (c) => {
   const body = resetSchema.parse(await c.req.json());
+  await reserveAuthAttempt(c, 'reset');
+  const db = getDb();
+  await assertPasswordResetLive(db, body.token);
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const passwordHash = await hashPassword(body.newPassword);
-  const userId = await consumePasswordReset(getDb(), body.token, passwordHash, fieldKey, pepper);
+  const userId = await consumePasswordReset(db, body.token, passwordHash, fieldKey, pepper);
   closeUserSockets(userId);
   clearAuthCookies(c);
   return c.json({ ok: true });

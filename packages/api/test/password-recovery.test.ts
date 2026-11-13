@@ -9,14 +9,18 @@ const h = vi.hoisted(() => ({
   enabled: true,
   send: vi.fn(),
   reserve: vi.fn(),
+  hash: vi.fn(),
   close: vi.fn(),
   warn: vi.fn(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/lib/mailer.js', () => ({ sendMail: h.send }));
-vi.mock('../src/lib/auth-throttle.js', () => ({ reserveAuthAttempt: h.reserve }));
+vi.mock('../src/lib/auth-throttle.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/auth-throttle.js')>()),
+  reserveAuthAttempt: h.reserve,
+}));
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
-vi.mock('../src/auth/password.js', () => ({ hashPassword: async () => 'new-hash' }));
+vi.mock('../src/auth/password.js', () => ({ hashPassword: h.hash }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: {
@@ -28,7 +32,8 @@ vi.mock('@haive/shared', async (original) => ({
 }));
 import { authRoutes } from '../src/routes/auth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
-import { PASSWORD_RESET_TTL_MS } from '../src/lib/password-resets.js';
+import { HTTPException } from 'hono/http-exception';
+import { issuePasswordReset, PASSWORD_RESET_TTL_MS } from '../src/lib/password-resets.js';
 import type { AppEnv } from '../src/context.js';
 
 const KEY = 'ab'.repeat(32);
@@ -84,6 +89,7 @@ beforeEach(() => {
   h.reserve.mockReset().mockResolvedValue({ refund: vi.fn() });
   h.warn.mockClear();
   h.close.mockClear();
+  h.hash.mockReset().mockResolvedValue('new-hash');
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -180,5 +186,32 @@ describe('forgot password', () => {
     expect((await post('reset-password', { token: 'token', newPassword: 'short' })).status).toBe(
       400,
     );
+  });
+});
+
+describe('reset password admission', () => {
+  it('rejects an unknown token without hashing the replacement password', async () => {
+    // SQL expiry and consumption predicates are exercised against PostgreSQL.
+    vi.spyOn(fake.db.query.passwordResets!, 'findFirst').mockResolvedValue(undefined);
+    const response = await post('reset-password', {
+      token: 'unknown',
+      newPassword: 'new-password-long',
+    });
+    expect(response.status).toBe(400);
+    expect(h.hash).not.toHaveBeenCalled();
+  });
+  it('answers a throttled address before hashing even a live token', async () => {
+    const row = await user();
+    const token = await issuePasswordReset(fake.db as unknown as Database, row.id);
+    h.reserve.mockRejectedValue(
+      new HTTPException(429, {
+        res: Response.json({ code: 'rate_limited' }, { status: 429 }),
+      }),
+    );
+    const response = await post('reset-password', { token, newPassword: 'new-password-long' });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ code: 'rate_limited' });
+    expect(h.hash).not.toHaveBeenCalled();
+    expect(h.reserve).toHaveBeenCalledWith(expect.anything(), 'reset');
   });
 });

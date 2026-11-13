@@ -43,7 +43,7 @@ end
 return {1, 0}
 `;
 
-type Scope = 'login' | 'register';
+type Scope = 'login' | 'register' | 'reset';
 
 export interface AuthAttempt {
   refund(): Promise<void>;
@@ -183,7 +183,8 @@ function refused(
   limiter: 'account' | 'address',
 ): AuthThrottleError {
   const seconds = Math.min(Math.max(1, Math.ceil(waitMs / 1000)), AUTH_THROTTLE_WINDOW_MS / 1000);
-  const what = scope === 'login' ? 'sign-in' : 'registration';
+  const what =
+    scope === 'login' ? 'sign-in' : scope === 'register' ? 'registration' : 'password reset';
   const res = Response.json(
     {
       error: `Too many ${what} attempts. Try again in ${seconds} seconds.`,
@@ -198,7 +199,7 @@ function refused(
 export async function reserveAuthAttempt(
   c: Context,
   scope: Scope,
-  account: string,
+  account?: string,
 ): Promise<AuthAttempt> {
   let keys: string[];
   let member: string;
@@ -209,8 +210,8 @@ export async function reserveAuthAttempt(
     redis = getRedis();
     if (redis.status !== 'ready') throw new Error(`redis is ${redis.status}`);
     const address = countedAddress(c);
-    keys = [`${KEY_PREFIX}${scope}:acct:${account}`];
-    const limits = [AUTH_ACCOUNT_LIMIT];
+    keys = account === undefined ? [] : [`${KEY_PREFIX}${scope}:acct:${account}`];
+    const limits = account === undefined ? [] : [AUTH_ACCOUNT_LIMIT];
     if (address !== undefined) {
       keys.push(`${KEY_PREFIX}${scope}:ip:${addressBucket(address)}`);
       limits.push(AUTH_IP_LIMIT);
@@ -259,7 +260,7 @@ export async function reserveAuthAttempt(
       scope,
       Number(waitMs),
       auditAllowed,
-      rejectedKey === keys[0] ? 'account' : 'address',
+      account !== undefined && rejectedKey === keys[0] ? 'account' : 'address',
     );
   }
   return {

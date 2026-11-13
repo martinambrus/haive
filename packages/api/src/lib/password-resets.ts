@@ -86,6 +86,19 @@ export async function findPasswordResetRecipient(
   return { userId: orphans[0]!.id, to: email, claimEmailEncrypted: encryptEmail(email, fieldKey) };
 }
 
+/** Admission hint only: the guarded consume in the transaction remains authoritative. */
+export async function assertPasswordResetLive(db: Database, token: string): Promise<void> {
+  const candidate = await db.query.passwordResets.findFirst({
+    where: and(
+      eq(schema.passwordResets.tokenHash, hashInviteToken(token)),
+      isNull(schema.passwordResets.consumedAt),
+      gt(schema.passwordResets.expiresAt, sql`now()`),
+    ),
+    columns: { id: true },
+  });
+  if (!candidate) throw invalid();
+}
+
 export async function consumePasswordReset(
   db: Database,
   token: string,
