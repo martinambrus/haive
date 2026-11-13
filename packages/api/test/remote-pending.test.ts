@@ -17,26 +17,25 @@ import { REMOTE_PENDING_PATH, startRemoteReconcileSweep } from '../src/lib/remot
 
 let root: string;
 let stop: (() => void) | undefined;
+let scheduledNextPass: (() => void) | undefined;
+const schedule = ((...args: Parameters<typeof setTimeout>) => {
+  const timer = setTimeout(...args);
+  if (args[1] === 10) scheduledNextPass?.();
+  return timer;
+}) as typeof setTimeout;
 // Advancing a fake timer does not drain real filesystem I/O. The next timer is
 // armed only after the whole sweep pass has settled, including its cleanup.
 async function pass(ms: number) {
-  const schedule = globalThis.setTimeout;
   let finished!: () => void;
   const done = new Promise<void>((resolve) => {
     finished = resolve;
   });
-  const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
-    ...args: Parameters<typeof setTimeout>
-  ) => {
-    const timer = schedule(...args);
-    if (args[1] === 10) finished();
-    return timer;
-  }) as typeof setTimeout);
+  scheduledNextPass = finished;
   try {
     await vi.advanceTimersByTimeAsync(ms);
     await done;
   } finally {
-    spy.mockRestore();
+    scheduledNextPass = undefined;
   }
 }
 beforeEach(async () => {
@@ -72,7 +71,7 @@ it.each(['pending\n', 'x', '', 'x'.repeat(100)])(
     await mkdir(join(root, '.haive'));
     await writeFile(join(root, REMOTE_PENDING_PATH), content);
     vi.useFakeTimers();
-    stop = startRemoteReconcileSweep({ intervalMs: 10 });
+    stop = startRemoteReconcileSweep({ intervalMs: 10, schedule });
     await pass(0);
     expect(h.git).toHaveBeenCalledOnce();
     await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -96,7 +95,7 @@ it.each(['marker directory', 'marker symlink', 'haive symlink', 'haive file'])(
       else await symlink(join(target, 'kept'), join(root, REMOTE_PENDING_PATH));
     }
     vi.useFakeTimers();
-    stop = startRemoteReconcileSweep({ intervalMs: 10 });
+    stop = startRemoteReconcileSweep({ intervalMs: 10, schedule });
     await pass(0);
     expect(h.git).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledTimes(1);

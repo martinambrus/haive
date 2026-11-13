@@ -169,6 +169,7 @@ async function reconcilePendingRemote(repo: RemoteRepo): Promise<void> {
 export function startRemoteReconcileSweep({
   batchSize = REMOTE_SWEEP_BATCH,
   intervalMs = REMOTE_SWEEP_INTERVAL_MS,
+  schedule = setTimeout,
 } = {}): () => void {
   let cursor: string | undefined;
   let stopped = false;
@@ -190,14 +191,14 @@ export function startRemoteReconcileSweep({
       logger.warn({ err }, 'remote reconciliation sweep deferred');
     } finally {
       if (!stopped) {
-        timer = setTimeout(() => {
+        timer = schedule(() => {
           void tick();
         }, intervalMs);
         timer.unref();
       }
     }
   };
-  timer = setTimeout(() => {
+  timer = schedule(() => {
     void tick();
   }, 0);
   timer.unref();

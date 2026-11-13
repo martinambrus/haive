@@ -152,16 +152,16 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   return app;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const { apiPort, webOrigin } = await retryWhileConfigUnavailable('api bootstrap', bootstrap);
 
   const app = createApiApp(webOrigin);
   await installModules(app);
-  startRemoteReconcileSweep();
-
   const server = serve({ fetch: app.fetch, port: apiPort }, (info) => {
     logger.info({ port: info.port }, 'haive-api listening');
   }) as unknown as Server;
+  const stopRemoteReconcileSweep = startRemoteReconcileSweep();
+  server.once('close', stopRemoteReconcileSweep);
 
   installTerminalWebSocket(server);
   installTerminalShellWebSocket(server);

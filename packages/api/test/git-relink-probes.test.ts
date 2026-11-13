@@ -1,6 +1,6 @@
 import { fork, execFile, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, rm } from 'node:fs/promises';
 import { createServer, connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +36,7 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import {
   startRemoteReconcileSweep,
   REMOTE_SWEEP_INTERVAL_MS,
+  REMOTE_PENDING_PATH,
 } from '../src/lib/remote-reconcile.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -227,32 +228,37 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     await exited;
     expect((await stored())?.remoteUrl).toBe(oldUrl);
     expect(await audits()).toHaveLength(0);
+    expect((await lstat(join(root, REMOTE_PENDING_PATH))).isFile()).toBe(true);
     // A detail read stays passive. The bounded sweep repairs the interrupted relink.
     h.db = db;
     expect((await app.request(`/${repository}`)).status).toBe(200);
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const schedule = globalThis.setTimeout;
+    let initialTick!: () => void;
+    const inertTimer = { unref() {} } as NodeJS.Timeout;
     let finished!: () => void;
     const done = new Promise<void>((resolve) => {
       finished = resolve;
     });
-    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
-      ...args: Parameters<typeof setTimeout>
-    ) => {
-      const scheduled = schedule(...args);
-      if (args[1] === REMOTE_SWEEP_INTERVAL_MS) finished();
-      return scheduled;
-    }) as typeof setTimeout);
-    const stop = startRemoteReconcileSweep();
+    const schedule = ((...args: Parameters<typeof setTimeout>) => {
+      // Fake only the sweep clock: postgres.js startup needs its own real timers.
+      if (args[1] === 0) {
+        initialTick = args[0] as () => void;
+        return inertTimer;
+      }
+      if (args[1] === REMOTE_SWEEP_INTERVAL_MS) {
+        finished();
+        return inertTimer;
+      }
+      throw new Error('Unexpected sweep delay');
+    }) as typeof setTimeout;
+    const stop = startRemoteReconcileSweep({ schedule });
     try {
-      await vi.advanceTimersByTimeAsync(0);
+      initialTick();
       await done;
     } finally {
       stop();
-      timer.mockRestore();
-      vi.useRealTimers();
     }
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(oldUrl);
+    await expect(lstat(join(root, REMOTE_PENDING_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

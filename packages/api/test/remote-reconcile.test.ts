@@ -221,3 +221,21 @@ it('skips other non-regular marker entries without running git', async () => {
     stop();
   }
 });
+
+it('reconciles a pending repository from a sweep and clears its intent before stopping', async () => {
+  vi.useFakeTimers();
+  const pages = vi
+    .spyOn(fake.db.query.repositories!, 'findMany')
+    .mockResolvedValue([repo] as never);
+  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.git).toHaveBeenCalled();
+  expect(h.remove).toHaveBeenCalledOnce();
+  expect(h.pending).toBe(false);
+  expect(h.remove.mock.invocationCallOrder[0]).toBeGreaterThan(
+    h.git.mock.invocationCallOrder.at(-1)!,
+  );
+  stop();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(pages).toHaveBeenCalledOnce();
+});

@@ -972,3 +972,50 @@ it('does not clear a newer relink intent during a restore after the lock was rel
   expect(marker).toBe('newer request');
   expect(h.clear).not.toHaveBeenCalled();
 });
+
+it('writes intent before the first git mutation and leaves it after success', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  expect((await link()).status).toBe(200);
+  expect(h.mark).toHaveBeenCalledOnce();
+  expect(h.mark.mock.invocationCallOrder[0]).toBeLessThan(h.git.mock.invocationCallOrder[1]!);
+  expect(h.clear).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'clears intent only after an in-lock restore succeeds (restore fails=%s)',
+  async (restoreFails) => {
+    const transaction = fake.db.transaction.bind(fake.db);
+    vi.spyOn(fake.db, 'transaction').mockImplementation((fn) =>
+      transaction((tx) =>
+        fn(
+          new Proxy(tx, {
+            get(target, key) {
+              if (key === 'update')
+                return () => ({
+                  set: () => ({
+                    where: async () => {
+                      throw new Error('update refused');
+                    },
+                  }),
+                });
+              const value = Reflect.get(target, key);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          }),
+        ),
+      ),
+    );
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.git.mockResolvedValueOnce({ stdout: '', stderr: '' });
+    if (restoreFails) h.git.mockRejectedValueOnce(fail(128, 'restore refused'));
+    expect((await link()).status).toBe(500);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).toHaveBeenCalledTimes(restoreFails ? 0 : 1);
+    if (!restoreFails)
+      expect(h.clear.mock.invocationCallOrder[0]).toBeGreaterThan(
+        h.git.mock.invocationCallOrder[2]!,
+      );
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
