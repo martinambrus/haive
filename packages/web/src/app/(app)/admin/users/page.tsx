@@ -51,6 +51,7 @@ const selectClass =
 export default function AdminUsersPage() {
   usePageTitle('Users');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
+  const [highlightedUserId, setHighlightedUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [relinkUser, setRelinkUser] = useState<AdminUser | null>(null);
@@ -88,6 +89,18 @@ export default function AdminUsersPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (users === null || typeof window === 'undefined') return;
+    const highlightHashRow = () => {
+      const user = users.find((candidate) => window.location.hash === `#user-${candidate.id}`);
+      setHighlightedUserId(user?.id ?? null);
+      if (user) document.getElementById(`user-${user.id}`)?.scrollIntoView({ block: 'start' });
+    };
+    highlightHashRow();
+    window.addEventListener('hashchange', highlightHashRow);
+    return () => window.removeEventListener('hashchange', highlightHashRow);
+  }, [users]);
 
   async function runAction(user: AdminUser, action: AdminUserAction, role?: 'admin' | 'user') {
     const payload: { action: AdminUserAction; role?: 'admin' | 'user' } = { action };
@@ -359,7 +372,8 @@ export default function AdminUsersPage() {
               <Card
                 key={user.id}
                 id={`user-${user.id}`}
-                className="scroll-mt-6 target:border-indigo-400 target:ring-1 target:ring-indigo-400"
+                data-highlighted={highlightedUserId === user.id || undefined}
+                className={`scroll-mt-6${highlightedUserId === user.id ? ' border-indigo-400 ring-1 ring-indigo-400' : ''}`}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">

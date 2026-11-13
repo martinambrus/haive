@@ -1,9 +1,9 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import UsersPage from './users/page';
 import AuditPage from './audit/page';
 import AccountPage from '../settings/account/page';
-import { createRenderer, findAll, fire, textOf } from '../../../../test/render-tree';
+import { createRenderer, findAll, fire, textOf, type Renderer } from '../../../../test/render-tree';
 
 vi.mock('react', async (original) => ({
   ...(await original<typeof import('react')>()),
@@ -31,7 +31,26 @@ const user = {
   status: 'active',
   createdAt: '2026-11-13T00:00:00Z',
 };
+let currentView: Renderer | undefined;
+let hashEvents: EventTarget;
+let location: { hash: string };
+const scrollIntoView = vi.fn();
 beforeEach(() => {
+  currentView = undefined;
+  hashEvents = new EventTarget();
+  location = { hash: '' };
+  scrollIntoView.mockClear();
+  vi.stubGlobal('window', {
+    location,
+    addEventListener: hashEvents.addEventListener.bind(hashEvents),
+    removeEventListener: hashEvents.removeEventListener.bind(hashEvents),
+  });
+  vi.stubGlobal('document', {
+    getElementById: (id: string) =>
+      currentView && findAll(currentView.tree(), (node) => node.props.id === id).length
+        ? { scrollIntoView }
+        : null,
+  });
   h.put.mockReset().mockResolvedValue({ ok: true });
   h.get.mockImplementation(async (path: string) => {
     if (path === '/admin/users') return { users: [user] };
@@ -65,8 +84,10 @@ beforeEach(() => {
     facets: { actions: [], targetTypes: [] },
   });
 });
+afterEach(() => vi.unstubAllGlobals());
 async function mount(page: typeof UsersPage) {
   const view = createRenderer(() => createElement(page));
+  currentView = view;
   await view.flush();
   await view.flush();
   return view;
@@ -75,15 +96,44 @@ it('labels an unreadable user email in the admin list', async () => {
   const view = await mount(UsersPage);
   expect(textOf(view.tree())).toContain('unreadable, needs relink (12345678)');
 });
-it('gives the users list and each user a highlighted fragment target beside Relink', async () => {
+it('scrolls to and highlights the hash row after users load asynchronously', async () => {
+  location.hash = `#user-${user.id}`;
+  const pending = Promise.withResolvers<{ users: (typeof user)[] }>();
+  h.get.mockImplementationOnce(() => pending.promise);
   const view = await mount(UsersPage);
+  expect(textOf(view.tree())).toContain('Loading...');
+  expect(scrollIntoView).not.toHaveBeenCalled();
+  pending.resolve({ users: [user] });
+  await view.flush();
+  await view.flush();
   expect(findAll(view.tree(), (node) => node.props.id === 'users')).toHaveLength(1);
   const row = findAll(view.tree(), (node) => node.props.id === `user-${user.id}`)[0]!;
   expect(row).toBeDefined();
-  expect(row.props.className).toContain('target:');
+  expect(row.props['data-highlighted']).toBe(true);
+  expect(row.props.className).toContain('border-indigo-400');
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
   expect(findAll(row, (node) => node.tag === 'button' && textOf(node) === 'Relink')).toHaveLength(
     1,
   );
+});
+it('updates the highlighted row on hashchange and clears it for an absent user', async () => {
+  const view = await mount(UsersPage);
+  location.hash = `#user-${user.id}`;
+  hashEvents.dispatchEvent(new Event('hashchange'));
+  await view.flush();
+  expect(findAll(view.tree(), (node) => node.props['data-highlighted'] === true)).toHaveLength(1);
+  expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  location.hash = '#user-absent';
+  expect(() => hashEvents.dispatchEvent(new Event('hashchange'))).not.toThrow();
+  await view.flush();
+  expect(findAll(view.tree(), (node) => node.props['data-highlighted'] === true)).toHaveLength(0);
+  expect(scrollIntoView).toHaveBeenCalledTimes(1);
+});
+it('leaves all rows unhighlighted when the initial hash names an absent user', async () => {
+  location.hash = '#user-absent';
+  const view = await mount(UsersPage);
+  expect(findAll(view.tree(), (node) => node.props['data-highlighted'] === true)).toHaveLength(0);
+  expect(scrollIntoView).not.toHaveBeenCalled();
 });
 it('links an unreadable audit actor to that user on the users page', async () => {
   const view = await mount(AuditPage);
