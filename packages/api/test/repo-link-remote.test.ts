@@ -1071,3 +1071,14 @@ it('refuses before git when the sweep settled this request intent before its loc
   expect(fake.rows(schema.auditEvents)).toEqual([]);
   expect(h.clear).toHaveBeenCalledWith(REPO, 'already-settled');
 });
+
+it('clears its intent when the previous remote read returns no exit status', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.git.mockRejectedValueOnce(fail(3, 'origin exists'));
+  h.git.mockRejectedValueOnce(fail(-1, 'read interrupted'));
+  expect((await link()).status).toBe(409);
+  expect(h.clear).toHaveBeenCalledWith(REPO, 'request-token');
+  expect(h.git).toHaveBeenCalledTimes(3);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});

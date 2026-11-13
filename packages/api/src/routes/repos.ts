@@ -2875,9 +2875,8 @@ repoRoutes.post('/:id/remote', async (c) => {
             for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
               const read = await git(['config', '--local', '--get-all', key]);
               if (!read.ok && read.code !== 1) {
-                if (!restore && read.code >= 0) {
-                  settleOwnIntent();
-                }
+                // This read changed nothing, including when no exit status arrived.
+                settleOwnIntent();
                 throw new HttpError(
                   409,
                   `Could not read the previous remote: ${gitFailureText(read)}`,
