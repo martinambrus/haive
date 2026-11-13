@@ -278,7 +278,18 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
       updatedAt: now,
       ...reofferGate,
     })
-    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        or(
+          eq(schema.taskSteps.status, 'waiting_form'),
+          and(
+            eq(schema.taskSteps.status, 'pending'),
+            eq(schema.taskSteps.stepId, '11g-save-database'),
+          ),
+        ),
+      ),
+    )
     .returning(reofferedTiming);
   await carryReofferedRuns(tx, rows);
 }

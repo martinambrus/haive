@@ -159,6 +159,37 @@ describe('deterministic apply redelivery', () => {
     },
   );
 
+  it.each([false, true])(
+    'handles a pending downstream save decision without a receipt (recovery=%s)',
+    async (recovery) => {
+      const ctx = context();
+      const [downstream] = await ctx.db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '11g-save-database',
+          stepIndex: 2,
+          round: 0,
+          title: 'Save database',
+          status: 'pending',
+          rerunGeneration: 2,
+        })
+        .returning();
+      await resetStepAndDownstream(
+        ctx.db,
+        ctx.taskId,
+        dbMigrateStep.metadata.id,
+        ctx.round,
+        undefined,
+        recovery,
+      );
+      const row = await ctx.db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, downstream!.id),
+      });
+      expect(row).toMatchObject({ applyReceipt: null, rerunGeneration: recovery ? 2 : 3 });
+    },
+  );
+
   it('does not rebuild an image whose first build completed before the lost done write', async () => {
     const build = vi.fn(
       async (_opts: import('../src/sandbox/docker-runner.js').DockerBuildOpts) => ({

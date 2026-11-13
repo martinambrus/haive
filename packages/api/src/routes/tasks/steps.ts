@@ -300,14 +300,43 @@ const ACTIVE_STEP_STATUSES = ['running', 'waiting_cli', 'waiting_form'] as const
 /** The rows a retry or resume leaves active outside the set it resets, such as another round's
  *  step. The action moves the task to its own step, so these are work the task has left; kept
  *  active, each makes the worker's other-step guard refuse every advance the action queues, and
- *  the task stops with nothing running. Exported for the unit test. */
-export function rowsLeftActive<T extends { id: string; status: string }>(
+ *  the task stops with nothing running. With a target, also invalidate pending durable
+ *  work downstream in its round, including save decisions recovery left pending.
+ *  Exported for the unit test. */
+export function rowsLeftActive<
+  T extends {
+    id: string;
+    status: string;
+    stepId?: string;
+    round?: number;
+    runSeq?: number | null;
+    stepIndex?: number;
+    applyReceipt?: unknown;
+  },
+>(
   rows: T[],
   kept: readonly string[],
+  target?: Pick<typeof schema.taskSteps.$inferSelect, 'round' | 'runSeq' | 'stepIndex'>,
 ): T[] {
   return rows.filter(
-    (r) => (ACTIVE_STEP_STATUSES as readonly string[]).includes(r.status) && !kept.includes(r.id),
+    (r) =>
+      !kept.includes(r.id) &&
+      ((ACTIVE_STEP_STATUSES as readonly string[]).includes(r.status) ||
+        (target != null &&
+          r.status === 'pending' &&
+          hasDurableApplyState(r) &&
+          r.round === target.round &&
+          (target.runSeq != null
+            ? r.runSeq != null && r.runSeq > target.runSeq
+            : r.stepIndex != null && r.stepIndex > target.stepIndex))),
   );
+}
+
+/** Save decisions live outside the step row and have no apply receipt. Reset even
+ * a pristine pending save row: advancing its generation is harmless and avoids
+ * racing publication of a decision in another metadata table. */
+function hasDurableApplyState(row: { stepId?: string; applyReceipt?: unknown }): boolean {
+  return row.applyReceipt != null || row.stepId === '11g-save-database';
 }
 
 /** A statement that could not take a lock without waiting: the pass that holds it is mid-write, and
@@ -448,7 +477,7 @@ export async function retryTaskAtStep(
   const downstream = rows.filter(
     (r) =>
       r.round === target.round &&
-      (r.status !== 'pending' || r.applyReceipt != null) &&
+      (r.status !== 'pending' || hasDurableApplyState(r)) &&
       (target.runSeq != null
         ? r.runSeq != null && r.runSeq > target.runSeq
         : r.stepIndex > target.stepIndex),
@@ -457,7 +486,7 @@ export async function retryTaskAtStep(
   const reset = [
     ...(target.status === 'failed' ||
     isLive(target) ||
-    (target.status === 'pending' && target.waitingStartedAt == null && target.applyReceipt != null)
+    (target.status === 'pending' && target.waitingStartedAt == null && hasDurableApplyState(target))
       ? [target]
       : []),
     ...downstream,
@@ -1107,6 +1136,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const leftActive = rowsLeftActive(
       await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
       [step.id, ...downstream.map((r) => r.id)],
+      step,
     );
 
     let newEpoch = 0;
@@ -1117,7 +1147,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // Recovery can leave approved apply inputs on a pending row. An explicit
       // upstream rerun invalidates that receipt just as it invalidates a done row.
       const downstreamToReset = downstream.filter(
-        (r) => r.status !== 'pending' || r.applyReceipt != null,
+        (r) => r.status !== 'pending' || hasDurableApplyState(r),
       );
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
       // reset blanks and why. Mirrors resetStepAndDownstream in the worker. A row still active
@@ -1322,11 +1352,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
               )
           : [];
       const downstreamToReset = downstream.filter(
-        (r) => r.status !== 'pending' || r.applyReceipt != null,
+        (r) => r.status !== 'pending' || hasDurableApplyState(r),
       );
       const leftActive = rowsLeftActive(
         await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
         [step.id, ...downstream.map((r) => r.id)],
+        step,
       );
       let newEpoch = task.orchestrationEpoch;
       let retriedAgents = 0;
@@ -1488,6 +1519,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const leftActive = rowsLeftActive(
       await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
       [step.id],
+      step,
     );
     const now = new Date();
     let resumedFromIteration = step.iterationCount;
@@ -1607,6 +1639,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const leftActive = rowsLeftActive(
       await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
       [step.id],
+      step,
     );
     const moved = await db.transaction(async (tx) => {
       await admitNewWork(tx);
@@ -1710,6 +1743,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const leftActive = rowsLeftActive(
       await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
       [step.id],
+      step,
     );
     const now = new Date();
     const moved = await db.transaction(async (tx) => {
@@ -2122,12 +2156,11 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
     // invalidated: the task has either not reached it, where an advance queued from here would
     // run it out of order, or already queued the advance that claims it.
-    const leftActive = movesTask
-      ? rowsLeftActive(
-          await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
-          [step.id],
-        )
-      : [];
+    const leftActive = rowsLeftActive(
+      await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+      [step.id],
+      step,
+    ).filter((r) => movesTask || r.status === 'pending');
     // Fold the finishing run's timing into carried_* before zeroing, so switching the
     // CLI and re-running the step keeps its accrued work/idle/effort (same as retry).
     // computeFoldContribution avoids carrying an orphaned open run's span as work.
@@ -2156,9 +2189,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       await tx
         .delete(schema.taskStepAgentMinings)
         .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
-      // The clicked row joins the rows it resets in one id-ordered batch; `leftActive` is empty
-      // unless the switch moves the task.
+      // The clicked row joins the rows it resets in one id-ordered batch. Even a
+      // pending-row switch invalidates downstream pending durable work.
       await lockRowsForMove(tx, id, leftActive, now);
+      if (!movesTask) await resetRowsForRerun(tx, id, leftActive, now);
       // Read under the row lock, so a fold or idle write that landed after the handler read `step`
       // is in it and none can land before this transaction ends.
       const [held] = await tx

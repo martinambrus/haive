@@ -28,7 +28,8 @@ class ReviveBlocked extends Error {
 }
 
 /** Reset `targetStepId` and every non-pending downstream row (same round) to `pending`,
- *  including pending rows with receipts when an explicit rerun invalidates their inputs,
+ *  including pending rows with receipts or save decisions when an explicit rerun
+ *  invalidates their inputs,
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
@@ -77,7 +78,13 @@ export async function resetStepAndDownstream(
       ),
     );
   const downstreamToReset = downstream
-    .filter((r) => r.status !== 'pending' || (!recovery && r.applyReceipt != null))
+    .filter(
+      (r) =>
+        r.status !== 'pending' ||
+        // Save decisions are stored outside task_steps, without an apply receipt.
+        // Resetting a pristine save row too is harmless and avoids a cross-table race.
+        (!recovery && (r.applyReceipt != null || r.stepId === '11g-save-database')),
+    )
     .map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 

@@ -37,6 +37,7 @@ import {
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import * as taskMeta from '../src/step-engine/steps/workflow/_task-meta.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 
 const runtime = vi.hoisted(() => ({ import: vi.fn(), config: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
@@ -585,10 +586,15 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     const a = await task('recovered save');
     const published = await candidate(a);
     expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
-    await db
-      .update(schema.tasks)
-      .set({ orchestrationEpoch: 1 })
-      .where(eq(schema.tasks.id, a.taskId));
+    await resetStepAndDownstream(db, a.taskId, DATABASE_SAVE_STEP_ID, 0, 0, true);
+    const recoveredStep = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, a.taskStepId),
+    });
+    expect(recoveredStep).toMatchObject({
+      status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: 0,
+    });
     expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('saved');
     expect(
       await saveDatabaseStep.apply(a, {
@@ -599,10 +605,19 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
       }),
     ).toEqual({ outcome: 'saved' });
     expect((await head())!.snapshotId).toBe(published.id);
-    // A real upstream reset increments the save step's logical generation too.
+    // Retry an upstream step while recovery left the save row pending without a receipt.
+    await db.insert(schema.taskSteps).values({
+      taskId: a.taskId,
+      stepId: 'upstream',
+      stepIndex: 1,
+      title: 'Upstream',
+      status: 'failed',
+    });
+    await resetStepAndDownstream(db, a.taskId, 'upstream', 0, 1);
+    // The runner claims the save row before the fenced decision loader writes to it.
     await db
       .update(schema.taskSteps)
-      .set({ rerunGeneration: 1 })
+      .set({ status: 'running' })
       .where(eq(schema.taskSteps.id, a.taskStepId));
     expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('pending');
     await expect(
