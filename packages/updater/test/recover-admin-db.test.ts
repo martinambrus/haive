@@ -4,7 +4,14 @@ import { eq } from 'drizzle-orm';
 import bcrypt from 'bcrypt';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
-import { computeEmailBlindIndex, configService, encryptEmail, secretsService } from '@haive/shared';
+import {
+  SECRET_KEYS,
+  computeEmailBlindIndex,
+  configService,
+  encrypt,
+  encryptEmail,
+  secretsService,
+} from '@haive/shared';
 import { recoverAdmin } from '../src/recover-admin.js';
 import { main } from '../src/recover-admin-cli.js';
 
@@ -96,6 +103,39 @@ describe.skipIf(!url)('admin recovery on PostgreSQL', () => {
     const audits = await db.select().from(schema.auditEvents);
     expect(audits.filter((row) => row.action === 'user.recovery.clear_password')).toHaveLength(1);
     expect(JSON.stringify(audits)).not.toContain(password!);
+  });
+
+  it('refuses a key that cannot read the stored pepper, before any write and despite --force', async () => {
+    const stored = encrypt('install-pepper', oldKey);
+    await db
+      .delete(schema.systemSecrets)
+      .where(eq(schema.systemSecrets.key, SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER));
+    await db
+      .insert(schema.systemSecrets)
+      .values({ key: SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER, encryptedValue: stored });
+    try {
+      vi.stubEnv('DATABASE_URL', url!);
+      vi.stubEnv('REDIS_URL', 'redis://unused');
+      vi.spyOn(configService, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue(key);
+      vi.spyOn(configService, 'close').mockResolvedValue(undefined);
+      // The service is a process singleton; an earlier test left it on a closed client.
+      Object.assign(secretsService, { initialized: false });
+      await expect(main(['--email', options.email, '--force'])).rejects.toThrow(
+        /does not decrypt the stored email pepper/,
+      );
+      const [row] = await db
+        .select()
+        .from(schema.systemSecrets)
+        .where(eq(schema.systemSecrets.key, SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER));
+      expect(row!.encryptedValue).toBe(stored);
+      const users = await db.select().from(schema.users);
+      expect(users.every((user) => user.passwordHash === oldHash)).toBe(true);
+    } finally {
+      await db
+        .delete(schema.systemSecrets)
+        .where(eq(schema.systemSecrets.key, SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER));
+    }
   });
 
   it('refuses an ambiguous choice and a readable email collision without changing users', async () => {

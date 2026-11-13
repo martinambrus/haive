@@ -3,9 +3,15 @@ import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { schema } from '@haive/database';
-import { configService, encryptionKeyBootDatabase, secretsService } from '@haive/shared';
+import {
+  SECRET_KEYS,
+  configService,
+  encryptionKeyBootDatabase,
+  secretsService,
+} from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { recoverAdmin } from './recover-admin.js';
 
@@ -38,6 +44,17 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const db = drizzle(client, { schema });
     await secretsService.initialize(db);
     const key = await configService.getEncryptionKey();
+    // A stored pepper this key cannot read means the key (or Redis) is not this install's. Outside
+    // production the getter would then generate a new pepper over it, breaking every login lookup.
+    const storedPepper = await db.query.systemSecrets.findFirst({
+      where: eq(schema.systemSecrets.key, SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER),
+      columns: { key: true },
+    });
+    if (storedPepper && (await secretsService.get(SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER)) === null) {
+      throw new Error(
+        'This encryption key does not decrypt the stored email pepper: check DATABASE_URL, REDIS_URL and the key belong to this install. Nothing was changed.',
+      );
+    }
     const pepper = await secretsService.getEmailBlindIndexPepper();
     const result = await recoverAdmin(db, {
       email: values.email,
