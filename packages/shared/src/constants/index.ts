@@ -712,6 +712,8 @@ export interface CliProbeResult {
 }
 
 export interface CliLoginCreateJobPayload {
+  /** Unique API-owned lease, written before this job is enqueued. Absent on older jobs. */
+  leaseId?: string;
   providerId: string;
   userId: string;
 }

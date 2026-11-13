@@ -53,6 +53,10 @@ import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { ensureSandboxCoreImage } from './sandbox/sandbox-core-image.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
+import {
+  startLoginContainerReaper,
+  loginContainerReaperDeps,
+} from './sandbox/login-container-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
 import { startDatabaseSnapshotCleanup } from './repo/database-snapshots.js';
@@ -252,6 +256,10 @@ async function main(): Promise<void> {
   // editor tab closes (refcount==0 + lastSeenAt stale). No-op until an open arrives.
   const ideReaper = new IdeSessionReaper({ redis: getRedis() });
   ideReaper.start();
+  const stopLoginContainerReaper = startLoginContainerReaper(
+    getRedis(),
+    loginContainerReaperDeps(getDb()),
+  );
   // Reclaim leaked DDEV/app runtime runners: a failed task keeps its runner for retry
   // and the boot reaper preserves runners, so an abandoned/crashed one otherwise lives
   // forever. Keys on task status + container age; never touches a live task's runner.
@@ -329,6 +337,7 @@ async function main(): Promise<void> {
     // next worker pid reaps orphan containers on boot.
     terminalReaper.stop();
     ideReaper.stop();
+    stopLoginContainerReaper();
     runtimeRunnerReaper.stop();
     stopDatabaseSnapshotCleanup();
     stopUploadReaper();

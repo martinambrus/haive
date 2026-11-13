@@ -465,9 +465,18 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
   session closes with "Authentication changed. Retry the login." A login holds the lock at most 2
   minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
-  releases the lock and stops waiting (the remove may still finish later); if it never does, nothing reaps it while its provider and user exist
-  (`reapOrphanedAuthVolumes` runs at worker boot and only for a gone owner), so a later login or
-  sign-out may run beside it. The provider secret migration's destructive drop phase also waits up
+  releases the lock and stops waiting (the remove may still finish later). Every login attempt
+  holds its own Redis lease (`cli-login-lease:<id>`, `@haive/shared/cli-login-lease`), written
+  with a fresh token before the container is queued, renewed every 20 s with a 60 s TTL and
+  compare-and-deleted when the lock is released. A renewal never recreates an expired key, and a
+  failed renewal call ends the login only once the owner's own deadline passes, which comes no
+  later than the key's expiry. The worker's login reaper (`sandbox/login-container-reaper.ts`, at
+  boot and every 30 s) removes a login container whose lease is absent; when Redis cannot be read,
+  or does not answer within 5 s, it removes nothing that pass. It never touches the auth lock, so a reaped scope starts a fresh
+  login at once. A container from before the lease, found through its stored Docker id with no
+  lease label, is kept for 13 minutes from its creation (2 minutes to start, a 10-minute session,
+  30 s of teardown, and margin) and then reaped. Until the next pass a later login or sign-out
+  may run beside an abandoned container. The provider secret migration's destructive drop phase also waits up
   to 30 s for it; its copy phase, which reruns at every worker boot, tries once and leaves a busy
   provider for the next boot. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while

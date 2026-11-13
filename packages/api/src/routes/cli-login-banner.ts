@@ -1,3 +1,5 @@
+import { startCliLoginLease, type CliLoginLease } from '@haive/shared/cli-login-lease';
+import { getRedis } from '../redis.js';
 import {
   cliAuthScope,
   advanceVolumeLoginGeneration,
@@ -376,7 +378,7 @@ export function installCliLoginBannerWebSocket(
               void releaseAuth();
               return;
             }
-            runBannerSession({
+            const sessionOpts: RunBannerOpts = {
               ws,
               userId: auth.userId,
               providerId: provider.id,
@@ -385,10 +387,12 @@ export function installCliLoginBannerWebSocket(
               releaseAuth,
               startupDeadline,
               docker,
-            }).catch(async (err) => {
+            };
+            runBannerSession(sessionOpts).catch(async (err) => {
               // The user closing the dialog unwinds the session through the same throw path as a
               // real failure. It is not one, and the socket it would report to is already gone.
-              await releaseAuth();
+              // The session replaced releaseAuth with a wrapper that also drops the login lease.
+              await sessionOpts.releaseAuth();
               if (err instanceof LoginCancelled) {
                 log.info({ providerId }, 'login dialog closed by the user');
                 return;
@@ -467,13 +471,31 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       });
   }, 1_000);
   let releasePending: Promise<void> | undefined;
+  let lease: CliLoginLease | undefined;
+  let released = false;
   opts.releaseAuth = Object.assign(
     async () => {
       clearInterval(lockWatch);
       clearTimeout(startupTimeout);
-      await (releasePending ??= heldAuth());
+      released = true;
+      await (releasePending ??= (async () => {
+        try {
+          await lease?.stop();
+        } catch (err) {
+          // Compare-and-delete is best effort during an outage; the TTL is the backstop.
+          log.warn({ error: safeErrorDetails(err), providerId }, 'login lease release failed');
+        } finally {
+          await heldAuth();
+        }
+      })());
     },
-    { assertHeld: heldAuth.assertHeld },
+    {
+      assertHeld: async () => {
+        lease?.assertHeld();
+        await heldAuth.assertHeld();
+        lease?.assertHeld();
+      },
+    },
   );
   let containerMayWrite = false;
   const pending: { job: Job | null } = { job: null };
@@ -491,12 +513,32 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   }
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
-  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending).catch(
-    async (err) => {
-      await opts.releaseAuth();
-      throw err;
-    },
-  );
+  try {
+    lease = await startCliLoginLease(getRedis(), () => {
+      abort.fire();
+      wsSend(ws, { type: 'error', message: 'Login session expired. Retry the login.' });
+      ws.close(1011, 'login_lease_lost');
+    });
+    // A close can release the auth lock while the initial Redis write is awaiting its reply.
+    if (released || abort.aborted) {
+      await lease.stop();
+      throw new LoginCancelled();
+    }
+  } catch (err) {
+    await opts.releaseAuth();
+    throw err;
+  }
+  const createResult = await enqueueLoginCreate(
+    providerId,
+    userId,
+    abort,
+    ws,
+    pending,
+    lease.id,
+  ).catch(async (err) => {
+    await opts.releaseAuth();
+    throw err;
+  });
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
@@ -1494,9 +1536,10 @@ async function enqueueLoginCreate(
   abort: AbortHandle,
   ws: WebSocket,
   pending: { job: Job | null },
+  leaseId: string,
 ): Promise<CliLoginCreateResult> {
   const queue = getCliExecQueue();
-  const payload: CliLoginCreateJobPayload = { providerId, userId };
+  const payload: CliLoginCreateJobPayload = { providerId, userId, leaseId };
   const job = await queue.add(CLI_EXEC_JOB_NAMES.LOGIN_CREATE, payload, {
     removeOnComplete: true,
     removeOnFail: true,
@@ -1611,10 +1654,8 @@ async function teardownContainer(
       removing,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
-          // Keep the row until removal really finishes. If it never does, nothing reaps the
-          // container while its provider and user exist: reapOrphanedAuthVolumes (worker boot)
-          // removes it only once the owner is gone. The lock is released regardless, so a later
-          // login or sign-out may run while this container still holds the auth volume.
+          // Keep the row until removal really finishes. Auth release drops the lease;
+          // the worker's periodic login reaper retries this resource after that release.
           log.warn(
             { containerRowId, dockerContainerId, timeoutMs: CONTAINER_TEARDOWN_TIMEOUT_MS },
             'login container removal timed out',

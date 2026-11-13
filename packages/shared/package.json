@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./cli-login-lease": {
+      "types": "./dist/cli-login-lease.d.ts",
+      "import": "./dist/cli-login-lease.js"
+    },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"

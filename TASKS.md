@@ -189,7 +189,7 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 
 ### T620 · design · reaper for a live owner's timed-out login container
 
-status: open · kind: design · found: #1088 review 2026-11-12 · priority: P4
+status: done 2026-11-13 #1120 (9dde1d292): per-attempt Redis lease (60 s TTL, 20 s renewal, compare-and-delete), worker reaper at boot and every 30 s removes a login container whose lease is absent, nothing on an unreadable or silent Redis, 13 min grace for pre-lease containers; lows in T636 · kind: design · found: #1088 review 2026-11-12 · priority: P4
 Owner decision 2026-11-12: lease with heartbeat: the holder renews a short Redis lease; the reaper removes the container only after the lease expires.
 When an api process that still holds a CLI login's auth lock times out the login container, nothing removes it, and a restart forgets it. A permanent quarantine table was tried in #1088 and reverted: after an api restart it refused the scope forever. Needs a mechanism that tells a dead owner from a live one (lease with heartbeat, or a container label checked at boot) before anything removes the container or blocks the scope.
 
@@ -833,6 +833,20 @@ status: open · kind: fix · found: #1119 reviews 2026-11-13 · priority: P4
 
 1. An allowlist entry that fails validation when read back (a stored value edited outside the PUT) makes the whole list fail closed with no log or admin-visible reason (api `lib/ollama-pull-policy.ts`). Low.
 2. `api/test/probe-targets.test.ts` ~:192 waits on real timers; convert to fake timers (testing.md rule). Low.
+
+### T636 · FNF[login-lease-reaper-lows] · CLI login lease and reaper lows (+8)
+
+status: open · kind: fix · found: #1120 reviews 2026-11-13 · priority: P4
+Worker `sandbox/login-container-reaper.ts` and shared `cli-login-lease.ts` unless named. Low.
+
+1. The reaper removes the Docker container, then marks the `containers` row destroyed; if that update throws it logs "will retry" but the container is gone, so the row stays `running` (~:69-79).
+2. The reaper lists every container on the host and runs a DB `IN (...)` query every 30 s forever, though the unlabelled legacy containers it serves vanish 13 min after the upgrade.
+3. An unremovable container logs a warning every 30 s with no backoff.
+4. A legacy container with no labels whose `containers` row is gone (provider deleted) or was never inserted is never reaped. PRE-EXISTING.
+5. `onLost` fires on the first heartbeat after the local deadline, up to 20 s after credential writes are already refused; the abort and socket close lag by that much.
+6. The lease relies on its caller's Redis command timeout (its only caller, the api's bounded client, has 2 s); an unbounded client would let a stalled renewal hang `stop()` and login teardown. Latent.
+7. Each timed-out reaper pass leaves one MGET in the worker client's unbounded offline queue while Redis stalls (worker-wide pattern).
+8. Coverage: the reaper's Redis-outage test models a rejection, not the worker client's hang; the fresh-login test never drives the api or auth lock; the lease's catch-past-deadline branch is untested; `login-container.ts` imports `@haive/shared` twice (nit).
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
