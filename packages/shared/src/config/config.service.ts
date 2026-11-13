@@ -1,4 +1,5 @@
 import { Redis, ReplyError } from 'ioredis';
+import { mailSeedDefaults } from './mail.js';
 import {
   generateBootEncryptionKey,
   PENDING_ENCRYPTION_KEY,
@@ -47,6 +48,13 @@ export const PRIVATE_ENDPOINT_SEED_STATE_KEY = 'bootstrap:privateEndpointSeed';
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
+  MAIL_ENABLED: 'config:mail:enabled',
+  MAIL_SMTP_HOST: 'config:mail:smtpHost',
+  MAIL_SMTP_PORT: 'config:mail:smtpPort',
+  MAIL_SECURE: 'config:mail:secure',
+  MAIL_USER: 'config:mail:user',
+  MAIL_FROM: 'config:mail:from',
+  MAIL_FROM_NAME: 'config:mail:fromName',
 
   // Max CLI/agent invocations that run in parallel GLOBALLY: bounds the cli-exec
   // queue concurrency AND the in-process fan-out limiter (e.g. DAG coders,
@@ -882,9 +890,20 @@ export class ConfigService {
   }
 
   private async seedDefaults(): Promise<void> {
+    const mail = mailSeedDefaults(process.env);
+    const defaults = {
+      ...DEFAULT_CONFIG,
+      [CONFIG_KEYS.MAIL_ENABLED]: String(mail.enabled),
+      [CONFIG_KEYS.MAIL_SMTP_HOST]: mail.smtpHost,
+      [CONFIG_KEYS.MAIL_SMTP_PORT]: String(mail.smtpPort),
+      [CONFIG_KEYS.MAIL_SECURE]: String(mail.secure),
+      [CONFIG_KEYS.MAIL_USER]: mail.user,
+      [CONFIG_KEYS.MAIL_FROM]: mail.from,
+      [CONFIG_KEYS.MAIL_FROM_NAME]: mail.fromName,
+    };
     const results = await this.redisCall('seedDefaults', async (redis) => {
       const pipeline = redis.pipeline();
-      for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
+      for (const [key, value] of Object.entries(defaults)) {
         pipeline.setnx(key, value);
       }
       const res = await pipeline.exec();

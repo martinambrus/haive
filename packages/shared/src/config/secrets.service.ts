@@ -9,6 +9,7 @@ type DbClient = Database;
 
 export const SECRET_KEYS = {
   JWT_SECRET: 'jwt_secret',
+  MAIL_SMTP_PASSWORD: 'mail_smtp_password',
   EMAIL_BLIND_INDEX_PEPPER: 'email_blind_index_pepper',
   MASTER_KEK: 'master_kek',
   // External global-KB Postgres connection string (may carry credentials).

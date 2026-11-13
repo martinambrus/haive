@@ -1,5 +1,6 @@
 'use client';
 import { LinkButton } from '@/components/ui';
+import { AdminMailCard } from '@/components/admin-mail-card';
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -1630,6 +1631,8 @@ function AdminPageInner() {
           </p>
         </Card>
       )}
+
+      {tab === 'data' && <AdminMailCard />}
 
       {tab === 'data' && attachmentMaxBytes !== null && (
         <Card>

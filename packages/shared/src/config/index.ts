@@ -7,3 +7,4 @@ export {
   encryptionKeyBootDatabase,
   type EncryptionKeyBootDatabase,
 } from './encryption-key-boot.js';
+export * from './mail.js';
