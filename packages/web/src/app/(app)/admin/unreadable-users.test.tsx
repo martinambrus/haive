@@ -94,14 +94,14 @@ it('links an unreadable audit actor to that user on the users page', async () =>
   expect(links).toHaveLength(1);
   expect(links[0]!.props.href).toBe(`/admin/users#user-${user.id}`);
 });
-it('offers the administrator relink destination for an unreadable account email', async () => {
+it('asks an administrator to relink an unreadable account email without a link', async () => {
   const view = await mount(AccountPage);
   const links = findAll(
     view.tree(),
-    (node) => node.tag === 'a' && textOf(node) === 'Relink email (administrator)',
+    (node) => node.tag === 'a' && String(node.props.href).startsWith('/admin/users'),
   );
-  expect(links).toHaveLength(1);
-  expect(links[0]!.props.href).toBe('/admin/users#users');
+  expect(links).toHaveLength(0);
+  expect(textOf(view.tree())).toContain('Ask an administrator to relink this email.');
 });
 it('links the selected unreadable actor even when there are no audit events', async () => {
   h.audit.mockResolvedValue({ events: [], total: 0, facets: { actions: [], targetTypes: [] } });
