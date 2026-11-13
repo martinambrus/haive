@@ -411,7 +411,7 @@ and address throttle buckets and a separate once-per-window throttled audit slot
 always answers the same 202, for unknown accounts, disabled mail, throttle refusals and delivery
 failures alike. Lookup, issuance and SMTP delivery run in-process after the reply, so the raw link
 never sits in Redis or a queue. Failure logs carry fixed codes, the error class and, when present, a short
-error code (a SQLSTATE or an errno), never the address, token or SMTP text.
+five-character error code (a SQLSTATE, or an errno such as `EPIPE`), never the address, token or SMTP text.
 
 A readable blind-index match gets a reset link at its stored address only while the user is active;
 a deactivated match sends nothing. A claim is allowed only after a `config.discard_unreadable_secrets`
