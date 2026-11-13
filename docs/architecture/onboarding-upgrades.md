@@ -144,14 +144,24 @@ the sync is retried. Every other real-index entry,
 a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
 those very names is not committed and is reset to `HEAD`). When nothing differs, nothing is committed and the real
 index is not written, except for the one caller that opts in, the Haive data Save (`commitHaiveProjections`):
-its no-op sets in the real index only the named entries that differ from `HEAD` there, which repairs a sync
-that failed after an earlier commit, leaves a staged entry below a named path alone, and writes nothing
-when none differ. A failed sync is retried with backoff and warned about with the count and at most ten
-paths. The Save also takes back a deletion it committed while the real index was locked: an
-addition staged under `.haive-data/state/` that neither `HEAD` nor the current record holds is
-removed from the index when the state codec recognizes its name (`commit.ts`). It is classified by
-name only and the staged blob is never read, so a file the person staged there under a recognized
-name is unstaged too, though it stays on disk. That is accepted, since the directory is Haive's.
+both its committing and no-op paths repair every owned name that differs in the real index from the
+captured commit, including an older owned blob left by an earlier failed sync. A committing Save
+syncs its committed names first, then separately repairs the remaining stale owned names, recomputed
+on each retry. A failure in that second repair is warned about and reports `indexSynced: false`,
+without blocking or undoing the committed-name sync. The committing path, like a no-op, also resets
+a person's deliberately staged blob at an unchanged owned name to HEAD.
+A staged entry below a named path stays alone, and a clean no-op writes no index. A failed sync is
+retried with backoff and warned about with the count and at most ten paths. The Save also takes back
+a deletion it committed while the real index was locked: an addition staged under
+`.haive-data/state/` that neither `HEAD` nor the current record holds is removed from the index when
+the state codec recognizes its name (`commit.ts`). It is classified by name only and the staged blob
+is never read, so a file the person staged there under a recognized name is unstaged too, though it
+stays on disk. That is accepted, since the directory is Haive's.
+The same repeat-Save repair recovers the exact `plan.json` and `plan.md` index names when those
+projections are absent from disk and HEAD, so a later ordinary commit cannot resurrect a deletion
+whose earlier real-index sync failed. It also unstages a person's own addition at either plan name
+when the file is absent from disk and HEAD; a re-created file is committed with its new bytes.
+A state-only push does not claim those plan names.
 A pathspec is `:(literal)`
 and the changed list is read with `--no-renames`, since a detected rename would name only the new
 path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
