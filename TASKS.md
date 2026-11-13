@@ -1866,13 +1866,9 @@ All low unless marked.
 8. Failed-merge notice edges (display only): cancelling the newest failed conversation surfaces an older failed one; the notice persists after Save/Pull discards its worktree; two reads in `Promise.all` can show one task as both `merge` and `failedMerge` for one poll.
 9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
 
-### T597 · Retry of a mining step re-buys agents whose replies were saved
-
-status: open (OWNER DECISION 2026-11-13: Resume also accepts done agent rows whose replies were saved but not applied, and re-runs only the apply; plain Retry keeps its full re-run) · kind: design · found: G (#270) review 1 2026-11-10 · priority: P3
-Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
-
 ## Done
 
+- T597 — owner decision: Resume on a failed mining step whose agents all finished re-runs only the apply from the saved replies (no agent bought again); a done row with no saved reply is marked failed in the same fenced write and re-dispatched; Retry keeps the full re-run; a fan-out loop step (`iterationCount > 0`) keeps the loop Resume arm; web shows "Resume (apply saved replies)" on structural columns only. Not live-checked: the only eligible steps on the dev install belong to cancelled tasks — PR #1149 (f3ce0c2aa), 2026-11-13.
 - T532 — owner decision: module install sources are git-only (API body, client type, admin dialog); stored registry rows stay readable as unsupported, deletable with token and audit, fetch refused with 400 `module_source_kind_unsupported`; `module_sources` CHECK constraints kept for a later two-phase cleanup (migrate or delete remaining registry rows, then tighten in a new migration); api, worker and web reloaded — PR #1147 (548013da4), 2026-11-13.
 - T541 — Cancel deletes the task's own skeleton, enriching or failed kb_author entry (Stop or a worker failure alone keeps it failed); both writes match the source task and user and skip approved entries; worker reloaded — PR #1148 (fccc9866a), 2026-11-13. Vector leftover in T582.
 - T312 — verified 2026-11-13: detection already checks candidate directories (`01-env-detect.ts` ~:948, commit 257ca270d) and the own-code consumers ignore a missing include; inventory of the dev install (every stored `customCodePaths.include`, checked in the worker filesystem) found none missing. No change needed.
