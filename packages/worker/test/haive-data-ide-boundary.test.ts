@@ -39,6 +39,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   h.exec.mockReset().mockImplementation(async (_command, args: string[]) => {
+    // The runner probe lists by exact name: an empty listing is a runner that does not exist.
+    if (args[0] === 'ps') return { stdout: '', stderr: '' };
     if (args[0] === 'inspect') throw new Error('container missing');
     return { stdout: '{"status":"alive"}', stderr: '' };
   });
