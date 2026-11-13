@@ -936,3 +936,17 @@ it('serves repository details without starting remote repair or writing state', 
   expect(h.clear).not.toHaveBeenCalled();
   expect(transaction).not.toHaveBeenCalled();
 });
+
+it.each(['SIGTERM', 'SIGKILL'])(
+  'keeps the intent when the first git mutation ended with %s',
+  async (signal) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.git.mockRejectedValueOnce(Object.assign(new Error('interrupted'), { signal }));
+    expect((await link()).status).toBe(409);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(h.git).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);

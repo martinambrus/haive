@@ -2751,11 +2751,13 @@ repoRoutes.post('/:id/remote', async (c) => {
     // A restore that failed is the answer even when the transaction then rejects with
     // another error, such as the lost connection that made the outer catch run.
     if (restoreFailure) throw restoreFailure;
+    let restored = false;
     if (restore) {
       try {
         const undo = restore;
         restore = undefined;
         await undo();
+        restored = true;
       } catch (restoreError) {
         const message = 'Remote update failed and the previous remote could not be restored';
         const failure = new AggregateError([restoreError], message, { cause: err });
@@ -2767,7 +2769,9 @@ repoRoutes.post('/:id/remote', async (c) => {
         throw restoreFailure;
       }
     }
-    if (intentWritten) {
+    // Without a successful undo, a signalled first write may already have
+    // changed Git. Leave the intent so reconciliation can settle that outcome.
+    if (intentWritten && restored) {
       await clearRemotePending(root);
       intentWritten = false;
     }
