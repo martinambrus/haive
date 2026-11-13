@@ -299,35 +299,57 @@ describe('deterministic apply redelivery', () => {
     };
     const apply = () => dbMigrateStep.apply(ctx, args);
     await apply();
+    const row = await ctx.db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, ctx.taskStepId),
+    });
+    expect(row!.applyReceipt!.result).toMatchObject({ durabilitySnapshotCompleted: true });
+    h.ensure.mockResolvedValue({ container: 'cold-restored', projectDir: '/workspace' });
     await redeliver(ctx, dbMigrateStep.metadata.id, apply);
     expect(appliedDataChanges).toBe(1);
   });
 
-  it('retries the durability snapshot after replaying a recorded command success', async () => {
-    h.exec.mockResolvedValue({ exitCode: 0, output: 'migration applied' });
-    h.snapshot.mockRejectedValueOnce(new Error('worker lost during snapshot'));
-    const ctx = context();
-    const args = {
-      detected: {
-        framework: 'unknown' as const,
-        migrationCommand: 'node migrate.js',
-        repoSubpath: 'repo',
-      },
-      formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
-      iteration: 0,
-      previousIterations: [],
-    };
-    await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('worker lost during snapshot');
-    h.snapshot.mockResolvedValue({ exitCode: 1, output: 'snapshot unavailable' });
-    await redeliver(ctx, dbMigrateStep.metadata.id, async () => {
-      await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({
-        passed: true,
-        output: 'migration applied',
+  it.each([
+    ['unknown', 'interrupted'],
+    ['unknown', 'non-zero'],
+    ['drupal', 'interrupted'],
+    ['drupal', 'non-zero'],
+  ] as const)(
+    'refuses a recorded %s success after cold restore when its snapshot was %s',
+    async (framework, failure) => {
+      h.exec.mockResolvedValue({ exitCode: 0, output: 'Connected; migration applied' });
+      if (failure === 'interrupted')
+        h.snapshot.mockRejectedValueOnce(new Error('worker lost during snapshot'));
+      else h.snapshot.mockResolvedValueOnce({ exitCode: 1, output: 'snapshot unavailable' });
+      const ctx = context();
+      const args = {
+        detected: {
+          framework,
+          migrationCommand: 'node migrate.js',
+          repoSubpath: 'repo',
+        },
+        formValues: { runMigration: true, migrationCommand: 'node migrate.js' },
+        iteration: 0,
+        previousIterations: [],
+      };
+      if (failure === 'interrupted')
+        await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow('worker lost during snapshot');
+      else await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({ passed: true });
+      const row = await ctx.db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, ctx.taskStepId),
       });
-    });
-    expect(h.exec).toHaveBeenCalledTimes(1);
-    expect(h.snapshot).toHaveBeenCalledTimes(2);
-  });
+      expect(row!.applyReceipt!.result).toMatchObject({ exitCode: 0 });
+      // Startup's seam now represents a rebuilt runner restored from the older import snapshot.
+      h.ensure.mockResolvedValue({ container: 'cold-restored', projectDir: '/workspace' });
+      h.exec.mockClear();
+      h.exec.mockResolvedValue({ exitCode: 0, output: '' });
+      h.snapshot.mockClear();
+      await expect(dbMigrateStep.apply(ctx, args)).rejects.toThrow(
+        /outcome is unknown.*Inspect the database.*Retry/,
+      );
+      expect(h.exec).not.toHaveBeenCalled();
+      expect(h.snapshot).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not claim a custom migration ran when DDEV startup failed', async () => {
     h.ensure.mockRejectedValueOnce(new Error('DDEV configuration needs repair'));

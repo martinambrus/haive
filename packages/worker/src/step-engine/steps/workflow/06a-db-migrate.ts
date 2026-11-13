@@ -1,4 +1,6 @@
 import { beginApplyEffect, finishApplyEffect } from '../../apply-receipt.js';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -194,6 +196,12 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     // The runner can be gone since 01c; a handle rebuilt from the task id execs into nothing,
     // which the Drupal probe below would read as an uninstalled site.
     const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
+    const previous = custom
+      ? await ctx.db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx.taskStepId),
+          columns: { applyReceipt: true },
+        })
+      : null;
 
     // Pre-flight (Drupal): `drush updatedb` requires a bootstrappable, installed
     // site with a wired DB connection. On a site that was never installed — no
@@ -207,7 +215,9 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     // --field=db-status` reports "Connected" ONLY when the connection is live
     // (empty when the site can't bootstrap) — a stable, documented drush field
     // that exits 0 either way, so we key on the value, not the exit code.
-    if (d.framework === 'drupal') {
+    // A replay must validate its receipt below. An older restored database may
+    // fail this probe, which must not turn an unconfirmed execution into a skip.
+    if (d.framework === 'drupal' && !previous?.applyReceipt) {
       const probe = await ddevExec(handle, 'exec drush status --field=db-status', {
         timeoutMs: 60_000,
       });
@@ -239,7 +249,7 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     let replayed: { exitCode: number; output: string } | undefined;
     if (effect && !effect.fresh) {
       const result = effect.receipt.result;
-      if (!result) {
+      if (!result || (result.exitCode === 0 && result.durabilitySnapshotCompleted !== true)) {
         throw new Error(
           'The previous custom migration may have run, but its outcome is unknown. Inspect the database before choosing Retry to run it again, or Skip to continue.',
         );
@@ -278,6 +288,14 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
         { taskId: ctx.taskId, output: snap.output.slice(-500) },
         'ddev post-migrate snapshot non-zero (continuing)',
       );
+    } else if (effect) {
+      // Only a completed durability snapshot proves cold recovery can retain this
+      // command's changes. A success receipt alone can outlive the live database.
+      await finishApplyEffect(ctx, effect.receipt, {
+        exitCode: res.exitCode,
+        output: res.output.slice(-2000),
+        durabilitySnapshotCompleted: true,
+      });
     }
 
     ctx.logger.info({ taskId: ctx.taskId, command }, 'db migrations applied');
