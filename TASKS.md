@@ -931,6 +931,17 @@ Since #1128 a failed warm start keeps the runner; its error names the container 
 status: open · kind: design · found: T634 review 2026-11-13 · priority: P2
 PRE-EXISTING. A CLI sandbox backed by the in-stack Ollama joins the models network and reaches `ollama:11434` directly (worker `sandbox/sandbox-runner.ts` ~:454-456, `SANDBOX_MODELS_NETWORK`). A prompt-injected agent can call `/api/pull`, `/api/create`, `/api/delete` or `/api/copy` on the shared daemon, bypassing the api and worker pull policy (T634) and able to delete other users' models. Design: a filtering proxy on the models network that forwards only the inference endpoints the CLIs use (chat/generate/embeddings, OpenAI- and Anthropic-compatible paths, model show/tags as needed) and refuses the admin endpoints; or a separate read-only daemon. Measure which paths each Ollama-backed CLI calls before choosing.
 
+### T646 · FNF[two-install-isolation] · S4 two-install check: two boot sweeps cross installs (+4)
+
+status: open · kind: fix · found: S4 two-install check 2026-11-13 · priority: P2
+S4 ran on one daemon with the dev install (`haive`) and a second checkout of main (`s4b`, own project, ports, key, database), test resources labelled `s4.test=1`, evidence .claude/tmp/codex-run/S4-S/. PASS: runtime runners (each install reaped only its own; an unlabelled runner whose task neither database knows was kept by both), login containers, CLI sandboxes (legacy unlabelled claimed only by the default install, as designed), auth volumes, composed images. Docker state after cleanup equals the pre-state. Defects:
+
+1. MEASURED, PRE-EXISTING, medium. Terminal shells carry no `haive.install` label (worker `terminal/terminal-container.ts` ~:359-365), so the default install's boot sweep claims every install's shells as legacy-unlabelled and removes them: `haive` removed `s4b-shell-s4tst`, a live terminal of another install. Fix: stamp the install label at create (as #1124 did for runners); keep the legacy rule only for shells created before that.
+2. MEASURED, PRE-EXISTING, medium. `reapSupersededSandboxCores` (`sandbox/sandbox-image-reaper.ts` ~:98-136) lists `dangling=true` images daemon-wide with no install filter: `s4b` removed a dangling sandbox core it did not build. Fix: filter by this install's repo or label (dangling images keep labels), never by dangling alone.
+3. PRE-EXISTING, low, unverified whether any sweep touches it. The DDEV registry cache container is labelled only `haive.role=ddev-registry-cache` (`sandbox/ddev-runner.ts` ~:937), no `haive.install`; named per install. Stamp the label for consistency.
+4. LATENT, low. `runner.inspect` (`sandbox/docker-runner.ts` ~:388-402) formats `{{json .Config.Labels}}`, which errors on an image whose config has no Labels key; the error reads as "missing", so the orphaned-provider-image sweep skips it silently. Built provider images always carry labels (the S4 miss was a label-less test image), so only hand-made or imported images hit it. Use `{{json .Config}}` and read Labels in code, or treat a template error as unknown.
+   When fixed, record the evidence in the S4 section of docs/plans/solitary-partitioning-lampson.md (it still says pending; S4 ran on a second main checkout, not a published release, by owner decision).
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
