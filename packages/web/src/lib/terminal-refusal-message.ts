@@ -13,6 +13,8 @@ export function terminalRefusalMessage(code: number): string | null {
       return 'Terminals are unavailable for read-only local repositories. Import a writable copy to use a terminal.';
     case TERMINAL_CLOSE_CODES.REPO_NOT_READY:
       return 'The repository is not ready. Wait until it is ready before opening the terminal.';
+    case TERMINAL_CLOSE_CODES.PROVIDER_DISABLED:
+      return 'The CLI provider is disabled. Enable it before opening a terminal.';
     default:
       return null;
   }

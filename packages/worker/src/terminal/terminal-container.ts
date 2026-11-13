@@ -193,6 +193,9 @@ export async function ensureShellContainer(
   });
   if (!provider) throw new Error(`cli provider ${providerId} not found`);
   if (provider.userId !== userId) throw new Error('cli provider does not belong to user');
+  if (!provider.enabled) {
+    throw new Error('The CLI provider is disabled. Enable it before opening a terminal.');
+  }
 
   // Resolve the same composed sandbox image cli-exec-queue uses so the
   // terminal sees the same toolchain (CLI binary + ripgrep + uv + env-template

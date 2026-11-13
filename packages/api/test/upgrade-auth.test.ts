@@ -272,7 +272,7 @@ beforeEach(() => {
     source: 'upload',
     writable: true,
   });
-  fake.insert(schema.cliProviders, { id: ID, userId: USER, name: 'codex' });
+  fake.insert(schema.cliProviders, { id: ID, userId: USER, name: 'codex', enabled: true });
   fake.insert(schema.cliInvocations, { id: ID, taskId: ID, steerable: false });
   fake.insert(schema.containers, {
     id: ID,

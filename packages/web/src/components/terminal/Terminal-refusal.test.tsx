@@ -82,6 +82,7 @@ const messages: Array<[number, string]> = [
     'Terminals are unavailable for read-only local repositories. Import a writable copy to use a terminal.',
   ],
   [4424, 'The repository is not ready. Wait until it is ready before opening the terminal.'],
+  [4425, 'The CLI provider is disabled. Enable it before opening a terminal.'],
 ];
 describe.each([
   ['Terminal', () => <Terminal containerId="container" />],

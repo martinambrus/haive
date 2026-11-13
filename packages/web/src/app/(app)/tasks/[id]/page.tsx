@@ -1224,7 +1224,7 @@ export default function TaskDetailPage() {
       .catch(() => setProviders([]));
   }, []);
 
-  // Default terminal CLI to the task's bound provider when known, else the server
+  // Default terminal CLI to the task's bound provider when enabled, else the server
   // default. User can switch via the dropdown above the shell.
   //
   // The list and task arrive independently. Only a user pick is sticky; an automatic
@@ -1233,11 +1233,15 @@ export default function TaskDetailPage() {
   useEffect(() => {
     if (terminalCliPickedRef.current) return;
     const taskProvider = task?.cliProviderId ?? null;
-    if (taskProvider && providers.some((p) => p.id === taskProvider)) {
+    if (taskProvider && providers.some((p) => p.id === taskProvider && p.enabled)) {
       setTerminalCliProviderId(taskProvider);
       return;
     }
-    setTerminalCliProviderId(defaultCliProviderId);
+    setTerminalCliProviderId(
+      providers.some((p) => p.id === defaultCliProviderId && p.enabled)
+        ? defaultCliProviderId
+        : null,
+    );
   }, [providers, task?.cliProviderId, defaultCliProviderId]);
 
   const selectTerminalCliProvider = useCallback((nextId: string) => {
@@ -2713,7 +2717,7 @@ function TerminalTab({
   selectedCliProviderId,
   onSelectCliProvider,
 }: TerminalTabProps) {
-  const usableProviders = providers.filter((p) => p.enabled || p.id === selectedCliProviderId);
+  const usableProviders = providers.filter((p) => p.enabled);
 
   if (disabled) {
     return (
@@ -2760,7 +2764,7 @@ function TerminalTab({
           Shell runs inside the same sandbox image used for CLI execs.
         </span>
       </div>
-      {selectedCliProviderId && (
+      {selectedCliProviderId && usableProviders.some((p) => p.id === selectedCliProviderId) && (
         <InteractiveShell taskId={taskId} cliProviderId={selectedCliProviderId} />
       )}
     </div>
