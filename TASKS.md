@@ -861,6 +861,17 @@ Worker `step-engine/undo-left-merge.ts`, web `task-left-merge-banner.tsx` unless
 6. Event reads order by `createdAt` only, with no tie-break (~:94, api `merges.ts`); the reader is order-sensitive but fails safe (spurious owed).
 7. Coverage: the worker test stubs `inMergeDirLock` as a pass-through (no concurrent completion control); no worker case for a settled `moved`/`refused`; no first-run test of the strict hand-back.
 
+### T638 · FNF[runner-ownership-lows] · runtime runner ownership lows (+5)
+
+status: open · kind: fix · found: #1124 reviews 2026-11-13 · priority: P4
+Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless named. Low.
+
+1. An unlabeled pre-label runner whose task id exists in two installs' databases (one restored from the other's dump) is owned by both (~:42-54). Finite: pre-upgrade runners only.
+2. An unlabeled pre-label runner whose task is gone is kept forever and needs manual cleanup; nothing lists them for an admin.
+3. The cancel sweep (`killSandboxContainersByTaskLabel`) uses `docker ps` without `-a`, so exited task containers are never removed there. PRE-EXISTING.
+4. Admission counts every runner on the daemon while the reaper can now reclaim only its own, so on a shared daemon a waiter can park behind the other install's runners (documented in runtime-capacity.md).
+5. Coverage: no control for an exited runner, nor for the real `docker ps` rendering of a missing label (mocked as ''). The real two-install S4 check is pending (docs/plans/solitary-partitioning-lampson.md).
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
@@ -1125,7 +1136,7 @@ From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `M
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
-status: open · priority: P2 · gate: bounded verification
+status: done 2026-11-13 #1124 (710bc6936): every runner creator stamps `haive.install`; sweep, preemption, task-end and cancel sweeps remove only this install's label or an unlabeled runner whose task or repository exists here; by-name editor paths refuse only a foreign label; S4 two-install check still pending; lows in T638 · priority: P2 · gate: bounded verification
 From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose Docker daemon serves two installs; read from code, not reproduced. worker sandbox runtime-runner-reaper.ts ~:515-526 lists every `haive.ddev` and `haive.apprunner` container on the daemon with no install-ownership test; ~:64 (`if (!task) return 'orphan'`) treats a runner whose task this install's database does not know as an orphan, and `sweep` (~:342-366) and the preemption path (~:461-466) then run `docker rm -f -v` on it, its volumes included. Runners carry no `haive.install` label (only docker-runner.ts ~:422 stamps one). Fix direction: stamp `haive.install` on every runner at create, list by it, and leave an unlabeled runner alone (never reap what this install cannot prove it owns); keep docs/plans/solitary-partitioning-lampson.md's pending two-install check (S4) in step.
 
 Execution fence 2026-11-01: first establish an affected legacy/current supported case in owned fixtures. The recorded risk is not a confirmed production incident and does not make completing an unbounded inventory a prerequisite for new functionality. Escalate a reproduced security/data-loss consequence.
