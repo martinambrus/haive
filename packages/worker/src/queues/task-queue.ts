@@ -137,6 +137,7 @@ import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
 import { ownsTaskRunner } from '../sandbox/runtime-runner-ownership.js';
+import { RunnerProbeError } from '../sandbox/runner-probe.js';
 import {
   ensureTaskScratchWorkspace,
   cleanupTaskScratchWorkspace,
@@ -4527,12 +4528,20 @@ async function handleCleanupRepoResources(
   db: Database,
   payload: RepoResourceCleanupPayload,
 ): Promise<void> {
-  await killRepoIdeRunner(payload.repositoryId).catch((err) =>
+  try {
+    await killRepoIdeRunner(payload.repositoryId);
+  } catch (err) {
     logger.warn(
       { err, repositoryId: payload.repositoryId },
       'repo-cleanup: editor teardown failed',
-    ),
-  );
+    );
+    if (err instanceof RunnerProbeError) {
+      // An unreadable runner is not gone. Keep its session and durable cleanup row,
+      // and spend no sweep attempt while Docker cannot establish its state.
+      await refundRepoCleanupAttempt(db, payload.cleanupId, payload.claimStamp);
+      throw err;
+    }
+  }
   await getRedis()
     .del(ideSessionKey(repoIdeSessionId(payload.repositoryId)))
     .catch((err) =>
