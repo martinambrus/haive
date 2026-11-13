@@ -186,3 +186,26 @@ it('allows an explicit force without discard evidence', async () => {
   await recoverAdmin(db, { ...options, force: true }, hashPassword);
   expect(fake.rows(schema.users)[1]!.tokenVersion).toBe(5);
 });
+
+it('hashes one orphan password before opening the locking transaction', async () => {
+  let inTransaction = false;
+  const transaction = db.transaction.bind(db);
+  vi.spyOn(db, 'transaction').mockImplementation((callback) =>
+    transaction(async (tx) => {
+      inTransaction = true;
+      return callback(tx);
+    }),
+  );
+  fake.insert(schema.users, {
+    ...fake.rows(schema.users)[1],
+    id: '00000000-0000-4000-8000-000000000004',
+    emailBlindIndex: 'another-index',
+  });
+  const hash = vi.fn(async (value: string) => {
+    expect(inTransaction).toBe(false);
+    return hashPassword(value);
+  });
+  await recoverAdmin(db, { ...options, force: true }, hash);
+  expect(hash).toHaveBeenCalledTimes(2);
+  expect(fake.rows(schema.users)[1]!.passwordHash).toBe(fake.rows(schema.users)[3]!.passwordHash);
+});

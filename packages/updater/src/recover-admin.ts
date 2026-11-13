@@ -36,6 +36,8 @@ export async function recoverAdmin(
   const blindIndex = computeEmailBlindIndex(email, options.pepper);
   const temporaryPassword = randomBytes(32).toString('base64url');
   const passwordHash = await hashPassword(temporaryPassword);
+  // Spend bcrypt time before holding user locks; no orphan can authenticate with this random value.
+  const orphanPasswordHash = await hashPassword(randomBytes(32).toString('hex'));
 
   return db.transaction(async (tx) => {
     // A consistent lock order serializes recovery runs and fences concurrent account edits.
@@ -105,7 +107,7 @@ export async function recoverAdmin(
         await tx
           .update(schema.users)
           .set({
-            passwordHash: await hashPassword(randomBytes(32).toString('hex')),
+            passwordHash: orphanPasswordHash,
             mustChangePassword: true,
             tokenVersion: sql`${schema.users.tokenVersion} + 1`,
             updatedAt: new Date(),
