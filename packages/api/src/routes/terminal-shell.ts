@@ -8,6 +8,7 @@ import { schema } from '@haive/database';
 import {
   TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
@@ -276,13 +277,17 @@ export async function runScopedShellSession(
     cliProviderId,
   }).catch((err) => {
     log.warn({ err, scope, scopeId, cliProviderId, correlationId }, 'open-session request failed');
-    return { ok: false as const, error: safeErrorMessage(err) };
+    return { ok: false as const, error: safeErrorMessage(err) } satisfies TerminalOpenResult;
   });
 
   if (!reply.ok) {
     if (!cleanupRan) sendJson(ws, { type: 'error', message: reply.error });
     try {
-      ws.close(1011, 'open_failed');
+      // Only a known code is passed on, with its own sentence: an unknown code or an
+      // over-long reason would make close() throw and leave the socket open.
+      if ('closeCode' in reply && reply.closeCode === TERMINAL_CLOSE_CODES.PROVIDER_DISABLED)
+        ws.close(TERMINAL_CLOSE_CODES.PROVIDER_DISABLED, TERMINAL_PROVIDER_DISABLED_MESSAGE);
+      else ws.close(1011, 'open_failed');
     } catch {
       // ignore
     }
@@ -341,9 +346,13 @@ export async function runScopedShellSession(
     if (exited) return;
     exited = true;
     const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
+    const providerDisabled = raw === JSON.stringify({ type: 'exit', reason: 'provider_disabled' });
     sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
     try {
-      ws.close(1000, 'pty_ended');
+      ws.close(
+        providerDisabled ? TERMINAL_CLOSE_CODES.PROVIDER_DISABLED : 1000,
+        providerDisabled ? TERMINAL_PROVIDER_DISABLED_MESSAGE : 'pty_ended',
+      );
     } catch {
       // ignore
     }

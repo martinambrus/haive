@@ -771,6 +771,8 @@ export const PUBSUB_CHANNELS = {
  *  → reaper kills container and deletes registry entry. */
 export const TERMINAL_SESSION_PREFIX = 'terminal:session:';
 export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
+export const TERMINAL_PROVIDER_DISABLED_MESSAGE =
+  'The CLI provider is disabled. Enable it before opening a terminal.';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
@@ -1105,7 +1107,15 @@ export interface TerminalCloseRequest {
   sessionId: string;
 }
 
-export type TerminalRequest = TerminalOpenRequest | TerminalCloseRequest;
+/** Revoke all live task/repository shell attachments of this owner's provider. */
+export interface TerminalCloseProviderRequest {
+  op: 'close-provider';
+  userId: string;
+  cliProviderId: string;
+}
+
+export type TerminalRequest =
+  TerminalOpenRequest | TerminalCloseRequest | TerminalCloseProviderRequest;
 
 export interface TerminalOpenReply {
   ok: true;
@@ -1124,6 +1134,8 @@ export interface TerminalWorkdirMismatch {
 export interface TerminalOpenError {
   ok: false;
   error: string;
+  /** WebSocket close code for a known refusal, such as a disabled provider (4425). */
+  closeCode?: number;
 }
 
 export type TerminalOpenResult = TerminalOpenReply | TerminalOpenError;

@@ -346,7 +346,7 @@ describe('the session registry the reaper reads', () => {
           }),
         },
         taskSteps: { findFirst: async () => ({ status: 'done' }) },
-        cliProviders: { findFirst: async () => undefined },
+        cliProviders: { findFirst: async () => ({ enabled: true }) },
       },
     };
     const subscriber = {

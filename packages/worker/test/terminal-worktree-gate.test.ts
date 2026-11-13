@@ -52,7 +52,7 @@ function open(
         }),
       },
       taskSteps: { findFirst: async () => (setup === null ? undefined : { status: setup }) },
-      cliProviders: { findFirst: async () => undefined },
+      cliProviders: { findFirst: async () => ({ enabled: true }) },
     },
   };
   const redis = {

@@ -26,6 +26,7 @@ import {
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
+import { TerminalProviderDisabledError } from './provider-disabled-error.js';
 
 const log = logger.child({ module: 'terminal-container' });
 
@@ -194,7 +195,7 @@ export async function ensureShellContainer(
   if (!provider) throw new Error(`cli provider ${providerId} not found`);
   if (provider.userId !== userId) throw new Error('cli provider does not belong to user');
   if (!provider.enabled) {
-    throw new Error('The CLI provider is disabled. Enable it before opening a terminal.');
+    throw new TerminalProviderDisabledError();
   }
 
   // Resolve the same composed sandbox image cli-exec-queue uses so the

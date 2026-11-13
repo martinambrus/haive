@@ -1,8 +1,11 @@
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
+  TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
+  TERMINAL_IN_CHANNEL_PREFIX,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   type TerminalOpenResult,
@@ -23,6 +26,7 @@ vi.mock('../src/terminal/terminal-container.js', () => ({
 
 import { TerminalSessionManager } from '../src/terminal/terminal-session-manager.js';
 import { ensureShellContainer, seedShellTrust } from '../src/terminal/terminal-container.js';
+import { TerminalProviderDisabledError } from '../src/terminal/provider-disabled-error.js';
 import { resolveTaskSandboxWorkdir } from '../src/queues/cli-exec-queue.js';
 
 const WORKTREE = '/haive/workdir/.haive-worktrees/task-1';
@@ -36,9 +40,12 @@ interface ExecCall {
 
 interface Harness {
   mgr: TerminalSessionManager;
+  provider: { enabled: boolean };
   execs: ExecCall[];
   openTask: (userId?: string) => Promise<TerminalOpenResult>;
-  openRepo: () => Promise<TerminalOpenResult>;
+  openRepo: (userId?: string, cliProviderId?: string) => Promise<TerminalOpenResult>;
+  sendRequest: (req: unknown) => Promise<void>;
+  sendInput: (sessionId: string) => Promise<void>;
   sendCtl: (sessionId: string, frame: unknown) => Promise<void>;
   attaches: PassThrough[];
   published: () => string[];
@@ -88,6 +95,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
       },
     }),
   };
+  const provider = { enabled: true };
   const db = {
     query: {
       tasks: {
@@ -100,7 +108,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
         }),
       },
       taskSteps: { findFirst: async () => ({ status: 'done' }) },
-      cliProviders: { findFirst: async () => undefined },
+      cliProviders: { findFirst: async () => ({ enabled: provider.enabled }) },
     },
   };
   const redis = {
@@ -127,6 +135,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
   };
   return {
     mgr,
+    provider,
     execs,
     attaches,
     attachGates,
@@ -141,12 +150,16 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
         scope: 'task',
         taskId: 'task-1',
       }),
-    openRepo: () =>
+    sendRequest: (req) =>
+      priv.handleSubscriberMessage(TERMINAL_REQUEST_CHANNEL, JSON.stringify(req)),
+    sendInput: (sid) =>
+      priv.handleSubscriberMessage(`${TERMINAL_IN_CHANNEL_PREFIX}${sid}`, 'input'),
+    openRepo: (userId = 'user-1', cliProviderId = 'prov-1') =>
       priv.openSession({
         op: 'open',
         correlationId: 'c2',
-        userId: 'user-1',
-        cliProviderId: 'prov-1',
+        userId,
+        cliProviderId,
         scope: 'repo',
         repositoryId: 'repo-1',
       }),
@@ -516,6 +529,150 @@ describe('an open that fails after it added its session', () => {
     const reply = await h.openTask();
     expect(reply.ok).toBe(true);
     expect(internals(h).sessions.size).toBe(1);
+    expect(h.attaches[0]!.destroyed).toBe(false);
+  });
+});
+
+describe('provider shell revocation', () => {
+  it('closes every matching task/repo attachment, records the refusal for late subscribers and stops input', async () => {
+    const h = harness(ROOT);
+    const replies = [await h.openTask(), await h.openRepo(), await h.openRepo()];
+    const writes = h.attaches.map((pty) => vi.spyOn(pty, 'write'));
+    await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+    const exit = JSON.stringify({ type: 'exit', reason: 'provider_disabled' });
+    for (const [i, reply] of replies.entries()) {
+      if (!reply.ok) throw new Error('open failed');
+      expect(h.attaches[i]!.destroyed).toBe(true);
+      await h.sendInput(reply.sessionId);
+      expect(writes[i]).not.toHaveBeenCalled();
+      h.attaches[i]!.emit('end');
+      expect(h.stored()).toContainEqual([`${TERMINAL_EXIT_KEY_PREFIX}${reply.sessionId}`, exit]);
+    }
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([exit, exit, exit]);
+    expect(killCalls(h.execs)).toHaveLength(0);
+  });
+
+  it('leaves other providers and other users attached and accepting input', async () => {
+    const h = harness(ROOT);
+    await h.openRepo();
+    const others = [await h.openRepo('user-1', 'prov-2'), await h.openRepo('user-2')];
+    const writes = h.attaches.slice(1).map((pty) => vi.spyOn(pty, 'write'));
+    await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+    expect(h.attaches[0]!.destroyed).toBe(true);
+    for (const [i, reply] of others.entries()) {
+      if (!reply.ok) throw new Error('open failed');
+      expect(h.attaches[i + 1]!.destroyed).toBe(false);
+      await h.sendInput(reply.sessionId);
+      expect(writes[i]).toHaveBeenCalledWith('input');
+    }
+  });
+
+  it('keeps ordinary PTY exit notification when manager stop ended the attachment', async () => {
+    const h = harness(ROOT);
+    await h.mgr.start();
+    await h.openRepo();
+    await h.mgr.stop();
+    h.attaches[0]!.emit('end');
+    await new Promise((r) => setImmediate(r));
+    expect(h.published()).toContain(JSON.stringify({ type: 'exit' }));
+  });
+
+  it('refuses an open whose provider was disabled while its container was being ensured', async () => {
+    const h = harness(ROOT);
+    // The close-provider for this disable ran before the session existed and found nothing.
+    vi.mocked(ensureShellContainer).mockImplementationOnce(async () => {
+      h.provider.enabled = false;
+      await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+      return {
+        containerName: 'haive-shell-1',
+        shell: 'bash',
+        created: false,
+        imageTag: 'img',
+        cliName: 'claude-code',
+      };
+    });
+    await expect(h.openRepo()).rejects.toThrow(TERMINAL_PROVIDER_DISABLED_MESSAGE);
+    expect(h.attaches[0]!.destroyed).toBe(true);
+    const mgr = h.mgr as unknown as {
+      redis: { hset: Mock };
+      subscriber: { subscribe: Mock };
+    };
+    // The refused container is registered, so the idle reaper still removes it.
+    expect(mgr.redis.hset).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ containerName: 'haive-shell-1' }),
+    );
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('does not subscribe a session that a close-provider removed during the provider read', async () => {
+    const h = harness(ROOT);
+    const mgr = h.mgr as unknown as {
+      db: { query: { cliProviders: { findFirst: () => Promise<unknown> } } };
+      subscriber: { subscribe: Mock };
+    };
+    // The read saw the database before the disable committed.
+    mgr.db.query.cliProviders.findFirst = async () => {
+      await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+      return { enabled: true };
+    };
+    await expect(h.openRepo()).rejects.toThrow(TERMINAL_PROVIDER_DISABLED_MESSAGE);
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('does not subscribe a session that an api close removed during the provider read', async () => {
+    const h = harness(ROOT);
+    const mgr = h.mgr as unknown as {
+      db: { query: { cliProviders: { findFirst: () => Promise<unknown> } } };
+      sessions: Map<string, unknown>;
+      subscriber: { subscribe: Mock };
+    };
+    mgr.db.query.cliProviders.findFirst = async () => {
+      const [sessionId] = [...mgr.sessions.keys()];
+      await h.sendRequest({ op: 'close', sessionId });
+      return { enabled: true };
+    };
+    await expect(h.openRepo()).rejects.toThrow('the shell ended while it was opening');
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('answers a refused open with the provider-disabled close code', async () => {
+    const h = harness(ROOT);
+    await h.mgr.start();
+    h.provider.enabled = false;
+    vi.mocked(ensureShellContainer).mockImplementationOnce(async () => {
+      throw new TerminalProviderDisabledError();
+    });
+    await h.sendRequest({
+      op: 'open',
+      correlationId: 'c-off',
+      userId: 'user-1',
+      cliProviderId: 'prov-1',
+      scope: 'repo',
+      repositoryId: 'repo-1',
+    });
+    const reply = h
+      .published()
+      .map((raw) => {
+        try {
+          return JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((m) => m?.ok === false);
+    expect(reply).toEqual({
+      ok: false,
+      error: TERMINAL_PROVIDER_DISABLED_MESSAGE,
+      closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED,
+    });
+  });
+
+  it('ignores incomplete provider revocation requests', async () => {
+    const h = harness(ROOT);
+    await h.openRepo();
+    await h.sendRequest({ op: 'close-provider', cliProviderId: 'prov-1' });
+    await h.sendRequest({ op: 'close-provider', userId: 'user-1' });
     expect(h.attaches[0]!.destroyed).toBe(false);
   });
 });
