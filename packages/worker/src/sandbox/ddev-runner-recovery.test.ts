@@ -162,6 +162,7 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
       expect(err).not.toBeInstanceOf(RunnerProbeError);
       expect((err as Error).message).toMatch(/^ddev start failed \(runner .* kept;/);
       expect((err as Error).message).toContain('web container exited');
+      expect((err as Error).message).toContain('Rebuild DDEV in the task action menu');
       expect(mutations()).toEqual([]);
       expect(taskRunnerBusy(task)).toBe(false);
     },

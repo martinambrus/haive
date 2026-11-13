@@ -32,6 +32,28 @@ vi.mock('lucide-react', async (importOriginal) =>
   Object.fromEntries(Object.keys(await importOriginal<object>()).map((name) => [name, () => null])),
 );
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
+// The dialog's request/outcome behavior has its own DOM controls. Exercise the
+// page's notice lifecycle through its real callback without opening a portal.
+vi.mock('@/components/ddev-rebuild-dialog', async (original) => ({
+  ...(await original<typeof import('@/components/ddev-rebuild-dialog')>()),
+  DdevRebuildDialog: ({
+    taskId,
+    onQueued,
+  }: {
+    taskId: string | null;
+    onQueued: (notice: string, forTaskId: string) => void;
+  }) =>
+    taskId ? (
+      <>
+        <button onClick={() => onQueued('DDEV rebuild requested for this test.', taskId)}>
+          Confirm test rebuild
+        </button>
+        <button onClick={() => onQueued('DDEV rebuild requested for this test.', 'other-task')}>
+          Confirm stale rebuild
+        </button>
+      </>
+    ) : null,
+}));
 vi.mock('@/lib/use-cli-login', () => ({
   useCliLogin: () => ({ requireCliLogin: () => {}, closeCliLogin: () => {}, request: null }),
 }));
@@ -258,6 +280,91 @@ const stepCardText = (view: Renderer): string[] =>
   findAll(view.tree(), (h) => h.tag === 'div' && textOf(h).includes(STEP_TITLE)).map((h) =>
     textOf(h),
   );
+
+describe('task page: DDEV rebuild notice', () => {
+  async function requested() {
+    const view = await mount({ status: 'failed', pausedAt: null }, [
+      {
+        ...stepRow(),
+        stepId: '01c-ddev-env',
+        status: 'failed',
+        detectOutput: { ddevConfigured: true },
+      },
+    ]);
+    await menuLabels(view);
+    const action = findAll(
+      view.tree(),
+      (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Rebuild DDEV',
+    )[0];
+    expect(action).toBeDefined();
+    fire.click(action!);
+    await view.flush();
+    fire.click(buttons(view.tree(), /confirm test rebuild/i)[0]!);
+    await view.flush();
+    expect(textOf(view.tree())).toContain('DDEV rebuild requested');
+    return view;
+  }
+  async function poll(view: Renderer) {
+    vi.advanceTimersByTime(2000);
+    for (let i = 0; i < 5; i++) await view.flush();
+  }
+  it('keeps the notice across unchanged polls and copy-only changes', async () => {
+    const view = await requested();
+    (net.detail.steps as Record<string, unknown>[])[0]!.statusMessage = 'unrelated display copy';
+    await poll(view);
+    expect(textOf(view.tree())).toContain('DDEV rebuild requested');
+  });
+  it.each(['task', 'step', 'route'])(
+    'clears the notice on the next %s state change',
+    async (kind) => {
+      const view = await requested();
+      if (kind === 'task') (net.detail.task as Record<string, unknown>).status = 'running';
+      if (kind === 'step') (net.detail.steps as Record<string, unknown>[])[0]!.status = 'running';
+      if (kind === 'route') {
+        net.routeId = 't2';
+        (net.detail.task as Record<string, unknown>).id = 't2';
+        view.tree();
+      }
+      await poll(view);
+      expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
+    },
+  );
+  it('ignores a rebuild result that belongs to another task', async () => {
+    const view = await mount({ status: 'failed', pausedAt: null }, [
+      {
+        ...stepRow(),
+        stepId: '01c-ddev-env',
+        status: 'failed',
+        detectOutput: { ddevConfigured: true },
+      },
+    ]);
+    await menuLabels(view);
+    fire.click(
+      findAll(
+        view.tree(),
+        (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Rebuild DDEV',
+      )[0]!,
+    );
+    await view.flush();
+    fire.click(buttons(view.tree(), /confirm stale rebuild/i)[0]!);
+    await view.flush();
+    expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
+  });
+
+  it('lets the user dismiss the notice', async () => {
+    const view = await requested();
+    const dismiss = findAll(
+      view.tree(),
+      (h) => h.tag === 'button' && h.props['aria-label'] === 'Dismiss DDEV rebuild notice',
+    )[0];
+    expect(dismiss).toBeDefined();
+    fire.click(dismiss!);
+    await view.flush();
+    expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
+    await poll(view);
+    expect(textOf(view.tree())).not.toContain('DDEV rebuild requested');
+  });
+});
 
 describe('task page: an administrator pause', () => {
   it('P3 owner own pause: banner says Paused by you and Press Resume, and the menu offers Resume', async () => {
