@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown, fetchFn: vi.fn() }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -46,7 +47,7 @@ beforeEach(() => {
   vi.spyOn(configService, 'set').mockImplementation(async (key, value) => {
     stored.set(key, value);
   });
-  vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('ab'.repeat(32));
+  vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue(randomBytes(32).toString('hex'));
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -83,11 +84,30 @@ async function allowed(model: string, user = USER) {
 }
 
 describe('Ollama pull authorization before the stream and upstream request', () => {
+  it('refuses a foreign embedding registry before SSE or any daemon request, while preserving admin access', async () => {
+    const model = 'foreign.example:5000/library/embed';
+    stored.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, model);
+    fake.insert(schema.cliProviders, { userId: USER, name: 'ollama', model });
+    const res = await pull(model);
+    expect(res.status).toBe(403);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(await res.json()).toEqual({
+      code: 'ollama_model_not_allowed',
+      error: 'Ask an administrator to allow this model and registry in the Ollama model allowlist.',
+    });
+    expect(h.fetchFn).not.toHaveBeenCalled();
+    await allowed(model, ADMIN);
+  });
+  it('allows a foreign registry only after an administrator explicitly allowlists its reference', async () => {
+    const model = 'foreign.example:5000/library/embed';
+    stored.set(KEY, model);
+    await allowed(model);
+  });
   it('refuses an unlisted model with an actionable 403 and no upstream call', async () => {
     const res = await pull('unlisted:70b');
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({
-      error: expect.stringMatching(/Global KB.*administrator/i),
+      error: expect.stringMatching(/administrator.*allow/i),
     });
     expect(h.fetchFn).not.toHaveBeenCalled();
   });

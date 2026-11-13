@@ -189,14 +189,41 @@ built-in hosts, so the worker's dials are guarded too. `POST /global-kb/test-db`
 stored settings and ignores the body, so it dials only what an administrator saved, still through the guard. It
 stays open to them because the settings page and the status panel run it on load, where `requireAdmin` would 403.
 
-**Who may make Ollama pull a model.** An administrator may make the in-stack daemon pull any model. Anyone else may make it pull only the effective Global KB embedding model, the onboarding embedding default (`DEFAULT_EMBED_MODEL`), or an entry of the administrators' allowlist (`config:security:ollamaModelAllowlist`, admin `GET`/`PUT /admin/config/ollama-model-allowlist`, audited as `config.ollama_model_allowlist`, at most 256 exact names). A model named in the caller's own provider grants nothing, since the caller writes that provider. One policy (`@haive/shared`) is applied at every place a pull or create starts:
+**Who may make Ollama pull a model.** An administrator may make the in-stack daemon pull any model. Anyone else may make it pull only the effective Global KB embedding model or the onboarding embedding default (`DEFAULT_EMBED_MODEL`), each from the default registry only, or an entry of the administrators' allowlist (`config:security:ollamaModelAllowlist`, admin `GET`/`PUT /admin/config/ollama-model-allowlist`, audited as `config.ollama_model_allowlist`, at most 256 exact names). A model named in the caller's own provider grants nothing, since the caller writes that provider. One policy (`@haive/shared`) is applied at every place a pull or create starts:
 
 - `/tooling/pull-ollama-model`, whatever `ollamaUrl` the caller names, refuses with 403 before the stream opens.
 - An in-stack Ollama provider's create, duplicate and PATCH refuse with the same 403 (`code: 'ollama_model_not_allowed'`) before anything is written. A PATCH is checked only when it changes the model, the Modelfile `FROM` base, or moves the endpoint into the stack, so a provider saved earlier can still be renamed, disabled or deleted.
 - For a Modelfile provider the `FROM` base is what gets pulled; its own model name is a `/api/create` target and is not checked.
 - The worker re-reads the owner's current role and applies the policy just before it would pull or create, at provisioning and at the boot re-pull. A model that is already resident stays `ready`. A disallowed one is skipped with a warn and settles `idle` with no error, and boot goes on.
 
-Names compare as Ollama resolves them: registry `registry.ollama.ai`, namespace `library` and tag `latest` by default, case-insensitive, distinct tags distinct. A digest or a URL is refused. External Ollama endpoints are not gated: they pull on someone else's daemon. Sandboxed agents reach only the inference/read-only [Ollama gate](sandbox.md#in-stack-model-access) on the models network; the daemon is not attached there.
+Names compare as Ollama resolves them: registry `registry.ollama.ai`, namespace `library` and tag `latest` by default, case-insensitive, distinct tags distinct. A digest or a URL is refused.
+
+For a non-administrator, the embedding defaults grant pull permission only on the exact default
+registry `registry.ollama.ai`, with no port. An omitted host uses that default. An explicit
+foreign host, IP literal, `localhost`, port, trailing host dot, or differently cased spelling of
+`registry.ollama.ai` needs explicit administrator approval. The Global KB embedding-model setting
+and a provider's own model or Modelfile cannot grant that approval.
+The admin model allowlist is an intentional exception: a valid full reference such as
+`models.example:5000/library/embed:latest` approves that exact model and registry for non-admin pulls.
+Registry spelling (case included) and port must match the allowlist entry exactly; the remaining
+name parts keep their case-insensitive comparison and default tag. A default-registry allowlist
+entry cannot approve a foreign registry or a differently spelled default host. Administrators
+retain unrestricted registry access.
+
+The check lives in the shared `isOllamaModelAllowed` policy, so the tooling pull stream,
+provider create/PATCH/duplicate and the worker's provision/boot paths use the same decision,
+including a Modelfile's `FROM` base. Refusals remain JSON 403 `ollama_model_not_allowed` before
+streaming, writing a provider or queuing its provisioning. The worker skips a refused pull.
+Ollama's [name parser](https://github.com/ollama/ollama/blob/main/types/model/name.go) splits names
+from the right: three parts supply a registry, while two parts normally supply namespace/model.
+The permission check also conservatively treats a first segment containing `.` or `:`, or equal
+to `localhost` ignoring case, as a registry; it never reinterprets an invalid name as an allowed
+model. Empty path components and trailing slashes remain invalid.
+
+External Ollama provider endpoints are not gated: they pull on someone else's daemon. The tooling
+pull route applies its model policy regardless of the typed endpoint. Sandboxed agents reach only
+the inference/read-only [Ollama gate](sandbox.md#in-stack-model-access) on the models network; the
+daemon is not attached there.
 
 **What an administrator types is dialled unguarded, by decision.** The guard protects the install from users who
 are not administrators; an administrator already controls the install, so the dials only an administrator can
