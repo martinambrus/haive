@@ -902,6 +902,22 @@ PRE-EXISTING. Worker unless named.
 3. Minor: `queues/safe-processor.ts` ~:12 keeps raw filesystem errors in the IDE ensure queue transport (the browser answer is already generic).
 4. Coverage: `step-command`, `01b-install-plugins` and the IDE ensure path have no errno-refusal control at the boundary lookup; the ENOTDIR absent controls inject at the leaf lstat, which real fs-safe never reaches.
 
+### T642 · DDEV recovery cold-boots a live runner when its health exec fails
+
+status: open · kind: fix · found: #1127 driver and reviews 2026-11-13 · priority: P2
+PRE-EXISTING, consequential (data loss). Worker `sandbox/ddev-runner.ts`: `ensureDdevStartedInner` reads `ddev describe -j` (~:2210-2233); `runnerDockerdUp` (~:2090-2100) swallows any exec failure to `false`; `decideDdevRecovery` (~:2078-2086) then picks a cold boot, and `startDdevRunner` runs `docker rm -f -v` on the live runner (~:481), dropping its anonymous nested `/var/lib/docker` (images, project containers, database volumes). A daemon timeout during that exec is enough. Fix direction: the same present/absent/unknown split #1127 gave runner existence: an exec that gave no answer (`gitGaveNoAnswer`-style: timeout, no exit status) is unknown and holds the step for retry; only a definite "dockerd not up" answer may cold-boot. Controls: an exec timeout at each probe keeps the runner.
+
+### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+5)
+
+status: open · kind: fix · found: #1127 reviews 2026-11-13 · priority: P4
+PRE-EXISTING unless marked. Worker `sandbox/`.
+
+1. `ide-runner.ts` ~:623 `stopIdeRunner` swallows `docker stop`/`rm` failures and returns `true`, so a surviving editor is reported stopped (reaper deletes its session key; repository cleanup goes on to `volumeRemove`, which fails on an in-use volume).
+2. `queues/task-queue.ts` ~:4541 repository cleanup refunds the attempt on every `RunnerProbeError`, so `REPO_CLEANUP_MAX_ATTEMPTS` is never reached while a probe stays unknown (about every 10 min, forever). Same semantics as `RagCleanupDeferredError`. Cap consecutive refunds. (#1127, new instance of the pattern)
+3. `ide-runner.ts` ~:424 warm editor reuse never retries a debug setup that failed earlier. Minor.
+4. IDE user-data volumes (`ideUserDataVolumeName`, ide-runner.ts ~:669,687) have no orphan sweeper; any path that skips `killRepoIdeRunner` leaks one. Minor.
+5. `runner-probe.ts` ~:24 `RunnerProbeError.retryable` is read nowhere; retry is the user's step Retry or the next ensure. Keep it or drop it.
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
@@ -1173,7 +1189,7 @@ Execution fence 2026-11-01: first establish an affected legacy/current supported
 
 ### T451 · FNF[runner-liveness-probe] [verify-first] · a failed docker inspect of a runner's existence still reads as "no"
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: done 2026-11-13 #1127 (7c5d8c50b): tri-state `probeRunner` by exact-name `docker ps -a` listing (no stderr text read); unknown never removes or recreates app or editor runners or the DDEV registry mirror, keeps editor sessions, user-data volumes, the repository cleanup row and the browser surcharge; DDEV cold-boot path is T642, lows in T643 · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `containerExists` read a failed `docker inspect` as "not running" or "absent" (worker sandbox ide-runner.ts ~:87-105, app-runner.ts ~:76-93, the same shape in ddev-runner.ts ~:888, callers not traced), and `startIdeRunner` (ide-runner.ts ~:259) and `startAppRunner` (app-runner.ts ~:154) open with an unconditional `docker rm -f -v`, so a transient failure of that first probe still recreates a live runner. T441 closed only the workspace-label probe. Needs a tri-state existence read and a decision per call site. Cross-reference: T371 [verify-first] FNF[docker-spawn-dedup].
 
 Executable verification scope: Tri-state existence/inspect failure before destructive runner recreation; trace supported callers before a fault-injection control. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
