@@ -1,5 +1,7 @@
-import { isPathContainmentError, isResourceLimitError } from '@haive/shared/fs-safe';
+import { errno, isPathContainmentError } from '@haive/shared/fs-safe';
 import { HttpError } from '../context.js';
+
+const PATH_ERRNOS = new Set(['EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG', 'EISDIR']);
 
 /**
  * One rendering of a containment refusal for every route that reads a repository path.
@@ -28,7 +30,7 @@ export function containmentHttpError(
   }
   if (isPathContainmentError(err)) throw new HttpError(403, outside);
   if (err instanceof HttpError) throw err;
-  // A process out of descriptors is not a bad path: the api's 500, and its error log, answer for it.
-  if (isResourceLimitError(err)) throw err;
-  throw new HttpError(400, 'Path cannot be read');
+  // Only path faults blame the request. Host faults keep their structure for the 500 error log.
+  if (PATH_ERRNOS.has(errno(err) ?? '')) throw new HttpError(400, 'Path cannot be read');
+  throw err;
 }
