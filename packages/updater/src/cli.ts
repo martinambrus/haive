@@ -7,6 +7,7 @@ import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { configService, encryptionKeyBootDatabase, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
+import { readComposeContext } from './compose-context.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
@@ -194,10 +195,7 @@ export async function main(): Promise<number> {
   const pgVolume = arg('postgres-volume', process.env.HAIVE_POSTGRES_VOLUME ?? '')!;
   const envFile = `${installDir}/.env`;
 
-  const compose: dk.ComposeContext = {
-    dir: installDir,
-    files: ['docker-compose.yml', 'docker-compose.run.yml'],
-  };
+  const compose = await readComposeContext(installDir);
 
   let channel = 'public';
   const launchDockerConfig = process.env.DOCKER_CONFIG;

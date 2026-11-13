@@ -30,6 +30,15 @@ it from the dev override, so a published-image install would otherwise boot agai
 database. `HAIVE_VERSION` has no default so the command fails rather than silently resolving
 `latest`; which version an install runs is the question every upgrade and rollback turns on.
 
+The updater preserves the GPU overlay already present in the install directory. Every deployment
+compose call uses `docker-compose.yml`, then `docker-compose.run.yml`, then
+`docker-compose.gpu.yml` when present, otherwise `docker-compose.vulkan.yml` when present. NVIDIA
+wins if both files exist, matching the installer's selection order for the generated helper.
+Without either file the updater uses only base and run. It resolves that list once per invocation
+and shares it across image pulls, snapshot stop/restart, verification, rollback and interrupted-run
+recovery; it never probes for a GPU inside the updater container. The separate synthetic Compose
+model used to parse image settings from `.env` does not load the deployment files.
+
 ## The drain an upgrade runs first
 
 `haive upgrade` (the updater) reads `MAINTENANCE_STATE` under the fence described below and writes
