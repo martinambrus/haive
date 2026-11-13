@@ -121,6 +121,27 @@ export function findingUpstream(f: {
   return f.upstream === undefined ? upstreamKind(f.path ?? f.file) : f.upstream;
 }
 
+/** show/cat-file use the same failure status for absent entries and unreadable blobs.
+ * Only a separate quiet presence probe answering 1 establishes absence. */
+async function readBaseline(
+  workspace: string,
+  refPath: string,
+  existenceOnly = false,
+): Promise<string | null> {
+  const result = await gitRun(
+    workspace,
+    existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath],
+  );
+  if (result.code === 0) return result.stdout;
+  const description = existenceOnly ? `the Drupal 7 marker ${refPath}` : refPath;
+  if (gitGaveNoAnswer(result)) {
+    throw new Error(`Cannot read ${description} at the repository baseline: git gave no answer.`);
+  }
+  const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath]);
+  if (presence.code === 1) return null;
+  throw new Error(`Cannot read ${description} at the repository baseline: git read failed.`);
+}
+
 /** Ownership is read from the task's fork point, never from an agent's edited working copy. */
 export async function loadDependencyPolicy(
   ctx: StepContext,
@@ -138,25 +159,14 @@ export async function loadDependencyPolicy(
   if (base.code !== 0) {
     throw new Error('Cannot establish the repository baseline for dependency ownership.');
   }
-  const ownership = await gitRun(workspace, [
-    'show',
-    `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
-  ]);
-  if (gitGaveNoAnswer(ownership)) {
-    throw new Error(
-      'Cannot read the dependency ownership file at the repository baseline: git gave no answer.',
-    );
-  }
-  const baselineComposer = await gitRun(workspace, ['show', `${base.stdout.trim()}:composer.json`]);
-  if (gitGaveNoAnswer(baselineComposer)) {
-    throw new Error('Cannot read composer.json at the repository baseline: git gave no answer.');
-  }
+  const ownership = await readBaseline(workspace, `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`);
+  const baselineComposer = await readBaseline(workspace, `${base.stdout.trim()}:composer.json`);
   const { anchor, prefix } = workspaceAnchor(workspace);
   const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
   let drupal = false;
   const roots = [...DEFAULT_ROOTS];
   // Removing the framework from the working manifest cannot remove its protection.
-  for (const raw of [baselineComposer.code === 0 ? baselineComposer.stdout : null, composer]) {
+  for (const raw of [baselineComposer, composer]) {
     if (!raw) continue;
     let manifest: {
       type?: string;
@@ -183,20 +193,8 @@ export async function loadDependencyPolicy(
   const drupal7Roots: string[] = [];
   for (const root of new Set(roots)) {
     const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
-    const baselineDrupal7 = await gitRun(workspace, [
-      'cat-file',
-      '-e',
-      `${base.stdout.trim()}:${marker}`,
-    ]);
-    if (gitGaveNoAnswer(baselineDrupal7)) {
-      throw new Error(
-        'Cannot read the Drupal 7 marker at the repository baseline: git gave no answer.',
-      );
-    }
-    if (
-      baselineDrupal7.code === 0 ||
-      (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null
-    ) {
+    const baselineDrupal7 = await readBaseline(workspace, `${base.stdout.trim()}:${marker}`, true);
+    if (baselineDrupal7 !== null || (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null) {
       drupal7Roots.push(root);
     }
   }
@@ -211,7 +209,7 @@ export async function loadDependencyPolicy(
     drupal7,
     drupal7Roots,
     drupalRoots: [...new Set(roots)],
-    ownedPaths: parseDependencyOwnership(ownership.code === 0 ? ownership.stdout : null),
+    ownedPaths: parseDependencyOwnership(ownership),
   };
 }
 
