@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { failGit, type FakeGit } from '../../test/support/fake-git.js';
+import { gitTemplate } from '../../test/support/git-template.js';
 import { listBranchProjectionEdits, revertHaiveProjectionsOnBranch } from './branch-revert.js';
 
 const resourceFault = vi.hoisted(() => ({ leaf: '', error: null as Error | null }));
@@ -57,16 +57,23 @@ async function commit(dir: string, files: Record<string, string>, message: strin
   await git(dir, ['commit', '-qm', message]);
 }
 
-/** A repository on `main` holding the record `"fork"`, and a `feature/x` worktree. */
-async function fixture(): Promise<{ parent: string; wt: string }> {
-  const parent = await mkdtemp(path.join(tmpdir(), 'br-unknown-'));
-  dirs.push(parent);
+const template = gitTemplate(async (parent) => {
   await git(parent, ['init', '-q', '-b', 'main']);
   await git(parent, ['config', 'gc.auto', '0']);
   await commit(parent, { 'base.txt': 'base\n', [FILE]: '"fork"\n' }, 'initial');
   const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
   await mkdir(path.dirname(wt), { recursive: true });
   await git(parent, ['worktree', 'add', '-q', '-b', 'feature/x', wt, 'main']);
+});
+
+/** A repository on `main` holding the record `"fork"`, and a `feature/x` worktree. */
+async function fixture(): Promise<{ parent: string; wt: string }> {
+  const { dir: parent } = await template.copy();
+  dirs.push(parent);
+  const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
+  // A linked worktree records absolute paths in both directions; neither copy may use the template.
+  await writeFile(path.join(wt, '.git'), `gitdir: ${parent}/.git/worktrees/feature-x\n`);
+  await writeFile(path.join(parent, '.git/worktrees/feature-x/gitdir'), `${wt}/.git\n`);
   return { parent, wt };
 }
 
