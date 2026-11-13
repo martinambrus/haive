@@ -205,7 +205,7 @@ function refused(
 export async function reserveAuthAttempt(
   c: Context,
   scope: Scope,
-  account?: string,
+  account: string,
 ): Promise<AuthAttempt> {
   let keys: string[];
   let member: string;
@@ -216,8 +216,8 @@ export async function reserveAuthAttempt(
     redis = getRedis();
     if (redis.status !== 'ready') throw new Error(`redis is ${redis.status}`);
     const address = countedAddress(c);
-    keys = account === undefined ? [] : [`${KEY_PREFIX}${scope}:acct:${account}`];
-    const limits = account === undefined ? [] : [AUTH_ACCOUNT_LIMIT];
+    keys = [`${KEY_PREFIX}${scope}:acct:${account}`];
+    const limits = [AUTH_ACCOUNT_LIMIT];
     if (address !== undefined) {
       keys.push(`${KEY_PREFIX}${scope}:ip:${addressBucket(address)}`);
       limits.push(AUTH_IP_LIMIT);
@@ -266,7 +266,7 @@ export async function reserveAuthAttempt(
       scope,
       Number(waitMs),
       auditAllowed,
-      account !== undefined && rejectedKey === keys[0] ? 'account' : 'address',
+      rejectedKey === keys[0] ? 'account' : 'address',
     );
   }
   return {
