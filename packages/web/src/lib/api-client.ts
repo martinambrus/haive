@@ -331,7 +331,8 @@ export async function getEstimationAccuracy(
 
 export interface User {
   id: string;
-  email: string;
+  email: string | null;
+  emailReadable?: boolean;
   role: 'admin' | 'user';
   status: 'active' | 'deactivated';
   createdAt: string;
@@ -1583,7 +1584,8 @@ export interface TaskFileContent {
 
 export interface AdminUser {
   id: string;
-  email: string;
+  email: string | null;
+  emailReadable?: boolean;
   role: 'admin' | 'user';
   status: 'active' | 'deactivated';
   tokenVersion: number;
@@ -1628,6 +1630,7 @@ export interface AuditEvent {
   id: string;
   actorUserId: string;
   actorEmail: string | null;
+  actorEmailReadable?: boolean | null;
   action: string;
   targetType: string;
   targetId: string | null;
@@ -2515,6 +2518,7 @@ export interface BlockingTask {
   ownerId: string | null;
   ownerName: string | null;
   ownerEmail: string | null;
+  ownerEmailReadable?: boolean | null;
   hasLiveCli: boolean;
 }
 
@@ -2528,6 +2532,7 @@ export interface BlockingJob {
   ownerId: string | null;
   ownerName: string | null;
   ownerEmail: string | null;
+  ownerEmailReadable?: boolean | null;
 }
 
 export interface BlockingResponse {

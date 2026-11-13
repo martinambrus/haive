@@ -46,6 +46,34 @@ export function decryptEmail(encryptedEmail: string, keyHex: string): string {
   return decrypt(encryptedEmail, keyHex);
 }
 
+/** User fields can outlive their key. Configuration and cipher setup errors still surface. */
+export function tryDecrypt(encryptedData: string, keyHex: string): string | null {
+  const key = keyBufferFromHex(keyHex);
+  const parts = encryptedData.split(':');
+  if (parts.length !== 3) return null;
+  const [iv, tag, ciphertext] = parts as [string, string, string];
+  if (
+    !/^[\da-f]{32}$/i.test(iv) ||
+    !/^[\da-f]{32}$/i.test(tag) ||
+    !/^(?:[\da-f]{2})*$/i.test(ciphertext)
+  )
+    return null;
+  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(tag, 'hex'));
+  const plaintext = decipher.update(ciphertext, 'hex', 'utf8');
+  // Node's GCM final() has no stable error code for a bad tag. Isolating exactly
+  // that operation identifies the failure without matching its message text.
+  try {
+    return plaintext + decipher.final('utf8');
+  } catch {
+    return null;
+  }
+}
+
+export function tryDecryptEmail(encryptedEmail: string, keyHex: string): string | null {
+  return tryDecrypt(encryptedEmail, keyHex);
+}
+
 export function computeEmailBlindIndex(email: string, pepper: string): string {
   const normalized = email.toLowerCase().trim();
   return createHmac('sha256', pepper).update(normalized).digest('hex');

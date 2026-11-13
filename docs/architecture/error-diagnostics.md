@@ -108,12 +108,58 @@ volume with no env key used to mint a new key with a warn and orphan every secre
 `HAIVE_DISCARD_UNREADABLE_SECRETS=1` (exactly `1`; api and worker): boot deletes every `system_secrets` row (master key,
 JWT secret, email pepper, the global KB connection string) in the same transaction as a
 system-actor audit row, logs a warn with the row count, then publishes the new key. User fields and
-envelopes stay stored and keep failing their existing decrypt checks. Known gap: existing accounts
-cannot sign in afterwards (a regenerated pepper matches no stored email index, and setup stays closed
-while users exist), and the override has no recovery step for that yet. Remove the setting once boot
+envelopes stay stored. User email and phone reads use `tryDecryptEmail` / `tryDecrypt`: malformed
+ciphertext or a failed GCM tag answers `null` with a readability flag instead of failing the request.
+The admin user list, audit actors and account settings show "unreadable, needs relink"; a missing
+phone is distinct from an unreadable one. Other encrypted secrets retain their existing checks.
+A regenerated pepper matches no old email index, and setup stays closed while users exist; recover
+one administrator with the host command below. Remove the setting once boot
 succeeds. Concurrent boots and a crash between commit and publish reuse one Redis-reserved pending key
 and audit id; the reserve and publish Lua scripts run against a real Redis in CI
 (`encryption-key-boot-redis.test.ts`). A boot with a usable env key, and the fallback recovery, seed that key only while no pending exists: a pending younger than 10 minutes (`PENDING_ENCRYPTION_KEY_WAIT_MS`, timed by its `reservedAt`) is a discard in progress, so boot waits and retries; an older one, or one without a readable `reservedAt`, is a discard a crash interrupted, and boot exits naming Redis key `bootstrap:pendingEncryptionKey` with the two ways out: restart without `CONFIG_ENCRYPTION_KEY` and with the override to finish it, or, when `audit_events` holds no `config.discard_unreadable_secrets` row whose id is the pending JSON's `id` (the discard did not commit), delete that key and restart to keep the secrets. The updater gives boot its own short-lived one-connection client, since Drizzle rewrites the codecs of the postgres.js client it wraps and the updater's journal needs its own.
+
+**Recover an administrator after key loss.** First let boot finish with the discard override, then
+remove the override. From an installed release's directory, run:
+
+```sh
+./haive recover-admin --email admin@example.com
+# When there are several administrators, choose one of the ids the command lists:
+./haive recover-admin --email admin@example.com --user-id <admin-uuid>
+```
+
+The helper runs the installed version's updater image on this install's network, with its database,
+Redis and configuration key. It needs neither the Docker socket nor a repository mount in that
+container. In the development stack, after updating dependencies with `pnpm docker rebuild`, use
+its existing API container (replace `haive-api` when the install has a different id):
+
+```sh
+docker exec -it haive-api sh -lc 'cd /app && pnpm --filter @haive/updater exec tsx src/recover-admin-cli.ts --email admin@example.com'
+```
+
+For a host invocation, `DATABASE_URL`, `REDIS_URL` and, when configured, `CONFIG_ENCRYPTION_KEY` must
+point to that same install; run `pnpm --filter @haive/updater exec tsx src/recover-admin-cli.ts` with
+the same arguments. A missing key still follows the normal boot refusal; this command is not a
+second discard override.
+
+The command selects the sole administrator or the explicit `--user-id`, refusing an email held by
+another readable account. It reactivates the selected administrator if needed. One transaction repairs the chosen
+email and blind index, sets a temporary password, requires a password change and increments the
+session token version. Every other account whose email is unreadable gets a bcrypt hash of 32
+random bytes, the same password-change flag and its own token-version increment. Existing passwords
+stop working; no repositories or tasks are deleted. A collision held only by an unreadable account
+is released in that transaction. The only secret printed is the temporary admin password, once,
+after commit. Sign in and replace it on the Account page. Token-version changes fence subsequent
+requests and refreshes; as with other out-of-band database edits, already-open sockets close when
+they disconnect or the API restarts.
+
+Required system-actor audit rows (`user.recover_admin`, `user.recovery.clear_password`) commit with
+the user changes; a refused audit undoes the recovery. A clearance row records only the target,
+a digest of its ciphertext and the resulting token version. A rerun reissues the administrator's
+password but leaves already-cleared orphan rows alone while those markers still match. Repaired
+admin email ciphertext is retained on a rerun with the same address. Recovery does not restore old
+phone ciphertext or other encrypted secrets. Forgot-password email and admin relinking are later
+work; this command restores one administrator independently of them. Rollback: revert the code
+change; no schema migration is needed. Committed password resets cannot be undone by a code revert.
 
 The api answers `ConfigUnavailableError` with 503
 `{ error: 'Service temporarily unavailable', code: 'config_unavailable' }` and leaks no key or host.

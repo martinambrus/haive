@@ -34,7 +34,7 @@ interface UiPrefsBlob {
 interface MeResponse {
   user: {
     id: string;
-    email: string;
+    email: string | null;
     role: 'admin' | 'user';
     status: 'active' | 'deactivated';
     /** Optional: an api that predates the column omits it, and the guard must fail open. */
@@ -136,7 +136,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         }
       >
         <SidebarNav
-          email={data.user.email}
+          email={data.user.email ?? 'unreadable, needs relink'}
           role={data.user.role}
           initialWidthPx={clampSidebarWidth(prefs.sidebarWidthPx ?? SIDEBAR_DEFAULT_PX)}
           initialCollapsed={prefs.sidebarCollapsed === true}

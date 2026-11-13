@@ -86,7 +86,9 @@ function TaskRow({
           ) : null}
         </div>
         <div className="mt-1 text-xs text-neutral-500">
-          {t.ownerName ?? t.ownerEmail ?? 'unknown owner'}
+          {t.ownerName ??
+            t.ownerEmail ??
+            (t.ownerEmailReadable === false ? 'unreadable, needs relink' : 'unknown owner')}
           {t.currentStepId ? ` · ${t.currentStepId}` : ''} · {shortTime(t.updatedAt)}
         </div>
       </div>
@@ -350,7 +352,12 @@ export default function MaintenancePage() {
                     <Badge variant="info">{j.status}</Badge>
                   </div>
                   <div className="mt-1 text-xs text-neutral-500">
-                    {j.ownerName ?? j.ownerEmail ?? 'unknown owner'} · {shortTime(j.updatedAt)}
+                    {j.ownerName ??
+                      j.ownerEmail ??
+                      (j.ownerEmailReadable === false
+                        ? 'unreadable, needs relink'
+                        : 'unknown owner')}{' '}
+                    · {shortTime(j.updatedAt)}
                   </div>
                 </div>
               </div>

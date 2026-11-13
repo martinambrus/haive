@@ -92,10 +92,10 @@ export default function AdminUsersPage() {
     if (role) payload.role = role;
 
     const confirmMessages: Record<AdminUserAction, string> = {
-      deactivate: `Deactivate ${user.email}? This revokes their active sessions.`,
-      activate: `Reactivate ${user.email}?`,
-      reset_password: `Reset password for ${user.email}? A new temporary password will be shown once.`,
-      set_role: `Change role for ${user.email} to ${role}?`,
+      deactivate: `Deactivate ${user.email ?? 'unreadable, needs relink'}? This revokes their active sessions.`,
+      activate: `Reactivate ${user.email ?? 'unreadable, needs relink'}?`,
+      reset_password: `Reset password for ${user.email ?? 'unreadable, needs relink'}? A new temporary password will be shown once.`,
+      set_role: `Change role for ${user.email ?? 'unreadable, needs relink'} to ${role}?`,
     };
     if (!confirm(confirmMessages[action])) return;
 
@@ -358,7 +358,7 @@ export default function AdminUsersPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="truncate text-base font-semibold text-neutral-50">
-                        {user.email}
+                        {user.email ?? 'unreadable, needs relink'}
                       </h3>
                       <Badge variant={user.role === 'admin' ? 'success' : 'default'}>
                         {user.role}

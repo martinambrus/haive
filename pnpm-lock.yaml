@@ -235,10 +235,19 @@ importers:
       '@haive/shared':
         specifier: workspace:*
         version: link:../shared
+      bcrypt:
+        specifier: ^6.0.0
+        version: 6.0.0
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=ba95541661260fe9eb74b4a42591259909862f0d0f185e65d5f4703259501945))
       postgres:
         specifier: ^3.4.5
         version: 3.4.9(patch_hash=ba95541661260fe9eb74b4a42591259909862f0d0f185e65d5f4703259501945)
     devDependencies:
+      '@types/bcrypt':
+        specifier: ^6.0.0
+        version: 6.0.0
       '@types/node':
         specifier: ^26.6.4
         version: 26.6.4

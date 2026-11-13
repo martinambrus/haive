@@ -147,7 +147,7 @@ export default function AuditLogPage() {
             <option value="">All</option>
             {users.map((u) => (
               <option key={u.id} value={u.id}>
-                {u.email}
+                {u.email ?? 'unreadable, needs relink'}
               </option>
             ))}
           </select>
@@ -200,7 +200,9 @@ export default function AuditLogPage() {
                   {new Date(ev.createdAt).toLocaleString()}
                 </td>
                 <td className="px-3 py-2 text-neutral-200" title={ev.actorUserId}>
-                  {ev.actorEmail ?? `${ev.actorUserId.slice(0, 8)}…`}
+                  {ev.actorEmailReadable === false
+                    ? 'unreadable, needs relink'
+                    : (ev.actorEmail ?? `${ev.actorUserId.slice(0, 8)}…`)}
                 </td>
                 <td className="px-3 py-2">
                   <Badge variant={actionVariant(ev.action)}>{ev.action}</Badge>
