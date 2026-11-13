@@ -190,8 +190,9 @@ function within<T>(promise: Promise<T>, ms = DEADLINE_MS): Promise<T | typeof NO
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// Drain pending listener callbacks after the awaited probe, without a wall-clock sleep.
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+// A real wait: the negative checks prove a refused probe never connects, which a single
+// event-loop turn is too short to show.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
 function sseEvents(text: string): Array<{ event: string; data: any }> {
   return text
