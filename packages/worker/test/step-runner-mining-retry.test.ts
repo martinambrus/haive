@@ -856,6 +856,111 @@ describe('advanceStep apply-to-form continuation', () => {
   });
 });
 
+describe('advanceStep saved mining replies after apply failure', () => {
+  it('re-applies saved replies without buying agents after apply failed', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, { consumedAt: null }),
+      miningRow('security-code-reviewer', 1, { consumedAt: null }),
+    ]);
+    const calls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const step = noRetryMiningStep(calls);
+    const apply = step.apply;
+    let busy = true;
+    step.apply = async (ctx, args) => {
+      if (busy) throw new Error('Plan patch is busy');
+      return apply(ctx, args);
+    };
+    const db = makeMockDb(state);
+    vi.spyOn(db.query.tasks, 'findFirst').mockResolvedValue({ summaryLlmEnabled: false } as never);
+    expect((await run(db, step, enqueued)).status).toBe('failed');
+    // The Resume route reopens the row and keeps the detection, answers and agents.
+    Object.assign(state.taskStepRow, { status: 'running', errorMessage: null, endedAt: null });
+    busy = false;
+    expect((await run(db, step, enqueued)).status).toBe('done');
+    expect(enqueued).toHaveLength(0);
+    expect(state.inserts.filter((r) => r.table === 'cli_invocations')).toHaveLength(0);
+    expect(calls[0]!.newAgentMiningResults).toHaveLength(2);
+    expect(calls[0]!.agentMiningResults?.map((r) => r.rawOutput)).toEqual([
+      'prose, no json',
+      'prose, no json',
+    ]);
+  });
+
+  it('dispatches the whole fan-out after Retry removed the saved rows', async () => {
+    const state = freshState([]);
+    state.taskStepRow.status = 'running';
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), noRetryMiningStep([]), enqueued)).status).toBe(
+      'waiting_cli',
+    );
+    expect(enqueued).toHaveLength(2);
+    expect(
+      state.inserts.filter((r) => r.table === 'cli_invocations' && r.row.mode === 'agent_mining'),
+    ).toHaveLength(2);
+  });
+
+  it('keeps earlier waves consumed while re-applying the unapplied replies', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, { consumedAt: new Date() }),
+      miningRow('security-code-reviewer', 1, { consumedAt: null }),
+    ]);
+    state.taskStepRow.status = 'running';
+    const calls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), noRetryMiningStep(calls), enqueued)).status).toBe('done');
+    expect(enqueued).toHaveLength(0);
+    expect(calls[0]!.agentMiningResults).toHaveLength(2);
+    expect(calls[0]!.newAgentMiningResults?.map((r) => r.agentId)).toEqual([
+      'security-code-reviewer',
+    ]);
+  });
+
+  it('reports a missing reply as failed when no dispatch prompt can be recovered', async () => {
+    const state = freshState([
+      miningRow('retained-wave-agent', 1, {
+        status: 'failed',
+        rawOutput: null,
+        output: null,
+        cliInvocationId: null,
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    const calls: StepApplyArgs[] = [];
+    const step = noRetryMiningStep(calls);
+    step.agentMining!.selectAgents = async () => [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), step, enqueued);
+    expect(enqueued).toHaveLength(0);
+    expect(calls[0]!.agentMiningResults).toMatchObject([
+      {
+        agentId: 'retained-wave-agent',
+        status: 'failed',
+      },
+    ]);
+  });
+
+  it('re-dispatches a marked done row without a reply instead of folding it empty', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 9, {
+        rawOutput: null,
+        output: null,
+        userRetryRequestedAt: new Date(),
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    state.taskStepRow.status = 'running';
+    const calls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), noRetryMiningStep(calls), enqueued)).status).toBe(
+      'waiting_cli',
+    );
+    expect(enqueued.map((r) => r.agentMiningId)).toEqual(['mining-peer-reviewer']);
+    expect(calls).toHaveLength(0);
+    expect(writesTo(state, 'mining-security-code-reviewer')).toHaveLength(0);
+  });
+});
+
 describe('advanceStep agentMining user-requested re-run', () => {
   it('re-runs only the marked terminal and leaves a done sibling alone', async () => {
     const state = freshState([

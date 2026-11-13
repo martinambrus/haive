@@ -3,13 +3,11 @@
  * review, WITHOUT throwing away the agents that already answered.
  *
  * The step's own fan-out is the expensive thing in a plan build — up to
- * SEQUENCE_AGENTS_PER_PASS runs, hours of wall clock — and both UI recoveries
- * spend it again: Retry calls resetRowsForRerun, which DELETES every
- * task_step_agent_minings row, and Resume refuses a step with no failed agent
- * and no iterations ("Resume is only available for a multi-iteration step").
- * So a step whose agents all SUCCEEDED and then hit a bug on the way to the
- * review form has no cheap way back. This is that way back: clear the cached
- * detect/form so advanceStep recomputes them, and hand the step to the worker.
+ * SEQUENCE_AGENTS_PER_PASS runs, hours of wall clock. Retry calls
+ * resetRowsForRerun, which DELETES every task_step_agent_minings row. Resume
+ * now re-applies saved replies after apply fails, without buying those agents
+ * again. This repair additionally clears the cached detect/form so advanceStep
+ * recomputes them and offers the end-of-pass review form again.
  *
  * Safe to re-run. The guard is the step's own status, not the error text — a
  * message column is display copy and outlives what it describes, so keying on

@@ -51,6 +51,25 @@ returns the runs its rows name; one the sweep missed rolls the release back, and
 sweeps that run first, so the lock order holds; it repeats while passes keep linking, up to five
 attempts, the last of which commits. A deadlock abort also gets that one retry.
 
+**Resume keeps saved replies when apply failed.** A failed step with settled mining rows may
+Resume even when every agent is done: the api reopens the step, keeps detection, answers and mining
+rows, bumps the task epoch and queues its continuation. It marks only failed agents and done agents
+without a saved reply as failed work for the worker's existing user-requested re-dispatch. The parsed payload takes
+precedence over raw prose; null or whitespace-only prose is missing, while a structured payload is
+saved even without a raw copy. The worker folds the retained replies, preserving `consumed_at` so
+wave-aware steps do not fold an earlier wave twice. A done step with all agents done cannot Resume;
+the existing recovery of degraded steps with failed agents remains. Live siblings still refuse
+Resume, and Retry still deletes every mining row and buys the whole fan-out again. The web offers
+the saved-reply action only for a failed step with done rows and no in-flight agents, based on
+structural counts and status, never message copy. A fan-out loop with completed
+passes (`iterationCount > 0`, with or without `cliRoles`) keeps the loop Resume arm, its unconsumed-invocation sweep and
+`resumedFromIteration` response, and the web's "keep N passes" label and confirmation.
+
+The non-resumable refusal remains HTTP 409 with code `not_resumable`. Its copy changed from
+"Resume is only available for a multi-iteration step — use Retry instead" to "Resume requires
+saved agent work or a resumable pass — use Retry instead"; callers and controls use status and
+code rather than that wording.
+
 **A run's end and its mining result land together, on the row still linked to it.**
 `handleCliExecJob` writes both in one transaction, on the success path and the failure path, so no
 crash can leave a run ended beside an agent row still `running`. Every write it makes to a mining

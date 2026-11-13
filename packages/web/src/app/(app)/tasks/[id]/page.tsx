@@ -479,7 +479,7 @@ const BIZ_REQ_REVIEW_STEP_ID = '03c-business-requirements-review';
 const BIZ_REQ_RERUN_TITLE =
   'Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft.';
 const RESUME_TITLE =
-  'Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI.';
+  'Continue from where this step failed, keeping saved replies and completed passes. Missing replies and failed passes re-run with the selected CLI; pick a different one above first if needed.';
 const RETRY_TITLE = 'Reset this step and re-run it (downstream steps will also reset)';
 
 /** A failed step that can resume from the pass that failed instead of resetting to pass 0.
@@ -501,8 +501,14 @@ function isResumableStep(
   // subset as the whole fan-out — observed as "keep 8 of 9 terminals" on a 13-wide 08c with 4
   // still running. Once inFlight is 0, done + failed IS the fan-out, so the label is correct
   // as written. Stop / Stop & retry stay available meanwhile.
-  if ((step.agentCounts?.failed ?? 0) > 0) return (step.agentCounts?.inFlight ?? 0) === 0;
+  const settled = (step.agentCounts?.inFlight ?? 0) === 0;
+  if ((step.agentCounts?.failed ?? 0) > 0) return settled;
+  if ((step.agentCounts?.done ?? 0) > 0) return settled && step.status === 'failed';
   return step.status === 'failed' && (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0);
+}
+
+function resumesSavedReplies(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'>): boolean {
+  return (step.agentCounts?.done ?? 0) > 0 && step.iterationCount <= 0;
 }
 
 function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'>): string {
@@ -513,6 +519,7 @@ function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'
       ? `Resume (keep ${kept} of ${kept + failed} terminals)`
       : `Re-run ${failed} failed terminal${failed === 1 ? '' : 's'}`;
   }
+  if (resumesSavedReplies(step)) return 'Resume (apply saved replies)';
   return step.iterationCount > 0
     ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
     : 'Resume (new CLI)';
@@ -1413,9 +1420,11 @@ export default function TaskDetailPage() {
                         ? ` ${downstreamCount} downstream step(s) will also be reset and re-run.`
                         : ''
                     }`
-                  : step.iterationCount > 0
-                    ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
-                    : `Resume this step's first pass with the currently-selected CLI?`
+                  : resumesSavedReplies(step)
+                    ? 'Apply the saved agent replies again? Any missing replies will be re-run.'
+                    : step.iterationCount > 0
+                      ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
+                      : `Resume this step's first pass with the currently-selected CLI?`
                 : downstreamCount
                   ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
                   : 'Retry this step?';

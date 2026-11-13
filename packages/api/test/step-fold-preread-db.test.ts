@@ -925,7 +925,6 @@ describe.skipIf(!url)(
     const notResumable = {
       status: 409,
       code: 'not_resumable',
-      message: 'Resume is only available for a multi-iteration step — use Retry instead',
     };
 
     it.each([
@@ -1040,6 +1039,7 @@ describe.skipIf(!url)(
             taskStepId: STEP.id,
             agentId: 'kept-reviewer',
             status: 'done',
+            rawOutput: 'Saved reply',
           })
           .returning();
         let expected: typeof schema.taskSteps.$inferSelect | undefined;

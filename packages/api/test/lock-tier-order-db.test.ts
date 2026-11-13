@@ -696,7 +696,12 @@ describe.skipIf(!url)(
           await seedStep(taskId, { status: 'failed' });
           await seedMining();
           await seedMining({ id: OTHER_FAILED_MINING, agentId: 'agent-f' });
-          await seedMining({ id: DONE_MINING, agentId: 'agent-d', status: 'done' });
+          await seedMining({
+            id: DONE_MINING,
+            agentId: 'agent-d',
+            status: 'done',
+            rawOutput: 'Saved reply',
+          });
 
           const result = await stepAction(taskId, 'resume');
 
