@@ -252,7 +252,8 @@ it.each([true, false])(
 it.each([true, false])(
   'Ollama provisioning stores and returns a safe ready-write failure (bound: %s)',
   async (bound) => {
-    const fake = createFakeDb({ cliProviders: schema.cliProviders });
+    const fake = createFakeDb({ cliProviders: schema.cliProviders, users: schema.users });
+    fake.insert(schema.users, { id: USER, role: 'admin' });
     fake.insert(schema.cliProviders, {
       id: PROVIDER,
       userId: USER,
@@ -262,17 +263,18 @@ it.each([true, false])(
     const error = failure(bound);
     let writes = 0;
     fake.hooks.beforeUpdate = () => {
-      if (++writes === 2) throw error;
+      if (++writes === 1) throw error; // resident model: the first write is ready
     };
     const fetch = vi.fn(async () => Response.json({ models: [{ name: 'fixture-model' }] }));
     vi.stubGlobal('fetch', fetch);
     const result = await provisionOllamaProvider(fake.db as unknown as Database, {
       id: PROVIDER,
+      userId: USER,
       model: 'fixture-model',
       modelfile: null,
       envVars: null,
     });
-    expect(writes).toBe(3); // provisioning, failed ready write, failed status
+    expect(writes).toBe(2); // failed ready write, then failed status (no provisioning needed)
     expect(fetch).toHaveBeenCalledOnce();
     const stored = fake.rows(schema.cliProviders)[0]!;
     expect(stored.modelProvisionStatus).toBe('failed');

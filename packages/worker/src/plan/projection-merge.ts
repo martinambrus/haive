@@ -29,7 +29,8 @@ import {
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
 import { logger } from '@haive/shared/logger';
-import { gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { provesUnbornHead } from '../repo/unborn-head.js';
 import { unmergedPaths } from '../step-engine/git-merge.js';
 
 export interface ProjectionResolution {
@@ -43,7 +44,21 @@ const BYTES = { encoding: 'latin1' as const };
 
 export async function readBlob(worktreePath: string, sha: string): Promise<Buffer | null> {
   const res = await gitRun(worktreePath, ['cat-file', 'blob', sha], undefined, BYTES);
-  return res.code === 0 ? Buffer.from(res.stdout, 'latin1') : null;
+  if (res.code === 0) return Buffer.from(res.stdout, 'latin1');
+  if (!gitGaveNoAnswer(res) && sha.startsWith('HEAD:')) {
+    const listing = await gitRun(worktreePath, [
+      'ls-tree',
+      '-z',
+      'HEAD',
+      '--',
+      `:(literal)${sha.slice('HEAD:'.length)}`,
+    ]);
+    if (listing.code === 0 && listing.stdout === '' && listing.stderr === '') return null;
+    if (listing.code !== 0 && !gitGaveNoAnswer(listing) && (await provesUnbornHead(worktreePath))) {
+      return null;
+    }
+  }
+  throw new Error(`git cat-file blob failed in ${worktreePath} for ${sha} (exit ${res.code})`);
 }
 
 /** The bytes of each stage git holds for `path`: 1 base, 2 ours, 3 theirs. */

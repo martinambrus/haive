@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   gdb: undefined as unknown,
   state: 'normal',
+  role: 'user',
   dbCalls: 0,
   queued: [] as string[],
   jobs: [] as string[],
@@ -48,6 +49,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
+    c.set('userRole', h.role);
     await next();
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
@@ -231,6 +233,7 @@ const post = (route: { path: string; body: unknown }) => app.request(route.path,
 
 beforeEach(() => {
   h.state = 'normal';
+  h.role = 'user';
   vi.spyOn(configService, 'get').mockResolvedValue('true');
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   vi.spyOn(configService, 'getFresh').mockImplementation(async () => h.state);
@@ -1439,7 +1442,11 @@ describe('the routes that start a background job', () => {
     },
     {
       name: 'PATCH /cli-providers/:id, which changes the model an ollama provider pulls',
-      prepare: (fx) => provider(fx, { name: 'ollama', model: 'qwen3-coder:30b' }),
+      prepare: (fx) => {
+        // This row exercises maintenance admission for an authorized model change.
+        h.role = 'admin';
+        provider(fx, { name: 'ollama', model: 'qwen3-coder:30b' });
+      },
       send: (app) =>
         app.request(
           `/cli-providers/${JOB_PROVIDER}`,
