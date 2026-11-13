@@ -2570,9 +2570,11 @@ function AdminPageInner() {
             <CardTitle>Ollama model allowlist</CardTitle>
             <CardDescription>
               Users can pull models named in their saved CLI providers or the Global KB embedding
-              configuration, plus the models listed here. Administrators can pull any model. Enter
-              one model per line or comma-separated, at most 256 names and 16 KiB of text. Names are
-              case-insensitive; an omitted tag means :latest. Other tags need their own entry.
+              configuration from the default Ollama registry, plus the models listed here.
+              Administrators can pull any model from any registry. Enter one model per line or
+              comma-separated, at most 256 names and 16 KiB of text. Model names are
+              case-insensitive; a registry host must be written exactly as users will type it,
+              including any port. An omitted tag means :latest. Other tags need their own entry.
               Applies within about 30 seconds. Save a new provider before downloading its model if
               it is not already allowed.
             </CardDescription>
