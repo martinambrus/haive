@@ -926,6 +926,11 @@ PRE-EXISTING unless marked. Worker `sandbox/`.
 status: open · kind: decision · found: #1128 review 2026-11-13 · priority: P4
 Since #1128 a failed warm start keeps the runner; its error names the container and says that removing it rebuilds from the last database snapshot and loses every change since. The only rebuild paths are removing the container by hand or the failed-task reaper (180 min). OWNER DECISION 2026-11-13: add the in-app "Rebuild DDEV" action, confirming the loss.
 
+### T645 · security · sandboxed agents reach the in-stack Ollama admin API directly
+
+status: open · kind: design · found: T634 review 2026-11-13 · priority: P2
+PRE-EXISTING. A CLI sandbox backed by the in-stack Ollama joins the models network and reaches `ollama:11434` directly (worker `sandbox/sandbox-runner.ts` ~:454-456, `SANDBOX_MODELS_NETWORK`). A prompt-injected agent can call `/api/pull`, `/api/create`, `/api/delete` or `/api/copy` on the shared daemon, bypassing the api and worker pull policy (T634) and able to delete other users' models. Design: a filtering proxy on the models network that forwards only the inference endpoints the CLIs use (chat/generate/embeddings, OpenAI- and Anthropic-compatible paths, model show/tags as needed) and refuses the admin endpoints; or a separate read-only daemon. Measure which paths each Ollama-backed CLI calls before choosing.
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
@@ -1374,9 +1379,9 @@ From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each n
 5. [verify-first] The upgrade path passes stored agent targets through `originAgentTargets` unfiltered when the 07 payload records neither `cliTargets` nor `enabledCliProviders` (worker _upgrade-render.ts ~:314-330, shared render-targets.ts ~:223-226), and 02's `safeDiskRel` does not refuse an off-catalog canonical dir; trace whether such a target reaches a write.
 6. Test hygiene from the first T480 review: repository-skill-empty-targets.test.ts ~:298-314 pins nothing new; 09_6-skill-verification.ts ~:147 hides a skill directory whose name holds `\`.
 
-### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+11)
+### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+14)
 
-status: open · gate: bounded verification · priority: P2
+status: open (items 1, 3, 5, 10 done 2026-11-13 #1129 (8e53558ba): absence needs a positive answer; rules staging and refresh use `provesUnbornHead`, baselines a quiet verify exit 1, projections a tree listing; any other failure is unknown) · gate: bounded verification · priority: P2
 From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
 
 1. 03-upgrade-commit.ts ~:91 (`headLacksImport`) and ~:114 (`agentsRulesVerdict`): any non-zero `rev-parse --verify -q HEAD` except no-answer reads as "no HEAD" and stages the whole file, taking unrelated edits; only exit 1 means no HEAD.
@@ -1392,6 +1397,10 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 11. (T397 fix round 5) The local-folder import and the folder browser accept a dead checkout: `isGitRepository` (api lib/filesystem.ts ~:31-38, called from routes/repos.ts ~:513 and routes/filesystem.ts ~:27, ~:54) answers yes for any `.git` directory or file, through a symlink too (`stat`, a path-based node:fs call), and no for every error. A folder whose `.git` git refuses imports as a repository that every refresh then reads as unusable; since T397 a refresh refuses it, but the import is where it should be refused. Fix direction: the same usable-checkout answer the worker gives (`.git` read without following a link, git asked, an unknown answer refused rather than read as no), through fs-safe. PRE-EXISTING, minor.
 
 12. T397 final review: git-merge.ts revParse (~:86-94) accepts GIT_NO_EXIT/ENOENT as absence when its lenient lstatNoFollow returns null, including non-absence filesystem failures. PRE-EXISTING, connected; the prior doc claim that this was a strict probe was corrected. Fix direction: strict stat with a missing-anchor proof, preserving genuine absent-worktree behavior. No change to the current seven-task scope.
+
+13. #1129 review: `_dependency-policy.ts` ~:140 absent probe `rev-parse -q --verify <base>:<path>` exits 1 also for a missing commit or tree object (measured), not only an absent path. Normal repos (new file, base without it, shallow clone) behave; an `ls-tree` listing, as item 5 uses, is the stronger probe. PRE-EXISTING, low.
+14. #1129 review: `project-state/set-aside.ts` ~:298 `headOid` and ~:1412 `headEntry` still map any non-zero exit to absent (item 4); now mostly shielded because `readBlob` throws first on an unreadable HEAD. Low.
+15. #1129 review: eight more sites read quiet `rev-parse HEAD` exit 1 as unborn (list in the review: .claude/tmp/codex-run/FRA-S/review.md); a broken branch ref exits 1 too. Apply `provesUnbornHead` (repo/unborn-head.ts) where the answer drives a write. Untraced.
 
 Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (current _stage-paths.ts344-349 permits only exit0/1); remaining open-operation helper duplication is refactoring and stays parked with T379. Failed-read candidates imported from T379 require deduplication and a current supported reproduction before repair. No full twelve-item audit by default.
 
