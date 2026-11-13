@@ -130,7 +130,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // Release on response headers, then do any 401 refresh outside the lock to avoid reentry.
   const method = init?.method ?? 'GET';
   const writesSession =
-    (method === 'POST' && ['/auth/login', '/auth/register', '/auth/logout'].includes(path)) ||
+    (method === 'POST' &&
+      ['/auth/login', '/auth/register', '/auth/logout', '/auth/reset-password'].includes(path)) ||
     (method === 'PUT' && path === '/user-settings/password');
   const doFetch = () =>
     writesSession ? withBrowserSessionLock(fetchWithCurrentCookies) : fetchWithCurrentCookies();

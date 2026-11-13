@@ -7,6 +7,7 @@ describe('all browser session cookie writers', () => {
     ['POST', '/auth/login'],
     ['POST', '/auth/register'],
     ['POST', '/auth/logout'],
+    ['POST', '/auth/reset-password'],
     ['PUT', '/user-settings/password'],
   ])('constructs %s %s inside the shared lock', async (method, path) => {
     vi.resetModules();
