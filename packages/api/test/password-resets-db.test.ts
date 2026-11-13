@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema } from '@haive/database';
 import { computeEmailBlindIndex, encryptEmail, tryDecryptEmail } from '@haive/shared';
@@ -186,6 +186,78 @@ describe.skipIf(!url)('password resets on Postgres', () => {
     await db.delete(schema.users).where(eq(schema.users.id, holder.id));
     await expect(consumePasswordReset(db, token, 'new-hash', key, pepper)).resolves.toBe(row.id);
   });
+  it.each(['issuance', 'redemption'])(
+    '%s permits a refresh-shaped transaction under the held user lock',
+    async (operation) => {
+      const row = await user();
+      const token = await issuePasswordReset(db, row.id);
+      const [session] = await db
+        .insert(schema.refreshTokens)
+        .values({
+          userId: row.id,
+          tokenHash: randomUUID(),
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .returning();
+      let checked = false;
+      const wrapped = new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'transaction')
+            return (run: (tx: unknown) => Promise<unknown>) =>
+              target.transaction((tx) =>
+                run(
+                  new Proxy(tx, {
+                    get(t, p) {
+                      if (p === 'select')
+                        return (fields: { id: typeof schema.users.id }) => ({
+                          from: (table: typeof schema.users) => ({
+                            where: (condition: ReturnType<typeof eq>) => ({
+                              for: async (strength: 'update' | 'no key update') => {
+                                const rows = await t
+                                  .select(fields)
+                                  .from(table)
+                                  .where(condition)
+                                  .for(strength);
+                                // A second connection holds a refresh row, then takes the FK's user lock.
+                                // NOWAIT makes an incompatible user lock fail without sleeps.
+                                await db.transaction(async (refresh) => {
+                                  await refresh
+                                    .update(schema.refreshTokens)
+                                    .set({ revokedAt: new Date() })
+                                    .where(eq(schema.refreshTokens.id, session!.id));
+                                  await refresh.execute(
+                                    sql`select id from users where id = ${row.id} for key share nowait`,
+                                  );
+                                  await refresh.insert(schema.refreshTokens).values({
+                                    userId: row.id,
+                                    tokenHash: randomUUID(),
+                                    expiresAt: new Date(Date.now() + 60_000),
+                                  });
+                                });
+                                checked = true;
+                                return rows;
+                              },
+                            }),
+                          }),
+                        });
+                      const value = Reflect.get(t, p);
+                      return typeof value === 'function' ? value.bind(t) : value;
+                    },
+                  }),
+                ),
+              );
+          const value = Reflect.get(target, prop);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const result =
+        operation === 'issuance'
+          ? issuePasswordReset(wrapped, row.id)
+          : consumePasswordReset(wrapped, token, 'new-hash', key, pepper);
+      await expect(result).resolves.toBeTypeOf('string');
+      expect(checked).toBe(true);
+    },
+  );
   it('an audit failure rolls the entire reset back', async () => {
     const row = await user();
     const token = await issuePasswordReset(db, row.id);

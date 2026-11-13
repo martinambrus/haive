@@ -35,7 +35,7 @@ export async function issuePasswordReset(
       .select({ id: schema.users.id })
       .from(schema.users)
       .where(eq(schema.users.id, userId))
-      .for('update');
+      .for('no key update');
     if (!locked.length) throw invalid();
     await tx
       .update(schema.passwordResets)
@@ -120,7 +120,7 @@ export async function consumePasswordReset(
         .select({ id: schema.users.id })
         .from(schema.users)
         .where(eq(schema.users.id, candidate.userId))
-        .for('update');
+        .for('no key update');
       const [claimed] = await tx
         .update(schema.passwordResets)
         .set({ consumedAt: changedAt })
@@ -148,6 +148,17 @@ export async function consumePasswordReset(
         if (holder) throw new HttpError(409, 'That email is already linked to another account.');
         emailUpdate = { emailEncrypted: encryptEmail(email, fieldKey), emailBlindIndex };
       }
+      // Refresh revokes its old row before inserting a successor (FK key-share on users).
+      // Take those rows before a claim's unique email-index change upgrades the user lock.
+      await tx
+        .update(schema.refreshTokens)
+        .set({ revokedAt: changedAt })
+        .where(
+          and(
+            eq(schema.refreshTokens.userId, claimed.userId),
+            isNull(schema.refreshTokens.revokedAt),
+          ),
+        );
       await tx
         .update(schema.users)
         .set({
@@ -158,15 +169,6 @@ export async function consumePasswordReset(
           updatedAt: changedAt,
         })
         .where(eq(schema.users.id, claimed.userId));
-      await tx
-        .update(schema.refreshTokens)
-        .set({ revokedAt: changedAt })
-        .where(
-          and(
-            eq(schema.refreshTokens.userId, claimed.userId),
-            isNull(schema.refreshTokens.revokedAt),
-          ),
-        );
       event = {
         actorUserId: claimed.userId,
         action: 'auth.password_reset.complete',
