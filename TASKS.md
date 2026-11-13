@@ -908,7 +908,7 @@ PRE-EXISTING. Worker unless named.
 status: done 2026-11-13 #1128 (10a97c011): recovery rebuilds a runner only on a definite answer (absent or stopped, another workspace, a working exec that finds no dockerd); a probe without an answer raises the retryable RunnerProbeError; a failed warm start keeps the runner and reports the DDEV output; lows in T643 items 6-8, rebuild action in T644 · kind: fix · found: #1127 driver and reviews 2026-11-13 · priority: P2
 PRE-EXISTING, consequential (data loss). Worker `sandbox/ddev-runner.ts`: `ensureDdevStartedInner` reads `ddev describe -j` (~:2210-2233); `runnerDockerdUp` (~:2090-2100) swallows any exec failure to `false`; `decideDdevRecovery` (~:2078-2086) then picks a cold boot, and `startDdevRunner` runs `docker rm -f -v` on the live runner (~:481), dropping its anonymous nested `/var/lib/docker` (images, project containers, database volumes). A daemon timeout during that exec is enough. Fix direction: the same present/absent/unknown split #1127 gave runner existence: an exec that gave no answer (`gitGaveNoAnswer`-style: timeout, no exit status) is unknown and holds the step for retry; only a definite "dockerd not up" answer may cold-boot. Controls: an exec timeout at each probe keeps the runner.
 
-### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+8)
+### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+9)
 
 status: open · kind: fix · found: #1127 reviews 2026-11-13 · priority: P4
 PRE-EXISTING unless marked. Worker `sandbox/`.
@@ -921,10 +921,11 @@ PRE-EXISTING unless marked. Worker `sandbox/`.
 6. `runner-probe.ts` ~:52 maps Docker `paused` to running; a runner paused outside the app (Haive never runs `docker pause`) then fails every exec, and DDEV recovery holds with "Retry when Docker is available", which retrying never clears. Name the pause in the error (Codex bot on #1128). Minor.
 7. Coverage: no test runs a failed DDEV warm start (`ddev start failed (runner ... kept;`) through the fix-loop failure classifier to show it still routes as an environment failure. (#1128 review)
 8. `ddev-runner.ts` `ddevFailureMessage` keeps only the last 8000 characters of DDEV output; an early root-cause line can be cut. Minor.
+9. From #1132 review. The failed-task reaper and a Rebuild DDEV can both remove the same runner: their fences differ (`sandbox/runner-activity.ts` ~:41, `runtime-runner-reaper.ts` ~:370 and ~:460), so one `docker rm` fails and that caller reports a failure for a runner that is gone. Take the task's `ddevBoots` exclusive entry in the reaper, or treat "no such container" after a definite presence answer as removed.
 
 ### T644 · no in-app way to rebuild a DDEV runner
 
-status: open · kind: decision · found: #1128 review 2026-11-13 · priority: P4
+status: done 2026-11-13 #1132 (8bdb0f01a): confirmed Rebuild DDEV action (API, exclusive worker job, dialog); owed: a live rebuild of a real DDEV task in the browser (none on the dev install), see T647 item 3 · kind: decision · found: #1128 review 2026-11-13 · priority: P4
 Since #1128 a failed warm start keeps the runner; its error names the container and says that removing it rebuilds from the last database snapshot and loses every change since. The only rebuild paths are removing the container by hand or the failed-task reaper (180 min). OWNER DECISION 2026-11-13: add the in-app "Rebuild DDEV" action, confirming the loss.
 
 ### T645 · security · sandboxed agents reach the in-stack Ollama admin API directly
@@ -942,6 +943,14 @@ S4 ran on one daemon with the dev install (`haive`) and a second checkout of mai
 3. PRE-EXISTING, low, unverified whether any sweep touches it. The DDEV registry cache container is labelled only `haive.role=ddev-registry-cache` (`sandbox/ddev-runner.ts` ~:937), no `haive.install`; named per install. Stamp the label for consistency.
 4. LATENT, low. `runner.inspect` (`sandbox/docker-runner.ts` ~:388-402) formats `{{json .Config.Labels}}`, which errors on an image whose config has no Labels key; the error reads as "missing", so the orphaned-provider-image sweep skips it silently. Built provider images always carry labels (the S4 miss was a label-less test image), so only hand-made or imported images hit it. Use `{{json .Config}}` and read Labels in code, or treat a template error as unknown.
    When fixed, record the evidence in the S4 section of docs/plans/solitary-partitioning-lampson.md (it still says pending; S4 ran on a second main checkout, not a published release, by owner decision).
+
+### T647 · FNF[runtime-wait-outcome] · runtime waits read a finished or missing job as pending or failed (+3)
+
+status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
+
+1. PRE-EXISTING, low. `waitUntilFinished` with `removeOnComplete`/`removeOnFail: true` rejects for a job that already finished and was removed before the wait attached, and the access-urls, ensure-ide and runtime-ensure handlers (api `routes/tasks/browser-access.ts` ~:69, ~:99, ~:131, ~:219; `lib/ide-target.ts` ~:57) answer that as pending or unavailable. Return the outcome through a structural channel (a short-lived result key, or keep the job briefly) rather than reading a rejection.
+2. Low. A job result from an older worker lacks `removed`; the rebuild dialog reads undefined as "already absent". Only a mixed-version deploy hits it.
+3. OWED LIVE CHECK. Rebuild an owned DDEV task's runner from the task page: the runner is recreated and the newest snapshot restored; a click while a step runs gets 409 with the busy reason. No DDEV task with a runner existed on the dev install at merge.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
