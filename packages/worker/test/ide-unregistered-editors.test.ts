@@ -68,7 +68,13 @@ const h = vi.hoisted(() => {
       return out(rows.map((row) => `${row}\n`).join(''));
     }
     if (verb === 'inspect') {
-      if (!state.containers.has(last)) throw new Error(`Error: No such object: ${last}`);
+      const container = state.containers.get(last);
+      if (!container) throw new Error(`Error: No such object: ${last}`);
+      if (rest[0] === '-f') {
+        const key = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(rest[1]!)?.[1];
+        if (!key) throw new Error(`fake docker: unhandled inspect format ${rest[1]}`);
+        return out(container.labels[key] ?? '');
+      }
       return out('[{}]');
     }
     if (verb === 'stop') {
@@ -280,8 +286,7 @@ describe('an editor session the sweep registered', () => {
   });
 });
 
-// IDE containers carry no install label: whose editor one is can only be read off its name, and the
-// reaper later stops whatever it registered.
+// Discovery checks install ownership as well as the name of the session it will later stop.
 describe('a running editor container that is not this install’s', () => {
   const name = ideRunnerName(TASK);
   const arrangements: [string, () => Promise<void> | void][] = [

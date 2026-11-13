@@ -140,3 +140,50 @@ it('waits for cancellation teardown before offering Undo', async () => {
   });
   expect(button('Undo merge')).toBeDefined();
 });
+
+const oweResync = () =>
+  h.events.push({
+    eventType: 'merge.left_committed_settled',
+    payload: { ...payload, outcome: 'undone', reason: 'Restored main' },
+  });
+it('offers Retry for owed re-sync, keeps it available, and observes completion while polling', async () => {
+  oweResync();
+  await render();
+  expect(document.body.textContent).toContain('project files were not re-synced');
+  expect(button('Undo merge')).toBeUndefined();
+  await click('Retry');
+  expect(h.post).toHaveBeenCalledWith('/tasks/task/merges/resync', {
+    dir: payload.dir,
+    baseShaAfter: payload.baseShaAfter,
+  });
+  expect(button('Retry')).toBeDefined();
+  h.events = [...h.events, { eventType: 'merge.left_committed_resynced', payload }];
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(button('Retry')).toBeUndefined();
+  expect(document.body.textContent).not.toContain('project files were not re-synced');
+});
+it('shows a failed Retry request and allows another press', async () => {
+  oweResync();
+  h.post.mockRejectedValueOnce(new Error('Queue unavailable'));
+  await render();
+  await click('Retry');
+  expect(document.body.textContent).toContain('Queue unavailable');
+  await click('Retry');
+  expect(h.post).toHaveBeenCalledTimes(2);
+});
+it('shows owed recovery to a viewer but reserves Retry for the owner', async () => {
+  oweResync();
+  h.viewer = 'other';
+  await render();
+  expect(document.body.textContent).toContain('project files were not re-synced');
+  expect(button('Retry')).toBeUndefined();
+});
+it('never derives Retry from stale display copy after completion', async () => {
+  oweResync();
+  h.events[2]!.payload.reason = 'project files were not re-synced';
+  h.events.push({ eventType: 'merge.left_committed_resynced', payload });
+  await render();
+  expect(button('Retry')).toBeUndefined();
+});

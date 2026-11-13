@@ -293,7 +293,7 @@ All editors share one editor origin, so script in one editor can request another
 
 ### T625 · design · re-drive an Undo whose re-sync failed after settling
 
-status: open · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
+status: done 2026-11-13 #1121 (5db613230): `merge.left_committed_resynced` records a finished re-sync; owed reports show a Retry (`POST /tasks/:id/merges/resync`) that re-syncs only, after a strict hand-back; lows in T637 · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
 Owner decision 2026-11-12: build the durable re-sync-owed marker with a visible Retry; P4 queue.
 An `undone` settlement whose projection re-sync then fails cannot be re-driven by the person, nor can a recovery still blocked after the queue's retry window (`worker/src/step-engine/undo-left-merge.ts`). The smallest fix needs new state: a durable "re-sync owed" marker on the settled report that the plan-mirror sweep or a person-visible Retry can drain. Needs an owner decision before any build.
 
@@ -848,6 +848,30 @@ Worker `sandbox/login-container-reaper.ts` and shared `cli-login-lease.ts` unles
 7. Each timed-out reaper pass leaves one MGET in the worker client's unbounded offline queue while Redis stalls (worker-wide pattern).
 8. Coverage: the reaper's Redis-outage test models a rejection, not the worker client's hang; the fresh-login test never drives the api or auth lock; the lease's catch-past-deadline branch is untested; `login-container.ts` imports `@haive/shared` twice (nit).
 
+### T637 · FNF[undo-resync-lows] · Undo re-sync Retry lows (+7)
+
+status: open · kind: fix · found: #1121 reviews 2026-11-13 · priority: P4
+Worker `step-engine/undo-left-merge.ts`, web `task-left-merge-banner.tsx` unless named.
+
+1. MEDIUM, PRE-EXISTING: a settled retry finds the checkout to hand back from the report's directory only (~:556-566), while the first run may have moved the repository root (`holders[0]`, ~:592); when they differ, a retry skips the hand-back and still records completion, leaving root-owned files. Fix: derive the settled checkout from the repository's worktree holders.
+2. During every normal Undo, between the settle and the completion, the banner shows "not re-synced" with a live Retry for a few seconds (owed-and-running vs owed-and-exhausted are not told apart).
+3. An exhausted Retry leaves no visible reason (`recordUndoFailure` returns false for a settled report); the thrown text reaches only worker logs.
+4. A settled, owed report whose directory is unreadable, not contained, pushed or a host checkout throws the generic "cannot settle an already settled report" on every attempt (~:477). PRE-EXISTING.
+5. A `rev-parse HEAD` failure on a settled checkout still on its branch blocks the re-sync on every Retry until the repository is repaired. PRE-EXISTING.
+6. Event reads order by `createdAt` only, with no tie-break (~:94, api `merges.ts`); the reader is order-sensitive but fails safe (spurious owed).
+7. Coverage: the worker test stubs `inMergeDirLock` as a pass-through (no concurrent completion control); no worker case for a settled `moved`/`refused`; no first-run test of the strict hand-back.
+
+### T638 · FNF[runner-ownership-lows] · runtime runner ownership lows (+5)
+
+status: open · kind: fix · found: #1124 reviews 2026-11-13 · priority: P4
+Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless named. Low.
+
+1. An unlabeled pre-label runner whose task id exists in two installs' databases (one restored from the other's dump) is owned by both (~:42-54). Finite: pre-upgrade runners only.
+2. An unlabeled pre-label runner whose task is gone is kept forever and needs manual cleanup; nothing lists them for an admin.
+3. The cancel sweep (`killSandboxContainersByTaskLabel`) uses `docker ps` without `-a`, so exited task containers are never removed there. PRE-EXISTING.
+4. Admission counts every runner on the daemon while the reaper can now reclaim only its own, so on a shared daemon a waiter can park behind the other install's runners (documented in runtime-capacity.md).
+5. Coverage: no control for an exited runner, nor for the real `docker ps` rendering of a missing label (mocked as ''). The real two-install S4 check is pending (docs/plans/solitary-partitioning-lampson.md).
+
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
@@ -1112,7 +1136,7 @@ From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `M
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
-status: open · priority: P2 · gate: bounded verification
+status: done 2026-11-13 #1124 (710bc6936): every runner creator stamps `haive.install`; sweep, preemption, task-end and cancel sweeps remove only this install's label or an unlabeled runner whose task or repository exists here; by-name editor paths refuse only a foreign label; S4 two-install check still pending; lows in T638 · priority: P2 · gate: bounded verification
 From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose Docker daemon serves two installs; read from code, not reproduced. worker sandbox runtime-runner-reaper.ts ~:515-526 lists every `haive.ddev` and `haive.apprunner` container on the daemon with no install-ownership test; ~:64 (`if (!task) return 'orphan'`) treats a runner whose task this install's database does not know as an orphan, and `sweep` (~:342-366) and the preemption path (~:461-466) then run `docker rm -f -v` on it, its volumes included. Runners carry no `haive.install` label (only docker-runner.ts ~:422 stamps one). Fix direction: stamp `haive.install` on every runner at create, list by it, and leave an unlabeled runner alone (never reap what this install cannot prove it owns); keep docs/plans/solitary-partitioning-lampson.md's pending two-install check (S4) in step.
 
 Execution fence 2026-11-01: first establish an affected legacy/current supported case in owned fixtures. The recorded risk is not a confirmed production incident and does not make completing an unbounded inventory a prerequisite for new functionality. Escalate a reproduced security/data-loss consequence.

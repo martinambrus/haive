@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
 import { ROOT_CLAIM_STALE_MS } from '@haive/database';
 
@@ -65,6 +65,7 @@ beforeEach(() => {
   state.added = [];
   state.hang = false;
 });
+afterEach(() => vi.useRealTimers());
 
 describe('POST /tasks/:id/merges/abort', () => {
   it('queues the abort for a cancelled task whose merge is still reported open', async () => {
@@ -77,7 +78,10 @@ describe('POST /tasks/:id/merges/abort', () => {
 
   it('answers 503 queue_unavailable when the queue never answers', async () => {
     state.hang = true;
-    const res = await abort();
+    vi.useFakeTimers();
+    const pending = abort();
+    await vi.advanceTimersByTimeAsync(2000);
+    const res = await pending;
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({
       error: 'Queue temporarily unavailable, try again shortly',
@@ -247,6 +251,62 @@ describe('POST /tasks/:id/merges/undo', () => {
       ).status,
     ).toBe(403);
     expect((await full.request(`/tasks/${TASK}/merges/undo`, { method: 'POST' })).status).toBe(401);
+    expect(state.added).toEqual([]);
+  });
+
+  const resync = (body: unknown = { dir: DIR, baseShaAfter: payload.baseShaAfter }) =>
+    app.request(`/tasks/${TASK}/merges/resync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const oweResync = () =>
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'undone' },
+    });
+  it('reuses the Undo job id for two Retry presses and an already queued Undo', async () => {
+    await undo();
+    oweResync();
+    const responses = await Promise.all([resync(), resync()]);
+    expect(responses.map((r) => r.status)).toEqual([202, 202]);
+    const ids = state.added.map((args) => (args[2] as { jobId: string }).jobId);
+    expect(new Set(ids).size).toBe(1);
+    expect(state.added.every((args) => args[0] === TASK_JOB_NAMES.UNDO_LEFT_MERGE)).toBe(true);
+  });
+  it('refuses Retry unless that exact settled report still owes re-sync', async () => {
+    expect((await resync()).status).toBe(409);
+    oweResync();
+    expect((await resync({ dir: DIR, baseShaAfter: 'c'.repeat(40) })).status).toBe(409);
+    state.events.push({ eventType: 'merge.left_committed_resynced', payload });
+    expect((await resync()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('requires a cancelled owned task, completed cleanup and valid report key for Retry', async () => {
+    oweResync();
+    expect((await resync({})).status).toBe(400);
+    state.task!.status = 'running';
+    expect((await resync()).status).toBe(409);
+    state.task!.status = 'cancelled';
+    state.events = state.events.filter((e) => e.eventType !== 'task.cancel_finished');
+    expect((await resync()).status).toBe(409);
+    state.task = null;
+    expect((await resync()).status).toBe(404);
+    expect(state.added).toEqual([]);
+  });
+  it('protects Retry with authentication and the foreign-origin gate', async () => {
+    const full = createApiApp('http://localhost:3000');
+    expect(
+      (
+        await full.request(`/tasks/${TASK}/merges/resync`, {
+          method: 'POST',
+          headers: { origin: 'http://localhost:5173' },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await full.request(`/tasks/${TASK}/merges/resync`, { method: 'POST' })).status).toBe(
+      401,
+    );
     expect(state.added).toEqual([]);
   });
 });

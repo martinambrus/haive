@@ -1,16 +1,22 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { APP_RUNNER_LABEL, IDE_RUNNER_LABEL, INSTALL_LABEL } from '@haive/shared';
 
 interface Run {
   stdout?: string;
   error?: boolean;
+  exitCode?: number;
+  hang?: boolean;
 }
 
-const h = vi.hoisted(() => ({ spawn: vi.fn() }));
+const h = vi.hoisted(() => ({ spawn: vi.fn(), findTask: vi.fn() }));
 
 vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:child_process')>()),
   spawn: h.spawn,
+}));
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({ query: { tasks: { findFirst: h.findTask } } }),
 }));
 
 class FakeChild extends EventEmitter {
@@ -30,6 +36,8 @@ let children: Array<{ args: string[]; child: FakeChild }> = [];
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.stubEnv('HAIVE_INSTALL_ID', 'haive');
+  h.findTask.mockReset().mockResolvedValue(undefined);
   script = null;
   children = [];
   h.spawn.mockReset();
@@ -44,7 +52,7 @@ beforeEach(() => {
         return;
       }
       if (run.stdout) child.stdout.emit('data', Buffer.from(run.stdout));
-      child.emit('close', 0, null);
+      if (!run.hang) child.emit('close', run.exitCode ?? 0, null);
     });
     return child;
   });
@@ -52,6 +60,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 const verbs = (verb: string) => children.filter((c) => c.args[0] === verb);
@@ -88,6 +97,99 @@ describe('task-queue killSandboxContainersByTaskLabel', () => {
     script = (args) => (args[0] === 'ps' ? { stdout: 'abc\n' } : { error: true });
     await expect(killSandboxContainersByTaskLabel(TASK)).resolves.toBe(1);
     expect(verbs('rm')).toHaveLength(1);
+    await expectNoTimerLeft();
+  });
+
+  it('discards listing output when docker exits unsuccessfully', async () => {
+    script = () => ({ stdout: 'abc\thaive\t\t\t\n', exitCode: 1 });
+
+    await expect(killSandboxContainersByTaskLabel(TASK)).resolves.toBe(0);
+
+    expect(verbs('rm')).toHaveLength(0);
+    await expectNoTimerLeft();
+  });
+
+  it('discards partial ownership metadata when the listing times out', async () => {
+    script = (args) => (args[0] === 'ps' ? { stdout: 'abc\thaive\t\t\t', hang: true } : {});
+    const killing = killSandboxContainersByTaskLabel(TASK);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(killing).resolves.toBe(0);
+
+    expect(verbs('rm')).toHaveLength(0);
+    expect(children[0]!.child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe.each(['haive', 'rio'])('cancel container ownership for install %s', (install) => {
+  const kinds = ['sandbox', 'haive.ddev', APP_RUNNER_LABEL, IDE_RUNNER_LABEL];
+  const fixture = (id: string, kind: string, label?: string) => ({
+    id,
+    labels: {
+      'haive.task.id': TASK,
+      ...(kind === 'sandbox' ? {} : { [kind]: '1' }),
+      ...(label === undefined ? {} : { [INSTALL_LABEL]: label }),
+    } as Record<string, string>,
+  });
+  const list = (containers: ReturnType<typeof fixture>[]) => {
+    script = (args) => {
+      if (args[0] !== 'ps') return {};
+      expect(args).toContain(`label=haive.task.id=${TASK}`);
+      const format = args.includes('--format') ? args[args.indexOf('--format') + 1]! : '{{.ID}}';
+      return {
+        stdout: containers
+          .map(({ id, labels }) =>
+            format
+              .replaceAll('{{.ID}}', id)
+              .replace(/\{\{\.Label "([^"]+)"\}\}/g, (_, key: string) => labels[key] ?? ''),
+          )
+          .join('\n'),
+      };
+    };
+  };
+  beforeEach(() => vi.stubEnv('HAIVE_INSTALL_ID', install));
+
+  it('removes this install’s containers and keeps foreign containers with the same task id', async () => {
+    list(
+      kinds.flatMap((kind, i) => [
+        fixture(`own-${i}`, kind, install),
+        fixture(`foreign-${i}`, kind, 'elsewhere'),
+      ]),
+    );
+
+    await expect(killSandboxContainersByTaskLabel(TASK)).resolves.toBe(kinds.length);
+
+    expect(verbs('rm').map(({ args }) => args)).toEqual([
+      ['rm', '-f', ...kinds.map((_, i) => `own-${i}`)],
+    ]);
+    expect(h.findTask).not.toHaveBeenCalled();
+    await expectNoTimerLeft();
+  });
+
+  it.each([false, true])(
+    'uses task proof for legacy runners and the sandbox legacy rule (known task: %s)',
+    async (known) => {
+      h.findTask.mockResolvedValue(known ? { id: TASK } : undefined);
+      list(kinds.map((kind, i) => fixture(`legacy-${i}`, kind)));
+      const ids = kinds.flatMap((_, i) =>
+        (i === 0 ? install === 'haive' : known) ? [`legacy-${i}`] : [],
+      );
+
+      await expect(killSandboxContainersByTaskLabel(TASK)).resolves.toBe(ids.length);
+
+      expect(verbs('rm').map(({ args }) => args)).toEqual(ids.length ? [['rm', '-f', ...ids]] : []);
+      await expectNoTimerLeft();
+    },
+  );
+
+  it('keeps legacy runners when the ownership lookup fails', async () => {
+    h.findTask.mockRejectedValue(new Error('database unavailable'));
+    list(kinds.slice(1).map((kind, i) => fixture(`legacy-${i}`, kind)));
+
+    await expect(killSandboxContainersByTaskLabel(TASK)).resolves.toBe(0);
+
+    expect(verbs('rm')).toHaveLength(0);
     await expectNoTimerLeft();
   });
 });

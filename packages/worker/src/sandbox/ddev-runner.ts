@@ -16,6 +16,7 @@ import {
   ddevRunnerName,
   imageRepo,
   logger,
+  installLabel,
   taskHostPort,
   type TaskAccessEndpoint,
   volumeName,
@@ -67,6 +68,7 @@ import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
 import { shellQuote } from './shell-quote.js';
 import { whileRunnerBusy } from './runner-activity.js';
+import { listOwnedTaskRunnerIds } from './runtime-runner-ownership.js';
 import {
   DdevBootAbortedError,
   DdevBoots,
@@ -435,6 +437,8 @@ export async function startDdevRunner(params: {
         '--privileged',
         '--name',
         name,
+        '--label',
+        installLabel(),
         '--label',
         `haive.task.id=${params.taskId}`,
         '--label',
@@ -3152,12 +3156,7 @@ export async function ensureDdevDbForward(
 export async function killTaskDdevRunners(taskId: string): Promise<number> {
   let ids: string[] = [];
   try {
-    const { stdout } = await exec(
-      'docker',
-      ['ps', '-aq', '--filter', 'label=haive.ddev=1', '--filter', `label=haive.task.id=${taskId}`],
-      { timeout: 15_000 },
-    );
-    ids = stdout.split(/\s+/).filter((s) => s.length > 0);
+    ids = await listOwnedTaskRunnerIds('haive.ddev', taskId);
   } catch {
     return 0;
   }
