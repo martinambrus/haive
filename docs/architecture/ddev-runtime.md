@@ -84,9 +84,16 @@ of every later database change. Failed steps stay failed: Retry them after recov
 `POST /tasks/:id/ddev/rebuild` requires ownership and refuses running steps or live CLI
 invocations. Its dedicated, coalesced job reserves the same `ddevBoots` entry as ensure,
 fences new execs, refuses busy runners (including surviving attached Docker execs), requires
-a definite presence answer and matching install ownership and workspace labels, then removes
-the immutable container ID with `docker rm -f -v` and records the requesting user in a task
-event. An unknown probe or foreign runner is kept. An absent runner needs no removal.
+a definite presence answer and matching install ownership and workspace labels. It then writes
+a `ddev.rebuild.requested` task event naming the user (a record of the request, written first so
+no removal goes unrecorded; it does not prove the removal happened), rechecks that the runner is
+idle, and removes the immutable container ID with `docker rm -f -v`. An unknown probe or foreign
+runner is kept. An absent runner needs no removal.
+The request waits at most 30 s (`DDEV_REBUILD_WAIT_MS`) for the job. A refusal answers 409 with
+a typed `reason` and `retryable`, and the worker logs it at info. A finished failure answers 500.
+Success answers 202 with `removed`, false when the runner was already absent. When the wait runs
+out or the outcome is unknown it answers 202 `pending`: the job keeps running, a repeat click
+joins it, and the task's Activity tab shows the request event.
 Recovery is the ordinary ENSURE job, with its existing admission and newest snapshot restore;
 a fresh recovery job ID for each rebuild avoids joining an older ensure that already resolved
 its handle.
