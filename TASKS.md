@@ -966,7 +966,7 @@ VERIFIED 2026-11-13 (Docker Desktop 29.9.2, WSL2): from the default bridge every
 
 ### T653 · design · web-kit FormError renders prose outside MarkdownView
 
-status: open · kind: design · found: #1135 review 2026-11-13 · priority: P4
+status: open (OWNER DECISION 2026-11-13: error lines are not prose; FormError stays plain text; rule clarified in markdown-rendering.md, PR #1144; close on merge) · kind: design · found: #1135 review 2026-11-13 · priority: P4
 web-kit `FormError` (`packages/web-kit/src/ui.tsx` ~:195) renders its message as plain text, against the AGENTS.md rule that every prose body renders through `MarkdownView`. web-kit must not import web, and it has no renderer prop or context; a compliant fix needs a host-supplied renderer (prop or context) across about 151 call sites. Decide whether error lines count as prose under the rule; if yes, pick prop or context.
 
 ### T652 · design · close per-task port reach before web or multi-user use [parked: owner decision]
