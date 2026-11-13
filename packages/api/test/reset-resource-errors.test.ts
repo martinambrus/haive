@@ -59,3 +59,22 @@ it.each(['EMFILE', 'ENFILE'])(
     expect(await readFile(path.join(h.root, '.claude/settings.json'), 'utf8')).toBe('user save');
   },
 );
+
+it('reports a lone reset whose removed file cannot be re-read instead of refusing it', async () => {
+  h.root = await mkdtemp(path.join(tmpdir(), 'reset-resource-'));
+  await mkdir(path.join(h.root, '.claude'));
+  await writeFile(path.join(h.root, '.claude/settings.json'), 'haive');
+  h.error = Object.assign(new Error('injected'), { code: 'EMFILE' });
+  // The old file is already unlinked, so the tree changed: the untouched-tree 500 would leave
+  // live rows naming a deleted file.
+  const outcome = await resetOnboardingArtifacts(h.root, {
+    writtenHashes: new Map([['.claude/settings.json', sha256Hex(normalizeContent('haive'))]]),
+    haiveDirs: new Set(),
+    haiveEntries: new Map(),
+  });
+  expect(outcome.vacatedPaths.has('.claude/settings.json')).toBe(false);
+  expect(outcome.skipped).toContainEqual({
+    path: '.claude/settings.json',
+    reason: expect.stringContaining('EMFILE'),
+  });
+});
