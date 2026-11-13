@@ -54,7 +54,7 @@ function manager() {
         }),
       },
       taskSteps: { findFirst: async () => ({ status: 'done' }) },
-      cliProviders: { findFirst: async () => undefined },
+      cliProviders: { findFirst: async () => ({ enabled: true }) },
     },
   };
   const mgr = new TerminalSessionManager({

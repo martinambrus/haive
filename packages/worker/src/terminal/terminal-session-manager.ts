@@ -11,6 +11,7 @@ import {
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_EXIT_KEY_TTL_SECONDS,
   TERMINAL_REPLY_CHANNEL_PREFIX,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_REQUEST_CHANNEL,
   terminalSessionKey,
   logger,
@@ -562,6 +563,14 @@ export class TerminalSessionManager {
     });
 
     try {
+      // A close-provider handled while the ensure above ran (it may build an image) found no
+      // session to close. The session is registered now, so a later close finds it; this read
+      // catches an earlier one, since the api publishes only after its commit.
+      const provider = await this.db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, providerId),
+        columns: { enabled: true },
+      });
+      if (!provider?.enabled) throw new Error(TERMINAL_PROVIDER_DISABLED_MESSAGE);
       await this.subscriber.subscribe(inChannel, ctlChannel);
 
       // Registry entry: worker writes container metadata only (HSETNX-style for

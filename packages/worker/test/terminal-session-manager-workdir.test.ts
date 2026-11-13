@@ -4,6 +4,7 @@ import {
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
+  TERMINAL_PROVIDER_DISABLED_MESSAGE,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   type TerminalOpenResult,
@@ -37,6 +38,7 @@ interface ExecCall {
 
 interface Harness {
   mgr: TerminalSessionManager;
+  provider: { enabled: boolean };
   execs: ExecCall[];
   openTask: (userId?: string) => Promise<TerminalOpenResult>;
   openRepo: (userId?: string, cliProviderId?: string) => Promise<TerminalOpenResult>;
@@ -91,6 +93,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
       },
     }),
   };
+  const provider = { enabled: true };
   const db = {
     query: {
       tasks: {
@@ -103,7 +106,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
         }),
       },
       taskSteps: { findFirst: async () => ({ status: 'done' }) },
-      cliProviders: { findFirst: async () => undefined },
+      cliProviders: { findFirst: async () => ({ enabled: provider.enabled }) },
     },
   };
   const redis = {
@@ -130,6 +133,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
   };
   return {
     mgr,
+    provider,
     execs,
     attaches,
     attachGates,
@@ -569,6 +573,24 @@ describe('provider shell revocation', () => {
     h.attaches[0]!.emit('end');
     await new Promise((r) => setImmediate(r));
     expect(h.published()).toContain(JSON.stringify({ type: 'exit' }));
+  });
+
+  it('refuses an open whose provider was disabled while its container was being ensured', async () => {
+    const h = harness(ROOT);
+    // The close-provider for this disable ran before the session existed and found nothing.
+    vi.mocked(ensureShellContainer).mockImplementationOnce(async () => {
+      h.provider.enabled = false;
+      await h.sendRequest({ op: 'close-provider', userId: 'user-1', cliProviderId: 'prov-1' });
+      return {
+        containerName: 'haive-shell-1',
+        shell: 'bash',
+        created: false,
+        imageTag: 'img',
+        cliName: 'claude-code',
+      };
+    });
+    await expect(h.openRepo()).rejects.toThrow(TERMINAL_PROVIDER_DISABLED_MESSAGE);
+    expect(h.attaches[0]!.destroyed).toBe(true);
   });
 
   it('ignores incomplete provider revocation requests', async () => {
