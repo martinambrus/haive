@@ -429,6 +429,13 @@ closes the WebSocket with 4425 and the same disabled-provider sentence, even whe
 after the close. Other users and providers remain attached. Re-enabling publishes no open request;
 a later connection reads eligibility again. Login containers use a separate lifecycle.
 
+A disable that lands while a shell is still opening (its container ensure can build an image)
+finds no session to close. The worker therefore reads the provider again once the session is
+registered, after the container's reaper registry entry is written, and refuses the open if it
+is disabled or a close already removed the session; it never subscribes a removed session's
+channels. The refusal reply carries `closeCode` 4425, so the api closes that socket as it closes
+a live revocation, and every other failed open still closes with 1011.
+
 This detaches the clients, preserving the normal two-minute tmux/container grace. A publication
 failure is logged after commit and does not fail the PATCH or DELETE; existing sessions can then
 remain open, while the connect gate still refuses new attachments to a disabled or deleted row.
