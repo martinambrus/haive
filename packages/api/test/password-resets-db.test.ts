@@ -298,6 +298,27 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       expect(checked).toBe(true);
     },
   );
+  it.each([false, true])('refuses redemption after deactivation (claim: %s)', async (claim) => {
+    const row = await user();
+    const token = await issuePasswordReset(db, row.id, claim ? encryptEmail(row.email, key) : null);
+    await db.update(schema.users).set({ status: 'deactivated' }).where(eq(schema.users.id, row.id));
+    const response = await post('reset-password', { token, newPassword: 'new-password-long' });
+    expect(response.status).toBe(400);
+    const unknown = await post('reset-password', {
+      token: 'unknown',
+      newPassword: 'new-password-long',
+    });
+    expect(await response.text()).toBe(await unknown.text());
+    expect(await db.query.users.findFirst({ where: eq(schema.users.id, row.id) })).toMatchObject({
+      passwordHash: 'old-hash',
+      tokenVersion: 0,
+      mustChangePassword: true,
+    });
+    const reset = await db.query.passwordResets.findFirst({
+      where: eq(schema.passwordResets.userId, row.id),
+    });
+    expect(reset!.consumedAt).toBeNull();
+  });
   it('an audit failure rolls the entire reset back', async () => {
     const row = await user();
     const token = await issuePasswordReset(db, row.id);

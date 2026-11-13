@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import { eq } from 'drizzle-orm';
 import { createFakeDb } from '@haive/database/testing';
 import { ConfigUnavailableError, computeEmailBlindIndex, encryptEmail } from '@haive/shared';
 
@@ -230,6 +231,19 @@ describe('forgot password', () => {
     await post('forgot-password', { email: EMAIL });
     await vi.runAllTimersAsync();
     expect(h.warn).toHaveBeenCalled();
+  });
+  it.each([true, false])('sends nothing to a deactivated user (readable: %s)', async (readable) => {
+    const row = await user(readable);
+    row.status = 'deactivated';
+    await fake.db
+      .update(schema.users)
+      .set({ status: 'deactivated' })
+      .where(eq(schema.users.id, String(row.id)));
+    await discard();
+    expect((await post('forgot-password', { email: EMAIL })).status).toBe(202);
+    await vi.runAllTimersAsync();
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await fake.db.query.passwordResets!.findMany()).toHaveLength(0);
   });
   it('throttles without revealing account state', async () => {
     h.reserve.mockRejectedValue(new Error('throttled'));

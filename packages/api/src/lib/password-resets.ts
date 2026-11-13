@@ -39,7 +39,7 @@ export async function issuePasswordReset(
     const locked = await tx
       .select({ id: schema.users.id })
       .from(schema.users)
-      .where(eq(schema.users.id, userId))
+      .where(and(eq(schema.users.id, userId), eq(schema.users.status, 'active')))
       .for('no key update');
     if (!locked.length) throw invalid();
     const recent = await tx.query.passwordResets.findFirst({
@@ -84,6 +84,7 @@ export async function findPasswordResetRecipient(
     where: eq(schema.users.emailBlindIndex, blindIndex),
   });
   if (matched) {
+    if (matched.status !== 'active') return null;
     const to = tryDecryptEmail(matched.emailEncrypted, fieldKey);
     if (to !== null) return { userId: matched.id, to, claimEmailEncrypted: null };
   }
@@ -93,10 +94,14 @@ export async function findPasswordResetRecipient(
   });
   if (!discard) return null;
   const candidates = await db.query.users.findMany({
-    where: sql`lower(trim(${schema.users.gitEmail})) = ${email.trim().toLowerCase()}`,
+    where: and(
+      eq(schema.users.status, 'active'),
+      sql`lower(trim(${schema.users.gitEmail})) = ${email.trim().toLowerCase()}`,
+    ),
   });
   const orphans = candidates.filter(
     (u) =>
+      u.status === 'active' &&
       u.gitEmail?.trim().toLowerCase() === email.trim().toLowerCase() &&
       tryDecryptEmail(u.emailEncrypted, fieldKey) === null,
   );
@@ -134,11 +139,12 @@ export async function consumePasswordReset(
         where: eq(schema.passwordResets.tokenHash, tokenHash),
       });
       if (!candidate) throw invalid();
-      await tx
+      const locked = await tx
         .select({ id: schema.users.id })
         .from(schema.users)
-        .where(eq(schema.users.id, candidate.userId))
+        .where(and(eq(schema.users.id, candidate.userId), eq(schema.users.status, 'active')))
         .for('no key update');
+      if (!locked.length) throw invalid();
       const [claimed] = await tx
         .update(schema.passwordResets)
         .set({ consumedAt: changedAt })
