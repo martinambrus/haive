@@ -337,6 +337,8 @@ describe('deterministic apply redelivery', () => {
     h.ensure.mockResolvedValue({ container: 'cold-restored', projectDir: '/workspace' });
     await redeliver(ctx, dbMigrateStep.metadata.id, apply);
     expect(appliedDataChanges).toBe(1);
+    // The replay still refreshes the durability snapshot.
+    expect(h.snapshot).toHaveBeenCalledTimes(2);
   });
 
   it.each([
