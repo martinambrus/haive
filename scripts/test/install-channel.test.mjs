@@ -239,7 +239,7 @@ printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
         'run',
         '--rm',
         '--name',
-        `rma-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
+        `t536-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
         '--pull',
         'never',
         '--network',
@@ -334,6 +334,7 @@ for (const lang of ['sh', 'ps1']) {
     try {
       const r = f.install();
       assert.notEqual(r.status, 0, 'empty Mailpit password must refuse installation');
+      assert.match(`${r.stdout}${r.stderr}`, /could not generate secrets/i);
       assert.ok(!existsSync(join(f.dir, '.env')), 'no env with an empty Mailpit password');
     } finally {
       f.clean();
