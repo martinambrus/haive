@@ -304,8 +304,13 @@ bridge gateway when it binds all interfaces, and on Docker Desktop through `host
 even when it binds 127.0.0.1 (MEASURED, Docker Desktop 29.9.2: a 127.0.0.1-bound port refused
 `172.17.0.1` and answered `host.docker.internal`). `docker-compose.dev.yml` therefore publishes
 no Redis, Ollama or Mailpit SMTP port, and only Postgres and the Mailpit UI on the loopback, for
-host tools. Those two stay reachable from a sandbox on Docker Desktop until they require a
-credential the sandbox does not hold.
+host tools. Both require credentials the sandbox does not hold: `scripts/dev.sh` generates
+per-install Postgres and Mailpit UI passwords in `.env`, replaces the former public database
+password on existing volumes through the local socket, and reconciles credential consumers
+before completing a start. Mailpit UI/API login is `haive` with `MAILPIT_UI_PASSWORD`; SMTP
+remains internal and unauthenticated. A failed database password sync stops dependants and
+is retried on the next start. See README's source-build setup for host database client
+settings and the credential-only rollback (the reverted script has no automatic sync).
 
 Only installs whose compose bundle carries the gate have it. `haive upgrade` swaps
 images and keeps the compose bundle it was installed with, so an install upgraded from
