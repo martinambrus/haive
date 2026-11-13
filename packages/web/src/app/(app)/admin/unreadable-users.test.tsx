@@ -98,3 +98,15 @@ it('labels unreadable contact fields and preserves the old phone when only savin
   await view.flush();
   expect(h.put).toHaveBeenCalledWith('/user-settings/account', { name: 'Admin' });
 });
+
+it('drops the unreadable phone notice once a whitespace phone clears it', async () => {
+  const view = await mount(AccountPage);
+  fire.type(findAll(view.tree(), (node) => node.props.id === 'account-phone')[0]!, '  ');
+  await view.flush();
+  fire.click(
+    findAll(view.tree(), (node) => node.tag === 'button' && textOf(node) === 'Save profile')[0]!,
+  );
+  await view.flush();
+  expect(h.put).toHaveBeenCalledWith('/user-settings/account', { name: 'Admin', phone: '  ' });
+  expect(textOf(view.tree())).not.toContain('Phone: unreadable, needs relink');
+});

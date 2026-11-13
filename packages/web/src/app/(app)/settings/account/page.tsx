@@ -72,9 +72,11 @@ export default function AccountPage() {
     setProfileError(null);
     setProfileSuccess(null);
     try {
+      // An empty field over an unreadable phone keeps it; any other value replaces or clears it.
+      const sendsPhone = !(account?.phoneReadable === false && phone === '');
       await api.put<{ ok: boolean }>('/user-settings/account', {
         name,
-        ...(account?.phoneReadable === false && phone === '' ? {} : { phone }),
+        ...(sendsPhone ? { phone } : {}),
       });
       setAccount((prev) =>
         prev
@@ -82,7 +84,7 @@ export default function AccountPage() {
               ...prev,
               name: name.trim() || null,
               phone: phone.trim() || null,
-              phoneReadable: phone.trim() ? true : prev.phoneReadable,
+              phoneReadable: sendsPhone ? true : prev.phoneReadable,
             }
           : prev,
       );
