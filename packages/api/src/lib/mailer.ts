@@ -5,9 +5,9 @@ import {
   SECRET_KEYS,
   configService,
   secretsService,
+  mailSettingsFieldsSchema,
   mailSettingsSchema,
   rethrowIfConfigUnavailable,
-  safeErrorMessage,
   logger,
   type MailSettings,
 } from '@haive/shared';
@@ -43,7 +43,7 @@ export const MAIL_FIELDS = {
 } as const;
 
 /** Bypass process caches: a save applies to the very next send, including the password. */
-export async function readMailSettings(): Promise<MailSettings> {
+async function readMailFields(): Promise<Record<string, unknown>> {
   const entries = await Promise.all(
     Object.entries(MAIL_FIELDS).map(async ([name, key]) => {
       const raw = await configService.getFresh(key);
@@ -59,7 +59,16 @@ export async function readMailSettings(): Promise<MailSettings> {
       return [name, value];
     }),
   );
-  return mailSettingsSchema.parse(Object.fromEntries(entries));
+  return Object.fromEntries(entries);
+}
+
+export async function readMailSettings(): Promise<MailSettings> {
+  return mailSettingsSchema.parse(await readMailFields());
+}
+
+/** For the admin form: loads an incomplete saved state so the admin can repair it. */
+export async function readStoredMailSettings(): Promise<MailSettings> {
+  return mailSettingsFieldsSchema.parse(await readMailFields());
 }
 
 /** Admin-only configuration chooses this endpoint. Per api-auth.md it may name an internal
@@ -88,7 +97,10 @@ export async function sendMail(
       host: settings.smtpHost,
       port: settings.smtpPort,
       secure: settings.secure,
-      ...(settings.user ? { auth: { user: settings.user, pass: password ?? '' } } : {}),
+      // Credentials never cross a plaintext link: without implicit TLS, STARTTLS is required.
+      ...(settings.user
+        ? { auth: { user: settings.user, pass: password ?? '' }, requireTLS: !settings.secure }
+        : {}),
       ...timeouts,
       disableFileAccess: true,
       disableUrlAccess: true,
@@ -113,12 +125,10 @@ export async function sendMail(
         : code === 'EAUTH'
           ? 'SMTP authentication failed. Check the saved credentials.'
           : 'Mail delivery failed. Check the SMTP settings and relay.';
-    logger.warn({ code: 'mail_send_failed' }, 'Mail delivery failed');
-    return {
-      ok: false,
-      code: 'mail_send_failed',
-      error: safeErrorMessage(new Error(diagnosis)).slice(0, 200),
-    };
+    // Only nodemailer's short error code is logged (e.g. ETIMEDOUT, EAUTH), never its message.
+    const smtpCode = typeof code === 'string' && /^[A-Z_]{1,32}$/.test(code) ? code : 'unknown';
+    logger.warn({ code: 'mail_send_failed', smtpCode }, 'Mail delivery failed');
+    return { ok: false, code: 'mail_send_failed', error: diagnosis };
   } finally {
     transport?.close();
   }
