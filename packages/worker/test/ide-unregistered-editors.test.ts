@@ -29,13 +29,18 @@ const h = vi.hoisted(() => {
     const [verb, ...rest] = args;
     const last = rest[rest.length - 1]!;
     if (verb === 'ps') {
-      if (state.psFails) throw new Error('docker ps timed out');
       const valuesOf = (flag: string) => rest.filter((_arg, index) => rest[index - 1] === flag);
       for (const flag of rest.filter((arg) => arg.startsWith('-'))) {
-        if (flag !== '--filter' && flag !== '--format') {
+        if (!['--filter', '--format', '-a', '--no-trunc'].includes(flag)) {
           throw new Error(`fake docker: unhandled ps flag ${flag}`);
         }
       }
+      const nameFilter = valuesOf('--filter').find((filter) => filter.startsWith('name=^/'));
+      if (nameFilter) {
+        const container = state.containers.get(nameFilter.slice('name=^/'.length, -1));
+        return out(container ? (container.running ? 'running\n' : 'exited\n') : '');
+      }
+      if (state.psFails) throw new Error('docker ps timed out');
       const wanted = valuesOf('--filter').map((filter) => {
         const [, key, value] = /^label=([^=]+)(?:=(.*))?$/.exec(filter) ?? [];
         if (key === undefined) throw new Error(`fake docker: unhandled ps filter ${filter}`);
@@ -69,13 +74,8 @@ const h = vi.hoisted(() => {
     }
     if (verb === 'inspect') {
       const container = state.containers.get(last);
-      if (!container)
-        throw Object.assign(new Error('missing'), {
-          code: 1,
-          stderr: `Error response from daemon: No such container: ${last}\n`,
-        });
+      if (!container) throw new Error('missing');
       if (rest[0] === '-f') {
-        if (rest[1] === '{{.State.Running}}') return out(String(container.running));
         const key = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(rest[1]!)?.[1];
         if (!key) throw new Error(`fake docker: unhandled inspect format ${rest[1]}`);
         return out(container.labels[key] ?? '');

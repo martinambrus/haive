@@ -56,23 +56,23 @@ const h = vi.hoisted(() => {
       state.imagePresent = true;
       return out('');
     }
-    if (verb === 'inspect') {
-      const name = rest[rest.length - 1]!;
-      const container = state.containers.get(name);
+    if (verb === 'ps') {
+      const name = rest[rest.indexOf('--filter') + 1]!.slice('name=^/'.length, -1);
       if (
         state.probeFailure &&
         (!state.probeTarget || state.probeTarget === name) &&
         (!state.failExistenceOnly || ++state.probeReads > 1)
       )
         throw state.probeFailure;
-      if (!container)
-        throw Object.assign(new Error('missing'), {
-          code: 1,
-          stderr: `Error: No such object: ${name}\n`,
-        });
+      const container = state.containers.get(name);
+      return out(container ? (container.running ? 'running\n' : 'exited\n') : '');
+    }
+    if (verb === 'inspect') {
+      const name = rest[rest.length - 1]!;
+      const container = state.containers.get(name);
+      if (!container) throw new Error('missing');
       if (rest[0] !== '-f') return out('[{}]');
       const format = rest[1]!;
-      if (format === '{{.State.Running}}') return out(`${container.running}\n`);
       const label = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(format)?.[1];
       if (label === undefined) throw new Error(`fake docker: unhandled inspect format ${format}`);
       if (label === state.unreadableLabel) throw new Error('docker inspect timed out');

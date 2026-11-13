@@ -19,7 +19,9 @@ beforeEach(() => {
 });
 
 const mutations = () =>
-  h.exec.mock.calls.map(([, args]) => args as string[]).filter((args) => args[0] !== 'inspect');
+  h.exec.mock.calls
+    .map(([, args]) => args as string[])
+    .filter((args) => !['inspect', 'ps'].includes(args[0]!));
 
 describe('DDEV registry cache liveness', () => {
   it.each([
@@ -42,7 +44,7 @@ describe('DDEV registry cache liveness', () => {
     await ensureDdevRegistryCache();
     expect(mutations()).toEqual([]);
 
-    h.exec.mockClear().mockResolvedValue({ stdout: 'true\n', stderr: '' });
+    h.exec.mockClear().mockResolvedValue({ stdout: 'running\n', stderr: '' });
     await ensureDdevRegistryCache();
     expect(h.exec).toHaveBeenCalledTimes(1);
     expect(mutations()).toEqual([]);
@@ -50,21 +52,14 @@ describe('DDEV registry cache liveness', () => {
 
   it('creates a genuinely absent mirror', async () => {
     const { ensureDdevRegistryCache } = await import('./ddev-runner.js');
-    h.exec.mockImplementation(async (_command: string, args: string[]) => {
-      if (args[0] === 'inspect')
-        throw Object.assign(new Error('missing'), {
-          code: 1,
-          stderr: `Error response from daemon: No such container: ${args.at(-1)}\n`,
-        });
-      return { stdout: '', stderr: '' };
-    });
+    h.exec.mockResolvedValue({ stdout: '', stderr: '' });
     await ensureDdevRegistryCache();
     expect(mutations().some((args) => args[0] === 'run')).toBe(true);
   });
 
   it('adopts a live mirror without removing or recreating it', async () => {
     const { ensureDdevRegistryCache } = await import('./ddev-runner.js');
-    h.exec.mockResolvedValue({ stdout: 'true\n', stderr: '' });
+    h.exec.mockResolvedValue({ stdout: 'running\n', stderr: '' });
     await ensureDdevRegistryCache();
     expect(mutations()).toEqual([]);
   });
@@ -86,13 +81,13 @@ describe.each(['app', 'ddev'] as const)('%s browser desktop accounting', (kind) 
 
   it('retains the surcharge when stopping a live desktop fails', async () => {
     h.exec
-      .mockResolvedValueOnce({ stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'running', stderr: '' })
       .mockRejectedValue(new Error('exec failed'));
     await stop();
     expect(h.down).not.toHaveBeenCalled();
   });
 
-  it.each(['true', 'false'])(
+  it.each(['running', 'exited'])(
     'clears the surcharge after a confirmed %s running state',
     async (running) => {
       h.exec.mockResolvedValueOnce({ stdout: running, stderr: '' }).mockImplementation(async () => {
@@ -101,7 +96,7 @@ describe.each(['app', 'ddev'] as const)('%s browser desktop accounting', (kind) 
       });
       await stop();
       expect(h.down).toHaveBeenCalledTimes(1);
-      expect(mutations()).toHaveLength(running === 'true' ? 1 : 0);
+      expect(mutations()).toHaveLength(running === 'running' ? 1 : 0);
     },
   );
 });

@@ -15,19 +15,20 @@ const h = vi.hoisted(() => {
   const out = (stdout: string) => ({ stdout, stderr: '' });
   const docker = async (_command: string, args: string[]) => {
     const [verb, ...rest] = args;
+    if (verb === 'ps') {
+      const name = rest[rest.indexOf('--filter') + 1]!.slice('name=^/'.length, -1);
+      if (state.probeFailure && (!state.failExistenceOnly || ++state.probeReads > 1))
+        throw state.probeFailure;
+      return out(
+        state.containers.has(name) ? (state.failExistenceOnly ? 'exited\n' : 'running\n') : '',
+      );
+    }
     if (verb === 'inspect') {
       const name = rest[rest.length - 1]!;
       const labels = state.containers.get(name);
-      if (state.probeFailure && (!state.failExistenceOnly || ++state.probeReads > 1))
-        throw state.probeFailure;
-      if (!labels)
-        throw Object.assign(new Error('missing'), {
-          code: 1,
-          stderr: `Error: No such object: ${name}\n`,
-        });
+      if (!labels) throw new Error('missing');
       if (rest[0] !== '-f') return out('[{}]');
       const format = rest[1]!;
-      if (format === '{{.State.Running}}') return out(`${!state.failExistenceOnly}\n`);
       const label = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(format)?.[1];
       if (label === undefined) throw new Error(`fake docker: unhandled inspect format ${format}`);
       if (label === state.unreadableLabel) throw new Error('docker inspect timed out');

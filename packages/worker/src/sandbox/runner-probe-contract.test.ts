@@ -9,12 +9,6 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 import { probeRunner, requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 const NAME = 'rlp-fixture';
-const missing = (extra = {}) =>
-  Object.assign(new Error('inspect failed'), {
-    code: 1,
-    stderr: `Error response from daemon: No such container: ${NAME}\n`,
-    ...extra,
-  });
 
 beforeEach(() => {
   h.exec.mockReset();
@@ -22,53 +16,78 @@ beforeEach(() => {
 
 describe('runner presence contract', () => {
   it.each([
-    ['true', true],
-    ['false', false],
+    ['running', true],
+    ['paused', true],
+    ['restarting', true],
+    ['created', false],
+    ['exited', false],
+    ['dead', false],
+    ['removing', false],
   ] as const)('reads %s as a present runner', async (stdout, running) => {
-    h.exec.mockResolvedValue({ stdout: `${stdout}\n`, stderr: '' });
+    h.exec.mockResolvedValue({ stdout: `${stdout}\n` });
     expect(await probeRunner(NAME)).toEqual({ state: 'present', running });
-    expect(h.exec).toHaveBeenCalledWith(
+    expect(h.exec).toHaveBeenCalledExactlyOnceWith(
       'docker',
-      ['inspect', '-f', '{{.State.Running}}', '--type', 'container', NAME],
+      ['ps', '-a', '--no-trunc', '--filter', `name=^/${NAME}$`, '--format', '{{.State}}'],
       { timeout: 15_000 },
     );
   });
 
-  it.each(['Error response from daemon: No such container: ', 'Error: No such object: '])(
-    'accepts exit 1 with the exact not-found contract %s',
-    async (prefix) => {
-      h.exec.mockRejectedValue(missing({ stderr: `${prefix}${NAME}\n` }));
-      expect(await probeRunner(NAME)).toEqual({ state: 'absent' });
-    },
-  );
+  it.each(['', ' \n\t'])('reads a successful empty listing as absent', async (stdout) => {
+    h.exec.mockResolvedValue({ stdout });
+    expect(await probeRunner(NAME)).toEqual({ state: 'absent' });
+  });
 
   it.each([
-    ['another exit code', missing({ code: 125 })],
-    ['spawn error', missing({ code: 'ENOENT' })],
-    ['timeout', missing({ killed: true, signal: 'SIGTERM' })],
-    [
-      'another object',
-      missing({ stderr: 'Error response from daemon: No such container: another\n' }),
-    ],
-    [
-      'extra diagnostic',
-      missing({
-        stderr: `Error response from daemon: No such container: ${NAME}\nDaemon connection lost\n`,
-      }),
-    ],
-    ['successful data alongside failure', missing({ stdout: 'true\n' })],
-    ['unknown future wording', missing({ stderr: `Container ${NAME} missing\n` })],
-    ['unstructured message', new Error(`No such container: ${NAME}`)],
-  ])('fails retryably rather than calling %s absence', async (_label, cause) => {
+    ['non-zero exit', { code: 1 }],
+    ['another exit code', { code: 125 }],
+    ['spawn error', { code: 'ENOENT' }],
+    ['timeout', { killed: true, signal: 'SIGTERM' }],
+    ['signal', { signal: 'SIGKILL' }],
+    ['successful data alongside failure', { code: 1, stdout: 'running\n' }],
+  ])('keeps %s unknown without reading stderr', async (_label, fields) => {
+    const cause = Object.assign(new Error('listing failed'), fields);
+    Object.defineProperty(cause, 'stderr', {
+      get: () => {
+        throw new Error('stderr must never be read');
+      },
+    });
     h.exec.mockRejectedValue(cause);
     const presence = await probeRunner(NAME);
-    expect(presence).toMatchObject({ state: 'unknown', error: { retryable: true, cause } });
+    expect(presence).toMatchObject({ state: 'unknown', error: { retryable: true } });
+    if (presence.state === 'unknown') expect(presence.error.cause).toBe(cause);
     await expect(requireRunnerPresence(NAME)).rejects.toBeInstanceOf(RunnerProbeError);
   });
 
-  it('rejects an invalid successful reply and honors the caller timeout', async () => {
-    h.exec.mockResolvedValue({ stdout: '<no value>\n', stderr: '' });
-    await expect(requireRunnerPresence(NAME, 10_000)).rejects.toThrow(/Cannot determine.*Retry/);
+  it.each([
+    '<no value>\n',
+    'true\n',
+    'unknown-state\n',
+    'running\nexited\n',
+    'running\n\nrunning\n',
+  ])('rejects an invalid successful listing %j and honors the caller timeout', async (stdout) => {
+    h.exec.mockResolvedValue({ stdout });
+    await expect(requireRunnerPresence(NAME, 10_000)).rejects.toBeInstanceOf(RunnerProbeError);
     expect(h.exec.mock.calls[0]![2]).toEqual({ timeout: 10_000 });
+  });
+
+  it.each([
+    '',
+    'runner.*',
+    'runner[12]',
+    'runner$',
+    'runner/name',
+    'runner\n',
+    '-runner',
+    'Runner',
+  ])('rejects an invalid name %j before executing Docker', async (name) => {
+    await expect(probeRunner(name)).rejects.toThrow(/Invalid runner name/);
+    expect(h.exec).not.toHaveBeenCalled();
+  });
+
+  it('accepts the underscore in a configured install id', async () => {
+    h.exec.mockResolvedValue({ stdout: '' });
+    expect(await probeRunner('team_a-ide-repo-1234')).toEqual({ state: 'absent' });
+    expect(h.exec.mock.calls[0]![1]).toContain('name=^/team_a-ide-repo-1234$');
   });
 });

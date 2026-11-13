@@ -39,8 +39,9 @@ vi.mock('node:child_process', async (importOriginal) => {
     const out = (stdout = '') => ({ stdout, stderr: '' });
     if (args[0] === 'ps') {
       const filters = args.filter((_, i) => args[i - 1] === '--filter');
-      const rows = [...h.containers].filter(([, c]) =>
+      const rows = [...h.containers].filter(([name, c]) =>
         filters.every((f) => {
+          if (f.startsWith('name=^/')) return name === f.slice('name=^/'.length, -1);
           if (!f.startsWith('label=')) throw new Error(`Unexpected filter: ${f}`);
           const [key, value] = f.slice(6).split('=');
           return key! in c.labels && (value === undefined || c.labels[key!] === value);
@@ -54,6 +55,7 @@ vi.mock('node:child_process', async (importOriginal) => {
             format!
               .replaceAll('{{.ID}}', id)
               .replaceAll('{{.Names}}', id)
+              .replaceAll('{{.State}}', c.running ? 'running' : 'exited')
               .replace(/\{\{\.Label "([^"]+)"\}\}/g, (_, key: string) => c.labels[key] ?? ''),
           )
           .join('\n'),

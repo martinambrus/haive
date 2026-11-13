@@ -62,11 +62,7 @@ beforeEach(() => {
   args = [`task-${++taskSeq}`, 'ws/sub', 'img:tag'];
   mock.run.mockReset();
   mock.run.mockImplementation(async (_command: string, args: string[]) => {
-    if (args[0] === 'inspect')
-      throw Object.assign(new Error('missing'), {
-        code: 1,
-        stderr: `Error response from daemon: No such container: ${args.at(-1)}\n`,
-      });
+    if (args[0] === 'ps') return { stdout: '', stderr: '' };
     throw new Error('docker unavailable');
   });
   mock.acquire.mockReset();
