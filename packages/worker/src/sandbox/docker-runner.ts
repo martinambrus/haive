@@ -10,6 +10,7 @@ export interface DockerBuildOpts {
   dockerfilePath?: string;
   tag: string;
   buildArgs?: Record<string, string>;
+  labels?: Record<string, string>;
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -353,6 +354,9 @@ export const defaultDockerRunner: DockerRunner = {
     // pipe and the build hangs with no exit. Plain mode avoids the issue.
     // Dangling images lose their repository name but retain build labels for the reaper.
     const args = ['build', '--progress=plain', '--label', installLabel(), '-t', opts.tag];
+    for (const [key, value] of Object.entries(opts.labels ?? {})) {
+      args.push('--label', `${key}=${value}`);
+    }
     if (opts.dockerfilePath) {
       args.push('-f', opts.dockerfilePath);
     }

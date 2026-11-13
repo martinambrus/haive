@@ -62,4 +62,5 @@ export const taskDatabaseStates = pgTable('task_database_states', {
   candidateStepId: uuid('candidate_step_id').references(() => taskSteps.id, {
     onDelete: 'set null',
   }),
+  decisionGeneration: integer('decision_generation').notNull().default(0),
 });

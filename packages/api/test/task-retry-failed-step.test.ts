@@ -24,6 +24,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES, configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { reofferParkedSteps, settleActiveStepsIn } from '../src/lib/task-control.js';
 import type { AppEnv } from '../src/context.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -46,6 +47,7 @@ beforeEach(() => {
 function setup(target: Record<string, unknown>) {
   const fake = createFakeDb({
     modules: schema.modules,
+    stepCatalog: schema.stepCatalog,
     repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
@@ -53,6 +55,8 @@ function setup(target: Record<string, unknown>) {
     cliInvocations: schema.cliInvocations,
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskDagPlans: schema.taskDagPlans,
+    taskStepCliChoices: schema.taskStepCliChoices,
+    taskDatabaseStates: schema.taskDatabaseStates,
   });
   fake.insert(schema.repositories, {
     id: USER,
@@ -106,6 +110,254 @@ function setup(target: Record<string, unknown>) {
 const queued = () => h.add.mock.calls.map(([name, data]) => ({ name, data }));
 
 describe('a task Retry re-runs the step the task stopped on', () => {
+  it('task retry clears a current pending receipt when recovery left no park marker', async () => {
+    const t = setup({
+      status: 'pending',
+      waitingStartedAt: null,
+      rerunGeneration: 2,
+      applyReceipt: { id: 'recovered-current', kind: 'custom-migration', input: 'old-input' },
+    });
+    expect((await t.retry()).status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({ applyReceipt: null, rerunGeneration: 3 });
+  });
+
+  it.each(['task retry', 'step retry', 'fanout resume'] as const)(
+    '%s invalidates a downstream pending receipt left by recovery',
+    async (action) => {
+      const t = setup({ status: action === 'fanout resume' ? 'done' : 'failed' });
+      t.fake.patch(schema.taskSteps, LATER_ROW, {
+        applyReceipt: { id: 'recovered-apply', kind: 'custom-migration', input: 'old-input' },
+        rerunGeneration: 2,
+        detectOutput: { prior: true },
+        formValues: { prior: true },
+      });
+      const fresh = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-d',
+        round: 0,
+        stepIndex: 4,
+        runSeq: 4,
+        status: 'pending',
+        rerunGeneration: 0,
+      });
+      const history = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-c',
+        round: 1,
+        stepIndex: 3,
+        runSeq: 3,
+        status: 'pending',
+        applyReceipt: { id: 'other-round', kind: 'custom-migration', input: 'other' },
+      });
+      if (action === 'fanout resume')
+        t.fake.insert(schema.taskStepAgentMinings, {
+          taskStepId: TARGET_ROW,
+          agentId: 'reviewer',
+          agentTitle: 'Reviewer',
+          status: 'failed',
+        });
+      const res =
+        action === 'task retry'
+          ? await t.retry()
+          : await app.request(`/${TASK}/steps/step-b/action`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: action === 'step retry' ? 'retry' : 'resume' }),
+            });
+      expect(res.status).toBe(200);
+      expect(t.step(LATER_ROW)).toMatchObject({
+        status: 'pending',
+        applyReceipt: null,
+        rerunGeneration: 3,
+        detectOutput: null,
+        formValues: null,
+      });
+      expect(t.step(fresh.id as string)).toMatchObject({ applyReceipt: null, rerunGeneration: 0 });
+      expect(t.step(history.id as string).applyReceipt).toMatchObject({ id: 'other-round' });
+    },
+  );
+
+  it.each([
+    'task retry',
+    'step retry',
+    'fanout resume',
+    'loop resume',
+    'retry_ai',
+    'provider switch',
+    'pending provider switch',
+  ] as const)(
+    '%s invalidates a downstream pending save decision without an apply receipt',
+    async (action) => {
+      const t = setup({
+        status:
+          action === 'fanout resume'
+            ? 'done'
+            : action === 'pending provider switch'
+              ? 'pending'
+              : 'failed',
+        iterationCount: action === 'loop resume' ? 1 : 0,
+      });
+      t.fake.patch(schema.taskSteps, LATER_ROW, {
+        stepId: '11g-save-database',
+        rerunGeneration: 2,
+      });
+      t.fake.insert(schema.taskDatabaseStates, {
+        taskId: TASK,
+        repositoryId: USER,
+        outcome: 'saved',
+        candidateStepId: LATER_ROW,
+        decisionGeneration: 2,
+      });
+      const history = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: '11g-save-database',
+        stepIndex: 3,
+        runSeq: 3,
+        round: 1,
+        status: 'pending',
+        rerunGeneration: 2,
+      });
+      const fresh = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'fresh',
+        stepIndex: 4,
+        runSeq: 4,
+        round: 0,
+        status: 'pending',
+        rerunGeneration: 0,
+      });
+      const switching = action === 'provider switch' || action === 'pending provider switch';
+      if (action === 'fanout resume')
+        t.fake.insert(schema.taskStepAgentMinings, {
+          taskStepId: TARGET_ROW,
+          agentId: 'reviewer',
+          agentTitle: 'Reviewer',
+          status: 'failed',
+        });
+      const res =
+        action === 'task retry'
+          ? await t.retry()
+          : await app.request(
+              switching ? `/${TASK}/steps/step-b/cli-provider` : `/${TASK}/steps/step-b/action`,
+              {
+                method: switching ? 'PATCH' : 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(
+                  switching
+                    ? { cliProviderId: null }
+                    : {
+                        action:
+                          action === 'step retry'
+                            ? 'retry'
+                            : action === 'retry_ai'
+                              ? 'retry_ai'
+                              : 'resume',
+                      },
+                ),
+              },
+            );
+      expect(res.status).toBe(200);
+      expect(t.step(LATER_ROW)).toMatchObject({
+        status: 'pending',
+        applyReceipt: null,
+        rerunGeneration: 3,
+      });
+      expect(t.step(history.id as string).rerunGeneration).toBe(2);
+      expect(t.step(fresh.id as string).rerunGeneration).toBe(0);
+    },
+  );
+
+  it('task retry invalidates a current pending save decision without a park or receipt', async () => {
+    const t = setup({ status: 'pending', stepId: '11g-save-database', rerunGeneration: 2 });
+    t.fake.patch(schema.tasks, TASK, { currentStepId: '11g-save-database' });
+    t.fake.insert(schema.taskDatabaseStates, {
+      taskId: TASK,
+      repositoryId: USER,
+      outcome: 'saved',
+      candidateStepId: TARGET_ROW,
+      decisionGeneration: 2,
+    });
+    expect((await t.retry()).status).toBe(200);
+    expect(t.step(TARGET_ROW).rerunGeneration).toBe(3);
+  });
+
+  it.each(['reoffer', 'settle'] as const)(
+    '%s clears receipts when reoffering a parked form',
+    async (writer) => {
+      const t = setup({
+        status: 'waiting_form',
+        applyReceipt: { id: 'old-apply', kind: 'custom-migration', input: 'command' },
+        rerunGeneration: 2,
+        formValues: { migrationCommand: 'node migrate.js' },
+      });
+      t.fake.patch(schema.taskSteps, LATER_ROW, {
+        stepId: '11g-save-database',
+        rerunGeneration: 2,
+      });
+      await t.fake.db.transaction(async (tx) => {
+        if (writer === 'reoffer') await reofferParkedSteps(tx as never, TASK, t.fake.now(), []);
+        else await settleActiveStepsIn(tx as never, TASK);
+      });
+      expect(t.step(TARGET_ROW)).toMatchObject({
+        status: 'pending',
+        applyReceipt: null,
+        rerunGeneration: 3,
+      });
+      expect(t.step(LATER_ROW).rerunGeneration).toBe(writer === 'settle' ? 3 : 2);
+    },
+  );
+
+  it('clears receipts when changing the default provider of a failed step', async () => {
+    const t = setup({
+      status: 'failed',
+      iterationCount: 0,
+      rerunGeneration: 2,
+      applyReceipt: { id: 'old-apply', kind: 'custom-migration', input: 'command' },
+    });
+    const res = await app.request(`/${TASK}/steps/step-b/cli-provider`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: null }),
+    });
+    expect(res.status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({
+      status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: 3,
+    });
+  });
+
+  it('AI retry clears the failed apply receipt without voiding the save generation or approved inputs', async () => {
+    const inputs = { runMigration: true, migrationCommand: 'node migrate.js' };
+    const t = setup({
+      status: 'failed',
+      errorMessage: 'column missing',
+      applyReceipt: {
+        id: 'failed-command',
+        kind: 'custom-migration',
+        input: 'command',
+        result: { exitCode: 1 },
+      },
+      rerunGeneration: 4,
+      detectOutput: { framework: 'unknown' },
+      formValues: inputs,
+    });
+    const res = await app.request(`/${TASK}/steps/step-b/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'retry_ai' }),
+    });
+    expect(res.status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({
+      status: 'running',
+      applyReceipt: null,
+      rerunGeneration: 4,
+      detectOutput: { framework: 'unknown' },
+      formValues: inputs,
+      aiFixContext: { priorError: 'column missing' },
+    });
+  });
+
   it('resets the failed row and advances to it at a new epoch, with no START', async () => {
     const t = setup({
       status: 'failed',

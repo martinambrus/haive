@@ -655,6 +655,15 @@ export const taskSteps = pgTable(
     integrationWait: jsonb('integration_wait').$type<IntegrationWait>(),
     /** The provider id the stored detect output was computed for; null means unknown (rows older than this column). */
     detectCliProviderId: uuid('detect_cli_provider_id'),
+    /** Durable deterministic effect receipt; recovery keeps it, an explicit rerun clears it. */
+    applyReceipt: jsonb('apply_receipt').$type<{
+      id: string;
+      kind: string;
+      input: string;
+      result?: Record<string, unknown>;
+    }>(),
+    /** Logical rerun generation: recovery epoch bumps leave it unchanged. */
+    rerunGeneration: integer('rerun_generation').notNull().default(0),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),

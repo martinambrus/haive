@@ -28,6 +28,8 @@ class ReviveBlocked extends Error {
 }
 
 /** Reset `targetStepId` and every non-pending downstream row (same round) to `pending`,
+ *  including pending rows with receipts or save decisions when an explicit rerun
+ *  invalidates their inputs,
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
@@ -42,6 +44,7 @@ export async function resetStepAndDownstream(
   targetStepId: string,
   round: number,
   expectedEpoch?: number,
+  recovery = false,
 ): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
@@ -74,7 +77,15 @@ export async function resetStepAndDownstream(
           : gt(schema.taskSteps.stepIndex, target.stepIndex),
       ),
     );
-  const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
+  const downstreamToReset = downstream
+    .filter(
+      (r) =>
+        r.status !== 'pending' ||
+        // Save decisions are stored outside task_steps, without an apply receipt.
+        // Resetting a pristine save row too is harmless and avoids a cross-table race.
+        (!recovery && (r.applyReceipt != null || r.stepId === '11g-save-database')),
+    )
+    .map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 
   let newEpoch = 0;
@@ -132,10 +143,16 @@ export async function resetStepAndDownstream(
           .update(schema.taskSteps)
           .set({
             status: 'pending',
-            detectOutput: null,
-            formSchema: null,
-            formValues: null,
+            detectOutput: recovery && r.applyReceipt ? r.detectOutput : null,
+            formSchema: recovery && r.applyReceipt ? r.formSchema : null,
+            formValues: recovery && r.applyReceipt ? r.formValues : null,
             output: null,
+            ...(recovery
+              ? {}
+              : {
+                  applyReceipt: null,
+                  rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
+                }),
             // The recap describes the run being discarded; left behind it reads as the new
             // run's recap the moment the step goes green again.
             summary: null,

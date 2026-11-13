@@ -36,6 +36,8 @@ import {
 } from '../src/repo/database-snapshots.js';
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
+import * as taskMeta from '../src/step-engine/steps/workflow/_task-meta.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 
 const runtime = vi.hoisted(() => ({ import: vi.fn(), config: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
@@ -392,6 +394,31 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     iteration: 0,
     previousIterations: [],
   });
+  it('keeps an export error on the reopened form after an explicit generation reset', async () => {
+    const ctx = await task('retried export');
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 2 })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    const workspace = vi.spyOn(taskMeta, 'resolveDdevWorkspace').mockResolvedValueOnce(null);
+    try {
+      await expect(saveDatabaseStep.apply(ctx, saveArgs('save:0'))).rejects.toThrow(
+        'Database export failed',
+      );
+    } finally {
+      workspace.mockRestore();
+    }
+    const detected = await loadDatabaseSnapshotState(ctx);
+    expect(detected!.state).toMatchObject({
+      outcome: 'pending',
+      exportError: 'No DDEV workspace is available',
+      decisionGeneration: 2,
+    });
+    expect(databaseSaveForm(detected)?.description).toContain(
+      'Database export failed: No DDEV workspace is available',
+    );
+  });
+
   it('requires explicit approval before saving even with a ready candidate', async () => {
     const a = await task('manual decision');
     const saved = await candidate(a);
@@ -555,9 +582,97 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     ).toBeUndefined();
   });
 
-  it('drops a pending candidate from an earlier epoch before saving retried work', async () => {
+  it('preserves a published decision across recovery and asks again after an explicit reset', async () => {
+    const a = await task('recovered save');
+    const published = await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    await resetStepAndDownstream(db, a.taskId, DATABASE_SAVE_STEP_ID, 0, 0, true);
+    const recoveredStep = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, a.taskStepId),
+    });
+    expect(recoveredStep).toMatchObject({
+      status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: 0,
+    });
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('saved');
+    expect(
+      await saveDatabaseStep.apply(a, {
+        detected: null,
+        formValues: { action: 'save:0' },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).toEqual({ outcome: 'saved' });
+    expect((await head())!.snapshotId).toBe(published.id);
+    // Retry an upstream step while recovery left the save row pending without a receipt.
+    await db.insert(schema.taskSteps).values({
+      taskId: a.taskId,
+      stepId: 'upstream',
+      stepIndex: 1,
+      title: 'Upstream',
+      status: 'failed',
+    });
+    await resetStepAndDownstream(db, a.taskId, 'upstream', 0, 1);
+    // The runner claims the save row before the fenced decision loader writes to it.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running' })
+      .where(eq(schema.taskSteps.id, a.taskStepId));
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('pending');
+    await expect(
+      saveDatabaseStep.apply(a, {
+        detected: null,
+        formValues: { action: 'save:0' },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).rejects.toThrow('Choose whether to save');
+  });
+
+  it('offers a fresh decision on a save step in a new round', async () => {
+    const a = await task('next round');
+    await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: a.taskId,
+        stepId: DATABASE_SAVE_STEP_ID,
+        stepIndex: 13,
+        title: 'Save database',
+        status: 'running',
+        round: 1,
+      })
+      .returning();
+    expect(
+      (await loadDatabaseSnapshotState({ ...a, taskStepId: step!.id, round: 1 }))!.state.outcome,
+    ).toBe('pending');
+  });
+
+  it('reoffers an ambiguous legacy decision when installing logical generations', async () => {
+    const a = await task('legacy reset');
+    await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, a.taskId));
+    const migration = await readFile(
+      new URL('../../database/migrations/0234_snapshot_decision_generation.sql', import.meta.url),
+      'utf8',
+    );
+    await db.$client.unsafe(migration);
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('pending');
+  });
+
+  it('drops a pending candidate after an upstream rerun before saving new work', async () => {
     const a = await task('retried');
     const old = await candidate(a);
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 1 })
+      .where(eq(schema.taskSteps.id, a.taskStepId));
     await db
       .update(schema.tasks)
       .set({ orchestrationEpoch: 1 })

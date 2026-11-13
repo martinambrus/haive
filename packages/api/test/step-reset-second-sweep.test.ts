@@ -22,6 +22,8 @@ describe('resetting rows for a re-run', () => {
     const step = fake.insert(schema.taskSteps, {
       taskId: TASK,
       stepId: '08c-peer-review',
+      rerunGeneration: 2,
+      applyReceipt: { id: 'approved-run', kind: 'custom-migration', input: 'command' },
       round: 0,
       status: 'running',
     });
@@ -52,6 +54,10 @@ describe('resetting rows for a re-run', () => {
     expect(recorded).toBe(true);
     expect(fake.rows(schema.cliInvocations).map((r) => r.supersededAt)).toEqual([expect.any(Date)]);
     expect(fake.rows(schema.taskStepAgentMinings)).toEqual([]);
-    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'pending' });
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({
+      status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: 3,
+    });
   });
 });

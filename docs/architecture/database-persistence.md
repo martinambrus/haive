@@ -64,8 +64,15 @@ attempt. Overwriting selects the whole database; databases are not merged.
 
 Approval carries the revision shown in the form. A further save while it is open asks again
 before exporting, and a change during export reopens the form with the newest revision. Duplicate
-delivery in the same epoch preserves the decision; an upstream retry in a new epoch permits a
-fresh export. Restoration is a separate step for both saved snapshots and uploaded dumps, before
+delivery and recovery preserve the decision across epoch bumps. A decision names the save
+step and its logical `rerun_generation` (`decision_generation`); an explicit reset increments
+that generation and a new round has another step id, so upstream retries still ask again
+and permit a fresh export. This includes downstream save rows recovery already returned
+to `pending`: a save decision has no apply receipt, so explicit resets identify save
+rows by their stable step id and reset pristine pending save rows conservatively too.
+Recovery alone keeps both the decision and its generation. Export errors also record the current save generation so
+the reopened form keeps their diagnosis. Legacy epoch-mismatched decisions are reoffered once on upgrade
+because they cannot identify whether recovery or an upstream reset moved the epoch. Restoration is a separate step for both saved snapshots and uploaded dumps, before
 migrations. It shares startup’s DDEV eligibility check: an upload alone cannot start DDEV in a
 non-DDEV workflow. An explicitly selected saved database reports missing DDEV eligibility rather
 than continuing without the requested restore. Already imported saved snapshots and consumed

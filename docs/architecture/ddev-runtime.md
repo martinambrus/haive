@@ -114,6 +114,23 @@ unsubmitted, genuinely waiting gates, preserving their evidence and all human de
 
 **`06a-db-migrate` detects a framework by files it SHIPS, not by composer.json.** A `drupal/core` regex reports `unknown` for every Drupal 7 site (7.90 ships no composer.json at all), which left `migrationCommand` empty, silently skipped `drush updatedb`, and — because the D7 bootstrap pre-flight below it is gated on `framework === 'drupal'` — made the check that exists to catch an unusable database dead code on exactly the sites it was written for. Markers must be TRACKED files: the workspace is a git worktree, which materialises tracked files only, so `wp-config.php` (credentials + salts, universally gitignored) is the wrong way to find WordPress and `wp-includes/version.php` is the right one — the same failure class as a test fixture missing from a worktree. Root `includes/bootstrap.inc` is D7-only (D8+ puts it under `core/`) so it is checked first; both resolve to `drupal` because the command and the pre-flight are identical.
 
+**Custom migration approvals survive recovery.** `06a-db-migrate` writes a durable
+`task_steps.apply_receipt` with a unique run identity immediately before execution,
+after DDEV startup and the Drupal connection probe, and records the command's outcome before the optional durability snapshot. A replay reuses a known
+result only when the receipt also records completion of its post-success durability
+snapshot, then still takes the non-fatal migrated-database snapshot. A successful
+command without that completion marker cannot prove its changes survived a cold
+restore; the step fails before any command or snapshot, including on a warm replay
+or an older receipt without the marker. Existing custom receipts bypass the Drupal
+pre-flight skip so an older restored database cannot hide an unconfirmed execution.
+A missing result likewise means the command may have run: the step fails with a clear
+sentence asking the user to inspect the database before choosing Retry or Skip. Retry
+and Retry with AI clear the receipt and authorize a fresh run; Retry with AI keeps
+the save-decision generation and approved form values. Edited commands, including commands
+for a detected framework, use this rule. Exact built-in defaults retain their existing
+ledger/version-backed replay: Drupal updatedb, Laravel migrate, Doctrine migrations,
+Django migrate, Rails db:migrate, WordPress core update-db and Prisma migrate deploy.
+
 **A `ddev restart` RECREATES the web container, so nothing installed inside it survives one.**
 Only `/mnt/ddev-global-cache` (a named volume) and the bind-mounted project outlive it;
 `/home/ddev/.cache` is in the container's writable layer and is not a symlink into that cache.
