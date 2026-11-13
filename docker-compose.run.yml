@@ -69,8 +69,8 @@ services:
     # healthy and is completely unreachable, which is the worst kind of working.
     #
     # Only web, api and the mail sink. Postgres, Redis and Ollama stay internal: the dev override
-    # publishes them for host tooling, and an install that does not need that should not widen its
-    # surface to get it.
+    # publishes only Postgres (and the Mailpit UI), on the host loopback, for host tooling, and an
+    # install that does not need that should not widen its surface to get it.
     ports:
       - '${HAIVE_API_PORT:-3001}:3001'
     environment:

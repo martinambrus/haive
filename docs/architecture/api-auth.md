@@ -397,7 +397,8 @@ Production seeds disabled mail and an empty host/from. The dev override seeds en
 API and worker environments. Optional `HAIVE_MAIL_USER` and `HAIVE_MAIL_FROM_NAME` complete the
 seed fields. All seeds use SET NX: existing administrator choices win on restart. Mailpit itself
 already lives in the base Compose file (`axllent/mailpit:latest`, persistent `mailpit_data`);
-the dev override publishes its SMTP and web ports. The Nodemailer dependency and lockfile change
+the dev override publishes only its web UI, on the host loopback (`127.0.0.1:8085`); SMTP stays
+internal, reached as `mailpit:1025`. The Nodemailer dependency and lockfile change
 require `pnpm docker rebuild` when this branch is deployed to a dev stack. Roll back by reverting
 the mail commit; unused config keys are harmless.
 

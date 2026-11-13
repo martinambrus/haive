@@ -118,5 +118,8 @@ describe('dev stack published ports', () => {
       'mailpit 127.0.0.1:8085:8025',
       'postgres 127.0.0.1:5432:5432',
     ]);
+    // The exemption covers the browser-facing ports only, not anything added beside them.
+    expect(services.api.ports).toEqual(['3001:3001']);
+    expect(services.web.ports).toEqual(['3000:3000']);
   });
 });
