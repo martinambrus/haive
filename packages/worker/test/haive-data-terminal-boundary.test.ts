@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TERMINAL_REQUEST_CHANNEL, TERMINAL_REPLY_CHANNEL_PREFIX } from '@haive/shared';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // WORKER_REPO_STORAGE_ROOT is read from the environment once, at import time, so the
 // fixture root has to exist and be exported before the manager is pulled in.
@@ -12,7 +13,22 @@ const USER = 'user-1';
 const SUBPATH = '11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222';
 const repoMount = { source: 'haive_repos', target: '/haive/workdir', subpath: SUBPATH };
 
-const h = vi.hoisted(() => ({ ensure: vi.fn() }));
+const h = vi.hoisted(() => ({ ensure: vi.fn(), publish: vi.fn(), error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (h.error && String(args[0]).endsWith('/.git')) throw h.error;
+      return real.lstat(...args);
+    },
+  };
+});
+
+afterEach(() => {
+  h.error = null;
+});
+
 vi.mock('../src/queues/cli-exec-queue.js', () => ({
   resolveRepoMount: vi.fn(async () => repoMount),
   resolveTaskRepoMount: vi.fn(async () => repoMount),
@@ -43,12 +59,16 @@ function manager() {
   };
   const mgr = new TerminalSessionManager({
     db: db as never,
-    redis: {} as never,
+    redis: { publish: h.publish } as never,
     subscriberRedis: {} as never,
     docker: {} as never,
     buildMcpServers: async () => [],
   });
-  return mgr as unknown as { openSession: (req: unknown) => Promise<unknown> };
+  return mgr as unknown as {
+    started: boolean;
+    openSession: (req: unknown) => Promise<unknown>;
+    handleSubscriberMessage: (channel: string, raw: string) => Promise<void>;
+  };
 }
 
 const open = (scope: 'task' | 'repo') =>
@@ -66,6 +86,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  h.publish.mockReset().mockResolvedValue(1);
   h.ensure.mockReset().mockRejectedValue(new Error('shell container not started in this test'));
   await rm(path.join(storageRoot, SUBPATH), { recursive: true, force: true });
   for (const name of ['state', 'knowledge_base', 'learnings']) {
@@ -75,6 +96,39 @@ beforeEach(async () => {
 });
 
 describe('the terminals are human surfaces', () => {
+  it.each(['EMFILE', 'ENFILE'])(
+    'answers a normal terminal error without starting a container on %s, then allows retry',
+    async (code) => {
+      const mgr = manager();
+      mgr.started = true;
+      const request = JSON.stringify({
+        op: 'open',
+        correlationId: 'c1',
+        userId: USER,
+        cliProviderId: 'prov-1',
+        scope: 'task',
+        taskId: 'task-1',
+      });
+      h.error = Object.assign(new Error('injected boundary lookup failure'), { code });
+      await mgr.handleSubscriberMessage(TERMINAL_REQUEST_CHANNEL, request);
+      expect(h.ensure).not.toHaveBeenCalled();
+      expect(h.publish).toHaveBeenLastCalledWith(
+        `${TERMINAL_REPLY_CHANNEL_PREFIX}c1`,
+        JSON.stringify({ ok: false, error: 'injected boundary lookup failure' }),
+      );
+
+      h.error = null;
+      await mgr.handleSubscriberMessage(TERMINAL_REQUEST_CHANNEL, request);
+      expect(h.ensure).toHaveBeenCalledTimes(1);
+      expect(h.ensure.mock.calls[0]![0].nestedMounts).toContainEqual({
+        source: 'haive_repos',
+        target: '/haive/workdir/.git',
+        subpath: `${SUBPATH}/.git`,
+        readOnly: true,
+      });
+    },
+  );
+
   it('gives the task shell the read-only .git it always had, and no .haive-data mount', async () => {
     await expect(open('task')).rejects.toThrow('not started in this test');
 

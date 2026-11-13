@@ -1,7 +1,22 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (h.error && String(args[0]).endsWith('/.git')) throw h.error;
+      return real.lstat(...args);
+    },
+  };
+});
+afterEach(() => {
+  h.error = null;
+});
 
 // WORKER_REPO_STORAGE_ROOT is read from the environment once, at import time, so the
 // fixture root has to exist and be exported before gitfile-mask.js is pulled in.
@@ -35,6 +50,19 @@ const fresh = async (): Promise<void> => {
 };
 
 describe('repoGitDataBoundary', () => {
+  it.each(['EMFILE', 'ENFILE'])(
+    'refuses an unread .git on %s instead of omitting its mask',
+    async (code) => {
+      await fresh();
+      await mkdir(path.join(repoDir, '.git'));
+      const err = Object.assign(new Error('injected boundary lookup failure'), { code });
+      h.error = err;
+      await expect(
+        repoGitDataBoundary(rootMount, { hasWorktree: false, hasRepo: true }),
+      ).rejects.toBe(err);
+    },
+  );
+
   it('mounts a repository root’s .git directory read-only, under the repo mount', async () => {
     await fresh();
     await mkdir(path.join(repoDir, '.git'));
