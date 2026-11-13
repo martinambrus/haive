@@ -21,7 +21,7 @@ vi.mock('@/lib/api-client', async (original) => ({
   listAuditEvents: h.audit,
 }));
 const user = {
-  id: 'user-1',
+  id: '12345678-0000-4000-8000-000000000001',
   email: null,
   emailReadable: false,
   role: 'user',
@@ -70,7 +70,7 @@ async function mount(page: typeof UsersPage) {
 }
 it('labels an unreadable user email in the admin list', async () => {
   const view = await mount(UsersPage);
-  expect(textOf(view.tree())).toContain('unreadable, needs relink');
+  expect(textOf(view.tree())).toContain('unreadable, needs relink (12345678)');
 });
 it('labels an unreadable audit actor and its filter option', async () => {
   const view = await mount(AuditPage);
@@ -83,7 +83,7 @@ it('labels an unreadable audit actor and its filter option', async () => {
   expect(
     findAll(
       view.tree(),
-      (node) => node.tag === 'option' && textOf(node) === 'unreadable, needs relink',
+      (node) => node.tag === 'option' && textOf(node) === 'unreadable, needs relink (12345678)',
     ),
   ).toHaveLength(1);
 });

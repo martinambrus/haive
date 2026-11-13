@@ -147,7 +147,7 @@ export default function AuditLogPage() {
             <option value="">All</option>
             {users.map((u) => (
               <option key={u.id} value={u.id}>
-                {u.email ?? 'unreadable, needs relink'}
+                {u.email ?? `unreadable, needs relink (${u.id.slice(0, 8)})`}
               </option>
             ))}
           </select>
