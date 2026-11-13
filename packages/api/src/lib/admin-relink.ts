@@ -36,6 +36,8 @@ export async function relinkUser(
         .where(eq(schema.users.id, userId))
         .for('no key update');
       if (!user) throw new HttpError(404, 'User not found');
+      // Compare the stored id: Postgres accepts other spellings of the same uuid in the URL.
+      if (user.id === actorUserId) throw new HttpError(400, 'Cannot relink the calling admin');
       if (user.status !== 'active')
         throw new HttpError(
           409,

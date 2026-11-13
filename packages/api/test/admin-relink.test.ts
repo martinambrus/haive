@@ -106,6 +106,12 @@ it('returns 404 for an unknown user', async () => {
   expect(await res.json()).toMatchObject({ error: 'User not found' });
 });
 it('refuses to relink the calling admin and changes nothing', async () => {
+  await fake.db.insert(schema.users).values({
+    id: '00000000-0000-4000-8000-000000000001',
+    emailEncrypted: encryptEmail(EMAIL, '12'.repeat(32)),
+    emailBlindIndex: 'caller-index',
+    passwordHash: 'old-hash',
+  });
   const before = structuredClone(fake.rows(schema.users));
   const res = await post('00000000-0000-4000-8000-000000000001');
   expect(res.status).toBe(400);

@@ -9,12 +9,16 @@ import type { AppEnv } from '../src/context.js';
 const url = process.env.ADMIN_RELINK_TEST_URL;
 if (url && new URL(url).pathname !== '/rlk_test')
   throw new Error('Use a dedicated rlk_test database');
-const h = vi.hoisted(() => ({ db: undefined as unknown, send: vi.fn() }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  send: vi.fn(),
+  caller: '00000000-0000-4000-8000-000000000001',
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
-    c.set('userId', '00000000-0000-4000-8000-000000000001');
+    c.set('userId', h.caller);
     c.set('userRole', 'admin');
     await next();
   },
@@ -80,6 +84,21 @@ describe.skipIf(!url)('admin relink on Postgres', () => {
       audits: await db.query.auditEvents.findMany({ where: eq(schema.auditEvents.targetId, id) }),
     };
   }
+  it('refuses relinking the caller under any spelling Postgres accepts for its id', async () => {
+    const u = await user();
+    h.caller = u.id;
+    try {
+      const before = await state(u.id);
+      for (const id of [u.id.toUpperCase(), u.id.replaceAll('-', ''), '{' + u.id + '}']) {
+        const res = await post(id, randomUUID() + '@example.test');
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'Cannot relink the calling admin' });
+      }
+      expect(await state(u.id)).toEqual(before);
+    } finally {
+      h.caller = '00000000-0000-4000-8000-000000000001';
+    }
+  });
   it('commits the normalized login index, password, revocation, plain reset and required audits together', async () => {
     const u = await user();
     const email = randomUUID() + '@example.test';
