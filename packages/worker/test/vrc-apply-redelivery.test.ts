@@ -9,6 +9,7 @@ import { createBuildImageStep } from '../src/step-engine/steps/env-replicate/03-
 import { dbMigrateStep } from '../src/step-engine/steps/workflow/06a-db-migrate.js';
 import { saveDatabaseStep } from '../src/step-engine/steps/workflow/11g-save-database.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 
 const h = vi.hoisted(() => ({ exec: vi.fn(), snapshot: vi.fn(), ensure: vi.fn() }));
 vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', () => ({
@@ -27,13 +28,23 @@ function context(): StepContext {
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     envTemplates: schema.envTemplates,
+    cliInvocations: schema.cliInvocations,
+    taskStepAgentMinings: schema.taskStepAgentMinings,
+    taskDagPlans: schema.taskDagPlans,
   });
   fake.insert(schema.tasks, {
     id: '11111111-1111-4111-8111-111111111111',
     status: 'running',
     orchestrationEpoch: 3,
   });
-  fake.insert(schema.taskSteps, { id: '22222222-2222-4222-8222-222222222222', status: 'running' });
+  fake.insert(schema.taskSteps, {
+    id: '22222222-2222-4222-8222-222222222222',
+    taskId: '11111111-1111-4111-8111-111111111111',
+    stepId: dbMigrateStep.metadata.id,
+    stepIndex: 1,
+    round: 0,
+    status: 'running',
+  });
   return {
     taskId: '11111111-1111-4111-8111-111111111111',
     taskStepId: '22222222-2222-4222-8222-222222222222',
@@ -189,6 +200,44 @@ describe('deterministic apply redelivery', () => {
     },
   );
 
+  it('rebuilds instead of adopting an image bearing another apply identity', async () => {
+    const build = vi.fn().mockRejectedValueOnce(new Error('build interrupted')).mockResolvedValue({
+      exitCode: 0,
+      imageTag: 'foreign:latest',
+      imageId: 'sha256:ours',
+      durationMs: 0,
+      stderr: '',
+      timedOut: false,
+    });
+    const inspect = vi.fn(async () => ({
+      exists: true,
+      imageId: 'sha256:foreign',
+      labels: { 'haive.apply-id': 'another-run' },
+    }));
+    const step = createBuildImageStep(fakeDockerRunner({ build, inspect }));
+    const ctx = context();
+    const args = {
+      detected: {
+        envTemplateId: '66666666-6666-4666-8666-666666666666',
+        name: 'image',
+        baseImage: 'scratch',
+        dockerfile: 'FROM scratch',
+        currentImageId: null,
+        status: 'pending',
+      },
+      formValues: { imageTag: 'foreign:latest', forceRebuild: false },
+      iteration: 0,
+      previousIterations: [],
+    };
+    await expect(step.apply(ctx, args)).rejects.toThrow('build interrupted');
+    await expect(step.apply(ctx, args)).resolves.toMatchObject({
+      imageId: 'sha256:ours',
+      skipped: false,
+    });
+    expect(inspect).toHaveBeenCalledWith('foreign:latest');
+    expect(build).toHaveBeenCalledTimes(2);
+  });
+
   it('does not repeat an approved custom migration after its external effect succeeded', async () => {
     let appliedDataChanges = 0;
     h.exec.mockImplementation(async () => {
@@ -305,9 +354,11 @@ describe('deterministic apply redelivery', () => {
     });
     expect(h.exec).toHaveBeenCalledTimes(1);
     // The explicit Retry reset clears the receipt, unlike recovery and Resume.
+    await resetStepAndDownstream(ctx.db, ctx.taskId, dbMigrateStep.metadata.id, ctx.round);
+    // The real runner claims the reset pending row before invoking apply.
     await ctx.db
       .update(schema.taskSteps)
-      .set({ applyReceipt: null })
+      .set({ status: 'running' })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));
     h.exec.mockResolvedValue({ exitCode: 0, output: 'done' });
     await expect(dbMigrateStep.apply(ctx, args)).resolves.toMatchObject({ passed: true });

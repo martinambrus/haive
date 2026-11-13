@@ -24,6 +24,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES, configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { reofferParkedSteps, settleActiveStepsIn } from '../src/lib/task-control.js';
 import type { AppEnv } from '../src/context.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -53,6 +54,7 @@ function setup(target: Record<string, unknown>) {
     cliInvocations: schema.cliInvocations,
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskDagPlans: schema.taskDagPlans,
+    taskStepCliChoices: schema.taskStepCliChoices,
   });
   fake.insert(schema.repositories, {
     id: USER,
@@ -106,6 +108,47 @@ function setup(target: Record<string, unknown>) {
 const queued = () => h.add.mock.calls.map(([name, data]) => ({ name, data }));
 
 describe('a task Retry re-runs the step the task stopped on', () => {
+  it.each(['reoffer', 'settle'] as const)(
+    '%s clears receipts when reoffering a parked form',
+    async (writer) => {
+      const t = setup({
+        status: 'waiting_form',
+        applyReceipt: { id: 'old-apply', kind: 'custom-migration', input: 'command' },
+        rerunGeneration: 2,
+        formValues: { migrationCommand: 'node migrate.js' },
+      });
+      await t.fake.db.transaction(async (tx) => {
+        if (writer === 'reoffer') await reofferParkedSteps(tx as never, TASK, t.fake.now(), []);
+        else await settleActiveStepsIn(tx as never, TASK);
+      });
+      expect(t.step(TARGET_ROW)).toMatchObject({
+        status: 'pending',
+        applyReceipt: null,
+        rerunGeneration: 3,
+      });
+    },
+  );
+
+  it('clears receipts when changing the default provider of a failed step', async () => {
+    const t = setup({
+      status: 'failed',
+      iterationCount: 0,
+      rerunGeneration: 2,
+      applyReceipt: { id: 'old-apply', kind: 'custom-migration', input: 'command' },
+    });
+    const res = await app.request(`/${TASK}/steps/step-b/cli-provider`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: null }),
+    });
+    expect(res.status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({
+      status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: 3,
+    });
+  });
+
   it('AI retry clears the failed apply receipt without voiding the save generation or approved inputs', async () => {
     const inputs = { runMigration: true, migrationCommand: 'node migrate.js' };
     const t = setup({
