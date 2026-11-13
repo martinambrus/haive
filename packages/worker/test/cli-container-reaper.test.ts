@@ -82,6 +82,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe('reapAllCliSandboxes shutdown budget', () => {
@@ -225,5 +226,27 @@ describe('kill timers', () => {
 describe('SHUTDOWN_REAP_BUDGET_MS', () => {
   it('C5 is 3 s', () => {
     expect(SHUTDOWN_REAP_BUDGET_MS).toBe(3_000);
+  });
+});
+
+// A task label finds repo and foreign-name shells too; the name pass recovers legacy shells.
+describe.each(['haive', 'tib_second'])('terminal shell ownership for install %s', (install) => {
+  it('removes own shells and only the default install claims legacy shells', async () => {
+    vi.stubEnv('HAIVE_INSTALL_ID', install);
+    const own = 'aaaaaaaa1111';
+    const foreign = 'bbbbbbbb2222';
+    const legacy = 'cccccccc3333';
+    h.fake.route = (verb, filter) => ({
+      stdout:
+        verb === 'ps' && (filter === 'label=haive.task.id' || filter.startsWith('name='))
+          ? `${own}\t${install}\n${foreign}\telsewhere\n${legacy}\t\n`
+          : '',
+      hang: false,
+    });
+
+    await expect(reapAllCliSandboxes('worker boot')).resolves.toBe(install === 'haive' ? 2 : 1);
+    expect(verbs('rm').map(({ args }) => args)).toEqual([
+      ['rm', '-f', '-v', own, ...(install === 'haive' ? [legacy] : [])],
+    ]);
   });
 });
