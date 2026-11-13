@@ -537,12 +537,6 @@ PRE-EXISTING, from the T393 build (2026-11-07). A `settle-stopped-task` job that
 
 From the T355 build: `enqueueCancelJob` (api lib/cancel-task.ts ~:125, ~:145) is now bounded and can return without queueing; the same sweep would cover a Cancel whose job never reached Redis.
 
-### T541 · FNF[kb-author-failed-then-cancel] · a Stop-settled kb_author entry stays 'failed' after a later Cancel
-
-status: open · kind: design · priority: P3
-Owner decision 2026-11-10: Cancel deletes a failed kb_author entry (restore the earlier behaviour).
-PRE-EXISTING for worker-failed tasks; since T393 (PR #1026) a Stop then Cancel also leaves the entry 'failed' where it was deleted before. worker `_global-kb-promote.ts` ~:744-783 reconciles only skeleton and enriching entries. Decide whether a Cancel deletes a failed entry too.
-
 ### T542 · FNF[settle-members-recheck] · settle members act on a task without re-reading its status after the job-start fence
 
 status: open · kind: fix · priority: P3
@@ -670,7 +664,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 4. Own change, minor. The DAG nothing-staged warning names the path, not the issue, and two issues sharing a path collapse to one note (`dag-executor.ts` `commitIssueWork`, `step-ownership.ts` `addStepWarning`). The warning cannot fire for edits in a gitlink directory holding no `.git`. Not run.
 5. Coverage. The unregistered-gitlink branch of `completeMergeHostSide` is not reached by a test, since a directory at a conflicted path is refused earlier by the marker read. New import cycle `_gitlink-registration` to `branch-revert` to `git-merge`, uses are all inside functions. `gitCommitStaged` and the DAG commit treat a nonzero commit exit as failure even if HEAD moved (unreachable today: pre-commit checks fail first on a malformed `.gitmodules`).
 
-### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+5)
+### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+6)
 
 status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 
@@ -679,7 +673,8 @@ status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 3. PRE-EXISTING, minor. Re-scoping an entry and deleting one rewrite `supersedes_entry_id` on entries of other owners, which that actor may not change (`routes/global-kb.ts` ~:1217, ~:1324). Fix direction: decide whether link repair is exempt from the change rule, and say so in `docs/architecture/global-kb.md`.
 4. Coverage. The activation target's `FOR UPDATE` row lock is not pinned by a test: the fake DB ignores it. The advisory lock serializes API writers, so no live race is known.
 5. PRE-EXISTING, minor. PATCH and DELETE call `enqueueSync` after the store (and, for an admin lapse, the audit row) committed; a Redis failure there answers 500 for a change that applied (`routes/global-kb.ts` PATCH ~:1357, DELETE ~:1408). Fix direction: log and let the worker reconciler repair, as the comment already says for upserts.
-6. Coverage. `smoke:house-rules-enforcement` races PATCH, DELETE and activation but asserts nothing about `audit_events` (one `global_kb.house_rule.lapse` row per lapse). From the T492 review.
+6. From #1148 review, PRE-EXISTING, low: the task-end reconciler's delete of a kb_author entry (`_global-kb-promote.ts` ~:770) removes only the row, while the API delete route also removes its `ai_rag_embeddings` and re-links `supersedes_entry_id` in one transaction (`routes/global-kb.ts` ~:1405-1426). Reach: an entry that held vectors and was demoted by a step retry's detect, effectively legacy only. An orphan chunk stays retrievable. Fix: delete the vectors in the reconciler's transaction as the route does.
+7. Coverage. `smoke:house-rules-enforcement` races PATCH, DELETE and activation but asserts nothing about `audit_events` (one `global_kb.house_rule.lapse` row per lapse). From the T492 review.
 
 ### T583 · FNF[global-kb-draft-owner-blind-link] · a non-admin's draft that replaces another owner's entry needs an admin to activate
 
@@ -1880,6 +1875,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T541 — Cancel deletes the task's own skeleton, enriching or failed kb_author entry (Stop or a worker failure alone keeps it failed); both writes match the source task and user and skip approved entries; worker reloaded — PR #1148 (fccc9866a), 2026-11-13. Vector leftover in T582.
 - T312 — verified 2026-11-13: detection already checks candidate directories (`01-env-detect.ts` ~:948, commit 257ca270d) and the own-code consumers ignore a missing include; inventory of the dev install (every stored `customCodePaths.include`, checked in the worker filesystem) found none missing. No change needed.
 - T552 — owner decision: the server refuses a terminal or task shell for a disabled CLI provider (api and worker, close 4425 with a sentence to enable it); the web offers only enabled providers. Live: api, worker and web reloaded clean; refusal not probed live (no disabled provider on the dev install) — PR #1145 (477c2e00d), 2026-11-13. Open-shell revocation T654; lows T553.
 - T653 — owner decision: error lines are not prose, FormError stays plain text; rule stated in markdown-rendering.md — PR #1144 (40233d3f4), 2026-11-13.
