@@ -2175,7 +2175,8 @@ export async function rebuildDdevRunner(
   repoSubpath: string,
   userId: string,
   enqueueEnsure: () => Promise<unknown>,
-): Promise<void> {
+): Promise<{ removed: boolean }> {
+  let removed = false;
   await ddevBoots.exclusive(taskId, async () => {
     const handle = runnerHandleForTask(taskId, repoSubpath);
     const db = getDb();
@@ -2240,12 +2241,14 @@ export async function rebuildDdevRunner(
         // The audit write yielded; activity arriving behind the fence still wins.
         await requireIdle();
         await exec('docker', ['rm', '-f', '-v', info.Id], { timeout: 90_000 });
+        removed = true;
         await markBrowserDesktopDown(handle.container);
       }
       await enqueueEnsure();
     });
     return handle;
   });
+  return { removed };
 }
 
 export async function ensureDdevStarted(

@@ -197,20 +197,26 @@ export async function rebuildDdevForTask(
           retryable: false,
         },
       };
-    await rebuildDdevRunner(payload.taskId, spec.repoSubpath, payload.userId, async () => {
-      const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
-        connection: getBullRedis(),
-      });
-      try {
-        await queue.add(RUNTIME_ENSURE_JOB_NAMES.ENSURE, payload, {
-          jobId: `ensure-rebuild-${payload.taskId}-${randomUUID()}`,
-          removeOnComplete: true,
-          removeOnFail: true,
+    const { removed } = await rebuildDdevRunner(
+      payload.taskId,
+      spec.repoSubpath,
+      payload.userId,
+      async () => {
+        const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
+          connection: getBullRedis(),
         });
-      } finally {
-        await queue.close();
-      }
-    });
+        try {
+          await queue.add(RUNTIME_ENSURE_JOB_NAMES.ENSURE, payload, {
+            jobId: `ensure-rebuild-${payload.taskId}-${randomUUID()}`,
+            removeOnComplete: true,
+            removeOnFail: true,
+          });
+        } finally {
+          await queue.close();
+        }
+      },
+    );
+    return { ok: true, url: null, mode: 'ddev', removed };
   } catch (error) {
     if (error instanceof DdevRebuildRefusedError)
       return { ok: false, url: null, mode: 'ddev', rebuildRefusal: error.refusal };
@@ -231,7 +237,6 @@ export async function rebuildDdevForTask(
       rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
     };
   }
-  return { ok: true, url: null, mode: 'ddev' };
 }
 
 export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, RuntimeEnsureResult> {

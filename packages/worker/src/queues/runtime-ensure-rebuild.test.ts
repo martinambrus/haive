@@ -43,7 +43,10 @@ const payload = { taskId: 'task', userId: 'owner' };
 beforeEach(() => {
   vi.clearAllMocks();
   h.classify.mockResolvedValue({ mode: 'ddev', repoSubpath: 'user/repo' });
-  h.rebuild.mockImplementation(async (_task, _workspace, _user, enqueue) => enqueue());
+  h.rebuild.mockImplementation(async (_task, _workspace, _user, enqueue) => {
+    await enqueue();
+    return { removed: true };
+  });
   h.add.mockResolvedValue({});
   h.close.mockResolvedValue(undefined);
 });
@@ -54,6 +57,7 @@ it('dispatches the dedicated rebuild job and enqueues ordinary ensure without jo
     ok: true,
     mode: 'ddev',
     url: null,
+    removed: true,
   });
   expect(h.rebuild).toHaveBeenCalledWith('task', 'user/repo', 'owner', expect.any(Function));
   expect(h.add).toHaveBeenCalledWith('ensure-runtime', payload, {
@@ -62,6 +66,14 @@ it('dispatches the dedicated rebuild job and enqueues ordinary ensure without jo
     removeOnFail: true,
   });
   expect(h.close).toHaveBeenCalledOnce();
+});
+it('carries the already absent runner outcome through the job result', async () => {
+  h.rebuild.mockImplementationOnce(async (_task, _workspace, _user, enqueue) => {
+    await enqueue();
+    return { removed: false };
+  });
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({ ok: true, removed: false });
+  expect(h.add).toHaveBeenCalledOnce();
 });
 it.each([
   ['busy', true],

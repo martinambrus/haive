@@ -304,6 +304,8 @@ export interface RuntimeEnsureResult {
   rebuildRefusal?: DdevRebuildRefusal;
   /** A finished rebuild failure, distinct from a wait whose outcome is unknown. */
   rebuildFailure?: { message: string };
+  /** Successful rebuilds distinguish removal from recovery of an already absent runner. */
+  removed?: boolean;
 }
 
 export const DDEV_CONTROL_JOB_NAMES = {

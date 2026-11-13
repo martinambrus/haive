@@ -41,7 +41,7 @@ it('Escape cancels without making a request', () => {
   expect(h.post).not.toHaveBeenCalled();
 });
 it('only confirmation posts a rebuild', async () => {
-  h.post.mockResolvedValue({ ok: true });
+  h.post.mockResolvedValue({ ok: true, removed: true });
   render(<Fixture />);
   fireEvent.click(screen.getByRole('button', { name: 'Rebuild DDEV' }));
   await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
@@ -84,7 +84,8 @@ it('recognizes DDEV detected after the initial runtime step', () => {
 });
 
 it.each([
-  [{ ok: true }, /removed.*recovery.*queued/i],
+  [{ ok: true, removed: true }, /removed.*recovery.*queued/i],
+  [{ ok: true, removed: false }, /recovery.*queued.*already absent runner/i],
   [{ ok: false, pending: true }, /still pending.*not.*confirmed/i],
 ])('shows the API rebuild outcome %j', async (reply, text) => {
   h.post.mockResolvedValueOnce(reply);

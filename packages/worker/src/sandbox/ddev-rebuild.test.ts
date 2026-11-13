@@ -123,13 +123,13 @@ it.each(['install', 'workspace'])('refuses a foreign %s', async (kind) => {
 });
 it('an absent runner is ensured only', async () => {
   presence = '';
-  await rebuild();
+  await expect(rebuild()).resolves.toEqual({ removed: false });
   expect(mutations()).toEqual([]);
   expect(h.ensure).toHaveBeenCalledTimes(1);
   expect(h.event).not.toHaveBeenCalled();
 });
 it('records the requesting user before removing an owned runner and ensuring recovery', async () => {
-  await rebuild();
+  await expect(rebuild()).resolves.toEqual({ removed: true });
   expect(mutations()[0]?.[1]).toEqual(['rm', '-f', '-v', 'immutable-id']);
   expect(h.event).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -200,8 +200,8 @@ it('serializes concurrent rebuilds and holds a new ensure until removal settles'
     await settled;
     vi.useRealTimers();
   }
-  await expect(first).resolves.toBeUndefined();
-  await expect(second).resolves.toBeUndefined();
+  await expect(first).resolves.toEqual({ removed: true });
+  await expect(second).resolves.toEqual({ removed: true });
   await expect(ensure).resolves.toEqual(runnerHandleForTask(task, workspace));
   expect(onReady).toHaveBeenCalledOnce();
   expect(mutations()).toHaveLength(2);

@@ -48,14 +48,16 @@ export function DdevRebuildDialog({
     setBusy(true);
     setError(null);
     try {
-      const result = await api.post<{ ok: boolean; pending?: boolean }>(
+      const result = await api.post<{ ok: boolean; pending?: boolean; removed?: boolean }>(
         `/tasks/${taskId}/ddev/rebuild`,
         {},
       );
       onQueued(
         result.pending
           ? 'DDEV rebuild is still pending; removal is not yet confirmed. See the task’s Activity tab for the request, and check again.'
-          : 'DDEV runner removed; recovery is queued. A failed step stays failed; Retry it after the runtime is ready.',
+          : result.removed === true
+            ? 'DDEV runner removed; recovery is queued. A failed step stays failed; Retry it after the runtime is ready.'
+            : 'DDEV recovery is queued for an already absent runner. A failed step stays failed; Retry it after the runtime is ready.',
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to queue DDEV rebuild');

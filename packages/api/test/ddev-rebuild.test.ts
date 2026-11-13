@@ -40,7 +40,7 @@ beforeEach(() => {
   h.step.mockResolvedValue(undefined);
   h.cli.mockResolvedValue(undefined);
   h.add.mockResolvedValue({ waitUntilFinished: h.wait });
-  h.wait.mockResolvedValue({ ok: true, mode: 'ddev', url: null });
+  h.wait.mockResolvedValue({ ok: true, mode: 'ddev', url: null, removed: true });
 });
 it('hides another user’s task and enqueues nothing', async () => {
   h.task.mockResolvedValue(undefined);
@@ -115,8 +115,14 @@ it('does not answer success until removal and enqueue finish', async () => {
   expect(h.wait).toHaveBeenCalledOnce();
   expect(answered).toBe(false);
   expect(h.wait.mock.calls[0]?.[1]).toBe(30_000);
-  finish({ ok: true, mode: 'ddev', url: null });
-  expect(await (await response).json()).toEqual({ ok: true });
+  finish({ ok: true, mode: 'ddev', url: null, removed: true });
+  expect(await (await response).json()).toEqual({ ok: true, removed: true });
+});
+it.each([true, false])('carries removed=%s to the user', async (removed) => {
+  h.wait.mockResolvedValueOnce({ ok: true, mode: 'ddev', url: null, removed });
+  const response = await request();
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ ok: true, removed });
 });
 it('returns pending when the bounded removal wait expires', async () => {
   vi.useFakeTimers();

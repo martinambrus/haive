@@ -179,7 +179,7 @@ browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
     }
     if (result?.rebuildFailure)
       return c.json({ ok: false, error: result.rebuildFailure.message }, 500);
-    if (result?.ok) return c.json({ ok: true }, 202);
+    if (result?.ok) return c.json({ ok: true, removed: result.removed }, 202);
   } catch {
     // Rebuild failures complete with rebuildFailure above. A rejected wait has
     // no known outcome: it may have expired or missed an already removed job.
