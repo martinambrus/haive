@@ -53,7 +53,9 @@ it('hides another user’s task and enqueues nothing', async () => {
 });
 it.each(['step', 'cli'] as const)('refuses a live %s using structural columns', async (kind) => {
   h[kind].mockResolvedValue({ id: 'busy' });
-  expect((await request()).status).toBe(409);
+  const response = await request();
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ ok: false, reason: 'busy', retryable: true });
   expect(h.add).not.toHaveBeenCalled();
 });
 it('accepts an idle task and coalesces repeated requests', async () => {

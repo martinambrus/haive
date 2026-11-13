@@ -156,8 +156,17 @@ browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
     ),
     columns: { id: true },
   });
+  // Same shape as the worker's busy refusal, so a client reads one contract.
   if (step || cli)
-    throw new HttpError(409, 'The task is busy. Stop its activity before rebuilding DDEV.');
+    return c.json(
+      {
+        ok: false,
+        error: 'The task is busy. Stop its activity before rebuilding DDEV.',
+        reason: 'busy',
+        retryable: true,
+      },
+      409,
+    );
   const job = await addOrRefuse(
     () =>
       getRuntimeEnsureQueue().add(
