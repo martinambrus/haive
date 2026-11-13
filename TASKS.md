@@ -408,11 +408,6 @@ All PRE-EXISTING, low.
 
 Executable verification scope: Cancellation completion/capacity and starvation: prioritize1/4/8/9; cosmetic, isolated coverage and cleanup members remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
-### T312 · FNF[rag-own-paths][verify-first] · customCodePaths can name missing directories
-
-status: open · priority: P2
-Eval repo 0e72847d names `sites/all/modules/custom/` + `sites/all/themes/custom/` (neither exists; real code is `sites/all/modules/activit`), so D1's own-code exemption never applies. Verify where customCodePaths comes from and how many dev repos name a missing path; then detection verifies candidates and the RAG build warns when an own-code path matches no file.
-
 ### T316 · FNF[merge-resolver-2] · resolver follow-ups (+8)
 
 status: open · area: modular-haive-plan (heads-up first) · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · gate: bounded verification · priority: P2
@@ -1116,7 +1111,7 @@ Candidates:
 
 ### T369 · FNF[usage-fallback-verify] · ollama/antigravity live usage fallbacks unverified; zai/muse killed runs store zero usage (+7)
 
-status: open · was modular #237 · gate: bounded verification · priority: P2
+status: open (VERIFIED 2026-11-13, MSC probe, opt-in `MSC_PROBES=1` `worker/test/msc-usage-probes.test.ts` on branch `verify/misc-probes`: member 3 CONFIRMED, a zai or muse run killed before `result` after zero-valued assistant events stores `{0,0,0}` instead of unknown (`cli-exec/stream.ts` ~:519, persisted at `handlers.ts` ~:422), understating statistics; fix: an all-zero assistant fallback means null, authoritative result usage kept. Member 5 NEEDS LIVE EVIDENCE: the parser replaces both values (`stream.ts` ~:237) and a constructed cumulative two-result stream passes; a captured steered claude run with two results must show whether the second result's usage is per-turn or cumulative before summing. Others stay measurement-gated) · executable: 3 · was modular #237 · priority: P2
 
 1. ollama puts message_start values on assistant events, so a killed run under-reports output.
 2. Whether antigravity's running usage is per-step or cumulative is unmeasured.
@@ -1391,9 +1386,9 @@ From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between tw
 
 Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept aside on rebuild failure. Item4 is RESOLVED for folder copies by staging; the remote-clone equivalent remains a verification candidate as item8 records. Never count the folder case as an open defect or sweep the only remaining copy. Retention/reporting design remains open.
 
-### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
+### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8) [parked: fence]
 
-status: open · gate: bounded verification · priority: P2
+status: parked 2026-11-13 (VERIFIED, MSC probe on 6d5854b19: item 1 already fixed, `repos.ts` ~:2744 redacts URLs and scrubs paths, real-git controls pass; item 7 already fixed, `bundle-composer.tsx` ~:47 shows the API reason, 44 controls pass; item 9 not reproducible, every current origin/fetch/push producer redacts userinfo (`git-push.ts` ~:68, ~:342, `merge.ts` ~:124) though the snapshot sink itself does not; items 2-6 and 8 are path-only or unreachable and stay under the fence. Resume on a credential-bearing transport or a misleading operational failure) · priority: P2
 From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErrorPaths` (@haive/shared logger) and passed the plan snapshot error, the plan Save/Pull 409 bodies, `repositories.status_message` and 12's plan-mirror warning through it.
 
 1. The set-remote responses keep raw filesystem and git diagnostics (api routes/repos.ts ~:2752); found from source, not exercised.
@@ -1732,9 +1727,9 @@ Split from T521 item3. Existing synchronization promises a checked boundary, not
 
 1. From T521 item3: syncRealIndex completion can still report indexSynced after HEAD changes immediately after its guard (~:297). Re-check the accepted commit boundary before reporting success; no stronger atomicity is currently promised.
 
-### T528 · FNF[validation-false-green] · verify whether current checks can pass after a lost audit, missing fake table or unlisted gated file
+### T528 · FNF[validation-false-green] · verify whether current checks can pass after a lost audit, missing fake table or unlisted gated file [parked: no current case]
 
-status: open · gate: bounded verification · priority: P2
+status: parked 2026-11-13 (VERIFIED, MSC probe: item 3 already fixed by #1093 (7c790dedb), the gated-list scanner follows guard expressions and aliases; items 1 and 2 found no current false-green control in a bounded pass. Resume when a control is shown green for the wrong reason) · priority: P2
 Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validation could hide a defect, not three confirmed current false-green tests. First find a current failing control that goes green for the wrong reason. Stop and park if bounded verification finds no current case; no general fake-database framework or scanner expansion.
 
 1. From T364 item1: recordAuditEvent catches a failed insert, so route tests over a fake DB pass with the audit lost. Fix: a shared helper that fails a test on a logged audit failure.
@@ -1885,6 +1880,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T312 — verified 2026-11-13: detection already checks candidate directories (`01-env-detect.ts` ~:948, commit 257ca270d) and the own-code consumers ignore a missing include; inventory of the dev install (every stored `customCodePaths.include`, checked in the worker filesystem) found none missing. No change needed.
 - T552 — owner decision: the server refuses a terminal or task shell for a disabled CLI provider (api and worker, close 4425 with a sentence to enable it); the web offers only enabled providers. Live: api, worker and web reloaded clean; refusal not probed live (no disabled provider on the dev install) — PR #1145 (477c2e00d), 2026-11-13. Open-shell revocation T654; lows T553.
 - T653 — owner decision: error lines are not prose, FormError stays plain text; rule stated in markdown-rendering.md — PR #1144 (40233d3f4), 2026-11-13.
 - T646 — terminal shells, built sandbox cores, the DDEV registry cache and the cli-sandbox base image carry `haive.install`; the core reaper filters on it and `runner.inspect` handles label-less images; live: worker reloaded, sweeps start clean — PR #1140 (97049b4c1), 2026-11-13. Lows T651.
