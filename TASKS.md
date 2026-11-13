@@ -582,6 +582,11 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
+### T655 · upgrade postgres.js to v4 and drop the local patch
+
+status: open · kind: fix · found: PGF driver 2026-11-13 · priority: P2
+MEASURED 2026-11-13 (`.claude/tmp/codex-run/PGF-S/codex-1/decision-data.md`): unpatched postgres.js v4.1.1 already fixes every defect `patches/postgres@3.4.9.patch` works around (closed-socket write, unbounded startup reconnects) plus two more: an abandoned transaction callback writing after its connection reopened (fenced in the 3.4.9 patch by the PGF PR), and a handle kept after a successful COMMIT still writing outside its transaction (3.4.9 only, NOT fenced: consequential, third-party). Upstream folded porsager/postgres #1209, #1215, #1201 into v4 (06cf28470), so nothing needs filing upstream. Blockers measured on v4.1.1: two migration overload type errors (`packages/database/src/migrate/client.ts` ~:99), the startup guards' deadlines differ (`pg-startup-storm.test.ts`, 2 mismatches), and `smoke:pg-drop` gets `57P01` where it expects `CONNECTION_CLOSED`. Do: upgrade, fix the typing, re-key the guards on v4's error class/code (not wording), keep the fence control and `smoke:pg-drop` green unpatched, remove the patch and its AGENTS.md paragraph, and lift the dependabot hold in `.github/dependabot.yml`. Read v4's CHANGELOG for every breaking change against the inventory in decision-data.md.
+
 ### T654 · design · an open task shell outlives its provider being disabled
 
 status: open · kind: design · found: #1145 review 2026-11-13 · priority: P3
