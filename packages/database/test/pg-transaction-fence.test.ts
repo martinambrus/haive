@@ -7,8 +7,8 @@ const url = process.env.PG_TX_FENCE_TEST_URL;
 const required = createRequire(import.meta.url)('postgres');
 const commonjs = (required.default ?? required) as typeof postgres;
 
-// Both distributions are patched. This control must also run unpatched before removing the patch
-// on an upgrade. It needs only its own table, not application fixtures or an opt-in probe flag.
+// Run against the unpatched dependency. Node 26's require().default loads the same ESM build;
+// cover both entry points. This needs only its own table, not application fixtures.
 describe.skipIf(!url)('postgres transaction handles stay fenced', () => {
   for (const [build, driver] of [
     ['ESM', postgres],

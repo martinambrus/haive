@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Sql } from 'postgres';
+import type { ISql, Sql } from 'postgres';
 import {
   CONFIG_KEYS,
   ConfigUnavailableError,
@@ -161,7 +161,10 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
 }
 
 /** Live work that still holds a maintenance window open: tasks, and the background jobs a route queues. */
-export async function liveWorkCount(sql: Sql, state: MaintenanceState = 'normal'): Promise<number> {
+export async function liveWorkCount(
+  sql: ISql<{}>,
+  state: MaintenanceState = 'normal',
+): Promise<number> {
   // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
     SELECT (
@@ -177,7 +180,7 @@ export async function liveWorkCount(sql: Sql, state: MaintenanceState = 'normal'
 }
 
 /** A session lock belongs to one connection, so lock and unlock share a reserved one. */
-async function underFence<T>(sql: Sql, work: (fence: Sql) => Promise<T>): Promise<T> {
+async function underFence<T>(sql: Sql, work: (fence: ISql<{}>) => Promise<T>): Promise<T> {
   const fence = await sql.reserve();
   try {
     await fence`SELECT pg_advisory_lock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;

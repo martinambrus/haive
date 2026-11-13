@@ -1,4 +1,3 @@
-import type net from 'node:net';
 import {
   createGuardedFetch,
   createGuardedPgSocket,
@@ -6,15 +5,13 @@ import {
   guardedPgSocket,
 } from '@haive/shared/egress';
 
-type PgSocketOptions = { host: string[]; port: number[]; path?: string | undefined };
-
 export function egressFor(
   role: string | undefined,
   allowHosts?: ReadonlySet<string>,
   allowOrigins?: ReadonlySet<string>,
 ): {
   fetchFn: typeof fetch;
-  pgSocket: ((options: PgSocketOptions) => Promise<net.Socket>) | undefined;
+  pgSocket: ReturnType<typeof createGuardedPgSocket> | undefined;
 } {
   if (role === 'admin') return { fetchFn: fetch, pgSocket: undefined };
   if (!allowHosts?.size && !allowOrigins?.size) {

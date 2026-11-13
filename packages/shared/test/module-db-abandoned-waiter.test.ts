@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, type Database } from '@haive/database';
 import { logger } from '../src/logger/index.js';
 import {
@@ -40,6 +40,13 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
     process.env.DATABASE_URL = named.toString();
     try {
       const handle = await openModuleDatabase(db, moduleId);
+      // Exercise the real shutdown at a small deadline, while pinning the production bound.
+      // Three in-flight-close controls otherwise each wait the full five seconds.
+      const end = handle.sql.end.bind(handle.sql);
+      vi.spyOn(handle.sql, 'end').mockImplementation(async (options) => {
+        expect(options).toEqual({ timeout: 5 });
+        await end({ timeout: 0.05 });
+      });
       handles.push(handle);
       return handle;
     } finally {
@@ -102,7 +109,7 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
 
   it('inherits the startup check interval inside the schema lock', async () => {
     const handle = await open(freshId(), 'mdw-lock-setting');
-    const readSetting = (sql: postgres.Sql | postgres.TransactionSql) =>
+    const readSetting = (sql: postgres.ISql<{}>) =>
       sql`SELECT setting::int, source FROM pg_settings
            WHERE name = 'client_connection_check_interval'`;
     const connections = await Promise.all(
