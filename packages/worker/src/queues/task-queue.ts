@@ -4456,7 +4456,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
   await unloadTaskOllamaCliModels(db, payload.taskId);
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
-  // delete the still-enriching row so it disappears from the KB view too.
+  // delete its unfinished entry, including one already marked failed by a Stop or worker failure.
   await reconcileKbAuthorEntryOnTaskEnd(db, payload.taskId, 'cancelled', logger);
   if (!sandboxesGone) {
     throw new Error(
