@@ -83,6 +83,31 @@ describe('Save index repair through supported Save and index-lock sequences', ()
       .toBe('2');
   });
 
+  it('syncs committed names even when an older owned name has a user-staged child', async () => {
+    const root = await fixture();
+    const stale = '.haive-data/state/settings/rtk-version.json';
+    const child = `${stale}/mine.txt`;
+    const committed = '.haive-data/state/settings/chrome-devtools-mcp-version.json';
+    await removeNoFollow(root, stale);
+    await ensureDirNoFollow(root, stale);
+    await writeFileNoFollow(root, child, 'personal staged bytes\n');
+    await git(root, ['add', child]);
+    const staged = await git(root, ['ls-files', '--stage', '--', child]);
+    await record(root, { 'chrome-devtools-mcp-version': '1' });
+
+    expect(await save(root)).toMatchObject({
+      committed: true,
+      indexSynced: false,
+      files: [committed],
+    });
+    expect(await git(root, ['ls-files', '--stage', '--', child])).toBe(staged);
+    expect(await git(root, ['diff', '--cached', '--name-only'])).toBe(
+      [stale, child, 'notes'].join('\n'),
+    );
+    await git(root, ['commit', '-qm', 'commit personal changes']);
+    expect(JSON.parse(await git(root, ['show', `HEAD:${committed}`]))).toBe('1');
+  });
+
   it('preserves an unrelated staged file whose disk bytes changed during a committing repair', async () => {
     const root = await fixture();
     const personal = '.haive-data/state/settings/personal.txt';
