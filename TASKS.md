@@ -1119,11 +1119,11 @@ Candidates:
 
 ### T369 · FNF[usage-fallback-verify] · ollama/antigravity live usage fallbacks unverified; zai/muse killed runs store zero usage (+7)
 
-status: open (VERIFIED 2026-11-13, MSC probe, opt-in `MSC_PROBES=1` `worker/test/msc-usage-probes.test.ts` on branch `verify/misc-probes`: member 3 CONFIRMED, a zai or muse run killed before `result` after zero-valued assistant events stores `{0,0,0}` instead of unknown (`cli-exec/stream.ts` ~:519, persisted at `handlers.ts` ~:422), understating statistics; fix: an all-zero assistant fallback means null, authoritative result usage kept. Member 5 NEEDS LIVE EVIDENCE: the parser replaces both values (`stream.ts` ~:237) and a constructed cumulative two-result stream passes; a captured steered claude run with two results must show whether the second result's usage is per-turn or cumulative before summing. Others stay measurement-gated) · executable: 3 · was modular #237 · priority: P2
+status: open (member 3 DONE #1150; the rest measurement-gated) (VERIFIED 2026-11-13, MSC probe, opt-in `MSC_PROBES=1` `worker/test/msc-usage-probes.test.ts` on branch `verify/misc-probes`: member 3 CONFIRMED, a zai or muse run killed before `result` after zero-valued assistant events stores `{0,0,0}` instead of unknown (`cli-exec/stream.ts` ~:519, persisted at `handlers.ts` ~:422), understating statistics; fix: an all-zero assistant fallback means null, authoritative result usage kept. Member 5 NEEDS LIVE EVIDENCE: the parser replaces both values (`stream.ts` ~:237) and a constructed cumulative two-result stream passes; a captured steered claude run with two results must show whether the second result's usage is per-turn or cumulative before summing. Others stay measurement-gated) · executable: 3 · was modular #237 · priority: P2
 
 1. ollama puts message_start values on assistant events, so a killed run under-reports output.
 2. Whether antigravity's running usage is per-step or cumulative is unmeasured.
-3. The killed-run fallback stores zero usage for zai and muse. Fix: all-zero means null.
+3. DONE #1150 (7c13cd38a): an all-zero assistant fallback records null usage, authoritative result usage kept.
 4. amp's multi-turn semantics are unmeasured.
 5. MODERATE, fix first: a steered claude run keeps only the last result's usage next to a cumulative cost (worker cli-exec/stream.ts ~:241). Fix: sum per result.
 6. gemini and antigravity could prove a single request, but nothing reads it (usage-extract.ts ~:120). sumTokenUsage treats a missing peak as 0.
@@ -1643,19 +1643,6 @@ From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by rea
 
 Execution fence 2026-11-01: Prove a supported stale/overlapping poll result and its visible consequence. The theoretical render-lane click edge does not automatically join a fix.
 
-### T519 · FNF[redrive-connected-leftovers] · verify PR-poller error visibility and refusal settlement guards
-
-status: open (VERIFIED 2026-11-13: member 2 CONFIRMED, opt-in control `worker/test/vrc-pr-poll-errors.test.ts` red on 4a7ac4b55: a rejected merged-task step lookup (`pr-poll-queue.ts` ~:139) escapes the catch and `runPrPollTick` drops the settled rejection (~:132), so nothing is logged with the task id; member 3 INVALID: `processTaskJob` holds each task/step/round through `holdStepAdvance` (`task-queue.ts` ~:4666), so two dispatch passes cannot race the unguarded refusal UPDATE (`dag-executor.ts` ~:2832) under the supported single worker) · executable members: 2 · priority: P2
-Queued connected findings from T498 PR #977; not part of the authorized seven-task delivery. PRE-EXISTING unless stated; minor.
-
-1. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
-2. worker queues/pr-poll-queue.ts ~:127-135: early re-drive runs outside try/catch; runPrPollTick discards Promise.allSettled results, hiding a failure. Catch/log per-task refusal or inspect settled results.
-3. worker step-engine/dag-executor.ts ~:2726-2739: refusal UPDATE lacks an outcome='pending' guard; add the same CAS guard as sibling settlement.
-4. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
-5. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
-
-Reconciled 2026-11-01: no automatic follow-up coverage or cosmetic changes. Members1/4/5 moved to parked T525; verify current caller reach and consequence for2/3 before implementation.
-
 ### T520 · FNF[shell-scanner-limits] · CI shell scanner cannot see several unused wrapper forms (+4)
 
 status: parked · reason: diminishing returns; none of these shapes occurs in the scanned workflows; resume when a real workflow needs one or a masking failure is measured · priority: P4
@@ -1865,6 +1852,7 @@ All low unless marked.
 
 ## Done
 
+- T519 — PR poller catches each task's poll on its own and logs settled rejections; a failed merged-task re-drive saves prPollError and a later success clears it; member 3 invalid (held by `holdStepAdvance`) — PR #1150 (7c13cd38a), 2026-11-13
 - T656 — CI flakes: dev.sh test stub drains psql stdin and pins its env; check-web-image uses referenced, budget-capped request timers — PR #1154 (969cddc24), 2026-11-13
 - T526 — Save syncs committed names into the index first and repairs stale owned names separately (bounded, reported via warning and `indexSynced:false`); a staged plan deletion is recovered as a deletion intent — PR #1152 (6a3541ffc), 2026-11-13
 - T472 — onboarding reset also takes back unsynced git-data claim files the codec classes as canonical claims, under an entry and byte cap, reporting what it skipped; unknown files stay; lows in T657 — PR #1151 (ee2258d78), 2026-11-13
