@@ -587,10 +587,16 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 status: open · kind: fix · found: PGF driver 2026-11-13 · priority: P2
 MEASURED 2026-11-13 (`.claude/tmp/codex-run/PGF-S/codex-1/decision-data.md`): unpatched postgres.js v4.1.1 already fixes every defect `patches/postgres@3.4.9.patch` works around (closed-socket write, unbounded startup reconnects) plus two more: an abandoned transaction callback writing after its connection reopened (fenced in the 3.4.9 patch by the PGF PR), and a handle kept after a successful COMMIT still writing outside its transaction (3.4.9 only, NOT fenced: consequential, third-party). Upstream folded porsager/postgres #1209, #1215, #1201 into v4 (06cf28470), so nothing needs filing upstream. Blockers measured on v4.1.1: two migration overload type errors (`packages/database/src/migrate/client.ts` ~:99), the startup guards' deadlines differ (`pg-startup-storm.test.ts`, 2 mismatches), and `smoke:pg-drop` gets `57P01` where it expects `CONNECTION_CLOSED`. Do: upgrade, fix the typing, re-key the guards on v4's error class/code (not wording), keep the fence control and `smoke:pg-drop` green unpatched, remove the patch and its AGENTS.md paragraph, and lift the dependabot hold in `.github/dependabot.yml`. Read v4's CHANGELOG for every breaking change against the inventory in decision-data.md.
 
-### T654 · design · an open task shell outlives its provider being disabled
+### T661 · FNF[provider-shell-close-lows] · provider shell revocation lows, after #1156 (+6)
 
-status: open · kind: design · found: #1145 review 2026-11-13 · priority: P3
-PRE-EXISTING, from T552. Since #1145 a disabled provider's terminal or task shell is refused at connect (close 4425), but a shell already attached keeps taking input after the PATCH to `enabled=false`: the session manager has no provider-change signal (worker `terminal-session-manager.ts` ~:203). The 2-minute tmux grace and the reconnect re-check bound only new attaches. Direction: on a provider PATCH that disables it, publish a close to the matching `terminalSessionKey`s (api cli-providers.ts PATCH), and have the worker close them with 4425.
+status: open · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
+
+1. `api/routes/cli-providers.ts` ~:258: `publish` returns the receiver count and it is ignored; a close-provider sent while the worker's subscriber reconnects is lost silently (open shells then outlive the disable). Log or retry on zero receivers.
+2. Design, documented: the tmux process tree keeps running in the container for the 2-minute grace plus up to a 30 s sweep after revocation; input is dead and the socket closed.
+3. `web/lib/terminal-refusal-message.ts` ~:17 and its tests hold a third copy of the disabled-provider sentence now that `TERMINAL_PROVIDER_DISABLED_MESSAGE` exists in shared.
+4. The connect refusal (`closeRefused`, `api/lib/upgrade-auth.ts` ~:42-56) closes with the code only; the revoke path sends the sentence as the reason too. Cosmetic.
+5. PRE-EXISTING, connected: a throw between the container ensure and the registry write (`worker/terminal/terminal-session-manager.ts` ~:490-527: turn, trust seed, workdir probe, exec, start) leaves a freshly created container that only the next worker boot/shutdown sweep removes. Write the registry entry right after the ensure.
+6. PRE-EXISTING, theoretical: the registry write is `hset` then three `hsetnx` (not atomic); a reaper sweep between them reads no `lastSeenAt`/`refcount` and may remove a just-attached container. Use one MULTI.
 
 ### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold (+2)
 
@@ -603,7 +609,7 @@ From the T406/T408 build (2026-11-07).
 4. A step held on a disabled provider shows "usage not connected": the usage poll covers enabled providers only (worker usage-poll-queue.ts ~:424). PRE-EXISTING, widened.
 5. The recap filters `summaryCliProviderId` to enabled only and falls to the step CLI; a recap whose resolved CLI is a disabled explicit pick is skipped silently (worker step-runner.ts ~:3999-4000). PRE-EXISTING.
 6. The module-schema-wins precedence of the hold is untested.
-7. From #1145 review: a disable that races an open gets the generic 1011 copy instead of 4425's sentence. Minor.
+7. DONE 2026-11-14 #1156: a disable that races an open now closes with 4425.
 8. From #1145 review: the web task page loads providers once (`tasks/[id]/page.tsx` ~:1220), so a provider disabled in another tab leaves the shell picker stale until the server refuses the next connect. PRE-EXISTING, minor.
 9. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
@@ -1861,6 +1867,7 @@ All low unless marked.
 
 ## Done
 
+- T654 — close live provider shells when the provider is disabled — PR #1156 (846c1ee9a), 2026-11-14
 - T501 — redelivery-safe deterministic applies (receipts, durable-snapshot replay gate, save generations) — PR #1155 (9fbfad0cc), 2026-11-14
 - T519 — PR poller catches each task's poll on its own and logs settled rejections; a failed merged-task re-drive saves prPollError and a later success clears it; member 3 invalid (held by `holdStepAdvance`) — PR #1150 (7c13cd38a), 2026-11-13
 - T656 — CI flakes: dev.sh test stub drains psql stdin and pins its env; check-web-image uses referenced, budget-capped request timers — PR #1154 (969cddc24), 2026-11-13
