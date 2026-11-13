@@ -1452,9 +1452,9 @@ Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (curr
 
 Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap first. Select at most three current consequential caller cases; no twelve-item generic Git-read audit. The fixed item9 HEAD probe must not be reimplemented.
 
-### T499 · FNF[parks-accounting] · verify whether a parked current row beside another active row can stall recovery
+### T499 · FNF[parks-accounting] · verify whether a parked current row beside another active row can stall recovery [parked: needs live evidence]
 
-status: open · gate: bounded verification · executable members: 4 · priority: P2
+status: parked 2026-11-13 (VERIFIED: members 1 and 7 stay resolved, both real-Postgres START-settle/reoffer controls pass on 4a7ac4b55; member 4 has no supported producer: the other-step guard (`task-queue.ts` ~:3179) would refuse the state, but Retry resets other live rows and boot requeues abandoned rows. Resume only on a live trace: the action sequence, task/step/round/epoch snapshots, queue state and repeated refusal logs) · priority: P2
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
 
 1. RESOLVED by T471, PR #981 (3078d9758): the retained run is carried, its live span is cleared, and the next claim opens a fresh span. Both reoffer and START-settle paths have passing real-Postgres controls.
@@ -1482,7 +1482,7 @@ Executable verification scope: Only members3/4: Stop-failed state overwritten an
 
 ### T501 · FNF[redrive-apply-idempotence] [verify-first] · is apply() idempotent for a re-driven running deterministic step?
 
-status: open · gate: bounded verification · priority: P2
+status: open (VERIFIED 2026-11-13, opt-in controls `VRC_PROBES=1` in `worker/test/vrc-apply-redelivery.test.ts`, red on 4a7ac4b55, branch `probe/T499-T501-T519` worktree sec-VRC: three apply paths re-run unsafely when recovery redelivers a step whose side effect landed before its done write. (a) `env-replicate/03-build-image.ts` ~:138 builds the image twice (expected 1 build call, got 2); reconcile a completed build before executing. (b) `workflow/06a-db-migrate.ts` ~:230 runs an approved custom migration command twice (external data changed twice); give a migration an identity and reconcile before replay. CONSEQUENTIAL. (c) `repo/database-snapshots.ts` ~:75: recovery's epoch bump voids an already-published save decision (`ReopenStepFormError` instead of `saved`); tell recovery apart from an upstream rerun. Minor. Source-only inventory of all 51 applies (44 stateful, 14 more UNSAFE by reading, unprobed) at `.claude/tmp/codex-run/VRC-S/codex-1/apply-safety.md`; those 14 stay unverified) · executable members: a, b, c · priority: P2
 From the T385/T348 driver (2026-10-31). Unaudited: the stalled sweep (T348), BullMQ stalled redelivery and the boot reset can all run a deterministic step's `apply()` a second time. Audit the steps whose apply writes files, commits or external state, and record which are safe; fix or fence the rest.
 
 Execution fence 2026-11-01: Bound verification to at most three current apply paths with meaningful external/file/commit side effects and a real redelivery producer. Do not audit every step speculatively.
@@ -1649,7 +1649,7 @@ Execution fence 2026-11-01: Prove a supported stale/overlapping poll result and 
 
 ### T519 · FNF[redrive-connected-leftovers] · verify PR-poller error visibility and refusal settlement guards
 
-status: open · gate: bounded verification · executable members: 2,3 · priority: P2
+status: open (VERIFIED 2026-11-13: member 2 CONFIRMED, opt-in control `worker/test/vrc-pr-poll-errors.test.ts` red on 4a7ac4b55: a rejected merged-task step lookup (`pr-poll-queue.ts` ~:139) escapes the catch and `runPrPollTick` drops the settled rejection (~:132), so nothing is logged with the task id; member 3 INVALID: `processTaskJob` holds each task/step/round through `holdStepAdvance` (`task-queue.ts` ~:4666), so two dispatch passes cannot race the unguarded refusal UPDATE (`dag-executor.ts` ~:2832) under the supported single worker) · executable members: 2 · priority: P2
 Queued connected findings from T498 PR #977; not part of the authorized seven-task delivery. PRE-EXISTING unless stated; minor.
 
 1. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
