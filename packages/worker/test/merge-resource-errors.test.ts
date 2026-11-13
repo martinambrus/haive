@@ -176,7 +176,7 @@ it.each(['EMFILE', 'ENFILE'])(
     expect(h.hits).toBeGreaterThan(0);
     expect(out?.moved).toEqual(['a-private.txt']);
     expect(out?.left).toEqual([
-      { path: 'keep.txt', reason: expect.stringContaining('not put back') },
+      { path: 'keep.txt', reason: 'not put back: its path could not be read' },
     ]);
     expect(await readFile(path.join(root, 'keep.txt/personal.cache'), 'utf8')).toBe(
       'personal data',
