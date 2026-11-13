@@ -1,4 +1,4 @@
-import { requireRunnerPresence } from './runner-probe.js';
+import { requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 import { execFile, spawn } from 'node:child_process';
 import { readFile, type FileHandle } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
@@ -2068,8 +2068,10 @@ export type DdevRecovery = 'reuse' | 'warm-start' | 'cold-boot';
  *  - `warm-start`: the project is down BUT the runner container + nested dockerd
  *    are alive, so `ddev start` in place recovers it using the cached images
  *    (no re-pull, no DB loss).
- *  - `cold-boot`: the runner is gone (or warm-start failed) — rebuild it, which
- *    re-pulls base images into a fresh nested store. */
+ *  - `cold-boot`: the runner or nested dockerd is definitely gone — rebuild it,
+ *    which re-pulls base images into a fresh nested store.
+ *  Inputs must be definite answers: a failed probe throws RunnerProbeError before
+ *  reaching this decision, rather than supplying false. */
 export function decideDdevRecovery(s: {
   describeOk: boolean;
   /** `ddev describe` reported the project RUNNING — not merely that it could be described.
@@ -2081,21 +2083,67 @@ export function decideDdevRecovery(s: {
   return s.dockerdUp ? 'warm-start' : 'cold-boot';
 }
 
-/** True when the runner container exists and its nested dockerd answers — i.e.
- *  an in-place `ddev start` is even possible. Runs `docker info` as ROOT inside
- *  the runner (NOT via ddevExec/runnerExec, which add `-u ddev`), mirroring the
- *  readiness probe in startDdevRunner. Swallows its own error and returns false
- *  (it runs inside the coalesced boot promise — a throw would fail all waiters
- *  instead of falling through to a cold rebuild). */
+/** Only a working exec can report a definite negative. procps ships in the runner:
+ * pgrep's 1 means no dockerd process; its operational errors (2/3), a missing binary,
+ * and a failed docker info all fail the probe. Docker info alone cannot distinguish
+ * a dead daemon from a transport or exec failure by exit status. */
+export const DDEV_DOCKERD_PROBE = `pgrep -x dockerd >/dev/null
+dockerd_probe_status=$?
+case "$dockerd_probe_status" in
+  0) docker info >/dev/null && printf 'up\\n' ;;
+  1) printf 'down\\n' ;;
+  *) exit "$dockerd_probe_status" ;;
+esac`;
+
+/** Root inside the runner, since its nested Docker socket belongs to root.
+ * Unknown fails every coalesced waiter without touching the existing runner. */
 async function runnerDockerdUp(name: string): Promise<boolean> {
   try {
-    await whileRunnerBusy(name, () =>
-      exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 }),
+    const { stdout } = await whileRunnerBusy(name, () =>
+      exec('docker', ['exec', name, 'sh', '-c', DDEV_DOCKERD_PROBE], { timeout: 10_000 }),
     );
-    return true;
-  } catch {
-    return false;
+    if (stdout.trim() === 'up') return true;
+    if (stdout.trim() === 'down') return false;
+    throw new Error('Invalid nested dockerd probe reply');
+  } catch (cause) {
+    throw new RunnerProbeError(name, cause);
   }
+}
+
+async function probeDdevRecovery(
+  existing: DdevRunnerHandle,
+  repoSubpath: string,
+): Promise<DdevRecovery> {
+  const presence = await requireRunnerPresence(existing.container);
+  if (presence.state === 'absent') return 'cold-boot';
+
+  // Inspect failure is unknown, not another workspace. A definite mismatch still
+  // requires new mounts, but defer removal to startDdevRunner after admission.
+  const subpath = await runnerSubpathVerdict(existing.container, repoSubpath);
+  if (subpath === 'absent') {
+    throw new RunnerProbeError(existing.container, new Error('Cannot read runner workspace label'));
+  }
+  if (subpath === 'other' || !presence.running) return 'cold-boot';
+
+  // Check dockerd before describe: when it is definitely down there can be no
+  // successful DDEV read. Neither an exec failure nor malformed stdout means down.
+  const dockerdUp = await runnerDockerdUp(existing.container);
+  if (!dockerdUp) return 'cold-boot';
+  const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
+  const status = parseDdevProjectStatus(describe.output);
+  if (describe.exitCode !== 0 || typeof status !== 'string' || status.trim() === '') {
+    throw new RunnerProbeError(
+      existing.container,
+      new Error('DDEV describe did not report project status', { cause: describe }),
+    );
+  }
+  // Stopped projects also describe cleanly and report primary_url. Only the
+  // project's own structured status proves it is serving.
+  return decideDdevRecovery({
+    describeOk: true,
+    serving: status === DDEV_STATUS_RUNNING,
+    dockerdUp,
+  });
 }
 
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
@@ -2204,35 +2252,10 @@ async function ensureDdevStartedInner(
   }
 
   const existing = runnerHandleForTask(taskId, repoSubpath);
-  // A runner mounts ONE subpath, so a container created for another one cannot serve this call.
-  // Removed rather than reused: the cold path below recreates it with the right mounts.
-  if ((await runnerSubpathVerdict(existing.container, repoSubpath)) === 'other') {
-    log.info(
-      { taskId, container: existing.container, repoSubpath },
-      'ddev runner mounts another subpath; recreating',
-    );
-    await exec('docker', ['rm', '-f', '-v', existing.container], { timeout: 90_000 }).catch(
-      () => {},
-    );
-  }
-  const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
+  const recovery = await probeDdevRecovery(existing, repoSubpath);
   scope.throwIfAborted();
-  const describeOk = describe.exitCode === 0;
-  // A STOPPED project still describes cleanly and still reports its primary_url, so the
-  // presence of that URL never meant the project was serving — it only meant DDEV could read
-  // the config. Task 75d8cbab is what that cost: 01c reused a project with no containers at
-  // all, and the `ddev exec … | ddev import-db` pipeline that followed then had BOTH of its
-  // sides bring the project up at once (containers created 10:50:35.634, restarts=0, and the
-  // loser reported `Conflict. The container name "/ddev-elmont-rs-web" is already in use`).
-  // pipefail turned that into a failed step, which is the good outcome — the bad one is the
-  // truncated import it exists to catch. Wrong in this direction costs a restart; wrong in
-  // the other costs a half-loaded database nothing downstream can detect.
-  const serving = describeOk && parseDdevProjectStatus(describe.output) === DDEV_STATUS_RUNNING;
-  // Only probe the nested dockerd when describe didn't already prove the project
-  // is up (the cheap path short-circuits the extra docker exec).
-  const dockerdUp = serving ? true : await runnerDockerdUp(existing.container);
 
-  switch (decideDdevRecovery({ describeOk, serving, dockerdUp })) {
+  switch (recovery) {
     case 'reuse':
       return existing; // already serving — don't re-boot (preserves an imported DB)
     case 'warm-start': {
@@ -2243,7 +2266,7 @@ async function ensureDdevStartedInner(
       // php/db image would). Its 300s execution budget starts AFTER taking the
       // runner-local lifecycle lock, which separately allows an orphaned cold boot
       // up to 900s to finish. Waiting must not consume this command's execution time.
-      const warm = await ddevExec(existing, 'start', {
+      let warm = await ddevExec(existing, 'start', {
         onLine: opts.onProgress,
         timeoutMs: 300_000,
       });
@@ -2317,18 +2340,20 @@ async function ensureDdevStartedInner(
         if (isDdevVersionConstraintFailure(retry.output)) {
           throw ddevVersionConstraintError(retry.output);
         }
+        warm = retry;
       }
-      log.warn(
-        { taskId, output: warm.output.slice(-800) },
-        'ddev warm-start failed; rebuilding the runner (cold boot)',
+      // A failed start (including a lost exec or lock deadline) says nothing
+      // about the nested store. Keep its live DB and let Retry probe afresh.
+      throw new RunnerProbeError(
+        existing.container,
+        new Error('DDEV warm start failed; existing runner kept', { cause: warm }),
       );
-      break; // fall through to cold-boot — its rm -v clears any wedged state
     }
     case 'cold-boot':
       break;
   }
 
-  // Cold boot: the runner is gone (or warm-start failed), so rebuild it. This
+  // Cold boot: a definite read requires a new runner, so rebuild it. This
   // re-pulls base images into a fresh nested /var/lib/docker. Hold admission
   // across the whole heavy boot (runner create + nested image pulls + ddev start), so
   // cold boots cannot together exceed the runtime budget; release once up or failed.
