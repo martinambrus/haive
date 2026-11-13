@@ -160,7 +160,7 @@ jobs:
           # shellcheck disable=SC2086
           sh install/install.sh $args
           echo "--- .env (secrets elided) ---"
-          sed -E 's/^(CONFIG_ENCRYPTION_KEY|JWT_SECRET|POSTGRES_PASSWORD)=.*/\1=<elided>/' "$HOME/haive-ci/.env"
+          sed -E 's/^(CONFIG_ENCRYPTION_KEY|JWT_SECRET|POSTGRES_PASSWORD|MAILPIT_UI_PASSWORD)=.*/\1=<elided>/' "$HOME/haive-ci/.env"
 
       - name: Boot the core services
         # A SUBSET, and the reason is measured rather than squeamish: `ollama/ollama:latest` is

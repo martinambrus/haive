@@ -556,6 +556,13 @@ Push-Location $Dir
 
 Get-Bundle "$Raw/$tag/docker-compose.yml"     (Join-Path $Dir 'docker-compose.yml')
 Get-Bundle "$Raw/$tag/docker-compose.run.yml" (Join-Path $Dir 'docker-compose.run.yml')
+# A release older than its installer may not pass the generated password to Mailpit; the
+# summary then says the inbox is open rather than promise a login it does not have.
+$mailLogin = if (Select-String -LiteralPath (Join-Path $Dir 'docker-compose.run.yml') -Pattern '^\s*MP_UI_AUTH:' -Quiet) {
+  '(user haive, MAILPIT_UI_PASSWORD from .env)'
+} else {
+  '(no login in this release: anyone who can reach this port can read its mail)'
+}
 Write-Note "compose bundle    docker-compose.yml + docker-compose.run.yml"
 
 # No GPU overlay on Windows. Docker Desktop can pass an NVIDIA GPU through on some setups, but the
@@ -574,7 +581,8 @@ if (-not (Test-Path $envPath)) {
   $key  = New-HexSecret 32
   $jwt  = New-HexSecret 32
   $pgpw = New-HexSecret 16
-  if (-not $key -or -not $jwt -or -not $pgpw) { Die "could not generate secrets. Nothing was installed." }
+  $mailpitUiPassword = New-HexSecret 24
+  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
 
   # HOST_REPO_ROOT is written EXPLICITLY and this is the one Windows-specific hard requirement.
   # docker-compose.yml defaults that mount to ${HOME}, and PowerShell does not set HOME as an
@@ -600,6 +608,8 @@ if (-not (Test-Path $envPath)) {
     "CONFIG_ENCRYPTION_KEY=$key"
     "JWT_SECRET=$jwt"
     "POSTGRES_PASSWORD=$pgpw"
+    "# Mailpit UI login, user haive."
+    "MAILPIT_UI_PASSWORD=$mailpitUiPassword"
     ""
     "HAIVE_WEB_PORT=$webPort"
     "HAIVE_API_PORT=$apiPort"
@@ -1027,7 +1037,7 @@ Write-Host "  Haive $pinned is running." -ForegroundColor Green
 Write-Host ""
 Write-Host "    Web       http://localhost:$webPort"
 Write-Host "    API       http://localhost:$apiPort"
-Write-Host "    Mail      http://localhost:$mailpitPort"
+Write-Host "    Mail      http://localhost:$mailpitPort $mailLogin"
 Write-Host "    Directory $Dir"
 Write-Host "    Install   $InstallId"
 Write-Host ""

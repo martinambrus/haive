@@ -40,6 +40,11 @@ generates for this install (mode 600), and two helper scripts — `./haive` and 
 (`.ps1` on Windows). Host ports are probed rather than assumed, so a second install, or a machine
 already running ddev, gets free ones instead of a bind error.
 
+The Mailpit URL in the install summary requires username `haive` and the generated
+`MAILPIT_UI_PASSWORD` from the install's `.env`. The summary names that file without printing the
+password. This applies to fresh installs: the installer refuses existing installs, and upgrades
+currently keep their original compose bundle.
+
 `./haive` is how you run the install afterwards, and it is worth knowing before you need it:
 
 ```bash

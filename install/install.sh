@@ -662,6 +662,13 @@ cd "$INSTALL_DIR"
 # The compose bundle is fetched AT THE TAG, so it always matches the images being pinned.
 fetch "${RAW}/${TAG}/docker-compose.yml"     docker-compose.yml
 fetch "${RAW}/${TAG}/docker-compose.run.yml" docker-compose.run.yml
+# A release older than its installer may not pass the generated password to Mailpit; the
+# summary then says the inbox is open rather than promise a login it does not have.
+if grep -q '^[[:space:]]*MP_UI_AUTH:' docker-compose.run.yml; then
+  MAIL_LOGIN="(user haive, MAILPIT_UI_PASSWORD from .env)"
+else
+  MAIL_LOGIN="(no login in this release: anyone who can reach this port can read its mail)"
+fi
 say "  compose bundle    docker-compose.yml + docker-compose.run.yml"
 
 # GPU layering, mirroring scripts/dev.sh so a RUN-IT host makes the same choice a dev host does.
@@ -700,10 +707,11 @@ if [ ! -f .env ]; then
   KEY=$(rand_hex 32)
   JWT=$(rand_hex 32)
   PGPW=$(rand_hex 16)
+  MAILPIT_UI_PASSWORD=$(rand_hex 24)
   # Explicit, not `A && B && C || die`: that reads as if-then-else and is not one — shellcheck
   # says so as SC2015 — and the answer here has to be unambiguous, since the branch it guards is
   # the one that would otherwise write an install with an empty encryption key.
-  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ]; then
+  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ] || [ -z "$MAILPIT_UI_PASSWORD" ]; then
     die "could not generate secrets. Nothing was installed."
   fi
   umask 077
@@ -725,6 +733,8 @@ COMPOSE_PROJECT_NAME=${INSTALL_ID}
 CONFIG_ENCRYPTION_KEY=${KEY}
 JWT_SECRET=${JWT}
 POSTGRES_PASSWORD=${PGPW}
+# Mailpit UI login, user haive.
+MAILPIT_UI_PASSWORD=${MAILPIT_UI_PASSWORD}
 
 # Ports on the host. Change these if something already holds them.
 HAIVE_WEB_PORT=${WEB_PORT}
@@ -1177,7 +1187,7 @@ cat <<EOF
 
     Web       http://localhost:${WEB}
     API       http://localhost:${PORT}
-    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1)
+    Mail      http://localhost:$(sed -n 's/^HAIVE_MAILPIT_PORT=//p' .env | head -1) ${MAIL_LOGIN}
     Directory ${INSTALL_DIR}
     Install   ${INSTALL_ID}
 
