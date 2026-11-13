@@ -620,6 +620,22 @@ describe('provider shell revocation', () => {
     expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
   });
 
+  it('does not subscribe a session that an api close removed during the provider read', async () => {
+    const h = harness(ROOT);
+    const mgr = h.mgr as unknown as {
+      db: { query: { cliProviders: { findFirst: () => Promise<unknown> } } };
+      sessions: Map<string, unknown>;
+      subscriber: { subscribe: Mock };
+    };
+    mgr.db.query.cliProviders.findFirst = async () => {
+      const [sessionId] = [...mgr.sessions.keys()];
+      await h.sendRequest({ op: 'close', sessionId });
+      return { enabled: true };
+    };
+    await expect(h.openRepo()).rejects.toThrow('the shell ended while it was opening');
+    expect(mgr.subscriber.subscribe).not.toHaveBeenCalled();
+  });
+
   it('answers a refused open with the provider-disabled close code', async () => {
     const h = harness(ROOT);
     await h.mgr.start();

@@ -283,9 +283,10 @@ export async function runScopedShellSession(
   if (!reply.ok) {
     if (!cleanupRan) sendJson(ws, { type: 'error', message: reply.error });
     try {
-      // A close reason is capped at 123 bytes.
-      if ('closeCode' in reply && reply.closeCode !== undefined)
-        ws.close(reply.closeCode, reply.error.slice(0, 120));
+      // Only a known code is passed on, with its own sentence: an unknown code or an
+      // over-long reason would make close() throw and leave the socket open.
+      if ('closeCode' in reply && reply.closeCode === TERMINAL_CLOSE_CODES.PROVIDER_DISABLED)
+        ws.close(TERMINAL_CLOSE_CODES.PROVIDER_DISABLED, TERMINAL_PROVIDER_DISABLED_MESSAGE);
       else ws.close(1011, 'open_failed');
     } catch {
       // ignore
