@@ -168,6 +168,12 @@ it('links the selected unreadable actor even when there are no audit events', as
   );
   expect(links).toHaveLength(1);
   expect(links[0]!.props.href).toBe(`/admin/users#user-${user.id}`);
+  expect(links[0]!.parent?.tag).not.toBe('label');
+  const actorSelect = findAll(
+    view.tree(),
+    (node) => node.tag === 'select' && node.props.value === user.id,
+  )[0]!;
+  expect(links[0]!.parent).toBe(actorSelect.parent!.parent);
 });
 it('labels an unreadable audit actor and its filter option', async () => {
   const view = await mount(AuditPage);

@@ -139,26 +139,28 @@ export default function AuditLogPage() {
           </select>
         </label>
 
-        <label className="flex flex-col gap-1 text-xs text-neutral-400">
-          Actor
-          <select
-            className={selectClass}
-            value={actorUserId}
-            onChange={(e) => onFilter(setActorUserId, e.target.value)}
-          >
-            <option value="">All</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.email ?? `unreadable, needs relink (${u.id.slice(0, 8)})`}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-col gap-1 text-xs text-neutral-400">
+          <label className="flex flex-col gap-1">
+            Actor
+            <select
+              className={selectClass}
+              value={actorUserId}
+              onChange={(e) => onFilter(setActorUserId, e.target.value)}
+            >
+              <option value="">All</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.email ?? `unreadable, needs relink (${u.id.slice(0, 8)})`}
+                </option>
+              ))}
+            </select>
+          </label>
           {selectedActor?.emailReadable === false && (
             <Link href={`/admin/users#user-${selectedActor.id}`} className="underline">
               Relink selected user
             </Link>
           )}
-        </label>
+        </div>
 
         <label className="flex flex-col gap-1 text-xs text-neutral-400">
           From
