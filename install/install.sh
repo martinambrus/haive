@@ -875,7 +875,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
       "\${HAIVE_REGISTRY}/haive-updater:\${HAIVE_VERSION#v}" \\
       packages/updater/dist/recover-admin-cli.js "\$@"
     ;;
-  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>]" >&2; exit 2 ;;
+  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>] [--force]" >&2; exit 2 ;;
 esac
 EOF
 chmod +x haive

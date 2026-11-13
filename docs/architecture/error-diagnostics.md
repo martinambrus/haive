@@ -130,7 +130,10 @@ The installer writes the helper once; upgrades do not refresh it, so an older in
 ```
 
 For an older installation, run this directly from its directory. It reads `HAIVE_VERSION` from
-`.env` and uses the same updater image, network, environment and Docker options as the new helper:
+`.env` and uses the same updater image, network, environment and Docker options as the new helper.
+That image must be a release that ships `recover-admin`: on an older `HAIVE_VERSION` the run fails
+with "Cannot find module", so upgrade first, or replace `${HAIVE_VERSION#v}` below with such a
+release's version. The same applies to the PowerShell fallback.
 
 ```sh
 (

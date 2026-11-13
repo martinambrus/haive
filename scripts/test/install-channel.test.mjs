@@ -1424,7 +1424,7 @@ for (const lang of ['sh', 'ps1']) {
             actual
               .toString()
               .replace(/^  recover-admin\)\n[\s\S]*?^    ;;\n/m, '')
-              .replace('|recover-admin --email <addr> [--user-id <id>]', ''),
+              .replace('|recover-admin --email <addr> [--user-id <id>] [--force]', ''),
           );
         }
         assert.deepEqual(actual, expected[name], name);
