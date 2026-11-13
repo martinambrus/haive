@@ -40,6 +40,7 @@ case "$1" in
       echo "additional privileges requested: pass \\"--allow=fs.read=/dev/null\\" to grant requested privileges" >&2; exit 1
     fi
     if [ "$1" = rm ] && [ -n "$STUB_DOCKER_RM_FAILS" ]; then exit 1; fi
+    if [ "$1" = exec ] && [ "$2" = -T ] && [ "$3" = postgres ]; then cat >/dev/null; fi
     if [ "$1" = run ] && [ -n "$STUB_DOCKER_RUN_FAILS" ]; then exit 1; fi ;;
 esac
 exit 0
@@ -49,6 +50,20 @@ const GPU_STUBS = {
   'nvidia-smi': '#!/bin/sh\necho "GPU 0: Stub Card (UUID: GPU-0)"\n',
   sleep: '#!/bin/sh\n', // has_nvidia_runtime waits a second between its three probes
 };
+
+it('the docker stub reads piped SQL before completing a postgres exec', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'haive-dev-sh-pipe-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const docker = join(dir, 'docker');
+  writeFileSync(docker, DOCKER_STUB, { mode: 0o755 });
+  // Exceed the pipe buffer so an exec that exits without reading cannot race the writer.
+  const out = spawnSync(docker, ['compose', 'exec', '-T', 'postgres', 'psql'], {
+    input: 'SELECT 1;\n'.repeat(16_384),
+    env: { PATH: process.env.PATH, STUB_DOCKER_LOG: join(dir, 'docker.log') },
+  });
+  assert.equal(out.error, undefined);
+  assert.equal(out.status, 0, out.stderr.toString());
+});
 
 const PROJECT = 'proj';
 const volume = (name) => `${PROJECT}_${name}`;
@@ -99,13 +114,26 @@ const run = (t, args, { buildFails = false, gpu = false, stub = {}, script = dev
   const out = spawnSync('bash', [script, ...args], {
     encoding: 'utf8',
     env: {
-      ...process.env,
+      // Allowlist the child environment: runner exports (including BASH_ENV and stub
+      // switches) must not change dev.sh's branches. Tests opt in through `stub` below.
       PATH: `${dir}${delimiter}${process.env.PATH}`,
+      TMPDIR: tmpdir(),
+      LC_ALL: 'C',
       DOCKER_HOST: 'unix:///nonexistent', // a docker that slips past the stub finds no daemon
       COMPOSE_PROJECT_NAME: PROJECT,
       HAIVE_GPU: gpu ? 'auto' : 'cpu',
+      POSTGRES_USER: '',
+      POSTGRES_DB: '',
+      POSTGRES_PASSWORD: '',
+      MAILPIT_UI_PASSWORD: '',
       STUB_DOCKER_LOG: log,
       STUB_DOCKER_BUILD_FAILS: buildFails ? '1' : '',
+      STUB_DOCKER_RM_FAILS: '',
+      STUB_DOCKER_RUN_FAILS: '',
+      STUB_BAKE_FS_ENFORCED: '',
+      STUB_VOLUMES_ABSENT: '',
+      STUB_VOLUME_HELD: '',
+      STUB_VOLUME_HOLDERS: '',
       ...stub,
     },
   });
