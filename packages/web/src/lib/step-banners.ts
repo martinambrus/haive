@@ -445,14 +445,20 @@ export function leftCommittedMergeBanner(
     merge.hostCheckout !== true &&
     merge.repoPath !== '/host-fs' &&
     !merge.repoPath.startsWith('/host-fs/');
+  const canResync =
+    merge.resyncOwed &&
+    opts.isOwner === true &&
+    events.some((e) => e.eventType === 'task.cancel_finished');
   return {
     dir: merge.dir,
     baseShaAfter: merge.baseShaAfter,
     canUndo,
+    resyncOwed: merge.resyncOwed,
+    canResync,
     refusals: merge.refused?.count ?? 0,
     confirm: `Move the local branch ${codeSpan(merge.landedOn)} from ${codeSpan(merge.baseShaAfter)} back to ${codeSpan(merge.baseShaBefore)}. Undo runs only if this is still the task's own unpushed merge and no task holds the checkout. A deleted feature branch is re-created at its recorded tip. Local changes are kept.`,
     text: merge.settled
-      ? `${labels[merge.settled.outcome]} ${merge.settled.reason}`
+      ? `${labels[merge.settled.outcome]} ${merge.settled.reason}${merge.resyncOwed ? ' The project files were not re-synced. Retry to finish recovery.' : ''}`
       : merge.refused
         ? `Undo refused: ${merge.refused.reason}`
         : `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,

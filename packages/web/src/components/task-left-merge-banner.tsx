@@ -48,11 +48,12 @@ export function TaskLeftMergeBanner({
     return b !== undefined && requested.get(key) === b.refusals;
   };
   // The cancel records its reports before `task.cancel_finished`, so polling may stop once that is
-  // in and no abort is waiting on its outcome.
+  // in and no abort, Undo or projection recovery is waiting on its outcome.
   const polling =
     !events.some((e) => e.eventType === CANCEL_FINISHED) ||
     banners.some((b) => inFlight(b.key)) ||
-    undoInFlight;
+    undoInFlight ||
+    committed?.resyncOwed;
 
   useEffect(() => {
     if (taskStatus !== 'cancelled') return;
@@ -60,7 +61,7 @@ export function TaskLeftMergeBanner({
     const load = async () => {
       try {
         const data = await api.get<{ events: TaskEvent[] }>(
-          `/tasks/${taskId}/events?type=merge.left_committed,merge.left_committed_settled,merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
+          `/tasks/${taskId}/events?type=merge.left_committed,merge.left_committed_settled,merge.left_committed_resynced,merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
         );
         if (!stop) setEvents(data.events);
       } catch {
@@ -114,6 +115,24 @@ export function TaskLeftMergeBanner({
     }
   }
 
+  async function resync(): Promise<void> {
+    if (!committed?.canResync) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/tasks/${taskId}/merges/resync`, {
+        dir: committed.dir,
+        baseShaAfter: committed.baseShaAfter,
+      });
+      // Keep Retry available after the request: a job that exhausts its attempts still
+      // owes recovery. Polling the completion event, not request copy, clears the banner.
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       {committed && (
@@ -124,6 +143,14 @@ export function TaskLeftMergeBanner({
           <GitMerge className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={committed.text} />
+            {committed.canResync && (
+              <div>
+                <Button size="sm" disabled={busy} onClick={() => void resync()}>
+                  {busy ? 'Retrying…' : 'Retry'}
+                </Button>
+              </div>
+            )}
+            {committed.resyncOwed && error && <FormError message={error} />}
             {committed.canUndo &&
               (undoInFlight ? (
                 <span className="text-xs opacity-80">Undoing…</span>

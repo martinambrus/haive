@@ -1141,7 +1141,8 @@ describe('explicit undo of a cancel-left committed merge', () => {
       });
       await f.run();
       expect(h.sync).toHaveBeenCalledTimes(1);
-      expect(await git(f.dir, 'rev-parse', 'feature')).toBe(f.feature);
+      // Settlement finalized git. A branch deleted afterwards stays deleted on re-sync Retry.
+      expect(await git(f.dir, 'branch', '--list', 'feature')).toBe('');
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
       expect(f.settled()).toHaveLength(1);
     },

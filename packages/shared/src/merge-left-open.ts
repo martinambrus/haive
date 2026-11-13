@@ -67,6 +67,7 @@ export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMer
 export const MERGE_LANDED_EVENT = 'merge.landed';
 export const MERGE_LEFT_COMMITTED_EVENT = 'merge.left_committed';
 export const MERGE_LEFT_COMMITTED_SETTLED_EVENT = 'merge.left_committed_settled';
+export const MERGE_LEFT_COMMITTED_RESYNCED_EVENT = 'merge.left_committed_resynced';
 export type MergeLeftCommittedOutcome = 'undone' | 'moved' | 'refused';
 export interface LandedMerge {
   baseShaBefore: string;
@@ -103,6 +104,8 @@ export function readLandedMerge(value: unknown): LandedMerge | null {
 export interface LeftCommittedMerge extends LandedMerge {
   refused: { reason: string; count: number } | null;
   settled: { outcome: MergeLeftCommittedOutcome; reason: string; resyncRequired?: boolean } | null;
+  /** A settled Undo still owes projection recovery until a later completion for this report. */
+  resyncOwed: boolean;
 }
 
 /** Refusals remain retryable unless the writer records permanent report-only evidence. The directory lock serializes
@@ -114,9 +117,22 @@ export function leftCommittedMerges(events: readonly LeftOpenEventRow[]): LeftCo
     if (e.eventType !== MERGE_LEFT_COMMITTED_EVENT) continue;
     const m = readLandedMerge(e.payload);
     if (m && !merges.has(key(m.dir, m.baseShaAfter)))
-      merges.set(key(m.dir, m.baseShaAfter), { ...m, settled: null, refused: null });
+      merges.set(key(m.dir, m.baseShaAfter), {
+        ...m,
+        settled: null,
+        refused: null,
+        resyncOwed: false,
+      });
   }
   for (const e of events) {
+    if (e.eventType === MERGE_LEFT_COMMITTED_RESYNCED_EVENT) {
+      const dir = text(e.payload?.dir);
+      const after = text(e.payload?.baseShaAfter);
+      const m = dir !== null && after !== null ? merges.get(key(dir, after)) : undefined;
+      // A completion before the settlement is not evidence of its recovery.
+      if (m?.settled) m.resyncOwed = false;
+      continue;
+    }
     if (e.eventType !== MERGE_LEFT_COMMITTED_SETTLED_EVENT) continue;
     const dir = text(e.payload?.dir);
     const after = text(e.payload?.baseShaAfter);
@@ -134,6 +150,7 @@ export function leftCommittedMerges(events: readonly LeftOpenEventRow[]): LeftCo
         reason: text(e.payload?.reason) ?? '',
         ...(e.payload?.resyncRequired === true ? { resyncRequired: true } : {}),
       };
+      m.resyncOwed = outcome === 'undone' || e.payload?.resyncRequired === true;
     }
   }
   return [...merges.values()];
