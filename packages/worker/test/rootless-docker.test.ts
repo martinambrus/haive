@@ -69,7 +69,7 @@ describe('sandbox models network', () => {
     '%s overlay keeps Ollama off the models network',
     async (overlay) => {
       const compose = parse(await readRepoFile(`docker-compose.${overlay}.yml`));
-      expect(compose.services.ollama.networks).toBeUndefined();
+      expect(compose.services?.ollama?.networks).toBeUndefined();
     },
   );
 });
@@ -99,4 +99,40 @@ describe('published sidecars', () => {
       }
     }
   });
+});
+
+describe('dev stack published ports', () => {
+  // A sandbox under the default `full` policy sits on Docker's default bridge and reaches
+  // every port published on all interfaces through the bridge gateway. Only the browser-facing
+  // api and web may listen there; the infrastructure ports are for host tools only.
+  const browserFacing = new Set(['api', 'web']);
+
+  it('publishes only host-used infrastructure ports, on the loopback', async () => {
+    const { services } = parse(await readRepoFile('docker-compose.dev.yml'));
+    const published = Object.entries(services as Record<string, { ports?: string[] }>)
+      .filter(([name, svc]) => !browserFacing.has(name) && svc.ports)
+      .flatMap(([name, svc]) => svc.ports!.map((port) => `${name} ${port}`));
+    // Redis, the Ollama daemon and Mailpit SMTP have no host user: published at all, a
+    // sandbox reaches them (on Docker Desktop through host.docker.internal, loopback or not).
+    expect(published.sort()).toEqual([
+      'mailpit 127.0.0.1:8085:8025',
+      'postgres 127.0.0.1:5432:5432',
+    ]);
+    // The exemption covers the browser-facing ports only, not anything added beside them.
+    expect(services.api.ports).toEqual(['3001:3001']);
+    expect(services.web.ports).toEqual(['3000:3000']);
+  });
+
+  // scripts/dev.sh layers these under the dev override; a port published in any of them would
+  // escape the assertion above.
+  it.each(['docker-compose.yml', 'docker-compose.gpu.yml', 'docker-compose.vulkan.yml'])(
+    '%s publishes no ports',
+    async (file) => {
+      const { services } = parse(await readRepoFile(file));
+      const withPorts = Object.entries(services as Record<string, { ports?: unknown }>)
+        .filter(([, svc]) => svc?.ports !== undefined)
+        .map(([name]) => name);
+      expect(withPorts).toEqual([]);
+    },
+  );
 });

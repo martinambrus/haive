@@ -1,20 +1,18 @@
 services:
+  # Infrastructure ports are for host tools only. A sandbox under the `full` network policy every
+  # provider ships with sits on Docker's default bridge and reaches every published port: through
+  # the bridge gateway when it binds all interfaces, and on Docker Desktop through
+  # host.docker.internal even when it binds 127.0.0.1. Redis, the Ollama daemon (a host
+  # `ollama serve` shadows its port anyway) and Mailpit's SMTP had no host user, so they are not
+  # published at all. Postgres (db:push, the e2e helpers, scripts/visual.sh) and the Mailpit UI
+  # stay, on the loopback.
   postgres:
     ports:
-      - "5432:5432"
-
-  redis:
-    ports:
-      - "6379:6379"
+      - "127.0.0.1:5432:5432"
 
   mailpit:
     ports:
-      - "1085:1025"
-      - "8085:8025"
-
-  ollama:
-    ports:
-      - "11434:11434"
+      - "127.0.0.1:8085:8025"
 
   db-migrate:
     # GLIBC, not alpine, and the only service where the choice is load-bearing: this is the

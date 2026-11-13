@@ -144,16 +144,14 @@ pnpm docker:down
 These are the fixed ports `docker-compose.dev.yml` publishes for the source build. A release
 install probes for free ports instead and writes what it chose into its own `.env`.
 
-| Service      | Host port | Container port | URL / DSN                                 |
-| ------------ | --------- | -------------- | ----------------------------------------- |
-| Web (Next)   | 3000      | 3000           | http://localhost:3000                     |
-| API (Hono)   | 3001      | 3001           | http://localhost:3001/health              |
-| PostgreSQL   | 5432      | 5432           | postgres://haive:...@localhost:5432/haive |
-| Redis        | 6379      | 6379           | redis://localhost:6379                    |
-| Mailpit SMTP | 1085      | 1025           | smtp://localhost:1085                     |
-| Mailpit UI   | 8085      | 8025           | http://localhost:8085                     |
+| Service    | Host port | Container port | URL / DSN                                 |
+| ---------- | --------- | -------------- | ----------------------------------------- |
+| Web (Next) | 3000      | 3000           | http://localhost:3000                     |
+| API (Hono) | 3001      | 3001           | http://localhost:3001/health              |
+| PostgreSQL | 5432      | 5432           | postgres://haive:...@localhost:5432/haive |
+| Mailpit UI | 8085      | 8025           | http://localhost:8085                     |
 
-Mailpit ports are shifted from the upstream defaults (1025/8025) because ddev binds those on many developer machines. If you do not run ddev, you may safely move them back in `docker-compose.dev.yml`.
+PostgreSQL and the Mailpit UI bind `127.0.0.1` only. Redis, Ollama and Mailpit SMTP are not published: a sandbox reaches any published port (see `docs/architecture/sandbox.md`), so reach them through a container instead, e.g. `docker exec haive-redis redis-cli` or `docker exec haive-worker node -e 'fetch("http://ollama:11434/api/tags").then(r=>r.text()).then(console.log)'`. The Mailpit UI port is shifted from the upstream default (8025) because ddev binds it on many developer machines.
 
 ## Architecture
 
