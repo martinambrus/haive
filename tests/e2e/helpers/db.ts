@@ -1,12 +1,11 @@
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { expect, type APIRequest, type APIRequestContext } from '@playwright/test';
 import postgres from 'postgres';
+import { devDatabaseUrl } from '../../../scripts/lib/dev-database-url.mjs';
 import { API_BASE, loginUser, type RegisteredUser } from './auth.js';
 
-const DEFAULT_URL = 'postgres://haive:haive_dev_password@localhost:5432/haive';
-
 export function getSql(): postgres.Sql {
-  const url = process.env.PLAYWRIGHT_DATABASE_URL ?? DEFAULT_URL;
+  const url = process.env.PLAYWRIGHT_DATABASE_URL || devDatabaseUrl();
   return postgres(url, { max: 1, idle_timeout: 5 });
 }
 

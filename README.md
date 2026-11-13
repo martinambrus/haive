@@ -130,6 +130,7 @@ cp .env.example .env
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 # Boot the stack (postgres, redis, mailpit, api, worker, web)
+# dev.sh generates POSTGRES_PASSWORD and MAILPIT_UI_PASSWORD in .env.
 pnpm docker:dev
 
 # Web UI
@@ -138,6 +139,34 @@ open http://localhost:3000
 # Tear down
 pnpm docker:down
 ```
+
+`scripts/dev.sh` generates private `POSTGRES_PASSWORD` and `MAILPIT_UI_PASSWORD` values in
+`.env` before starting services, replacing the former public database password. Keep `.env`
+private (a newly created file has mode 600). Existing non-default passwords stay unchanged.
+The script waits for Postgres, syncs the role password through its local socket, then reconciles
+api, worker, web, db-migrate and Mailpit even on a partial restart. An interrupted sync is retried
+on the next start; a failed sync stops database dependants and prints recovery instructions.
+
+For a host database client, use host `localhost`, port `5432`, database `POSTGRES_DB` (default
+`haive`), user `POSTGRES_USER` (default `haive`), and the `POSTGRES_PASSWORD` from `.env`.
+Host tools read these values automatically; an explicit `DATABASE_URL` overrides them. A URL in
+`.env` using the internal `postgres` hostname is mapped to `localhost` for host tools.
+The Mailpit UI at <http://localhost:8085> requires username `haive` and `MAILPIT_UI_PASSWORD`
+from `.env`; the same authentication protects its HTTP API. SMTP remains internal and unauthenticated.
+
+To roll back the dev credential change, revert its commit, set `POSTGRES_PASSWORD` and any
+`DATABASE_URL` in `.env` back to the old value, and remove `MAILPIT_UI_PASSWORD`. The reverted
+script has **no password sync**, so explicitly restore the database role through the local socket
+before restarting services. For the former defaults (adjust the role/user/database for a custom install):
+
+```bash
+printf "%s\n" "ALTER ROLE haive PASSWORD 'haive_dev_password';" |
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T postgres \
+    psql -X -v ON_ERROR_STOP=1 -U haive -d haive
+pnpm docker restart
+```
+
+This changes credentials only; no data or volumes are removed.
 
 ### Ports (dev override)
 

@@ -69,6 +69,107 @@ fi
 export BUILDX_BAKE_ENTITLEMENTS_FS=0
 dc() { docker compose "${FILES[@]}" "$@"; }
 
+# Read a single-line dotenv value without executing it. Quoted values and inline
+# comments are accepted; credentials must be literal (no dotenv interpolation).
+env_value() {
+  [ -f .env ] || return 0
+  awk -v key="$1" '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+      v=$0; sub(/^[^=]*=[[:space:]]*/, "", v)
+      q=substr(v,1,1)
+      if (q == "\047" || q == "\042") {
+        v=substr(v,2); end=index(v,q); if (end) v=substr(v,1,end-1)
+      } else { sub(/^#.*$/, "", v); sub(/[[:space:]]+#.*$/, "", v); sub(/[[:space:]\r]+$/, "", v) }
+      value=v
+    }
+    END { printf "%s", value }
+  ' .env
+}
+
+# Replace only the value, retaining the line's spacing/comment and all other
+# bytes. The generated hex needs no dotenv, URL or SQL escaping.
+write_credential() {
+  local key="$1" value="$2" file
+  file=$(mktemp .env.XXXXXX)
+  CREDENTIAL_VALUE="$value" OLD_PASSWORD="${3:-haive_dev_password}" awk -v key="$key" '
+    BEGIN { value=ENVIRON["CREDENTIAL_VALUE"] }
+    key == "POSTGRES_PASSWORD" && /^[[:space:]]*(export[[:space:]]+)?DATABASE_URL[[:space:]]*=/ {
+      old=":" ENVIRON["OLD_PASSWORD"] "@"; pos=index($0,old)
+      if (pos) $0=substr($0,1,pos) value substr($0,pos+length(old)-1)
+    }
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+      prefix=$0; sub(/=.*/, "=", prefix)
+      suffix=$0; sub(/^[^=]*=[[:space:]]*/, "", suffix)
+      q=substr(suffix,1,1)
+      if (q == "\047" || q == "\042") {
+        suffix=substr(suffix,2); end=index(suffix,q)
+        suffix=end ? substr(suffix,end+1) : ""
+      } else if (q == "#") { suffix=" " suffix }
+      else { sub(/^[^[:space:]]*/, "", suffix) }
+      print prefix value suffix; found=1; next
+    }
+    { print }
+    END { if (!found) print key "=" value }
+  ' .env > "$file"
+  chmod --reference=.env "$file"
+  mv -f "$file" .env
+}
+
+ensure_credentials() {
+  local key value old
+  if [ ! -e .env ]; then (umask 077; : > .env); fi
+  for key in POSTGRES_PASSWORD MAILPIT_UI_PASSWORD; do
+    value=$(env_value "$key")
+    if [ -z "$value" ] || [ "$value" = haive_dev_password ]; then
+      old="$value"
+      value=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+      [ "${#value}" -eq 48 ] || { say "Credential generation failed; no services started."; return 1; }
+      # Password and any legacy URL change in one atomic rename, so interruption
+      # cannot leave a new key beside a URL still carrying the public password.
+      write_credential "$key" "$value" "$old"
+      say "Generated $key; read it in .env. Update host clients with that credential."
+    fi
+    # Compose normally gives a shell export precedence over .env. Pin both the
+    # ALTER and compose to the persisted value so an old export cannot undo it.
+    export "$key=$value"
+  done
+}
+
+sync_credentials() {
+  ensure_credentials
+  # --wait waits for the compose healthcheck, without starting dependants. Local
+  # socket auth is intentionally used: the TCP password can still be the old one.
+  dc up -d --wait --wait-timeout 120 --no-deps postgres
+  local user db password
+  user="${POSTGRES_USER:-$(env_value POSTGRES_USER)}"
+  db="${POSTGRES_DB:-$(env_value POSTGRES_DB)}"
+  password=$(printf '%s' "$POSTGRES_PASSWORD" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g")
+  # Suppress psql errors too: a failing statement can echo its secret literal.
+  # format() quotes the authenticated role name, including custom role names.
+  if ! printf "SET standard_conforming_strings = on;\nSELECT format('ALTER ROLE %%I PASSWORD %%L', current_user, E'%s') \\gexec\n" "$password" |
+    dc exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "${user:-haive}" -d "${db:-haive}" >/dev/null 2>&1; then
+    if ! dc stop api worker web db-migrate >/dev/null 2>&1; then
+      say "Could not stop database dependants; stop them before recovery."
+    fi
+    say "Postgres password sync failed; no dependants started and .env retained."
+    say "Fix local socket access (POSTGRES_USER/POSTGRES_DB in .env), then re-run this command."
+    say "The next up retries the sync before starting dependants; no data is changed."
+    return 1
+  fi
+}
+
+start_services() {
+  sync_credentials
+  # Reconcile ALL consumers even for `restart worker`: compose recreates those
+  # whose environment changed. Doing this every time also heals interrupted runs.
+  if [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --force-recreate ]; }; then
+    # No service selection means the ENTIRE stack, including model services.
+    dc up -d "$@"
+  else
+    dc up -d "$@" api worker web db-migrate mailpit
+  fi
+}
+
 gpu_note() {
   case "$GPU_MODE" in
     NVIDIA)     say "NVIDIA GPU detected -> Ollama on GPU (fast embeddings)." ;;
@@ -156,7 +257,7 @@ teardown_verdict() {
 restart_stack() {
   dc rm -fs dev-libs || teardown_failed "removing dev-libs (dc rm -fs dev-libs) failed"
   gpu_note
-  dc up -d --force-recreate "$@"
+  start_services --force-recreate "$@"
   teardown_verdict
 }
 
@@ -175,7 +276,7 @@ rebuild_services() {
   dc rm -fs "$@" || true
   remove_volumes "${vols[@]}"
   gpu_note
-  dc up -d "$@"
+  start_services "$@"
   teardown_verdict
 }
 
@@ -188,7 +289,7 @@ rebuild_all() {
   dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
   remove_volumes "${NM_VOLUMES[@]}"
   gpu_note
-  dc up -d
+  start_services
   teardown_verdict
 }
 
@@ -203,7 +304,7 @@ reset_stack() {
     "rm -rf packages/shared/dist packages/database/dist packages/web-kit/dist modules/*/dist packages/shared/*.tsbuildinfo packages/database/*.tsbuildinfo packages/web-kit/*.tsbuildinfo" ||
     teardown_failed "the dist/tsbuildinfo wipe (dc run dev-libs) failed"
   gpu_note
-  dc up -d
+  start_services
   teardown_verdict
 }
 
@@ -245,16 +346,16 @@ EOF
 cmd="${1:-help}"
 shift || true
 case "$cmd" in
-  up|run)        gpu_guard "$cmd"; gpu_note; dc up -d "$@" ;;
+  up|run)        gpu_guard "$cmd"; gpu_note; start_services "$@" ;;
   down)          dc down ;;
   logs)          dc logs -f "$@" ;;
   status|ps)     dc ps ;;
-  libs)          build_libs ;;
+  libs)          sync_credentials; dc up -d api worker web db-migrate mailpit; build_libs ;;
   restart)       gpu_guard "$cmd"; restart_stack "$@" ;;
   rebuild)       gpu_guard "$cmd"; if [ "$#" -eq 0 ]; then rebuild_all; else rebuild_services "$@"; fi ;;
   reset)         gpu_guard "$cmd"; reset_stack ;;
   sandbox-build) dc --profile sandbox build cli-sandbox ;;
-  migrate)       dc run --rm db-migrate ;;
+  migrate)       sync_credentials; dc up -d api worker web db-migrate mailpit; dc run --rm db-migrate ;;
   help|-h|--help) usage ;;
   *)             say "unknown command: $cmd"; echo; usage; exit 1 ;;
 esac
