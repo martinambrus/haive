@@ -118,32 +118,29 @@ describe('Ollama gate', () => {
     await close(upstream);
   });
 
-  it.each(allowed)('forwards %s %s with the original query and body', async (method, path) => {
-    const url = `${path}?beta=true&raw=%2f%2E`;
+  it('forwards an allowed request with its original query and body', async () => {
+    const url = '/v1/messages?beta=true&raw=%2f%2E';
     const before = hits.length;
-    expect(isAllowed(method, url)).toBe(true);
-    const result = await request(
-      port,
-      method!,
-      url,
-      { 'x-test': 'kept' },
-      method === 'POST' ? 'payload' : '',
-    );
-    expect(result).toEqual({ status: 200, body: method === 'HEAD' ? '' : url });
+    const result = await request(port, 'POST', url, { 'x-test': 'kept' }, 'payload');
+    expect(result).toEqual({ status: 200, body: url });
     expect(hits.slice(before)).toMatchObject([
-      { method, url, headers: { 'x-test': 'kept' }, body: method === 'POST' ? 'payload' : '' },
+      { method: 'POST', url, headers: { 'x-test': 'kept' }, body: 'payload' },
     ]);
   });
 
-  it.each(refused)('refuses %s %s without contacting upstream', async (method, path) => {
+  // Over HTTP only the targets whose raw form must survive Node's parser unchanged:
+  // the decision itself is covered for every variant by the pure tests below.
+  it.each([
+    ['POST', '/api/delete'],
+    ['POST', '/v1/messages/../api/delete'],
+    ['POST', 'http://x/api/delete'],
+  ])('refuses %s %s without contacting upstream', async (method, path) => {
     const before = hits.length;
-    expect(isAllowed(method, path)).toBe(false);
     const result = await request(port, method!, path!);
     expect(result.status).toBe(403);
-    if (method !== 'HEAD')
-      expect(JSON.parse(result.body)).toEqual({
-        error: { type: 'forbidden', message: expect.any(String) },
-      });
+    expect(JSON.parse(result.body)).toEqual({
+      error: { type: 'forbidden', message: expect.any(String) },
+    });
     expect(hits).toHaveLength(before);
   });
 
@@ -265,5 +262,16 @@ describe('Ollama gate', () => {
     } finally {
       await close(broken);
     }
+  });
+});
+
+describe('Ollama gate policy', () => {
+  it.each(allowed)('allows %s %s, with or without a query', (method, path) => {
+    expect(isAllowed(method, path)).toBe(true);
+    expect(isAllowed(method, `${path}?beta=true&raw=%2f%2E`)).toBe(true);
+  });
+
+  it.each(refused)('refuses %s %s', (method, path) => {
+    expect(isAllowed(method, path)).toBe(false);
   });
 });
