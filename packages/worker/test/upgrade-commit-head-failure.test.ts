@@ -25,8 +25,27 @@ it.each([2, 128, 124, -1])('does not stage rules after HEAD exits %s', async (co
   });
 });
 
-it('stages rules after HEAD positively answers unborn with exit 1', async () => {
-  vi.mocked(gitRun).mockResolvedValue({ code: 1, stdout: '', stderr: '' });
+/** Quiet HEAD exits 1 for an unborn branch AND over a broken branch ref; only the
+ *  enumeration in `provesUnbornHead` tells them apart. */
+function headExitsOne(forEachRef: { code: number; stdout: string; stderr: string }) {
+  vi.mocked(gitRun).mockImplementation(async (_cwd: string, args: string[]) => {
+    if (args[0] === 'symbolic-ref') return { code: 0, stdout: 'refs/heads/main\n', stderr: '' };
+    if (args[0] === 'for-each-ref') return forEachRef;
+    return { code: 1, stdout: '', stderr: '' };
+  });
+}
+
+it('stages rules after HEAD is proven unborn', async () => {
+  headExitsOne({ code: 0, stdout: '', stderr: '' });
   expect(await headLacksImport('/repo', 'CLAUDE.md')).toBe(true);
   expect(await agentsRulesVerdict('/repo')).toEqual({ verdict: 'stage' });
+});
+
+it('does not stage rules when HEAD exits 1 over a broken branch ref', async () => {
+  headExitsOne({ code: 0, stdout: '', stderr: 'warning: ignoring broken ref refs/heads/main\n' });
+  expect.soft(await headLacksImport('/repo', 'CLAUDE.md')).toBe(false);
+  expect(await agentsRulesVerdict('/repo')).toEqual({
+    verdict: 'unknown',
+    reason: expect.any(String),
+  });
 });

@@ -29,6 +29,7 @@ import { safeDiskRel } from './02-upgrade-apply.js';
 import { detectOrigin } from '../../../repo/git-push.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
+import { provesUnbornHead } from '../../../repo/unborn-head.js';
 
 const DEFAULT_COMMIT_MESSAGE = [
   'chore: apply Haive onboarding upgrade',
@@ -91,7 +92,9 @@ export function appliedImportStubs(applyOutput: unknown): { file: string; link: 
 export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
   const head = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
   if (gitGaveNoAnswer(head)) return false;
-  if (head.code !== 0) return head.code === 1;
+  // Exit 1 also comes from a broken branch ref, so it needs the positive unborn proof.
+  if (head.code === 1) return provesUnbornHead(repoPath);
+  if (head.code !== 0) return false;
   try {
     await gitExec(['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
       cwd: repoPath,
@@ -114,7 +117,11 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
   if (disk.region === null) return { verdict: 'current' };
   const probe = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
   if (gitGaveNoAnswer(probe)) return { verdict: 'unknown', reason: probe.noExit ?? 'timed out' };
-  if (probe.code === 1) return { verdict: 'stage' };
+  if (probe.code === 1) {
+    return (await provesUnbornHead(repoPath))
+      ? { verdict: 'stage' }
+      : { verdict: 'unknown', reason: 'HEAD could not be resolved and is not proven unborn' };
+  }
   if (probe.code !== 0) return { verdict: 'unknown', reason: `git exited ${probe.code}` };
   try {
     const { stdout: entry } = await gitExec(['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH], {
