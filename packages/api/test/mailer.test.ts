@@ -64,6 +64,8 @@ describe('sendMail', () => {
         port: secure ? 465 : 587,
         secure,
         auth: { user: 'smtp-user', pass: 'first-password' },
+        // Credentials never cross a plaintext link: without implicit TLS, STARTTLS is required.
+        requireTLS: !secure,
         ...MAIL_TIMEOUTS,
         disableFileAccess: true,
         disableUrlAccess: true,

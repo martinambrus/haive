@@ -74,6 +74,13 @@ describe('administrator SMTP settings', () => {
     password = null;
     expect(await (await request('GET')).json()).toEqual({ ...settings, passwordSet: false });
   });
+  it('GET loads an incomplete saved state so the card can repair it', async () => {
+    stored.set('config:mail:enabled', 'true');
+    stored.set('config:mail:smtpHost', '');
+    const response = await request('GET');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: true, smtpHost: '' });
+  });
   it.each([undefined, '', '   '])(
     'PUT keeps the password when blank or absent (%s)',
     async (value) => {

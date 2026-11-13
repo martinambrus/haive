@@ -14,27 +14,28 @@ const headerText = z
   .string()
   .max(320)
   .regex(/^[^\r\n\x00]*$/);
-export const mailSettingsSchema = z
-  .object({
-    enabled: z.boolean(),
-    smtpHost: z
-      .string()
-      .trim()
-      .max(253)
-      .regex(/^[a-zA-Z0-9_.:-]*$/),
-    smtpPort: z.number().int().min(1).max(65535),
-    secure: z.boolean(),
-    user: headerText,
-    from: z.union([z.literal(''), z.email()]),
-    fromName: headerText,
-  })
-  .superRefine((settings, ctx) => {
-    if (!settings.enabled) return;
-    for (const key of ['smtpHost', 'from'] as const) {
-      if (!settings[key])
-        ctx.addIssue({ code: 'custom', path: [key], message: 'Required when mail is enabled' });
-    }
-  });
+/** Field rules only. The admin form reads stored values with this, so an incomplete save
+ *  (enabled written, host not) still loads and can be repaired. */
+export const mailSettingsFieldsSchema = z.object({
+  enabled: z.boolean(),
+  smtpHost: z
+    .string()
+    .trim()
+    .max(253)
+    .regex(/^[a-zA-Z0-9_.:-]*$/),
+  smtpPort: z.number().int().min(1).max(65535),
+  secure: z.boolean(),
+  user: headerText,
+  from: z.union([z.literal(''), z.email()]),
+  fromName: headerText,
+});
+export const mailSettingsSchema = mailSettingsFieldsSchema.superRefine((settings, ctx) => {
+  if (!settings.enabled) return;
+  for (const key of ['smtpHost', 'from'] as const) {
+    if (!settings[key])
+      ctx.addIssue({ code: 'custom', path: [key], message: 'Required when mail is enabled' });
+  }
+});
 export type MailSettings = z.infer<typeof mailSettingsSchema>;
 
 /** Environment values seed missing keys only; a later boot never overwrites an admin save. */

@@ -51,7 +51,7 @@ import { isUuid } from '../lib/uuid.js';
 import { ollamaModelAllowlistSchema } from '../lib/ollama-pull-policy.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
-import { MAIL_FIELDS, readMailSettings, sendMail } from '../lib/mailer.js';
+import { MAIL_FIELDS, readStoredMailSettings, sendMail } from '../lib/mailer.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -581,7 +581,7 @@ const mailUpdateSchema = mailSettingsSchema.and(
 );
 
 adminRoutes.get('/mail', async (c) => {
-  const settings = await readMailSettings();
+  const settings = await readStoredMailSettings();
   const passwordSet = Boolean(await secretsService.getFresh(SECRET_KEYS.MAIL_SMTP_PASSWORD));
   return c.json({ ...settings, passwordSet });
 });
