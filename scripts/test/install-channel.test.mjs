@@ -354,6 +354,7 @@ for (const lang of ['sh', 'ps1']) {
     for (const [name, missingKey, required, forbidden] of [
       ['allows a missing encryption key', true, [], []],
       ['disables persistent container logs', false, ['--log-driver', 'none'], []],
+      ['runs without a TTY', false, ['-i'], ['-it', '-t']],
     ]) {
       check(`recover-admin ${name}`, () => {
         const f = fixture(lang, { publicInstall: true });
