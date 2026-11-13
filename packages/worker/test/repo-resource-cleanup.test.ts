@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Job } from 'bullmq';
+import { eq, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -48,6 +50,7 @@ vi.mock('../src/sandbox/app-runner.js', async (importOriginal) => ({
   killTaskAppRunners: async () => 0,
 }));
 
+import { RunnerProbeError } from '../src/sandbox/runner-probe.js';
 import { processTaskJob } from '../src/queues/task-queue.js';
 
 const TEMPLATE = '00000000-0000-4000-8000-0000000000c1';
@@ -124,6 +127,62 @@ describe('repository resource cleanup', () => {
       const fake = withRows();
       await cleanup({ taskIds: [], envTemplateIds: [], cleanupId: ROW });
       expect(fake.rows(schema.repoCleanups).map((r) => r.id)).toEqual([OTHER]);
+    });
+
+    it('keeps the editor session and refunds the claim on unknown teardown, then finishes on Retry', async () => {
+      const fake = withRows();
+      const claim = new Date('2026-11-13T08:00:00.000Z');
+      await fake.db
+        .update(schema.repoCleanups)
+        .set({ attempts: 3, lastEnqueuedAt: claim })
+        .where(eq(schema.repoCleanups.id, ROW));
+      const error = new RunnerProbeError('fixture-editor', new Error('daemon unavailable'));
+      h.killRepoIde.mockRejectedValueOnce(error);
+      const payload = {
+        taskIds: [],
+        envTemplateIds: [],
+        cleanupId: ROW,
+        claimStamp: claim.toISOString(),
+      };
+
+      await expect(cleanup(payload)).rejects.toBe(error);
+
+      expect(h.del).not.toHaveBeenCalled();
+      expect(fake.rows(schema.repoCleanups).map((row) => row.id)).toEqual([ROW, OTHER]);
+      const [kept] = fake.rows(schema.repoCleanups);
+      expect(new PgDialect().sqlToQuery(kept!.attempts as SQL).sql).toBe(
+        'greatest("repo_cleanups"."attempts" - 1, 0)',
+      );
+      expect(kept!.lastEnqueuedAt).toEqual(new Date(claim.getTime() + 1));
+
+      await cleanup(payload);
+      expect(h.del).toHaveBeenCalledWith('ide:session:repo-00000000-0000-4000-8000-0000000000b1');
+      expect(fake.rows(schema.repoCleanups).map((row) => row.id)).toEqual([OTHER]);
+    });
+
+    it('keeps the session and row on unknown teardown without a sweep claim', async () => {
+      const fake = withRows();
+      const error = new RunnerProbeError('fixture-editor', new Error('listing timed out'));
+      h.killRepoIde.mockRejectedValueOnce(error);
+
+      await expect(cleanup({ taskIds: [], envTemplateIds: [], cleanupId: ROW })).rejects.toBe(
+        error,
+      );
+
+      expect(h.del).not.toHaveBeenCalled();
+      expect(fake.rows(schema.repoCleanups).map((row) => row.id)).toEqual([ROW, OTHER]);
+    });
+
+    it('continues best-effort session cleanup and drops the row for other editor errors', async () => {
+      const fake = withRows();
+      h.killRepoIde.mockRejectedValueOnce(new Error('other teardown error'));
+
+      await expect(
+        cleanup({ taskIds: [], envTemplateIds: [], cleanupId: ROW }),
+      ).resolves.toBeUndefined();
+
+      expect(h.del).toHaveBeenCalledTimes(1);
+      expect(fake.rows(schema.repoCleanups).map((row) => row.id)).toEqual([OTHER]);
     });
 
     it('is kept when the cleanup throws', async () => {

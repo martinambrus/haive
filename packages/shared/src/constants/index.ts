@@ -451,6 +451,8 @@ export interface RepoResourceCleanupPayload {
   storagePath: string | null;
   /** The `repo_cleanups` row to delete once the job has run. */
   cleanupId?: string;
+  /** The sweep claim (`last_enqueued_at`, ISO) this job was counted under; a refund consumes it. */
+  claimStamp?: string;
 }
 
 export const CLI_EXEC_JOB_NAMES = {

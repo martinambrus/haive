@@ -1,3 +1,4 @@
+import { requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -88,23 +89,12 @@ export interface IdeRunnerHandle {
 }
 
 async function containerExists(name: string): Promise<boolean> {
-  try {
-    await exec('docker', ['inspect', name], { timeout: 15_000 });
-    return true;
-  } catch {
-    return false;
-  }
+  return (await requireRunnerPresence(name)).state === 'present';
 }
 
 async function isRunning(name: string): Promise<boolean> {
-  try {
-    const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name], {
-      timeout: 15_000,
-    });
-    return stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
+  const presence = await requireRunnerPresence(name);
+  return presence.state === 'present' && presence.running;
 }
 
 // A container from before the label existed reads as empty, and so as stale; one docker cannot
@@ -526,7 +516,9 @@ async function setupIdeDebugging(db: Database, taskId: string, name: string): Pr
   }
   if (!task?.debugMode) return;
   await installXdebugExtension(taskId, name);
-  await setupIdeDebugForwards(taskId, name);
+  await setupIdeDebugForwards(taskId, name).catch((err: unknown) => {
+    log.warn({ taskId, err }, 'ide debug forwards skipped: runtime presence could not be read');
+  });
 }
 
 /** Install xdebug.php-debug into the per-user /ext volume (Open VSX is code-server's
@@ -612,7 +604,9 @@ async function startIdeForward(
  *  code-server time to flush hot-exit backups) and remove it. The per-user
  *  extensions and per-task user-data volumes are intentionally left intact, so a
  *  later reopen restores extensions, settings, and unsaved buffers. Used by the
- *  idle-grace reaper. Returns true when a container was stopped. */
+ *  idle-grace reaper. Returns true when a container was stopped. Throws
+ *  `RunnerProbeError` when whether the container exists, or whose it is, cannot
+ *  be read, so a caller keeps the session and its volumes for a later retry. */
 export async function stopIdeRunner(taskId: string): Promise<boolean> {
   const name = ideRunnerName(taskId);
   if (!(await containerExists(name))) return false;
@@ -623,8 +617,10 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
       { timeout: 15_000 },
     );
     if (!(await ownsNamedIdeRunner(name, stdout.trim()))) return false;
-  } catch {
-    return false;
+  } catch (cause) {
+    // Existence was established, but ownership is still unknown. Let callers keep
+    // the idle-session key and repository user-data volume until a later retry.
+    throw new RunnerProbeError(name, cause);
   }
   await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 }).catch(() => {});
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});

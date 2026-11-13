@@ -1,3 +1,4 @@
+import { requireRunnerPresence } from './runner-probe.js';
 import { execFile, spawn } from 'node:child_process';
 import { readFile, type FileHandle } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
@@ -260,8 +261,14 @@ export function runnerHandleForTask(taskId: string, repoSubpath: string): DdevRu
  *  For a caller that wants to use the runner opportunistically but must not wait on it:
  *  `ensureAppServing` blocks in the runtime admission gate, which a step's detect() must
  *  never do. False here means "not available right now", never "this repo has no runner". */
-export function ddevRunnerRunning(handle: DdevRunnerHandle): Promise<boolean> {
-  return containerRunning(handle.container);
+export async function ddevRunnerRunning(handle: DdevRunnerHandle): Promise<boolean> {
+  try {
+    return await containerRunning(handle.container);
+  } catch (err) {
+    // Opportunistic reads (detect preflight and save availability) boot and delete nothing.
+    log.warn({ err, container: handle.container }, 'DDEV runner availability could not be read');
+    return false;
+  }
 }
 
 /** Launch a per-task DinD runner with the repo volume mounted, and wait for its
@@ -887,17 +894,10 @@ export async function ddevRunnerLife(handle: DdevRunnerHandle): Promise<RunnerLi
   }
 }
 
-/** True when the named container exists AND is running. One cheap inspect (mirrors
- *  runnerDockerdUp's shape); false on any error (absent/created/exited). */
+/** Absence and a stopped runner are false; an unknown read must never allow replacement. */
 async function containerRunning(name: string): Promise<boolean> {
-  try {
-    const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name], {
-      timeout: 10_000,
-    });
-    return stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
+  const presence = await requireRunnerPresence(name, 10_000);
+  return presence.state === 'present' && presence.running;
 }
 
 /** Ensure the singleton DDEV registry pull-through cache is up. Idempotent: a no-op
@@ -2814,15 +2814,19 @@ const BROWSER_DESKTOP_STOP_CMD =
  *  startBrowserDesktop brings it back up. */
 export async function stopBrowserDesktop(taskId: string): Promise<void> {
   const container = ddevRunnerName(taskId);
-  // Before the running check: a stopped runner must not stay on the surcharge list either.
-  await markBrowserDesktopDown(container);
-  if (!(await containerRunning(container))) return;
+  // An unknown read must not clear the surcharge for a desktop that may still be up.
+  const running = await containerRunning(container);
+  if (!running) {
+    await markBrowserDesktopDown(container);
+    return;
+  }
   try {
     await whileRunnerBusy(container, () =>
       exec('docker', ['exec', '-u', 'ddev', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {
         timeout: 20_000,
       }),
     );
+    await markBrowserDesktopDown(container);
   } catch (err) {
     logger.debug({ err, taskId }, 'stopBrowserDesktop (ddev) best-effort failed');
   }

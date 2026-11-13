@@ -34,7 +34,7 @@ const SUBPATH = `${USER}/${REPO}`;
 
 beforeEach(() => {
   h.exec.mockReset().mockImplementation(async (_command, args: string[]) => {
-    if (args[0] === 'inspect') throw new Error('container missing');
+    if (args[0] === 'ps') return { stdout: '', stderr: '' };
     return { stdout: '{"status":"alive"}', stderr: '' };
   });
   h.boundary.mockReset().mockResolvedValue({
