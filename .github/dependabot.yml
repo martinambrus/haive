@@ -69,6 +69,7 @@ updates:
       - "/packages/web"
       - "/docker/ollama-thinking-proxy"
       - "/docker/openrouter-compat-proxy"
+      - "/docker/ollama-gate"
       - "/packages/worker/docker/ddev-runner"
     schedule:
       interval: weekly

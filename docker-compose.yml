@@ -77,6 +77,7 @@ services:
     networks:
       - haive-network
 
+  # The daemon is reachable only on the stack network. Sandboxes use ollama-gate.
   ollama:
     image: ollama/ollama:latest
     container_name: ${HAIVE_INSTALL_ID:-haive}-ollama
@@ -90,10 +91,11 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - haive-network
-      # Shared with per-task sandboxes so an Ollama-backed CLI can reach the
-      # daemon directly; postgres/redis are not on this network.
-      - haive-models
+      haive-network:
+        # The gate's upstream name. `ollama` itself is also the gate's alias on
+        # haive-models, so the gate must not dial it and depend on DNS order.
+        aliases:
+          - ollama-daemon
 
   api:
     build:
@@ -243,6 +245,26 @@ services:
     networks:
       - haive-network
 
+  # Sandboxes resolve the daemon's existing names to this inference/read-only
+  # gate on haive-models. Only the gate reaches the daemon on haive-network.
+  ollama-gate:
+    build:
+      context: ./docker/ollama-gate
+      dockerfile: Dockerfile
+    container_name: ${HAIVE_INSTALL_ID:-haive}-ollama-gate
+    restart: unless-stopped
+    environment:
+      UPSTREAM_HOST: ollama-daemon
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      haive-network:
+      haive-models:
+        aliases:
+          - ollama
+          - ${HAIVE_INSTALL_ID:-haive}-ollama
+
   # Injects thinking:{type:"disabled"} into Ollama Cloud /v1/messages requests for
   # providers with the per-provider "Disable model thinking" toggle on. Dual-homed
   # like the api container: haive-network for outbound internet to ollama.com,
@@ -278,18 +300,17 @@ networks:
   haive-network:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-network
-  # Sandbox<->API only: the api and the per-task sandboxes join this; postgres,
-  # redis, etc. do NOT, so agent code can reach rag_search but not the queues/DB.
-  # internal = no NAT/internet, so it provides ONLY api access — internet is
-  # governed by the sandbox's policy network (default bridge / squid / none).
+  # Sandbox<->API and cloud compatibility proxies: postgres/redis do NOT join,
+  # so agent code can reach rag_search and those proxies but not the queues/DB.
+  # internal = no NAT/internet; other internet access is governed by the
+  # sandbox's policy network (default bridge / squid / none).
   haive-sandbox:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-sandbox
     internal: true
-  # Sandbox<->Ollama only: the ollama service and the per-task sandboxes join
-  # this; postgres/redis do NOT, so a local Ollama-backed CLI reaches the daemon
-  # at http://ollama:11434 without widening the sandbox's reach. internal = no
-  # NAT/internet (the model is in-stack).
+  # Sandbox<->Ollama gate only: the daemon, postgres and redis do NOT join.
+  # The gate owns the daemon's names here and forwards only inference/read-only
+  # endpoints, preventing sandboxes from changing shared models. No NAT/internet.
   haive-models:
     driver: bridge
     name: ${HAIVE_INSTALL_ID:-haive}-models
