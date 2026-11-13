@@ -71,3 +71,15 @@ it('returns a failure when login container creation fails', async () => {
   h.create.mockRejectedValueOnce(new Error('create failed'));
   expect(await handleLoginCreateJob(makeDb() as never, payload)).toMatchObject({ ok: false });
 });
+
+it('passes the API-owned attempt lease to Docker creation', async () => {
+  const result = await handleLoginCreateJob(makeDb() as never, {
+    ...payload,
+    leaseId: 'api-attempt',
+  });
+  expect(result.ok).toBe(true);
+  expect(h.create).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ leaseId: 'api-attempt' }),
+  );
+});

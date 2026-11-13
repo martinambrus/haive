@@ -1186,6 +1186,7 @@ export async function handleLoginCreateJob(
     const Docker = (await import('dockerode')).default;
     const docker = new Docker();
     const created = await createSandboxLoginContainer(db, {
+      leaseId: payload.leaseId,
       provider,
       commandSpec,
       docker,

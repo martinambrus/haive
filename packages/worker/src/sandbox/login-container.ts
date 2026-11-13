@@ -1,3 +1,5 @@
+import { CLI_LOGIN_LABEL, CLI_LOGIN_LEASE_LABEL } from '@haive/shared/cli-login-lease';
+import { INSTALL_LABEL, installId } from '@haive/shared';
 import Docker from 'dockerode';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -25,6 +27,7 @@ const HEADLESS_AUTH_ENV: Record<string, string> = {
 };
 
 export interface CreateLoginContainerOpts {
+  leaseId?: string;
   provider: CliProviderRecord;
   commandSpec: CliCommandSpec;
   docker: Docker;
@@ -74,6 +77,11 @@ export async function createSandboxLoginContainer(
   const envArr = Object.entries(mergedEnv).map(([k, v]) => `${k}=${v}`);
 
   const dockerContainer = await docker.createContainer({
+    Labels: {
+      [CLI_LOGIN_LABEL]: '1',
+      [INSTALL_LABEL]: installId(),
+      ...(opts.leaseId ? { [CLI_LOGIN_LEASE_LABEL]: opts.leaseId } : {}),
+    },
     Image: provider.sandboxImageTag,
     Cmd: [commandSpec.command, ...commandSpec.args],
     Env: envArr,
