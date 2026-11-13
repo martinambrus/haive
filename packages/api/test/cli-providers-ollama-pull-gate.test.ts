@@ -90,6 +90,33 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('in-stack Ollama provider save policy', () => {
   it.each(['create', 'patch', 'clone'])(
+    'refuses a foreign embedding registry in the model and FROM on %s',
+    async (operation) => {
+      const foreign = 'foreign.example:5000/library/embed';
+      vi.mocked(configService.get).mockImplementation(async (key) =>
+        key === CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL ? foreign : null,
+      );
+      for (const values of [
+        { name: 'ollama', model: foreign },
+        { name: 'ollama', model: 'custom', modelfile: `FROM ${foreign}` },
+      ]) {
+        const fake = setup(operation === 'create' ? undefined : values);
+        const before = structuredClone(fake.rows(schema.cliProviders));
+        const res =
+          operation === 'create'
+            ? await post(values)
+            : operation === 'patch'
+              ? await patch({ model: `${values.model}:latest` })
+              : await app.request(`/${PROVIDER}/clone`, { method: 'POST' });
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: 'ollama_model_not_allowed' });
+        expect(fake.rows(schema.cliProviders)).toEqual(before);
+        expect(fake.rows(schema.auditEvents)).toEqual([]);
+        expect(h.add).not.toHaveBeenCalled();
+      }
+    },
+  );
+  it.each(['create', 'patch', 'clone'])(
     'refuses a disallowed model on %s before any write or queue',
     async (operation) => {
       const fake = setup(

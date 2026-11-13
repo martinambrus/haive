@@ -67,6 +67,25 @@ it('boot skips a disallowed non-admin provider and continues provisioning the ad
     fake.rows(schema.cliProviders).find((row) => row.id === blocked.id)!.modelProvisionStatus,
   ).toBe('idle');
 });
+it('boot refuses foreign embedding registries in models and FROM bases and preserves admin pulls', async () => {
+  const foreign = 'foreign.example:5000/library/embed';
+  vi.mocked(configService.get).mockImplementation(async (key) =>
+    key === CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL ? foreign : null,
+  );
+  provider('foreign-model', USER, foreign);
+  provider('foreign-from', USER, 'custom', `FROM ${foreign}`);
+  provider('foreign-admin', ADMIN, foreign);
+  await ensureOllamaModels(fake.db as unknown as Database);
+  const writes = fetchFn.mock.calls.filter(([url]) => !url.endsWith('/api/tags'));
+  expect(writes).toHaveLength(1);
+  expect(writes[0]![0]).toMatch(/\/api\/pull$/);
+  expect(JSON.parse(writes[0]![1].body).model).toBe(foreign);
+  expect(fake.rows(schema.cliProviders).map((row) => row.modelProvisionStatus)).toEqual([
+    'idle',
+    'idle',
+    'ready',
+  ]);
+});
 it('checks a queued provider owner’s current role, including demotion', async () => {
   const row = provider('demoted', ADMIN);
   await fake.db.update(schema.users).set({ role: 'user' }).where(eq(schema.users.id, ADMIN));
