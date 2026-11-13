@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -33,6 +33,7 @@ app.use('*', async (c, next) => {
 app.onError(errorHandler);
 app.route('/tasks', browserAccessRoutes);
 const request = () => app.request('/tasks/task/ddev/rebuild', { method: 'POST' });
+afterEach(() => vi.useRealTimers());
 beforeEach(() => {
   vi.clearAllMocks();
   h.task.mockResolvedValue({ id: 'task' });
@@ -118,7 +119,36 @@ it('does not answer success until removal and enqueue finish', async () => {
   expect(await (await response).json()).toEqual({ ok: true });
 });
 it('returns pending when the bounded removal wait expires', async () => {
-  h.wait.mockRejectedValue(new Error('wait expired'));
+  vi.useFakeTimers();
+  h.wait.mockImplementation(
+    (_events, ttl) =>
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('arbitrary BullMQ timeout copy')), ttl);
+      }),
+  );
+  const pending = request();
+  await vi.advanceTimersByTimeAsync(30_000);
+  const response = await pending;
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ ok: false, pending: true });
+});
+it.each(['rm', 'audit-insert', 'enqueue'])(
+  'returns a finished %s failure as an error, never pending',
+  async () => {
+    const message = 'DDEV rebuild failed. Try again; recovery may still be needed.';
+    h.wait.mockResolvedValueOnce({
+      ok: false,
+      url: null,
+      mode: 'ddev',
+      rebuildFailure: { message },
+    });
+    const response = await request();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ ok: false, error: message });
+  },
+);
+it('treats a job already gone before its outcome was read as unknown, not failed', async () => {
+  h.wait.mockRejectedValueOnce(new Error('arbitrary missing-job copy'));
   const response = await request();
   expect(response.status).toBe(202);
   expect(await response.json()).toEqual({ ok: false, pending: true });

@@ -5,6 +5,11 @@ const h = vi.hoisted(() => ({
   add: vi.fn(),
   close: vi.fn(),
   worker: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<typeof import('@haive/shared')>()),
+  logger: { child: () => ({ error: h.error, warn: vi.fn() }) },
 }));
 vi.mock('bullmq', () => ({
   Queue: class {
@@ -85,11 +90,23 @@ it('rejects a non-DDEV task without removal', async () => {
   });
   expect(h.rebuild).not.toHaveBeenCalled();
 });
-it('fails the job if ensure could not be queued, and closes the queue', async () => {
-  h.add.mockRejectedValue(new Error('queue unavailable'));
-  await expect(rebuildDdevForTask(payload)).rejects.toThrow('queue unavailable');
-  expect(h.close).toHaveBeenCalledOnce();
-});
+it.each(['rm', 'audit-insert', 'enqueue', 'context'] as const)(
+  'returns a typed failure and logs an error when %s fails',
+  async (source) => {
+    const error = Object.assign(new Error(`${source} failed with private details`), {
+      params: ['secret'],
+    });
+    if (source === 'enqueue') h.add.mockRejectedValueOnce(error);
+    else if (source === 'context') h.classify.mockRejectedValueOnce(error);
+    else h.rebuild.mockRejectedValueOnce(error);
+    await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+      ok: false,
+      rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
+    });
+    expect(h.error).toHaveBeenCalledWith({ taskId: 'task', err: error }, 'DDEV rebuild failed');
+    if (source === 'enqueue') expect(h.close).toHaveBeenCalledOnce();
+  },
+);
 
 it('never coalesces a later rebuild recovery into an earlier rebuild’s finishing ensure', async () => {
   await rebuildDdevForTask(payload);

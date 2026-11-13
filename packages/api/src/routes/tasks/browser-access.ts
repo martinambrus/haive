@@ -177,9 +177,12 @@ browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
       const { reason, message, retryable } = result.rebuildRefusal;
       return c.json({ ok: false, error: message, reason, retryable }, 409);
     }
+    if (result?.rebuildFailure)
+      return c.json({ ok: false, error: result.rebuildFailure.message }, 500);
     if (result?.ok) return c.json({ ok: true }, 202);
   } catch {
-    // A bounded wait can expire while the coalesced job is still active.
+    // Rebuild failures complete with rebuildFailure above. A rejected wait has
+    // no known outcome: it may have expired or missed an already removed job.
   }
   return c.json({ ok: false, pending: true }, 202);
 });

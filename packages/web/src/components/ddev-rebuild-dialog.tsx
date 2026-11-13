@@ -54,7 +54,7 @@ export function DdevRebuildDialog({
       );
       onQueued(
         result.pending
-          ? 'DDEV rebuild is still pending; removal is not yet confirmed. Check task history for the outcome.'
+          ? 'DDEV rebuild is still pending; removal is not yet confirmed. See the task’s Activity tab for the request, and check again.'
           : 'DDEV runner removed; recovery is queued. A failed step stays failed; Retry it after the runtime is ready.',
       );
     } catch (err) {

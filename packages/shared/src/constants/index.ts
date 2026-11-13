@@ -302,6 +302,8 @@ export interface RuntimeEnsureResult {
    *  published. See `TaskAccessEndpoint`. */
   accessUrls?: TaskAccessEndpoint[];
   rebuildRefusal?: DdevRebuildRefusal;
+  /** A finished rebuild failure, distinct from a wait whose outcome is unknown. */
+  rebuildFailure?: { message: string };
 }
 
 export const DDEV_CONTROL_JOB_NAMES = {

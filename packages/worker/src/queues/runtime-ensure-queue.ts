@@ -172,31 +172,31 @@ async function navigateDesktopToMailpit(taskId: string): Promise<RuntimeEnsureRe
 export async function rebuildDdevForTask(
   payload: RuntimeEnsurePayload,
 ): Promise<RuntimeEnsureResult> {
-  const ctx = await runtimeContext(payload.taskId);
-  if (!ctx)
-    return {
-      ok: false,
-      url: null,
-      mode: 'none',
-      rebuildRefusal: {
-        reason: 'no-ddev',
-        message: 'No DDEV workspace for this task.',
-        retryable: false,
-      },
-    };
-  const spec = await classifyRuntime(ctx);
-  if (spec.mode !== 'ddev' || !spec.repoSubpath)
-    return {
-      ok: false,
-      url: null,
-      mode: 'none',
-      rebuildRefusal: {
-        reason: 'no-ddev',
-        message: 'This task has no DDEV runtime.',
-        retryable: false,
-      },
-    };
   try {
+    const ctx = await runtimeContext(payload.taskId);
+    if (!ctx)
+      return {
+        ok: false,
+        url: null,
+        mode: 'none',
+        rebuildRefusal: {
+          reason: 'no-ddev',
+          message: 'No DDEV workspace for this task.',
+          retryable: false,
+        },
+      };
+    const spec = await classifyRuntime(ctx);
+    if (spec.mode !== 'ddev' || !spec.repoSubpath)
+      return {
+        ok: false,
+        url: null,
+        mode: 'none',
+        rebuildRefusal: {
+          reason: 'no-ddev',
+          message: 'This task has no DDEV runtime.',
+          retryable: false,
+        },
+      };
     await rebuildDdevRunner(payload.taskId, spec.repoSubpath, payload.userId, async () => {
       const queue = new Queue<RuntimeEnsurePayload>(QUEUE_NAMES.RUNTIME_ENSURE, {
         connection: getBullRedis(),
@@ -221,7 +221,15 @@ export async function rebuildDdevForTask(
         mode: 'ddev',
         rebuildRefusal: { reason: 'probe-unknown', message: error.message, retryable: true },
       };
-    throw error;
+    // Complete with a typed outcome so the API cannot mistake a finished failure
+    // for BullMQ's bounded-wait rejection. Keep private diagnostics in the log.
+    log.error({ taskId: payload.taskId, err: error }, 'DDEV rebuild failed');
+    return {
+      ok: false,
+      url: null,
+      mode: 'ddev',
+      rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
+    };
   }
   return { ok: true, url: null, mode: 'ddev' };
 }

@@ -102,3 +102,20 @@ it.each(['busy', 'unknown Docker probe; retry', 'foreign runner', 'no DDEV runti
     expect(screen.getByRole('alertdialog')).toBeTruthy();
   },
 );
+
+it('points pending requests at Activity and asks the user to check again', async () => {
+  h.post.mockResolvedValueOnce({ ok: false, pending: true });
+  render(<Fixture />);
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild DDEV' }));
+  expect(await screen.findByText(/still pending.*Activity tab.*check again/i)).toBeTruthy();
+  expect(screen.queryByText(/check task history/i)).toBeNull();
+});
+it('keeps a finished rebuild failure visible in the dialog', async () => {
+  const message = 'DDEV rebuild failed. Try again; recovery may still be needed.';
+  h.post.mockRejectedValueOnce(new Error(message));
+  render(<Fixture />);
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild DDEV' }));
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(screen.getByRole('alertdialog')).toBeTruthy();
+  expect(screen.queryByText(/still pending/i)).toBeNull();
+});
