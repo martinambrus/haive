@@ -43,8 +43,11 @@ export function AdminRelinkDialog({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        // The relink commits before the reply: closing mid-flight would lose a one-time link.
+        if (!open && !busy) onClose();
       }}
+      // A shown link exists nowhere else; only Escape or Close may dismiss it.
+      dismissOnBackdrop={!busy && !result}
       aria-label="Relink account"
     >
       <DialogContent>
@@ -103,7 +106,7 @@ export function AdminRelinkDialog({
               </div>
             )}
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="secondary" onClick={onClose}>
+              <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>
                 Cancel
               </Button>
               <Button type="submit" disabled={busy || !email.trim()}>

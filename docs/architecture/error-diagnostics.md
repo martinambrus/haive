@@ -236,8 +236,8 @@ no or duplicate `git_email`, go through **Admin → Users → Relink**: the admi
 orphan by its name, git name and git email and enters the account holder's email. Relink ends the
 old sessions, randomizes the password and issues a reset link; mail delivers it when enabled, or
 the dialog reveals it once for manual handoff when mail is disabled or delivery fails. Deactivated
-accounts must be reactivated first. See Admin relink in `api-auth.md`. This command restores
-one administrator without mail or a matching `git_email`. Rollback: revert the code
+accounts must be reactivated first. See Admin relink in `api-auth.md`. The host `recover-admin` command
+restores one administrator without mail or a matching `git_email`. Rollback: revert the code
 change; no schema migration is needed. Committed password resets cannot be undone by a code revert.
 
 The api answers `ConfigUnavailableError` with 503

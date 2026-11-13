@@ -143,3 +143,39 @@ it('keeps a rejected relink open with its error', async () => {
   expect(textOf(view.tree())).toContain('That email is already linked to another account.');
   expect(findAll(view.tree(), (n) => n.props.id === 'relink-email')).toHaveLength(1);
 });
+it('cannot be dismissed while the relink is in flight, so a committed link is never lost', async () => {
+  let finish: (value: unknown) => void = () => {};
+  h.post.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+  await open();
+  submit();
+  await view.flush();
+  const event = new Event('keydown');
+  Object.defineProperty(event, 'key', { value: 'Escape' });
+  events.dispatchEvent(event);
+  await view.flush();
+  expect(buttons(view.tree(), /^Cancel$/i)[0]!.props.disabled).toBe(true);
+  const backdrop = findAll(view.tree(), (n) =>
+    String(n.props.className ?? '').includes('backdrop-blur'),
+  )[0]!;
+  (backdrop.props.onClick as () => void)();
+  await view.flush();
+  expect(findAll(view.tree(), (n) => n.props.role === 'dialog')).toHaveLength(1);
+  finish({ ok: true, delivery: 'manual', link: 'https://haive.example/reset-password?token=t' });
+  await view.flush();
+  await view.flush();
+  expect(textOf(view.tree())).toContain('https://haive.example/reset-password?token=t');
+});
+it('keeps a shown link on a backdrop click; only Escape or Close dismiss it', async () => {
+  const link = 'https://haive.example/reset-password?token=t';
+  h.post.mockResolvedValue({ ok: true, delivery: 'manual', link });
+  await open();
+  submit();
+  await view.flush();
+  await view.flush();
+  const backdrop = findAll(view.tree(), (n) =>
+    String(n.props.className ?? '').includes('backdrop-blur'),
+  )[0]!;
+  (backdrop.props.onClick as () => void)();
+  await view.flush();
+  expect(textOf(view.tree())).toContain(link);
+});
