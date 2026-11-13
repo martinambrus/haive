@@ -7,6 +7,7 @@ import {
   applyTreeNoFollow,
   chownNoFollow,
   ensureDirNoFollow,
+  RESOURCE_LIMITS,
   lstatNoFollow,
   openDirNoFollow,
   openFileNoFollow,
@@ -167,7 +168,10 @@ async function importHaiveDataMirror(
   let deferred = false;
   const recordHolds = async (unit: string): Promise<boolean> => {
     if (afterSync) return false;
-    const holds = (await lstatNoFollow(storagePath, `${PROJECT_STATE_DIR}/${unit}`)) !== null;
+    const holds =
+      (await lstatNoFollow(storagePath, `${PROJECT_STATE_DIR}/${unit}`, {
+        rethrow: RESOURCE_LIMITS,
+      })) !== null;
     if (holds) deferred = true;
     return holds;
   };

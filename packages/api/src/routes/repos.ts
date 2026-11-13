@@ -33,6 +33,7 @@ import {
   decodeUtf8Strict,
   isNotUtf8Error,
   NotUtf8Error,
+  RESOURCE_LIMITS,
   lstatNoFollow,
   ParkedFileError,
   openFileNoFollow,
@@ -2192,7 +2193,9 @@ export async function resetOnboardingArtifacts(
         { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
       // A save that took the name back while the old file was judged is the person's file.
-      const retaken = result === 'removed' && (await lstatNoFollow(root, rel)) !== null;
+      const retaken =
+        result === 'removed' &&
+        (await lstatNoFollow(root, rel, { rethrow: RESOURCE_LIMITS })) !== null;
       if (result === 'removed' && !retaken) {
         removed.push(rel);
         vacatedPaths.add(rel);

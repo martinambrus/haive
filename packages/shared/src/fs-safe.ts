@@ -2692,17 +2692,21 @@ export async function readLinkNoFollow(
   opts: StrictOption = {},
 ): Promise<string | null> {
   const safe = toSafeRel(rel);
-  return readResult(opts.strict, async () => {
-    const segs = segments(safe);
-    const leaf = segs.pop();
-    if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, rel, '');
-    const dir = await walkDir(anchor, safe, segs);
-    try {
-      const st = await lstat(at(dir.fh.fd, leaf));
-      if (!st.isSymbolicLink()) return null;
-      return await readlink(at(dir.fh.fd, leaf));
-    } finally {
-      await closeQuietly(dir.fh);
-    }
-  });
+  return readResult(
+    opts.strict,
+    async () => {
+      const segs = segments(safe);
+      const leaf = segs.pop();
+      if (leaf === undefined) throw new PathContainmentError('not-regular-file', anchor, rel, '');
+      const dir = await walkDir(anchor, safe, segs);
+      try {
+        const st = await lstat(at(dir.fh.fd, leaf));
+        if (!st.isSymbolicLink()) return null;
+        return await readlink(at(dir.fh.fd, leaf));
+      } finally {
+        await closeQuietly(dir.fh);
+      }
+    },
+    opts.rethrow,
+  );
 }

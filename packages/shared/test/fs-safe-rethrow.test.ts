@@ -10,10 +10,12 @@ import {
   lstatNoFollow,
   openFileNoFollow,
   readFileNoFollow,
+  readLinkNoFollow,
   readdirNoFollow,
 } from '../src/fs-safe.js';
 
 const reads = [
+  (opts = {}) => readLinkNoFollow('/anchor', 'link', opts),
   (opts = {}) => openFileNoFollow('/anchor', 'file', 'read', opts),
   (opts = {}) => readFileNoFollow('/anchor', 'file', opts),
   (opts = {}) => readdirNoFollow('/anchor', 'dir', opts),

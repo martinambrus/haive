@@ -3,10 +3,23 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { failGit, type FakeGit } from '../../test/support/fake-git.js';
 import { listBranchProjectionEdits, revertHaiveProjectionsOnBranch } from './branch-revert.js';
+
+const resourceFault = vi.hoisted(() => ({ leaf: '', error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    lstat: (...args: Parameters<typeof real.lstat>) => {
+      if (resourceFault.error && String(args[0]).endsWith('/' + resourceFault.leaf))
+        throw resourceFault.error;
+      return real.lstat(...args);
+    },
+  };
+});
 
 const exec = promisify(execFile);
 const IDENTITY = {
@@ -29,6 +42,7 @@ const verify = (spec: string) => ['rev-parse', '-q', '--verify', spec];
 const dirs: string[] = [];
 let shim: FakeGit | null = null;
 afterEach(async () => {
+  resourceFault.error = null;
   await shim?.restore();
   shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 5 });
@@ -199,4 +213,22 @@ describe('a failed ref read in branch-revert is unknown, not absent', () => {
     expect(h.events).toHaveLength(1);
     expect((await git(parent, ['show', `feature/x:${FILE}`])).trim()).toBe('"fork"');
   });
+});
+
+it('does not mark an unread worktree synced or move its branch on a descriptor shortage', async () => {
+  const { parent, wt } = await fixture();
+  await commit(wt, { [FILE]: '"agent"\n' }, 'agent edit');
+  const before = await revOf(wt);
+  const h = stubDb();
+  for (const leaf of ['.haive-data', 'feature-x']) {
+    for (const code of ['EMFILE', 'ENFILE']) {
+      resourceFault.leaf = leaf;
+      const err = Object.assign(new Error('injected'), { code });
+      resourceFault.error = err;
+      await expect(revert(parent, wt, h.db)).rejects.toBe(err);
+      resourceFault.error = null;
+      expect(await revOf(wt)).toBe(before);
+      expect(h.events).toEqual([]);
+    }
+  }
 });

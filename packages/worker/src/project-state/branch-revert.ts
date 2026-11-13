@@ -4,7 +4,12 @@ import path from 'node:path';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_DIR, HAIVE_DATA_FILES } from '@haive/shared';
-import { lstatNoFollow, removeNoFollow, type EntryKind } from '@haive/shared/fs-safe';
+import {
+  RESOURCE_LIMITS,
+  lstatNoFollow,
+  removeNoFollow,
+  type EntryKind,
+} from '@haive/shared/fs-safe';
 import { isBranchName } from '@haive/shared/git-args';
 import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { GIT_MAX_BUFFER, gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
@@ -136,7 +141,9 @@ async function refuseLinkedDataDir(
 ): Promise<void> {
   if (worktree !== null) {
     const { anchor, prefix } = workspaceAnchor(worktree);
-    const entry = await lstatNoFollow(anchor, `${prefix}${HAIVE_DATA_DIR}`);
+    const entry = await lstatNoFollow(anchor, `${prefix}${HAIVE_DATA_DIR}`, {
+      rethrow: RESOURCE_LIMITS,
+    });
     if (entry !== null && entry.kind !== 'directory') {
       throw new Error(
         `${HAIVE_DATA_DIR} is ${KIND_TEXT[entry.kind]} in the worktree ${worktree}, so Haive's project files on ${branch} cannot be put back; make it the directory it should be, then retry`,
@@ -205,7 +212,7 @@ async function stillOnTip(
 
 async function syncable(worktree: string, branch: string): Promise<boolean> {
   const { anchor, prefix } = workspaceAnchor(worktree);
-  const held = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''));
+  const held = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { rethrow: RESOURCE_LIMITS });
   if (held?.kind !== 'directory') return false;
   const head = await gitRun(worktree, ['symbolic-ref', '-q', 'HEAD']);
   // With -q only a detached HEAD exits 1; any other failure is git unable to read the worktree.

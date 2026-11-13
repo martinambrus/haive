@@ -1,4 +1,9 @@
-import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
+import {
+  RESOURCE_LIMITS,
+  lstatNoFollow,
+  readdirNoFollow,
+  readTextNoFollow,
+} from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -217,7 +222,7 @@ export async function checkSkill(
     // string (missingSkillIds versus broken), so an absent file has to keep saying it. A file that
     // IS there but could not be read — unreadable, or reached through a link — is a different
     // verdict and says so, which also keeps it out of the "regenerate this skill" bucket.
-    const present = (await lstatNoFollow(repo, skillRel)) !== null;
+    const present = (await lstatNoFollow(repo, skillRel, { rethrow: RESOURCE_LIMITS })) !== null;
     return {
       skillId,
       skillsDir,

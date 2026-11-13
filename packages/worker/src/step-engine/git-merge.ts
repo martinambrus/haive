@@ -14,6 +14,8 @@ import {
   chmodNoFollow,
   isPathContainmentError,
   chownNoFollow,
+  RESOURCE_LIMITS,
+  isResourceLimitError,
   lstatNoFollow,
   readdirNoFollow,
   readLinkNoFollow,
@@ -783,7 +785,14 @@ async function missingParents(anchor: string, prefix: string, paths: string[]): 
       const parent = parts.slice(0, i).join('/');
       if (seen.has(parent)) continue;
       seen.add(parent);
-      if ((await lstatNoFollow(anchor, `${prefix}${parent}`).catch(() => undefined)) === null) {
+      if (
+        (await lstatNoFollow(anchor, `${prefix}${parent}`, { rethrow: RESOURCE_LIMITS }).catch(
+          (err: unknown) => {
+            if (isResourceLimitError(err)) throw err;
+            return undefined;
+          },
+        )) === null
+      ) {
         missing.push(parent);
       }
     }
@@ -812,9 +821,19 @@ async function occupiedDirectories(
 ): Promise<Set<string>> {
   const occupied = new Set<string>();
   for (const p of paths) {
-    const entry = await lstatNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+    const entry = await lstatNoFollow(anchor, `${prefix}${p}`, { rethrow: RESOURCE_LIMITS }).catch(
+      (err: unknown) => {
+        if (isResourceLimitError(err)) throw err;
+        return null;
+      },
+    );
     if (entry?.kind !== 'directory') continue;
-    const inside = await readdirNoFollow(anchor, `${prefix}${p}`).catch(() => null);
+    const inside = await readdirNoFollow(anchor, `${prefix}${p}`, {
+      rethrow: RESOURCE_LIMITS,
+    }).catch((err: unknown) => {
+      if (isResourceLimitError(err)) throw err;
+      return null;
+    });
     if (inside === null || inside.length > 0) occupied.add(p);
   }
   return occupied;
@@ -948,7 +967,12 @@ export async function relocateFixerChanges(
   }
   // A retry of one run keeps the attempt before it, reported or not.
   const folder =
-    (await lstatNoFollow(root, `${base}/manifest.json`).catch(() => undefined)) === null
+    (await lstatNoFollow(root, `${base}/manifest.json`, { rethrow: RESOURCE_LIMITS }).catch(
+      (err: unknown) => {
+        if (isResourceLimitError(err)) throw err;
+        return undefined;
+      },
+    )) === null
       ? base
       : `${base}-${randomUUID().slice(0, 8)}`;
   const nothingChecked = (reason: string): FixerLeftovers => ({
@@ -1061,7 +1085,12 @@ export async function relocateFixerChanges(
   const replacedModes = new Map<string, number>();
   for (const c of toMove) {
     if (c.status !== 'D') {
-      const was = await lstatNoFollow(root, `${prefix}${c.path}`).catch(() => null);
+      const was = await lstatNoFollow(root, `${prefix}${c.path}`, {
+        rethrow: RESOURCE_LIMITS,
+      }).catch((err: unknown) => {
+        if (isResourceLimitError(err)) throw err;
+        return null;
+      });
       try {
         await renameNoFollow(root, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
           noReplace: true,
