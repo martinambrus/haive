@@ -883,8 +883,24 @@ it('leaves Git as written and reports reconciliation when the fresh read is unav
     expect(response.status).toBe(500);
     expect(await response.text()).toContain('state is being reconciled');
     expect(h.git).toHaveBeenCalledTimes(2); // Checkout probe and the successful remote add; no blind undo.
-    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER, true);
+    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER);
   } finally {
     errors.mockRestore();
   }
+});
+
+it('keeps an unmanaged origin when the connection fails before the transaction callback', async () => {
+  let origin: string | null = 'https://git-only.example.test/x';
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  vi.spyOn(fake.db, 'transaction').mockRejectedValueOnce(
+    Object.assign(new Error('closed before callback'), { code: 'CONNECTION_CLOSED' }),
+  );
+  h.reconcile.mockImplementation(async () => {
+    origin = null;
+  });
+  expect((await link()).status).toBe(500);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(origin).toBe('https://git-only.example.test/x');
+  expect(h.reconcile).not.toHaveBeenCalled();
+  expect(h.git).toHaveBeenCalledTimes(1);
 });

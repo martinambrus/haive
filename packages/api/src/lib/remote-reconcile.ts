@@ -85,7 +85,7 @@ export function isRemoteConnectionError(err: unknown): boolean {
 }
 
 /** A fresh locked read is the authority, never the route's pre-transaction snapshot. */
-export async function reconcileRemote(id: string, userId: string, force = false): Promise<void> {
+export async function reconcileRemote(id: string, userId: string): Promise<void> {
   await withFreshDatabase(async (db) => {
     await db.transaction(async (tx) => {
       const [repo] = await boundedLockWait(tx, () =>
@@ -98,7 +98,7 @@ export async function reconcileRemote(id: string, userId: string, force = false)
       if (!repo) return; // A delete won the lock; do not touch its former checkout.
       const root = repo.storagePath ?? repo.localPath;
       if (!root) throw new Error('Repository has no path for remote reconciliation');
-      if (!force && !(await hasRemotePending(root))) return;
+      if (!(await hasRemotePending(root))) return;
       await verifyRelinkCheckout(root);
       // A legacy stored URL may still contain credentials. Never copy those to Git.
       let remote: string | null = null;

@@ -108,12 +108,12 @@ it('records no remote or credential in its durable intent and preserves director
 });
 it('leaves Git and the intent untouched when the fresh database read fails', async () => {
   h.fresh.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'ECONNREFUSED' }));
-  await expect(reconcileRemote(id, userId, true)).rejects.toThrow('unavailable');
+  await expect(reconcileRemote(id, userId)).rejects.toThrow('unavailable');
   expect(h.git).not.toHaveBeenCalled();
   expect(h.remove).not.toHaveBeenCalled();
 });
 it('reads the committed destination under the ownership lock and clears push overrides', async () => {
-  await reconcileRemote(id, userId, true);
+  await reconcileRemote(id, userId);
   expect(h.git.mock.calls.map((call) => call[1])).toEqual([
     ['remote', 'add', 'origin', 'https://saved.test/repo'],
     ['config', '--local', '--unset-all', 'remote.origin.pushurl'],
@@ -123,7 +123,7 @@ it('reads the committed destination under the ownership lock and clears push ove
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://saved.test/repo');
 });
 it('does not touch a deleted or foreign-owned repository', async () => {
-  await reconcileRemote(id, '00000000-0000-4000-8000-000000000099', true);
+  await reconcileRemote(id, '00000000-0000-4000-8000-000000000099');
   expect(h.git).not.toHaveBeenCalled();
   expect(h.remove).not.toHaveBeenCalled();
 });

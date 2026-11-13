@@ -2914,8 +2914,9 @@ repoRoutes.post('/:id/remote', async (c) => {
     // Let its last write and any in-callback restore finish before the fallback runs.
     await callbackSettled;
     if (isRemoteConnectionError(err)) {
+      if (!intentWritten) throw err;
       try {
-        await reconcileRemote(id, userId, true);
+        await reconcileRemote(id, userId);
       } catch (reconcileError) {
         logger.error(
           { err: reconcileError, repositoryId: id },
