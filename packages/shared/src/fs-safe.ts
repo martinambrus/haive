@@ -500,7 +500,7 @@ export async function readTextNoFollow(
 
 export interface ReadDirOptions extends StrictOption {
   /** Bound allocation by iterating the held directory. Exceeding the cap refuses the whole
-   * listing (throws when strict, null otherwise), never returns an incomplete prefix. */
+   * listing (EDIRENTRYLIMIT when strict, null otherwise), never returns an incomplete prefix. */
   maxEntries?: number;
 }
 
@@ -530,8 +530,9 @@ export async function readdirNoFollow(
           // The async iterator closes the listing on completion, early return, or throw.
           for await (const entry of listing) {
             if (entries.length === opts.maxEntries) {
-              throw new Error(
-                `Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`,
+              throw Object.assign(
+                new Error(`Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`),
+                { code: 'EDIRENTRYLIMIT' },
               );
             }
             entries.push(entry);
