@@ -61,6 +61,7 @@ import { adminTaskTypeRoutes, taskTypeRoutes } from './routes/task-types.js';
 import { taskTypeDraftRoutes } from './routes/task-type-drafts.js';
 import { adminIntegrationRoutes } from './routes/admin-integrations.js';
 import { installModules } from './modules/loader.js';
+import { startRemoteReconcileSweep } from './lib/remote-reconcile.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -156,6 +157,7 @@ async function main(): Promise<void> {
 
   const app = createApiApp(webOrigin);
   await installModules(app);
+  startRemoteReconcileSweep();
 
   const server = serve({ fetch: app.fetch, port: apiPort }, (info) => {
     logger.info({ port: info.port }, 'haive-api listening');

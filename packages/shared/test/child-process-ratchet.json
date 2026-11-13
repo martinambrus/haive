@@ -1,7 +1,7 @@
 {
   "packages/api/src/lib/haive-data-status.ts": 1,
+  "packages/api/src/lib/relink-git.ts": 1,
   "packages/api/src/routes/plan.ts": 1,
-  "packages/api/src/routes/repos.ts": 1,
   "packages/updater/src/docker.ts": 1,
   "packages/worker/scripts/backfill-task-changed-paths.ts": 1,
   "packages/worker/scripts/check-cli-arch.ts": 1,

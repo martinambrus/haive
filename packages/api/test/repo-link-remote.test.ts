@@ -6,10 +6,22 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFileSync, type ChildProcess, type ExecFileOptions } from 'node:child_process';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn(), entry: vi.fn() }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  git: vi.fn(),
+  entry: vi.fn(),
+  reconcile: vi.fn(),
+}));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   lstatNoFollow: h.entry,
+}));
+vi.mock('../src/lib/remote-reconcile.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/remote-reconcile.js')>()),
+  markRemotePending: vi.fn(),
+  clearRemotePending: vi.fn(),
+  reconcileRemoteOnRead: vi.fn(),
+  reconcileRemote: h.reconcile,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -54,6 +66,7 @@ beforeEach(() => {
   h.db = fake.db;
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
+  h.reconcile.mockReset().mockResolvedValue(undefined);
 });
 const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
@@ -305,7 +318,7 @@ it('rechecks a retained credential binding changed between the initial and locke
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
 
-it('waits for a disconnected transaction callback before restoring the remote', async () => {
+it('waits for a disconnected transaction callback before reconciling the remote', async () => {
   const old = 'https://old.test/r';
   const next = 'https://example.test/r';
   fake.patch(schema.repositories, REPO, { remoteUrl: old });
@@ -323,7 +336,7 @@ it('waits for a disconnected transaction callback before restoring the remote', 
   const dropped = new Promise<never>((_resolve, reject) => {
     disconnect = reject;
   });
-  const failure = new Error('connection closed');
+  const failure = Object.assign(new Error('connection closed'), { code: 'CONNECTION_CLOSED' });
   let callback!: Promise<unknown>;
   h.db = new Proxy(fake.db, {
     get(target, key) {
@@ -372,6 +385,10 @@ it('waits for a disconnected transaction callback before restoring the remote', 
     }
     return { stdout: '', stderr: '' };
   });
+  h.reconcile.mockImplementation(async () => {
+    checkout = old;
+    events.push('reconciled');
+  });
   const response = Promise.resolve(link());
   try {
     await atWrite;
@@ -383,7 +400,7 @@ it('waits for a disconnected transaction callback before restoring the remote', 
   }
   await callback.catch(() => undefined);
   expect((await response).status).toBe(500);
-  expect(events).toEqual(['write finished', 'restored']);
+  expect(events).toEqual(['write finished', 'reconciled']);
   expect(checkout).toBe(old);
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
   expect(fake.rows(schema.auditEvents)).toEqual([]);
@@ -851,3 +868,23 @@ it.each(['probe', 'add', 'snapshot', 'clear', 'update'])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it('leaves Git as written and reports reconciliation when the fresh read is unavailable', async () => {
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    await transaction(fn);
+    throw Object.assign(new Error('acknowledgement lost'), { code: 'CONNECTION_CLOSED' });
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.reconcile.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'ECONNREFUSED' }));
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  try {
+    const response = await link();
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain('state is being reconciled');
+    expect(h.git).toHaveBeenCalledTimes(2); // Checkout probe and the successful remote add; no blind undo.
+    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER, true);
+  } finally {
+    errors.mockRestore();
+  }
+});

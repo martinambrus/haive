@@ -7,7 +7,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
-vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => h.db,
+  withFreshDatabase: (run: (db: unknown) => Promise<unknown>) => run(h.db),
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
     c.set('userId', '00000000-0000-4000-8000-0000000000a1');
