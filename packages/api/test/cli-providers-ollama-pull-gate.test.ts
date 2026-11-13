@@ -164,6 +164,26 @@ describe('in-stack Ollama provider save policy', () => {
     );
   });
 
+  it.each(['create', 'patch', 'clone'])(
+    'allows a custom target name with an allowlisted FROM on %s',
+    async (operation) => {
+      const values = { name: 'ollama', model: 'my-variant', modelfile: 'FROM allowed' };
+      setup(
+        operation === 'create'
+          ? undefined
+          : { ...values, modelfile: operation === 'patch' ? 'FROM blocked' : values.modelfile },
+      );
+      const res =
+        operation === 'create'
+          ? await post(values)
+          : operation === 'patch'
+            ? await patch({ modelfile: values.modelfile })
+            : await app.request(`/${PROVIDER}/clone`, { method: 'POST' });
+      expect(res.status).toBe(operation === 'patch' ? 200 : 201);
+      expect(h.add.mock.calls.some(([name]) => name === 'cli-provision-ollama-model')).toBe(true);
+    },
+  );
+
   it('refuses replacing an allowed model with a disallowed model', async () => {
     const fake = setup({ name: 'ollama', model: 'allowed' });
     const before = structuredClone(fake.rows(schema.cliProviders));

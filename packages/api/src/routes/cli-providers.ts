@@ -220,11 +220,10 @@ async function assertOllamaSaveAllowed(
     !isInStackOllamaBaseUrl(provider.envVars?.ANTHROPIC_BASE_URL)
   )
     return;
-  const from = provider.modelfile ? parseModelfile(provider.modelfile).from : undefined;
-  for (const model of [provider.model!, ...(from ? [from] : [])]) {
-    if (!(await mayPullOllamaModel(role, model))) {
-      throw new HttpError(403, OLLAMA_MODEL_NOT_ALLOWED_MESSAGE, 'ollama_model_not_allowed');
-    }
+  // A custom model's name is an output, not a registry pull target.
+  const pullModel = provider.modelfile ? parseModelfile(provider.modelfile).from : provider.model;
+  if (pullModel && !(await mayPullOllamaModel(role, pullModel))) {
+    throw new HttpError(403, OLLAMA_MODEL_NOT_ALLOWED_MESSAGE, 'ollama_model_not_allowed');
   }
 }
 

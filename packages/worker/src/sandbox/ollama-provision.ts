@@ -160,8 +160,9 @@ export async function provisionOllamaProvider(
           embedModel: await configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
           allowlist: null as string | null,
         };
+        // /api/create pulls FROM, while model is only its output name.
         const from = provider.modelfile ? parseModelfile(provider.modelfile).from : undefined;
-        const models = [model, ...(from ? [from] : [])];
+        const models = provider.modelfile ? (from ? [from] : []) : [model];
         if (models.some((candidate) => !isOllamaModelAllowed(owner?.role, candidate, policy))) {
           policy.allowlist = await configService.get(CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST);
         }

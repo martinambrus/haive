@@ -151,3 +151,12 @@ it('fails closed if listing models fails and the absent model is disallowed', as
   expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(false);
   expect(fetchFn.mock.calls.every(([url]) => url.endsWith('/api/tags'))).toBe(true);
 });
+
+it('builds a custom target name using only the allowed FROM as pull authority', async () => {
+  const row = provider('variant', USER, 'my-variant', 'FROM allowed');
+  expect((await provisionOllamaProvider(fake.db as unknown as Database, row)).ok).toBe(true);
+  const creates = fetchFn.mock.calls.filter(([url]) => url.endsWith('/api/create'));
+  expect(creates).toHaveLength(1);
+  expect(JSON.parse(creates[0]![1].body)).toMatchObject({ model: 'my-variant', from: 'allowed' });
+  expect(fetchFn.mock.calls.some(([url]) => url.endsWith('/api/pull'))).toBe(false);
+});
