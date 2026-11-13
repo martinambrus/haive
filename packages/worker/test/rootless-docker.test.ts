@@ -39,8 +39,14 @@ describe('rootless docker support', () => {
 describe('sandbox models network', () => {
   it('exposes only the filtering gate under the daemon names', async () => {
     const { services, networks } = parse(await readRepoFile('docker-compose.yml'));
-    expect(services.ollama.networks).not.toContain('haive-models');
-    expect(services.ollama.networks).toEqual(['haive-network']);
+    expect(Object.keys(services.ollama.networks)).toEqual(['haive-network']);
+    const daemonAliases: string[] = services.ollama.networks['haive-network'].aliases;
+    const gateAliases: string[] = services['ollama-gate'].networks['haive-models'].aliases;
+    // The gate must dial a name that is the daemon's alone: `ollama` is the gate on haive-models.
+    const upstream = services['ollama-gate'].environment.UPSTREAM_HOST;
+    expect(daemonAliases).toContain(upstream);
+    expect(gateAliases).not.toContain(upstream);
+    expect(upstream).not.toBe('ollama');
     expect(services['ollama-gate'].networks).toEqual({
       'haive-network': null,
       'haive-models': { aliases: ['ollama', '${HAIVE_INSTALL_ID:-haive}-ollama'] },

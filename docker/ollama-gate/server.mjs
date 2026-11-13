@@ -51,7 +51,7 @@ function jsonError(res, status, type, message) {
 
 /** Construct without listening, so tests can supply a private upstream. */
 export function createGateServer({
-  upstreamHost = process.env.UPSTREAM_HOST || 'ollama',
+  upstreamHost = process.env.UPSTREAM_HOST || 'ollama-daemon',
   upstreamPort = Number(process.env.UPSTREAM_PORT || 11434),
 } = {}) {
   return http.createServer((req, res) => {

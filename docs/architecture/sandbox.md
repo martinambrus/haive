@@ -278,7 +278,9 @@ removes the credentials from the container's reach; the editor's own authority i
 An Ollama-backed CLI joins the internal `haive-models` network, where `ollama` and
 `${HAIVE_INSTALL_ID:-haive}-ollama` resolve to `ollama-gate:11434`, not the daemon.
 The daemon is only on `haive-network`; the api and worker retain direct access there
-for embeddings, model listing and policy-controlled provisioning. The gate joins both
+for embeddings, model listing and policy-controlled provisioning. The gate dials the
+daemon by its own alias `ollama-daemon`, never `ollama`: on `haive-models` that name is
+the gate itself, and which address a dual-homed container gets for it is Docker's choice. The gate joins both
 networks and streams requests and responses without buffering, including SSE.
 
 The gate permits `POST` inference at `/v1/messages`, `/v1/messages/count_tokens`,
@@ -294,6 +296,11 @@ uses the exact method and raw pathname, without decoding or normalization; queri
 are forwarded unchanged. Traversal, encoded path, trailing-slash and case variants
 are refused, and method-override headers are removed. This closes direct mutation of
 shared models by sandboxed agents while keeping provider URLs unchanged.
+
+Only installs whose compose bundle carries the gate have it. `haive upgrade` swaps
+images and keeps the compose bundle it was installed with, so an install upgraded from
+an earlier release keeps the daemon on `haive-models` with no gate until its compose bundle is
+replaced by one from this release or later.
 
 ## Container attachment startup
 
