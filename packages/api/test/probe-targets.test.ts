@@ -132,7 +132,6 @@ beforeEach(() => {
   });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
-  fake.insert(schema.cliProviders, { userId: USER, name: 'ollama', model: 'm' });
   h.db = fake.db;
   h.fake = fake;
   h.open = false;
@@ -147,6 +146,8 @@ beforeEach(() => {
     if (key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST) return h.open ? '127.0.0.1/32' : null;
     if (key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL) return h.ollamaUrl;
     if (key === CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL) return h.embedModel;
+    // These cases exercise the non-admin transport, after model authorization.
+    if (key === CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST) return 'm';
     if (key === CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS) return h.dimensions;
     return null;
   });
@@ -189,7 +190,8 @@ function within<T>(promise: Promise<T>, ms = DEADLINE_MS): Promise<T | typeof NO
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+// Drain pending listener callbacks after the awaited probe, without a wall-clock sleep.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 function sseEvents(text: string): Array<{ event: string; data: any }> {
   return text
