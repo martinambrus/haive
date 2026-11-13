@@ -2125,25 +2125,16 @@ async function probeDdevRecovery(
   }
   if (subpath === 'other' || !presence.running) return 'cold-boot';
 
-  // Check dockerd before describe: when it is definitely down there can be no
-  // successful DDEV read. Neither an exec failure nor malformed stdout means down.
-  const dockerdUp = await runnerDockerdUp(existing.container);
-  if (!dockerdUp) return 'cold-boot';
+  // A STOPPED project still describes cleanly and still reports its primary_url, so only the
+  // project's own structured status proves it is serving; that positive answer needs no
+  // dockerd probe. Anything else (describe failed, unparseable, or the project is down)
+  // asks dockerd: down is definite and cold-boots, up warm-starts in place (non-destructive),
+  // and a probe that gave no answer throws without touching the runner.
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
-  const status = parseDdevProjectStatus(describe.output);
-  if (describe.exitCode !== 0 || typeof status !== 'string' || status.trim() === '') {
-    throw new RunnerProbeError(
-      existing.container,
-      new Error('DDEV describe did not report project status', { cause: describe }),
-    );
-  }
-  // Stopped projects also describe cleanly and report primary_url. Only the
-  // project's own structured status proves it is serving.
-  return decideDdevRecovery({
-    describeOk: true,
-    serving: status === DDEV_STATUS_RUNNING,
-    dockerdUp,
-  });
+  const describeOk = describe.exitCode === 0;
+  const serving = describeOk && parseDdevProjectStatus(describe.output) === DDEV_STATUS_RUNNING;
+  const dockerdUp = serving ? true : await runnerDockerdUp(existing.container);
+  return decideDdevRecovery({ describeOk, serving, dockerdUp });
 }
 
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
@@ -2342,11 +2333,15 @@ async function ensureDdevStartedInner(
         }
         warm = retry;
       }
-      // A failed start (including a lost exec or lock deadline) says nothing
-      // about the nested store. Keep its live DB and let Retry probe afresh.
-      throw new RunnerProbeError(
-        existing.container,
-        new Error('DDEV warm start failed; existing runner kept', { cause: warm }),
+      // A failed start (including a lost exec or lock deadline) says nothing about the
+      // nested store, so the runner and its live DB are kept. The message carries the
+      // DDEV output, as the cold boot's does: the fix loop classifies on it.
+      throw new Error(
+        await ddevFailureMessage(
+          existing,
+          `ddev start failed (runner ${existing.container} and its database kept; removing that container rebuilds it from the last database snapshot)`,
+          warm.output,
+        ),
       );
     }
     case 'cold-boot':

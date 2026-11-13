@@ -103,40 +103,37 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
     ['daemon/exec non-zero', { code: 1 }],
   ] as const;
 
-  describe.each<Probe>(['presence', 'workspace', 'dockerd', 'describe', 'warm start'])(
-    '%s',
-    (probe) => {
-      it.each(failures)('holds on %s and permits a later ensure', async (_kind, fields) => {
-        failAt = probe;
-        failure = Object.assign(new Error('arbitrary failure wording'), fields);
-        if (probe === 'dockerd' || probe === 'warm start') status = 'stopped';
+  describe.each<Probe>(['presence', 'workspace', 'dockerd'])('%s', (probe) => {
+    it.each(failures)('holds on %s and permits a later ensure', async (_kind, fields) => {
+      failAt = probe;
+      failure = Object.assign(new Error('arbitrary failure wording'), fields);
+      if (probe === 'dockerd') status = 'stopped';
 
-        // Concurrent callers share the failure, then release the boot entry for Retry.
-        const results = await Promise.allSettled([
-          ensureDdevStarted(task, subpath),
-          ensureDdevStarted(task, subpath),
-        ]);
-        expect(mutations()).toEqual([]);
-        for (const result of results) {
-          expect(result.status).toBe('rejected');
-          if (result.status === 'rejected') {
-            expect(result.reason).toBeInstanceOf(RunnerProbeError);
-            expect(result.reason.retryable).toBe(true);
-          }
+      // Concurrent callers share the failure, then release the boot entry for Retry.
+      const results = await Promise.allSettled([
+        ensureDdevStarted(task, subpath),
+        ensureDdevStarted(task, subpath),
+      ]);
+      expect(mutations()).toEqual([]);
+      for (const result of results) {
+        expect(result.status).toBe('rejected');
+        if (result.status === 'rejected') {
+          expect(result.reason).toBeInstanceOf(RunnerProbeError);
+          expect(result.reason.retryable).toBe(true);
         }
-        expect(h.acquire).not.toHaveBeenCalled();
-        expect(taskRunnerBusy(task)).toBe(false);
+      }
+      expect(h.acquire).not.toHaveBeenCalled();
+      expect(taskRunnerBusy(task)).toBe(false);
 
-        failAt = undefined;
-        status = 'running';
-        await expect(ensureDdevStarted(task, subpath)).resolves.toEqual(handle);
-        expect(mutations()).toEqual([]);
-        expect(taskRunnerBusy(task)).toBe(false);
-      });
-    },
-  );
+      failAt = undefined;
+      status = 'running';
+      await expect(ensureDdevStarted(task, subpath)).resolves.toEqual(handle);
+      expect(mutations()).toEqual([]);
+      expect(taskRunnerBusy(task)).toBe(false);
+    });
+  });
 
-  it.each<Probe>(['presence', 'dockerd', 'describe'])(
+  it.each<Probe>(['presence', 'dockerd'])(
     'holds on an invalid successful %s reply',
     async (probe) => {
       failAt = probe;
@@ -146,6 +143,47 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
       expect(mutations()).toEqual([]);
     },
   );
+
+  it.each(failures)(
+    'keeps the runner and reports the DDEV output when a warm start fails on %s',
+    async (_kind, fields) => {
+      status = 'stopped';
+      failAt = 'warm start';
+      failure = Object.assign(new Error('arbitrary failure wording'), {
+        ...fields,
+        stdout: 'Failed to start fixture: web container exited\n',
+      });
+      const err = await ensureDdevStarted(task, subpath).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      // Not a probe error: the fix loop classifies the step's message, which must carry
+      // what DDEV said (cold boot's message has the same shape).
+      expect(err).not.toBeInstanceOf(RunnerProbeError);
+      expect((err as Error).message).toMatch(/^ddev start failed \(runner .* kept;/);
+      expect((err as Error).message).toContain('web container exited');
+      expect(mutations()).toEqual([]);
+      expect(taskRunnerBusy(task)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['fails', () => Object.assign(new Error('describe failed'), { code: 1 })],
+    ['answers no status', () => 'not json'],
+  ])('warm-starts in place when describe %s and dockerd is up', async (_kind, make) => {
+    failAt = 'describe';
+    failure = make();
+    await expect(ensureDdevStarted(task, subpath)).resolves.toEqual(handle);
+    expect(h.exec.mock.calls.some(([, args]) => args.at(-1)?.endsWith('ddev start'))).toBe(true);
+    expect(mutations()).toEqual([]);
+  });
+
+  it('reuses a serving project without asking dockerd', async () => {
+    failAt = 'dockerd';
+    failure = Object.assign(new Error('docker info timed out'), { killed: true });
+    await expect(ensureDdevStarted(task, subpath)).resolves.toEqual(handle);
+    expect(mutations()).toEqual([]);
+  });
 
   it('keeps the runner when both describe and the dockerd exec fail', async () => {
     h.exec.mockImplementation(async (_bin: string, args: string[]) => {
