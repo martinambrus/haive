@@ -109,6 +109,7 @@ export function AdminMailCard() {
               aria-label="Enable mail"
               className="h-4 w-4"
               checked={settings.enabled}
+              disabled={pending}
               onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
             />
             Enable mail
@@ -122,6 +123,7 @@ export function AdminMailCard() {
                 value={settings[key]}
                 type={key === 'from' ? 'email' : 'text'}
                 required={settings.enabled && (key === 'smtpHost' || key === 'from')}
+                disabled={pending}
                 onChange={(event) => setSettings({ ...settings, [key]: event.target.value })}
               />
             </div>
@@ -136,6 +138,7 @@ export function AdminMailCard() {
               max={65535}
               required
               value={port}
+              disabled={pending}
               onChange={(event) => setPort(event.target.value)}
             />
           </div>
@@ -145,6 +148,7 @@ export function AdminMailCard() {
               aria-label="TLS on connect"
               className="h-4 w-4"
               checked={settings.secure}
+              disabled={pending}
               onChange={(event) => setSettings({ ...settings, secure: event.target.checked })}
             />
             TLS on connect (port 465)
@@ -157,6 +161,7 @@ export function AdminMailCard() {
               type="password"
               autoComplete="new-password"
               value={password}
+              disabled={pending}
               onChange={(event) => setPassword(event.target.value)}
             />
             <MarkdownView

@@ -124,4 +124,19 @@ describe('admin Mail card', () => {
     expect(findAll(view.tree(), (node) => node.props.role === 'dialog')).toHaveLength(0);
     expect(api.post).not.toHaveBeenCalled();
   });
+  it('locks every field while a save is pending, so later edits are not overwritten', async () => {
+    let finish: (value: typeof saved) => void = () => {};
+    vi.mocked(api.put).mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    await mount();
+    submit();
+    await view.flush();
+    const inputs = findAll(view.tree(), (node) => node.tag === 'input');
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(inputs.every((node) => node.props.disabled === true)).toBe(true);
+    finish(saved);
+    await view.flush();
+    expect(
+      findAll(view.tree(), (node) => node.tag === 'input').every((node) => !node.props.disabled),
+    ).toBe(true);
+  });
 });
