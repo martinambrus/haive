@@ -122,17 +122,17 @@ it('an absent runner is ensured only', async () => {
   expect(h.ensure).toHaveBeenCalledTimes(1);
   expect(h.event).not.toHaveBeenCalled();
 });
-it('removes an owned immutable runner with its volume, records the user, then ensures', async () => {
+it('records the requesting user before removing an owned runner and ensuring recovery', async () => {
   await rebuild();
   expect(mutations()[0]?.[1]).toEqual(['rm', '-f', '-v', 'immutable-id']);
   expect(h.event).toHaveBeenCalledWith(
     expect.objectContaining({
       taskId: task,
       eventType: 'ddev_rebuild',
-      payload: expect.objectContaining({ userId: 'owner' }),
+      payload: expect.objectContaining({ userId: 'owner', action: 'requested' }),
     }),
   );
-  expect(h.exec.mock.invocationCallOrder.at(-1)).toBeLessThan(h.event.mock.invocationCallOrder[0]!);
+  expect(h.event.mock.invocationCallOrder[0]).toBeLessThan(h.exec.mock.invocationCallOrder.at(-1)!);
   expect(h.event.mock.invocationCallOrder[0]).toBeLessThan(h.ensure.mock.invocationCallOrder[0]!);
 });
 it('does not report success or ensure when the removal fails', async () => {
@@ -150,7 +150,11 @@ it('does not report success or ensure when the removal fails', async () => {
     throw new Error('remove failed');
   });
   await expect(rebuild()).rejects.toThrow('remove failed');
-  expect(h.event).not.toHaveBeenCalled();
+  expect(h.event).toHaveBeenCalledWith(
+    expect.objectContaining({
+      payload: expect.objectContaining({ userId: 'owner', action: 'requested' }),
+    }),
+  );
   expect(h.ensure).not.toHaveBeenCalled();
 });
 it('serializes concurrent rebuilds and holds a new ensure until removal settles', async () => {
@@ -184,8 +188,61 @@ it('serializes concurrent rebuilds and holds a new ensure until removal settles'
 it('fails visibly when the required user event cannot be recorded', async () => {
   h.event.mockRejectedValueOnce(new Error('event store unavailable'));
   await expect(rebuild()).rejects.toThrow('event store unavailable');
-  expect(mutations()).toHaveLength(1);
+  expect(mutations()).toHaveLength(0);
   expect(h.ensure).not.toHaveBeenCalled();
+});
+it('awaits the request audit write before attempting removal', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.event.mockImplementationOnce(() => {
+    entered();
+    return new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  });
+  const rebuilding = rebuild();
+  await started;
+  const removedBeforeAudit = mutations().length;
+  release();
+  await rebuilding;
+  expect(removedBeforeAudit).toBe(0);
+  expect(mutations()).toHaveLength(1);
+});
+it('keeps the runner if an exec arrives during the request audit write', async () => {
+  let release!: () => void;
+  let arriving: Promise<void> | undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  h.event.mockImplementationOnce(async () => {
+    arriving = whileRunnerBusy(ddevRunnerName(task), () => held);
+  });
+  const outcome = rebuild().catch((error: unknown) => error);
+  const result = await outcome;
+  release();
+  await arriving;
+  expect(result).toBeInstanceOf(Error);
+  expect(result).toMatchObject({ message: expect.stringMatching(/busy/) });
+  expect(mutations()).toEqual([]);
+  expect(h.ensure).not.toHaveBeenCalled();
+});
+it('keeps the request event when enqueue fails and redrives an absent runner', async () => {
+  h.ensure.mockRejectedValueOnce(new Error('enqueue failed'));
+  await expect(rebuild()).rejects.toThrow('enqueue failed');
+  expect(mutations()).toHaveLength(1);
+  expect(h.event).toHaveBeenCalledWith(
+    expect.objectContaining({
+      payload: expect.objectContaining({ userId: 'owner', action: 'requested' }),
+    }),
+  );
+  presence = '';
+  await rebuild();
+  expect(mutations()).toHaveLength(1);
+  expect(h.event).toHaveBeenCalledOnce();
+  expect(h.ensure).toHaveBeenCalledTimes(2);
 });
 it('keeps the runner if an exec arrives while ownership is inspected', async () => {
   const base = h.exec.getMockImplementation()!;

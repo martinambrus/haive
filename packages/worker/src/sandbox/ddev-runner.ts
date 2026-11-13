@@ -2230,13 +2230,16 @@ export async function rebuildDdevRunner(
             retryable: true,
           });
         await requireIdle();
-        await exec('docker', ['rm', '-f', '-v', info.Id], { timeout: 90_000 });
-        // Required evidence, never best-effort: a failed event write fails the job.
+        // Persist the request before removal so a crash or failed enqueue cannot
+        // erase who authorized it. A failed audit write must keep the runner.
         await db.insert(schema.taskEvents).values({
           taskId,
           eventType: 'ddev_rebuild',
-          payload: { userId, containerId: info.Id },
+          payload: { userId, containerId: info.Id, action: 'requested' },
         });
+        // The audit write yielded; activity arriving behind the fence still wins.
+        await requireIdle();
+        await exec('docker', ['rm', '-f', '-v', info.Id], { timeout: 90_000 });
         await markBrowserDesktopDown(handle.container);
       }
       await enqueueEnsure();
