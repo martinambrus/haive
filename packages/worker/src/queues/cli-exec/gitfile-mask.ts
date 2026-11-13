@@ -1,5 +1,5 @@
 import { posix } from 'node:path';
-import { lstatNoFollow, RESOURCE_LIMITS, type EntryInfo } from '@haive/shared/fs-safe';
+import { lstatNoFollow, type EntryInfo } from '@haive/shared/fs-safe';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../../repo/worktree-git-boundary.js';
@@ -48,14 +48,15 @@ export interface GitDataBoundary {
 
 const NOTHING: GitDataBoundary = { mounts: [], masks: [] };
 
-/** The no-follow lstat of `name` below a repository mount, walked from the repository root. */
+/** The no-follow lstat of `name` below a repository mount, walked from the repository root.
+ * Only ENOENT/ENOTDIR mean absent; other lookup failures and containment refusals must stop the run. */
 export async function lookupInRepoMount(
   subpath: string,
   name: string,
 ): Promise<{ anchor: string; rel: string; entry: EntryInfo | null }> {
   const { anchor, rel: mountRel } = splitRepoSubpath(WORKER_REPO_STORAGE_ROOT, subpath);
   const rel = [mountRel, name].filter((part) => part !== '').join('/');
-  return { anchor, rel, entry: await lstatNoFollow(anchor, rel, { rethrow: RESOURCE_LIMITS }) };
+  return { anchor, rel, entry: await lstatNoFollow(anchor, rel, { strict: true }) };
 }
 
 /**

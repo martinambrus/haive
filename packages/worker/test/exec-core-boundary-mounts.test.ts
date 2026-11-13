@@ -175,7 +175,7 @@ const KINDS: CliExecInvocationKind[] = [
 ];
 
 describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox gets', (kind) => {
-  it.each(['EMFILE', 'ENFILE'])(
+  it.each(['EMFILE', 'ENFILE', 'EACCES', 'EIO'])(
     'starts no container when the .git lookup fails with %s',
     async (code) => {
       const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
@@ -186,6 +186,21 @@ describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox g
       expect(stubs.runInSandbox).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['ENOENT', 'ENOTDIR'])('runs without a .git boundary on %s', async (code) => {
+    const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
+    stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
+    stubs.error = Object.assign(new Error('injected absent lookup'), { code });
+    await executeByKind(db, payloadFor(kind), {} as never, {});
+    expect(stubs.runInSandbox).toHaveBeenCalled();
+    for (const [spec, options] of stubs.runInSandbox.mock.calls) {
+      expect(options.extraMounts).not.toContainEqual(ro(SUBPATH, '.git'));
+      expect(spec.extraFiles ?? []).not.toContainEqual({
+        containerPath: `${WORKDIR}/.git`,
+        content: '',
+      });
+    }
+  });
 
   it('mounts .git, .haive-data and .haive/worktrees under the repository root, ahead of the repository mount', async () => {
     const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };

@@ -3,19 +3,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ error: null as Error | null }));
+const h = vi.hoisted(() => ({ error: null as Error | null, suffix: '/.git' }));
 vi.mock('node:fs/promises', async (original) => {
   const real = await original<typeof import('node:fs/promises')>();
   return {
     ...real,
     lstat: (...args: Parameters<typeof real.lstat>) => {
-      if (h.error && String(args[0]).endsWith('/.git')) throw h.error;
+      if (h.error && String(args[0]).endsWith(h.suffix)) throw h.error;
       return real.lstat(...args);
     },
   };
 });
 afterEach(() => {
   h.error = null;
+  h.suffix = '/.git';
 });
 
 // WORKER_REPO_STORAGE_ROOT is read from the environment once, at import time, so the
@@ -23,7 +24,10 @@ afterEach(() => {
 const storageRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-git-boundary-'));
 process.env.REPO_STORAGE_ROOT = storageRoot;
 
-const { repoGitDataBoundary } = await import('../src/queues/cli-exec/gitfile-mask.js');
+const { lookupInRepoMount, repoGitDataBoundary } =
+  await import('../src/queues/cli-exec/gitfile-mask.js');
+const { haiveDataBoundary } = await import('../src/queues/cli-exec/haive-data-boundary.js');
+const { worktreesBoundary } = await import('../src/queues/cli-exec/worktrees-boundary.js');
 const { chownCmd } = await import('../src/terminal/terminal-container.js');
 
 const USER_ID = '11111111-1111-1111-1111-111111111111';
@@ -50,7 +54,7 @@ const fresh = async (): Promise<void> => {
 };
 
 describe('repoGitDataBoundary', () => {
-  it.each(['EMFILE', 'ENFILE'])(
+  it.each(['EMFILE', 'ENFILE', 'EACCES', 'EIO', 'ENOMEM', 'ESTALE', 'ELOOP', 'EPERM'])(
     'refuses an unread .git on %s instead of omitting its mask',
     async (code) => {
       await fresh();
@@ -62,6 +66,50 @@ describe('repoGitDataBoundary', () => {
       ).rejects.toBe(err);
     },
   );
+
+  it.each(['ENOENT', 'ENOTDIR'])(
+    'returns no boundary only for an absent .git (%s)',
+    async (code) => {
+      await fresh();
+      h.error = Object.assign(new Error('not matched by message'), { code });
+      expect(await repoGitDataBoundary(rootMount, { hasWorktree: false, hasRepo: true })).toEqual({
+        mounts: [],
+        masks: [],
+      });
+    },
+  );
+
+  it('refuses an unknown failure even when its message says ENOENT', async () => {
+    await fresh();
+    h.error = new Error('ENOENT: no such file or directory');
+    await expect(lookupInRepoMount(SUBPATH, '.git')).rejects.toBe(h.error);
+  });
+
+  it('refuses a symlinked parent component instead of treating .git as absent', async () => {
+    await fresh();
+    await mkdir(path.join(repoDir, 'elsewhere/worktrees/feature/.git'), { recursive: true });
+    await symlink('elsewhere', path.join(repoDir, '.haive'));
+    await expect(
+      repoGitDataBoundary(worktreeMount, { hasWorktree: false, hasRepo: true }),
+    ).rejects.toMatchObject({ code: 'EPATHCONTAINMENT', reason: 'link' });
+  });
+
+  describe.each([
+    ['.haive-data', () => haiveDataBoundary(rootMount, { hasRepo: true })],
+    ['.haive-data/knowledge_base', () => haiveDataBoundary(rootMount, { hasRepo: true })],
+    ['.haive-data/learnings', () => haiveDataBoundary(rootMount, { hasRepo: true })],
+    ['.haive', () => worktreesBoundary(rootMount, { hasWorktree: false, hasRepo: true })],
+    ['.haive/worktrees', () => worktreesBoundary(rootMount, { hasWorktree: false, hasRepo: true })],
+  ] as const)('sibling boundary lookup: %s', (name, boundary) => {
+    it.each(['EACCES', 'EIO'])('refuses %s rather than guessing absence', async (code) => {
+      await fresh();
+      await mkdir(path.join(repoDir, '.haive-data/learnings'), { recursive: true });
+      await mkdir(path.join(repoDir, '.haive/worktrees'), { recursive: true });
+      h.suffix = `/${name.split('/').at(-1)}`;
+      h.error = Object.assign(new Error('injected boundary lookup failure'), { code });
+      await expect(boundary()).rejects.toBe(h.error);
+    });
+  });
 
   it('mounts a repository root’s .git directory read-only, under the repo mount', async () => {
     await fresh();
