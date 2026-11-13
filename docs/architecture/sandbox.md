@@ -421,9 +421,17 @@ provider ownership before eligibility. A disabled provider is refused with
 the current provider before image resolution and before reusing or creating a container, so
 a direct worker request cannot bypass the gate.
 
-Disabling a provider does not revoke an already open shell. There is no provider-change
-notification to the terminal registry; revocation would require a separate lifecycle change.
-A reconnect reads eligibility again.
+After a provider disable PATCH or DELETE commits, the api publishes an owner/provider-scoped
+`close-provider` request on the existing `terminal:request` channel. The worker removes every
+matching task and repository attachment from input routing and closes its PTY. It publishes a
+`provider_disabled` exit reason through the existing output channel and retained exit key; the api
+closes the WebSocket with 4425 and the same disabled-provider sentence, even when it subscribes
+after the close. Other users and providers remain attached. Re-enabling publishes no open request;
+a later connection reads eligibility again. Login containers use a separate lifecycle.
+
+This detaches the clients, preserving the normal two-minute tmux/container grace. A publication
+failure is logged after commit and does not fail the PATCH or DELETE; existing sessions can then
+remain open, while the connect gate still refuses new attachments to a disabled or deleted row.
 
 ## The task's current worktree
 
