@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, expect, it } from 'vitest';
+import { beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { computeEmailBlindIndex, decryptEmail, encryptEmail } from '@haive/shared';
@@ -10,7 +10,7 @@ const oldKey = '22'.repeat(32);
 const admin = '00000000-0000-4000-8000-000000000001';
 const orphan = '00000000-0000-4000-8000-000000000002';
 const readable = '00000000-0000-4000-8000-000000000003';
-const options = { email: 'admin@example.com', key, pepper: 'pepper' };
+const options = { email: 'admin@example.com', key, pepper: 'pepper', force: true };
 let fake: ReturnType<typeof createFakeDb>;
 let db: Database;
 const hashPassword = (value: string) => bcrypt.hash(value, 4);
@@ -158,4 +158,31 @@ it('reactivates the explicitly recovered administrator so the temporary password
       }),
     ]),
   );
+});
+
+it('refuses orphan invalidation without discard evidence and writes nothing', async () => {
+  const before = structuredClone(fake.rows(schema.users));
+  const report = vi.fn();
+  await expect(
+    recoverAdmin(db, { ...options, force: false, reportInvalidationCount: report }, hashPassword),
+  ).rejects.toThrow('config.discard_unreadable_secrets');
+  expect(report).toHaveBeenCalledWith(1);
+  expect(fake.rows(schema.users)).toEqual(before);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+it('accepts discard evidence and reports the orphan count before any writes', async () => {
+  fake.insert(schema.auditEvents, { action: 'config.discard_unreadable_secrets' });
+  const before = structuredClone(fake.rows(schema.users));
+  const report = vi.fn(() => expect(fake.rows(schema.users)).toEqual(before));
+  await recoverAdmin(
+    db,
+    { ...options, force: false, reportInvalidationCount: report },
+    hashPassword,
+  );
+  expect(report).toHaveBeenCalledWith(1);
+  expect(fake.rows(schema.users)[1]!.tokenVersion).toBe(5);
+});
+it('allows an explicit force without discard evidence', async () => {
+  await recoverAdmin(db, { ...options, force: true }, hashPassword);
+  expect(fake.rows(schema.users)[1]!.tokenVersion).toBe(5);
 });

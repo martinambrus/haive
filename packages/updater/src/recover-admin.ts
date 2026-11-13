@@ -18,6 +18,8 @@ export interface RecoveryOptions {
   userId?: string;
   key: string;
   pepper: string;
+  force?: boolean;
+  reportInvalidationCount?: (count: number) => void;
 }
 
 /** Host-authorized recovery. All user writes and their audit evidence commit together.
@@ -70,8 +72,9 @@ export async function recoverAdmin(
       .select()
       .from(schema.auditEvents)
       .where(eq(schema.auditEvents.action, CLEAR_ACTION));
-    for (const user of users) {
-      if (user.id === selected.id || emails.get(user.id) !== null) continue;
+    const orphans = users.filter((user) => user.id !== selected.id && emails.get(user.id) === null);
+    const needsClearing = new Map<string, string>();
+    for (const user of orphans) {
       const emailDigest = createHash('sha256').update(user.emailEncrypted).digest('hex');
       const alreadyCleared = cleared.some((event) => {
         const metadata = event.metadata as Record<string, unknown> | null;
@@ -81,7 +84,24 @@ export async function recoverAdmin(
           metadata.tokenVersion === user.tokenVersion
         );
       });
-      if (!alreadyCleared) {
+      if (!alreadyCleared) needsClearing.set(user.id, emailDigest);
+    }
+    options.reportInvalidationCount?.(needsClearing.size);
+    if (needsClearing.size > 0 && !options.force) {
+      const discard = await tx
+        .select({ id: schema.auditEvents.id })
+        .from(schema.auditEvents)
+        .where(eq(schema.auditEvents.action, 'config.discard_unreadable_secrets'))
+        .limit(1);
+      if (discard.length === 0) {
+        throw new Error(
+          'Refusing to invalidate orphan passwords without a config.discard_unreadable_secrets audit row; verify this install or pass --force',
+        );
+      }
+    }
+    for (const user of orphans) {
+      const emailDigest = needsClearing.get(user.id);
+      if (emailDigest !== undefined) {
         await tx
           .update(schema.users)
           .set({

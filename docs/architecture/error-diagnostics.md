@@ -211,7 +211,11 @@ another readable account. It reactivates the selected administrator if needed. O
 email and blind index, sets a temporary password, requires a password change and increments the
 session token version. Every other account whose email is unreadable gets a bcrypt hash of 32
 random bytes, the same password-change flag and its own token-version increment. Existing passwords
-stop working; no repositories or tasks are deleted. A collision held only by an unreadable account
+stop working; no repositories or tasks are deleted. Before any user write the command prints how
+many orphan passwords will be invalidated. Invalidation requires a
+`config.discard_unreadable_secrets` audit row in this database; without one it refuses and writes
+nothing unless the operator supplies `--force` after verifying the database, Redis and key belong
+to this install. Already-cleared accounts do not count again. A collision held only by an unreadable account
 is released in that transaction. The only secret printed is the temporary admin password, once,
 after commit. Sign in and replace it on the Account page. Token-version changes fence subsequent
 requests and refreshes; as with other out-of-band database edits, already-open sockets close when

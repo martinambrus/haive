@@ -15,7 +15,7 @@ const key = '11'.repeat(32);
 const oldKey = '22'.repeat(32);
 const admin = '00000000-0000-4000-8000-000000000001';
 const orphan = '00000000-0000-4000-8000-000000000002';
-const options = { email: 'admin@example.com', key, pepper: 'pepper' };
+const options = { email: 'admin@example.com', key, pepper: 'pepper', force: true };
 const cheapHash = (value: string) => bcrypt.hash(value, 4);
 
 describe.skipIf(!url)('admin recovery on PostgreSQL', () => {
@@ -69,9 +69,10 @@ describe.skipIf(!url)('admin recovery on PostgreSQL', () => {
       stdout += String(chunk);
       return true;
     });
-    expect(await main(['--email', options.email])).toBe(0);
+    expect(await main(['--email', options.email, '--force'])).toBe(0);
     const password = stdout.match(/Temporary password: (\S+)/)?.[1];
     expect(password).toBeDefined();
+    expect(stdout).toContain('Accounts whose passwords will be invalidated: 1\n');
     expect(stdout.match(/Temporary password:/g)).toHaveLength(1);
     const owner = await db.query.users.findFirst({
       where: eq(

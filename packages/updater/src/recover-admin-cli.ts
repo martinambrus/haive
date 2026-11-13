@@ -12,13 +12,17 @@ import { recoverAdmin } from './recover-admin.js';
 export async function main(args = process.argv.slice(2)): Promise<number> {
   const { values } = parseArgs({
     args,
-    options: { email: { type: 'string' }, 'user-id': { type: 'string' } },
+    options: {
+      email: { type: 'string' },
+      'user-id': { type: 'string' },
+      force: { type: 'boolean' },
+    },
   });
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!databaseUrl || !redisUrl || !values.email) {
     process.stderr.write(
-      'Usage: recover-admin --email <addr> [--user-id <id>]; DATABASE_URL and REDIS_URL are required\n',
+      'Usage: recover-admin --email <addr> [--user-id <id>] [--force]; DATABASE_URL and REDIS_URL are required\n',
     );
     return 2;
   }
@@ -38,6 +42,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const result = await recoverAdmin(db, {
       email: values.email,
       userId: values['user-id'],
+      force: values.force,
+      reportInvalidationCount: (count) =>
+        process.stdout.write(`Accounts whose passwords will be invalidated: ${count}\n`),
       key,
       pepper,
     });
