@@ -4,7 +4,13 @@
 
 /** Pages reachable without a session. `/setup` is here because an install with no users has nobody
  *  who could authenticate for it. */
-export const PUBLIC_PATHS = new Set(['/login', '/register', '/setup']);
+export const PUBLIC_PATHS = new Set([
+  '/login',
+  '/register',
+  '/setup',
+  '/forgot-password',
+  '/reset-password',
+]);
 
 /** Marker browser recovery adds after the current session is refused. */
 export const SESSION_EXPIRED_PARAM = 'session';
@@ -24,6 +30,9 @@ export type RouteDecision = { action: 'continue' } | { action: 'redirect'; to: s
 
 export function decideRouteAccess(req: RouteRequest): RouteDecision {
   if (PUBLIC_PATHS.has(req.path)) {
+    // An email link can be opened while another account is signed in on this browser.
+    if (req.path === '/forgot-password' || req.path === '/reset-password')
+      return { action: 'continue' };
     // Recovery must be able to show login despite dead cookies. Their presence alone would
     // bounce back to the protected page, which would ask for recovery again.
     if (req.sessionRejected) return { action: 'continue' };

@@ -65,6 +65,23 @@ export const refreshTokens = pgTable(
   (table) => [index('refresh_tokens_user_id_idx').on(table.userId)],
 );
 
+/** Only the hash is persisted; a claim address is encrypted under the current field key. */
+export const passwordResets = pgTable(
+  'password_resets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    claimEmailEncrypted: text('claim_email_encrypted'),
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at').notNull(),
+    consumedAt: timestamp('consumed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => [index('password_resets_user_id_idx').on(table.userId)],
+);
+
 // System-wide secrets (single-key encryption with master KEK).
 export const systemSecrets = pgTable(
   'system_secrets',

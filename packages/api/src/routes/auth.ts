@@ -36,10 +36,12 @@ import { decideRegistration } from '../lib/registration.js';
 import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { passwordRecoveryRoutes } from './password-recovery.js';
 
 const log = logger.child({ module: 'auth' });
 
 export const authRoutes = new Hono<AppEnv>();
+authRoutes.route('/', passwordRecoveryRoutes);
 
 /** Set on an install that wants the first registration gated. Read once: it is process config, and
  *  a value that changed under a running api would make the gate non-deterministic. */
