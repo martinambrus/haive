@@ -15,7 +15,7 @@ vi.mock('next/link', () => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {} }) }));
 vi.mock('@/components/markdown/markdown-view', () => ({
-  MarkdownView: ({ body }: { body: string }) => body,
+  MarkdownView: ({ body }: { body: string }) => <div data-markdown-view>{body}</div>,
 }));
 const h = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), audit: vi.fn() }));
 vi.mock('@/lib/api-client', async (original) => ({
@@ -151,7 +151,10 @@ it('asks an administrator to relink an unreadable account email without a link',
     (node) => node.tag === 'a' && String(node.props.href).startsWith('/admin/users'),
   );
   expect(links).toHaveLength(0);
-  expect(textOf(view.tree())).toContain('Ask an administrator to relink this email.');
+  const rendered = findAll(view.tree(), (node) => 'data-markdown-view' in node.props);
+  expect(rendered.map((node) => textOf(node))).toContain(
+    'Ask an administrator to relink this email.',
+  );
 });
 it('links the selected unreadable actor even when there are no audit events', async () => {
   h.audit.mockResolvedValue({ events: [], total: 0, facets: { actions: [], targetTypes: [] } });
