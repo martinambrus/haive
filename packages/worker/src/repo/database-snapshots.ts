@@ -71,11 +71,17 @@ export async function loadDatabaseSnapshotState(ctx: StepContext) {
   if (!task) throw new StepSupersededError(ctx.taskStepId);
   let state = await initializeTaskDatabaseState(ctx.db, task);
   if (!state) return null;
-  // An upstream Retry advances the task epoch. It needs a fresh export after its new work;
-  // duplicate delivery in the same epoch must keep the decision that already committed.
+  const step = await ctx.db.query.taskSteps.findFirst({
+    where: eq(schema.taskSteps.id, ctx.taskStepId),
+  });
+  if (!step) throw new StepSupersededError(ctx.taskStepId);
+  // Epochs fence deliveries, including recovery; they do not name new work.
+  // Only an explicit reset increments the logical generation. A new round has
+  // a different step id. Neither may reuse the earlier save decision.
   if (
     (state.outcome !== 'pending' || state.candidateSnapshotId || state.exportError) &&
-    state.decisionEpoch !== task.orchestrationEpoch
+    ((state.decisionGeneration ?? 0) !== (step.rerunGeneration ?? 0) ||
+      (state.candidateStepId != null && state.candidateStepId !== ctx.taskStepId))
   ) {
     state = await withSnapshotStep(ctx, task.orchestrationEpoch, async (tx) => {
       const [updated] = await tx
@@ -86,6 +92,7 @@ export async function loadDatabaseSnapshotState(ctx: StepContext) {
           candidateStepId: null,
           exportError: null,
           decisionEpoch: null,
+          decisionGeneration: step.rerunGeneration ?? 0,
         })
         .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId))
         .returning();
@@ -169,6 +176,12 @@ export async function withSnapshotStep<T>(
     .catch(snapshotLockFailure);
 }
 
+async function saveGeneration(tx: DbTx, taskStepId: string) {
+  const step = await tx.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, taskStepId) });
+  if (!step) throw new StepSupersededError(taskStepId);
+  return step.rerunGeneration ?? 0;
+}
+
 export async function reserveDatabaseSnapshot(
   ctx: StepContext,
   epoch: number,
@@ -199,6 +212,7 @@ export async function reserveDatabaseSnapshot(
         candidateStepId: ctx.taskStepId,
         exportError: null,
         decisionEpoch: epoch,
+        decisionGeneration: await saveGeneration(tx, ctx.taskStepId),
       })
       .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
     return snapshot!;
@@ -238,6 +252,7 @@ export async function promoteDatabaseSnapshot(
         outcome: 'saved',
         exportError: null,
         decisionEpoch: epoch,
+        decisionGeneration: await saveGeneration(tx, ctx.taskStepId),
         baseRevision: head.revision + 1,
       })
       .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
@@ -254,7 +269,13 @@ export async function discardDatabaseSnapshot(ctx: StepContext, epoch: number) {
     if (state.outcome !== 'pending') return state.outcome;
     await tx
       .update(schema.taskDatabaseStates)
-      .set({ outcome: 'discarded', exportError: null, decisionEpoch: epoch })
+      .set({
+        outcome: 'discarded',
+        exportError: null,
+        decisionEpoch: epoch,
+        candidateStepId: ctx.taskStepId,
+        decisionGeneration: await saveGeneration(tx, ctx.taskStepId),
+      })
       .where(eq(schema.taskDatabaseStates.taskId, ctx.taskId));
     return 'discarded';
   });

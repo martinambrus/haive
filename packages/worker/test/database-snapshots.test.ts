@@ -555,9 +555,83 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
     ).toBeUndefined();
   });
 
-  it('drops a pending candidate from an earlier epoch before saving retried work', async () => {
+  it('preserves a published decision across recovery and asks again after an explicit reset', async () => {
+    const a = await task('recovered save');
+    const published = await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, a.taskId));
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('saved');
+    expect(
+      await saveDatabaseStep.apply(a, {
+        detected: null,
+        formValues: { action: 'save:0' },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).toEqual({ outcome: 'saved' });
+    expect((await head())!.snapshotId).toBe(published.id);
+    // A real upstream reset increments the save step's logical generation too.
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 1 })
+      .where(eq(schema.taskSteps.id, a.taskStepId));
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('pending');
+    await expect(
+      saveDatabaseStep.apply(a, {
+        detected: null,
+        formValues: { action: 'save:0' },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).rejects.toThrow('Choose whether to save');
+  });
+
+  it('offers a fresh decision on a save step in a new round', async () => {
+    const a = await task('next round');
+    await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: a.taskId,
+        stepId: DATABASE_SAVE_STEP_ID,
+        stepIndex: 13,
+        title: 'Save database',
+        status: 'running',
+        round: 1,
+      })
+      .returning();
+    expect(
+      (await loadDatabaseSnapshotState({ ...a, taskStepId: step!.id, round: 1 }))!.state.outcome,
+    ).toBe('pending');
+  });
+
+  it('reoffers an ambiguous legacy decision when installing logical generations', async () => {
+    const a = await task('legacy reset');
+    await candidate(a);
+    expect(await promoteDatabaseSnapshot(a, 0)).toBe('saved');
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, a.taskId));
+    const migration = await readFile(
+      new URL('../../database/migrations/0234_snapshot_decision_generation.sql', import.meta.url),
+      'utf8',
+    );
+    await db.$client.unsafe(migration);
+    expect((await loadDatabaseSnapshotState(a))!.state.outcome).toBe('pending');
+  });
+
+  it('drops a pending candidate after an upstream rerun before saving new work', async () => {
     const a = await task('retried');
     const old = await candidate(a);
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 1 })
+      .where(eq(schema.taskSteps.id, a.taskStepId));
     await db
       .update(schema.tasks)
       .set({ orchestrationEpoch: 1 })

@@ -235,6 +235,8 @@ export async function reofferParkedSteps(
     .update(schema.taskSteps)
     .set({
       status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
       ...parkFolded,
       waitingStartedAt: null,
       integrationWait: null,
@@ -268,6 +270,8 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
     .update(schema.taskSteps)
     .set({
       status: 'pending',
+      applyReceipt: null,
+      rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
       ...parkFolded,
       waitingStartedAt: null,
       integrationWait: null,

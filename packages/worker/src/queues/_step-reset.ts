@@ -137,7 +137,12 @@ export async function resetStepAndDownstream(
             formSchema: recovery && r.applyReceipt ? r.formSchema : null,
             formValues: recovery && r.applyReceipt ? r.formValues : null,
             output: null,
-            ...(recovery ? {} : { applyReceipt: null }),
+            ...(recovery
+              ? {}
+              : {
+                  applyReceipt: null,
+                  rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
+                }),
             // The recap describes the run being discarded; left behind it reads as the new
             // run's recap the moment the step goes green again.
             summary: null,

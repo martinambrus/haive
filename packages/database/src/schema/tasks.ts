@@ -662,6 +662,8 @@ export const taskSteps = pgTable(
       input: string;
       result?: Record<string, unknown>;
     }>(),
+    /** Logical rerun generation: recovery epoch bumps leave it unchanged. */
+    rerunGeneration: integer('rerun_generation').notNull().default(0),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),

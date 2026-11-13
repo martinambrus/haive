@@ -15,6 +15,7 @@ describe('resetStepAndDownstream on a step whose merge retries ran out', () => {
     async (recovery) => {
       const target = {
         id: 'ts-1',
+        rerunGeneration: 2,
         applyReceipt: { id: 'run', kind: 'image-build', input: 'input' },
         detectOutput: { dockerfile: 'FROM scratch' },
         formSchema: { title: 'Build image' },
@@ -68,6 +69,7 @@ describe('resetStepAndDownstream on a step whose merge retries ran out', () => {
       await resetStepAndDownstream(db, 'task-1', '12-worktree-cleanup', 0, undefined, recovery);
       const patch = stepWrites[0]!;
       expect('applyReceipt' in patch).toBe(!recovery);
+      expect('rerunGeneration' in patch).toBe(!recovery);
       expect(patch.detectOutput).toEqual(recovery ? target.detectOutput : null);
       expect(patch.formValues).toEqual(recovery ? target.formValues : null);
 

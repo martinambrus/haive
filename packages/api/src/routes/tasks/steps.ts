@@ -255,6 +255,7 @@ export async function resetRowsForRerun(
         formValues: null,
         output: null,
         applyReceipt: null,
+        rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
         // The recap describes the run being discarded. Left behind it reads as the new
         // run's recap the moment the step goes green again.
         summary: null,
@@ -2163,6 +2164,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           status: 'pending',
           detectOutput: null,
           applyReceipt: null,
+          rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
           formSchema: null,
           formValues: withoutGateAnswer,
           statusMessage: null,
