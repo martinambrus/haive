@@ -1,4 +1,4 @@
-# Rebuild DDEV  and key-loss account recovery
+# Rebuild DDEV and key-loss account recovery
 
 > Status 2026-11-13: A in review (#1132); B1 shipped (#1131); B2 in progress; B3, B4 planned.
 
