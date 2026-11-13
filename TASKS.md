@@ -928,16 +928,14 @@ PRE-EXISTING unless marked. Worker `sandbox/`.
 status: done 2026-11-13 #1132 (8bdb0f01a): confirmed Rebuild DDEV action (API, exclusive worker job, dialog); owed: a live rebuild of a real DDEV task in the browser (none on the dev install), see T647 item 3 · kind: decision · found: #1128 review 2026-11-13 · priority: P4
 Since #1128 a failed warm start keeps the runner; its error names the container and says that removing it rebuilds from the last database snapshot and loses every change since. The only rebuild paths are removing the container by hand or the failed-task reaper (180 min). OWNER DECISION 2026-11-13: add the in-app "Rebuild DDEV" action, confirming the loss.
 
-### T646 · FNF[two-install-isolation] · S4 two-install check: two boot sweeps cross installs (+4)
+### T651 · FNF[two-install-isolation-lows] · cross-install sweep leftovers after #1140 (+4)
 
-status: open · kind: fix · found: S4 two-install check 2026-11-13 · priority: P2
-S4 ran on one daemon with the dev install (`haive`) and a second checkout of main (`s4b`, own project, ports, key, database), test resources labelled `s4.test=1`, evidence .claude/tmp/codex-run/S4-S/. PASS: runtime runners (each install reaped only its own; an unlabelled runner whose task neither database knows was kept by both), login containers, CLI sandboxes (legacy unlabelled claimed only by the default install, as designed), auth volumes, composed images. Docker state after cleanup equals the pre-state. Defects:
+status: open · kind: fix · found: #1140 review 2026-11-13 · priority: P4
 
-1. MEASURED, PRE-EXISTING, medium. Terminal shells carry no `haive.install` label (worker `terminal/terminal-container.ts` ~:359-365), so the default install's boot sweep claims every install's shells as legacy-unlabelled and removes them: `haive` removed `s4b-shell-s4tst`, a live terminal of another install. Fix: stamp the install label at create (as #1124 did for runners); keep the legacy rule only for shells created before that.
-2. MEASURED, PRE-EXISTING, medium. `reapSupersededSandboxCores` (`sandbox/sandbox-image-reaper.ts` ~:98-136) lists `dangling=true` images daemon-wide with no install filter: `s4b` removed a dangling sandbox core it did not build. Fix: filter by this install's repo or label (dangling images keep labels), never by dangling alone.
-3. PRE-EXISTING, low, unverified whether any sweep touches it. The DDEV registry cache container is labelled only `haive.role=ddev-registry-cache` (`sandbox/ddev-runner.ts` ~:937), no `haive.install`; named per install. Stamp the label for consistency.
-4. LATENT, low. `runner.inspect` (`sandbox/docker-runner.ts` ~:388-402) formats `{{json .Config.Labels}}`, which errors on an image whose config has no Labels key; the error reads as "missing", so the orphaned-provider-image sweep skips it silently. Built provider images always carry labels (the S4 miss was a label-less test image), so only hand-made or imported images hit it. Use `{{json .Config}}` and read Labels in code, or treat a template error as unknown.
-   When fixed, record the evidence in the S4 section of docs/plans/solitary-partitioning-lampson.md (it still says pending; S4 ran on a second main checkout, not a published release, by owner decision).
+1. Low, PRE-EXISTING. `agent-preemption.ts` ~:255 and `runtime-runner-reaper.ts` ~:238 remove a container they matched by invocation or task id alone, with no `haive.install` filter. Another install matches only on a uuid collision or a database cloned between installs. Add the install label filter.
+2. Low, theoretical. `auth-volume-reaper.ts` ~:79 has the same id-only match on auth volumes.
+3. Low, transitional. Shells created before #1140 carry no label, and the default install's sweep still claims them from every install until they are gone. It ends once old shells age out; no action unless it is seen.
+4. By design, recorded. Legacy unlabelled sandbox cores are kept by every install, because their owner cannot be proven: about one ~1.56 GB core per install until removed by hand.
 
 ### T647 · FNF[runtime-wait-outcome] · runtime waits read a finished or missing job as pending or failed (+3)
 
@@ -1875,6 +1873,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T646 — terminal shells, built sandbox cores, the DDEV registry cache and the cli-sandbox base image carry `haive.install`; the core reaper filters on it and `runner.inspect` handles label-less images; live: worker reloaded, sweeps start clean — PR #1140 (97049b4c1), 2026-11-13. Lows T651.
 - T645 — sandboxes reach an `ollama-gate` holding the daemon's names on the models network; only inference and read-only endpoints pass (exact raw method+path), the daemon leaves that network and the gate dials it as `ollama-daemon`; live-checked: admin calls 403 and never reach the daemon, claude-code through the gate succeeds, worker/api embed and tags unchanged, model list unchanged — PR #1136 (f2b1bc8d0), 2026-11-13. Leftovers T648-T650.
 - T603 — plan-merge discard runs on its own transaction and commits its leftovers report before a second, re-checked teardown transaction; `integrateOrigin` keys its rethrow on an explicit phase; a busy revival warns; real-git and real-PostgreSQL controls — PR #1095 (d4df23f2c), 2026-11-12. Lows T623.
 - T606 — the fake database honours conflict `setWhere`/`<=` and throws on unsupported options; refresh run ordering needs evidence; hidden-tab poll pause; viewer-role read retry; shared trigger labels — PR #1096 (e914dee4a), 2026-11-12. Items 3, 5, 12 recorded in T623.
