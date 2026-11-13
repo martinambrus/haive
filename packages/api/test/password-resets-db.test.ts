@@ -102,6 +102,17 @@ describe.skipIf(!url)('password resets on Postgres', () => {
       await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, gate!.id));
     }
   });
+  it('refuses direct issuance for a deactivated user at the SQL user lock', async () => {
+    const row = await user();
+    await db.update(schema.users).set({ status: 'deactivated' }).where(eq(schema.users.id, row.id));
+    await expect(issuePasswordReset(db, row.id)).rejects.toMatchObject({ status: 400 });
+    expect(
+      await db.query.passwordResets.findMany({ where: eq(schema.passwordResets.userId, row.id) }),
+    ).toEqual([]);
+    expect(
+      await db.query.auditEvents.findMany({ where: eq(schema.auditEvents.targetId, row.id) }),
+    ).toEqual([]);
+  });
   it('atomically consumes once, revokes refresh tokens, bumps the version, and audits', async () => {
     const row = await user();
     await db.insert(schema.refreshTokens).values({
