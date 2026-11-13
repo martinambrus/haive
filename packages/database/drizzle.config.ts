@@ -1,4 +1,5 @@
 import type { Config } from 'drizzle-kit';
+import { devDatabaseUrl } from '../../scripts/lib/dev-database-url.mjs';
 
 export default {
   schema: './src/schema/index.ts',
@@ -9,7 +10,7 @@ export default {
   out: './.drizzle',
   dialect: 'postgresql',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? 'postgres://haive:haive_dev_password@localhost:5432/haive',
+    url: devDatabaseUrl(),
   },
   strict: true,
   verbose: true,

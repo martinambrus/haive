@@ -44,6 +44,10 @@ fi
 
 say "running the visual project in $PLAYWRIGHT_IMAGE"
 
+# Export by name so the credential is absent from docker's argv.
+PLAYWRIGHT_DATABASE_URL=$(node scripts/lib/dev-database-url.mjs)
+export PLAYWRIGHT_DATABASE_URL
+
 # --user keeps the baselines owned by whoever ran this rather than by root: they are committed
 # files, and a root-owned snapshot cannot be rewritten by the next run. HOME is redirected because
 # that user has none inside the image; the browsers live at /ms-playwright and need no home.
@@ -55,7 +59,7 @@ exec docker run --rm \
   -e HAIVE_VISUAL_RUNNER=1 \
   -e PLAYWRIGHT_BASE_URL="${PLAYWRIGHT_BASE_URL:-http://localhost:3000}" \
   -e PLAYWRIGHT_API_BASE="${PLAYWRIGHT_API_BASE:-http://localhost:3001}" \
-  -e PLAYWRIGHT_DATABASE_URL="${PLAYWRIGHT_DATABASE_URL:-postgres://haive:haive_dev_password@localhost:5432/haive}" \
+  -e PLAYWRIGHT_DATABASE_URL \
   -v "$PWD":/work \
   -w /work \
   "$PLAYWRIGHT_IMAGE" \

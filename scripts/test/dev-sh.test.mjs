@@ -86,6 +86,7 @@ const scriptIn = (t, dirName) => {
 
 // HAIVE_GPU=cpu skips dev.sh's GPU probes, so the host's card cannot change the path it takes.
 const run = (t, args, { buildFails = false, gpu = false, stub = {}, script = devScript } = {}) => {
+  if (script === devScript) script = scriptIn(t, 'checkout');
   const dir = mkdtempSync(join(tmpdir(), 'haive-dev-sh-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'docker.log');
@@ -108,7 +109,14 @@ const run = (t, args, { buildFails = false, gpu = false, stub = {}, script = dev
       ...stub,
     },
   });
-  const lines = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
+  // Credential ordering has its own behavioural controls in dev-credentials.test.mjs.
+  const lines = (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []).filter(
+    (line) =>
+      !line.includes('up -d --wait') &&
+      !line.includes('exec -T postgres') &&
+      !line.includes('ps --services'),
+  );
+
   return { out, calls: lines.map(kind), lines };
 };
 

@@ -1,12 +1,25 @@
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { expect, type APIRequest, type APIRequestContext } from '@playwright/test';
 import postgres from 'postgres';
 import { API_BASE, loginUser, type RegisteredUser } from './auth.js';
 
-const DEFAULT_URL = 'postgres://haive:haive_dev_password@localhost:5432/haive';
+let devUrl: string | undefined;
+
+// Playwright loads this file as CommonJS, where the ESM helper's import.meta cannot run, so its
+// CLI prints the URL (PLAYWRIGHT_DATABASE_URL first, then the install .env).
+function databaseUrl(): string {
+  devUrl ??= execFileSync(
+    process.execPath,
+    [join(__dirname, '../../../scripts/lib/dev-database-url.mjs')],
+    { encoding: 'utf8' },
+  );
+  return devUrl;
+}
 
 export function getSql(): postgres.Sql {
-  const url = process.env.PLAYWRIGHT_DATABASE_URL ?? DEFAULT_URL;
+  const url = databaseUrl();
   return postgres(url, { max: 1, idle_timeout: 5 });
 }
 

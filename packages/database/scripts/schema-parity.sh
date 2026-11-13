@@ -16,12 +16,17 @@
 set -euo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-haive-postgres}"
-PG_USER="${PG_USER:-haive}"
-PG_PASSWORD="${PG_PASSWORD:-haive_dev_password}"
-PG_HOST="${PG_HOST:-localhost}"
-PG_PORT="${PG_PORT:-5432}"
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+URL_HELPER="$PKG_DIR/../../scripts/lib/dev-database-url.mjs"
+# PG_PASSWORD is explicitly supplied in CI; local runs use the install .env.
+if [ -n "${PG_PASSWORD:-}" ] && [ -z "${DATABASE_URL:-}" ]; then
+  export POSTGRES_PASSWORD="$PG_PASSWORD"
+fi
+# Resolve the same user for local-socket administration and host TCP clients.
+PARITY_ADMIN_URL=$(node "$URL_HELPER" postgres)
+PG_USER="${PG_USER:-$(PARITY_ADMIN_URL="$PARITY_ADMIN_URL" node -e 'process.stdout.write(decodeURIComponent(new URL(process.env.PARITY_ADMIN_URL).username))')}"
+export PG_USER
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -39,12 +44,12 @@ cleanup_dbs
 psql_admin -c "CREATE DATABASE $PUSH_DB" -c "CREATE DATABASE $MIG_DB" >/dev/null
 
 echo "[parity] building $PUSH_DB with drizzle-kit push --force"
-DATABASE_URL="postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$PUSH_DB" \
+DATABASE_URL="$(node "$URL_HELPER" "$PUSH_DB")" \
   pnpm --filter @haive/database push --force >"$WORK/push.log" 2>&1 ||
   { echo "[parity] push failed:"; tail -30 "$WORK/push.log"; exit 1; }
 
 echo "[parity] building $MIG_DB with the migration runner"
-DATABASE_URL="postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$MIG_DB" \
+DATABASE_URL="$(node "$URL_HELPER" "$MIG_DB")" \
   pnpm --filter @haive/database migrate >"$WORK/migrate.log" 2>&1 ||
   { echo "[parity] migrate failed:"; tail -30 "$WORK/migrate.log"; exit 1; }
 
