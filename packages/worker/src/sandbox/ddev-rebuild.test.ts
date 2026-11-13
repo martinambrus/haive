@@ -158,6 +158,7 @@ it('does not report success or ensure when the removal fails', async () => {
   expect(h.ensure).not.toHaveBeenCalled();
 });
 it('serializes concurrent rebuilds and holds a new ensure until removal settles', async () => {
+  vi.useFakeTimers();
   let release!: () => void;
   const held = new Promise<void>((r) => {
     release = r;
@@ -177,11 +178,26 @@ it('serializes concurrent rebuilds and holds a new ensure until removal settles'
   const first = rebuild();
   await started;
   const second = rebuild();
-  const ensure = ensureDdevStarted(task, workspace);
-  expect(h.ensure).not.toHaveBeenCalled();
-  release();
-  await Promise.all([first, second]);
+  const beforeEnsure = h.exec.mock.calls.length;
+  const onReady = vi.fn(async () => {});
+  const ensure = ensureDdevStarted(task, workspace, { onReady });
+  const settled = Promise.allSettled([first, second, ensure]);
+  try {
+    // Drain runnable work with removal still held. The real ensure must not even
+    // probe Docker, and the second rebuild must not enter its removal either.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.exec).toHaveBeenCalledTimes(beforeEnsure);
+    expect(onReady).not.toHaveBeenCalled();
+    expect(mutations()).toHaveLength(1);
+  } finally {
+    release();
+    await settled;
+    vi.useRealTimers();
+  }
+  await expect(first).resolves.toBeUndefined();
+  await expect(second).resolves.toBeUndefined();
   await expect(ensure).resolves.toEqual(runnerHandleForTask(task, workspace));
+  expect(onReady).toHaveBeenCalledOnce();
   expect(mutations()).toHaveLength(2);
 });
 
