@@ -279,8 +279,9 @@ An Ollama-backed CLI joins the internal `haive-models` network, where `ollama` a
 `${HAIVE_INSTALL_ID:-haive}-ollama` resolve to `ollama-gate:11434`, not the daemon.
 The daemon is only on `haive-network`; the api and worker retain direct access there
 for embeddings, model listing and policy-controlled provisioning. The gate dials the
-daemon by its own alias `ollama-daemon`, never `ollama`: on `haive-models` that name is
-the gate itself, and which address a dual-homed container gets for it is Docker's choice. The gate joins both
+daemon by the daemon's alias `ollama-daemon`, never `ollama`: on `haive-models` that name
+is the gate itself, so a dual-homed gate dialling `ollama` would depend on which of its
+networks Docker's resolver answers from (on the version measured it was the daemon's). The gate joins both
 networks and streams requests and responses without buffering, including SSE.
 
 The gate permits `POST` inference at `/v1/messages`, `/v1/messages/count_tokens`,
