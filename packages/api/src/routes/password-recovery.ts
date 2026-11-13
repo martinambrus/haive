@@ -82,13 +82,13 @@ passwordRecoveryRoutes.post('/forgot-password', async (c) => {
         });
         if (!result.ok) log.warn({ code: result.code }, 'Password recovery mail was not delivered');
       })().catch((error: unknown) => {
-        // Keep only the class and SQLSTATE, never messages, query values or SMTP text.
+        // Keep only the class and a short error code (SQLSTATE or errno), never messages, query values or SMTP text.
         const { name, code } = safeErrorDetails(error);
         log.warn(
           {
             code: 'password_recovery_failed',
             errorName: name,
-            ...(typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? { sqlState: code } : {}),
+            ...(typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? { errorCode: code } : {}),
           },
           'Password recovery could not be completed',
         );

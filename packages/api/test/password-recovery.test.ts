@@ -260,7 +260,7 @@ describe('forgot password', () => {
       {
         code: 'password_recovery_failed',
         errorName: 'DrizzleQueryError',
-        sqlState: '42P01',
+        errorCode: '42P01',
       },
       'Password recovery could not be completed',
     );
