@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import TaskDetailPage from './page';
+import { useActiveTime } from '@/lib/active-time/use-active-time';
 import {
   buttons,
   createRenderer,
@@ -15,6 +16,10 @@ vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
+vi.mock('@/lib/active-time/use-active-time', async (original) => {
+  const mod = await original<typeof import('@/lib/active-time/use-active-time')>();
+  return { ...mod, useActiveTime: vi.fn(mod.useActiveTime) };
+});
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: net.routeId }),
   useRouter: () => ({ replace: () => {}, push: () => {} }),
@@ -251,6 +256,14 @@ const stepRow = () => ({
   preferredEffortLevel: null,
   cliInvocationCount: 0,
 });
+
+it.each([null, PAUSED_AT])(
+  'counts human time only while the form awaits input (%s)',
+  async (waitingStartedAt) => {
+    await mount({ pausedAt: null }, [{ ...stepRow(), status: 'waiting_form', waitingStartedAt }]);
+    expect(vi.mocked(useActiveTime).mock.lastCall?.[0].enabled).toBe(waitingStartedAt !== null);
+  },
+);
 
 const smallest = (hosts: Host[]): Host | undefined =>
   [...hosts].sort((a, b) => textOf(a).length - textOf(b).length)[0];

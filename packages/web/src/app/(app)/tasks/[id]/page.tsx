@@ -56,7 +56,7 @@ import {
 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { useActiveTime } from '@/lib/active-time/use-active-time';
-import { shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
+import { isAwaitingFormInput, shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import {
@@ -1265,7 +1265,7 @@ export default function TaskDetailPage() {
   const taskEnded =
     task?.status === 'completed' || task?.status === 'failed' || task?.status === 'cancelled';
   const activeWaitingStep =
-    taskEnded || taskDead ? null : (steps.find((s) => s.status === 'waiting_form') ?? null);
+    taskEnded || taskDead ? null : (steps.find(isAwaitingFormInput) ?? null);
   const userActive = useUserActiveTimer(
     id,
     // The step ROW id (unique per fix-loop round), so the live timer + the task total
