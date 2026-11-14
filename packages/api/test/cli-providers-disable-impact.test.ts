@@ -58,6 +58,7 @@ function task(over: Record<string, unknown> = {}) {
     userId: h.userId,
     type: 'test',
     status: 'running',
+    deadAt: null,
     currentRound: 0,
     currentStepId: 'cli',
     cliProviderId: providerId,
@@ -87,6 +88,16 @@ describe('provider disable impact', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ taskCount: 2, stepCount: 3 });
     expect(fake.rows(schema.cliProviders)[0]?.enabled).toBe(true);
+  });
+
+  it('excludes dead and terminal tasks the worker cannot advance', async () => {
+    task();
+    for (const status of ['created', 'queued', 'running', 'paused', 'waiting_user', 'waiting_pr'])
+      task({ status, deadAt: new Date() });
+    for (const status of ['completed', 'cancelled', 'failed']) task({ status });
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ taskCount: 1, stepCount: 2 });
   });
 
   it('resolves task choices, cleared choices, saved preferences and the saved-choice lock', async () => {

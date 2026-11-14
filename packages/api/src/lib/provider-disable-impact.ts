@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { loadTaskStepFlags } from './step-flags.js';
 import { enrichStepsWithCliPreferences } from '../routes/tasks/_helpers.js';
@@ -14,6 +14,8 @@ export async function providerDisableImpact(db: Database, userId: string, provid
     .where(
       and(
         eq(schema.tasks.userId, userId),
+        // handleAdvanceStep returns before providerHoldFor for dead or terminal tasks.
+        isNull(schema.tasks.deadAt),
         inArray(schema.tasks.status, [
           'created',
           'queued',
