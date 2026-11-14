@@ -6,6 +6,7 @@ import {
   type TimeCostStep,
   type FormWaitEvent,
   type TimeCostInvocation,
+  type TimeCostCheckRun,
 } from '@haive/shared/stats';
 import { realCostUsdSql, notionalCostUsdSql, pricedCostRowSql } from '@haive/shared/stats-server';
 
@@ -22,13 +23,18 @@ export async function timeCostOver(
   const steps: TimeCostStep[] = [];
   const events: FormWaitEvent[] = [];
   const invocations: TimeCostInvocation[] = [];
+  const checkRuns: TimeCostCheckRun[] = [];
+  const [recording] = await db
+    .select({ startedAt: schema.taskCheckRecording.startedAt })
+    .from(schema.taskCheckRecording)
+    .where(eq(schema.taskCheckRecording.id, 1));
   let excludedLegacyInvocations = 0;
   const inv = schema.cliInvocations;
   const ts = schema.taskSteps;
   const te = schema.taskEvents;
   for (let offset = 0; offset < tasks.length; offset += batchSize) {
     const ids = tasks.slice(offset, offset + batchSize).map((t) => t.id);
-    const [stepRows, eventRows, runRows, excluded] = await Promise.all([
+    const [stepRows, eventRows, runRows, excluded, checks] = await Promise.all([
       db
         .select({
           id: ts.id,
@@ -95,10 +101,23 @@ export async function timeCostOver(
             isNull(inv.summaryForStepId),
           ),
         ),
+      db
+        .select({
+          taskId: schema.taskCheckRuns.taskId,
+          slot: schema.taskCheckRuns.slot,
+          outcome: schema.taskCheckRuns.outcome,
+          startedAt: schema.taskCheckRuns.startedAt,
+          endedAt: schema.taskCheckRuns.endedAt,
+        })
+        .from(schema.taskCheckRuns)
+        .where(
+          and(inArray(schema.taskCheckRuns.taskId, ids), eq(schema.taskCheckRuns.slot, 'test')),
+        ),
     ]);
     steps.push(...stepRows);
     events.push(...eventRows);
     invocations.push(...runRows);
+    checkRuns.push(...checks);
     excludedLegacyInvocations += Number(excluded[0]?.n ?? 0);
   }
   const report = buildTimeCostReport({
@@ -108,6 +127,8 @@ export async function timeCostOver(
     steps,
     events,
     invocations,
+    checkRuns,
+    recordingStartedAt: recording?.startedAt.toISOString() ?? null,
   });
   const details = new Map<string, { title: string; repository: string | null }>();
   for (let offset = 0; offset < report.rows.length; offset += batchSize) {

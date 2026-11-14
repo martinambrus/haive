@@ -18,49 +18,53 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-000000000002';
 const query = '?from=2026-11-01T00:00:00Z&to=2026-11-12T00:00:00Z';
 
-function fixture(role = 'user') {
+function fixture(role = 'user', checkRows: unknown[] = []) {
   const predicates: string[] = [];
   const tables: unknown[] = [];
   const parameters: unknown[][] = [];
   const db = {
     select: (fields: Record<string, unknown>) => {
       const keys = Object.keys(fields);
-      const rows = keys.includes('estimatedTimeHours')
-        ? [{ id: TASK, completedAt: new Date('2026-11-10Z') }]
-        : keys.includes('carriedWorkMs')
-          ? [
-              {
-                id: 's',
-                taskId: TASK,
-                stepId: '08-phase-5-verify',
-                startedAt: new Date(0),
-                endedAt: new Date(1000),
-                idleMs: 100,
-                userActiveMs: 50,
-                carriedWorkMs: 25,
-                carriedUserActiveMs: 10,
-                status: 'done',
-                waitingStartedAt: null,
-                output: { test: { ran: false } },
-              },
-            ]
-          : keys.includes('pricedInvocations')
-            ? [
-                {
-                  taskId: TASK,
-                  stepId: '08-phase-5-verify',
-                  agentMs: 500,
-                  realUsd: 0,
-                  notionalUsd: 2,
-                  invocations: 1,
-                  pricedInvocations: 1,
-                  unpricedInvocations: 0,
-                  unsnapshottedInvocations: 1,
-                },
-              ]
-            : keys.includes('title')
-              ? [{ taskId: TASK, title: 'Example', repository: 'Repo' }]
-              : [];
+      const rows = keys.includes('outcome')
+        ? checkRows
+        : keys.length === 1 && keys[0] === 'startedAt'
+          ? [{ startedAt: new Date('2026-11-14T00:00:00.000Z') }]
+          : keys.includes('estimatedTimeHours')
+            ? [{ id: TASK, completedAt: new Date('2026-11-10Z') }]
+            : keys.includes('carriedWorkMs')
+              ? [
+                  {
+                    id: 's',
+                    taskId: TASK,
+                    stepId: '08-phase-5-verify',
+                    startedAt: new Date(0),
+                    endedAt: new Date(1000),
+                    idleMs: 100,
+                    userActiveMs: 50,
+                    carriedWorkMs: 25,
+                    carriedUserActiveMs: 10,
+                    status: 'done',
+                    waitingStartedAt: null,
+                    output: { test: { ran: false } },
+                  },
+                ]
+              : keys.includes('pricedInvocations')
+                ? [
+                    {
+                      taskId: TASK,
+                      stepId: '08-phase-5-verify',
+                      agentMs: 500,
+                      realUsd: 0,
+                      notionalUsd: 2,
+                      invocations: 1,
+                      pricedInvocations: 1,
+                      unpricedInvocations: 0,
+                      unsnapshottedInvocations: 1,
+                    },
+                  ]
+                : keys.includes('title')
+                  ? [{ taskId: TASK, title: 'Example', repository: 'Repo' }]
+                  : [];
       const chain: unknown = new Proxy(
         {},
         {
@@ -97,6 +101,32 @@ function fixture(role = 'user') {
 }
 
 describe('completed-task report endpoint', () => {
+  it('reads test check history in bounded task batches and coverage from the durable singleton', async () => {
+    const f = fixture('user', [
+      {
+        taskId: TASK,
+        slot: 'test',
+        outcome: 'passed',
+        startedAt: new Date(0),
+        endedAt: new Date(2000),
+      },
+    ]);
+    const report = await loadReport(
+      f.db,
+      [{ id: TASK, completedAt: new Date('2026-11-10Z') }],
+      sql`true`,
+      2,
+    );
+    const { getTableName } = await import('drizzle-orm');
+    expect(f.tables.map((t) => getTableName(t as never))).toContain('task_check_recording');
+    const checks = f.predicates.filter((p) => p.includes('"task_check_runs"'));
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toContain('"task_id"');
+    expect(checks[0]).toContain('"slot"');
+    expect(report.recordingStartedAt).toBe('2026-11-14T00:00:00.000Z');
+    expect(report.totals.testSuiteMs).toBe(2000);
+    expect(report.rows[0]?.testExecution).toBe('ran');
+  });
   it('bounds every task-id query, including the full-history event reads', async () => {
     expect(TIME_COST_BATCH_SIZE).toBe(200);
     const f = fixture();

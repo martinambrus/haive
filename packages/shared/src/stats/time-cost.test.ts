@@ -143,6 +143,67 @@ describe('form lifecycle pairing', () => {
 });
 
 describe('time and cost report', () => {
+  it('sums only completed test checks and excludes incomplete/environment stops from pass share before the row cap', () => {
+    const check = (
+      outcome: 'passed' | 'failed' | 'not_run' | 'running' | 'interrupted',
+      slot = 'test',
+      taskId = 't',
+    ) => ({
+      taskId,
+      slot,
+      outcome,
+      startedAt: new Date(0),
+      endedAt: outcome === 'running' ? null : new Date(20),
+    });
+    const report = buildTimeCostReport({
+      tasks: ['t', 'old', 'zero', 'not_run', 'incomplete'].map((taskId) => ({
+        taskId,
+        completedAt: new Date(1000),
+      })),
+      steps: [
+        step({ taskId: 't', carriedWorkMs: 1000, output: { test: { ran: false } } }),
+        step({ taskId: 'old', output: { test: { ran: true } } }),
+        step({ taskId: 'not_run', output: { test: { ran: true } } }),
+      ],
+      events: [],
+      invocations: [],
+      limit: 1,
+      checkRuns: [
+        check('passed'),
+        check('failed'),
+        check('not_run'),
+        check('running'),
+        check('interrupted'),
+        check('passed', 'lint'),
+        { ...check('passed', 'test', 'zero'), endedAt: new Date(0) },
+        check('not_run', 'test', 'not_run'),
+        check('running', 'test', 'incomplete'),
+      ],
+      recordingStartedAt: '2026-11-14T00:00:00.000Z',
+    });
+    expect(report.recordingStartedAt).toBe('2026-11-14T00:00:00.000Z');
+    expect(report.rows[0]).toMatchObject({
+      taskId: 't',
+      testExecution: 'ran',
+      testSuiteMs: 40,
+      testSuiteRuns: 2,
+    });
+    expect(report.totals).toMatchObject({
+      testSuiteMs: 40,
+      testSuiteRuns: 3,
+      testPassShare: { ratio: 2 / 3, n: 3, sufficient: false },
+      testCheckCounts: { passed: 2, failed: 1, not_run: 2, running: 2, interrupted: 1 },
+      testExecutionCounts: { ran: 3, not_run: 1, unrecorded: 1 },
+    });
+    const empty = buildTimeCostReport({
+      tasks: [{ taskId: 't', completedAt: new Date(1000) }],
+      steps: [],
+      events: [],
+      invocations: [],
+    });
+    expect(empty.rows[0]?.testSuiteMs).toBeNull();
+    expect(empty.totals.testPassShare).toEqual({ ratio: null, n: 0, sufficient: false });
+  });
   it('counts every execution state across the population before limiting rows', () => {
     const report = buildTimeCostReport({
       tasks: ['ran', 'not_run', 'unrecorded'].map((taskId) => ({
