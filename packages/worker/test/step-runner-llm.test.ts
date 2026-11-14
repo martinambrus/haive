@@ -81,7 +81,16 @@ interface MockState {
   inserts: { table: string; row: Record<string, unknown> }[];
 }
 
-function makeMockDb(state: MockState): Database {
+interface MockDbOptions {
+  refuseUpdate?: (
+    table: string,
+    values: Record<string, unknown>,
+    draft: MockState,
+    inTransaction: boolean,
+  ) => boolean;
+}
+
+function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = false): Database {
   let nextId = 1;
   const db = {
     select: () => ({
@@ -134,7 +143,20 @@ function makeMockDb(state: MockState): Database {
         };
       },
     }),
-    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    transaction: async (fn: (tx: unknown) => unknown) => {
+      // Isolate transaction writes: a hook accidentally using the outer db must
+      // leave its insert behind when the owned checkpoint refuses the draft.
+      const draft = {
+        ...state,
+        taskStepRow: { ...state.taskStepRow },
+        cliInvocationRow: state.cliInvocationRow && { ...state.cliInvocationRow },
+        updates: [...state.updates],
+        inserts: [...state.inserts],
+      };
+      const result = await fn(makeMockDb(draft, opts, true));
+      Object.assign(state, draft);
+      return result;
+    },
     insert: (table: unknown) => {
       const tableName = tableNameOf(table);
       return {
@@ -181,7 +203,7 @@ function makeMockDb(state: MockState): Database {
       };
       return {
         set: (v: Record<string, unknown>) => {
-          const rows = apply(v);
+          const rows = opts.refuseUpdate?.(tableName, v, state, inTransaction) ? [] : apply(v);
           return { where: (_: unknown) => ({ returning: async () => rows }) };
         },
       };
@@ -693,6 +715,60 @@ describe('plan writers through the real runner dispatch', () => {
       expect(state.inserts.filter((entry) => entry.table === 'plan_node_messages')).toMatchObject([
         { row: { role: 'user', body: original } },
       ]);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['park', 'resume'] as const)(
+    'rolls back the original when the runner loses ownership of its recovery %s checkpoint',
+    async (mode) => {
+      const original = 'x'.repeat(20_001);
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: mode === 'resume' ? original : null,
+        ...(mode === 'resume' ? { pendingFromLegacySubmission: true as const } : {}),
+      };
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: planChatStep.form!({} as never, detected),
+      });
+      const refuseUpdate = vi.fn((table, values, draft, inTransaction) => {
+        if (table !== 'task_steps' || values.status !== 'waiting_form' || !values.detectOutput)
+          return false;
+        expect(inTransaction).toBe(true);
+        expect(
+          draft.inserts.filter((entry: { table: string }) => entry.table === 'plan_node_messages'),
+        ).toMatchObject([{ row: { role: 'user', body: original } }]);
+        expect(state.inserts).toEqual([]);
+        return true; // No returned row makes the real updateOwnedStep throw StepSupersededError.
+      });
+      const enqueue = vi.fn();
+      const result = await advanceStep({
+        db: makeMockDb(state, { refuseUpdate }),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true },
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        formValues: { message: mode === 'resume' ? 'Edited replacement' : original },
+      });
+      expect(result.status).toBe('superseded');
+      expect(refuseUpdate).toHaveBeenCalled();
+      expect(state.inserts).toEqual([]);
+      expect(state.taskStepRow.detectOutput).toEqual(detected);
+      expect(state.taskStepRow.formValues).toBeNull();
       expect(enqueue).not.toHaveBeenCalled();
     },
   );
