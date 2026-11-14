@@ -1,3 +1,4 @@
+import { UnresolvedStepError } from './registry.js';
 import {
   beginFixTestCapture,
   finishFixTestCapture,
@@ -3928,6 +3929,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     return { status: 'done', row: done, output };
   } catch (err) {
     if (superseded || err instanceof StepSupersededError) return supersededPass(row);
+    // Missing pinned code is a dead task; the queue owns that durable state and its recovery.
+    if (err instanceof UnresolvedStepError) throw err;
     if (err instanceof IntegrationBlockedError) {
       return {
         status: 'integration_blocked',

@@ -938,6 +938,22 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
       })
       .where(stillParkedAsRead(step))
       .returning({ id: schema.taskSteps.id });
+    if (stepId === '00-triage') {
+      const [heldTask] = await tx
+        .select({
+          hasDerivedRunPlan: sql<boolean>`${schema.tasks.derivedRunPlan} IS NOT NULL`,
+          executionPath: schema.tasks.executionPath,
+        })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, id))
+        .for('no key update');
+      if (
+        heldTask?.hasDerivedRunPlan &&
+        heldTask.executionPath !== null &&
+        values.path !== heldTask.executionPath
+      )
+        throw new HttpError(409, 'Create a new task to change path.', 'derived_path_pinned');
+    }
     // Another closer took the row after it was read (a pass, Skip, a Retry, the PR poller): the answer, its
     // event and the advance are not this one's to add, and the throw rolls the transaction back.
     if (answered.length === 0) throw formNotWaiting('form submission', stepId);
@@ -1731,6 +1747,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   }
 
   if (body.action === 'skip') {
+    if (stepId === '00-triage' && task.derivedRunPlan != null && task.executionPath === null)
+      throw new HttpError(
+        409,
+        'Select a path before skipping derived triage',
+        'derived_path_unselected',
+      );
     // Skip is disabled across the workflow except on the steps that opt in
     // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
@@ -1761,6 +1783,20 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .for('no key update');
       if (!held) throw new HttpError(404, 'Step not found');
       refuseSkipOutsideParked(held);
+      const [heldTask] = await tx
+        .select({
+          executionPath: schema.tasks.executionPath,
+          hasDerivedRunPlan: sql<boolean>`${schema.tasks.derivedRunPlan} IS NOT NULL`,
+        })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, id))
+        .for('no key update');
+      if (stepId === '00-triage' && heldTask?.hasDerivedRunPlan && heldTask.executionPath === null)
+        throw new HttpError(
+          409,
+          'Select a path before skipping derived triage',
+          'derived_path_unselected',
+        );
       await tx
         .update(schema.taskSteps)
         .set({

@@ -66,6 +66,12 @@ const acme = { moduleId: 'acme', name: 'Acme', missingAt: null, deactivatedAt: n
 
 const handle = (rows: unknown[], modules: unknown[] = [acme]) =>
   ({
+    execute: () => {
+      throw new Error('Static definition control must not execute catalog locks');
+    },
+    transaction: () => {
+      throw new Error('Static definition control must not open a derived read transaction');
+    },
     select: () => ({
       from: (table: unknown) =>
         table === schema.stepCatalog
@@ -74,7 +80,7 @@ const handle = (rows: unknown[], modules: unknown[] = [acme]) =>
             ? { where: () => ({ for: async () => modules }) }
             : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
     }),
-  }) as unknown as Pick<Database, 'select'>;
+  }) as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
 
 async function refusal(promise: Promise<unknown>): Promise<HttpError> {
   const err = await promise.then(

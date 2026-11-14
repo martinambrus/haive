@@ -1,3 +1,4 @@
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
@@ -913,12 +914,19 @@ export async function enrichStepsWithActiveRole<
 export function isStepSkippable(
   flags: StepFlagMap,
   stepId: string,
-  task: { type?: string | null; runListSnapshot?: readonly string[] | null },
+  task: {
+    type?: string | null;
+    runListSnapshot?: readonly string[] | null;
+    derivedRunPlan?: unknown;
+    executionPath?: string | null;
+  },
 ): boolean {
+  if (stepId === '00-triage' && task.derivedRunPlan != null && task.executionPath == null)
+    return false;
   if (flags.get(stepId)?.allowSkip === true) return true;
   if (stepId !== '01-worktree-setup') return false;
   if (task.type === 'run_app') return true;
-  const snapshot = task.runListSnapshot;
+  const snapshot = pinnedTaskStepIds(task);
   return snapshot?.includes(stepId) === true && compositionSurvivesWithout(flags, snapshot, stepId);
 }
 
@@ -934,7 +942,7 @@ export async function enrichStepsWithSkipFlag<
   // enforces the same rule). Task-aware so the worktree can be skipped where the run list allows.
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { type: true, runListSnapshot: true },
+    columns: { type: true, runListSnapshot: true, derivedRunPlan: true, executionPath: true },
   });
   const withFlags = (s: T, manuallySkipped: boolean) => ({
     ...s,

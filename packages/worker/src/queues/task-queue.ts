@@ -320,7 +320,8 @@ async function resolveTaskContext(
     currentRound: task.currentRound ?? 0,
     status: task.status,
     completedAt: task.completedAt ?? null,
-    ...(await taskTypeRuntimeFor(db, task.type)),
+    ...(await taskTypeRuntimeFor(db, task.type, task.derivedRunPlan)),
+    derivedRunPlan: task.derivedRunPlan,
     runListSnapshot: task.runListSnapshot ?? null,
     customSteps: parseCustomSteps(task.customSteps),
     deadAt: task.deadAt ?? null,
@@ -2183,6 +2184,16 @@ export async function handleResult(
   result: AdvanceStepResult,
   opts: { redrive?: boolean } = {},
 ): Promise<void> {
+  if (ctx.derivedRunPlan != null) {
+    const fresh = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { executionPath: true, runListSnapshot: true },
+    });
+    if (fresh) {
+      ctx.executionPath = fresh.executionPath as ExecutionPath | null;
+      ctx.runListSnapshot = fresh.runListSnapshot;
+    }
+  }
   const stepDef = requireTaskStep(ctx, stepId);
   // A first pass appends; only a re-driven hand-off can repeat the events its pass already wrote.
   const record = opts.redrive ? appendEventOnce : appendEvent;
@@ -2383,6 +2394,15 @@ export async function handleResult(
           next.metadata.id,
           nextRound,
           ctx.orchestrationEpoch,
+        );
+      } else if (ctx.derivedRunPlan != null && ctx.executionPath === null) {
+        await finishFailedStep(
+          db,
+          ctx,
+          stepId,
+          result.row,
+          'derived_path_unselected: The derived workflow reached the end of its prefix without selecting a path.',
+          OPEN_TASK_STATUSES,
         );
       } else {
         await markTaskCompleted(db, ctx.taskId, { epoch: ctx.orchestrationEpoch });

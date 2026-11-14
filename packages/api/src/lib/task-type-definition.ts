@@ -1,3 +1,4 @@
+import { DerivedTaskAdmissionError } from './derived-errors.js';
 import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -13,10 +14,11 @@ import {
   promptStepId,
   resolveTaskTypeAvailability,
   type CompositionIssue,
+  type DerivedRunPlan,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
-import { readStepCatalog } from '@haive/shared/modularity-server';
+import { readDerivedDefinition, readStepCatalog } from '@haive/shared/modularity-server';
 import { HttpError } from '../context.js';
 
 const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
@@ -40,7 +42,7 @@ export function restoresDatabase(def: {
 }): boolean {
   return (
     def.source !== 'builtin' &&
-    def.runListStrategy === 'static' &&
+    (def.runListStrategy === 'static' || def.runListStrategy === 'derived') &&
     def.stepIds?.includes(RESTORE_DATABASE_STEP_ID) === true
   );
 }
@@ -54,6 +56,9 @@ export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
 
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
+  derivedRunPlan?: DerivedRunPlan | null;
+  candidateStepIds?: string[];
+  warnings?: unknown[];
   /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
   customSteps: Record<string, unknown> | null;
   requiresRepository: boolean;
@@ -123,9 +128,9 @@ const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
   modules.map((m) => (m.name === null ? m.id : `${m.name} (${m.id})`)).join(', ');
 
 export async function definitionForCreate(
-  handle: Pick<Database, 'select'>,
+  handle: Pick<Database, 'select' | 'execute' | 'transaction'>,
   slug: string,
-  opts: { generic: boolean },
+  opts: { generic: boolean; locked?: boolean },
 ): Promise<TaskTypeDefinitionForCreate> {
   // FOR SHARE holds the row until the caller's insert commits, so a concurrent delete waits and then sees the task.
   const [def] = await handle
@@ -142,9 +147,30 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
-  const modules = await readModuleStates(handle, moduleIdsOfTaskType(def));
+  // Preserve the availability precedence before evaluating a potentially stale overlay.
+  if (def.runListStrategy === 'derived') {
+    if (!def.enabled) throw new HttpError(403, `Task type ${slug} is disabled`);
+    if (opts.generic && !def.selectable)
+      throw new HttpError(403, `Task type ${slug} cannot be created here`);
+    if (
+      def.source === 'admin' &&
+      !(await configService.getBoolean(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, false))
+    )
+      throw new HttpError(403, 'Custom task types are disabled on this install');
+  }
+  if (def.runListStrategy === 'derived' && !opts.locked)
+    return handle.transaction((tx) => definitionForCreate(tx, slug, { ...opts, locked: true }));
+  const derived =
+    def.runListStrategy === 'derived' ? await readDerivedDefinition(handle, def) : null;
+  const membership = derived?.stepIds ?? def.stepIds;
+  const modules = await readModuleStates(
+    handle,
+    moduleIdsOfTaskType({ ...def, stepIds: derived?.dependencyStepIds ?? membership }),
+  );
   const storedCatalog =
-    def.runListStrategy === 'static' && def.stepIds !== null ? await readStepCatalog(handle) : null;
+    (def.runListStrategy === 'static' || def.runListStrategy === 'derived') && def.stepIds !== null
+      ? await readStepCatalog(handle)
+      : null;
   const catalog = storedCatalog?.synced ? mergePromptStepCatalog(storedCatalog, def) : null;
   const availability = resolveTaskTypeAvailability({
     definition: def,
@@ -159,6 +185,15 @@ export async function definitionForCreate(
     modules,
     catalog,
     generic: opts.generic,
+    ...(derived
+      ? {
+          derived: {
+            stepIds: derived.stepIds,
+            dependencyStepIds: derived.dependencyStepIds,
+            valid: derived.plan !== null,
+          },
+        }
+      : {}),
   });
   if (!availability.available) {
     switch (availability.reason) {
@@ -195,6 +230,7 @@ export async function definitionForCreate(
           availability.reason,
         );
       case 'invalid-composition':
+        if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
           `Task type ${slug} has an invalid step composition: ${(availability.issues ?? []).map(describeIssue).join(', ')}`,
@@ -212,7 +248,9 @@ export async function definitionForCreate(
     def.source === 'admin' ? Object.entries(parsePromptSteps(def.promptSteps)) : [];
   // Every prompt step dispatches a CLI, which the stored entries prove without a synced catalog.
   const promptIds = new Set(promptEntries.map(([, entry]) => promptStepId(def.slug, entry.slug)));
-  let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
+  let snapshot =
+    derived?.plan?.candidates.find((candidate) => candidate.executionPath === null)?.stepIds ??
+    (def.runListStrategy === 'static' ? def.stepIds : null);
   if (
     notBuiltin &&
     snapshot !== null &&
@@ -221,7 +259,11 @@ export async function definitionForCreate(
   ) {
     snapshot = [MODEL_HEALTH_STEP_ID, ...snapshot];
   }
-  const has = (id: string) => snapshot?.includes(id) === true;
+  const has = (id: string) => (derived?.stepIds ?? snapshot)?.includes(id) === true;
+  const prune = <T>(values: Record<string, T>) =>
+    derived
+      ? Object.fromEntries(Object.entries(values).filter(([id]) => derived.stepIds.includes(id)))
+      : values;
   const customSteps: Record<string, unknown> = {};
   for (const [key, entry] of promptEntries) {
     const id = promptStepId(def.slug, entry.slug);
@@ -229,16 +271,36 @@ export async function definitionForCreate(
     if (has(id)) customSteps[id] = def.promptSteps[key];
   }
   return {
-    runListSnapshot: snapshot,
+    runListSnapshot: snapshot === null ? null : [...snapshot],
+    ...(derived
+      ? {
+          derivedRunPlan: derived.plan,
+          candidateStepIds: derived.stepIds,
+          warnings: [...derived.warnings, ...derived.defaultIssues],
+        }
+      : {}),
     customSteps: Object.keys(customSteps).length > 0 ? customSteps : null,
     requiresRepository: def.requiresRepository,
     repoOptional: !def.requiresRepository,
     preAnswers:
-      notBuiltin && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
-    stepLoopLimits: notBuiltin ? def.stepLoopLimitDefaults : {},
+      notBuiltin && Object.keys(def.preAnswerDefaults).length > 0
+        ? prune(def.preAnswerDefaults)
+        : null,
+    stepLoopLimits: notBuiltin
+      ? prune(
+          Object.fromEntries(
+            Object.entries(def.stepLoopLimitDefaults).filter(
+              ([id]) =>
+                !derived?.defaultIssues.some(
+                  (issue) => issue.kind === 'loop-limit-not-editable' && issue.stepId === id,
+                ),
+            ),
+          ),
+        )
+      : {},
     simplifyCode: notBuiltin && has(SIMPLIFY_STEP_ID),
     takesRootLock: slug === 'workflow' || ROOT_WRITING_STEP_IDS.some(has),
     pinsDatabase: notBuiltin && DATABASE_PIN_STEP_IDS.some(has),
-    restoresDatabase: restoresDatabase(def),
+    restoresDatabase: restoresDatabase({ ...def, stepIds: membership }),
   };
 }

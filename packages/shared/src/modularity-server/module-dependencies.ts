@@ -43,10 +43,20 @@ export function moduleIntegrationPredicates(moduleId: string | SQL) {
   };
 }
 
+/** Retained account choices are still displayable after triage, but only categories a
+ * chosen pinned step declares can keep its provider module in use. Live runs are checked separately. */
+function selectedDerivedCategory(category: AnyColumn | SQL): SQL {
+  return sql`(${schema.tasks.derivedRunPlan} IS NULL OR ${schema.tasks.executionPath} IS NULL OR EXISTS (
+    SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${schema.tasks.derivedRunPlan} -> 'composableEntries') = 'array' THEN ${schema.tasks.derivedRunPlan} -> 'composableEntries' ELSE '[]'::jsonb END) AS entry(value)
+    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(entry.value -> 'integrations') = 'array' THEN entry.value -> 'integrations' ELSE '[]'::jsonb END) AS requirement(value)
+    WHERE entry.value ->> 'stepId' IN (SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array' THEN ${schema.tasks.runListSnapshot} ELSE '[]'::jsonb END))
+      AND requirement.value ->> 'category' = ${category}))`;
+}
+
 export function moduleIntegrationTaskPredicate(moduleId: string | SQL) {
   const p = moduleIntegrationPredicates(moduleId);
-  return sql`(EXISTS (SELECT 1 FROM ${schema.taskIntegrationChoices} WHERE ${schema.taskIntegrationChoices.taskId} = ${schema.tasks.id} AND ${p.taskChoices})
-    OR EXISTS (SELECT 1 FROM ${schema.integrationGrants} WHERE ${schema.integrationGrants.taskId} = ${schema.tasks.id} AND ${p.grants}))`;
+  return sql`(EXISTS (SELECT 1 FROM ${schema.taskIntegrationChoices} WHERE ${schema.taskIntegrationChoices.taskId} = ${schema.tasks.id} AND ${p.taskChoices} AND ${selectedDerivedCategory(schema.taskIntegrationChoices.categoryId)})
+    OR EXISTS (SELECT 1 FROM ${schema.integrationGrants} WHERE ${schema.integrationGrants.taskId} = ${schema.tasks.id} AND ${p.grants} AND ${selectedDerivedCategory(schema.integrationGrants.categoryId)}))`;
 }
 
 /** Correlated to tasks; persisted ownership only, never loaded provider declarations. */
@@ -57,7 +67,11 @@ export function moduleTaskDependency(moduleId: string | SQL): SQL {
     typeof moduleId === 'string' ? `module:${moduleId}` : sql`('module:' || ${moduleId})`;
   return sql`(EXISTS (SELECT 1 FROM ${schema.taskTypeDefinitions} WHERE ${schema.taskTypeDefinitions.slug} = ${schema.tasks.type} AND ${schema.taskTypeDefinitions.source} = ${source})
     OR CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements_text(${schema.tasks.runListSnapshot}) AS s(id) WHERE starts_with(s.id, ${prefix})) ELSE false END
-    OR EXISTS (SELECT 1 FROM ${schema.moduleTaskAdmissions} WHERE ${schema.moduleTaskAdmissions.moduleId} = ${moduleId} AND ${schema.moduleTaskAdmissions.taskId} = ${schema.tasks.id})
+    OR CASE WHEN ${schema.tasks.executionPath} IS NULL AND jsonb_typeof(${schema.tasks.derivedRunPlan} -> 'candidates') = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements(${schema.tasks.derivedRunPlan} -> 'candidates') AS candidate(value) CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(candidate.value -> 'stepIds') = 'array' THEN candidate.value -> 'stepIds' ELSE '[]'::jsonb END) AS s(id) WHERE starts_with(s.id, ${prefix})) ELSE false END
+    OR EXISTS (SELECT 1 FROM ${schema.moduleTaskAdmissions} WHERE ${schema.moduleTaskAdmissions.moduleId} = ${moduleId} AND ${schema.moduleTaskAdmissions.taskId} = ${schema.tasks.id}
+      AND (${schema.tasks.derivedRunPlan} IS NULL OR ${schema.tasks.executionPath} IS NULL OR EXISTS (
+        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${schema.tasks.derivedRunPlan} -> 'integrationAdmissions') = 'array' THEN ${schema.tasks.derivedRunPlan} -> 'integrationAdmissions' ELSE '[]'::jsonb END) AS admission(value)
+        WHERE admission.value ->> 'moduleId' = ${schema.moduleTaskAdmissions.moduleId} AND ${selectedDerivedCategory(sql`admission.value ->> 'categoryId'`)})))
     OR ${moduleIntegrationTaskPredicate(moduleId)}
     OR EXISTS (SELECT 1 FROM ${schema.cliInvocations} WHERE ${schema.cliInvocations.taskId} = ${schema.tasks.id}
       AND ${schema.cliInvocations.supersededAt} IS NULL

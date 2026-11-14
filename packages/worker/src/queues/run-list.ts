@@ -1,8 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
-import { parseStepId, type PromptStepEntry } from '@haive/shared/modularity';
-import { assertRunListStrategyAvailable, taskRunListIds } from '@haive/shared/run-list';
+import { parseStepId, parseDerivedRunPlan, type PromptStepEntry } from '@haive/shared/modularity';
+import { taskRunListIds, type RunListStrategy } from '@haive/shared/run-list';
 import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
@@ -38,7 +38,8 @@ export interface ResolvedTaskContext {
   status: string;
   /** When the task last ended: on a failed task, when it failed. */
   completedAt: Date | null;
-  runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
+  runListStrategy: RunListStrategy;
+  derivedRunPlan?: unknown;
   runListSnapshot: string[] | null;
   /** The prompt steps this task pinned at create, by step id (tasks.custom_steps, invalid entries dropped). */
   customSteps?: Record<string, PromptStepEntry>;
@@ -115,6 +116,9 @@ export async function buildRunList(
 ): Promise<StepDefinition[]> {
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).
+  if (ctx.runListStrategy === 'derived' || ctx.derivedRunPlan != null) {
+    return taskRunListIds(ctx, () => []).map((id) => requireTaskStep(ctx, id));
+  }
   if (ctx.runListStrategy === 'run_app_modes') return buildRunAppRunList(ctx, db);
   if (ctx.runListStrategy === 'workflow_paths') {
     return taskRunListIds(ctx, (type) =>
@@ -129,18 +133,22 @@ export async function buildRunList(
 export async function taskTypeRuntimeFor(
   db: Database,
   slug: string,
+  derivedRunPlan?: unknown,
 ): Promise<Pick<ResolvedTaskContext, 'runListStrategy' | 'fixLoop'>> {
+  if (derivedRunPlan != null) {
+    parseDerivedRunPlan(derivedRunPlan);
+    return { runListStrategy: 'derived', fixLoop: null };
+  }
   const row = await db.query.taskTypeDefinitions.findFirst({
     where: eq(schema.taskTypeDefinitions.slug, slug),
   });
   if (row) {
-    assertRunListStrategyAvailable(row.runListStrategy);
+    if (row.runListStrategy === 'derived') parseDerivedRunPlan(derivedRunPlan);
     return { runListStrategy: row.runListStrategy, fixLoop: row.fixLoop ?? null };
   }
   // Smokes and a fresh install run worker code on a database the boot never seeded.
   const builtin = builtinTaskTypeRows(stepRegistry).find((r) => r.slug === slug);
   if (!builtin) throw new Error(`task type ${slug} has no definition`);
-  assertRunListStrategyAvailable(builtin.runListStrategy);
   return { runListStrategy: builtin.runListStrategy, fixLoop: null };
 }
 

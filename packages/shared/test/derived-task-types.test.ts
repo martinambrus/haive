@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adminTaskTypeCreateSchema as customTaskTypeCreateSchema,
+  taskTypeUpdateSchema,
   MAX_DERIVED_CHANGES,
   derivedChangesSchema,
   createDerivedChangesSchema,
@@ -179,6 +181,22 @@ describe('derived overlay evaluation', () => {
       expect(result.issues.every((i) => i.kind === 'replacement-contract-unavailable')).toBe(true);
       expect(result.candidates[0]!.stepIds).toEqual(baseCandidates[0]!.stepIds);
     }
+  });
+
+  it('warns explicitly when a replacement is absent from a candidate path', () => {
+    const result = evaluate([{ replace: 'b', with: 'x' }]);
+    expect(result.warnings).toEqual([
+      {
+        kind: 'path-absent-replacement',
+        executionPath: 'quick_bugfix',
+        operationIndex: 0,
+        stepId: 'b',
+      },
+    ]);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ kind: 'replacement-contract-unavailable' }),
+    );
+    expect(evaluate([{ remove: 'b' }]).warnings).toEqual([]);
   });
 
   it('skips inactive replacements and does not alias a refused replacement', () => {
@@ -423,5 +441,139 @@ describe('ordered workflow base adapter', () => {
     expect(
       derivedBaseEligibility({ slug: 'onboarding', source: 'builtin', runListStrategy: 'static' }),
     ).toMatchObject({ eligible: false, reason: 'base-not-supported' });
+  });
+});
+
+describe('derived authoring contract', () => {
+  const draft = {
+    slug: 'derived-test',
+    displayName: 'Derived',
+    runListStrategy: 'derived',
+    baseSlug: 'workflow',
+    changes: [],
+  };
+  it('accepts derived overlays without a flattened list', () => {
+    expect(customTaskTypeCreateSchema.safeParse(draft).success).toBe(true);
+    expect(customTaskTypeCreateSchema.safeParse({ ...draft, stepIds: ['a'] }).success).toBe(false);
+    expect(customTaskTypeCreateSchema.safeParse({ ...draft, maxChanges: 100 }).success).toBe(false);
+  });
+  it('allows overlay edits but never changes a base or strategy', () => {
+    expect(taskTypeUpdateSchema.safeParse({ changes: [{ remove: 'a' }] }).success).toBe(true);
+    expect(taskTypeUpdateSchema.safeParse({ baseSlug: 'workflow' }).success).toBe(false);
+    expect(taskTypeUpdateSchema.safeParse({ runListStrategy: 'derived' }).success).toBe(false);
+  });
+});
+
+// Pins are a separate contract from overlay evaluation: recovery must never consult a live base.
+describe('derived task pin readers', () => {
+  const paths = [null, ...EXECUTION_PATHS];
+  const plan = () => ({
+    version: 1,
+    base: {
+      slug: 'workflow',
+      runListStrategy: 'workflow_paths',
+      candidates: paths.map((executionPath) => ({ executionPath, stepIds: [...prefix, 'a'] })),
+      catalogFingerprint: 'fingerprint',
+    },
+    overlay: { revision: 'saved-revision', changes: [] },
+    requiresRepository: true,
+    composableEntries: [...catalog.values()],
+    candidates: paths.map((executionPath) => ({
+      executionPath,
+      stepIds: [...prefix, executionPath === 'quick_bugfix' ? 'x' : 'a'],
+      outcomes: [],
+      compositionIssues: [],
+    })),
+    commonPrefix: prefix,
+    warnings: [],
+  });
+  it('executes only the common prefix before selection, then the pinned chosen candidate', async () => {
+    const { taskRunListIds } = await import('../src/step-engine/run-list.js');
+    const { pinnedTaskStepIds } = await import('../src/modularity/derived-task-types.js');
+    const raw = plan();
+    const task = {
+      workflowType: 'derived-test',
+      runListStrategy: 'derived' as const,
+      runListSnapshot: ['wrong'],
+      executionPath: null,
+      derivedRunPlan: raw,
+    };
+    expect(taskRunListIds(task, () => ['live-base-was-edited'])).toEqual(prefix);
+    expect(pinnedTaskStepIds(task)).toEqual([...prefix, 'a', 'x']);
+    expect(taskRunListIds({ ...task, executionPath: 'quick_bugfix' }, () => [])).toEqual([
+      ...prefix,
+      'x',
+    ]);
+    expect(pinnedTaskStepIds({ ...task, executionPath: 'quick_bugfix' })).toEqual([...prefix, 'x']);
+    // Persisted pins take precedence over the definition's strategy.
+    expect(taskRunListIds({ ...task, runListStrategy: 'run_app_modes' }, () => [])).toEqual(prefix);
+  });
+  it('reads a pinned plan without applying tightened composition rules', async () => {
+    const { parseDerivedRunPlan, pinnedTaskStepIds, derivedTaskWarnings } =
+      await import('../src/modularity/derived-task-types.js');
+    const { validateComposition } = await import('../src/modularity/composition.js');
+    const { taskRunListIds } = await import('../src/step-engine/run-list.js');
+    const raw = plan();
+    raw.composableEntries = raw.composableEntries.map((entry) =>
+      entry.stepId === 'a'
+        ? { ...entry, requires: [{ needs: 'new-token', reason: 'a later composition rule' }] }
+        : entry,
+    );
+    expect(
+      validateComposition(
+        raw.candidates[0]!.stepIds,
+        new Map(raw.composableEntries.map((entry) => [entry.stepId, entry])),
+        { requiresRepository: true },
+      ),
+    ).toEqual([expect.objectContaining({ kind: 'unmet-need' })]);
+    expect(parseDerivedRunPlan(raw)).toEqual(raw);
+    expect(pinnedTaskStepIds({ derivedRunPlan: raw, executionPath: 'full_workflow' })).toEqual([
+      ...prefix,
+      'a',
+    ]);
+    expect(
+      taskRunListIds(
+        {
+          workflowType: 'derived-test',
+          runListStrategy: 'derived',
+          runListSnapshot: null,
+          executionPath: 'full_workflow',
+          derivedRunPlan: raw,
+        },
+        () => [],
+      ),
+    ).toEqual([...prefix, 'a']);
+    expect(derivedTaskWarnings(raw)).toEqual([]);
+  });
+  it('names malformed and missing plans rather than using a custom slug live fallback', async () => {
+    const { parseDerivedRunPlan, pinnedTaskStepIds } =
+      await import('../src/modularity/derived-task-types.js');
+    const { taskRunListIds } = await import('../src/step-engine/run-list.js');
+    for (const raw of [
+      null,
+      {},
+      { ...plan(), version: 2 },
+      { ...plan(), unexpected: true },
+      { ...plan(), candidates: plan().candidates.slice(1) },
+      { ...plan(), commonPrefix: ['a'] },
+    ]) {
+      expect(() => parseDerivedRunPlan(raw)).toThrow(
+        expect.objectContaining({ code: 'invalid-derived-run-plan' }),
+      );
+    }
+    expect(() =>
+      taskRunListIds(
+        {
+          workflowType: 'derived-test',
+          runListStrategy: 'derived',
+          runListSnapshot: [],
+          executionPath: null,
+        },
+        () => [],
+      ),
+    ).toThrow(expect.objectContaining({ code: 'invalid-derived-run-plan' }));
+    expect(() => pinnedTaskStepIds({ derivedRunPlan: plan(), executionPath: 'invalid' })).toThrow(
+      expect.objectContaining({ code: 'invalid-derived-run-plan' }),
+    );
   });
 });

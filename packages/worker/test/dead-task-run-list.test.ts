@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import { resolveRunList, taskTypeRuntimeFor } from '../src/queues/run-list.js';
+import { buildRunList, resolveRunList, taskTypeRuntimeFor } from '../src/queues/run-list.js';
 import { StepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -55,7 +55,7 @@ describe('StepRegistry.require', () => {
 });
 
 describe('taskTypeRuntimeFor', () => {
-  it('refuses a persisted derived definition before it reaches a run-list reader', async () => {
+  it('names a missing derived plan instead of falling back to the definition slug', async () => {
     const db = {
       query: {
         taskTypeDefinitions: {
@@ -64,7 +64,27 @@ describe('taskTypeRuntimeFor', () => {
       },
     } as unknown as Database;
     await expect(taskTypeRuntimeFor(db, 'derived-example')).rejects.toThrow(
-      'derived task types are not available yet',
+      'The derived task run plan is missing or malformed',
     );
+  });
+});
+
+describe('run_app saved database guard', () => {
+  it('refuses a non-DDEV mode before resolving the runtime list when a saved database is waiting', async () => {
+    const db = {
+      query: {
+        tasks: { findFirst: async () => ({ envTemplateId: 'template' }) },
+        envTemplates: { findFirst: async () => ({ declaredDeps: { containerTool: 'docker' } }) },
+        taskDatabaseStates: {
+          findFirst: async () => ({ sourceSnapshotId: 'snapshot', importedAt: null }),
+        },
+      },
+    } as unknown as Database;
+    await expect(
+      buildRunList(
+        { taskId: 't', runListStrategy: 'run_app_modes' } as Parameters<typeof buildRunList>[0],
+        db,
+      ),
+    ).rejects.toThrow('The selected saved database requires DDEV.');
   });
 });

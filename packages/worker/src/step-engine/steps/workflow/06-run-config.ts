@@ -1,3 +1,4 @@
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -199,6 +200,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         executionPath: true,
         exposeDbPort: true,
         preAnswers: true,
+        runListSnapshot: true,
+        derivedRunPlan: true,
       },
     });
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
@@ -220,8 +223,14 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       appRunnerMode,
       taskAdversarialQaLevel: taskRow?.adversarialQaLevel ?? null,
       taskMaxFixRounds: taskRow?.maxFixRounds ?? 5,
-      runsBrowserVerify: keepForPath('08a-browser-verify', execPath),
-      runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
+      runsBrowserVerify:
+        taskRow?.derivedRunPlan != null
+          ? pinnedTaskStepIds(taskRow)!.includes('08a-browser-verify')
+          : keepForPath('08a-browser-verify', execPath),
+      runsAdversarialQa:
+        taskRow?.derivedRunPlan != null
+          ? pinnedTaskStepIds(taskRow)!.includes('08d-adversarial-qa')
+          : keepForPath('08d-adversarial-qa', execPath),
       dbExposeAvailable: dbAvailable && ddevMode,
       taskExposeDbPort: taskRow?.exposeDbPort ?? false,
       reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(

@@ -8,6 +8,7 @@ import {
   COMPOSABLE_STEP_GROUPS,
   checkPromptSteps,
   customTaskTypeCreateSchema,
+  derivedTaskTypeCreateSchema,
   mergePromptStepCatalog,
   parsePromptSteps,
   publicTaskTypeSchema,
@@ -17,7 +18,13 @@ import {
   validateTaskTypeDefaults,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
-import { readStepCatalog, type StepCatalogRead } from '@haive/shared/modularity-server';
+import {
+  inspectDerivedDefinition,
+  readDerivedDefinition,
+  readStepCatalog,
+  type StepCatalogRead,
+} from '@haive/shared/modularity-server';
+import { derivedBaseEligibility } from '@haive/shared/run-list';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { buildUpcomingCliSteps } from './tasks/_helpers.js';
@@ -63,14 +70,26 @@ function availabilityOf(
   switches: Awaited<ReturnType<typeof readSwitches>>,
   catalog: Catalog,
   modules: ReadonlyMap<string, TaskTypeModuleState>,
+  base?: DefinitionRow,
 ) {
   const own = mergePromptStepCatalog(catalog, row);
+  const derived =
+    row.runListStrategy === 'derived' ? inspectDerivedDefinition(row, base, catalog) : null;
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
     modules,
     catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
+    ...(derived
+      ? {
+          derived: {
+            stepIds: derived.stepIds,
+            dependencyStepIds: derived.dependencyStepIds,
+            valid: derived.plan !== null,
+          },
+        }
+      : {}),
   });
 }
 
@@ -93,7 +112,10 @@ const MODULE_FIELDS = ['enabled', 'sortOrder', 'displayName'];
 const ENABLE_LOCKED_BUILTINS: ReadonlySet<string> = new Set(['onboarding', 'workflow']);
 
 function allowedFields(row: DefinitionRow): string[] | null {
-  if (row.source === 'admin') return null;
+  if (row.source === 'admin')
+    return row.runListStrategy === 'derived'
+      ? UPDATABLE_FIELDS.filter((f) => f !== 'stepIds' && f !== 'requiresRepository')
+      : UPDATABLE_FIELDS.filter((f) => f !== 'changes');
   if (row.source === 'builtin')
     return row.selectable && !ENABLE_LOCKED_BUILTINS.has(row.slug)
       ? [...BUILTIN_FIELDS, 'enabled']
@@ -153,8 +175,23 @@ adminTaskTypeRoutes.get('/', async (c) => {
       ...row,
       builtin: row.source === 'builtin',
       editableFields: editableFieldsOf(row),
-      availability: availabilityOf(row, switches, catalog, modules),
+      availability: availabilityOf(
+        row,
+        switches,
+        catalog,
+        modules,
+        rows.find((base) => base.slug === row.baseSlug),
+      ),
       taskCount: taskCounts.get(row.slug) ?? 0,
+      ...(row.runListStrategy === 'derived'
+        ? {
+            diagnostics: inspectDerivedDefinition(
+              row,
+              rows.find((base) => base.slug === row.baseSlug),
+              catalog,
+            ),
+          }
+        : {}),
     })),
   });
 });
@@ -166,7 +203,11 @@ function catalogModuleState(row: TaskTypeModuleState): 'missing' | 'deactivated'
 
 adminTaskTypeRoutes.get('/catalog', async (c) => {
   const db = getDb();
-  const [catalog, modules] = await Promise.all([loadCatalog(db), readModuleStates(db)]);
+  const [catalog, modules, definitions] = await Promise.all([
+    loadCatalog(db),
+    readModuleStates(db),
+    db.select().from(schema.taskTypeDefinitions),
+  ]);
   const offSources = new Set(
     [...modules].filter(([, row]) => row.deactivated).map(([id]) => `module:${id}`),
   );
@@ -186,7 +227,55 @@ adminTaskTypeRoutes.get('/catalog', async (c) => {
       .map(([id, row]) => ({ id, name: row.name, state: catalogModuleState(row) }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     registeredStepIds: [...catalog.stepIds],
+    bases: definitions
+      .filter((row) => row.source === 'builtin')
+      .map((row) => ({
+        slug: row.slug,
+        eligibility: derivedBaseEligibility(row),
+        ...(row.slug === 'workflow'
+          ? {
+              orderedSteps: catalog.orderedRows,
+              orderedBaseLists: inspectDerivedDefinition(
+                {
+                  ...row,
+                  source: 'admin',
+                  runListStrategy: 'derived',
+                  baseSlug: row.slug,
+                  changes: [],
+                },
+                row,
+                catalog,
+              ).candidates.map(({ executionPath, stepIds }) => ({ executionPath, stepIds })),
+            }
+          : {}),
+      })),
   });
+});
+
+adminTaskTypeRoutes.post('/preview', async (c) => {
+  const body = derivedTaskTypeCreateSchema.parse(await c.req.json());
+  const db = getDb();
+  const diagnostics = await db.transaction(async (tx) => {
+    const [base] = await tx
+      .select()
+      .from(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, body.baseSlug))
+      .for('share');
+    return readDerivedDefinition(
+      tx,
+      {
+        ...body,
+        source: 'admin',
+        requiresRepository: body.requiresRepository ?? base?.requiresRepository ?? true,
+        promptSteps: body.promptSteps ?? {},
+        preAnswerDefaults: body.preAnswerDefaults ?? {},
+        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+      },
+      registeredCategoryIds(),
+    );
+  });
+  const { catalog: _catalog, base: _base, ...preview } = diagnostics;
+  return c.json(preview, diagnostics.issues.length || diagnostics.defaultIssues.length ? 400 : 200);
 });
 
 adminTaskTypeRoutes.get('/:slug', async (c) => {
@@ -198,14 +287,18 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
     readSwitches(),
     readModuleStates(db),
   ]);
+  const derived =
+    row.runListStrategy === 'derived'
+      ? await db.transaction((tx) => readDerivedDefinition(tx, row, registeredCategoryIds()))
+      : null;
   const compositionIssues =
-    row.source === 'admin' && catalog.synced
+    row.source === 'admin' && row.runListStrategy !== 'derived' && catalog.synced
       ? validateComposition(row.stepIds ?? [], mergePromptStepCatalog(catalog, row).composable, {
           requiresRepository: row.requiresRepository,
         })
       : [];
   const promptStepIssues =
-    row.source === 'admin' && catalog.synced
+    row.source === 'admin' && row.runListStrategy !== 'derived' && catalog.synced
       ? checkPromptSteps(
           {
             slug: row.slug,
@@ -219,7 +312,20 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
       : [];
   return c.json({
     taskType: { ...row, editableFields: editableFieldsOf(row) },
-    availability: availabilityOf(row, switches, catalog, modules),
+    availability: availabilityOf(row, switches, catalog, modules, derived?.base),
+    ...(derived
+      ? {
+          diagnostics: {
+            eligibility: derived.eligibility,
+            revision: derived.revision,
+            candidates: derived.candidates,
+            issues: derived.issues,
+            defaultIssues: derived.defaultIssues,
+            warnings: derived.warnings,
+            catalogFingerprint: derived.catalogFingerprint,
+          },
+        }
+      : {}),
     compositionIssues,
     promptStepIssues,
   });
@@ -231,9 +337,70 @@ adminTaskTypeRoutes.post('/', async (c) => {
   if (typeof rawSlug === 'string' && BUILTIN_SLUGS.has(rawSlug)) {
     throw new HttpError(409, 'That slug belongs to a built-in type');
   }
-  const body = customTaskTypeCreateSchema.parse(raw);
+  const body =
+    (raw as { runListStrategy?: unknown } | null)?.runListStrategy === 'derived'
+      ? derivedTaskTypeCreateSchema.parse(raw)
+      : customTaskTypeCreateSchema.parse(raw);
   const db = getDb();
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
+  if ('runListStrategy' in body) {
+    const outcome = await db.transaction(async (tx) => {
+      const [base] = await tx
+        .select()
+        .from(schema.taskTypeDefinitions)
+        .where(eq(schema.taskTypeDefinitions.slug, body.baseSlug))
+        .for('share');
+      const values = {
+        ...body,
+        source: 'admin',
+        requiresRepository: body.requiresRepository ?? base?.requiresRepository ?? true,
+        preAnswerDefaults: body.preAnswerDefaults ?? {},
+        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+        promptSteps: body.promptSteps ?? {},
+      };
+      const diagnostics = await readDerivedDefinition(tx, values, registeredCategoryIds());
+      if (!diagnostics.plan || diagnostics.defaultIssues.length)
+        return {
+          invalid: {
+            error: 'Invalid derived task type',
+            issues: [...diagnostics.issues, ...diagnostics.defaultIssues],
+            warnings: diagnostics.warnings,
+          },
+        } as const;
+      const [created] = await tx
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          ...values,
+          stepIds: null,
+          description: body.description ?? null,
+          fixLoop: null,
+          enabled: body.enabled ?? true,
+          selectable: body.selectable ?? true,
+          sortOrder: body.sortOrder ?? 0,
+          contentHash: null,
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (!created) throw new HttpError(409, 'That slug is already taken');
+      const event: AuditEvent = {
+        actorUserId: c.get('userId'),
+        action: 'task_type.create',
+        targetType: 'task_type',
+        metadata: { slug: body.slug, stepCount: diagnostics.stepIds.length },
+      };
+      await insertAuditEvent(tx, event);
+      return { created, event, warnings: diagnostics.warnings } as const;
+    });
+    if ('invalid' in outcome) return c.json(outcome.invalid, 400);
+    logAuditEvent(outcome.event);
+    return c.json(
+      {
+        taskType: { ...outcome.created, editableFields: editableFieldsOf(outcome.created) },
+        warnings: outcome.warnings,
+      },
+      201,
+    );
+  }
   const catalog = await loadCatalog(db);
   requireSynced(catalog);
   const promptSteps = body.promptSteps ?? {};
@@ -293,9 +460,8 @@ adminTaskTypeRoutes.post('/', async (c) => {
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const { expectedUpdatedAt, ...body } = taskTypePatchSchema.parse(await c.req.json());
+  const raw: unknown = await c.req.json();
   const db = getDb();
-  const fields = Object.keys(body);
   // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
   const outcome = await db.transaction(async (tx) => {
     const [row] = await tx
@@ -304,6 +470,13 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .for('update');
     if (!row) throw new HttpError(404, 'Task type not found');
+    const patchSchema =
+      row.runListStrategy === 'derived'
+        ? taskTypePatchSchema
+        : taskTypePatchSchema.omit({ changes: true });
+    const parsed: z.infer<typeof taskTypePatchSchema> = patchSchema.parse(raw);
+    const { expectedUpdatedAt, ...body } = parsed;
+    const fields = Object.keys(body);
     // A JS Date holds milliseconds and the column microseconds, so the two are compared as Dates.
     if (
       expectedUpdatedAt !== undefined &&
@@ -315,6 +488,42 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     const refused = allowed ? fields.filter((f) => !allowed.includes(f)) : [];
     if (refused.length > 0) {
       throw new HttpError(400, `Cannot change ${refused.join(', ')} on this task type`);
+    }
+    if (row.runListStrategy === 'derived') {
+      const merged = { ...row, ...body };
+      const diagnostics = await readDerivedDefinition(tx, merged, registeredCategoryIds());
+      const structural = body.changes !== undefined || body.promptSteps !== undefined;
+      const explicitDefaultIssues = diagnostics.defaultIssues.filter((issue) =>
+        issue.kind === 'loop-limit-not-editable'
+          ? body.stepLoopLimitDefaults !== undefined
+          : body[issue.field] !== undefined,
+      );
+      if ((structural && !diagnostics.plan) || explicitDefaultIssues.length)
+        return {
+          invalid: {
+            error: 'Invalid derived task type',
+            issues: [...diagnostics.issues, ...explicitDefaultIssues],
+            warnings: diagnostics.warnings,
+          },
+        } as const;
+      const [updated] = await tx
+        .update(schema.taskTypeDefinitions)
+        .set({ ...body, updatedAt: new Date() })
+        .where(eq(schema.taskTypeDefinitions.slug, slug))
+        .returning();
+      if (!updated) throw new HttpError(404, 'Task type not found');
+      const event: AuditEvent = {
+        actorUserId: c.get('userId'),
+        action: 'task_type.update',
+        targetType: 'task_type',
+        metadata: { slug, fields },
+      };
+      await insertAuditEvent(tx, event);
+      return {
+        updated,
+        event,
+        warnings: [...diagnostics.warnings, ...diagnostics.defaultIssues],
+      } as const;
     }
     // A removed step takes its preset and loop limit with it, unless the request sends that map itself.
     const dropped: Partial<Pick<DefinitionRow, 'preAnswerDefaults' | 'stepLoopLimitDefaults'>> = {};
@@ -415,7 +624,10 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const updated = outcome.updated;
   if (!updated) throw new HttpError(404, 'Task type not found');
   logAuditEvent(outcome.event);
-  return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
+  return c.json({
+    taskType: { ...updated, editableFields: editableFieldsOf(updated) },
+    ...('warnings' in outcome ? { warnings: outcome.warnings } : {}),
+  });
 });
 
 adminTaskTypeRoutes.delete('/:slug', async (c) => {
@@ -472,17 +684,26 @@ taskTypeRoutes.get('/', async (c) => {
     readModuleStates(db),
   ]);
   // Rows behind a switch that is off stay listed, unavailable with that reason, so the form can say why.
+  const base = rows.some((row) => row.runListStrategy === 'derived')
+    ? await findDefinition(db, 'workflow')
+    : undefined;
   const taskTypes = rows.map((row) => {
-    const availability = availabilityOf(row, switches, catalog, modules);
+    const derived =
+      row.runListStrategy === 'derived' ? inspectDerivedDefinition(row, base, catalog) : null;
+    const availability = availabilityOf(row, switches, catalog, modules, base);
     return publicTaskTypeSchema.parse({
       slug: row.slug,
       displayName: row.displayName,
       description: row.description,
       requiresRepository: row.requiresRepository,
       sortOrder: row.sortOrder,
-      restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
+      restoresDatabase: acceptsSavedDatabase(
+        row.slug,
+        restoresDatabase({ ...row, stepIds: derived?.stepIds ?? row.stepIds }),
+      ),
       dispatchesCli: dispatchesCliOf(row, catalog),
       available: availability.available,
+      ...(derived ? { warnings: derived.warnings } : {}),
       ...(availability.available
         ? {}
         : {
@@ -502,7 +723,7 @@ taskTypeRoutes.get('/:slug/saved-step-clis', async (c) => {
   const flags = withTaskCustomSteps(await loadStepFlags(db), {
     type: slug,
     requiresRepository: definition.requiresRepository,
-    runListSnapshot: definition.runListSnapshot,
+    runListSnapshot: definition.candidateStepIds ?? definition.runListSnapshot,
     customSteps: definition.customSteps,
   });
   const upcoming = await buildUpcomingCliSteps(
@@ -513,7 +734,7 @@ taskTypeRoutes.get('/:slug/saved-step-clis', async (c) => {
     slug,
     [],
     false,
-    definition.runListSnapshot,
+    definition.candidateStepIds ?? definition.runListSnapshot,
   );
   const holdsSaved = (values: Record<string, string | null> | undefined) =>
     Object.values(values ?? {}).some((value) => value !== null);

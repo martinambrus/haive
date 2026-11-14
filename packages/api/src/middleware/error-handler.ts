@@ -1,4 +1,6 @@
-import { ModuleAdmissionError } from '@haive/shared/modularity-server';
+import { DerivedRunPlanError } from '@haive/shared/modularity';
+import { DerivedTaskAdmissionError } from '../lib/derived-errors.js';
+import { DerivedCatalogBusyError, ModuleAdmissionError } from '@haive/shared/modularity-server';
 import type { ErrorHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { routePath } from 'hono/route';
@@ -17,6 +19,10 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       { error: err.message, code: err.code, moduleId: err.moduleId },
       err.code === 'module-busy' ? 503 : 409,
     );
+  if (err instanceof DerivedRunPlanError)
+    return c.json({ error: err.message, code: err.code }, 409);
+  if (err instanceof DerivedTaskAdmissionError || err instanceof DerivedCatalogBusyError)
+    return c.json({ error: err.message, code: err.code, issues: err.issues }, 409);
   if (err instanceof HttpError) {
     return c.json(
       { error: err.message, code: err.code ?? null },

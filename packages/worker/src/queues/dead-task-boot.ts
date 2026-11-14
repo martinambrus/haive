@@ -1,3 +1,4 @@
+import { parseDerivedRunPlan, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
@@ -86,19 +87,23 @@ export function deadTaskResolution(
     currentStepId: string | null;
     runListSnapshot: string[] | null;
     customSteps: unknown;
+    derivedRunPlan?: unknown;
+    executionPath?: string | null;
     /** The step ids its last task.dead event named. */
     deathNamed?: readonly string[];
   },
   strategy: ResolvedTaskContext['runListStrategy'],
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
+  if (strategy === 'derived') parseDerivedRunPlan(task.derivedRunPlan);
   const scope = {
     taskId: task.id,
     workflowType: task.type as WorkflowType,
-    runListSnapshot: task.runListSnapshot,
+    runListSnapshot:
+      task.derivedRunPlan != null ? [...pinnedTaskStepIds(task)!] : task.runListSnapshot,
     customSteps: parseCustomSteps(task.customSteps),
   };
-  const isStatic = strategy === 'static';
+  const isStatic = strategy === 'static' || strategy === 'derived';
   const unresolved = isStatic ? [...resolveRunList(scope, registry).unresolved] : [];
   // A task with no snapshot keeps no list to re-check, so the record of its death says what was missing.
   if (task.runListSnapshot === null) {
@@ -117,7 +122,7 @@ export function deadTaskResolution(
   return {
     unresolved,
     outsideList:
-      isStatic && task.runListSnapshot !== null && !task.runListSnapshot.includes(current)
+      isStatic && scope.runListSnapshot !== null && !scope.runListSnapshot.includes(current)
         ? current
         : null,
   };
@@ -297,6 +302,8 @@ const readCandidates = (db: Database | DbTx, extra: SQL | undefined) =>
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
       runListSnapshot: schema.tasks.runListSnapshot,
+      derivedRunPlan: schema.tasks.derivedRunPlan,
+      executionPath: schema.tasks.executionPath,
       customSteps: schema.tasks.customSteps,
       deadAt: schema.tasks.deadAt,
       deadReason: schema.tasks.deadReason,
@@ -307,7 +314,7 @@ const readCandidates = (db: Database | DbTx, extra: SQL | undefined) =>
 type Candidate = Awaited<ReturnType<typeof readCandidates>>[number];
 
 async function judgeCandidate(db: Database, c: Candidate) {
-  const { runListStrategy } = await taskTypeRuntimeFor(db, c.type);
+  const { runListStrategy } = await taskTypeRuntimeFor(db, c.type, c.derivedRunPlan);
   const deathNamed =
     c.deadAt !== null && c.runListSnapshot === null ? await deathNamedSteps(db, c.id) : undefined;
   const found = deadTaskResolution({ ...c, deathNamed }, runListStrategy);

@@ -1,3 +1,4 @@
+import { derivedTaskWarnings } from '@haive/shared/modularity';
 import { assertTaskRootMergeIdle } from '../../lib/root-merge-busy.js';
 import { recordTaskModuleAdmissions } from '@haive/shared/modularity-server';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
@@ -324,7 +325,7 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where,
     // A task's pinned prompt steps can run to many KiB; no list reader needs them.
-    columns: { customSteps: false },
+    columns: { customSteps: false, derivedRunPlan: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -706,7 +707,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
       }
     }
-    const locked = await definitionForCreate(handle, body.type, { generic: true });
+    const locked = await definitionForCreate(handle, body.type, { generic: true, locked: true });
     // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
     if (
       locked.takesRootLock !== definition.takesRootLock ||
@@ -772,6 +773,12 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        derivedRunPlan: locked.derivedRunPlan
+          ? {
+              ...locked.derivedRunPlan,
+              integrationAdmissions: integrationAdmission.categoryModules,
+            }
+          : null,
         customSteps,
         status: 'created',
         expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
@@ -895,7 +902,15 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (queued) await enqueueStart(task.id, userId);
 
-  return c.json({ task: queued ?? task }, 201);
+  return c.json(
+    {
+      task: queued ?? task,
+      ...(task.derivedRunPlan != null
+        ? { warnings: derivedTaskWarnings(task.derivedRunPlan) }
+        : {}),
+    },
+    201,
+  );
 });
 
 // Read-only draft account resolution, registered before /:id.
@@ -1187,8 +1202,9 @@ taskRoutes.get('/:id', async (c) => {
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
-  // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
-  const { customSteps: _pinned, ...taskFields } = task;
+  // Pins feed flags and warnings, but the page never reads their full bodies.
+  const warnings = task.derivedRunPlan != null ? derivedTaskWarnings(task.derivedRunPlan) : null;
+  const { customSteps: _pinned, derivedRunPlan: _plan, ...taskFields } = task;
   const providerRows =
     task.cliProviderId === null
       ? await db
@@ -1261,6 +1277,7 @@ taskRoutes.get('/:id', async (c) => {
 
   return c.json({
     task: taskWithActive,
+    ...(warnings !== null ? { warnings } : {}),
     testChecks,
     dead: await loadTaskDead(db, task),
     stop: await loadTaskStop(db, task),

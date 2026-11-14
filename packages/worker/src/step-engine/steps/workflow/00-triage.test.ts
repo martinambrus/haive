@@ -104,6 +104,20 @@ describe('triageStep.form', () => {
     return { schema, field };
   }
 
+  it('shows the pinned path and audit flag after Retry even when the recommendation differs', () => {
+    const schema = triageStep.form!(
+      null as never,
+      { ...detected, pinnedPath: 'plan_tasklist', pinnedBroadAudit: false },
+      { recommended: 'full_workflow', rationale: 'new recommendation' },
+    )!;
+    expect(schema.fields.find((field) => field.id === 'path')).toMatchObject({
+      default: 'plan_tasklist',
+    });
+    expect(schema.fields.find((field) => field.id === 'broadAudit')).toMatchObject({
+      default: false,
+    });
+  });
+
   it('puts "(recommended)" in the chosen label and the rationale in its info tooltip', () => {
     const { field } = buildForm({ recommended: 'quick_bugfix', rationale: 'a small focused fix' });
     const rec = field.options.find((o) => o.value === 'quick_bugfix')!;

@@ -4,6 +4,7 @@ import { composableStepEntrySchema, type ComposableStepEntry } from '../modulari
 
 export interface StepCatalogRead {
   synced: boolean;
+  orderedRows: { stepId: string; workflowType: string; stepIndex: number | null }[];
   stepIds: Set<string>;
   dispatchesCli: Set<string>;
   composable: Map<string, ComposableStepEntry>;
@@ -14,11 +15,13 @@ export interface StepCatalogRead {
 /** `ordered` sorts in SQL: a JS sort would not reproduce the database's collation order. */
 export async function readStepCatalog(
   handle: Pick<Database, 'select'>,
-  opts: { ordered?: boolean } = {},
+  opts: { ordered?: boolean; lock?: boolean } = {},
 ): Promise<StepCatalogRead> {
   const read = handle
     .select({
       stepId: schema.stepCatalog.stepId,
+      workflowType: schema.stepCatalog.workflowType,
+      stepIndex: schema.stepCatalog.stepIndex,
       source: schema.stepCatalog.source,
       title: schema.stepCatalog.title,
       dispatchesCli: schema.stepCatalog.dispatchesCli,
@@ -26,9 +29,15 @@ export async function readStepCatalog(
       entry: schema.stepCatalog.entry,
     })
     .from(schema.stepCatalog);
-  const rows = await (opts.ordered ? read.orderBy(asc(schema.stepCatalog.stepId)) : read);
+  const ordered = opts.ordered ? read.orderBy(asc(schema.stepCatalog.stepId)) : read;
+  const rows = await (opts.lock ? ordered.for('share') : ordered);
   const catalog: StepCatalogRead = {
     synced: rows.length > 0,
+    orderedRows: rows.map(({ stepId, workflowType, stepIndex }) => ({
+      stepId,
+      workflowType,
+      stepIndex,
+    })),
     stepIds: new Set(rows.map((r) => r.stepId)),
     dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
     composable: new Map(),
@@ -56,3 +65,5 @@ export async function readStepCatalog(
 export * from './module-dependencies.js';
 export * from './module-drain.js';
 export * from './custom-tools-switch.js';
+
+export * from './derived-task-types.js';

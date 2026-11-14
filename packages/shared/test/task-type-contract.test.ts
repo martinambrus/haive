@@ -959,3 +959,53 @@ describe('validateTaskTypeDefaults', () => {
     ]);
   });
 });
+
+describe('derived availability precedence', () => {
+  it('checks active module state before invalid derived composition, after disabled/selectable/switches', () => {
+    const input = {
+      definition: {
+        ...definition({ source: 'admin' }),
+        runListStrategy: 'derived' as const,
+        stepIds: null,
+      },
+      switches: on,
+      catalog: null,
+      generic: true,
+      modules: new Map([['acme', moduleRow('Acme', { missing: true })]]),
+      derived: { valid: false, stepIds: ['module.acme.check'] },
+    };
+    expect(resolveTaskTypeAvailability(input)).toEqual({
+      available: false,
+      reason: 'module-missing',
+      modules: [{ id: 'acme', name: 'Acme' }],
+    });
+    expect(
+      resolveTaskTypeAvailability({
+        ...input,
+        definition: { ...input.definition, enabled: false },
+      }),
+    ).toEqual({ available: false, reason: 'disabled' });
+    expect(
+      resolveTaskTypeAvailability({
+        ...input,
+        definition: { ...input.definition, selectable: false },
+      }),
+    ).toEqual({ available: false, reason: 'not-selectable' });
+    expect(
+      resolveTaskTypeAvailability({ ...input, switches: { ...on, customEnabled: false } }),
+    ).toEqual({ available: false, reason: 'custom-types-off' });
+    expect(
+      resolveTaskTypeAvailability({
+        ...input,
+        modules: new Map([['acme', moduleRow('Acme', { deactivated: true })]]),
+      }),
+    ).toEqual({
+      available: false,
+      reason: 'module-deactivated',
+      modules: [{ id: 'acme', name: 'Acme' }],
+    });
+    expect(
+      resolveTaskTypeAvailability({ ...input, modules: new Map([['acme', moduleRow('Acme')]]) }),
+    ).toEqual({ available: false, reason: 'invalid-composition' });
+  });
+});

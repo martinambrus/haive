@@ -1,3 +1,4 @@
+import { pinDerivedWorkflowPath } from '../../derived-path.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -34,6 +35,8 @@ interface TriageDetect {
    *  "these should be plan nodes", and the user bounces between the two — on
    *  exactly the tasks both heuristics agree are large. */
   fromPlanChat: boolean;
+  pinnedPath?: ExecutionPath | null;
+  pinnedBroadAudit?: boolean;
 }
 
 /** The triage agent's optional aside: this looks less like one task than like
@@ -225,7 +228,15 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
   async detect(ctx: StepContext): Promise<TriageDetect> {
     const row = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { title: true, description: true, metadata: true, repositoryId: true },
+      columns: {
+        title: true,
+        description: true,
+        metadata: true,
+        repositoryId: true,
+        derivedRunPlan: true,
+        executionPath: true,
+        broadAudit: true,
+      },
     });
     const title = row?.title ?? '';
     const description = row?.description ?? '';
@@ -237,6 +248,9 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
       heuristicPath: h.path,
       heuristicReason: h.reason,
       repositoryId: row?.repositoryId ?? null,
+      pinnedBroadAudit:
+        row?.derivedRunPlan != null && row.executionPath != null ? row.broadAudit : undefined,
+      pinnedPath: row?.derivedRunPlan != null ? (row.executionPath as ExecutionPath | null) : null,
       fromPlanChat: meta.fromPlanChat === true,
     };
   },
@@ -332,7 +346,7 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
           id: 'path',
           label: 'Execution path',
           options,
-          default: r.recommended,
+          default: detected.pinnedPath ?? r.recommended,
           required: true,
         },
         {
@@ -346,7 +360,7 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
             'in tokens usage, as unticking it will potentially save you some tokens (but may ' +
             'also cost you more, as the spec or code could need more corrections after ' +
             'your review).',
-          default: true,
+          default: detected.pinnedBroadAudit ?? true,
           // Hide on quick_bugfix: that path's step set (SPINE) has neither audit step
           // (04a-spec-audit / 08c2-code-audit), so the flag does nothing there. The
           // plan_tasklist and full_workflow paths both include the audits. If a future
@@ -365,14 +379,22 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
     const parsedChoice = executionPathSchema.safeParse(values.path);
     const chosen: ExecutionPath = parsedChoice.success ? parsedChoice.data : r.recommended;
     const broadAudit = resolveBroadAudit(chosen, values.broadAudit);
-    await ctx.db
-      .update(schema.tasks)
-      .set({ executionPath: chosen, broadAudit, updatedAt: new Date() })
-      .where(eq(schema.tasks.id, ctx.taskId));
+    const pinned = await pinDerivedWorkflowPath(ctx, chosen, broadAudit);
+    if (!pinned)
+      await ctx.db
+        .update(schema.tasks)
+        .set({ executionPath: chosen, broadAudit, updatedAt: new Date() })
+        .where(eq(schema.tasks.id, ctx.taskId));
+    const effectiveBroadAudit = pinned ? pinned.broadAudit : broadAudit;
     ctx.logger.info(
-      { chosen, recommended: r.recommended, source: r.source, broadAudit },
+      { chosen, recommended: r.recommended, source: r.source, broadAudit: effectiveBroadAudit },
       'execution path selected',
     );
-    return { path: chosen, recommended: r.recommended, source: r.source, broadAudit };
+    return {
+      path: chosen,
+      recommended: r.recommended,
+      source: r.source,
+      broadAudit: effectiveBroadAudit,
+    };
   },
 };

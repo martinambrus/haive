@@ -1,8 +1,9 @@
 import { expect, it, vi } from 'vitest';
+import { DerivedRunPlanError } from '../src/modularity/derived-task-types.js';
 import { taskRunListIds } from '../src/step-engine/run-list.js';
 import { resolveTaskTypeAvailability } from '../src/modularity/task-types.js';
 
-it('refuses derived run-list selection before a static or live-list fallback', () => {
+it('names a missing derived plan before a static or live-list fallback', () => {
   const list = vi.fn(() => ['fallback-step']);
   for (const runListSnapshot of [null, ['pinned-step']]) {
     expect(() =>
@@ -15,13 +16,13 @@ it('refuses derived run-list selection before a static or live-list fallback', (
         },
         list,
       ),
-    ).toThrow('derived task types are not available yet');
+    ).toThrow(DerivedRunPlanError);
   }
   expect(list).not.toHaveBeenCalled();
 });
 
-it('refuses derived availability even with enabled switches and an unsynced catalog', () => {
-  expect(() =>
+it('reports invalid composition for derived availability without admitted candidates', () => {
+  expect(
     resolveTaskTypeAvailability({
       definition: {
         source: 'admin',
@@ -36,5 +37,5 @@ it('refuses derived availability even with enabled switches and an unsynced cata
       catalog: null,
       generic: true,
     }),
-  ).toThrow('derived task types are not available yet');
+  ).toEqual({ available: false, reason: 'invalid-composition' });
 });
