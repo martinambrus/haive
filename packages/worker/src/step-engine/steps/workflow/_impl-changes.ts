@@ -1,3 +1,4 @@
+import { isResourceLimitError } from '@haive/shared/fs-safe';
 import type { ImplementationFileSet, ChangedLineNotes } from '@haive/shared/step';
 export type { ImplementationFileSet, ChangedLineNotes, FileCoverage } from '@haive/shared/step';
 import type { DiffHunk, DiffFile } from '@haive/shared/step/review';
@@ -77,7 +78,11 @@ interface DirtyScan {
  *
  *  Cost: a repo with a large un-gitignored untracked tree now enumerates it and can crowd
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
-async function dirtyWorktreeFiles(worktreePath: string, signal?: AbortSignal): Promise<DirtyScan> {
+async function dirtyWorktreeFiles(
+  worktreePath: string,
+  signal?: AbortSignal,
+  propagateResourceErrors = false,
+): Promise<DirtyScan> {
   try {
     // -z keeps a name literal; plain porcelain C-quotes one with a space or a non-ASCII byte.
     const { stdout } = await gitExec(
@@ -96,7 +101,16 @@ async function dirtyWorktreeFiles(worktreePath: string, signal?: AbortSignal): P
           const head = await nestedRepositoryHead(
             worktreePath,
             entry.path,
-            signal ? (cwd, args, env, io) => gitRun(cwd, args, env, { ...io, signal }) : undefined,
+            signal || propagateResourceErrors
+              ? async (cwd, args, env, io) => {
+                  const result = await gitRun(cwd, args, env, { ...io, signal });
+                  if (propagateResourceErrors && isResourceLimitError({ code: result.noExit }))
+                    throw Object.assign(new Error('Git could not start due to a resource limit.'), {
+                      code: result.noExit,
+                    });
+                  return result;
+                }
+              : undefined,
           );
           if (head)
             nestedRepositories[entry.path] = head.commit === null ? 'unborn' : 'with commits';
@@ -105,6 +119,7 @@ async function dirtyWorktreeFiles(worktreePath: string, signal?: AbortSignal): P
     }
     return { files, untracked, nestedRepositories, error: null };
   } catch (err) {
+    if (propagateResourceErrors && isResourceLimitError(err)) throw err;
     const detail = err as { stderr?: unknown; message?: unknown };
     const stderr = typeof detail.stderr === 'string' ? detail.stderr.trim() : '';
     const message = typeof detail.message === 'string' ? detail.message.trim() : String(err);
@@ -149,6 +164,7 @@ async function resolveDiffBase(
   timeout?: number,
   forkPointOnly = false,
   signal?: AbortSignal,
+  propagateResourceErrors = false,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
@@ -160,6 +176,7 @@ async function resolveDiffBase(
       const sha = stdout.toString().trim();
       if (sha) return sha;
     } catch (err) {
+      if (propagateResourceErrors && isResourceLimitError(err)) throw err;
       // A git killed at its timeout said nothing, and HEAD would answer a narrower question.
       if ((err as { killed?: boolean }).killed) return null;
       // base branch renamed, deleted, or unrelated history — fall through to HEAD
@@ -169,7 +186,8 @@ async function resolveDiffBase(
   try {
     await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout, signal });
     return 'HEAD';
-  } catch {
+  } catch (err) {
+    if (propagateResourceErrors && isResourceLimitError(err)) throw err;
     return null;
   }
 }
@@ -179,11 +197,23 @@ async function readChangeDiff(
   baseBranch: string | null,
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
+  propagateResourceErrors = false,
 ): Promise<string | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch, undefined, false, signal);
+  const base = await resolveDiffBase(
+    worktreePath,
+    baseBranch,
+    undefined,
+    false,
+    signal,
+    propagateResourceErrors,
+  );
   if (!base) return null;
   const paths = denyContent
-    ? await readChangedPaths(worktreePath, baseBranch, { includeDeleted: true, signal })
+    ? await readChangedPaths(worktreePath, baseBranch, {
+        includeDeleted: true,
+        signal,
+        propagateResourceErrors,
+      })
     : undefined;
   if (paths === null) return null;
   const pathspecs = paths?.filter((p) => !denyContent!(p)).map((p) => ':(literal)' + p);
@@ -207,7 +237,8 @@ async function readChangeDiff(
       { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES, signal },
     );
     return stdout.toString();
-  } catch {
+  } catch (err) {
+    if (propagateResourceErrors && isResourceLimitError(err)) throw err;
     return null;
   }
 }
@@ -224,6 +255,7 @@ export async function readChangedPaths(
     timeoutMs?: number;
     forkPointOnly?: boolean;
     signal?: AbortSignal;
+    propagateResourceErrors?: boolean;
   } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(
@@ -232,6 +264,7 @@ export async function readChangedPaths(
     options.timeoutMs,
     options.forkPointOnly,
     options.signal,
+    options.propagateResourceErrors,
   );
   if (!base) return null;
   try {
@@ -246,7 +279,8 @@ export async function readChangedPaths(
       if (fields[i] !== 'D' || options.includeDeleted) paths.push(fields[i + 1]!);
     }
     return paths;
-  } catch {
+  } catch (err) {
+    if (options.propagateResourceErrors && isResourceLimitError(err)) throw err;
     return null;
   }
 }
@@ -255,7 +289,11 @@ export async function readChangedPaths(
 async function readCommittedDeletions(
   worktreePath: string,
   baseBranch: string | null,
-  options: { forkPointOnly?: boolean; signal?: AbortSignal } = {},
+  options: {
+    forkPointOnly?: boolean;
+    signal?: AbortSignal;
+    propagateResourceErrors?: boolean;
+  } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(
     worktreePath,
@@ -263,6 +301,7 @@ async function readCommittedDeletions(
     undefined,
     options.forkPointOnly,
     options.signal,
+    options.propagateResourceErrors,
   );
   if (!base) return null;
   try {
@@ -276,7 +315,8 @@ async function readCommittedDeletions(
       if (fields[i] === 'D') paths.push(fields[i + 1]!);
     }
     return paths;
-  } catch {
+  } catch (err) {
+    if (options.propagateResourceErrors && isResourceLimitError(err)) throw err;
     return null;
   }
 }
@@ -290,8 +330,15 @@ async function changedLineNotes(
   baseBranch: string | null,
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
+  propagateResourceErrors = false,
 ): Promise<ChangedLineNotes> {
-  const diff = await readChangeDiff(worktreePath, baseBranch, signal, denyContent);
+  const diff = await readChangeDiff(
+    worktreePath,
+    baseBranch,
+    signal,
+    denyContent,
+    propagateResourceErrors,
+  );
   return diff === null ? {} : parseChangedLineRanges(diff);
 }
 
@@ -311,6 +358,7 @@ export async function collectImplementationFiles(
     maxRound?: number;
     signal?: AbortSignal;
     denyContent?: (path: string) => boolean;
+    propagateResourceErrors?: boolean;
   } = {},
 ): Promise<ImplementationFileSet> {
   return collectChangeSet(
@@ -319,6 +367,7 @@ export async function collectImplementationFiles(
     await reportedFiles(ctx, options.maxRound),
     options.signal,
     options.denyContent,
+    options.propagateResourceErrors,
   );
 }
 
@@ -329,14 +378,21 @@ export async function collectChangeSet(
   files: Set<string>,
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
+  propagateResourceErrors = false,
 ): Promise<ImplementationFileSet> {
-  const scan = await dirtyWorktreeFiles(worktreePath, signal);
+  const scan = await dirtyWorktreeFiles(worktreePath, signal, propagateResourceErrors);
   for (const f of scan.files) files.add(f);
 
   // Which lines of each file the change wrote. Measured against the fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const measured = await changedLineNotes(worktreePath, baseBranch, signal, denyContent);
+  const measured = await changedLineNotes(
+    worktreePath,
+    baseBranch,
+    signal,
+    denyContent,
+    propagateResourceErrors,
+  );
   for (const p of scan.untracked) {
     const nested = scan.nestedRepositories[p];
     measured[p] ??= nested ? `nested repository (${nested})` : 'new file';
@@ -345,6 +401,7 @@ export async function collectChangeSet(
   const deletions = await readCommittedDeletions(worktreePath, baseBranch, {
     forkPointOnly: true,
     signal,
+    propagateResourceErrors,
   });
   for (const p of deletions ?? []) {
     files.add(p);
@@ -354,6 +411,7 @@ export async function collectChangeSet(
   const committed = await readChangedPaths(worktreePath, baseBranch, {
     forkPointOnly: true,
     signal,
+    propagateResourceErrors,
   });
   for (const p of committed ?? []) files.add(p);
   const all = [...files];

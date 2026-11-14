@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { readTextNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
-import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
+import { readTextNoFollow, lstatNoFollow, isResourceLimitError } from '@haive/shared/fs-safe';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -122,6 +122,13 @@ export function findingUpstream(f: {
   return f.upstream === undefined ? upstreamKind(f.path ?? f.file) : f.upstream;
 }
 
+function preserveResourceError(result: GitRunResult, propagate = false): void {
+  if (propagate && isResourceLimitError({ code: result.noExit }))
+    throw Object.assign(new Error('Git could not start due to a resource limit.'), {
+      code: result.noExit,
+    });
+}
+
 /** show/cat-file use the same failure status for absent entries and unreadable blobs.
  * Only a separate quiet presence probe answering 1 establishes absence. */
 async function readBaseline(
@@ -129,6 +136,7 @@ async function readBaseline(
   refPath: string,
   existenceOnly = false,
   signal?: AbortSignal,
+  propagateResourceErrors = false,
 ): Promise<string | null> {
   const result = await gitRun(
     workspace,
@@ -136,6 +144,7 @@ async function readBaseline(
     undefined,
     { signal },
   );
+  preserveResourceError(result, propagateResourceErrors);
   if (result.code === 0) return result.stdout;
   const description = existenceOnly ? `the Drupal 7 marker ${refPath}` : refPath;
   if (gitGaveNoAnswer(result)) {
@@ -144,6 +153,7 @@ async function readBaseline(
   const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath], undefined, {
     signal,
   });
+  preserveResourceError(presence, propagateResourceErrors);
   if (presence.code === 1) return null;
   throw new Error(`Cannot read ${description} at the repository baseline: git read failed.`);
 }
@@ -156,6 +166,7 @@ export async function loadDependencyPolicy(
     maxRound?: number;
     signal?: AbortSignal;
     denyContent?: (path: string) => boolean;
+    propagateResourceErrors?: boolean;
   } = {},
 ): Promise<DependencyPolicy> {
   const previous = await loadPreviousStepOutput(
@@ -176,6 +187,7 @@ export async function loadDependencyPolicy(
     : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD'], undefined, {
         signal: options.signal,
       });
+  preserveResourceError(base, options.propagateResourceErrors);
   if (base.code !== 0) {
     throw new Error('Cannot establish the repository baseline for dependency ownership.');
   }
@@ -189,14 +201,25 @@ export async function loadDependencyPolicy(
         `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
         false,
         options.signal,
+        options.propagateResourceErrors,
       );
   const baselineComposer = withheldPaths.includes('composer.json')
     ? null
-    : await readBaseline(workspace, `${base.stdout.trim()}:composer.json`, false, options.signal);
+    : await readBaseline(
+        workspace,
+        `${base.stdout.trim()}:composer.json`,
+        false,
+        options.signal,
+        options.propagateResourceErrors,
+      );
   const { anchor, prefix } = workspaceAnchor(workspace);
   const composer = withheldPaths.includes('composer.json')
     ? null
-    : await readTextNoFollow(anchor, `${prefix}composer.json`);
+    : await readTextNoFollow(
+        anchor,
+        `${prefix}composer.json`,
+        options.propagateResourceErrors ? { strict: true } : undefined,
+      );
   let drupal = false;
   const roots = [...DEFAULT_ROOTS];
   // Removing the framework from the working manifest cannot remove its protection.
@@ -236,8 +259,16 @@ export async function loadDependencyPolicy(
       `${base.stdout.trim()}:${marker}`,
       true,
       options.signal,
+      options.propagateResourceErrors,
     );
-    if (baselineDrupal7 !== null || (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null) {
+    if (
+      baselineDrupal7 !== null ||
+      (await lstatNoFollow(
+        anchor,
+        `${prefix}${marker}`,
+        options.propagateResourceErrors ? { strict: true } : undefined,
+      )) !== null
+    ) {
       drupal7Roots.push(root);
     }
   }

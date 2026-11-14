@@ -71,3 +71,55 @@ it('never requests denied dependency metadata from git or the current manifest',
       ),
   ).toBe(false);
 });
+
+it.each(['EMFILE', 'ENFILE'])(
+  'preserves %s at every collector read for host review only',
+  async (code) => {
+    const normal = vi.mocked(gitExec).getMockImplementation()!;
+    const stages = [
+      (args: string[]) => args.includes('status'),
+      (args: string[]) => args.includes('merge-base'),
+      (args: string[]) => args.includes('--unified=0'),
+      (args: string[]) => args.includes('--name-status') && args.includes('HEAD'),
+      (args: string[]) => args.includes('--name-status') && !args.includes('HEAD'),
+    ];
+    for (const stage of stages) {
+      const error = Object.assign(new Error(code), { code });
+      vi.mocked(gitExec).mockImplementation((args, io) =>
+        stage(args) ? Promise.reject(error) : normal(args, io),
+      );
+      await expect(
+        collectImplementationFiles(ctx, '/repo', {
+          propagateResourceErrors: true,
+        } as never),
+      ).rejects.toBe(error);
+      await expect(collectImplementationFiles(ctx, '/repo')).resolves.toBeDefined();
+    }
+  },
+);
+
+it.each(['EMFILE', 'ENFILE'])(
+  'preserves %s at every dependency git read for host review only',
+  async (code) => {
+    const normal = vi.mocked(gitRun).getMockImplementation()!;
+    for (const stage of [
+      'merge-base',
+      OWNERSHIP_POLICY_PATH,
+      'composer.json',
+      'cat-file',
+      'rev-parse',
+    ]) {
+      vi.mocked(gitRun).mockImplementation((cwd, args, env, io) =>
+        args.some((arg) => arg === stage || arg.endsWith(':' + stage))
+          ? Promise.resolve({ code: -1, noExit: code, stdout: '', stderr: '' })
+          : normal(cwd, args, env, io),
+      );
+      await expect(
+        loadDependencyPolicy(ctx, '/repo', {
+          propagateResourceErrors: true,
+        } as never),
+      ).rejects.toMatchObject({ code });
+      await expect(loadDependencyPolicy(ctx, '/repo')).rejects.not.toHaveProperty('code');
+    }
+  },
+);

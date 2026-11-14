@@ -232,7 +232,7 @@ export async function readReviewDiff(
         return true;
       }
     };
-    const readLimits = { ...limits, denyContent };
+    const readLimits = { ...limits, denyContent, propagateResourceErrors: true };
     scope = await collectImplementationFiles(ctx, worktree, readLimits);
     if (scope.scanError) return unavailable(scope, 'The implementation scan failed.');
     if (!scope.files.length) return unavailable(scope, 'The review scope is empty.');
