@@ -18,6 +18,49 @@ type Owner = Pick<Stats, 'uid' | 'gid' | 'mode'>;
 const absent = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
 export const INSTALL_FILE_NAMES = ['.env', ...RELEASE_BUNDLE_FILES, '.haive-bundle.json'] as const;
+const WRITTEN_NAMES = [...INSTALL_FILE_NAMES, '.haive-backup-kind'];
+const TEMP_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Under the upgrade lock, clean only our writer's crash leftovers in its known directories. */
+export async function cleanupInstallTemps(path: string): Promise<void> {
+  const info = await lstat(path).catch((error: unknown) => {
+    if (absent(error)) return undefined;
+    throw error;
+  });
+  if (!info) return;
+  await inInstall(path, async (root) => {
+    await root.removeTemps();
+    await withExistingDirectory(root, '.haive-upgrade', async (upgrades) => {
+      for (const name of await upgrades.names()) {
+        if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
+        await withExistingDirectory(upgrades, name, (run) =>
+          withExistingDirectory(run, name === 'pending' ? 'new' : 'previous', (files) =>
+            files.removeTemps(),
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function withExistingDirectory(
+  parent: InstallDirectory,
+  name: string,
+  work: (dir: InstallDirectory) => Promise<void>,
+): Promise<void> {
+  const info = await lstat(parent.path(name)).catch((error: unknown) => {
+    if (absent(error)) return undefined;
+    throw error;
+  });
+  // Never descend into a symlink, even if its target is another install directory.
+  if (!info?.isDirectory()) return;
+  const child = await parent.child(name);
+  try {
+    await work(child);
+  } finally {
+    await child.close();
+  }
+}
 
 /** Refuse links before readers or writers can disagree about which install file they use. */
 export async function requireRegularInstallFiles(dir: string): Promise<void> {
@@ -157,6 +200,27 @@ export class InstallDirectory {
 
   async names(): Promise<string[]> {
     return readdir(`/proc/self/fd/${this.handle.fd}`);
+  }
+  async removeTemps(): Promise<void> {
+    for (const name of await this.names()) {
+      if (
+        !WRITTEN_NAMES.some((file) => {
+          const prefix = `.${file}.`;
+          return name.startsWith(prefix) && TEMP_UUID.test(name.slice(prefix.length));
+        })
+      )
+        continue;
+      // unlink removes a leftover link itself. Never follow it or recursively remove directories.
+      const info = await lstat(this.path(name)).catch((error: unknown) => {
+        if (absent(error)) return undefined;
+        throw error;
+      });
+      if (!info || info.isDirectory()) continue;
+      await unlink(this.path(name)).catch((error: unknown) => {
+        if (!absent(error)) throw error;
+      });
+      await this.sync();
+    }
   }
   async sync(): Promise<void> {
     await this.handle.sync();

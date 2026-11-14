@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const h = vi.hoisted(() => ({
@@ -203,6 +203,65 @@ describe('bundle preflight', () => {
     expect(journal.startRun).not.toHaveBeenCalled();
     expect(images.prepareImages).not.toHaveBeenCalled();
     expect(dk.validateCompose).not.toHaveBeenCalled();
+  });
+  it('cleans only writer UUID temps before starting, without following file or directory links', async () => {
+    const stale = [
+      `..env.${randomUUID()}`,
+      `.docker-compose.yml.${randomUUID()}`,
+      `..haive-bundle.json.${randomUUID()}`,
+      `.haive-upgrade/pending/new/.docker-compose.run.yml.${randomUUID()}`,
+      `.haive-upgrade/older/previous/..haive-backup-kind.${randomUUID()}`,
+    ];
+    await mkdir(join(dir, '.haive-upgrade/pending/new'), { recursive: true });
+    await mkdir(join(dir, '.haive-upgrade/older/previous'), { recursive: true });
+    for (const name of stale) await writeFile(join(dir, name), env, { mode: 0o600 });
+    const outside = join(dir, 'outside');
+    await mkdir(join(outside, 'previous'), { recursive: true });
+    const untouched = [
+      '..env.not-a-uuid',
+      `..env.${randomUUID()}.bak`,
+      `.unrelated.${randomUUID()}`,
+      `outside/previous/..env.${randomUUID()}`,
+    ];
+    for (const name of untouched) await writeFile(join(dir, name), env);
+    await symlink(outside, join(dir, '.haive-upgrade/linked'));
+    const source = join(dir, 'link-source');
+    await writeFile(source, env);
+    const linkedTemp = `..env.${randomUUID()}`;
+    await symlink(source, join(dir, linkedTemp));
+    vi.mocked(journal.startRun).mockImplementationOnce(async () => {
+      for (const name of [...stale, linkedTemp])
+        await expect(readFile(join(dir, name))).rejects.toMatchObject({ code: 'ENOENT' });
+      return 'new-run';
+    });
+    expect(await main()).toBe(0);
+    for (const name of untouched) expect(await readFile(join(dir, name), 'utf8')).toBe(env);
+    expect(await readFile(source, 'utf8')).toBe(env);
+  });
+  it('check leaves stale writer temps untouched', async () => {
+    const name = `..env.${randomUUID()}`;
+    await writeFile(join(dir, name), env);
+    process.argv.push('--check');
+    expect(await main()).toBe(0);
+    expect(await readFile(join(dir, name), 'utf8')).toBe(env);
+  });
+  it('cleans stale temps before interrupted-run recovery without fetching a target', async () => {
+    const name = `..env.${randomUUID()}`;
+    await writeFile(join(dir, name), env);
+    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+      id: 'live',
+      fromVersion: '1.0.0',
+      toVersion: manifest.version,
+      startedAt: new Date(),
+      phase: 'migrate',
+      metadata: { migrationHead: manifest.migrationHead },
+    } as never);
+    vi.mocked(run.resume).mockImplementationOnce(async () => {
+      await expect(readFile(join(dir, name))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+    expect(await main()).toBe(0);
+    expect(run.resume).toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
   });
   it('bundle-absent keeps the old path, without a release-image pull or new refusal', async () => {
     const { bundle: _bundle, ...older } = manifest;
