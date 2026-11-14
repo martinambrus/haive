@@ -129,7 +129,7 @@ export async function captureTestImage(
             const chunks: Buffer[] = [];
             const data = Buffer.alloc(Math.min(file.size, 64 * 1024));
             let filled = 0;
-            while (filled < file.size) {
+            while (!withheld && filled < file.size) {
               const { bytesRead } = await fh.read(
                 data,
                 0,
@@ -152,7 +152,7 @@ export async function captureTestImage(
               BigInt(named.stats.dev) !== before.dev
             )
               throw new Error('test entry changed during read');
-            file.hash = hash.digest('hex');
+            file.hash = withheld ? 'withheld:present' : hash.digest('hex');
             file.status = withheld
               ? 'content withheld'
               : keep
@@ -441,7 +441,7 @@ export function fixTestEditsRow(
     for (const c of r.changes) {
       if (!safePath(c.path)) continue;
       body.push(
-        `- ${asPlainText(c.path)} (${c.kind}); before SHA-256: ${asPlainText(c.beforeHash ?? 'absent')}; after SHA-256: ${asPlainText(c.afterHash ?? 'absent')}`,
+        `- ${asPlainText(c.path)} (${c.kind}); before identity: ${asPlainText(c.beforeHash ?? 'absent')}; after identity: ${asPlainText(c.afterHash ?? 'absent')}`,
       );
       const bounded = cutPatch(displayLines(c.patch), Math.max(0, bytes), Math.max(0, lines));
       bytes -= Buffer.byteLength(bounded.patch);

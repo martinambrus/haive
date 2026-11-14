@@ -165,6 +165,7 @@ describe('host fix-pass test evidence', () => {
     for (const name of ['.env.test', '.auth/user.json', 'storage-state.json', 'custom.json']) {
       const file = image.files!.find((f) => f.path === `tests/${name}`)!;
       expect(file.status).toBe('content withheld');
+      expect(file.hash).toBe('withheld:present');
       expect(file.base64).toBeUndefined();
     }
     for (const name of ['id_rsa', '.env.example'])

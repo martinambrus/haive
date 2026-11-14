@@ -463,7 +463,7 @@ export async function loadFixTestRecords(
           ...image,
           files: image.files?.map((f) =>
             secretMaskDeniesPath(policy ?? secretMaskPolicy({}), f.path)
-              ? { ...f, status: 'content withheld', base64: undefined }
+              ? { ...f, hash: 'withheld:present', status: 'content withheld', base64: undefined }
               : {
                   ...f,
                   base64: f.status === 'available' && f.hash ? bytes.get(f.hash) : undefined,
