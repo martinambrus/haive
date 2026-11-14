@@ -14,7 +14,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('channel manifest controls', () => {
   it('refuses --manifest and --manifest-image together before IO', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch');
-    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
+    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue({ text: JSON.stringify(manifest) });
     await expect(
       loadManifest({
         manifest: 'https://invalid/release.json',
@@ -27,9 +27,9 @@ describe('channel manifest controls', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it('refuses a wrong channel', async () => {
-    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(
-      JSON.stringify({ ...manifest, channel: 'other' }),
-    );
+    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue({
+      text: JSON.stringify({ ...manifest, channel: 'other' }),
+    });
     await expect(
       loadManifest({
         manifestImage: 'private/haive-acme-release:9.9.9',
@@ -40,9 +40,9 @@ describe('channel manifest controls', () => {
     ).rejects.toThrow('channel');
   });
   it('refuses a wrong version', async () => {
-    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(
-      JSON.stringify({ ...manifest, version: '8.8.8' }),
-    );
+    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue({
+      text: JSON.stringify({ ...manifest, version: '8.8.8' }),
+    });
     await expect(
       loadManifest({
         manifestImage: 'private/haive-acme-release:9.9.9',
@@ -66,7 +66,7 @@ describe('channel manifest controls', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it('parses the shared schema and accepts a matching manifest', async () => {
-    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
+    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue({ text: JSON.stringify(manifest) });
     expect(
       await loadManifest({
         manifestImage: 'private/haive-acme-release:9.9.9',
@@ -108,7 +108,9 @@ it.each([
   ['private/haive-acme-release-evil:9.9.9', 'private'],
   ['private/haive-acme-release:9.9.9', ''],
 ])('refuses a foreign release ref or empty registry before pulling: %s', async (ref, registry) => {
-  const read = vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
+  const read = vi
+    .spyOn(dk, 'readReleaseManifestImage')
+    .mockResolvedValue({ text: JSON.stringify(manifest) });
   await expect(
     loadManifest({
       manifestImage: ref,

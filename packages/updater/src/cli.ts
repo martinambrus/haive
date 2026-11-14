@@ -8,6 +8,9 @@ import { configService, encryptionKeyBootDatabase, networkName } from '@haive/sh
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
+import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
+import { ensureEnvKeys } from './envkeys.js';
+import { UpgradeRefusal } from './refusal.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
@@ -110,6 +113,9 @@ export async function loadManifest(options: {
   channelRegistry?: string;
   channel: string;
   version?: string;
+  releaseImage?: string;
+  registry?: string;
+  onBundle?: (payload: Map<string, Buffer>) => void;
 }): Promise<ReleaseManifest> {
   const { manifest: source, manifestImage: image, channel, version } = options;
   if (source && image) throw new Error('--manifest and --manifest-image are mutually exclusive');
@@ -122,20 +128,44 @@ export async function loadManifest(options: {
     if (!image!.startsWith(`${registry}/haive-${channel}-release:`))
       throw new Error('manifest image release repository differs from install channel registry');
   }
-  const text = image
-    ? await dk.readReleaseManifestImage(image, (container, error) => {
-        emit('warning', {
-          container,
-          message: `could not remove release manifest container ${container}: ${safeErrorMessage(error)}`,
-        });
-      })
-    : /^https?:\/\//.test(source!)
-      ? await (await fetch(source!)).text()
-      : await readFile(source!, 'utf8');
+  const cleanup = (container: string, error: unknown) => {
+    emit('warning', {
+      container,
+      message: `could not remove release manifest container ${container}: ${safeErrorMessage(error)}`,
+    });
+  };
+  const loaded = image ? await dk.readReleaseManifestImage(image, cleanup) : undefined;
+  let response: Response | undefined;
+  const text =
+    loaded?.text ??
+    (/^https?:\/\//.test(source!)
+      ? await (response = await fetch(source!)).text()
+      : await readFile(source!, 'utf8'));
   const target = parseReleaseManifest(JSON.parse(text));
   if (target.channel !== channel) throw new Error('manifest channel differs from install channel');
   if (version !== undefined && target.version !== version)
     throw new Error('manifest version differs from requested target version');
+  if (target.bundle) {
+    if (
+      response &&
+      (!source?.startsWith('https://') || (response.url && !response.url.startsWith('https://')))
+    )
+      throw new UpgradeRefusal(
+        'bundle-manifest-insecure',
+        'release bundle requires an HTTPS manifest URL',
+      );
+    const payload =
+      loaded ??
+      (await dk.readReleaseManifestImage(
+        options.releaseImage ??
+          `${options.registry ?? 'ghcr.io/martinambrus'}/haive-release:${target.version}`,
+        cleanup,
+        { manifest: target },
+      ));
+    if (!payload.bundle)
+      throw new UpgradeRefusal('bundle-invalid', 'release bundle payload is missing');
+    options.onBundle?.(payload.bundle);
+  } else emit('bundle-absent');
   return target;
 }
 
@@ -209,6 +239,8 @@ export async function main(): Promise<number> {
       channelRegistry: imageSettings.HAIVE_CHANNEL_REGISTRY,
       channel,
       version: arg('version'),
+      releaseImage: arg('release-image'),
+      registry,
     };
     // Recovery needs no target, so a missing one is refused only where a target is read.
     const missingTarget = (): string | undefined =>
@@ -247,11 +279,12 @@ export async function main(): Promise<number> {
   let hasRun = false;
   let fromVersion = 'unknown';
   let toVersion = attemptVersion(arg('version'));
+  let envAdded: string[] = [];
   let terminal:
     | {
         status: 'refused' | 'failed';
         error: string;
-        metadata: { refusal?: string };
+        metadata: { refusal?: string; envAdded?: string[] };
       }
     | undefined;
   const report = (event: string, fields: Record<string, unknown> = {}) => {
@@ -259,7 +292,10 @@ export async function main(): Promise<number> {
       terminal = {
         status: event === 'refused' ? 'refused' : 'failed',
         error: String(fields.message ?? 'unknown error'),
-        metadata: typeof fields.refusal === 'string' ? { refusal: fields.refusal } : {},
+        metadata: {
+          ...(typeof fields.refusal === 'string' ? { refusal: fields.refusal } : {}),
+          ...(envAdded.length ? { envAdded } : {}),
+        },
       };
     }
     emit(event, fields);
@@ -363,7 +399,13 @@ export async function main(): Promise<number> {
       report('error', { message: usage });
       return EXIT.usage;
     }
-    const target = await loadManifest(manifestOptions);
+    let payload: Map<string, Buffer> | undefined;
+    const target = await loadManifest({
+      ...manifestOptions,
+      onBundle: (files) => {
+        payload = files;
+      },
+    });
     toVersion = attemptVersion(target.version);
 
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
@@ -393,6 +435,17 @@ export async function main(): Promise<number> {
       report('refused', { refusal: check.refusal, message: check.message });
       return EXIT.refused;
     }
+    if (target.bundle) {
+      const classification = await classifyBundle(compose, target.bundle);
+      requireUnmodifiedBundle(classification, flag('replace-modified-bundle'));
+      report('bundle-classified', {
+        ...classification,
+        replaceModifiedBundle: flag('replace-modified-bundle'),
+      });
+      // Check all required keys now, without generating or changing files. Actual additions follow
+      // the --check return, and still precede startRun and the first hold.
+      await ensureEnvKeys(envFile, target.bundle.env, { check: true });
+    }
     report('preflight-ok', { from: fromVersion, to: target.version });
 
     // `--check` stops here, having changed nothing. This is also where a support conversation
@@ -403,15 +456,27 @@ export async function main(): Promise<number> {
       return EXIT.ok;
     }
 
-    // Pull BEFORE any hold is applied: a failed pull must cost nothing.
+    let pullCompose = compose;
+    if (target.bundle) {
+      pullCompose = await stageBundle(compose, target.bundle, payload!);
+      envAdded = await ensureEnvKeys(envFile, target.bundle.env, { emit: report });
+    }
+    // Pull BEFORE any hold is applied. Generated keys intentionally remain after a later failure.
     const targetImages = await prepareImages(
-      compose,
+      pullCompose,
       envFile,
       target.version,
       registry,
       imageSettings,
       channel !== 'public' ? target.images : undefined,
     );
+    if (target.bundle)
+      await dk.validateCompose(pullCompose, {
+        ...process.env,
+        HAIVE_VERSION: target.version,
+        HAIVE_REGISTRY: registry,
+        ...targetImages,
+      });
     report('pulled', { version: target.version });
 
     const runId = await startRun(sql, {
@@ -423,6 +488,9 @@ export async function main(): Promise<number> {
         imageRegistry: registry,
         previousImages,
         targetImages,
+        ...(target.bundle
+          ? { envAdded, replaceModifiedBundle: flag('replace-modified-bundle') }
+          : {}),
       },
     });
 
@@ -480,7 +548,15 @@ export async function main(): Promise<number> {
       return EXIT.failed;
     }
   } catch (err) {
-    terminal = { status: 'failed', error: scrubErrorPaths(safeErrorMessage(err)), metadata: {} };
+    if (err instanceof UpgradeRefusal) {
+      report('refused', { refusal: err.refusal, message: err.message });
+      return EXIT.refused;
+    }
+    terminal = {
+      status: 'failed',
+      error: scrubErrorPaths(safeErrorMessage(err)),
+      metadata: envAdded.length ? { envAdded } : {},
+    };
     throw err;
   } finally {
     if (locked && !hasRun && !flag('check') && terminal) {

@@ -6,10 +6,17 @@ vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: h.exec }),
   spawn: h.spawn,
 }));
-import { readReleaseManifestImage } from './docker.js';
+import { readReleaseManifestImage, streamSingleFile, MANIFEST_MAX } from './docker.js';
 import { loadManifest } from './cli.js';
+import { createHash, randomBytes } from 'node:crypto';
 
-const MAX = 1024 * 1024;
+const MAX = 8;
+const manifestText = JSON.stringify({
+  manifestVersion: 1,
+  version: '1.2.0',
+  builtAt: '2026-11-14',
+  migrationHead: '0221',
+});
 function header(name = 'release.json', size = 21, type = '0') {
   const block = Buffer.alloc(512);
   block.write(name);
@@ -24,22 +31,21 @@ function checksum(block: Buffer) {
   const sum = block.reduce((sum, byte) => sum + byte, 0);
   block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
 }
-function tar(
-  body = Buffer.from('{"manifestVersion":1}'),
-  block = header('release.json', body.length),
-) {
+function tar(body = Buffer.from(manifestText), block = header('release.json', body.length)) {
   return Buffer.concat([block, body, Buffer.alloc(((512 - (body.length % 512)) % 512) + 1024)]);
 }
 let chunks: Iterable<Buffer>;
 let cpError: Error | undefined;
 let killed: boolean;
 let delivered: number;
+let archives: Buffer[][] | undefined;
 beforeEach(() => {
   vi.stubEnv('HAIVE_INSTALL_ID', 't534_test');
   chunks = [tar()];
   cpError = undefined;
   killed = false;
   delivered = 0;
+  archives = undefined;
   h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => ({
     stdout: args[0] === 'create' ? 'container-id\n' : '',
   }));
@@ -54,7 +60,7 @@ beforeEach(() => {
         return true;
       }),
     });
-    const iterator = chunks[Symbol.iterator]();
+    const iterator = (archives?.shift() ?? chunks)[Symbol.iterator]();
     const send = () => {
       if (stopped) return;
       if (cpError) {
@@ -76,12 +82,150 @@ beforeEach(() => {
     return child;
   });
 });
+
+const bundleBody = Buffer.from('services: {}\n');
+const bundleHash = `sha256:${createHash('sha256').update(bundleBody).digest('hex')}`;
+const bundledManifest = {
+  manifestVersion: 1,
+  version: '1.2.0',
+  builtAt: '2026-11-14',
+  migrationHead: '0221',
+  bundle: {
+    files: { 'docker-compose.yml': bundleHash, 'docker-compose.run.yml': bundleHash },
+    env: [],
+    known: [],
+  },
+};
+it.each(['wrong-name', 'symlink', 'oversize', 'hash-mismatch', 'missing'])(
+  'refuses invalid bundle file: %s',
+  async (fault) => {
+    const { readReleaseManifestImage } = await import('./docker.js');
+    const body = fault === 'hash-mismatch' ? Buffer.from('different') : bundleBody;
+    const block = header(
+      fault === 'wrong-name' ? '../docker-compose.yml' : 'docker-compose.yml',
+      body.length,
+      fault === 'symlink' ? '2' : '0',
+    );
+    archives = [
+      [tar(Buffer.from(JSON.stringify(bundledManifest)))],
+      [fault === 'missing' ? Buffer.alloc(1024) : tar(body, block)],
+      [tar(bundleBody, header('docker-compose.run.yml', bundleBody.length))],
+    ];
+    await expect(
+      readReleaseManifestImage('private/release:1', undefined, {
+        maxBundleBytes: fault === 'oversize' ? 8 : undefined,
+      }),
+    ).rejects.toMatchObject({ refusal: 'bundle-invalid' });
+    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
+  },
+);
+
+it('reads each bundle file separately from one manifest container and pins the production cap', async () => {
+  const { BUNDLE_FILE_MAX } = await import('./docker.js');
+  expect(BUNDLE_FILE_MAX).toBe(256 * 1024);
+  archives = [
+    [tar(Buffer.from(JSON.stringify(bundledManifest)))],
+    [tar(bundleBody, header('docker-compose.yml', bundleBody.length))],
+    [tar(bundleBody, header('docker-compose.run.yml', bundleBody.length))],
+  ];
+  const result = await readReleaseManifestImage('private/release:1');
+  expect(result.bundle?.get('docker-compose.yml')).toEqual(bundleBody);
+  expect(h.exec.mock.calls.filter((call) => call[1][0] === 'create')).toHaveLength(1);
+  expect(h.spawn.mock.calls.map((call) => call[1])).toEqual([
+    ['cp', 'container-id:/release.json', '-'],
+    ['cp', 'container-id:/bundle/docker-compose.yml', '-'],
+    ['cp', 'container-id:/bundle/docker-compose.run.yml', '-'],
+  ]);
+});
+
+it.each([undefined, 'mirror.test/haive-release:1.2.0'])(
+  'uses public URL hashes as the trust anchor, release image override=%s',
+  async (releaseImage) => {
+    const urlManifest = { ...bundledManifest, channel: 'public' };
+    const imageManifest = {
+      ...bundledManifest,
+      bundle: {
+        ...bundledManifest.bundle,
+        files: {
+          'docker-compose.yml': `sha256:${'0'.repeat(64)}`,
+          'docker-compose.run.yml': `sha256:${'0'.repeat(64)}`,
+        },
+      },
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(urlManifest)));
+    archives = [
+      [tar(Buffer.from(JSON.stringify(imageManifest)))],
+      [tar(bundleBody, header('docker-compose.yml', bundleBody.length))],
+      [tar(bundleBody, header('docker-compose.run.yml', bundleBody.length))],
+    ];
+    const onBundle = vi.fn();
+    const target = await loadManifest({
+      manifest: 'https://release.test/release.json',
+      channel: 'public',
+      registry: 'registry.test',
+      releaseImage,
+      onBundle,
+    });
+    expect(target.bundle?.files).toEqual(urlManifest.bundle.files);
+    expect(onBundle).toHaveBeenCalledWith(
+      new Map(Object.keys(urlManifest.bundle.files).map((name) => [name, bundleBody])),
+    );
+    expect(h.exec.mock.calls[0]![1]).toEqual([
+      'pull',
+      releaseImage ?? 'registry.test/haive-release:1.2.0',
+    ]);
+    expect(h.exec.mock.calls.filter((call) => call[1][0] === 'create')).toHaveLength(1);
+  },
+);
+
+it.each(['pullImages', 'composeUp', 'composeStop'] as const)(
+  'preserves Compose failure diagnostics from %s',
+  async (operation) => {
+    const dk = await import('./docker.js');
+    const failure = Object.assign(new Error('Docker Compose process failed'), {
+      code: 1,
+      signal: 'SIGTERM',
+      killed: true,
+      stderr: 'dependency failed to start',
+    });
+    h.exec.mockRejectedValue(failure);
+    await expect(
+      dk[operation]({ dir: '/install', files: ['docker-compose.yml'] }, {}, []),
+    ).rejects.toBe(failure);
+  },
+);
+
+it('discards config -q output and errors', async () => {
+  const { validateCompose } = await import('./docker.js');
+  const value = randomBytes(24).toString('hex');
+  const ctx = {
+    dir: '/install',
+    files: ['/install/.haive-upgrade/pending/new/docker-compose.yml'],
+  };
+  h.exec.mockResolvedValue({ stdout: value, stderr: value });
+  expect(await validateCompose(ctx, {})).toBeUndefined();
+  h.exec.mockRejectedValue(new Error(`Compose stderr: ${value}`));
+  const failure = await validateCompose(ctx, {}).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ refusal: 'bundle-config-invalid' });
+  expect(JSON.stringify(failure)).not.toContain(value);
+  expect((failure as Error).message).not.toContain(value);
+  expect(h.exec.mock.calls[0]![1]).toContain('--project-directory');
+  expect(h.exec.mock.calls[0]![1]).toEqual([
+    'compose',
+    '-f',
+    ctx.files[0],
+    '--project-directory',
+    '/install',
+    'config',
+    '-q',
+  ]);
+});
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 it('streams a single regular manifest and removes its scratch-compatible container', async () => {
-  expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
+  expect(await readReleaseManifestImage('private/release:1')).toEqual({ text: manifestText });
   const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
   expect(calls[0]).toEqual(['pull', 'private/release:1']);
   expect(calls[1]).toEqual([
@@ -187,34 +331,41 @@ it.each(['prefix', 'link', 'checksum', 'size', 'truncated', 'extra', 'missing en
     await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
   },
 );
-it('accepts a one MiB manifest across split header and payload chunks', async () => {
+it('accepts a the injected cap manifest across split header and payload chunks', async () => {
   const archive = tar(Buffer.alloc(MAX, 'a'));
   chunks = [archive.subarray(0, 100), archive.subarray(100, 513), archive.subarray(513)];
-  expect((await readReleaseManifestImage('private/release:1')).length).toBe(MAX);
+  expect(MANIFEST_MAX).toBe(1024 * 1024);
+  expect(
+    (await streamSingleFile('container-id', '/release.json', 'release.json', MAX)).length,
+  ).toBe(MAX);
 });
-it('kills the copy as soon as the header declares more than one MiB', async () => {
+it('kills the copy as soon as the header declares more than the injected cap', async () => {
   chunks = (function* () {
     yield header('release.json', MAX + 1);
     for (let i = 0; i < 100; i++) yield Buffer.alloc(MAX);
   })();
-  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  await expect(
+    streamSingleFile('container-id', '/release.json', 'release.json', MAX),
+  ).rejects.toThrow('release manifest');
   expect(killed).toBe(true);
   expect(delivered).toBe(1);
 });
 it('bounds the tar stream even when a small declared file is followed by unbounded zeros', async () => {
   chunks = (function* () {
-    yield tar();
-    for (let i = 0; i < 100; i++) yield Buffer.alloc(64 * 1024);
+    yield tar(Buffer.from('{}'));
+    for (let i = 0; i < 100; i++) yield Buffer.alloc(512);
   })();
-  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  await expect(
+    streamSingleFile('container-id', '/release.json', 'release.json', MAX),
+  ).rejects.toThrow('release manifest');
   expect(killed).toBe(true);
-  expect(delivered).toBeLessThan(20);
+  expect(delivered).toBe(2);
 });
 
 it.each(['private/release:1', `private/release@sha256:${'b'.repeat(64)}`])(
   'keeps the pulled release image without probing ownership: %s',
   async (ref) => {
-    expect(await readReleaseManifestImage(ref)).toBe('{"manifestVersion":1}');
+    expect(await readReleaseManifestImage(ref)).toEqual({ text: manifestText });
     const calls = h.exec.mock.calls.map((call) => call[1]);
     expect(calls[0]).toEqual(['pull', ref]);
     expect(calls.filter((args) => args[0] === 'image')).toEqual([]);

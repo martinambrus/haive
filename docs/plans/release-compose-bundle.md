@@ -1,6 +1,6 @@
 # T648 plan: the release manifest image carries the compose bundle; `haive upgrade` swaps it
 
-PR1 shipped #1157; PR2 shipped #1172; PR3 this change
+PR1 shipped #1157; PR2 shipped #1172; PR3 shipped #1180; PR4 this change
 
 ## Context
 - The installer downloads the compose bundle once, at the install tag: `install/install.sh:662-664`, plus the GPU or Vulkan overlay at `:688-696`. `install/install.ps1:557-558` does the same.
