@@ -7,7 +7,7 @@ import type { StatsTimeCost } from '../api.js';
 import { StackedShareBar } from './stacked-share-bar.js';
 import { formatAgentHours } from '../lib/format-stats.js';
 
-// Fixed to category, validated against #0a0a0a; named legend also identifies every segment.
+// Fixed to category, contrast-checked against #0a0a0a; named legend also identifies every segment.
 export const REPORT_CATEGORY_COLORS: Record<TimeCategory, string> = {
   setup: '#38bdf8',
   planning: '#fb923c',
