@@ -45,9 +45,8 @@ function fixture() {
 const identity = { stepId: '08-phase-5-verify', slot: 'test' as const, iteration: 0 };
 const verdict = (r: { ran: boolean; passed: boolean }) =>
   !r.ran ? ('not_run' as const) : r.passed ? ('passed' as const) : ('failed' as const);
-const replay = (outcome: string) => ({ ran: outcome !== 'not_run', passed: outcome === 'passed' });
 const run = (ctx: StepContext, result = { ran: true, passed: true }, over = {}) =>
-  recordCheckRun(ctx, { ...identity, ...over }, async () => result, verdict, replay);
+  recordCheckRun(ctx, { ...identity, ...over }, async () => result, verdict);
 beforeEach(() => {
   m.exec.mockReset().mockResolvedValue({ ran: true, exitCode: 0, output: '' });
 });
@@ -64,7 +63,6 @@ it.each(['test', 'lint', 'php_lint', 'typecheck'] as const)(
         return { ran: true, passed: true };
       },
       verdict,
-      replay,
     );
     expect(s.rows()[0]).toMatchObject({ slot, outcome: 'passed', endedAt: expect.any(Date) });
   },
@@ -89,20 +87,20 @@ it('preserves the cancellation and finalizes an interrupted run', async () => {
         throw error;
       },
       verdict,
-      replay,
     ),
   ).rejects.toBe(error);
   expect(s.rows()[0]).toMatchObject({ outcome: 'interrupted', endedAt: expect.any(Date) });
 });
-it('does not execute a completed replay; explicit retry and loop iterations get new attempts', async () => {
+it('re-executes a replay; explicit retry and loop iterations get new attempts', async () => {
   const s = fixture();
   await run(s.ctx);
   const execute = vi.fn(async () => ({ ran: true, passed: false }));
-  expect(await recordCheckRun(s.ctx, identity, execute, verdict, replay)).toEqual({
+  expect(await recordCheckRun(s.ctx, identity, execute, verdict)).toEqual({
     ran: true,
-    passed: true,
+    passed: false,
   });
-  expect(execute).not.toHaveBeenCalled();
+  expect(execute).toHaveBeenCalledOnce();
+  expect(s.rows()[0]?.outcome).toBe('failed');
   s.ctx.epoch = 9;
   await run(s.ctx);
   expect(s.rows()).toHaveLength(1);
@@ -111,14 +109,28 @@ it('does not execute a completed replay; explicit retry and loop iterations get 
   await run(s.ctx, undefined, { iteration: 1 });
   expect(s.rows()).toHaveLength(3);
 });
-it.each(['running', 'interrupted'] as const)(
-  'keeps %s incomplete on replay until a deliberate retry',
+it.each(['running', 'interrupted', 'passed', 'failed', 'not_run'] as const)(
+  'takes over a prior %s observation before executing',
   async (outcome) => {
     const s = fixture();
     await run(s.ctx);
-    s.f.patch(schema.taskCheckRuns, s.rows()[0]!.id as string, { outcome, endedAt: null });
-    await expect(run(s.ctx)).rejects.toThrow(/incomplete/);
+    s.f.patch(schema.taskCheckRuns, s.rows()[0]!.id as string, {
+      outcome,
+      startedAt: new Date(0),
+      endedAt: new Date(1000),
+    });
+    await recordCheckRun(
+      s.ctx,
+      identity,
+      async () => {
+        expect(s.rows()[0]).toMatchObject({ outcome: 'running', endedAt: null });
+        expect(s.rows()[0]?.startedAt).not.toEqual(new Date(0));
+        return { ran: true, passed: true };
+      },
+      verdict,
+    );
     expect(s.rows()).toHaveLength(1);
+    expect(s.rows()[0]).toMatchObject({ outcome: 'passed', endedAt: expect.any(Date) });
   },
 );
 it.each(['insert', 'update'] as const)(
@@ -163,7 +175,7 @@ it('verify records each selected slot and no skipped slot', async () => {
     ['typecheck', 'passed'],
   ]);
   await phase5VerifyStep.apply(s.ctx, verifyArgs());
-  expect(m.exec).toHaveBeenCalledTimes(4);
+  expect(m.exec).toHaveBeenCalledTimes(8);
   expect(s.rows()).toHaveLength(4);
   const skipped = fixture();
   await phase5VerifyStep.apply(skipped.ctx, verifyArgs({ formValues: {} }));
@@ -217,13 +229,58 @@ it('selective runs record each loop pass, preserve retry history and skip no-cha
     ['08b-test-management', 'test', 'passed'],
     ['08b-test-management', 'test', 'passed'],
   ]);
-  expect(m.exec).toHaveBeenCalledTimes(2);
+  expect(m.exec).toHaveBeenCalledTimes(3);
   await testManagementStep.apply(s.ctx, {
     ...selectiveArgs(),
     formValues: { action: 'skip' },
   } as never);
   expect(s.rows()).toHaveLength(2);
 });
+
+const applyCheck = async (step: '08' | '08b', ctx: StepContext) =>
+  step === '08'
+    ? phase5VerifyStep.apply(ctx, verifyArgs())
+    : testManagementStep.apply(ctx, selectiveArgs() as never);
+
+it.each(['08', '08b'] as const)(
+  '%s apply re-runs recovery observations and keeps fresh diagnostics',
+  async (step) => {
+    for (const outcome of ['running', 'interrupted', 'failed'] as const) {
+      const s = fixture();
+      await applyCheck(step, s.ctx);
+      for (const row of s.rows()) s.f.patch(schema.taskCheckRuns, row.id as string, { outcome });
+      m.exec
+        .mockClear()
+        .mockResolvedValue({ ran: true, exitCode: 1, output: 'fresh assertion failure' });
+      const result = await applyCheck(step, s.ctx);
+      expect(m.exec).toHaveBeenCalledTimes(step === '08' ? 4 : 1);
+      expect(s.rows()).toHaveLength(step === '08' ? 4 : 1);
+      expect(s.rows().every((r) => r.outcome === 'failed')).toBe(true);
+      const check = 'test' in result ? result.test : result.testRun;
+      expect(check).toMatchObject({ ran: true, passed: false, output: 'fresh assertion failure' });
+    }
+  },
+);
+
+it.each(['08', '08b'] as const)(
+  '%s outcome is unchanged by a recording failure at begin or finish',
+  async (step) => {
+    for (const op of ['begin', 'finish'] as const) {
+      for (const exitCode of [0, 1]) {
+        m.exec.mockResolvedValue({ ran: true, exitCode, output: 'command diagnostics' });
+        const baseline = await applyCheck(step, fixture().ctx);
+        const s = fixture();
+        const fail = async () => {
+          throw new Error('recording offline');
+        };
+        if (op === 'begin') s.f.hooks.beforeInsert = fail;
+        else s.f.hooks.beforeUpdate = fail;
+        expect(await applyCheck(step, s.ctx)).toEqual(baseline);
+        expect(s.ctx.logger.warn).toHaveBeenCalled();
+      }
+    }
+  },
+);
 
 it('starts selective timing after browser provisioning, then classifies environment stops', async () => {
   const s = fixture();

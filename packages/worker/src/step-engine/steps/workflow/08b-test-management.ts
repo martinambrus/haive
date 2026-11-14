@@ -1086,7 +1086,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           await killStalePlaywrightRuns(runnerHandleForTask(ctx.taskId, d.repoSubpath!));
         }
 
-        const recorded = await recordCheckRun(
+        await recordCheckRun(
           ctx,
           { stepId: '08b-test-management', slot: 'test', iteration: args.iteration },
           async () => {
@@ -1166,21 +1166,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
             return { testRun, testsPassed, degradedNote };
           },
           (r) => (!r.testRun.ran ? 'not_run' : r.testRun.passed ? 'passed' : 'failed'),
-          (outcome) => ({
-            testRun: {
-              ran: outcome !== 'not_run',
-              passed: outcome === 'passed',
-              command: cmd.args.join(' '),
-              output: `Reused recorded check: ${outcome}. Command output is not retained in check history.`,
-            },
-            testsPassed: outcome === 'not_run' ? null : outcome === 'passed',
-            degradedNote:
-              outcome === 'not_run' ? 'Previously recorded as not run in this attempt' : undefined,
-          }),
         );
-        testRun = recorded.testRun;
-        testsPassed = recorded.testsPassed;
-        degradedNote = recorded.degradedNote;
       }
 
       if (dropped.size > 0) {

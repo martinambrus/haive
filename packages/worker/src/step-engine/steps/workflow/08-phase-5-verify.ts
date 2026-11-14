@@ -1091,7 +1091,6 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     }
     const recorded = (
       slot: 'test' | 'lint' | 'php_lint' | 'typecheck',
-      cmd: SlotCommand,
       execute: () => Promise<CheckResult>,
     ) =>
       recordCheckRun(
@@ -1099,15 +1098,6 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         { stepId: '08-phase-5-verify', slot, iteration: args.iteration },
         execute,
         (r) => (!r.ran ? 'not_run' : r.passed ? 'passed' : 'failed'),
-        (outcome): CheckResult => ({
-          ran: outcome !== 'not_run',
-          passed: outcome === 'passed',
-          command: cmd.label,
-          output: `Reused recorded check: ${outcome}. Command output is not retained in check history.`,
-          ...(outcome === 'not_run'
-            ? { note: 'Previously recorded as not run in this attempt' }
-            : {}),
-        }),
       );
     let testEnvBlocker: ReturnType<typeof classifyTestEnvFailure> = null;
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
@@ -1119,7 +1109,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const envFramework = testCmd?.source === 'declared' ? 'playwright' : (testFramework ?? null);
     const test =
       values.runTest && testCmd
-        ? await recorded('test', testCmd, async () => {
+        ? await recorded('test', async () => {
             const testRun = await runSlotRaw('test', testCmd, ctx, ddevHandle);
             const check = testRun.check;
             testEnvBlocker =
@@ -1135,18 +1125,16 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         : skippedResult();
     const lint =
       values.runLint && lintCmd
-        ? await recorded('lint', lintCmd, () => runLint(lintCmd, ctx, workspacePath, ddevHandle))
+        ? await recorded('lint', () => runLint(lintCmd, ctx, workspacePath, ddevHandle))
         : skippedResult();
     const phpLint = phpLintCmd
       ? values.runLint
-        ? await recorded('php_lint', phpLintCmd, () =>
-            runLint(phpLintCmd, ctx, workspacePath, ddevHandle),
-          )
+        ? await recorded('php_lint', () => runLint(phpLintCmd, ctx, workspacePath, ddevHandle))
         : skippedResult()
       : undefined;
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await recorded('typecheck', typeCmd, () => runSlot('typecheck', typeCmd, ctx, ddevHandle))
+        ? await recorded('typecheck', () => runSlot('typecheck', typeCmd, ctx, ddevHandle))
         : skippedResult();
 
     const passed =

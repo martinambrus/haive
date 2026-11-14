@@ -13,7 +13,6 @@ export async function recordCheckRun<T>(
   check: { stepId: string; slot: CheckSlot; iteration: number },
   execute: () => Promise<T>,
   classify: (result: T) => SettledOutcome,
-  replay: (outcome: SettledOutcome) => T,
 ): Promise<T> {
   const t = schema.taskCheckRuns;
   const attemptId = JSON.stringify([
@@ -23,7 +22,7 @@ export async function recordCheckRun<T>(
     check.iteration,
   ]);
   let id: string | undefined;
-  let existing: { outcome: CheckOutcome } | undefined;
+  const startedAt = new Date();
   try {
     const inserted = await ctx.db
       .insert(t)
@@ -34,14 +33,14 @@ export async function recordCheckRun<T>(
         slot: check.slot,
         attemptId,
         outcome: 'running',
-        startedAt: new Date(),
+        startedAt,
       })
       .onConflictDoNothing({ target: [t.taskId, t.stepId, t.slot, t.attemptId] })
       .returning({ id: t.id });
     id = inserted[0]?.id;
     if (!id) {
-      [existing] = await ctx.db
-        .select({ outcome: t.outcome })
+      const [existing] = await ctx.db
+        .select({ id: t.id, outcome: t.outcome, startedAt: t.startedAt })
         .from(t)
         .where(
           and(
@@ -51,27 +50,42 @@ export async function recordCheckRun<T>(
             eq(t.attemptId, attemptId),
           ),
         );
+      if (existing) {
+        // Recovery repeats the command as before recording existed. Only the
+        // observation is replaced; a lost CAS must never prevent execution.
+        const [taken] = await ctx.db
+          .update(t)
+          .set({ outcome: 'running', startedAt, endedAt: null })
+          .where(
+            and(
+              eq(t.id, existing.id),
+              eq(t.outcome, existing.outcome),
+              eq(t.startedAt, existing.startedAt),
+            ),
+          )
+          .returning({ id: t.id });
+        id = taken?.id;
+      }
     }
   } catch (err) {
-    ctx.logger.warn({ err }, 'check run insert/read failed (non-fatal)');
-  }
-  if (existing) {
-    if (existing.outcome === 'running' || existing.outcome === 'interrupted') {
-      throw new Error(
-        `The recorded ${check.slot} check is incomplete. Use Retry to start a new attempt.`,
-      );
-    }
-    return replay(existing.outcome);
+    ctx.logger.warn({ err }, 'check run insert/read/takeover failed (non-fatal)');
   }
   let outcome: CheckOutcome = 'interrupted';
   try {
     const result = await execute();
-    outcome = classify(result);
+    try {
+      outcome = classify(result);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'check run classification failed (non-fatal)');
+    }
     return result;
   } finally {
     if (id) {
       try {
-        await ctx.db.update(t).set({ outcome, endedAt: new Date() }).where(eq(t.id, id));
+        await ctx.db
+          .update(t)
+          .set({ outcome, endedAt: new Date() })
+          .where(and(eq(t.id, id), eq(t.outcome, 'running'), eq(t.startedAt, startedAt)));
       } catch (err) {
         ctx.logger.warn({ err }, 'check run finalization failed (non-fatal)');
       }
