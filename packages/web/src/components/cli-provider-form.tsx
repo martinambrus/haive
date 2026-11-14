@@ -903,7 +903,7 @@ export function CliProviderForm({
               inside the image so your pin cannot drift.
             </p>
             {versionCache?.fetchedAt && (
-              <p className="mt-1 text-xs text-neutral-600">
+              <p className="mt-1 text-xs text-neutral-400">
                 Version list refreshed {new Date(versionCache.fetchedAt).toLocaleString()} (max
                 every 12h automatically).
               </p>

@@ -52,6 +52,10 @@ interface StreamJsonCollector {
    *  assistant fallback is all zero (unknown on zai/muse, not a measured zero). */
   getTokenUsage: () => CliTokenUsage | null;
   getRequestUsage: () => RequestUsageCapture;
+  /** Only the overwritten duplicate distinction needs parser state; replay derives other diagnostics. */
+  getRequestUsageDiagnostics: () => {
+    outputOnlyContradiction: boolean;
+  };
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its cost; its usage is per turn). Null when no result event carried one. */
   getApiDurationMs: () => number | null;
@@ -124,6 +128,8 @@ export function createStreamJsonCollector(
   let resultOutputKnown = false;
   let initialized = false;
   const requestIssues = new Set<string>();
+  let outputContradiction = false;
+  let otherContradiction = false;
   // Same message ids as assistantUsageByMessage; this strict view never changes legacy totals.
   const requestsByMessage = new Map<string, RequestUsage>();
   let billedUsageByModel = new Map<string, RequestUsage | null>();
@@ -373,8 +379,14 @@ export function createStreamJsonCollector(
       if (resultCount > 0) requestIssues.add('request-after-result');
       if (id && request) {
         const previous = requestsByMessage.get(id);
-        if (previous && JSON.stringify(previous) !== JSON.stringify(request))
+        if (previous && JSON.stringify(previous) !== JSON.stringify(request)) {
           requestIssues.add('contradictory-request');
+          const { outputTokens: previousOutput, ...previousPrompt } = previous;
+          const { outputTokens: nextOutput, ...nextPrompt } = request;
+          if (JSON.stringify(previousPrompt) === JSON.stringify(nextPrompt))
+            outputContradiction ||= previousOutput !== nextOutput;
+          else otherContradiction = true;
+        }
         requestsByMessage.set(id, request);
       }
       const msg = event.message as Record<string, unknown> | undefined;
@@ -590,7 +602,8 @@ export function createStreamJsonCollector(
       // Reconcile the billed entry for each observed model, not every ledger key:
       // titling tokens can be outside result.usage. A differently named entry may
       // corroborate the same token vector (grok/GLM aliases), without changing identity.
-      // An exact-name contradiction must never be rescued by another billed entry.
+      // Same-name entries may contain unobserved side calls too. Preserve their
+      // excess separately; a deficit must never be rescued by another billed entry.
       const modelSums = new Map<string | null, RequestUsage>();
       for (const r of requests) {
         const prior = modelSums.get(r.model);
@@ -605,12 +618,25 @@ export function createStreamJsonCollector(
               : null;
         }
       }
-      const billedMatches = (sum: RequestUsage, billed: RequestUsage | null | undefined) =>
-        billed != null &&
-        sum.inputTokens === billed.inputTokens &&
-        sum.cacheReadTokens === billed.cacheReadTokens &&
-        sum.cacheCreationTokens === billed.cacheCreationTokens &&
-        (!outputKnown || sum.outputTokens === billed.outputTokens);
+      const billedMatches = (
+        sum: RequestUsage,
+        billed: RequestUsage | null | undefined,
+        sameName = false,
+      ) => {
+        const matches = (observed: number, billed: number) =>
+          sameName ? billed >= observed : billed === observed;
+        return (
+          billed != null &&
+          matches(sum.inputTokens, billed.inputTokens) &&
+          matches(sum.cacheReadTokens, billed.cacheReadTokens) &&
+          matches(sum.cacheCreationTokens, billed.cacheCreationTokens) &&
+          (!outputKnown ||
+            (sum.outputTokens !== null &&
+              billed.outputTokens !== null &&
+              matches(sum.outputTokens, billed.outputTokens)))
+        );
+      };
+      const unobservedSameModel: NonNullable<RequestUsageCapture['unobservedSameModel']> = [];
       const billedUsages = [...billedUsageByModel.values()];
       for (const [model, modelSum] of modelSums) {
         // Mixed/unknown models already withhold coverage. Probe aliases only for
@@ -621,19 +647,53 @@ export function createStreamJsonCollector(
         if (modelCoverage !== 'single' || billedUsageByModel.size === 0) break;
         const matches =
           model !== null && billedUsageByModel.has(model)
-            ? billedMatches(modelSum, billedUsageByModel.get(model))
+            ? billedMatches(modelSum, billedUsageByModel.get(model), true)
             : billedUsages.some((billed) => billedMatches(modelSum, billed));
+        const sameName = model === null ? null : billedUsageByModel.get(model);
+        if (matches && sameName) {
+          const excess = {
+            model,
+            inputTokens: sameName.inputTokens - modelSum.inputTokens,
+            cacheReadTokens: sameName.cacheReadTokens - modelSum.cacheReadTokens,
+            cacheCreationTokens: sameName.cacheCreationTokens - modelSum.cacheCreationTokens,
+            outputTokens:
+              outputKnown && sameName.outputTokens !== null && modelSum.outputTokens !== null
+                ? sameName.outputTokens - modelSum.outputTokens
+                : null,
+            // The ledger does not break its cache writes down by TTL.
+            cacheCreation5mTokens:
+              sameName.cacheCreationTokens === modelSum.cacheCreationTokens ? 0 : null,
+            cacheCreation1hTokens:
+              sameName.cacheCreationTokens === modelSum.cacheCreationTokens ? 0 : null,
+          };
+          if (
+            excess.inputTokens > 0 ||
+            excess.cacheReadTokens > 0 ||
+            excess.cacheCreationTokens > 0 ||
+            (excess.outputTokens ?? 0) > 0
+          ) {
+            unobservedSameModel.push(excess);
+          }
+        }
         if (!matches) reasons.add('model-usage-mismatch');
       }
       const complete = reasons.size === 0;
       return {
         requests,
+        ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
         coverage: complete ? 'complete' : 'incomplete',
         inputConvention: 'exclusive',
         requestCount: complete ? requests.length : null,
         modelCoverage,
         reasons: [...reasons],
       };
+    },
+    getRequestUsageDiagnostics() {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return { outputOnlyContradiction: outputContradiction && !otherContradiction };
     },
     getTokenUsage(): CliTokenUsage | null {
       if (buffer.trim()) {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { CLI_PROVIDER_LIST, configService, trimOpenRouterModels } from '@haive/shared';
@@ -62,6 +63,81 @@ async function cost(providerName = 'codex') {
 }
 
 describe('tier refresh lifecycle', () => {
+  it('locks before reading live rows and guards closure when two refreshes overlap', async () => {
+    await refreshModelPrices(db);
+    feed = { x: { ...raw, tiered_pricing: [] } };
+    const statements: string[] = [];
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, 'transaction').mockImplementation((fn) =>
+      transaction(async (tx) => {
+        const execute = tx.execute.bind(tx);
+        vi.spyOn(tx, 'execute').mockImplementation((query) => {
+          statements.push(new PgDialect().sqlToQuery(query as never).sql);
+          return execute(query);
+        });
+        const update = tx.update.bind(tx);
+        vi.spyOn(tx, 'update').mockImplementation((table) => {
+          const builder = update(table);
+          const set = builder.set.bind(builder);
+          vi.spyOn(builder, 'set').mockImplementation((value) => {
+            const changed = set(value);
+            const where = changed.where.bind(changed);
+            vi.spyOn(changed, 'where').mockImplementation((condition) => {
+              expect(new PgDialect().sqlToQuery(condition!).sql).toContain(
+                '"effective_to" is null',
+              );
+              return where(condition);
+            });
+            return changed;
+          });
+          return builder;
+        });
+        return fn(
+          new Proxy(tx, {
+            get(target, key, receiver) {
+              if (key === 'select')
+                expect(statements.some((q) => q.includes('pg_advisory_xact_lock'))).toBe(true);
+              return Reflect.get(target, key, receiver);
+            },
+          }),
+        );
+      }),
+    );
+    await Promise.all([refreshModelPrices(db), refreshModelPrices(db)]);
+    expect(statements.filter((q) => q.includes('pg_advisory_xact_lock'))).toHaveLength(2);
+    expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(2);
+    expect(await live()).toMatchObject([{ rates: { pricingState: 'unsupported' } }]);
+  });
+  it.each(['55P03', '23505'])(
+    'returns a safe failed result when the price transaction fails with SQLSTATE %s',
+    async (code) => {
+      await refreshModelPrices(db);
+      const before = await fake.db.select().from(schema.cliModelPrices);
+      const syncBefore = await fake.db.select().from(schema.cliPricingSync);
+      const error = Object.assign(new Error('bound values must stay private'), {
+        query: 'UPDATE cli_model_prices SET rates = $1',
+        params: ['private-value'],
+        cause: Object.assign(new Error('driver detail must stay private'), { code }),
+      });
+      vi.spyOn(db, 'transaction').mockRejectedValueOnce(error);
+      feed = { x: { ...raw, input_cost_per_token: 3 } };
+      const result = await refreshModelPrices(db);
+      expect(result).toMatchObject({
+        ok: false,
+        refreshed: [],
+        errors: [
+          {
+            name: 'price:database',
+            error:
+              code === '55P03' ? 'Model price refresh lock timed out' : 'Database operation failed',
+          },
+        ],
+      });
+      expect(JSON.stringify(result)).not.toMatch(/private|UPDATE/);
+      expect(await fake.db.select().from(schema.cliModelPrices)).toEqual(before);
+      expect(await fake.db.select().from(schema.cliPricingSync)).toEqual(syncBefore);
+    },
+  );
   it('leaves untiered rows alone, replaces tiered rows once, then stops writing', async () => {
     for (const [modelKey, tiers] of [
       ['x', undefined],
@@ -125,7 +201,11 @@ describe('tier refresh lifecycle', () => {
     fake.hooks.beforeInsert = (table) => {
       if (table === schema.cliModelPrices) throw new Error('insert failed');
     };
-    await expect(refreshModelPrices(db)).rejects.toThrow('insert failed');
+    expect(await refreshModelPrices(db)).toMatchObject({
+      ok: false,
+      refreshed: [],
+      errors: expect.arrayContaining([{ name: 'price:database', error: 'insert failed' }]),
+    });
     expect(await cost()).toMatchObject({ source: 'computed' });
     expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(1);
   });

@@ -155,6 +155,55 @@ const PARTIAL: RefreshCliVersionsJobResult = {
 };
 
 describe('stored refresh result', () => {
+  it.each(['scheduled', 'manual'])(
+    'shows unsupported prices from a %s result without calling them failures',
+    async (mode) => {
+      const result = {
+        ok: true,
+        refreshed: [],
+        errors: [],
+        unsupported: [
+          { model: 'timed-model', reason: 'time-window' },
+          { model: 'variable-model', reason: 'variable-price' },
+        ],
+      };
+      let view: ReturnType<typeof createRenderer>;
+      if (mode === 'scheduled') {
+        const original = h.get.getMockImplementation()!;
+        h.get.mockImplementation((path: string) =>
+          path === '/cli-pricing/refresh/latest'
+            ? Promise.resolve({
+                run: {
+                  startedAt: '2026-11-01T00:00:00Z',
+                  finishedAt: '2026-11-01T00:01:00Z',
+                  trigger: 'scheduled',
+                  result,
+                },
+              })
+            : original(path),
+        );
+        view = createRenderer(() => createElement(PricingPage));
+        await settle(view);
+      } else {
+        view = await start();
+        status = { status: 'done', result };
+        await vi.advanceTimersByTimeAsync(2000);
+        view.draw();
+      }
+      const text = textOf(view.tree());
+      for (const expected of ['timed-model', 'time-window', 'variable-model', 'variable-price'])
+        expect(text).toContain(expected);
+      expect(alerts(view)).toHaveLength(0);
+      expect(
+        findAll(
+          view.tree(),
+          (node) =>
+            typeof node.props.className === 'string' &&
+            node.props.className.includes('text-indigo-300'),
+        ),
+      ).not.toHaveLength(0);
+    },
+  );
   it('shows a scheduled failure on page load without starting a job', async () => {
     h.get.mockImplementation(async (path: string) =>
       path === '/cli-pricing/refresh/latest'

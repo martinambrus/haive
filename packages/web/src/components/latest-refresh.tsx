@@ -90,6 +90,11 @@ export function LatestRefresh({
         new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime()));
   const displayedRun =
     preferResult && (run?.runId !== result?.runId || run?.finishedAt === null) ? null : run;
+  const displayedResult = preferResult
+    ? result
+    : displayedRun?.finishedAt
+      ? displayedRun.result
+      : null;
   return (
     <div className="space-y-2 text-sm text-neutral-400">
       {loadError && (
@@ -107,9 +112,20 @@ export function LatestRefresh({
           }
         />
       )}
-      <RefreshFailures
-        result={preferResult ? result : displayedRun?.finishedAt ? displayedRun.result : null}
-      />
+      <RefreshFailures result={displayedResult} />
+      {!!displayedResult?.unsupported?.length && (
+        <div className="space-y-2 text-neutral-400">
+          <InlineMarkdown body="These models have unsupported feed pricing and remain unpriced unless a manual rate or valid reported total applies." />
+          <ul className="space-y-1">
+            {displayedResult.unsupported.map(({ model, reason }) => (
+              <li key={`${model}:${reason}`} className="flex flex-wrap gap-2">
+                <code className="text-indigo-300">{model}</code>
+                <span>{reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

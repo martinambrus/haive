@@ -14,6 +14,9 @@ export interface RequestUsage {
 
 export interface RequestUsageCapture {
   requests: RequestUsage[] | null;
+  /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
+   * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */
+  unobservedSameModel?: Omit<RequestUsage, 'requestId' | 'turnId'>[];
   coverage: 'complete' | 'incomplete' | 'unknown';
   inputConvention: 'exclusive' | 'inclusive' | 'unknown';
   /** Exact only when the transcript proves it; Gemini reports this independently. */
@@ -46,6 +49,9 @@ export function aggregateRequestUsage(
       requestId: JSON.stringify([i, p.id, r.requestId]),
     })),
   );
+  const unobservedSameModel = captures.flatMap((c) =>
+    (c.coverage === 'complete' ? (c.unobservedSameModel ?? []) : []).map((usage) => ({ ...usage })),
+  );
   const conventions = new Set(captures.map((c) => c.inputConvention));
   const inputConvention = conventions.size === 1 ? captures[0]!.inputConvention : 'unknown';
   const modelCoverage = captures.some((c) => c.modelCoverage === 'mixed')
@@ -60,6 +66,7 @@ export function aggregateRequestUsage(
     : null;
   return {
     requests: captures.some((c) => c.requests !== null) ? requests : null,
+    ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
     coverage: complete ? 'complete' : requests.length ? 'incomplete' : 'unknown',
     inputConvention,
     requestCount: count !== null && Number.isSafeInteger(count) ? count : null,
