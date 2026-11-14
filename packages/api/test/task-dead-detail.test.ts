@@ -117,6 +117,7 @@ function setup(task: Rows, events: Rows[] = [], modules: Rows[] = []) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
+    taskCheckRuns: schema.taskCheckRuns,
     taskEvents: schema.taskEvents,
     modules: schema.modules,
     stepCatalog: schema.stepCatalog,

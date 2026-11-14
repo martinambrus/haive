@@ -22,6 +22,49 @@ afterEach(() => {
   h.replace.mockReset();
 });
 
+it('shows durable recording coverage, suite totals and incomplete checks alongside historical dashes', () => {
+  const report = buildTimeCostReport({
+    tasks: ['new', 'old'].map((taskId) => ({ taskId, completedAt: new Date(3000) })),
+    steps: [],
+    events: [],
+    invocations: [],
+    recordingStartedAt: '2026-11-14T00:00:00.000Z',
+    checkRuns: [
+      {
+        taskId: 'new',
+        slot: 'test',
+        outcome: 'passed',
+        startedAt: new Date(0),
+        endedAt: new Date(2000),
+      },
+      {
+        taskId: 'new',
+        slot: 'test',
+        outcome: 'interrupted',
+        startedAt: new Date(2000),
+        endedAt: new Date(3000),
+      },
+    ],
+  });
+  render(
+    <TimeCostReport
+      report={{
+        ...report,
+        rows: report.rows.map((r) => ({ ...r, title: r.taskId, repository: null })),
+        excludedLegacyInvocations: 0,
+        scope: { providerIgnored: false },
+        costDisplay: { currency: 'USD', usdPerUnit: 1, rateDate: null, approximate: false },
+      }}
+    />,
+  );
+  expect(screen.getAllByText('Test suite runs')).toHaveLength(2);
+  expect(screen.getAllByText('1 run · 2s · incomplete')).toHaveLength(2);
+  expect(screen.getByText(/Recording began 2026-11-14/)).toBeTruthy();
+  expect(screen.getAllByText(/Pass share: n=1.*1 incomplete/)).toHaveLength(2);
+  const oldRow = screen.getByRole('link', { name: 'old' }).closest('tr');
+  expect(oldRow?.children[3]?.textContent).toContain('—');
+});
+
 it('shows absent task timing as unmeasured even though summary reconciliation totals are zero', () => {
   const report = buildTimeCostReport({
     tasks: [{ taskId: 't', completedAt: new Date(1000) }],

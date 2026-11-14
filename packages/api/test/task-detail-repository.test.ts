@@ -103,6 +103,7 @@ function setup(repo: Rows) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
+    taskCheckRuns: schema.taskCheckRuns,
     taskEvents: schema.taskEvents,
     modules: schema.modules,
     stepCatalog: schema.stepCatalog,
@@ -129,6 +130,7 @@ function setup(repo: Rows) {
     orchestrationEpoch: 3,
   });
   h.db = routeDb(fake.db);
+  return fake;
 }
 
 async function repositoryOf(): Promise<unknown> {
@@ -138,6 +140,30 @@ async function repositoryOf(): Promise<unknown> {
 }
 
 describe('GET /tasks/:id repository', () => {
+  it('returns suite measurements only for this owned task and test slots', async () => {
+    const f = setup({ writable: true });
+    for (const [slot, taskId] of [
+      ['test', TASK],
+      ['lint', TASK],
+      ['test', REPO],
+    ]) {
+      f.insert(schema.taskCheckRuns, {
+        taskId,
+        stepId: '08-phase-5-verify',
+        slot,
+        attemptId: '0',
+        outcome: 'passed',
+        startedAt: new Date(0),
+        endedAt: new Date(1000),
+      });
+    }
+    const response = await app.request(`/${TASK}`);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { testChecks: unknown }).testChecks).toMatchObject({
+      testSuiteMs: 1000,
+      testSuiteRuns: 1,
+    });
+  });
   it('A1 names a read-only local repository by the fields the attachments tab needs, and no more', async () => {
     setup({ writable: false });
     expect(await repositoryOf()).toEqual({
