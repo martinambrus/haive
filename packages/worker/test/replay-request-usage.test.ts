@@ -123,6 +123,62 @@ describe('read-only request replay', () => {
     });
   });
 
+  it('reports aggregate excess magnitude per main model at histogram and tier boundaries', async () => {
+    const excessRow = (prompt: number, model = 'model-a') => {
+      const events = fixture('request-claude');
+      events[0].model = model;
+      for (const event of events) if (event.message) event.message.model = model;
+      const part = Math.floor(prompt / 3);
+      events[3].modelUsage = {
+        [model]: {
+          inputTokens: 300 + part,
+          cacheReadInputTokens: 70 + part,
+          cacheCreationInputTokens: 30 + prompt - 2 * part,
+          outputTokens: 6,
+        },
+      };
+      return row(events);
+    };
+    const good = excessRow(300_000);
+    const droppedEvents = JSON.parse(`[${good.streamLog.split('\n').join(',')}]`);
+    droppedEvents.splice(2, 1);
+    const buffer = createStreamLogBuffer({ headChars: 4, tailChars: 4 });
+    buffer.push('x'.repeat(12));
+    const report = await replayRequestUsage([
+      ...[
+        0, 999, 1000, 9999, 10_000, 99_999, 100_000, 199_999, 200_000, 271_999, 272_000, 300_000,
+      ].map((n) => excessRow(n)),
+      excessRow(10_000, 'model-b'),
+      row(fixture('request-claude')),
+      row(droppedEvents),
+      { ...good, streamLog: `${good.streamLog}\n{"type":` },
+      { ...good, streamLog: `${buffer.toString()}\n${good.streamLog}` },
+    ]);
+    expect(report.byMainModel.find((r) => r.model === 'model-a')).toMatchObject({
+      sameModelExcess: {
+        histogram: [
+          { minInclusive: 0, maxExclusive: 1000, runs: 2 },
+          { minInclusive: 1000, maxExclusive: 10_000, runs: 2 },
+          { minInclusive: 10_000, maxExclusive: 100_000, runs: 2 },
+          { minInclusive: 100_000, maxExclusive: 200_000, runs: 2 },
+          { minInclusive: 200_000, maxExclusive: 272_000, runs: 2 },
+          { minInclusive: 272_000, maxExclusive: null, runs: 2 },
+        ],
+        atOrAboveTierThreshold: { '100000': 6, '200000': 4, '272000': 2 },
+      },
+    });
+    expect(report.byMainModel.find((r) => r.model === 'model-b')).toMatchObject({
+      sameModelExcess: {
+        histogram: expect.arrayContaining([
+          { minInclusive: 10_000, maxExclusive: 100_000, runs: 1 },
+        ]),
+        atOrAboveTierThreshold: { '100000': 0, '200000': 0, '272000': 0 },
+      },
+    });
+    expect(report.counters.unobservedSameModelRuns).toBe(13);
+    expect(JSON.stringify(report)).not.toMatch(/requestId|msg_redacted|"result"|"usage"|"prompt"/);
+  });
+
   it('skips pretty-printed stderr and non-event objects while replaying complete events', async () => {
     const good = row(fixture('request-claude'));
     const stderr = JSON.stringify({ diagnostic: { details: [{ message: 'retry' }] } }, null, 2);

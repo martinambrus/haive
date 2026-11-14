@@ -51,6 +51,21 @@ const counts = (): Counts => ({
   incompleteReasons: {},
 });
 
+// Half-open buckets; the final bucket is unbounded. Zero-prompt output-only excess
+// belongs in the first bucket. Runs with no excess do not enter the histogram.
+const EXCESS_PROMPT_BUCKET_EDGES = [0, 1000, 10_000, 100_000, 200_000, 272_000] as const;
+const excessCounts = () => ({
+  histogram: EXCESS_PROMPT_BUCKET_EDGES.map((minInclusive, i) => ({
+    minInclusive,
+    maxExclusive: EXCESS_PROMPT_BUCKET_EDGES[i + 1] ?? null,
+    runs: 0,
+  })),
+  // Conservative potential ambiguity, including inclusive tiers at the boundary.
+  // These are bounds on unattributed usage, never inferred request sizes or prices.
+  atOrAboveTierThreshold: { '100000': 0, '200000': 0, '272000': 0 },
+});
+type ModelCounts = Counts & { sameModelExcess: ReturnType<typeof excessCounts> };
+
 export function parseOptions(args: string[]) {
   const options: { since: string | null; limit: number | null; cli: string | null } = {
     since: null,
@@ -94,7 +109,7 @@ export async function replayRequestUsage(
 ) {
   const total = counts();
   const byCli = new Map<string, Counts>();
-  const byMainModel = new Map<string, Counts>();
+  const byMainModel = new Map<string, ModelCounts>();
   const counters = {
     sameNameSideModelCandidates: 0,
     sameNameLedgerExcessRuns: 0,
@@ -185,7 +200,7 @@ export async function replayRequestUsage(
       reasons.add('no-request-channel');
     }
     const cliCounts = byCli.get(cli) ?? counts();
-    const modelCounts = byMainModel.get(model) ?? counts();
+    const modelCounts = byMainModel.get(model) ?? { ...counts(), sameModelExcess: excessCounts() };
     byCli.set(cli, cliCounts);
     byMainModel.set(model, modelCounts);
     for (const bucket of [total, cliCounts, modelCounts]) {
@@ -197,6 +212,18 @@ export async function replayRequestUsage(
       if (coverage !== 'complete')
         for (const reason of reasons)
           bucket.incompleteReasons[reason] = (bucket.incompleteReasons[reason] ?? 0) + 1;
+    }
+    if (coverage === 'complete' && capture.unobservedSameModel?.length) {
+      const promptTokens = capture.unobservedSameModel.reduce(
+        (sum, usage) => sum + usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens,
+        0,
+      );
+      const magnitude = modelCounts.sameModelExcess;
+      magnitude.histogram.find(
+        (bucket) => bucket.maxExclusive === null || promptTokens < bucket.maxExclusive,
+      )!.runs++;
+      for (const threshold of ['100000', '200000', '272000'] as const)
+        magnitude.atOrAboveTierThreshold[threshold] += Number(promptTokens >= Number(threshold));
     }
     if (truncated) continue;
     counters.sameNameLedgerExcessRuns += Number(
