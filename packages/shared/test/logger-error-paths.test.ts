@@ -87,3 +87,31 @@ describe('path scrubbing for displayed error text', () => {
     expect(scrubErrorPaths(err)).toBe('Database operation failed');
   });
 });
+
+describe('path scrubbing restricted to storage roots', () => {
+  const roots = ['/var/lib/haive/repos', '/host-fs/'];
+  it.each([
+    ['EIO: open /var/lib/haive/repos/u/r/a', 'EIO: open [path]'],
+    ["open '/host-fs/private repo/a'", "open '[path]'"],
+    ['open /var/lib/haive/repos', 'open [path]'],
+    ['open /var/lib/haive/repos-other/a', 'open /var/lib/haive/repos-other/a'],
+    ['nginx: syntax error in /etc/nginx/x.conf:5', 'nginx: syntax error in /etc/nginx/x.conf:5'],
+    [
+      '+ source /mnt/ddev_config/web-entrypoint.d/start.sh',
+      '+ source /mnt/ddev_config/web-entrypoint.d/start.sh',
+    ],
+    ['read /host-fs/a; see https://host/docs/a', 'read [path]; see https://host/docs/a'],
+  ])('retains the diagnosis in %s', (raw, expected) => {
+    expect(scrubErrorPaths(new Error(raw), roots)).toBe(expected);
+    expect(scrubErrorPaths(expected, roots)).toBe(expected);
+  });
+
+  it('sanitizes bound errors before applying a root filter', () => {
+    expect(
+      scrubErrorPaths(
+        new DrizzleQueryError('select $1', ['/host-fs/a'], new Error('driver')),
+        roots,
+      ),
+    ).toBe('Database operation failed');
+  });
+});
