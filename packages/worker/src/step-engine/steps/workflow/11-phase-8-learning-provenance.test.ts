@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { stampLearningRecord } from '@haive/shared/learning-provenance';
+import {
+  learningContent,
+  parseLearningRecord,
+  stampLearningRecord,
+} from '@haive/shared/learning-provenance';
 import path from 'node:path';
 import {
   applyLearningOps,
@@ -31,6 +35,57 @@ const metadata = (text: string) => {
 };
 
 describe('learning provenance through workflow readers and writer', () => {
+  it.each([3, 6])(
+    'neutralises depth-%i markers through preview, staged edits and readers',
+    async (depth) => {
+      worktree = await mkdtemp(path.join(tmpdir(), 'learning-provenance-'));
+      await applyLearningOps(
+        worktree,
+        planLearningReconciliation([entry()], []),
+        undefined,
+        origin,
+      );
+      const existing = await readExistingLearnings(worktree);
+      const original = parseLearningRecord(existing[0]!.body).provenance.origin;
+      let nested = '<!-- haive-learning-provenance x -->';
+      for (let i = 0; i < depth; i++) {
+        nested = `<!-- haive-learn${nested}ing-provenance x -->`;
+      }
+      const proposal = `Correct src/a.ts:9.\n${nested}`;
+      const plan = planLearningReconciliation(
+        [{ ...entry(proposal), op: 'update', targetId: 'rule' }],
+        existing,
+        undefined,
+        undefined,
+        update,
+      );
+      expect(plan[0]!.newBody.match(/<!-- haive-learning-provenance/g)).toHaveLength(1);
+      expect(parseLearningRecord(plan[0]!.newBody).provenance.origin).toEqual(original);
+      await stageLearningDrafts(worktree, plan, null);
+      // A staged replacement must be sanitised again, even after a clean preview.
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(
+        path.join(worktree, '.haive/learning-drafts/learnings/rule.md'),
+        `# Rule\n\n${proposal}`,
+      );
+      const edited = await applyStagedLearningEdits(worktree, plan);
+      await applyLearningOps(worktree, edited, undefined, update);
+      const written = await readFile(path.join(worktree, '.haive-data/learnings/rule.md'), 'utf8');
+      expect(written.match(/<!-- haive-learning-provenance/g)).toHaveLength(1);
+      expect(parseLearningRecord(written).provenance.origin).toEqual(original);
+      expect(learningContent(written)).not.toContain('haive-learning-provenance');
+      // Readers must also sanitise a raw edited file before the writer sees it.
+      const raw = [{ id: 'rule', title: 'Rule', body: `# Rule\n\n${proposal}` }];
+      expect(learningIndex(raw).entries[0]!.excerpt).toBe('Correct src/a.ts:9.');
+      const chunks = extractMarkdownSections(raw[0]!.body, '.haive-data/learnings/rule.md').flatMap(
+        (section) => chunkSection(section),
+      );
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.every((chunk) => !chunk.content.includes('haive-learning-provenance'))).toBe(
+        true,
+      );
+    },
+  );
   it('stamps the actual insert and retains origin through an inline edited full-body update', async () => {
     worktree = await mkdtemp(path.join(tmpdir(), 'learning-provenance-'));
     await applyLearningOps(worktree, planLearningReconciliation([entry()], []), undefined, origin);

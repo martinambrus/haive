@@ -27,7 +27,13 @@ const WITH_SEPARATOR = /(?:\r?\n){0,2}<!--\s*haive-learning-provenance\b[\s\S]*?
 
 /** Byte-identical on legacy files; a canonical footer strips back to the original final newline. */
 export function learningContent(text: string): string {
-  return text.replace(WITH_SEPARATOR, '');
+  let previous: string;
+  do {
+    previous = text;
+    // Removing an inner block can assemble another reserved marker. Every match shrinks text.
+    text = text.replace(WITH_SEPARATOR, '');
+  } while (text !== previous);
+  return text;
 }
 
 export function parseLearningRecord(text: string): {

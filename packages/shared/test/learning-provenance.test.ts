@@ -78,6 +78,20 @@ describe('learning provenance record', () => {
     expect(learningContent(body)).toBe(body);
     expect(learningContent(text)).toBe(body);
   });
+  it.each([3, 6])('strips nested markers to a fixpoint at depth %i', (depth) => {
+    let nested = '<!-- haive-learning-provenance x -->';
+    for (let i = 0; i < depth; i++) {
+      nested = `<!-- haive-learn${nested}ing-provenance x -->`;
+    }
+    const original = stampLearningRecord(body, null, first);
+    const proposal = `${body}Correction.\n${nested}`;
+    expect(learningContent(proposal)).not.toContain('haive-learning-provenance');
+    const written = stampLearningRecord(proposal, original, next);
+    expect(written.match(/<!-- haive-learning-provenance/g)).toHaveLength(1);
+    const record = parseLearningRecord(written);
+    expect(record.provenance.origin).toEqual(parseLearningRecord(original).provenance.origin);
+    expect(record.content).not.toContain('haive-learning-provenance');
+  });
   it('treats malformed or unsupported records as unknown, hiding their reserved metadata', () => {
     for (const payload of ['broken', '{"version":99}', '{"version":1,"origin":{}}']) {
       const text = body + '\n<!-- haive-learning-provenance\n' + payload + '\n-->\n';
