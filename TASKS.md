@@ -681,7 +681,7 @@ Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md
 8. AGENTS.md is within a few bytes of the 32 KiB Codex limit; any addition must trim first.
 9. Owed live checks: each CLI reads the per-turn snapshot from its sandbox path; the Docker file-subpath mount works; rerun a large plan chat on Ollama.
 
-### T674 · FNF[release-bundle-publish] · release bundle publish lows, after #1180 (+5)
+### T674 · FNF[release-bundle-publish] · release bundle publish and read lows, after #1180 and #1181 (+15)
 
 status: open · kind: fix · found: #1180 review 2026-11-14 · priority: P4
 
@@ -692,6 +692,19 @@ Review in `.claude/tmp/codex-run/RBP-S/review-1.md`.
 3. A stale `<out>/release.json.image/` after a hard kill refuses every later publish, and a successful manual recovery leaves it behind. Document the manual delete.
 4. The token-holding `release` job now runs `pnpm install` with checkout credentials persisted. `persist-credentials: false` on checkouts of token-holding jobs (release `build`/`merge`/`release` and CI); no workflow sets it today. Related first-party.
 5. `release-bundle.test.mjs` always writes all four compose files, so the workflow's overlay-absent branch is untested.
+
+From #1181 (updater reads the bundle), reviews in `.claude/tmp/codex-run/RBR-S/review-{1,2,3}.md`:
+
+6. `setEnvVar` (updater) rewrites `.env` non-atomically, unlike `envkeys.ts`, which writes a temp file and renames it. Use the same exclusive temp + fsync + rename.
+7. The dry plan (`--check`) and the real run compute their classification separately; extract one plan function both call.
+8. Transport errors (DNS, TLS, reset) while fetching the manifest or bundle surface as refusals; they should be retryable failures, not policy refusals.
+9. Writes under the install dir follow links in intermediate components; resolve held descriptors per component as fs-safe does.
+10. A symlinked `.env` is replaced by a regular file on rename; refuse a linked `.env` or write through its resolved target.
+11. `composeStop` now inherits the 32 MiB `maxBuffer`; harmless, but stop output needs no capture.
+12. A third-party Compose error that echoes `.env` fragments reaches the journal through the restored pull/up/stop diagnostics; scrub or bound it.
+13. `envkeys.ts` parses only `KEY=`; Docker's env-file syntax also accepts `KEY: value`, so `R=abc` then `R: ${X:-}` passes the interpolation check. Widen to `[=:]` with a test.
+14. Single-quote scanning (`envkeys.ts` ~:26) treats `\\` before `'` as an escape; Docker documents only `\'`. Unverified, rare.
+15. Tests do not pin a duplicate key (last wins), an `export` prefix, a multiline double-quoted value or the `env-key-interpolated` journal row.
 
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
@@ -1145,7 +1158,7 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 ### T648 · upgrades never refresh the compose bundle (design)
 
-status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 done 2026-11-14 #1172 (9233cfc97): the release manifest describes the bundle (`install/bundle-env.json`, `build-release-manifest.mjs --bundle-dir`); PR3 done 2026-11-14 #1180 (a08f46568): `release.yml` and `publish-channel.mjs` publish `haive-release:<v>` with `/release.json` and `/bundle/`; owed at the first rc tag: the filtered `pnpm --filter @haive/shared install` runs green and the new GHCR package `haive-release` is public and linked (PR4 pulls it anonymously); PR4 must also refuse a non-https manifest URL when a bundle is present (updater `cli.ts` ~:132 accepts http via operator override); PR4 next) · kind: design · found: #1136 review 2026-11-13 · priority: P2
+status: open (PR4 done 2026-11-14 #1181 (fd2eadc64): the updater reads and verifies the release bundle and prepares required `.env` keys; `--replace-modified-bundle` is a no-op until PR5, so cut no bundle release between PR4 and PR5; next PR5 swap/rollback, then PR6 installers. OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 done 2026-11-14 #1172 (9233cfc97): the release manifest describes the bundle (`install/bundle-env.json`, `build-release-manifest.mjs --bundle-dir`); PR3 done 2026-11-14 #1180 (a08f46568): `release.yml` and `publish-channel.mjs` publish `haive-release:<v>` with `/release.json` and `/bundle/`; owed at the first rc tag: the filtered `pnpm --filter @haive/shared install` runs green and the new GHCR package `haive-release` is public and linked (PR4 pulls it anonymously); PR4 must also refuse a non-https manifest URL when a bundle is present (updater `cli.ts` ~:132 accepts http via operator override); PR4 next) · kind: design · found: #1136 review 2026-11-13 · priority: P2
 PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
 Also from #1139: an existing install whose bundle predates MP_UI_AUTH keeps an open Mailpit UI after any upgrade, and a refreshed bundle installed over an `.env` with no `MAILPIT_UI_PASSWORD` fails open (empty value = no auth). Whatever refreshes the bundle must also generate missing keys it needs.
 
@@ -2047,6 +2060,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Updater reads the release bundle, T648 PR 4 (#1181): before an upgrade the updater fetches and hash-checks the release's compose bundle, refuses a modified or unreadable bundle with a typed refusal, refuses plain-http manifests when a bundle is present, and generates missing `hex` `.env` keys atomically; a required key written as a variable reference refuses (`env-key-interpolated`). Lows filed in T674.
 
 - External module dev install, T669 items 2-3 (#1179): private modules cloned into ignored `external-modules/` install through `.pnpmfile.cjs` with a local lockfile, leaving tracked manifests and `pnpm-lock.yaml` unchanged; `pnpm module lock` refreshes the public lock; CI refuses install wiring that names a module missing from `public-modules.json`. Lows filed as T676.
 
