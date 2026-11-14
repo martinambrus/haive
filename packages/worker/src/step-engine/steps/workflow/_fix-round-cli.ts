@@ -24,10 +24,10 @@ export function fixRoundCliField(options?: FixRoundCliOptions): FormSchema['fiel
   return {
     type: 'select',
     id: FIX_ROUND_CLI_FIELD,
-    label: 'Run the next round on',
+    label: 'CLI for the next implementation fix',
     description: options?.providers.length
-      ? `Applies to ${FIX_LOOP_TARGET_STEP_ID}, round ${options.round}, default role: ` +
-        'next round only, this task only. Your worktree is kept. Later rounds use your existing CLI choices.'
+      ? 'Applies only to the implementation step in the next fix round of this task. ' +
+        'Your worktree is kept. Later rounds use your existing CLI choices.'
       : 'No enabled CLI is eligible for the next fix round; your existing CLI choice will be used.',
     default: 'same',
     options: [

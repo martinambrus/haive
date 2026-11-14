@@ -183,9 +183,11 @@ describe('next-round CLI', () => {
           { value: picked.id, label: picked.label },
         ],
       });
-      expect(field?.description).toContain('next round only, this task only');
-      expect(field?.description).toContain('2');
-      expect(field?.description).toContain('default');
+      expect(field?.description).toContain(
+        'the implementation step in the next fix round of this task',
+      );
+      expect(field?.description).not.toMatch(/07-phase-2-implement|default|role|round 2/);
+      expect(field?.label).toBe('CLI for the next implementation fix');
     },
   );
 
