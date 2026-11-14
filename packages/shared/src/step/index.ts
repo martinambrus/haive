@@ -748,6 +748,8 @@ export interface ReviewDiffOptions {
 export type ReviewDiff =
   | {
       status: 'ready';
+      /** True when evidence was withheld or capture coverage is incomplete. */
+      partial: boolean;
       content: string;
       bytes: number;
       diffHash: string;
@@ -755,6 +757,7 @@ export type ReviewDiff =
     }
   | {
       status: 'too-large' | 'unavailable';
+      partial: true;
       reason: string;
       scope: import('./review-types.js').ImplementationFileSet;
     };

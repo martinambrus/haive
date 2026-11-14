@@ -96,6 +96,7 @@ describe('compiled module step SDK consumer', () => {
       collectImplementationFiles: vi.fn(async () => ({ files: ['a'], total: 1, truncated: false })),
       readReviewDiff: vi.fn(async () => ({
         status: 'unavailable' as const,
+        partial: true as const,
         reason: 'fixture',
         scope: { files: [], total: 0, truncated: false },
       })),

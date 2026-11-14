@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { taskSecretMaskPolicy } from '../src/queues/cli-exec/secret-mask.js';
+import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import { randomBytes } from 'node:crypto';
 import { loadDependencyPolicy } from '../src/step-engine/steps/workflow/_dependency-policy.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -288,3 +291,75 @@ it('pins the production retention cap and spends one cumulative budget across fi
   expect(payload.fileContents).toEqual([{ path: 'a', content: 'z' }]);
   expect(payload.omittedContents).toContainEqual({ path: 'b', reason: 'retained-content-limit' });
 });
+
+it.each([
+  { path: 'x.bak', policy: {}, withheld: true },
+  { path: 'x.bak', policy: { allow: ['**/*.bak'] }, withheld: false },
+  { path: 'private.txt', policy: { denyExtend: ['private.txt'] }, withheld: true },
+])(
+  'keeps ordinary evidence beside $path under repository policy $policy',
+  async ({ path, policy, withheld }) => {
+    vi.mocked(taskSecretMaskPolicy).mockResolvedValue(secretMaskPolicy(policy));
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', path],
+      total: 2,
+    });
+    const run = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) =>
+      args[1].includes('--others') ? { code: 0, stdout: path + '\0', stderr: '' } : run(...args),
+    );
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(result).toMatchObject({ partial: withheld });
+    const payload = JSON.parse(result.content);
+    expect(payload.diff).toContain('+z');
+    expect(payload.files).toContainEqual(
+      expect.objectContaining({
+        path: 'a',
+        kind: 'text',
+        hash: createHash('sha256').update('z').digest('hex'),
+      }),
+    );
+    expect(payload.fileContents).toContainEqual({ path: 'a', content: 'z' });
+    expect(payload.files).toContainEqual(
+      expect.objectContaining({ path, kind: withheld ? 'withheld' : 'text', size: 1, mode: 0o644 }),
+    );
+    if (withheld) {
+      expect(payload.files.find((f: { path: string }) => f.path === path).hash).toBeUndefined();
+      expect(vi.mocked(openFileNoFollow).mock.calls.some((call) => call[1] === path)).toBe(false);
+      expect(
+        vi.mocked(gitRun).mock.calls.some((call) => call[1].includes(':(literal)' + path)),
+      ).toBe(false);
+    }
+  },
+);
+it.each(['deleted', 'missing'])(
+  'withholds the whole capture for a denied %s path',
+  async (kind) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', 'x.bak'],
+      total: 2,
+    });
+    vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) =>
+      rel === 'x.bak' ? null : ({ kind: 'file', stats: stat } as never),
+    );
+    const run = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) =>
+      args[1].includes('--name-status')
+        ? { code: 0, stdout: (kind === 'deleted' ? 'D\0x.bak\0' : '') + 'A\0a\0', stderr: '' }
+        : run(...args),
+    );
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result).toMatchObject({ status: 'ready', partial: true });
+    if (result.status !== 'ready') return;
+    const payload = JSON.parse(result.content);
+    expect(payload.diff).toBe('');
+    expect(
+      payload.files.every((f: { kind: string; hash?: string }) => f.kind === 'withheld' && !f.hash),
+    ).toBe(true);
+    expect(openFileNoFollow).not.toHaveBeenCalled();
+  },
+);

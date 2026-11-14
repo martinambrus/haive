@@ -48,6 +48,7 @@ interface ReviewFile {
 }
 export interface ReviewSnapshot {
   forkPoint: string;
+  partial?: boolean;
   /** Fingerprint all git-changed paths, including paths omitted by the scope cap. */
   changeHash: string;
   scope: ImplementationFileSet;
@@ -78,7 +79,7 @@ function snapshotIdentity(snapshot: ReviewSnapshot) {
   return { ...snapshot, files: snapshot.files.map(fileIdentity) };
 }
 function unavailable(scope: ImplementationFileSet, reason: string): ReviewDiff {
-  return { status: 'unavailable', scope, reason };
+  return { status: 'unavailable', partial: true, scope, reason };
 }
 
 /** All mandatory evidence is measured before optional full-file contents are packed. */
@@ -110,6 +111,7 @@ export function serializeReviewPayload(
     scope: ordered(scope),
     coverage: {
       partial:
+        snapshot.partial === true ||
         scope.truncated ||
         files.some(
           (f) => !['text', 'binary', 'deleted'].includes(f.kind) || f.contentOmission !== undefined,
@@ -132,6 +134,7 @@ export function serializeReviewPayload(
   if (Buffer.byteLength(encode()) > options.maxBytes)
     return {
       status: 'too-large',
+      partial: true,
       reason: 'The complete diff and mandatory coverage evidence exceed maxBytes.',
       scope,
     };
@@ -150,6 +153,7 @@ export function serializeReviewPayload(
   const content = encode();
   return {
     status: 'ready',
+    partial: payload.coverage.partial,
     content,
     bytes: Buffer.byteLength(content),
     diffHash: createHash('sha256').update(content).digest('hex'),
@@ -251,11 +255,29 @@ export async function readReviewDiff(
       // The cap limits delivered review evidence, not retry identity. Hash omitted changes
       // too, so a partial payload cannot reuse an earlier identity after those files change.
       const allPaths = [...new Set([...paths, ...changed, ...untracked])].sort(compare);
-      // A move is delete + add. Once a denied endpoint participates, the allowed
-      // endpoint cannot be identified safely, so withhold the whole capture's contents.
-      const withhold = allPaths.some(denied);
+      // A denied deletion/missing source could have moved to any allowed destination.
+      // Existing denied paths withhold only their own bytes, hashes and hunks.
+      let withholdAll = allPaths.some((p) => denied(p) && deleted.has(p));
+      const withheld = new Map<string, ReviewFile>();
+      for (const p of allPaths.filter(denied)) {
+        let metadata = {};
+        try {
+          const rel = (prefix ? prefix + '/' : '') + toSafeRel(p);
+          const entry = await lstatNoFollow(ctx.repoPath, rel, { strict: true });
+          if (!entry) withholdAll = true;
+          else metadata = { size: entry.stats.size, mode: entry.stats.mode & 0o7777 };
+        } catch (error) {
+          if (isResourceLimitError(error)) throw error;
+        }
+        withheld.set(p, { path: p, kind: 'withheld', ...metadata });
+      }
       for (const p of allPaths) {
         checkHostCancellation(ctx);
+        const deniedFile = withheld.get(p);
+        if (deniedFile) {
+          files.push(deniedFile);
+          continue;
+        }
         if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
           files.push({ path: p, kind: 'nested-repository' });
           continue;
@@ -281,7 +303,7 @@ export async function readReviewDiff(
           continue;
         }
         const metadata = entry ? { size: entry.stats.size, mode: entry.stats.mode & 0o7777 } : {};
-        if (withhold) {
+        if (withholdAll) {
           files.push({ path: p, kind: 'withheld', ...metadata });
           continue;
         }
@@ -427,6 +449,7 @@ export async function readReviewDiff(
         .digest('hex');
       return {
         forkPoint,
+        partial: withheld.size > 0,
         changeHash,
         scope,
         dependencyPolicy,
@@ -453,7 +476,12 @@ export async function readReviewDiff(
     checkHostCancellation(ctx);
     if (isResourceLimitError(error)) throw error;
     if (error instanceof DiffTooLarge)
-      return { status: 'too-large', scope, reason: 'The complete diff exceeds maxBytes.' };
+      return {
+        status: 'too-large',
+        partial: true,
+        scope,
+        reason: 'The complete diff exceeds maxBytes.',
+      };
     return unavailable(scope, scrubErrorPaths(safeErrorMessage(error)));
   }
 }
