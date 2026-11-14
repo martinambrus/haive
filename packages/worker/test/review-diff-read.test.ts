@@ -24,6 +24,10 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   openFileNoFollow: vi.fn(),
 }));
+vi.mock('../src/queues/cli-exec/secret-mask.js', async () => {
+  const { secretMaskPolicy } = await import('../src/queues/cli-exec/secret-mask-policy.js');
+  return { taskSecretMaskPolicy: vi.fn(async () => secretMaskPolicy({})) };
+});
 const scope = { files: ['a'], total: 1, truncated: false, scanError: null };
 let controller: AbortController;
 let ctx: StepContext;

@@ -16,6 +16,10 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
 vi.mock('../src/step-engine/review-dimension-context.js', () => ({
   resolveTaskReviewDimensions: vi.fn(async () => ({ enabled: [{ id: 'security' }] })),
 }));
+vi.mock('../src/queues/cli-exec/secret-mask.js', async () => {
+  const { secretMaskPolicy } = await import('../src/queues/cli-exec/secret-mask-policy.js');
+  return { taskSecretMaskPolicy: vi.fn(async () => secretMaskPolicy({})) };
+});
 let root: string;
 const git = (...args: string[]) =>
   execFileSync('git', args, { cwd: root, stdio: 'pipe' }).toString();
