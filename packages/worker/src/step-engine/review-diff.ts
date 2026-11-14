@@ -18,6 +18,7 @@ import type {
 import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { compileSecretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 import { gitRun } from '../repo/git-exec.js';
+import { nestedRepositoryHead } from '../repo/nested-repository.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
 import { loadDependencyPolicy } from './steps/workflow/_dependency-policy.js';
@@ -42,6 +43,8 @@ interface ReviewFile {
   mode?: number;
   size?: number;
   hash?: string;
+  gitlinkTargets?: string[];
+  gitlinkHead?: string | null;
   content?: string;
   untracked?: boolean;
   contentOmission?: 'retained-content-limit' | 'maxBytes';
@@ -336,13 +339,17 @@ export async function readReviewDiff(
       );
       if (!Number.isSafeInteger(pathspecBudget) || pathspecBudget <= 0)
         throw new Error('The gitlink pathspec budget must be a positive safe integer.');
-      const gitlinks = new Set<string>();
+      const gitlinks = new Map<string, string[]>();
       const readGitlinks = async (batch: string[]) => {
         for (const record of (await run(['ls-files', '--stage', '-z', '--', ...batch])).split(
           '\0',
         )) {
-          const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
-          if (match) gitlinks.add(match[1]!);
+          const match = /^160000 ([a-f0-9]{40,64}) ([0-3])\t(.*)$/s.exec(record);
+          if (match) {
+            const targets = gitlinks.get(match[3]!) ?? [];
+            targets.push(`${match[2]}:${match[1]}`);
+            gitlinks.set(match[3]!, targets);
+          }
         }
       };
       let batch: string[] = [];
@@ -397,7 +404,38 @@ export async function readReviewDiff(
           continue;
         }
         if (gitlinks.has(safe)) {
-          files.push({ path: p, kind: 'gitlink', ...metadata });
+          const gitlinkTargets = gitlinks.get(safe)!;
+          try {
+            const head =
+              entry?.kind === 'directory'
+                ? await nestedRepositoryHead(worktree, safe, async (cwd, args, env, io) => {
+                    checkHostCancellation(ctx);
+                    const result = await gitRun(cwd, ['--no-optional-locks', ...args], env, {
+                      ...io,
+                      signal: ctx.signal,
+                      maxBuffer: REVIEW_METADATA_BYTES,
+                    });
+                    checkHostCancellation(ctx);
+                    if (isResourceLimitError({ code: result.noExit }))
+                      throw Object.assign(
+                        new Error('Git could not start due to a resource limit.'),
+                        { code: result.noExit },
+                      );
+                    return result;
+                  })
+                : null;
+            files.push({
+              path: p,
+              kind: 'gitlink',
+              ...metadata,
+              gitlinkTargets,
+              gitlinkHead: head?.commit,
+            });
+          } catch (error) {
+            checkHostCancellation(ctx);
+            if (isResourceLimitError(error)) throw error;
+            files.push({ path: p, kind: 'unreadable', ...metadata, gitlinkTargets });
+          }
           continue;
         }
         if (!entry || entry.kind !== 'file') {

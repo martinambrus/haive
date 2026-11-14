@@ -15,6 +15,7 @@ import {
 } from '../src/step-engine/review-diff.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { gitRun } from '../src/repo/git-exec.js';
+import { nestedRepositoryHead } from '../src/repo/nested-repository.js';
 import { openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
@@ -30,6 +31,9 @@ vi.mock('../src/step-engine/review-dimension-context.js', () => ({
   resolveTaskReviewDimensions: vi.fn(async () => ({ enabled: [] })),
 }));
 vi.mock('../src/repo/git-exec.js', () => ({ gitRun: vi.fn() }));
+vi.mock('../src/repo/nested-repository.js', () => ({
+  nestedRepositoryHead: vi.fn(async () => null),
+}));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   openFileNoFollow: vi.fn(),
@@ -266,6 +270,42 @@ it('uses the held cwd for capture git calls and both helper chains', async () =>
     expect.objectContaining({ gitCwd }),
   );
 });
+
+it.each(['index', 'checkout'] as const)(
+  'fingerprints the %s gitlink target and detects a capture race',
+  async (source) => {
+    let target = 'b'.repeat(40);
+    vi.mocked(lstatNoFollow).mockResolvedValue({ kind: 'directory', stats: stat } as never);
+    const run = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) =>
+      args[1].includes('--stage')
+        ? {
+            code: 0,
+            stderr: '',
+            stdout: `160000 ${source === 'index' ? target : 'b'.repeat(40)} 0\ta\0`,
+          }
+        : run(...args),
+    );
+    vi.mocked(nestedRepositoryHead).mockImplementation(async () => ({
+      commit: source === 'checkout' ? target : 'b'.repeat(40),
+    }));
+    const first = await readReviewDiff(ctx, '/repo', options);
+    target = 'c'.repeat(40);
+    const second = await readReviewDiff(ctx, '/repo', options);
+    expect(first.status).toBe('ready');
+    expect(second.status).toBe('ready');
+    if (first.status !== 'ready' || second.status !== 'ready') return;
+    expect(first.diffHash).not.toBe(second.diffHash);
+    expect(JSON.parse(first.content).changeHash).not.toBe(JSON.parse(second.content).changeHash);
+    let captures = 0;
+    const read = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) => {
+      if (args[1].includes('--stage') && ++captures === 2) target = 'd'.repeat(40);
+      return read(...args);
+    });
+    expect((await readReviewDiff(ctx, '/repo', options)).status).toBe('unavailable');
+  },
+);
 it.each([false, true])(
   'caps cumulative retained contents and lists omissions (contents %s)',
   async (includeFileContents) => {

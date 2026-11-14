@@ -13,6 +13,29 @@ const snapshot: ReviewSnapshot = {
     { path: 'b', kind: 'binary', mode: 420, size: 1, hash: 'hash-b' },
   ],
 };
+it('marks coverage partial when retained text is omitted only during JSON packing', () => {
+  const data: ReviewSnapshot = {
+    ...snapshot,
+    partial: false,
+    scope: { files: ['a'], total: 1, truncated: false, scanError: null },
+    files: [{ path: 'a', kind: 'text', hash: 'hash-a', content: '\n'.repeat(100) }],
+  };
+  const complete = serializeReviewPayload(data, { maxBytes: 10000, includeFileContents: true });
+  expect(complete.status).toBe('ready');
+  if (complete.status !== 'ready') return;
+  expect(complete.partial).toBe(false);
+  const maxBytes = complete.bytes - 1;
+  const packed = serializeReviewPayload(data, { maxBytes, includeFileContents: true });
+  expect(packed.status).toBe('ready');
+  if (packed.status !== 'ready') return;
+  expect(packed.partial).toBe(true);
+  expect(packed.bytes).toBeLessThanOrEqual(maxBytes);
+  expect(JSON.parse(packed.content)).toMatchObject({
+    coverage: { partial: true },
+    fileContents: [],
+    omittedContents: [{ path: 'a', reason: 'maxBytes' }],
+  });
+});
 it('canonicalizes scope and policy and hashes the exact payload including the flag', () => {
   const a = serializeReviewPayload(snapshot, { maxBytes: 10000 });
   const b = serializeReviewPayload(
