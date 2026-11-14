@@ -582,7 +582,7 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
-### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+5)
+### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+10)
 
 status: open · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
@@ -1173,6 +1173,11 @@ status: parked · was modular #231 · reason: diminishing returns (2026-11-01 sc
 In 9 grok runs, tool-result chars/4 come to 1.14-2.25x the recorded prompt tokens; e.g. run e3d08fb4… (09-qa).
 Candidates:
 
+- #1167 PR 3 prerequisite: real complete rate per CLI and per main model is unmeasured; replay retained stream logs read-only (`worker/src/queues/cli-exec/stream.ts` getRequestUsage) before pricing from coverage. CONNECTED.
+- #1167 Same-name ledger rule may keep runs whose main model is the titling model (haiku) permanently incomplete (stream.ts billedMatches); if measured, relax to entry >= priced sum per bucket. Safe direction. CONNECTED.
+- #1167 An empty `result.modelUsage` ledger is still accepted as complete when prompt sums match (stream.ts reconcile loop break on size 0). NIT, PRE-EXISTING in design.
+- #1167 `contradictory-request` compares output tokens too (stream.ts ~354); if a binary updates output between content blocks of one message, runs go incomplete. Compare prompt buckets + model only if it shows. LOW.
+- Killed Claude/Ollama fallback under-counts output (stream.ts ~646: fallback output 0 vs completed 141 on the retained fixture). PRE-EXISTING, consequential for token stats.
 - #1166 Time tab grid went lg:grid-cols-6 -> 4, so 7 tiles lay out 4+3 (reflows existing tiles); pick a layout. LOW cosmetic.
 - #1166 Plan page tile hint does not say a dash can also mean the selected class excludes plan work (card description does). LOW.
 - usage under-reports;
@@ -1911,6 +1916,8 @@ All low unless marked.
 9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
 
 ## Done
+
+- Context-tiered pricing PR 2 (#1167): per-request usage capture (Claude family, codex app-server watermarks, Gemini count) with complete/incomplete coverage; prices nothing yet. PR 3 prerequisites filed under T665.
 
 - Human time PR 3 (#1166): plan page attention as `time.planActiveMs` on the statistics summary and a Plan page tile on the Time tab; lows filed under T666.
 
