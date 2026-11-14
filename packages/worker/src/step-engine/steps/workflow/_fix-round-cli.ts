@@ -1,44 +1,27 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { CLI_DISPATCH_STEP_IDS, FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
+import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
 import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
 import type { StepDefinition } from '../../step-definition.js';
-/** The implementation step every fix round re-enters. Kept here so the form builder
- * and dispatch lookup share it without importing the gate/diagnosis module. */
-export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
+import {
+  FIX_LOOP_TARGET_STEP_ID,
+  FIX_ROUND_CLI_FIELD,
+  fixRoundCliField,
+  fixRoundCliRole,
+  type FixRoundCliOptions,
+} from './_fix-round-cli-field.js';
+
+export {
+  FIX_LOOP_TARGET_STEP_ID,
+  FIX_ROUND_CLI_FIELD,
+  fixRoundCliField,
+  fixRoundCliRole,
+  type FixRoundCliOptions,
+};
 
 export class FixRoundCliUnavailable extends Error {}
-
-export const FIX_ROUND_CLI_FIELD = 'fixRoundCliProviderId';
-
-/** A separate slot leaves the task's ordinary step/seat choices intact. The exact round
- * lookup expires it after that round, while a recovery or Retry of that round keeps it. */
-export const fixRoundCliRole = (round: number): string => `fix:${round}:default`;
-
-export interface FixRoundCliOptions {
-  round: number;
-  providers: Pick<CliProviderRecord, 'id' | 'label'>[];
-}
-
-export function fixRoundCliField(options?: FixRoundCliOptions): FormSchema['fields'][number] {
-  return {
-    type: 'select',
-    id: FIX_ROUND_CLI_FIELD,
-    label: 'CLI for the next implementation fix',
-    description: options?.providers.length
-      ? 'Applies only to the implementation step in the next fix round of this task. ' +
-        'Your worktree is kept. Later rounds use your existing CLI choices.'
-      : 'No enabled CLI is eligible for the next fix round; your existing CLI choice will be used.',
-    default: 'same',
-    options: [
-      { value: 'same', label: 'The same CLI' },
-      ...(options?.providers ?? []).map((p) => ({ value: p.id, label: p.label })),
-    ],
-    visibleWhen: { field: FIX_LOOP_ACTION_FIELD, equals: 'continue' },
-  };
-}
 
 /** Use the real dispatcher's capability and command-build checks, with one candidate so
  * an incompatible explicit pick cannot accidentally pass by falling back to another CLI.

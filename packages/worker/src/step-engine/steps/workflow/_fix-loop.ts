@@ -7,7 +7,7 @@ import {
   FIX_LOOP_TARGET_STEP_ID,
   fixRoundCliField,
   type FixRoundCliOptions,
-} from './_fix-round-cli.js';
+} from './_fix-round-cli-field.js';
 import {
   cleanText,
   contentFingerprint,
