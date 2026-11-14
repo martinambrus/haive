@@ -496,14 +496,6 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
 
     const next = String((args.formValues as { message?: unknown }).message ?? '').trim();
     if (next.length > PLAN_CHAT_MESSAGE_MAX_CHARS) throw new Error(PLAN_CHAT_MESSAGE_LIMIT_TEXT);
-    if (d.pendingFromLegacySubmission && d.pendingQuestion) {
-      await ctx.db.insert(schema.planNodeMessages).values({
-        nodeId: d.nodeId,
-        taskId: ctx.taskId,
-        role: 'user',
-        body: d.pendingQuestion,
-      });
-    }
     if (needsEdit(d) && !next) {
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
