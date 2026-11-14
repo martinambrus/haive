@@ -106,9 +106,19 @@ insert's origin records the writer's task id, UTC ISO timestamp and `bodyHash`; 
 retains that origin and appends its own task id, UTC timestamp, `beforeHash` and `afterHash`.
 `LEARNING_UPDATE_HISTORY_MAX` is **5**: origin is retained indefinitely, the last five updates
 are retained, and older update records are dropped. Stamps optionally carry an `operationId`:
-SHA-256 over the task/step row, round, invocation and the proposal's original ordinal and entry.
-Recovery epochs and Retry generations are excluded, as are reviewer edits. An insert reuses the
-file whose origin records that operation, including its collision suffix and staged-draft id.
+two SHA-256 hashes separated by a colon. The prefix identifies the task/step row, round and
+invocation; the suffix also includes the proposal's original ordinal and entry. Original
+unprefixed operation hashes remain readable and reusable for the same proposal. Recovery epochs
+and Retry generations are excluded, as are reviewer edits. An insert reuses the file whose
+origin records that operation, including its collision suffix and staged-draft id.
+
+Target decisions use the pre-apply set: files inserted by this same apply are excluded from
+update/delete lookup, while all on-disk filenames remain reserved for collision allocation.
+An unknown delete that was dropped on the first pass stays dropped on replay, and an unknown
+update stays an insert. This also holds for supersession expressed as delete plus insert.
+Deletion of a pre-existing target still leaves no durable identity: update then delete (or
+update then supersede) can resurrect that target on replay and needs separate deletion tracking.
+
 A recorded update proves that target's preceding operations in the same proposal completed;
 replay skips that prefix, preserving bytes and history. The default atomic filesystem write
 publishes content and identity together, independently of the best-effort reconcile event.
@@ -166,6 +176,9 @@ unknown legacy records, nested-marker stripping at depths 3 and 6, unchanged-upd
 CRLF hash continuity and stable parse/render. Worker `11-phase-8-learning-provenance.test.ts`
 pins actual file writes, staged edits, both reader exclusions, nested markers through preview
 and staged full-body replacement, unchanged indexed hashes, repeated-target updates and
-clearing prose with a footer left. The reconcile snapshot strips only the separately tested
-footer from learning files; its original prompt/form/output/content snapshot remains
+clearing prose with a footer left. The outcome tests cover 30 recoverable two-operation
+sequences across insert/update/delete/supersession and new/pre-existing targets, identical insert
+ordinals, apply-prefix isolation and original unprefixed identities. The two pre-existing-target
+deletion failures above remain outside that passing matrix. The reconcile snapshot strips only
+the separately tested footer from learning files; its original prompt/form/output/content snapshot remains
 unchanged.
