@@ -157,7 +157,17 @@ describe('host fix-pass test evidence', () => {
       expect(result.changes).toHaveLength(1);
       expect(result.changes[0]!.patch).toBe('content withheld by secret policy.');
     }
-    expect(compareTestImages(image, { ...image, files: [{ ...file }] }).changes).toEqual([]);
+    const same = compareTestImages(image, { ...image, files: [{ ...file }] });
+    expect(same.changes).toEqual([]);
+    expect(same.contentUnknown).toBe(1);
+    const notice = fixTestReviewNotice([record(same)]);
+    expect(notice).toBe(
+      '1 withheld secret test files kept their size and mode; a content edit to them cannot be measured.',
+    );
+    const row = fixTestEditsRow([record(same)]);
+    expect(row?.body).toContain('1 withheld secret test files kept their size and mode');
+    expect(row?.body).toContain('No measurable change to the classified test paths.');
+    expect(row?.body).not.toContain('No change to the classified test paths.');
   });
 
   it('shows a mid-file expectation change in a contextual hunk', async () => {
