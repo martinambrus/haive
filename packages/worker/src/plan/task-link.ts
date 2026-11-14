@@ -1,6 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { retryPlanConflict } from '@haive/shared/plan';
 import { applyPlanPatchWithRetry as applyPlanPatch } from './patch-retry.js';
 import { flushPlanMirrorForRepository } from './mirror.js';
 
@@ -62,20 +63,40 @@ export async function completePlanNodesForTask(db: Database, taskId: string): Pr
     }
 
     for (const [repositoryId, group] of byRepo) {
-      // No expectedVersion: this is not competing with a human editing the same
-      // node, it is recording a fact that already happened. A conflict here would
-      // just drop the update on the floor.
-      await applyPlanPatch(
-        db,
-        {
-          ops: group.map((n) => ({
-            op: 'upsert' as const,
-            nodeRef: n.id,
-            status: 'done' as const,
-          })),
-        },
-        { repositoryId, origin: 'user', sourceTaskId: taskId },
-      );
+      // This fact can survive a content edit. Re-read eligibility and version on
+      // a CAS conflict so a new human verdict is preserved as well.
+      await retryPlanConflict(async () => {
+        const fresh = await db
+          .select({
+            id: schema.planNodes.id,
+            status: schema.planNodes.status,
+            version: schema.planNodes.version,
+          })
+          .from(schema.planNodes)
+          .where(
+            and(
+              eq(schema.planNodes.repositoryId, repositoryId),
+              inArray(
+                schema.planNodes.id,
+                group.map((n) => n.id),
+              ),
+            ),
+          );
+        const eligible = fresh.filter((n) => n.status === 'todo' || n.status === 'in_progress');
+        if (eligible.length === 0) return;
+        await applyPlanPatch(
+          db,
+          {
+            ops: eligible.map((n) => ({
+              op: 'upsert' as const,
+              nodeRef: n.id,
+              status: 'done' as const,
+              expectedVersion: n.version,
+            })),
+          },
+          { repositoryId, origin: 'user', sourceTaskId: taskId },
+        );
+      });
       await flushPlanMirrorForRepository(db, repositoryId).catch((err) => {
         logger.warn({ err, repositoryId }, 'plan mirror refresh after task completion failed');
       });

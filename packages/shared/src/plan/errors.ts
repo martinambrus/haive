@@ -9,8 +9,9 @@ export type PlanPatchErrorKind =
    *  impossible (an unresolvable ref, a move that would create a cycle, a second
    *  root). Retryable by an LLM: re-prompting can produce a valid patch. */
   | 'invalid'
-  /** expectedVersion did not match — someone else wrote this node first. NOT
-   *  retryable without showing a human the other write. */
+  /** expectedVersion or the applier's atomic read-version check did not match.
+   * Stale caller versions must be shown, never silently retried. Derived writes
+   * without one may rebuild their intent from a fresh read and retry boundedly. */
   | 'conflict'
   /** Another patch still owns this repository's plan. Retry the same patch. */
   | 'busy'

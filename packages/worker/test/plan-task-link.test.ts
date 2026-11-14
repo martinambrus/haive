@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import { eq } from 'drizzle-orm';
 import { createFakeDb } from '@haive/database/testing';
 import { applyPlanPatch, PlanPatchError } from '@haive/shared/plan';
 import { logger } from '@haive/shared';
@@ -52,7 +53,14 @@ describe('task completion beside a busy plan', () => {
     await done;
     expect(applyPlanPatch).toHaveBeenCalledTimes(2);
     expect(vi.mocked(applyPlanPatch).mock.lastCall?.[1]).toEqual({
-      ops: [{ op: 'upsert', nodeRef: '20000000-0000-4000-8000-000000000001', status: 'done' }],
+      ops: [
+        {
+          op: 'upsert',
+          nodeRef: '20000000-0000-4000-8000-000000000001',
+          status: 'done',
+          expectedVersion: 1,
+        },
+      ],
     });
     expect(flushPlanMirrorForRepository).toHaveBeenCalledOnce();
   });
@@ -77,13 +85,48 @@ describe('task completion beside a busy plan', () => {
     expect(flushPlanMirrorForRepository).not.toHaveBeenCalled();
   });
 
-  it('never retries a stale version or another refusal', async () => {
+  it('bounds persistent CAS conflicts and keeps completion non-fatal', async () => {
     vi.mocked(applyPlanPatch)
       .mockReset()
       .mockRejectedValue(new PlanPatchError('conflict', 'edited meanwhile'));
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     await completePlanNodesForTask(linkedTask(), '10000000-0000-4000-8000-000000000001');
-    expect(applyPlanPatch).toHaveBeenCalledOnce();
+    expect(applyPlanPatch).toHaveBeenCalledTimes(3);
     expect(flushPlanMirrorForRepository).not.toHaveBeenCalled();
+  });
+
+  it('retries the mark after a concurrent edit using a fresh eligibility and version read', async () => {
+    const db = linkedTask();
+    vi.mocked(applyPlanPatch)
+      .mockReset()
+      .mockImplementationOnce(async () => {
+        await db
+          .update(schema.planNodes)
+          .set({ version: 2 })
+          .where(eq(schema.planNodes.id, '20000000-0000-4000-8000-000000000001'));
+        throw new PlanPatchError('conflict', 'edited meanwhile');
+      })
+      .mockResolvedValue({} as never);
+    await completePlanNodesForTask(db, '10000000-0000-4000-8000-000000000001');
+    expect(applyPlanPatch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(applyPlanPatch).mock.lastCall?.[1]).toMatchObject({
+      ops: [{ status: 'done', expectedVersion: 2 }],
+    });
+    expect(flushPlanMirrorForRepository).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a human verdict that lands before the retry', async () => {
+    const db = linkedTask();
+    vi.mocked(applyPlanPatch)
+      .mockReset()
+      .mockImplementationOnce(async () => {
+        await db
+          .update(schema.planNodes)
+          .set({ status: 'blocked_human', version: 2 })
+          .where(eq(schema.planNodes.id, '20000000-0000-4000-8000-000000000001'));
+        throw new PlanPatchError('conflict', 'human verdict');
+      });
+    await completePlanNodesForTask(db, '10000000-0000-4000-8000-000000000001');
+    expect(applyPlanPatch).toHaveBeenCalledOnce();
   });
 });

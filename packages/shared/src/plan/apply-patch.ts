@@ -869,7 +869,7 @@ async function applyOps(
     if (updated.length === 0)
       throw new PlanPatchError(
         'conflict',
-        `plan node ${row.id} was modified while applying the patch (expected version ${row.version})`,
+        `plan node ${row.id} was modified while applying the patch (read version ${row.version})`,
         opIndex,
       );
     versionAfterOwnWrite.set(row.id, row.version + 1);
@@ -958,7 +958,7 @@ async function applyOps(
         if (deleted.length === 0)
           throw new PlanPatchError(
             'conflict',
-            `plan node ${row.id} was modified while applying the patch (expected version ${row.version})`,
+            `plan node ${row.id} was modified while applying the patch (read version ${row.version})`,
             opIndex,
           );
         // The cascade takes this subtree's edges with it, so a dependency graph

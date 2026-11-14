@@ -62,6 +62,19 @@ const OPTS = { repositoryId: 'repo-1', origin: 'user', requireExpectedVersion: t
 const op = (fields: Record<string, unknown>) => ({ op: 'upsert', nodeRef: NODE, ...fields });
 
 describe('applyPlanPatch node versions', () => {
+  it('describes an unversioned CAS race using the read version, not a caller expectation', async () => {
+    const { db } = fakeDb(3, undefined, (row) => {
+      row.version = 4;
+    });
+    const err = await applyPlanPatch(
+      db,
+      { ops: [op({ ordinal: 2 })] },
+      { repositoryId: 'repo-1', origin: 'user' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ kind: 'conflict' });
+    expect((err as Error).message).toContain('read version 3');
+    expect((err as Error).message).not.toContain('expected version');
+  });
   it('compares the version atomically when an edit commits after the applier read', async () => {
     const { db, row } = fakeDb(3, undefined, (current) => {
       current.version = 4;

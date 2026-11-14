@@ -41,6 +41,7 @@ import {
   PlanPatchError,
   ancestryOf,
   applyPlanPatch,
+  retryPlanConflict,
   computeImpact,
   computePlanReady,
   computePlanSequence,
@@ -1073,11 +1074,13 @@ planRoutes.delete('/:id/plan', async (c) => {
   // Through applyPlanPatch like every other write; the subtree goes by the
   // parent_id cascade. No expectedVersion: the user is deleting the whole
   // plan, so a concurrent edit to one node does not change their intent, and a
-  // 409 here would be noise on the one action nobody wants to retry.
-  const result = await applyPlanPatch(
-    db,
-    { ops: [{ op: 'delete', nodeRef: root.id }] },
-    { repositoryId, origin: 'user' },
+  // CAS race is retried boundedly against that same root, never a replacement plan.
+  const result = await retryPlanConflict(() =>
+    applyPlanPatch(
+      db,
+      { ops: [{ op: 'delete', nodeRef: root.id }] },
+      { repositoryId, origin: 'user' },
+    ),
   ).catch(planError);
   await enqueuePlanMirrorRefresh(repositoryId, userId);
 
@@ -1109,10 +1112,12 @@ planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
     await refuseRootChangeDuringClarify(repositoryId);
   }
   try {
-    const res = await applyPlanPatch(
-      db,
-      { ops: [{ op: 'delete', nodeRef: nodeId }] },
-      { repositoryId, origin: 'user' },
+    const res = await retryPlanConflict(() =>
+      applyPlanPatch(
+        db,
+        { ops: [{ op: 'delete', nodeRef: nodeId }] },
+        { repositoryId, origin: 'user' },
+      ),
     );
     await enqueuePlanMirrorRefresh(repositoryId, userId);
     return c.json({ deleted: res.deleted });

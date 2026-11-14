@@ -1,4 +1,5 @@
 export * from './errors.js';
+export * from './retry-conflict.js';
 export * from './paths.js';
 export * from './sequence.js';
 export * from './sequence-progress.js';
