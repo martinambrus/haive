@@ -174,9 +174,17 @@ describe('a cli run start', () => {
       modelCoverage: 'unknown',
       reasons: ['test'],
     };
-    stubs.executeByKind.mockResolvedValue({ ...ok, requestUsage });
+    const tokenUsage = { inputTokens: 1, outputTokens: 2, totalTokens: 3 };
+    stubs.executeByKind.mockResolvedValue({
+      ...ok,
+      requestUsage,
+      tokenUsage,
+      streamLog: 'retained stream',
+      cleanTranscript: { segments: [] },
+    });
     const result = await handleCliExecJob(db, base);
-    expect(result?.requestUsage).toEqual(requestUsage);
+    expect(result).toStrictEqual({ ...ok, tokenUsage, requestUsage });
+    expect(writes.some((w) => w.set.streamLog === 'retained stream')).toBe(true);
     expect(writes.some((w) => 'requestUsage' in w.set)).toBe(false);
     expect(writes.some((w) => JSON.stringify(w.set.tokenUsage ?? {}).includes('requests'))).toBe(
       false,

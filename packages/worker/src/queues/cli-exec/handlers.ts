@@ -473,9 +473,12 @@ async function runCliExecJob(
       }
     });
     outcome = {
-      ...result,
-      requestUsage: result.requestUsage ?? unknownRequestUsage(),
+      exitCode: result.exitCode,
+      rawOutput: result.rawOutput,
+      parsedOutput: result.parsedOutput,
       errorMessage: finalErrorMessage,
+      tokenUsage: result.tokenUsage,
+      requestUsage: result.requestUsage ?? unknownRequestUsage(),
     };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
