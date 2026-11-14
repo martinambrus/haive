@@ -63,6 +63,11 @@ its provider was disabled or deleted. Ordering stays in PostgreSQL, preserving f
 timestamp precision, with the ordinary default winning an exact tie. Other rounds
 and roles ignore the slot. The task card, CLIs tab before a row exists, current-step
 usage strip and disable-impact reader apply the same precedence for the relevant round.
+An active round choice whose provider is deleted, no longer owned or disabled is
+reported as unavailable (`roundCliUnavailable`, present only when true), rather than as
+an ordinary cleared slot. The card and row-less CLIs picker explain how to choose another
+CLI, and the usage meters and disable-impact count name no fallback for that slot. A later
+ordinary card clear still supersedes the round choice and restores normal fallthrough.
 The preview describes the implementation step in the next fix round of this task;
 no user preference is written. The provider is refreshed at dispatch and remains
 the only candidate. A stale gate submission is reoffered with a fixed explanation
