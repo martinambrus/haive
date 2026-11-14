@@ -55,6 +55,7 @@ interface StreamJsonCollector {
   /** Measurement only; does not relax request coverage or alter token totals. */
   getRequestUsageDiagnostics: () => {
     resultCount: number;
+    absentModelUsageAcceptedComplete: boolean;
     emptyModelUsageAcceptedComplete: boolean;
     sameNameLedgerExcess: boolean;
     outputOnlyContradiction: boolean;
@@ -135,6 +136,7 @@ export function createStreamJsonCollector(
   let otherContradiction = false;
   let sameNameLedgerExcess = false;
   let emptyModelUsage = false;
+  let absentModelUsage = false;
   // Same message ids as assistantUsageByMessage; this strict view never changes legacy totals.
   const requestsByMessage = new Map<string, RequestUsage>();
   let billedUsageByModel = new Map<string, RequestUsage | null>();
@@ -261,6 +263,7 @@ export function createStreamJsonCollector(
     if (type === 'result') {
       resultCount++;
       const ledger = record(event.modelUsage);
+      absentModelUsage = event.modelUsage === undefined;
       emptyModelUsage = ledger !== null && Object.keys(ledger).length === 0;
       const strictResult = claudeRequestUsage(event.usage, 'result', null);
       if (!strictResult) requestIssues.add('invalid-result-usage');
@@ -701,6 +704,7 @@ export function createStreamJsonCollector(
       const capture = this.getRequestUsage();
       return {
         resultCount,
+        absentModelUsageAcceptedComplete: absentModelUsage && capture.coverage === 'complete',
         emptyModelUsageAcceptedComplete: emptyModelUsage && capture.coverage === 'complete',
         sameNameLedgerExcess,
         outputOnlyContradiction: outputContradiction && !otherContradiction,

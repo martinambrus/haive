@@ -99,6 +99,7 @@ export async function replayRequestUsage(
     sameNameSideModelCandidates: 0,
     sameNameLedgerExcessRuns: 0,
     unobservedSameModelRuns: 0,
+    absentModelUsageAcceptedComplete: 0,
     emptyModelUsageAcceptedComplete: 0,
     outputOnlyContradictoryRuns: 0,
     killedFallbackRuns: 0,
@@ -210,6 +211,9 @@ export async function replayRequestUsage(
       coverage === 'complete' &&
         diagnostics.sameNameLedgerExcess &&
         /^claude-haiku(?:-|$)/.test(model),
+    );
+    counters.absentModelUsageAcceptedComplete += Number(
+      diagnostics.absentModelUsageAcceptedComplete && coverage === 'complete',
     );
     counters.emptyModelUsageAcceptedComplete += Number(
       diagnostics.emptyModelUsageAcceptedComplete && coverage === 'complete',

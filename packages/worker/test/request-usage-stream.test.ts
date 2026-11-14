@@ -117,6 +117,18 @@ describe('Claude request coverage', () => {
       expect(aggregate.unobservedSameModel).toBeUndefined();
     }
   });
+  it.each(['absent', 'empty'] as const)('distinguishes an accepted %s ledger (S5/S6)', (shape) => {
+    const events = structuredClone(fixture);
+    if (shape === 'absent') delete events[3].modelUsage;
+    else events[3].modelUsage = {};
+    const collector = createStreamJsonCollector();
+    collector.onChunk(events.map((event: unknown) => JSON.stringify(event)).join('\n') + '\n');
+    expect(collector.getRequestUsage().coverage).toBe('complete');
+    expect(collector.getRequestUsageDiagnostics()).toMatchObject({
+      absentModelUsageAcceptedComplete: shape === 'absent',
+      emptyModelUsageAcceptedComplete: shape === 'empty',
+    });
+  });
   it('accepts an exact same-name ledger without excess', () => {
     const capture = read(billingCases[2]!.events);
     expect(capture.coverage).toBe('complete');

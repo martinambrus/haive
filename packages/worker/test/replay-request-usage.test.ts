@@ -74,6 +74,27 @@ describe('read-only request replay', () => {
     });
   });
 
+  it('counts accepted absent and empty ledgers separately, excluding incomplete runs (S5/S6)', async () => {
+    const absent = fixture('request-claude');
+    delete absent[3].modelUsage;
+    const empty = fixture('request-claude');
+    empty[3].modelUsage = {};
+    const dropped = structuredClone(absent);
+    dropped.splice(2, 1);
+    const broken = row(empty);
+    const report = await replayRequestUsage([
+      row(absent),
+      row(empty),
+      row(dropped),
+      { ...broken, streamLog: `${broken.streamLog}\n{"type":` },
+    ]);
+    expect(report.total).toMatchObject({ complete: 2, incomplete: 2 });
+    expect(report.counters).toMatchObject({
+      absentModelUsageAcceptedComplete: 1,
+      emptyModelUsageAcceptedComplete: 1,
+    });
+  });
+
   it('counts same-model excess only for complete replay captures', async () => {
     const events = fixture('request-claude');
     events[0].model = 'claude-haiku-4-5';
