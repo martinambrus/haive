@@ -365,6 +365,7 @@ taskRoutes.get('/', async (c) => {
           round: schema.taskSteps.round,
           statusMessage: schema.taskSteps.statusMessage,
           integrationWait: schema.taskSteps.integrationWait,
+          providerWaitProviderId: schema.taskSteps.providerWaitProviderId,
           updatedAt: schema.taskSteps.updatedAt,
           // currentStepLabel (below) rides the same rows: the human title plus the
           // in-place pass count, and run_seq/step_index to order the round scan.

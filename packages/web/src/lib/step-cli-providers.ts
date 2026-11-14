@@ -16,8 +16,8 @@
  *  the user never touched, it runs the mining summary pass, and keeping it means this can
  *  only ever ADD a meter to the header, never remove the one shown today.
  *
- *  Pure and unit-tested, like usage-chip-state and step-banners. No `@/` VALUE imports: the
- *  web package has no vitest config, so an aliased one would not resolve under the runner. */
+ *  Pure and unit-tested, like usage-chip-state and step-banners. Keep this resolver free of
+ *  runtime dependencies; the web Vitest config resolves `@/` imports when needed. */
 
 /** The fields of a `TaskStep` this reads. Structural rather than the whole type so tests can
  *  build one without the fifty unrelated columns. */

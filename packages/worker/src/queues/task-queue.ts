@@ -570,7 +570,7 @@ async function writeFencedPark(
   const fence = { epoch: ctx.orchestrationEpoch };
   try {
     await db.transaction(async (tx) => {
-      const patch = { ...requestedPatch };
+      const patch = { providerWaitProviderId: null, ...requestedPatch };
       if (opts.clearIntegrationCause) {
         // A pending CLI switch resets the envelope without changing the task epoch.
         // Transform the held current value, never the caller's unlocked park snapshot.
@@ -1693,7 +1693,7 @@ async function providerHoldFor(
   stepDef: StepDefinition,
   round: number,
   runIdx: number,
-): Promise<string | null> {
+): Promise<{ message: string; providerId: string } | null> {
   if (!dispatchesCli(stepDef) && stepDef.metadata.providerSensitive !== true) return null;
   const providers = await loadProviders(db, ctx.userId);
   const { cliProviderId } = await resolvePreferredCli(
@@ -1712,7 +1712,7 @@ async function providerHoldFor(
     { ...ctx, db, stepDef, round, providers },
     await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
   );
-  return skips ? null : message;
+  return skips || !cliProviderId ? null : { message, providerId: cliProviderId };
 }
 
 /** The three inputs `fairPriority` (@haive/shared/fair-priority) turns into a BullMQ priority,
@@ -3431,7 +3431,7 @@ async function handleAdvanceStep(
         }
       : providerWait !== null
         ? {
-            message: providerWait,
+            message: providerWait.message,
             pollMs: PROVIDER_HOLD_POLL_MS,
             label: 'provider hold',
             scope: undefined,
@@ -3474,7 +3474,11 @@ async function handleAdvanceStep(
         db,
         ctx,
         row.id,
-        { statusMessage: message, updatedAt: new Date() },
+        {
+          statusMessage: message,
+          providerWaitProviderId: providerWait?.providerId ?? null,
+          updatedAt: new Date(),
+        },
         payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
         { clearIntegrationCause: !pause },
       );
@@ -3495,6 +3499,7 @@ async function handleAdvanceStep(
           waitingStartedAt: new Date(),
           userActiveMs: 0,
           statusMessage: message,
+          providerWaitProviderId: providerWait?.providerId ?? null,
           updatedAt: new Date(),
         },
         pointer,

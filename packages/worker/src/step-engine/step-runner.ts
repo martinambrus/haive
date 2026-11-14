@@ -46,6 +46,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
+import { disabledProvider } from '../orchestrator/provider-hold.js';
 import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -2906,6 +2907,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,
         integrationWait: null,
+        providerWaitProviderId: null,
       });
       if (!claimed) return supersededPass(current);
       current = claimed;
@@ -4010,8 +4012,8 @@ async function maybeEnqueueStepSummary(
     } else {
       return; // no agent text to summarize
     }
-    // Only while still enabled: resolveDispatch merely ORDERS the preferred provider first,
-    // so an id matching nothing falls through to the default provider instead of failing.
+    // An explicit recap choice is honored only while enabled; otherwise inherit the step's
+    // chain. If that chain names a disabled provider, resolveDispatch skips and we warn below.
     const summaryProvider = task?.summaryCliProviderId
       ? providers.find((p) => p.id === task.summaryCliProviderId && p.enabled)
       : undefined;
@@ -4054,7 +4056,15 @@ async function maybeEnqueueStepSummary(
       },
     });
     const invocation = plan.invocation;
-    if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;
+    if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') {
+      if (disabledProvider(providers, preferredProviderId)) {
+        logger.warn(
+          { taskId: params.taskId, stepId: stepDef.metadata.id, providerId: preferredProviderId },
+          'step summary skipped: the resolved CLI provider is disabled',
+        );
+      }
+      return;
+    }
 
     const [invRow] = await db
       .insert(schema.cliInvocations)

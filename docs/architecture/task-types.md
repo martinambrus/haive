@@ -184,7 +184,11 @@ Task form can say why.
 
 `buildRunList` dispatches on the strategy: `run_app_modes` builds the run-app list, `workflow_paths`
 orders the workflow steps with the environment prelude for the execution path, `static` resolves the
-snapshot (`resolveRunList`).
+snapshot (`resolveRunList`). The pure strategy selection and dynamic step IDs live in
+`@haive/shared/run-list`; path ordering lives in `@haive/shared/execution-paths`. The worker
+resolves those IDs through its registry and retains the run-app database-compatibility check.
+The provider-disable preview uses the same selector with catalog steps, the stored execution
+path and the linked environment template, including before a task has a run-list snapshot.
 
 **A missing step is never filtered out.** `resolveRunList` returns the steps and the unresolved ids, and
 an unresolved step marks the task dead (`markTaskDead`). Filtering made both forward walks read "no next

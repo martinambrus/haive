@@ -31,6 +31,21 @@ const derive = (
   });
 
 describe('deriveSlotWait', () => {
+  it('uses a structural provider marker even on module steps and with unrelated copy', () => {
+    const stepId = 'module.acme.rebuild';
+    const held = step({
+      stepId,
+      providerWaitProviderId: 'off',
+      statusMessage: 'arbitrary copy',
+    });
+    expect(derive({ currentStepId: stepId }, [held])?.kind).toBe('provider');
+    expect(derive({ currentStepId: stepId, paused: true }, [held])).toBeNull();
+    expect(derive({ currentStepId: stepId }, [{ ...held, status: 'done' }])).toBeNull();
+    expect(
+      derive({ currentStepId: stepId }, [{ ...held, providerWaitProviderId: null }])?.kind,
+    ).toBe('module');
+  });
+
   it('reports a runtime park (pending + marker) on the current step', () => {
     expect(derive()).toEqual({
       kind: 'runtime',

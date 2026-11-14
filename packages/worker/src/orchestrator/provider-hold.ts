@@ -26,5 +26,5 @@ export function providerHoldMessage(
 ): string | null {
   const off = disabledProvider(providers, id);
   if (!off) return null;
-  return `Waiting for the CLI provider — "${providerLabel(off)}" is disabled, so this step is held until it is enabled again`;
+  return `Waiting for the CLI provider — "${providerLabel(off)}" is disabled. Enable the provider again or switch this step's CLI to continue.`;
 }

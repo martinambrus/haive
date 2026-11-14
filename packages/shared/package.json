@@ -7,6 +7,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./execution-paths": {
+      "types": "./dist/step-engine/execution-paths.d.ts",
+      "import": "./dist/step-engine/execution-paths.js"
+    },
+    "./run-list": {
+      "types": "./dist/step-engine/run-list.d.ts",
+      "import": "./dist/step-engine/run-list.js"
+    },
     "./cli-login-lease": {
       "types": "./dist/cli-login-lease.d.ts",
       "import": "./dist/cli-login-lease.js"

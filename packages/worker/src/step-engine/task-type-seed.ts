@@ -1,3 +1,4 @@
+import { builtinRunListStrategy } from '@haive/shared/run-list';
 import { createHash } from 'node:crypto';
 import { and, eq, inArray, notInArray, or, sql, type AnyColumn } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
@@ -42,10 +43,6 @@ const DISPLAY_NAMES: Record<string, string> = {
   type_draft: 'Task type draft',
 };
 
-const DYNAMIC_STRATEGIES: Record<string, RunListStrategy> = {
-  workflow: 'workflow_paths',
-  run_app: 'run_app_modes',
-};
 const SELECTABLE_SLUGS = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_app'];
 
 // An unchanged row is not rewritten, so updated_at stays the version an editor read.
@@ -59,7 +56,7 @@ const contentHashOf = (runListStrategy: RunListStrategy, stepIds: string[] | nul
 
 export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[] {
   return schema.workflowTypeEnum.enumValues.map((slug, index) => {
-    const runListStrategy = DYNAMIC_STRATEGIES[slug] ?? 'static';
+    const runListStrategy = builtinRunListStrategy(slug);
     const stepIds =
       runListStrategy === 'static' ? registry.listByWorkflow(slug).map((d) => d.metadata.id) : null;
     return {

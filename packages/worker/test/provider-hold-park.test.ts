@@ -7,6 +7,7 @@ import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared'
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -42,6 +43,8 @@ const SENSITIVE = `provider-hold-${SUFFIX}.sensitive`;
 const LLM = `provider-hold-${SUFFIX}.llm`;
 const PLAIN = `provider-hold-${SUFFIX}.plain`;
 const SKIPPED = `provider-hold-${SUFFIX}.skipped`;
+const MODULE = `provider-hold-${SUFFIX}`;
+const MODULE_STEP = `module.${MODULE}.sensitive`;
 const EMAIL_INDEX = 'provider-hold-park-test-user';
 const START_TYPE = 'provider-hold-park';
 
@@ -78,6 +81,7 @@ define(SENSITIVE, 0, { providerSensitive: true }, phases);
 define(LLM, 1, { llm: { requiredCapabilities: [], buildPrompt: () => 'a prompt' } }, phases);
 define(PLAIN, 2, {}, phases);
 define(SKIPPED, 3, { providerSensitive: true }, skippedPhases);
+define(MODULE_STEP, 4, { providerSensitive: true }, phases);
 
 const advances = () => h.adds.filter((add) => add.name === TASK_JOB_NAMES.ADVANCE_STEP);
 
@@ -150,7 +154,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
       .values({
         emailEncrypted: 'provider-hold-park-test@test.local',
         emailBlindIndex: EMAIL_INDEX,
-        passwordHash: 'not-real',
+        passwordHash: randomBytes(12).toString('hex'),
         role: 'user',
         status: 'active',
         tokenVersion: 0,
@@ -223,6 +227,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
   });
 
   afterEach(() => {
+    markModuleSchemaReady(MODULE);
     vi.restoreAllMocks();
   });
 
@@ -238,6 +243,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
       .delete(schema.taskTypeDefinitions)
       .where(eq(schema.taskTypeDefinitions.slug, START_TYPE));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, MODULE));
     await db.$client.end({ timeout: 5 });
   });
 
@@ -260,13 +266,18 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     await runningTask();
     await tick();
     const [first] = await rows();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const oldHeartbeat = new Date('2026-01-01T00:00:00Z');
+    await db
+      .update(schema.taskSteps)
+      .set({ updatedAt: oldHeartbeat })
+      .where(eq(schema.taskSteps.id, first!.id));
     await runNext();
     const [second] = await rows();
     expect(second!.status).toBe('pending');
     expect(second!.waitingStartedAt).toEqual(first!.waitingStartedAt);
     expect(second!.statusMessage).toBe(first!.statusMessage);
-    expect(second!.updatedAt.getTime()).toBeGreaterThan(first!.updatedAt.getTime());
+    expect(second!.updatedAt).not.toEqual(oldHeartbeat);
+    expect(second!.providerWaitProviderId).toBe(ownId);
     expect(advances()).toHaveLength(2);
     expect(advances()[1]!.opts.delay).toBe(30_000);
     noDetectOrApply();
@@ -282,6 +293,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     const [row] = await rows();
     expect(row!.startedAt).toBeInstanceOf(Date);
     expect(row!.waitingStartedAt).toBeNull();
+    expect(row!.providerWaitProviderId).toBeNull();
   });
 
   it('H4: an enabled CLI picked for the step in this task releases the park', async () => {
@@ -295,15 +307,65 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     expect((await rows())[0]!.waitingStartedAt).toBeNull();
   });
 
-  it('H5: a global pause wins over the provider hold and shows the pause words', async () => {
-    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+  it('H5 first park: a global pause wins before evaluating a provider hold', async () => {
     await runningTask();
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     await tick();
     const [row] = await rows();
-    expect(row).toMatchObject({ status: 'pending' });
+    expect(row).toMatchObject({ status: 'pending', providerWaitProviderId: null });
+    expect(row!.waitingStartedAt).toBeInstanceOf(Date);
     expect(row!.statusMessage).toMatch(/^Paused/);
     expect(row!.statusMessage).not.toContain('Own CLI');
+    expect(advances()).toHaveLength(1);
     expect(advances()[0]!.opts.delay).toBe(30_000);
+    expect(phases.shouldRun).not.toHaveBeenCalled();
+    noDetectOrApply();
+  });
+
+  it('H5 re-park: a global pause overtakes an existing provider hold', async () => {
+    await runningTask();
+    await tick();
+    expect((await rows())[0]!.providerWaitProviderId).toBe(ownId);
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    await runNext();
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: 'pending' });
+    expect(row!.providerWaitProviderId).toBeNull();
+    expect(row!.statusMessage).toMatch(/^Paused/);
+    expect(row!.statusMessage).not.toContain('Own CLI');
+    expect(advances()).toHaveLength(2);
+    expect(advances()[1]!.opts.delay).toBe(30_000);
+    noDetectOrApply();
+  });
+
+  it('module schema wins over a disabled provider until setup is ready', async () => {
+    await db.insert(schema.modules).values({
+      moduleId: MODULE,
+      packageName: `@haive/module-${MODULE}`,
+      name: MODULE,
+      installedVersion: '1.0.0',
+    });
+    await db
+      .update(schema.tasks)
+      .set({ runListSnapshot: [MODULE_STEP] })
+      .where(eq(schema.tasks.id, taskId));
+    markModuleSchemaUnready(MODULE);
+    await runningTask(MODULE_STEP);
+    await tick(MODULE_STEP);
+    const [schemaPark] = await rows();
+    expect(schemaPark).toMatchObject({ status: 'pending', providerWaitProviderId: null });
+    expect(schemaPark!.waitingStartedAt).toBeInstanceOf(Date);
+    expect(advances()[0]!.opts.delay).toBe(5_000);
+    expect(phases.shouldRun).not.toHaveBeenCalled();
+    noDetectOrApply();
+
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    const [providerPark] = await rows();
+    expect(providerPark).toMatchObject({ status: 'pending', providerWaitProviderId: ownId });
+    expect(providerPark!.waitingStartedAt).toEqual(schemaPark!.waitingStartedAt);
+    expect(advances()[1]!.opts.delay).toBe(30_000);
+    expect(phases.shouldRun).toHaveBeenCalledTimes(1);
     noDetectOrApply();
   });
 

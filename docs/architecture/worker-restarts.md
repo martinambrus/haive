@@ -99,7 +99,31 @@ The hold is evaluated only for fresh entries, never for a continuation, so a dis
 with the dispatcher's named skip and Retry works once the provider is enabled. START takes the same
 check and queues the advance; a held first step leaves a `pending` row without the park stamp, which
 the stalled sweep treats like a missing row and re-drives. Only the `default` role is checked here;
-role and seat picks rely on the dispatcher rule.
+role and seat picks rely on the dispatcher rule. The hold copy names both recovery actions:
+enable the provider again or switch the step's CLI.
+
+A provider park writes `task_steps.provider_wait_provider_id` (nullable uuid, migration 0236) on
+the first park and on each re-park tick. Every other fenced park defaults the marker to NULL,
+including a pause or module-schema wait that overtakes it, and a step claim clears it. The
+derived badge reads it only on the current pending row with a live `waiting_started_at`, for
+a running task that is neither paused nor dead. Reset paths that close the park marker therefore
+cannot keep the badge alive. The task list explicitly selects this column; detail reads the
+whole step row.
+
+Before saving a provider disable, Save and Rebuild read the authenticated, owner-scoped
+`GET /cli-providers/:id/disable-impact`. It counts remaining fresh default-slot bindings to that
+provider on non-dead, nonterminal tasks (including tasks waiting to start or resume), using the
+same CLI preference resolution as the step display. Continuations, deterministic steps that are
+not provider-sensitive, implicit defaults and other owners' tasks are excluded. Repository-dependent
+`shouldRun` skips are not predicted, and the confirmation says so. A successful nonzero preview
+asks for confirmation; two zero counts skip it. A failed preview also proceeds without a dialog,
+since this read is advisory and PATCH remains authoritative. Rebuild sets its build gate before
+persistence clears dirty state, defers polling until the request finishes, and restores the previous
+build state if confirmation is cancelled. Save and Rebuild share a synchronous in-flight
+guard acquired before either awaits the preview, held through confirmation and persistence
+(and the rebuild request), and released in `finally`. A second action is refused while the
+first holds it, so it cannot overwrite the confirmation resolver. Both controls reflect the
+shared pending state.
 
 **A park whose poll chain was lost is re-driven.** A parked row (`pending` with
 `waiting_started_at`: a runtime slot, a pause, module schema setup, a required integration or a disabled explicit CLI provider) is

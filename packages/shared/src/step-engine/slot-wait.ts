@@ -4,7 +4,7 @@
  *  ninth task status. Being derived, it is recomputed from the live step rows on every poll
  *  and cannot go stale the way a written-on-park / forgotten-on-resume column would.
  *
- *  Three waits exist, the first two bounded by an admin cap:
+ *  Capacity waits and holds share a parked step shape:
  *    - runtime: the task-level runtime admission gate (MAX_CONCURRENT_RUNTIMES) parked the
  *      step before it could boot its DDEV/app runner. Only a step that will actually spawn one
  *      is gated — a task whose runtime classifies as 'none' never queues — so this wait always
@@ -16,6 +16,9 @@
  *    - module: a module step is parked until its module's schema setup has finished on this
  *      worker. No slot is involved. The park writes the same `pending` + `waiting_started_at`
  *      row the runtime park does, so the step id (`module.<moduleId>.<step>`) tells them apart.
+ *    - provider: a fresh step is held on its disabled explicit CLI. The worker writes
+ *      provider_wait_provider_id, including on module steps whose schema is ready.
+ *    - integration: integration_wait carries the unresolved required accounts/providers.
  *
  *  These signals are structural — a step status plus a marker column, the step id's grammar, or
  *  the existence of an unstarted invocation row. The park's `status_message` is display copy
@@ -23,7 +26,7 @@
 
 import { isModuleStepId } from '../modularity/contracts.js';
 
-export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration';
+export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration' | 'provider';
 
 /** A task step reduced to the fields the derivation needs. Date fields accept a `Date`
  *  (server-side Drizzle rows) or an ISO string (web JSON), like `TaskTimingStep`. */
@@ -34,6 +37,8 @@ export interface SlotWaitStep {
   round: number;
   status: string;
   integrationWait?: { causes: readonly unknown[] } | null;
+  /** Non-null only while the worker has parked on this disabled explicit CLI. */
+  providerWaitProviderId?: string | null;
   waitingStartedAt: Date | string | null;
   statusMessage: string | null;
   updatedAt: Date | string | null;
@@ -126,11 +131,13 @@ export function deriveSlotWait(args: {
 
   if (row.status === 'pending' && since !== null) {
     return {
-      kind: row.integrationWait?.causes.length
-        ? 'integration'
-        : isModuleStepId(row.stepId)
-          ? 'module'
-          : 'runtime',
+      kind: row.providerWaitProviderId
+        ? 'provider'
+        : row.integrationWait?.causes.length
+          ? 'integration'
+          : isModuleStepId(row.stepId)
+            ? 'module'
+            : 'runtime',
       since,
       stepId: row.stepId,
       message: row.statusMessage,

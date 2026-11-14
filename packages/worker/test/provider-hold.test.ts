@@ -34,6 +34,8 @@ describe('providerHoldMessage', () => {
     const message = providerHoldMessage(providers, 'off');
     expect(message).toContain('"Off label"');
     expect(message).toMatch(/disabled/);
+    expect(message).toContain('Enable the provider again');
+    expect(message).toContain("switch this step's CLI");
   });
 
   it('falls back to the provider name when the label is empty', () => {

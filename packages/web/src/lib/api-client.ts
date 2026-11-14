@@ -742,9 +742,11 @@ export type StepStatus =
 /** What a running-but-parked task is waiting on: 'runtime' = the runtime admission gate (no
  *  free DDEV/app runner slot), 'agent' = its CLI job is enqueued but no parallel-agent slot
  *  has picked it up, 'module' = a module step waiting for its module's schema setup (no slot
- *  involved). Local mirror of @haive/shared's SlotWait — the web package intentionally keeps
+ *  involved), 'integration' = unresolved required accounts or providers, and 'provider' = a
+ *  fresh step held on its disabled explicit CLI. Local mirror of @haive/shared's SlotWait — the
+ *  web package intentionally keeps
  *  its own copies of API types. */
-export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration';
+export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration' | 'provider';
 
 export interface SlotWait {
   kind: SlotWaitKind;

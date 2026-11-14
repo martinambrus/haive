@@ -2,6 +2,7 @@ import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
+import { logger } from '@haive/shared';
 
 const stamp = vi.hoisted(() => `tree:${'ab'.repeat(20)}`);
 vi.mock('../src/build-stamp.js', () => ({ currentBuildStamp: () => stamp }));
@@ -230,6 +231,27 @@ const summaries = (enqueued: CliExecJobPayload[]) =>
   enqueued.filter((p) => p.purpose === 'step_summary');
 
 describe('per-step summarizer provider choice', () => {
+  it('warns with the resolved provider id when a disabled step CLI skips the recap', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      const { enqueued } = await runToDone(
+        { summaryCliProviderId: 'prov-summary', summaryLlmEnabled: true },
+        [makeProvider({ enabled: false }), makeProvider({ id: 'prov-summary', enabled: false })],
+      );
+      expect(summaries(enqueued)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: 'prov-1',
+          taskId: 'task-1',
+          stepId: 'test-summary-step',
+        }),
+        'step summary skipped: the resolved CLI provider is disabled',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('inherits the step CLI when the task names no summary provider', async () => {
     const { enqueued } = await runToDone({ summaryCliProviderId: null, summaryLlmEnabled: true }, [
       makeProvider(),
@@ -283,9 +305,8 @@ describe('per-step summarizer provider choice', () => {
   });
 
   it('falls back to the step CLI when the summary provider is disabled', async () => {
-    // The failure this guards: a disabled id does not fail the dispatch, it simply matches
-    // nothing, and resolveDispatch then hands the run to whichever provider is ordered
-    // first. Here that would be the OTHER enabled provider, not the task's own CLI.
+    // Summary settings inherit the step chain when their provider is disabled. Passing the
+    // disabled summary id straight to dispatch would skip the recap instead of inheriting.
     const { enqueued } = await runToDone(
       { summaryCliProviderId: 'prov-summary', summaryLlmEnabled: true },
       [
