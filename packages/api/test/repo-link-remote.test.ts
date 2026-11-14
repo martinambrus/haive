@@ -18,12 +18,17 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   lstatNoFollow: h.entry,
 }));
-vi.mock('../src/lib/remote-reconcile.js', async (original) => ({
-  ...(await original<typeof import('../src/lib/remote-reconcile.js')>()),
-  markRemoteIntent: h.mark,
-  clearRemoteIntent: h.clear,
-  reconcileRemote: h.reconcile,
-}));
+vi.mock('../src/lib/remote-reconcile.js', async (original) => {
+  const real = await original<typeof import('../src/lib/remote-reconcile.js')>();
+  return {
+    ...real,
+    markRemoteIntent: h.mark,
+    clearRemoteIntent: h.clear,
+    reconcileRemote: h.reconcile,
+    // The real fence, with its begin and end calls recorded.
+    beginRelinkWriter: vi.fn((id: string) => vi.fn(real.beginRelinkWriter(id))),
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
@@ -46,6 +51,7 @@ import { hardenGitArgs } from '@haive/shared/git-args';
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError, type AppEnv } from '../src/context.js';
+import { beginRelinkWriter } from '../src/lib/remote-reconcile.js';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -947,6 +953,36 @@ it.each(['ECONNREFUSED', 'CONNECTION_CLOSED', '55P03'])(
     expect(h.clear).not.toHaveBeenCalled();
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
     expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'fences the sweep off the repository across its Git writes and its own reconcile (connection lost=%s)',
+  async (dropped) => {
+    const begin = vi.mocked(beginRelinkWriter);
+    begin.mockClear();
+    const fenced = () =>
+      begin.mock.calls.length === 1 && begin.mock.results[0]!.value.mock.calls.length === 0;
+    const seen: boolean[] = [];
+    h.git.mockImplementation(async (_file: string, args: string[]) => {
+      if (args.includes('remote')) seen.push(fenced());
+      return { stdout: args.includes('rev-parse') ? 'true' : '', stderr: '' };
+    });
+    if (dropped) {
+      const transaction = fake.db.transaction.bind(fake.db);
+      vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+        await transaction(fn);
+        throw Object.assign(new Error('acknowledgement lost'), { code: 'CONNECTION_CLOSED' });
+      });
+      h.reconcile.mockImplementationOnce(async () => {
+        seen.push(fenced());
+      });
+    }
+    await link();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every(Boolean)).toBe(true);
+    expect(begin).toHaveBeenCalledWith(REPO);
+    expect(begin.mock.results[0]!.value).toHaveBeenCalledTimes(1);
   },
 );
 

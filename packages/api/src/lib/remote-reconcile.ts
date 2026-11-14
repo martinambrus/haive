@@ -12,6 +12,24 @@ import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js
 export const REMOTE_SWEEP_BATCH = 25;
 export const REMOTE_SWEEP_INTERVAL_MS = 30_000;
 
+// Relinks in this process whose Git writes may still be running. A dropped database
+// connection releases the row lock before such a write finishes, so the lock alone cannot
+// keep the sweep from repairing and clearing an intent a later write then contradicts.
+const relinkWriters = new Map<string, number>();
+
+/** Fences the sweep off a repository until the returned call; a relink holds it across its Git. */
+export function beginRelinkWriter(id: string): () => void {
+  relinkWriters.set(id, (relinkWriters.get(id) ?? 0) + 1);
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    const left = (relinkWriters.get(id) ?? 1) - 1;
+    if (left > 0) relinkWriters.set(id, left);
+    else relinkWriters.delete(id);
+  };
+}
+
 /** Commit intent separately before the relink transaction or any Git mutation. */
 export async function markRemoteIntent(id: string, userId: string) {
   return withFreshDatabase((db) =>
@@ -105,6 +123,8 @@ export async function reconcileRemote(
       );
       // A delete won the lock (do not touch its former checkout), or a relink holds the row.
       if (!repo?.remoteRelinkIntent) return;
+      // A relink whose connection dropped may still be writing Git; it reconciles itself.
+      if (skipLocked && relinkWriters.has(id)) return;
       const root = repo.storagePath ?? repo.localPath;
       if (!root) throw new Error('Repository has no path for remote reconciliation');
       await verifyRelinkCheckout(root);

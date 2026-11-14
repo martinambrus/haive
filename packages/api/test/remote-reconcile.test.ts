@@ -20,6 +20,7 @@ import {
   markRemoteIntent,
   clearRemoteIntent,
   reconcileRemote,
+  beginRelinkWriter,
   startRemoteReconcileSweep,
   REMOTE_SWEEP_BATCH,
   REMOTE_SWEEP_INTERVAL_MS,
@@ -192,4 +193,22 @@ it('reconciles a pending repository from a sweep and clears its intent before st
   stop();
   await vi.advanceTimersByTimeAsync(100);
   expect(pages).toHaveBeenCalledOnce();
+});
+
+it('leaves a repository to a relink in this process whose Git writes may still run', async () => {
+  const end = beginRelinkWriter(id);
+  await reconcileRemote(id, userId, { skipLocked: true });
+  expect(h.git).not.toHaveBeenCalled();
+  expect(fake.rows(schema.repositories)[0]!.remoteRelinkIntent).not.toBeNull();
+  // The relink's own reconcile is not fenced.
+  await reconcileRemote(id, userId);
+  expect(h.git).toHaveBeenCalled();
+  end();
+  end();
+  h.git.mockClear();
+  fake.patch(schema.repositories, id, {
+    remoteRelinkIntent: '00000000-0000-4000-8000-000000000004',
+  });
+  await reconcileRemote(id, userId, { skipLocked: true });
+  expect(h.git).toHaveBeenCalled();
 });

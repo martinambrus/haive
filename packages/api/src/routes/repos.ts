@@ -126,6 +126,7 @@ import {
   clearRemoteIntent,
   reconcileRemote,
   isRemoteConnectionError,
+  beginRelinkWriter,
 } from '../lib/remote-reconcile.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
@@ -2810,6 +2811,9 @@ repoRoutes.post('/:id/remote', async (c) => {
   // Other COMMIT failures may restore after the lock is released: a concurrent
   // relink can still race that Git fallback. Never clear its possibly newer intent.
   let callbackSettled: Promise<void> | undefined;
+  // Held until this request's Git writes have settled and its own reconcile ran, so the sweep
+  // cannot clear the intent while a write that outlived a dropped connection is still running.
+  const endWriter = beginRelinkWriter(id);
   try {
     await db.transaction(async (tx) => {
       let settle!: () => void;
@@ -2979,6 +2983,8 @@ repoRoutes.post('/:id/remote', async (c) => {
       );
     }
     await restoreRemote(err, false);
+  } finally {
+    endWriter();
   }
   logAuditEvent(event!);
 
