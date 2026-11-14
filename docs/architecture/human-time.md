@@ -89,3 +89,55 @@ misjudge positioned descendants that escape an ancestor, and hit testing can exc
 with pointer-events disabled. Real layout cost and overflow frequency need browser measurement;
 jsdom geometry controls verify logic only. Measurement runs after settled input, never on the
 one-second sampling interval.
+
+## Plan-page delivery
+
+The plan page enables `useActiveTime` for the whole repository visit, including an empty
+plan. Its memoized sink depends only on the repository id and calls `postPlanUserActive`;
+ordinary page renders and status polls keep the same sink. The helper sends a credentialed,
+keepalive POST with no retry, like the task-step sink. Failed additive deliveries are dropped.
+The shared attention lease above covers both task and plan pages, so focused tabs in one
+profile do not normally count the same interval twice. A plan chat form on the task page
+continues to count only against its task step; the plan-page registry is not mounted there.
+
+A page-owned, symbol-keyed registry combines independent pending reporters. Each producer
+clears its entry on unmount, and the callbacks are optional for components reused elsewhere:
+
+- Plan starter reports its busy request, including creation and attachment uploads.
+- Ordering reports only while this page's ordering-start request is in flight. The loaded
+  overview supplies an `activeTaskId` without the task's status; that id alone cannot prove
+  work is running, and the page adds no task-status fetch.
+- The selected node reports its linked implementation tasks and its separate `advisoryTask`
+  only when they are alive and their status is `queued` or `running`. `created`,
+  `waiting_user`, `waiting_pr` and terminal tasks do not extend attention. A paused task
+  keeps status `running` (pausing sets `pausedAt`, which the node payload does not carry),
+  so it still counts; the 15-minute pending bound caps that over-count per absence.
+- Plan chat reports a send or live working turn, excluding a dead task or a parked form.
+- Merge reports its start request, answer submission or live working turn, excluding a dead
+  task or a parked form.
+
+Pending follows state already loaded on mount, through explicit refresh/reload and through
+existing pollers. Attention adds no periodic whole-plan overview or node-detail fetch. The
+existing snapshot and merge polls remain at 10 seconds and unread counts at 15 seconds;
+chat and merge retain their own task pollers. A cached pending `true` may outlive its task,
+but the extension remains bounded by `PENDING_WORK_IDLE_MS` (15 minutes) per presence epoch:
+`ActivityClock.setModes` cannot revive an expired epoch or move its input timestamp. Stale
+pending state therefore cannot keep an unattended visit counting indefinitely.
+
+The registry's content key advances only when a chat's latest assistant message id changes
+after that repository/node scope's transcript baseline. Loading history, changing scope,
+user messages and unchanged polls do not renew presence. A new answer still observes the
+clock's recent-real-input requirement.
+
+`POST /repositories/:id/plan/user-active` requires authentication and repository ownership;
+a missing repository or another user's repository returns 404. The app's state-changing
+request origin guard applies. The request accepts an integer `deltaMs` from 0 through
+60,000; zero writes nothing. Positive deltas use one atomic additive upsert on
+`(repository_id, user_id, hour_start)`, clamped to 3,600,000 ms per user/repository/hour.
+The hour is the server's receipt hour rounded down in UTC and stored as a timestamp without
+time zone; a flush crossing an hour belongs wholly to the receipt hour.
+
+Migration `0237_plan_active_time.sql` creates `plan_active_time` idempotently. Repository and
+user foreign keys both cascade on deletion. Undo by reverting the application commits; the
+unused table is harmless. Drop it only through a later numbered migration. The migration's
+header records this path before it is applied; applied migration checksums must stay fixed.

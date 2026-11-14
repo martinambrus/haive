@@ -200,3 +200,7 @@ query and fragment from that response while keeping the non-secret SSH login and
 ([Secret and git-data masking](sandbox-masking.md)). The checkout's origin is unchanged by the read.
 
 `CONFIG_KEYS.PLAN_CANVAS_ENABLED` (admin toggle) off refuses new plan tasks and makes the onboarding step self-skip; existing plans stay readable and editable — hiding a plan someone made reads as data loss. Web: drill-down grid, not a graph engine (`components/plan/`); `plan-status.ts` is the single status→colour source; counts are server-computed. Live-Postgres coverage: `pnpm --filter @haive/worker smoke:plan-canvas` (202 checks).
+
+Plan-page attention uses the shared presence clock and a page-owned pending registry, with
+no additional overview or node-detail polls. Its reporter rules, cached-state bound and
+repository/hour delivery are documented in [Human active time](human-time.md#plan-page-delivery).
