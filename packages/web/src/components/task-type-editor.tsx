@@ -127,9 +127,11 @@ export function TaskTypeEditor({
   const [row, setRow] = useState<AdminTaskType | null>(null);
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [baseSlug, setBaseSlug] = useState<string | null>(creating ? duplicateBaseSlug : null);
+  const [baseSlug, setBaseSlug] = useState<string | null>(
+    creating ? duplicateBaseSlug || null : null,
+  );
   const [changes, setChanges] = useState<DerivedChange[]>([]);
-  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string>('pre-triage');
   const [stepIds, setStepIds] = useState<string[]>([]);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
@@ -152,6 +154,7 @@ export function TaskTypeEditor({
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   const applyRow = useCallback((taskType: AdminTaskType) => {
+    setPermissionDenied(null);
     setRow(taskType);
     setBaseSlug(taskType.runListStrategy === 'derived' ? (taskType.baseSlug ?? '') : null);
     setChanges(taskType.changes ?? []);
@@ -195,6 +198,7 @@ export function TaskTypeEditor({
             requiresRepository: one.taskType.requiresRepository,
             sortOrder: one.taskType.sortOrder,
           };
+          setPermissionDenied(null);
           setBaseSlug(duplicateBaseSlug);
           setChanges([]);
           setValues(copied);
@@ -341,9 +345,9 @@ export function TaskTypeEditor({
   // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
   const compositionTouched =
     creating || compositionEdited || requiresRepository !== row?.requiresRepository;
+  const authoringForbidden = derived && (permissionDenied !== null || preview.forbidden);
   const blocked =
-    permissionDenied ||
-    preview.forbidden ||
+    authoringForbidden ||
     derivedBlocked ||
     (composable &&
       compositionTouched &&
@@ -453,9 +457,8 @@ export function TaskTypeEditor({
       await refreshAvailability(row!.slug);
     } catch (err) {
       const error = err as ApiError;
-      if (error.status === 403) {
-        setPermissionDenied(true);
-        setSaveError(error.message ?? 'Admin access is required. Saving is unavailable.');
+      if (derived && error.status === 403) {
+        setPermissionDenied(error.message ?? 'Admin access is required. Saving is unavailable.');
         return;
       }
       const changed = changedTaskType(error);
@@ -533,7 +536,7 @@ export function TaskTypeEditor({
         loopLimits={loopLimits}
         requiresRepository={requiresRepository}
         readOnly={readOnly}
-        disabled={saving || permissionDenied || preview.forbidden}
+        disabled={saving || authoringForbidden}
         {...(derived
           ? {
               overlay: {
@@ -639,7 +642,7 @@ export function TaskTypeEditor({
             diagnostics={preview.diagnostics}
             serverIssues={serverDerivedIssues}
             error={preview.error}
-            disabled={saving || permissionDenied || preview.forbidden}
+            disabled={saving || authoringForbidden}
             editable={editableFields.includes('changes')}
             revision={formRevision}
             entries={withPrompts!}
@@ -683,7 +686,7 @@ export function TaskTypeEditor({
                   <Button
                     type="button"
                     variant="secondary"
-                    disabled={saving || permissionDenied || preview.forbidden}
+                    disabled={saving || authoringForbidden}
                     aria-label={`Clear obsolete loop limit for ${id}`}
                     onClick={() => {
                       touch();
@@ -713,7 +716,7 @@ export function TaskTypeEditor({
                   <PromptStepEditor
                     entry={entry}
                     integrationCategories={integrationCategories}
-                    disabled={saving || permissionDenied || preview.forbidden}
+                    disabled={saving || authoringForbidden}
                     onChange={(next) => {
                       touch();
                       setPromptSteps((prev) => ({ ...prev, [entry.slug]: next }));
@@ -739,7 +742,7 @@ export function TaskTypeEditor({
           initialValues={loadedValues ?? initialValues}
           submitting={saving}
           submitDisabled={blocked || changedRow !== null}
-          errorMessage={saveError}
+          errorMessage={derived ? (permissionDenied ?? saveError) : saveError}
           onSubmit={submit}
           onValuesChange={(next) => {
             if (creating && typeof next.slug === 'string' && next.slug.trim() !== typeSlug) {

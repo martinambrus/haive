@@ -299,6 +299,76 @@ describe('derived editor', () => {
     expect((screen.getByLabelText(/^Target step/) as HTMLInputElement).value).toBe('old-name');
   });
 
+  it('keeps static saves retryable after a 403', async () => {
+    mocks.getAdminTaskType.mockResolvedValue({
+      taskType: {
+        ...row,
+        runListStrategy: 'static',
+        baseSlug: null,
+        stepIds: fixture.candidates[0]!.stepIds,
+      },
+      availability: { available: true },
+    });
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    mocks.updateTaskType.mockRejectedValueOnce({ status: 403, message: 'Static access required' });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Unsaved' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+    expect(screen.getByText('Static access required')).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(mocks.previewDerivedTaskType).not.toHaveBeenCalled();
+  });
+
+  it('keeps derived permission errors visible through edits until a successful reload', async () => {
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    mocks.updateTaskType.mockRejectedValueOnce({ status: 403, message: 'Derived access required' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await act(async () => {});
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Still unsaved' } });
+    expect(screen.getByText('Derived access required')).toBeTruthy();
+    expect(
+      (screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    cleanup();
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    expect(screen.queryByText('Derived access required')).toBeNull();
+    expect(
+      (screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('opens the static editor for an empty base query value', async () => {
+    await mount({ slug: null, duplicateBaseSlug: '' });
+    expect(screen.getByText('Static creator')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Changes' })).toBeNull();
+    expect(mocks.getAdminTaskType).not.toHaveBeenCalled();
+    await advance();
+    expect(mocks.previewDerivedTaskType).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['06-gate-1-spec-approval', true],
+    ['09-gate-2-verify-approval', true],
+    ['10-gate-3-commit', true],
+    ['11a-gate-4-push', true],
+    ['07-phase-2-implement', true],
+    ['module.example.gate-check', false],
+    ['custom.mine.gate-check', false],
+    ['delegate-work', false],
+  ])(
+    'warns about safeguard removal for %s only when it is a core safeguard',
+    async (stepId, expected) => {
+      await mount({ slug: 'mine', duplicateBaseSlug: '' });
+      fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
+      fireEvent.change(screen.getByLabelText(/^Target step/), { target: { value: stepId } });
+      expect(screen.queryByText(/Removing a gate or the implementation step/) !== null).toBe(
+        expected,
+      );
+    },
+  );
+
   it('creates an overlay with its own limits and no inherited base presets', async () => {
     mocks.getAdminTaskType.mockResolvedValue({
       taskType: {

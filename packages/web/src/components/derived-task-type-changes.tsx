@@ -15,6 +15,14 @@ import { FormRenderer } from './form-renderer';
 import { InlineMarkdown } from './markdown/inline-markdown';
 import { Button } from './ui';
 
+const SAFEGUARD_STEP_IDS = new Set([
+  '07-phase-2-implement',
+  '06-gate-1-spec-approval',
+  '09-gate-2-verify-approval',
+  '10-gate-3-commit',
+  '11a-gate-4-push',
+]);
+
 export function DerivedTaskTypeChanges({
   changes,
   evaluation,
@@ -86,9 +94,7 @@ export function DerivedTaskTypeChanges({
       return describePromptStepIssue(issue.issue as PromptStepIssue);
     return describeDerivedProblem(issue);
   };
-  const risky = changes.filter(
-    (c) => 'remove' in c && (c.remove === '07-phase-2-implement' || c.remove.includes('gate-')),
-  );
+  const risky = changes.filter((c) => 'remove' in c && SAFEGUARD_STEP_IDS.has(c.remove));
   return (
     <section aria-label="Derived changes" className="flex flex-col gap-3">
       <h3 className="text-sm font-semibold text-neutral-100">Changes</h3>
