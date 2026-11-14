@@ -87,7 +87,6 @@ describe('Claude request coverage', () => {
     ]);
     expect(collector.getRequestUsage()).toEqual(capture);
     expect(collector.getTokenUsage()).toMatchObject({ inputTokens: 300, outputTokens: 5 });
-    expect(collector.getRequestUsageDiagnostics().sameNameLedgerExcess).toBe(true);
   });
   it('keeps same-model excess through sequential sub-step aggregation', () => {
     const usage = read(haikuMain());
@@ -117,17 +116,24 @@ describe('Claude request coverage', () => {
       expect(aggregate.unobservedSameModel).toBeUndefined();
     }
   });
-  it.each(['absent', 'empty'] as const)('distinguishes an accepted %s ledger (S5/S6)', (shape) => {
+  it.each(['absent', 'empty'] as const)('accepts an %s ledger (S5/S6)', (shape) => {
     const events = structuredClone(fixture);
     if (shape === 'absent') delete events[3].modelUsage;
     else events[3].modelUsage = {};
     const collector = createStreamJsonCollector();
     collector.onChunk(events.map((event: unknown) => JSON.stringify(event)).join('\n') + '\n');
     expect(collector.getRequestUsage().coverage).toBe('complete');
-    expect(collector.getRequestUsageDiagnostics()).toMatchObject({
-      absentModelUsageAcceptedComplete: shape === 'absent',
-      emptyModelUsageAcceptedComplete: shape === 'empty',
-    });
+  });
+  it('exposes only the contradiction diagnostic that replay cannot derive from the capture', () => {
+    const events = structuredClone(fixture).slice(0, 2);
+    const duplicate = structuredClone(events[1]);
+    duplicate.message.usage.output_tokens++;
+    events.push(duplicate);
+    const collector = createStreamJsonCollector();
+    // No final newline: reading diagnostics must still flush the pending event.
+    collector.onChunk(events.map((event: unknown) => JSON.stringify(event)).join('\n'));
+    expect(collector.getRequestUsageDiagnostics()).toEqual({ outputOnlyContradiction: true });
+    expect(collector.getRequestUsage().reasons).toContain('contradictory-request');
   });
   it('accepts an exact same-name ledger without excess', () => {
     const capture = read(billingCases[2]!.events);

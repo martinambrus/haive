@@ -95,6 +95,30 @@ describe('read-only request replay', () => {
     });
   });
 
+  it.each([
+    ['claude-haiku', 1],
+    ['claude-haiku-4-5', 1],
+    ['claude-haikux', 0],
+    ['other-model', 0],
+  ] as const)('limits the volatile titling-family diagnostic to %s', async (model, candidates) => {
+    const events = fixture('request-claude');
+    events[0].model = model;
+    for (const event of events) if (event.message) event.message.model = model;
+    events[3].modelUsage = {
+      [model]: {
+        inputTokens: 301,
+        outputTokens: 5,
+        cacheReadInputTokens: 70,
+        cacheCreationInputTokens: 30,
+      },
+    };
+    const report = await replayRequestUsage([row(events)]);
+    expect(report.counters).toMatchObject({
+      sameNameSideModelCandidates: candidates,
+      sameNameLedgerExcessRuns: 1,
+    });
+  });
+
   it('counts same-model excess only for complete replay captures', async () => {
     const events = fixture('request-claude');
     events[0].model = 'claude-haiku-4-5';

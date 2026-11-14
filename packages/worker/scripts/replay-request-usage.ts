@@ -14,6 +14,7 @@ import { Writable } from 'node:stream';
 import { createDatabase, type Database } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { createStreamJsonCollector } from '../src/queues/cli-exec/stream.js';
+import { record } from '../src/cli-executor/request-usage.js';
 import {
   isElidedStreamLog,
   STREAM_LOG_HEAD_CHARS,
@@ -50,6 +51,11 @@ const counts = (): Counts => ({
   malformedEventLines: 0,
   incompleteReasons: {},
 });
+
+// VOLATILE: measured Claude titling family. If CLI naming changes, fail loud and
+// remeasure before changing this matcher; never silently broaden the family.
+// Unmatched models still enter the all-model excess counters and magnitude inventory.
+const VOLATILE_CLAUDE_TITLING_MODEL = /^claude-haiku(?:-|$)/;
 
 // Half-open buckets; the final bucket is unbounded. Zero-prompt output-only excess
 // belongs in the first bucket. Runs with no excess do not enter the histogram.
@@ -135,6 +141,9 @@ export async function replayRequestUsage(
     });
     codex?.attach(sink);
     let appServer = false;
+    let resultCount = 0;
+    let absentModelUsage = false;
+    let emptyModelUsage = false;
     let skippedNonEventLines = 0;
     let malformedEventLines = 0;
     const truncated =
@@ -161,6 +170,14 @@ export async function replayRequestUsage(
         skippedNonEventLines++;
         continue;
       }
+      // The event is already parsed for filtering. Inventory envelope shape here;
+      // request reconciliation continues to use the production collector exclusively.
+      if (event.type === 'result') {
+        resultCount++;
+        const ledger = record(event.modelUsage);
+        absentModelUsage = event.modelUsage === undefined;
+        emptyModelUsage = ledger !== null && Object.keys(ledger).length === 0;
+      }
       collector.onChunk(line + '\n');
       codex?.onChunk(line + '\n');
       appServer ||= codex !== null && !streamEvent && rpcEvent;
@@ -177,10 +194,7 @@ export async function replayRequestUsage(
     // not a Claude result just because both call the event "result".
     const hasChannel =
       !['gemini', 'antigravity'].includes(cli) &&
-      (appServer ||
-        (capture.requests?.length ?? 0) > 0 ||
-        diagnostics.resultCount > 0 ||
-        identity !== null);
+      (appServer || (capture.requests?.length ?? 0) > 0 || resultCount > 0 || identity !== null);
     if (appServer && collector.getRequestUsage().requests?.length)
       reasons.add('mixed-request-channels');
     // Transcript noise must never manufacture the live parser's malformed-stream reason.
@@ -226,33 +240,22 @@ export async function replayRequestUsage(
         magnitude.atOrAboveTierThreshold[threshold] += Number(promptTokens >= Number(threshold));
     }
     if (truncated) continue;
-    counters.sameNameLedgerExcessRuns += Number(
-      coverage === 'complete' && diagnostics.sameNameLedgerExcess,
-    );
-    counters.unobservedSameModelRuns += Number(
-      coverage === 'complete' && (capture.unobservedSameModel?.length ?? 0) > 0,
-    );
-    // VOLATILE: Haiku is the measured Claude titling family. Excess is a candidate,
-    // not proof of a side call: raw streams do not identify CLI-owned requests.
+    const hasExcess = coverage === 'complete' && (capture.unobservedSameModel?.length ?? 0) > 0;
+    counters.sameNameLedgerExcessRuns += Number(hasExcess);
+    counters.unobservedSameModelRuns += Number(hasExcess);
+    // A candidate, not proof of a side call: streams do not identify CLI-owned requests.
     counters.sameNameSideModelCandidates += Number(
-      coverage === 'complete' &&
-        diagnostics.sameNameLedgerExcess &&
-        /^claude-haiku(?:-|$)/.test(model),
+      hasExcess && VOLATILE_CLAUDE_TITLING_MODEL.test(model),
     );
     counters.absentModelUsageAcceptedComplete += Number(
-      diagnostics.absentModelUsageAcceptedComplete && coverage === 'complete',
+      absentModelUsage && coverage === 'complete',
     );
-    counters.emptyModelUsageAcceptedComplete += Number(
-      diagnostics.emptyModelUsageAcceptedComplete && coverage === 'complete',
-    );
+    counters.emptyModelUsageAcceptedComplete += Number(emptyModelUsage && coverage === 'complete');
     counters.outputOnlyContradictoryRuns += Number(
       diagnostics.outputOnlyContradiction && reasons.has('contradictory-request'),
     );
     const fallback =
-      !appServer &&
-      hasChannel &&
-      diagnostics.resultCount === 0 &&
-      collector.getTokenUsage() !== null;
+      !appServer && hasChannel && resultCount === 0 && collector.getTokenUsage() !== null;
     counters.noResultFallbackRuns += Number(fallback);
     counters.killedFallbackRuns += Number(
       fallback &&

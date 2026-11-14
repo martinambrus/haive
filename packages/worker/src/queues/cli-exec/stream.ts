@@ -52,12 +52,8 @@ interface StreamJsonCollector {
    *  assistant fallback is all zero (unknown on zai/muse, not a measured zero). */
   getTokenUsage: () => CliTokenUsage | null;
   getRequestUsage: () => RequestUsageCapture;
-  /** Measurement only; does not relax request coverage or alter token totals. */
+  /** Only the overwritten duplicate distinction needs parser state; replay derives other diagnostics. */
   getRequestUsageDiagnostics: () => {
-    resultCount: number;
-    absentModelUsageAcceptedComplete: boolean;
-    emptyModelUsageAcceptedComplete: boolean;
-    sameNameLedgerExcess: boolean;
     outputOnlyContradiction: boolean;
   };
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
@@ -134,9 +130,6 @@ export function createStreamJsonCollector(
   const requestIssues = new Set<string>();
   let outputContradiction = false;
   let otherContradiction = false;
-  let sameNameLedgerExcess = false;
-  let emptyModelUsage = false;
-  let absentModelUsage = false;
   // Same message ids as assistantUsageByMessage; this strict view never changes legacy totals.
   const requestsByMessage = new Map<string, RequestUsage>();
   let billedUsageByModel = new Map<string, RequestUsage | null>();
@@ -262,9 +255,6 @@ export function createStreamJsonCollector(
     // Extract final result
     if (type === 'result') {
       resultCount++;
-      const ledger = record(event.modelUsage);
-      absentModelUsage = event.modelUsage === undefined;
-      emptyModelUsage = ledger !== null && Object.keys(ledger).length === 0;
       const strictResult = claudeRequestUsage(event.usage, 'result', null);
       if (!strictResult) requestIssues.add('invalid-result-usage');
       resultOutputKnown = strictResult?.outputTokens != null;
@@ -583,7 +573,6 @@ export function createStreamJsonCollector(
         buffer = '';
       }
       const requests = [...requestsByMessage.values()].map((r) => ({ ...r }));
-      sameNameLedgerExcess = false;
       const reasons = new Set(requestIssues);
       if (!initialized) reasons.add('missing-init');
       // #1160 fixes whole-run totals by summing per-turn results. This does not prove
@@ -684,7 +673,6 @@ export function createStreamJsonCollector(
             (excess.outputTokens ?? 0) > 0
           ) {
             unobservedSameModel.push(excess);
-            sameNameLedgerExcess = true;
           }
         }
         if (!matches) reasons.add('model-usage-mismatch');
@@ -701,14 +689,11 @@ export function createStreamJsonCollector(
       };
     },
     getRequestUsageDiagnostics() {
-      const capture = this.getRequestUsage();
-      return {
-        resultCount,
-        absentModelUsageAcceptedComplete: absentModelUsage && capture.coverage === 'complete',
-        emptyModelUsageAcceptedComplete: emptyModelUsage && capture.coverage === 'complete',
-        sameNameLedgerExcess,
-        outputOnlyContradiction: outputContradiction && !otherContradiction,
-      };
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return { outputOnlyContradiction: outputContradiction && !otherContradiction };
     },
     getTokenUsage(): CliTokenUsage | null {
       if (buffer.trim()) {
