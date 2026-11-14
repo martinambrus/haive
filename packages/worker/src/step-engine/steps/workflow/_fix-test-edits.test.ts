@@ -143,6 +143,23 @@ describe('host fix-pass test evidence', () => {
     expect(compareTestImages(refused, image).changes).toHaveLength(1);
   });
 
+  it('measures withheld size and mode changes without measuring same-size content', () => {
+    const file = {
+      path: 'tests/.env.test',
+      hash: 'withheld:present',
+      mode: 420,
+      size: 12,
+      status: 'content withheld' as const,
+    };
+    const image = { state: 'captured' as const, files: [file] };
+    for (const change of [{ size: 13 }, { mode: 384 }]) {
+      const result = compareTestImages(image, { ...image, files: [{ ...file, ...change }] });
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0]!.patch).toBe('content withheld by secret policy.');
+    }
+    expect(compareTestImages(image, { ...image, files: [{ ...file }] }).changes).toEqual([]);
+  });
+
   it('shows a mid-file expectation change in a contextual hunk', async () => {
     const anchor = await fixture();
     const lines = Array.from({ length: 200 }, (_, i) => `expect(f(${i})).toBe(${i});`);

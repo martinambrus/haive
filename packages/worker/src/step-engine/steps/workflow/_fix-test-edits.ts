@@ -304,6 +304,8 @@ export function testFileChanged(a?: TestFile, b?: TestFile): boolean {
   if (!a || !b) return a !== b;
   if (a.status === 'refused' && b.status === 'refused') return false;
   if ((a.status === 'refused') !== (b.status === 'refused')) return true;
+  if (a.status === 'content withheld' && b.status === 'content withheld')
+    return a.size !== b.size || a.mode !== b.mode;
   return a.hash !== b.hash || a.mode !== b.mode;
 }
 
