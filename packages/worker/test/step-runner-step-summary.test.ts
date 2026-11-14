@@ -451,20 +451,25 @@ it.each([true, false])(
   },
 );
 
-it.each([true, false])(
+it.each([true, false, 'path'] as const)(
   'fix6 records safe recap failures before and after insert (bound: %s)',
   async (bound) => {
     for (const stage of ['read', 'enqueue']) {
       const state = freshState({ summaryLlmEnabled: true });
       const db = makeMockDb(state);
       const message = 'ordinary recap failure\n  exact whitespace';
-      const err = bound
-        ? new DrizzleQueryError(
-            'select $1',
-            ['F8gH2jK9lZ3xC7vB4nM6qW1eR5tY0uI'],
-            new Error('synthetic driver'),
-          )
-        : new Error(message);
+      const expected =
+        bound === 'path' ? 'EIO: open [path]' : bound ? 'Database operation failed' : message;
+      const err =
+        bound === 'path'
+          ? Object.assign(new Error('EIO: open /var/lib/haive/repos/user/repo'), { code: 'EIO' })
+          : bound
+            ? new DrizzleQueryError(
+                'select $1',
+                ['F8gH2jK9lZ3xC7vB4nM6qW1eR5tY0uI'],
+                new Error('synthetic driver'),
+              )
+            : new Error(message);
       const writes: Record<string, unknown>[] = [];
       const update = db.update.bind(db);
       db.update = ((table: never) => ({
@@ -499,7 +504,7 @@ it.each([true, false])(
       expect(result.status).toBe('done');
       expect(
         [...writes, ...state.inserts.map((entry) => entry.row)].some(
-          (row) => row.errorMessage === (bound ? 'Database operation failed' : message),
+          (row) => row.errorMessage === expected,
         ),
       ).toBe(true);
     }

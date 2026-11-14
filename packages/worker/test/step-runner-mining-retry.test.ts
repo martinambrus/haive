@@ -2522,41 +2522,56 @@ describe('a fan-out reserved before any agent is sent', () => {
     expect(enqueued).toHaveLength(51);
   });
 
-  it('fails what it reserved or linked and did not queue when a dispatch throws', async () => {
-    const state = freshState([miningRow('peer-reviewer', 1)]);
-    let calls = 0;
-    const outcome = await runWith(
-      makeMockDb(state),
-      waveStep([], ['refute-a', 'refute-b', 'refute-c']),
-      async () => {
-        calls += 1;
-        if (calls === 2) throw new Error('redis refused the job');
-      },
-    ).catch((err: unknown) => err);
+  it.each([false, true])(
+    'fails unsent reservations with safe dispatch text (path: %s)',
+    async (withPath) => {
+      const state = freshState([miningRow('peer-reviewer', 1)]);
+      let calls = 0;
+      const outcome = await runWith(
+        makeMockDb(state),
+        waveStep([], ['refute-a', 'refute-b', 'refute-c']),
+        async () => {
+          calls += 1;
+          if (calls === 2)
+            throw new Error(
+              withPath ? 'redis refused /var/lib/haive/repos/user/repo' : 'redis refused the job',
+            );
+        },
+      ).catch((err: unknown) => err);
 
-    const reserved = state.inserts
-      .filter((i) => i.table === 'task_step_agent_minings')
-      .map((i) => String(i.row.id));
-    const [sentId, linkedId, untouchedId] = reserved;
-    const failed = (id: string) =>
-      writesTo(state, id).filter(
-        (u) => u.set.status === 'failed' && String(u.set.errorMessage).includes('redis refused'),
+      const reserved = state.inserts
+        .filter((i) => i.table === 'task_step_agent_minings')
+        .map((i) => String(i.row.id));
+      const [sentId, linkedId, untouchedId] = reserved;
+      const failed = (id: string) =>
+        writesTo(state, id).filter(
+          (u) => u.set.status === 'failed' && String(u.set.errorMessage).includes('redis refused'),
+        );
+      // The first went out and is left alone; the second was linked and never queued; the third was
+      // never reached. Neither of the last two may stay pending on a run nothing will start.
+      expect(failed(sentId!)).toEqual([]);
+      expect(failed(linkedId!)).toHaveLength(1);
+      expect(failed(untouchedId!)).toHaveLength(1);
+      const ended = state.updates.filter(
+        (u) => u.table === 'cli_invocations' && String(u.errorMessage).includes('redis refused'),
       );
-    // The first went out and is left alone; the second was linked and never queued; the third was
-    // never reached. Neither of the last two may stay pending on a run nothing will start.
-    expect(failed(sentId!)).toEqual([]);
-    expect(failed(linkedId!)).toHaveLength(1);
-    expect(failed(untouchedId!)).toHaveLength(1);
-    const ended = state.updates.filter(
-      (u) => u.table === 'cli_invocations' && String(u.errorMessage).includes('redis refused'),
-    );
-    expect(ended).toHaveLength(1);
-    expect(ended[0]!.endedAt).toBeInstanceOf(Date);
-    // The dispatch's own error is what reaches the step.
-    const message =
-      outcome instanceof Error ? outcome.message : String((outcome as { error?: unknown }).error);
-    expect(message).toContain('redis refused');
-  });
+      expect(ended).toHaveLength(1);
+      if (withPath) {
+        for (const text of [
+          ...failed(linkedId!).map((w) => w.set.errorMessage),
+          ...failed(untouchedId!).map((w) => w.set.errorMessage),
+          ...ended.map((w) => w.errorMessage),
+        ]) {
+          expect(text).not.toContain('/var/lib/haive/repos');
+        }
+      }
+      expect(ended[0]!.endedAt).toBeInstanceOf(Date);
+      // The dispatch's own error is what reaches the step.
+      const message =
+        outcome instanceof Error ? outcome.message : String((outcome as { error?: unknown }).error);
+      expect(message).toContain('redis refused');
+    },
+  );
 
   it('releases every reservation when the work after reserving throws before the first send', async () => {
     const state = freshState([miningRow('peer-reviewer', 1)]);

@@ -7,7 +7,7 @@ import {
 import { fixTestReviewNotice } from './steps/workflow/_fix-test-edits.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import {
   and,
   asc,
@@ -2444,9 +2444,11 @@ async function releaseUnsentAgents(
   err: unknown,
   ctx: StepContext,
 ): Promise<void> {
-  const errorMessage = `dispatch failed before the agent was queued: ${safeErrorMessage(
-    err,
-  )}`.slice(0, 2000);
+  const errorMessage =
+    `dispatch failed before the agent was queued: ${scrubErrorPaths(safeErrorMessage(err))}`.slice(
+      0,
+      2000,
+    );
   const now = new Date();
   try {
     if (linking) {
@@ -4306,7 +4308,7 @@ async function recordSummaryEnqueueFailure(
         .update(schema.cliInvocations)
         .set({
           exitCode: -1,
-          errorMessage: safeErrorMessage(err),
+          errorMessage: scrubErrorPaths(safeErrorMessage(err)),
           endedAt: now,
         })
         .where(eq(schema.cliInvocations.id, invocationId));
@@ -4321,7 +4323,7 @@ async function recordSummaryEnqueueFailure(
       prompt: '',
       agentTitle: 'Step summary',
       exitCode: -1,
-      errorMessage: safeErrorMessage(err),
+      errorMessage: scrubErrorPaths(safeErrorMessage(err)),
       endedAt: now,
       haiveBuild: currentBuildStamp(),
     });
