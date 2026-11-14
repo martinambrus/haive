@@ -96,7 +96,10 @@ describe('PATCH /repos/:id/exclusions response', () => {
   it.each(CASES)(
     'shows the stored remote the way the repository read does: %s',
     async (remote, marker, expected) => {
-      fake.patch(schema.repositories, REPO, { remoteUrl: remote });
+      fake.patch(schema.repositories, REPO, {
+        remoteUrl: remote,
+        remoteRelinkIntent: '00000000-0000-4000-8000-0000000000bb',
+      });
       if (marker) expect(storedRow(REPO)?.remoteUrl).toContain(marker);
 
       const res = await patchExclusions();
@@ -107,7 +110,7 @@ describe('PATCH /repos/:id/exclusions response', () => {
       const { repository } = JSON.parse(text) as { repository: Record<string, unknown> };
       expect(repository.remoteUrl).toBe(expected);
       expect(repository.remoteUrl).toBe(await readRemote(REPO));
-      for (const key of ['fileTree', 'renderContext', 'agentRulesOverride'])
+      for (const key of ['fileTree', 'renderContext', 'agentRulesOverride', 'remoteRelinkIntent'])
         expect(repository).not.toHaveProperty(key);
     },
   );

@@ -65,9 +65,6 @@ import {
   uploadsStorageRoot,
 } from '../lib/uploads.js';
 import { MAX_FILE_CONTENT_BYTES } from './tasks/_helpers.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { hardenGitArgs } from '@haive/shared/git-args';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
   createRepoRequestSchema,
@@ -106,13 +103,11 @@ import {
   readRenderContextColumn,
   settingFileName,
 } from '@haive/shared/project-state';
-import { scrubErrorPaths } from '@haive/shared/logger';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import {
   credentialFitsGitRemote,
   parseScpLikeGitUrl,
   redactEditableGitUrl,
-  redactGitText,
   redactGitUrl,
 } from '@haive/shared/schemas';
 import {
@@ -125,6 +120,14 @@ import {
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
+import { relinkGit, gitFailureText, verifyRelinkCheckout } from '../lib/relink-git.js';
+import {
+  markRemoteIntent,
+  clearRemoteIntent,
+  reconcileRemote,
+  isRemoteConnectionError,
+  beginRelinkWriter,
+} from '../lib/remote-reconcile.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
@@ -309,6 +312,8 @@ repoRoutes.get('/', async (c) => {
       agentRulesOverride: false,
       onboardingTooling: false,
       onboardingEnvironment: false,
+      // An internal repair token; nothing a client sends or reads.
+      remoteRelinkIntent: false,
     },
   });
 
@@ -894,6 +899,8 @@ repoRoutes.get('/:id', async (c) => {
       agentRulesOverride: false,
       onboardingTooling: false,
       onboardingEnvironment: false,
+      // An internal repair token; nothing a client sends or reads.
+      remoteRelinkIntent: false,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -1045,6 +1052,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     agentRulesOverride: _rules,
     onboardingTooling: _tooling,
     onboardingEnvironment: _environment,
+    remoteRelinkIntent: _intent,
     ...rest
   } = updated[0]!;
   return c.json({
@@ -2674,16 +2682,6 @@ export async function resetOnboardingArtifacts(
   return { removed, cleaned, skipped, quarantined, vacatedPaths };
 }
 
-const execGit = promisify(execFile);
-// A relink's git child still running after GIT_DEADLINE_MS gets SIGTERM, and SIGKILL only if it is
-// still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED
-// with git 2.43.0 and 2.54.0 on config writes held inside their lock windows: gone within 3 ms
-// after the signal), while SIGKILL leaves `.git/config.lock` behind and fails the restore and every later
-// relink. So SIGKILL is for a child that ignores SIGTERM, after a grace that is wide for git's
-// cleanup and short for a waiting request.
-const GIT_DEADLINE_MS = 10_000;
-const GIT_KILL_GRACE_MS = 2_000;
-
 /**
  * Bind a repository that has no origin to one.
  *
@@ -2748,106 +2746,44 @@ repoRoutes.post('/:id/remote', async (c) => {
     body.credentialsId === undefined ? repo.credentialsSecretId : body.credentialsId,
   );
 
-  const git = async (
-    args: string[],
-  ): Promise<{
-    ok: boolean;
-    exitedClean: boolean;
-    code: number;
-    stdout: string;
-    stderr: string;
-  }> => {
-    let deadline: NodeJS.Timeout | undefined;
-    let grace: NodeJS.Timeout | undefined;
-    let deadlineFired = false;
-    try {
-      const run = execGit('git', hardenGitArgs(args), {
-        cwd: root,
-        env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
-      });
-      deadline = setTimeout(() => {
-        deadlineFired = true;
-        // As execFile's own timeout does: close both pipes before the signal, so a grandchild that
-        // still holds them cannot keep the call pending once git is gone. `child` is read with `?.`
-        // because a stubbed execFile has none.
-        run.child?.stdout?.destroy();
-        run.child?.stderr?.destroy();
-        run.child?.kill('SIGTERM');
-        grace = setTimeout(() => run.child?.kill('SIGKILL'), GIT_KILL_GRACE_MS);
-      }, GIT_DEADLINE_MS);
-      const { stdout, stderr } = await run;
-      // Closing the pipes can discard unread output even if git exited 0 in this turn.
-      // Never accept that truncated output as a snapshot of the previous remote.
-      if (deadlineFired)
-        return { ok: false, exitedClean: true, code: -1, stdout: '', stderr: 'no answer' };
-      return {
-        ok: true,
-        exitedClean: true,
-        code: 0,
-        stdout: stdout.toString().trim(),
-        stderr: stderr.toString().trim(),
-      };
-    } catch (err) {
-      const e = err as {
-        code?: unknown;
-        signal?: NodeJS.Signals;
-        stdout?: string;
-        stderr?: string;
-      };
-      const code = typeof e.code === 'number' ? e.code : -1;
-      return {
-        ok: false,
-        exitedClean: false,
-        code,
-        stdout: (e.stdout ?? '').toString().trim(),
-        // execFile's message includes argv, which can contain credentials.
-        stderr:
-          (e.stderr ?? '').toString().trim() || (e.signal ? `signal ${e.signal}` : `exit ${code}`),
-      };
-    } finally {
-      clearTimeout(deadline);
-      clearTimeout(grace);
+  const git = (args: string[]) => relinkGit(root, args);
+  await verifyRelinkCheckout(root);
+
+  let intent: Awaited<ReturnType<typeof markRemoteIntent>>;
+  try {
+    intent = await markRemoteIntent(id, userId);
+  } catch (err) {
+    logger.warn({ err, repositoryId: id }, 'could not record remote update intent');
+    if (err instanceof HttpError && (err.status === 409 || err.status === 404)) throw err;
+    throw new HttpError(
+      409,
+      'Could not record the remote update intent; retry when the database is available',
+    );
+  }
+  let intentWritten = true;
+  let clearIntent = false;
+  let gitStarted = false;
+  const settleOwnIntent = () => {
+    if (intent.created) {
+      // Clear after rollback, outside the transaction that holds the repository row.
+      clearIntent = true;
+      intentWritten = false;
     }
   };
-
-  // Keep snapshots intact for restoration; redact only text reported to the caller.
-  const gitFailureText = (result: { stderr: string; stdout: string }) =>
-    scrubErrorPaths(redactGitText(result.stderr || result.stdout || 'no answer'));
-
-  // Without its own .git entry, upward discovery would relink a parent checkout.
-  const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
-    throw new HttpError(409, `This repository could not be examined: ${scrubErrorPaths(err)}`);
-  });
-  if (!entry || entry.kind === 'symlink') {
-    throw new HttpError(
-      409,
-      'This repository has no usable .git entry of its own, so it cannot have a remote',
-    );
-  }
-  const inside = await git(['rev-parse', '--is-inside-work-tree']);
-  if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
-    const reason = gitFailureText(inside);
-    throw new HttpError(
-      409,
-      `This repository could not be examined: git rev-parse --is-inside-work-tree failed (exit ${inside.code}): ${reason}`,
-    );
-  }
-  if (inside.stdout === 'false') {
-    throw new HttpError(409, 'This repository is not a Git checkout, so it cannot have a remote');
-  }
-
   let restore: (() => Promise<void>) | undefined;
   let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
-  const restoreRemote = async (err: unknown): Promise<never> => {
+  const restoreRemote = async (err: unknown, lockHeld = true): Promise<never> => {
     // A restore that failed is the answer even when the transaction then rejects with
     // another error, such as the lost connection that made the outer catch run.
     if (restoreFailure) throw restoreFailure;
+    let restored = false;
     if (restore) {
       try {
         const undo = restore;
         restore = undefined;
         await undo();
+        restored = true;
       } catch (restoreError) {
         const message = 'Remote update failed and the previous remote could not be restored';
         const failure = new AggregateError([restoreError], message, { cause: err });
@@ -2859,15 +2795,25 @@ repoRoutes.post('/:id/remote', async (c) => {
         throw restoreFailure;
       }
     }
+    // Without a successful undo, a signalled first write may already have
+    // changed Git. Leave the intent so reconciliation can settle that outcome.
+    if (intentWritten && restored && lockHeld) {
+      settleOwnIntent();
+    }
     throw err;
   };
-  // Keep the column aligned with Git: lock the repository row first (a wait past the
+  // Git follows the committed row: lock the repository row first (a wait past the
   // repository lock bound answers 409 busy, before any Git write), insert its
   // audit, change Git, then write the column. Callback-visible failures restore
   // Git while that row is still locked, before a queued relink can snapshot it.
-  // COMMIT or connection-close failures may restore after the lock is released:
-  // a concurrent relink or a lost COMMIT acknowledgement can still race that fallback.
+  // A connection error has an unknown outcome: reconcile on a fresh connection.
+  // The durable intent also survives process death between the Git write and COMMIT.
+  // Other COMMIT failures may restore after the lock is released: a concurrent
+  // relink can still race that Git fallback. Never clear its possibly newer intent.
   let callbackSettled: Promise<void> | undefined;
+  // Held until this request's Git writes have settled and its own reconcile ran, so the sweep
+  // cannot clear the intent while a write that outlived a dropped connection is still running.
+  const endWriter = beginRelinkWriter(repo.id);
   try {
     await db.transaction(async (tx) => {
       let settle!: () => void;
@@ -2883,6 +2829,9 @@ repoRoutes.post('/:id/remote', async (c) => {
             .for('no key update'),
         );
         if (!stored) throw new HttpError(404, 'Repository not found');
+        // The sweep may have settled the autocommitted intent before we took this lock.
+        if (stored.remoteRelinkIntent !== intent.token)
+          throw new HttpError(409, 'Remote update intent was settled; retry the request');
         await requireFittingCredential(
           tx,
           body.credentialsId === undefined ? stored.credentialsSecretId : body.credentialsId,
@@ -2913,6 +2862,7 @@ repoRoutes.post('/:id/remote', async (c) => {
         };
         await insertAuditEvent(tx, event);
         try {
+          gitStarted = true;
           // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
           // so both directions use the address being persisted to the repository row.
           const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
@@ -2924,16 +2874,23 @@ repoRoutes.post('/:id/remote', async (c) => {
             };
           if (!added.ok) {
             if (added.code !== 3) {
+              // A known refusal with no armed undo leaves Git unchanged.
+              if (!restore && added.code >= 0) {
+                settleOwnIntent();
+              }
               throw new HttpError(409, `Could not add the remote: ${gitFailureText(added)}`);
             }
             const previous: [string, string[]][] = [];
             for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
               const read = await git(['config', '--local', '--get-all', key]);
-              if (!read.ok && read.code !== 1)
+              if (!read.ok && read.code !== 1) {
+                // This read changed nothing, including when no exit status arrived.
+                settleOwnIntent();
                 throw new HttpError(
                   409,
                   `Could not read the previous remote: ${gitFailureText(read)}`,
                 );
+              }
               previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
             }
             const restoreExisting = async () => {
@@ -2961,6 +2918,9 @@ repoRoutes.post('/:id/remote', async (c) => {
             ]);
             if (cleared.exitedClean || cleared.code === 5) restore = restoreExisting;
             if (!cleared.ok && cleared.code !== 5) {
+              if (!restore && cleared.code >= 0) {
+                settleOwnIntent();
+              }
               throw new HttpError(
                 409,
                 `Could not clear the remote's push URLs: ${gitFailureText(cleared)}`,
@@ -2986,6 +2946,7 @@ repoRoutes.post('/:id/remote', async (c) => {
             })
             .where(eq(schema.repositories.id, id));
         } catch (err) {
+          if (isRemoteConnectionError(err)) throw err;
           await restoreRemote(err);
         }
       } finally {
@@ -2996,8 +2957,34 @@ repoRoutes.post('/:id/remote', async (c) => {
     // postgres.js can reject on connection close while the callback still awaits Git.
     // Let its last write and any in-callback restore finish before the fallback runs.
     await callbackSettled;
-    // A COMMIT with a lost acknowledgement can have applied; restoration is ambiguous.
-    await restoreRemote(err);
+    if (!gitStarted) settleOwnIntent();
+    if (clearIntent) await clearRemoteIntent(id, intent.token);
+    if (isRemoteConnectionError(err)) {
+      if (!intentWritten) throw err;
+      try {
+        await reconcileRemote(id, userId);
+      } catch (reconcileError) {
+        logger.error(
+          { err: reconcileError, repositoryId: id },
+          'remote state reconciliation deferred',
+        );
+        throw new HttpError(
+          500,
+          'Remote update outcome is uncertain; the repository state is being reconciled',
+        );
+      }
+      logger.warn(
+        { repositoryId: id },
+        'remote update connection lost; reconciled to the database',
+      );
+      throw new HttpError(
+        500,
+        'Remote update lost its database connection; the remote was reconciled to the saved repository state',
+      );
+    }
+    await restoreRemote(err, false);
+  } finally {
+    endWriter();
   }
   logAuditEvent(event!);
 

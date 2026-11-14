@@ -39,7 +39,17 @@ vi.mock('node:child_process', async (original) => {
     }),
   };
 });
-vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => h.db,
+  withFreshDatabase: async (run: (db: ReturnType<typeof createDatabase>) => Promise<unknown>) => {
+    const fresh = createDatabase(url!);
+    try {
+      return await run(fresh);
+    } finally {
+      await fresh.$client.end({ timeout: 5 });
+    }
+  },
+}));
 // These controls exercise Postgres row contention; the RAG writer lease is held in memory.
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({}) }));
 vi.mock('@haive/shared/rag', async (original) => {
@@ -210,7 +220,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           );
           await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
           await db.execute(
-            sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
+            sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE OF remote_url ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
           );
         }
         if (failure === 'commit') {
@@ -254,7 +264,10 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         expect(res.status).toBe(failure === 'none' ? 200 : 500);
         const config = await git(root, ['config', '--local', '--list']);
         if (failure !== 'none') {
-          expect(await stored()).toEqual(before);
+          expect(await stored()).toEqual({
+            ...before,
+            remoteRelinkIntent: failure === 'commit' ? expect.any(String) : null,
+          });
           if (existing) {
             expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
               'https://old.test/r\nhttps://extra.test/r',

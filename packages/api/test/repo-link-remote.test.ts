@@ -1,16 +1,34 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, openSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFileSync, type ChildProcess, type ExecFileOptions } from 'node:child_process';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn(), entry: vi.fn() }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  git: vi.fn(),
+  entry: vi.fn(),
+  reconcile: vi.fn(),
+  mark: vi.fn(),
+  clear: vi.fn(),
+}));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   lstatNoFollow: h.entry,
 }));
+vi.mock('../src/lib/remote-reconcile.js', async (original) => {
+  const real = await original<typeof import('../src/lib/remote-reconcile.js')>();
+  return {
+    ...real,
+    markRemoteIntent: h.mark,
+    clearRemoteIntent: h.clear,
+    reconcileRemote: h.reconcile,
+    // The real fence, with its begin and end calls recorded.
+    beginRelinkWriter: vi.fn((id: string) => vi.fn(real.beginRelinkWriter(id))),
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
@@ -32,7 +50,8 @@ import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
-import type { AppEnv } from '../src/context.js';
+import { HttpError, type AppEnv } from '../src/context.js';
+import { beginRelinkWriter } from '../src/lib/remote-reconcile.js';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -54,6 +73,13 @@ beforeEach(() => {
   h.db = fake.db;
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
+  h.reconcile.mockReset().mockResolvedValue(undefined);
+  h.mark.mockReset().mockImplementation(async () => {
+    const intent = { token: 'request-token', created: true };
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: intent.token });
+    return intent;
+  });
+  h.clear.mockReset().mockResolvedValue(undefined);
 });
 const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
@@ -122,6 +148,22 @@ const startChild = (command: string, args: string[], options: ExecFileOptions, c
   child = run.child;
   return run;
 };
+// Git creates config.lock before installing its tempfile signal handler. The later
+// blocking FIFO open proves that cleanup is armed before the fake deadline fires.
+async function waitForConfigFifo(config: string): Promise<number> {
+  let writer: number | undefined;
+  await until('git opened its config FIFO for reading after creating config.lock', () => {
+    if (!existsSync(`${config}.lock`)) return false;
+    try {
+      writer = openSync(config, constants.O_WRONLY | constants.O_NONBLOCK);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENXIO') return false;
+      throw new Error('Could not establish the git config FIFO reader handshake', { cause: err });
+    }
+  });
+  return writer!;
+}
 const alive = (c: ChildProcess) => c.exitCode === null && c.signalCode === null;
 const running = (pid: number) => {
   try {
@@ -305,7 +347,7 @@ it('rechecks a retained credential binding changed between the initial and locke
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
 
-it('waits for a disconnected transaction callback before restoring the remote', async () => {
+it('waits for a disconnected transaction callback before reconciling the remote', async () => {
   const old = 'https://old.test/r';
   const next = 'https://example.test/r';
   fake.patch(schema.repositories, REPO, { remoteUrl: old });
@@ -323,7 +365,7 @@ it('waits for a disconnected transaction callback before restoring the remote', 
   const dropped = new Promise<never>((_resolve, reject) => {
     disconnect = reject;
   });
-  const failure = new Error('connection closed');
+  const failure = Object.assign(new Error('connection closed'), { code: 'CONNECTION_CLOSED' });
   let callback!: Promise<unknown>;
   h.db = new Proxy(fake.db, {
     get(target, key) {
@@ -372,6 +414,10 @@ it('waits for a disconnected transaction callback before restoring the remote', 
     }
     return { stdout: '', stderr: '' };
   });
+  h.reconcile.mockImplementation(async () => {
+    checkout = old;
+    events.push('reconciled');
+  });
   const response = Promise.resolve(link());
   try {
     await atWrite;
@@ -383,7 +429,7 @@ it('waits for a disconnected transaction callback before restoring the remote', 
   }
   await callback.catch(() => undefined);
   expect((await response).status).toBe(500);
-  expect(events).toEqual(['write finished', 'restored']);
+  expect(events).toEqual(['write finished', 'reconciled']);
   expect(checkout).toBe(old);
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
   expect(fake.rows(schema.auditEvents)).toEqual([]);
@@ -421,18 +467,23 @@ it('stops a timed-out git write with SIGTERM, so git removes its own lock file',
   const response = Promise.resolve(
     link('https://synthetic-user:synthetic-password@example.test/r'),
   );
-  await until('git took its lock', () => existsSync(`${config}.lock`));
-  await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-  const answer = await answeredWithin(3_000, response);
-  expect(answer.status).toBe(409);
-  const text = await answer.text();
-  expect(text).not.toMatch(
-    /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
-  );
-  expect(text).toContain('SIGTERM');
-  expect(existsSync(`${config}.lock`)).toBe(false);
-  expect(child!.signalCode).toBe('SIGTERM');
-  expect(vi.getTimerCount()).toBe(0);
+  let writer: number | undefined;
+  try {
+    writer = await waitForConfigFifo(config);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    const answer = await answeredWithin(3_000, response);
+    expect(answer.status).toBe(409);
+    const text = await answer.text();
+    expect(text).not.toMatch(
+      /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+    );
+    expect(text).toContain('SIGTERM');
+    expect(existsSync(`${config}.lock`)).toBe(false);
+    expect(child!.signalCode).toBe('SIGTERM');
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    if (writer !== undefined) closeSync(writer);
+  }
 });
 
 it('kills a git child that traps SIGTERM once the grace after the deadline is over', async () => {
@@ -618,9 +669,10 @@ it.each([false, true])(
     });
     const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let writer: number | undefined;
     try {
       const response = Promise.resolve(link(submitted));
-      await until('git took its lock', () => existsSync(`${config}.lock`));
+      writer = await waitForConfigFifo(config);
       await vi.advanceTimersByTimeAsync(DEADLINE_MS);
       const answer = await answeredWithin(3_000, response);
       expect(answer.status).toBe(restoreFails ? 500 : 409);
@@ -638,6 +690,7 @@ it.each([false, true])(
       if (!restoreFails) expect(text).toContain('SIGTERM');
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      if (writer !== undefined) closeSync(writer);
       errors.mockRestore();
     }
   },
@@ -851,3 +904,247 @@ it.each(['probe', 'add', 'snapshot', 'clear', 'update'])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it('leaves Git as written and reports reconciliation when the fresh read is unavailable', async () => {
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    await transaction(fn);
+    throw Object.assign(new Error('acknowledgement lost'), { code: 'CONNECTION_CLOSED' });
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.reconcile.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'ECONNREFUSED' }));
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  try {
+    const response = await link();
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain('state is being reconciled');
+    expect(h.git).toHaveBeenCalledTimes(2); // Checkout probe and the successful remote add; no blind undo.
+    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+it('keeps an unmanaged origin when the connection fails before the transaction callback', async () => {
+  let origin: string | null = 'https://git-only.example.test/x';
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  vi.spyOn(fake.db, 'transaction').mockRejectedValueOnce(
+    Object.assign(new Error('closed before callback'), { code: 'CONNECTION_CLOSED' }),
+  );
+  h.reconcile.mockImplementation(async () => {
+    origin = null;
+  });
+  expect((await link()).status).toBe(500);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(origin).toBe('https://git-only.example.test/x');
+  expect(h.reconcile).not.toHaveBeenCalled();
+  expect(h.git).toHaveBeenCalledTimes(1);
+});
+
+it.each(['ECONNREFUSED', 'CONNECTION_CLOSED', '55P03'])(
+  'refuses an unusable intent with 409 before changing git (%s)',
+  async (code) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.mark.mockRejectedValueOnce(Object.assign(new Error('database unavailable'), { code }));
+    const response = await link();
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('Could not record the remote update intent');
+    expect(h.git).toHaveBeenCalledTimes(1);
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'fences the sweep off the repository across its Git writes and its own reconcile (connection lost=%s)',
+  async (dropped) => {
+    const begin = vi.mocked(beginRelinkWriter);
+    begin.mockClear();
+    const fenced = () =>
+      begin.mock.calls.length === 1 && begin.mock.results[0]!.value.mock.calls.length === 0;
+    const seen: boolean[] = [];
+    h.git.mockImplementation(async (_file: string, args: string[]) => {
+      if (args.includes('remote')) seen.push(fenced());
+      return { stdout: args.includes('rev-parse') ? 'true' : '', stderr: '' };
+    });
+    if (dropped) {
+      const transaction = fake.db.transaction.bind(fake.db);
+      vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+        await transaction(fn);
+        throw Object.assign(new Error('acknowledgement lost'), { code: 'CONNECTION_CLOSED' });
+      });
+      h.reconcile.mockImplementationOnce(async () => {
+        seen.push(fenced());
+      });
+    }
+    await link();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every(Boolean)).toBe(true);
+    expect(begin).toHaveBeenCalledWith(REPO);
+    expect(begin.mock.results[0]!.value).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('answers 404 when the repository is deleted before its intent is recorded', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.mark.mockRejectedValueOnce(new HttpError(404, 'Repository not found'));
+  expect((await link()).status).toBe(404);
+  expect(h.git).toHaveBeenCalledTimes(1);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+
+it('keeps the internal repair token out of repository reads', async () => {
+  const body = (await (await app.request(`/${REPO}`)).json()) as {
+    repository: Record<string, unknown>;
+  };
+  expect(body.repository).not.toHaveProperty('remoteRelinkIntent');
+});
+
+it('serves repository details without starting remote repair or writing state', async () => {
+  const transaction = vi.spyOn(fake.db, 'transaction');
+  expect((await app.request(`/${REPO}`)).status).toBe(200);
+  expect(h.reconcile).not.toHaveBeenCalled();
+  expect(h.git).not.toHaveBeenCalled();
+  expect(h.mark).not.toHaveBeenCalled();
+  expect(h.clear).not.toHaveBeenCalled();
+  expect(transaction).not.toHaveBeenCalled();
+});
+
+it.each(['add', 'snapshot', 'clear'])(
+  'clears intent when git refuses the %s stage with a known exit',
+  async (stage) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    if (stage !== 'add') h.git.mockRejectedValueOnce(fail(3, 'origin exists'));
+    if (stage === 'clear') {
+      h.git.mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' });
+      h.git.mockResolvedValueOnce({ stdout: 'https://push.test/r', stderr: '' });
+    }
+    h.git.mockRejectedValueOnce(fail(128, 'refused'));
+    expect((await link()).status).toBe(409);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).toHaveBeenCalledOnce();
+    expect(h.clear.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.git.mock.invocationCallOrder.at(-1)!,
+    );
+    expect(h.git).toHaveBeenCalledTimes(stage === 'add' ? 2 : stage === 'snapshot' ? 3 : 5);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it.each(['SIGTERM', 'SIGKILL'])(
+  'keeps the intent when the first git mutation ended with %s',
+  async (signal) => {
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.git.mockRejectedValueOnce(Object.assign(new Error('interrupted'), { signal }));
+    expect((await link()).status).toBe(409);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(h.git).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it('does not clear a newer relink intent during a restore after the lock was released', async () => {
+  let marker: string | null = null;
+  h.mark.mockImplementation(async () => {
+    marker = 'first request';
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: marker });
+    return { token: marker, created: true };
+  });
+  h.clear.mockImplementation(async () => {
+    marker = null;
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    await transaction(fn);
+    // A second relink acquired the released lock and wrote its intent.
+    marker = 'newer request';
+    throw new Error('ordinary commit failure');
+  });
+  expect((await link()).status).toBe(500);
+  expect(h.git.mock.calls.at(-1)![1]).toEqual(hardenGitArgs(['remote', 'remove', 'origin']));
+  expect(marker).toBe('newer request');
+  expect(h.clear).not.toHaveBeenCalled();
+});
+
+it('writes intent before the first git mutation and leaves it after success', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  expect((await link()).status).toBe(200);
+  expect(h.mark).toHaveBeenCalledOnce();
+  expect(h.mark.mock.invocationCallOrder[0]).toBeLessThan(h.git.mock.invocationCallOrder[1]!);
+  expect(h.clear).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'clears intent only after an in-lock restore succeeds (restore fails=%s)',
+  async (restoreFails) => {
+    const transaction = fake.db.transaction.bind(fake.db);
+    vi.spyOn(fake.db, 'transaction').mockImplementation((fn) =>
+      transaction((tx) =>
+        fn(
+          new Proxy(tx, {
+            get(target, key) {
+              if (key === 'update')
+                return () => ({
+                  set: () => ({
+                    where: async () => {
+                      throw new Error('update refused');
+                    },
+                  }),
+                });
+              const value = Reflect.get(target, key);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          }),
+        ),
+      ),
+    );
+    h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+    h.git.mockResolvedValueOnce({ stdout: '', stderr: '' });
+    if (restoreFails) h.git.mockRejectedValueOnce(fail(128, 'restore refused'));
+    expect((await link()).status).toBe(500);
+    expect(h.mark).toHaveBeenCalledOnce();
+    expect(h.clear).toHaveBeenCalledTimes(restoreFails ? 0 : 1);
+    if (!restoreFails)
+      expect(h.clear.mock.invocationCallOrder[0]).toBeGreaterThan(
+        h.git.mock.invocationCallOrder[2]!,
+      );
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it('keeps a predecessor intent after a clean refusal', async () => {
+  h.mark.mockImplementationOnce(async () => {
+    fake.patch(schema.repositories, REPO, { remoteRelinkIntent: 'predecessor' });
+    return { token: 'predecessor', created: false };
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.git.mockRejectedValueOnce(fail(128, 'refused'));
+  expect((await link()).status).toBe(409);
+  expect(h.clear).not.toHaveBeenCalled();
+});
+
+it('refuses before git when the sweep settled this request intent before its lock', async () => {
+  h.mark.mockResolvedValueOnce({ token: 'already-settled', created: true });
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  expect((await link()).status).toBe(409);
+  expect(h.git).toHaveBeenCalledTimes(1);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect(h.clear).toHaveBeenCalledWith(REPO, 'already-settled');
+});
+
+it('clears its intent when the previous remote read returns no exit status', async () => {
+  h.git.mockResolvedValueOnce({ stdout: 'true', stderr: '' });
+  h.git.mockRejectedValueOnce(fail(3, 'origin exists'));
+  h.git.mockRejectedValueOnce(fail(-1, 'read interrupted'));
+  expect((await link()).status).toBe(409);
+  expect(h.clear).toHaveBeenCalledWith(REPO, 'request-token');
+  expect(h.git).toHaveBeenCalledTimes(3);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});

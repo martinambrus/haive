@@ -61,6 +61,7 @@ import { adminTaskTypeRoutes, taskTypeRoutes } from './routes/task-types.js';
 import { taskTypeDraftRoutes } from './routes/task-type-drafts.js';
 import { adminIntegrationRoutes } from './routes/admin-integrations.js';
 import { installModules } from './modules/loader.js';
+import { startRemoteReconcileSweep } from './lib/remote-reconcile.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -151,15 +152,16 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   return app;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const { apiPort, webOrigin } = await retryWhileConfigUnavailable('api bootstrap', bootstrap);
 
   const app = createApiApp(webOrigin);
   await installModules(app);
-
   const server = serve({ fetch: app.fetch, port: apiPort }, (info) => {
     logger.info({ port: info.port }, 'haive-api listening');
   }) as unknown as Server;
+  const stopRemoteReconcileSweep = startRemoteReconcileSweep();
+  server.once('close', stopRemoteReconcileSweep);
 
   installTerminalWebSocket(server);
   installTerminalShellWebSocket(server);

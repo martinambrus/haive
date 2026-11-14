@@ -290,6 +290,8 @@ export const repositories = pgTable(
      *  it ignores this stored value if that observation fails or times out.
      *  Declared LAST so ALTER TABLE and drizzle-kit push agree on column order. */
     checkoutBranch: text('checkout_branch'),
+    /** Trusted repair intent, outside the repository sandbox. Declared LAST for migration parity. */
+    remoteRelinkIntent: uuid('remote_relink_intent'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

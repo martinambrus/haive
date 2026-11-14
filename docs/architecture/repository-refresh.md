@@ -99,3 +99,104 @@ then `POST /repos/upload/:id/complete`. Completion persists its `repo_uploads` s
 enqueuing extraction, so a failed preparation can use Retry. The unused single-shot
 `POST /repos/upload` route is retired (404). Existing completed upload records remain valid
 Retry sources, and archive retention is unchanged.
+
+## Remote relink reconciliation
+
+`POST /repos/:id/remote` commits a credential-free UUID in
+`repositories.remote_relink_intent` before the relink transaction or its first Git
+mutation. Recording intent uses a separate fresh database client and a short
+transaction with a bounded repository row lock. It stores no URL or credential.
+A failed intent write answers 409 before changing Git; a busy lock retains the
+ordinary busy refusal. The relink transaction then locks the row, verifies that
+its token is still current, inserts the required audit, changes Git and updates
+the repository columns. A token already settled by the sweep, or superseded by
+another request, refuses before any Git mutation.
+
+The intent lives in the database, outside the sandbox trust boundary. Nothing in
+the repository tree can trigger a reconcile: the old
+`.haive/remote-relink-pending` file is neither read nor written, and a planted
+file, link or directory there is inert. No repository-controlled file grants the
+root API permission to remove or rewrite origin. Paths remain rooted at the
+storage/local repository anchor, and Git uses the hardened relink runner.
+
+Each request replaces the token under its intent transaction's row lock and
+remembers whether it inherited an unresolved predecessor repair. Such a request
+never clears that repair on a clean refusal or successful in-lock undo: the
+sweep must still settle the predecessor's outcome. Every clear compares both
+repository ID and this request's token (`WHERE id = ... AND remote_relink_intent
+= ...`), so it cannot erase a newer request's intent. Known outcomes are cleared
+in their own committed transaction after the relink transaction has rolled back,
+rather than clearing a column inside a transaction that is about to roll back.
+A failed clear fails the request; a clear that did not commit leaves repair pending.
+
+A connection-class failure is reconciled only after this request successfully
+recorded intent. Reconciliation uses a fresh database client, rechecks ownership
+and non-null intent under the repository row lock, and aligns origin with the
+committed row, clearing push overrides when replacing an existing origin. It
+clears the locked token in that same transaction. Fresh clients end with
+`end({ timeout: 5 })`. If the fresh read or Git repair fails, intent remains
+for another attempt and the request returns 500 explaining the uncertain outcome.
+A failure before this request records intent leaves Git alone, including a
+folder import's Git-only origin whose database `remote_url` is null.
+
+A successful relink leaves intent for locked reconciliation. For a request with
+no predecessor repair, a known refusal before any mutation clears its token,
+as does a successful undo under the relink row lock. An unreadable previous-remote
+snapshot also clears its token even without an exit status: that read changed
+nothing. The add-origin and clear-push-URL mutation sites still retain intent when
+the outcome is unknown (deadline, signal or spawn failure). A failed undo also
+retains intent. A restore after a non-connection COMMIT failure runs after the
+lock has been released and never clears intent, even if the undo succeeds.
+That late Git restore can still race a concurrent relink; retained intent lets
+the sweep align Git again.
+
+The API starts one bounded sweep after its HTTP server is created and stops its
+timer when the server closes. It selects only repositories with non-null
+database intent, at most 25 IDs per 30-second tick, rotating the cursor and
+scheduling only after the preceding pass finishes; its timers are unref'd. The
+request pool is used only to collect the page, never held across sweep Git.
+Each selected repository is rechecked under the fresh-client lock, taken with
+`SKIP LOCKED`: a repository a relink holds is passed over, not waited for, so the
+sweep never acts on a live request's intent the moment that request rolls back;
+the next tick sees it again. A dropped database connection releases that lock
+before the request's Git writes finish, so the lock alone is not enough: a relink
+also holds an in-process writer fence from before its relink transaction until its Git
+writes and its own reconcile have settled, and the sweep passes over a fenced
+repository too. The fence is per API process, which matches the single API the
+stack runs; process death ends both the writes and the fence. A repository
+without intent runs no Git. Repair
+errors warn and retry on a later rotation. The route's own reconcile after a
+connection loss still waits for the lock. `GET /repos/:id` remains passive: it
+reads database columns without reconciliation, Git work or database writes, and
+no repository response returns the intent token. Process-death recovery happens
+through the sweep or the next successful relink.
+
+Limitations: pending intent makes a null committed remote authoritative as
+"no origin". After intent is committed on a folder import, connection loss,
+process death, failed undo, an unknown-outcome timeout or signal, or a
+non-connection COMMIT failure with a successful undo can therefore remove a
+pre-existing Git-only origin. This also applies when a clean refusal inherits
+a predecessor's unresolved repair. Two short windows remain where a sweep tick
+can act on a live request's intent on a folder import: after the request's
+rollback when its own intent clear fails (the writer fence covers the clear's
+round trips in this process, but not a clear that never lands), and between
+recording the intent and taking the relink lock (the request then answers 409 and a retry restores the origin).
+No durable pre-change origin snapshot is kept;
+preserving one across process death requires a separately designed snapshot
+with credential-handling rules. Each Git call has a 10-second deadline and a
+2-second kill grace, but there is no aggregate deadline over all calls under the
+row lock, and an uninterruptible kernel I/O wait cannot be made to exit by SIGKILL.
+The killed-after-config-rename boundary still needs live evidence; retained
+intent is the recovery mechanism for unknown Git outcomes.
+
+Migration 0235 adds the nullable UUID column last in the Drizzle table. Roll back
+by reverting the code and keeping the column; never drop it. Existing database
+tokens and old repository marker files are inert without the reconciliation code.
+The real Git/PostgreSQL probes cover a lost COMMIT reply, API death before COMMIT
+on both a first link and an existing managed remote, locked-config refusals that
+preserve origin and push URLs after a sweep, and planted files without database
+intent that leave origin unchanged. Unit controls cover token comparison,
+predecessor repair retention, intent ordering and lifetime, unanswered reads,
+bounded sweep rotation and API start/stop wiring. The Git signal controls wait
+for a FIFO reader with a nonblocking writer open, keep that writer until cleanup,
+and close it in `finally`; they do not read kernel wait-channel names.
