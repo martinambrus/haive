@@ -633,7 +633,10 @@ describe('applyLearningOps + readExistingLearnings', () => {
         ],
       })!;
       const plan = planLearningReconciliation(entries, existing);
-      const res = await applyLearningOps(ws, plan);
+      const res = await applyLearningOps(ws, plan, undefined, {
+        taskId: 'task-id',
+        date: '2026-11-14T00:00:00.000Z',
+      });
 
       // collision-guarded insert wrote a new file and left the original untouched
       expect(await readFile(path.join(dir, 'dup.md'), 'utf8')).toBe('# Dup\n\nORIGINAL');

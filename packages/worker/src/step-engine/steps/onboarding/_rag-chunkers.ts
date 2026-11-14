@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { learningContent } from '@haive/shared/learning-provenance';
+import { LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import path from 'node:path';
 
 /* ------------------------------------------------------------------ */
@@ -204,6 +206,8 @@ export function isHeadingOnlyChunk(content: string): boolean {
 }
 
 export function extractMarkdownSections(content: string, _filePath: string): RagSection[] {
+  // Strip before extracting headings, hashing chunks or embedding, in both ingestion paths.
+  if (_filePath.startsWith(`${LEARNINGS_DIR}/`)) content = learningContent(content);
   const { lines, offsets } = sourceLines(content);
   const sections: RagSection[] = [];
   // Heading-only sections are dropped, but held aside: a document that is
