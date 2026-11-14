@@ -27,7 +27,7 @@ from that tree, including base or run. Unknown file names are rejected by both r
 `known` contains the historical bundle hash records; it will
 let the updater recognise an unmodified older install that predates a local bundle record.
 An older manifest still parses without `bundle`, and an older reader's plain zod `z.object`
-strips the new field. The updater, upgrade API and channel publisher keep their existing behavior.
+strips the new field. The updater and upgrade API keep their existing behavior.
 
 `node scripts/build-release-manifest.mjs --version <tag> --bundle-dir <tree>` hashes the required
 base/run files and any allowed overlays present in `<tree>`. It validates
@@ -61,11 +61,34 @@ generation assignments and `.env` mappings, pins their matching byte counts, and
 key allowed to be generated is referenced by the compose bundle. A change outside the recognised
 assignment grammar fails the control and requires updating its extractor.
 
-This schema/generator change does not yet publish or install the bundle. Publishing, classification,
-required-key writes, swapping and rollback follow the approved
-[compose bundle plan](../plans/release-compose-bundle.md). That plan refuses a modified or unknown
-legacy bundle with `bundle-modified` unless `--replace-modified-bundle` is supplied; those runtime
-behaviors remain for the later PRs.
+The release job checks out complete history and release tags (`fetch-depth: 0`, `fetch-tags: true`),
+uses Node 26 and installs the shared schema dependencies. After the service images and their
+multi-platform indexes are published, it snapshots the four allowlisted compose files and
+`install/bundle-env.json`, then passes that snapshot as `--bundle-dir` to the manifest generator.
+Base and run are required; GPU and Vulkan overlays may be absent. The env declaration is removed
+after generation, so the payload context contains only `release.json` and `bundle/<allowed files>`.
+The Dockerfile lives outside that context; `.env` and other checkout files never enter it.
+
+Before `gh release create`, the job builds and pushes
+`ghcr.io/<owner>/haive-release:<version>` for `linux/amd64,linux/arm64` with buildx and re-reads its
+pushed digest from the registry. A failed build, push, inspect or malformed digest stops the release.
+The image is `FROM scratch`, with `/release.json`, `/bundle/<allowed files>` and the label
+`org.haive.release=1`. The manifest hashes the same staged bytes sent to BuildKit, and the GitHub
+Release attaches the same `release.json`. Existing service images and their tags are unchanged.
+
+Channel publication archives the compose files, env declaration, generator, migrations and shared
+schema source from `record.commit`. It uses the invoking checkout's installed schema dependencies
+and release history, then hashes and publishes the archived bundle in the channel's release image.
+The release image remains last, after every runtime push and digest verification. If it fails after
+the local manifest is written, `<out>/release.json.image/` retains the complete payload context and
+its separate Dockerfile; the printed, shell-quoted recovery command rebuilds and pushes that context.
+The context is removed after success or a failure before the local manifest write. See
+[Modules](modules.md#publishing-a-channel-scriptspublish-channelmjs) for the channel gates.
+
+Publication does not yet install the bundle. Classification, required-key writes, swapping and
+rollback follow the approved [compose bundle plan](../plans/release-compose-bundle.md). That plan
+refuses a modified or unknown legacy bundle with `bundle-modified` unless
+`--replace-modified-bundle` is supplied; those runtime behaviors remain for the later PRs.
 
 To run a published release instead of building from source:
 
