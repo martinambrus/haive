@@ -50,7 +50,7 @@ describe('host fix-pass test evidence', () => {
     const pass2 = compareTestImages(after, await captureTestImage(anchor, ''));
     expect(pass1.changes.map((c) => c.path)).toEqual(['tests/a.test.ts']);
     expect(pass2.changes[0]!.beforeHash).toBe(pass1.changes[0]!.afterHash);
-    expect(Buffer.from(before.files![0]!.base64, 'base64').toString()).toBe(first);
+    expect(Buffer.from(before.files![0]!.base64!, 'base64').toString()).toBe(first);
     expect(pass1.changes[0]!.beforeHash).toBe(before.files![0]!.hash);
     expect(pass1.changes[0]!.beforeHash).not.toBe(pass2.changes[0]!.beforeHash);
   });

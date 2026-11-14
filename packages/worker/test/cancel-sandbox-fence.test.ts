@@ -16,6 +16,8 @@ import {
   FIX_TEST_TASK_BYTES,
   FIX_TEST_STORE_BYTES,
   FIX_TEST_RETENTION_DAYS,
+  FIX_TEST_RECORD_LIMIT,
+  FIX_TEST_PENDING_COUNT,
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
 import { captureTestImage } from '../src/step-engine/steps/workflow/_fix-test-edits.js';
 
@@ -68,6 +70,10 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       .insert(schema.cliInvocations)
       .values({ taskId: task!.id, taskStepId: step!.id, mode: 'cli', prompt: 'repair' })
       .returning();
+    await db
+      .update(schema.tasks)
+      .set({ worktreePath: workspace })
+      .where(eq(schema.tasks.id, task!.id));
     return {
       taskId: task!.id,
       taskStepId: step!.id,
@@ -88,6 +94,7 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
 
   it('replays both boundaries once, keeps the first reference through resets and a later pass', async () => {
     const meta = await seed();
+    await writeFile(join(meta.workspace, 'tests/unchanged.test.ts'), 'unchanged');
     await Promise.all([beginFixTestCapture(db, meta), beginFixTestCapture(db, meta)]);
     await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after one');
     await end(meta.invocationId);
@@ -105,6 +112,16 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     const saved = await db.query.taskEvents.findFirst({
       where: eq(schema.taskEvents.id, first.beforeEventId),
     });
+    const payload = JSON.stringify(saved!.payload);
+    expect(payload).not.toContain('base64');
+    expect(payload).not.toContain(meta.workspace);
+    expect(payload).not.toContain('"image":');
+    const blobs = await db
+      .select()
+      .from(schema.fixTestBlobs)
+      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+    expect(blobs).toHaveLength(2);
+    expect(blobs.map((b) => b.content?.toString()).sort()).toEqual(['after one', 'before']);
     const [next] = await db
       .insert(schema.cliInvocations)
       .values({ taskId: meta.taskId, taskStepId: meta.taskStepId, mode: 'cli', prompt: 'next' })
@@ -121,6 +138,12 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     expect(records).toHaveLength(2);
     expect(records[0]).toEqual(first);
     expect(records[1]!.changes[0]!.beforeHash).toBe(first.changes[0]!.afterHash);
+    expect(
+      await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(eq(schema.fixTestBlobs.taskId, meta.taskId)),
+    ).toHaveLength(3);
     expect(
       (await db.query.taskEvents.findFirst({
         where: eq(schema.taskEvents.id, first.beforeEventId),
@@ -177,10 +200,13 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       16777216, 67108864, 30,
     ]);
     const meta = await seed();
-    await beginFixTestCapture(db, meta, { taskBytes: 1 });
+    await beginFixTestCapture(db, meta);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'changed');
     await end(meta.invocationId);
-    await finishFixTestCapture(db, meta.invocationId);
-    expect((await loadFixTestRecords(db, meta.taskId))[0]!.state).toBe('not captured');
+    await finishFixTestCapture(db, meta.invocationId, { taskBytes: 1 });
+    expect((await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.patch).toContain(
+      'content not retained',
+    );
     const other = await seed();
     await beginFixTestCapture(db, other);
     await db
@@ -194,6 +220,7 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
   it('expires whole content while retaining the pinned reference and disclosing its absence', async () => {
     const meta = await seed();
     await beginFixTestCapture(db, meta);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after');
     await end(meta.invocationId);
     await finishFixTestCapture(db, meta.invocationId);
     const first = (await loadFixTestRecords(db, meta.taskId))[0]!;
@@ -201,21 +228,140 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       where: eq(schema.taskEvents.id, first.beforeEventId),
     });
     await db
-      .update(schema.taskEvents)
+      .update(schema.fixTestBlobs)
       .set({ createdAt: new Date(0) })
-      .where(eq(schema.taskEvents.taskId, meta.taskId));
+      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
     await expireFixTestImages(db);
     const expired = await db.query.taskEvents.findFirst({
       where: eq(schema.taskEvents.id, first.beforeEventId),
     });
-    expect(expired!.payload!.image).toBeUndefined();
-    expect(expired!.payload!.imageHash).toBe(before!.payload!.imageHash);
-    expect((await loadFixTestRecords(db, meta.taskId))[0]!.state).toBe('not captured');
+    expect(expired!.payload).toEqual(before!.payload);
+    expect((expired!.payload!.manifest as { hash: string }).hash).toMatch(/^[a-f0-9]{64}$/);
+    const blobs = await db
+      .select()
+      .from(schema.fixTestBlobs)
+      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+    expect(blobs).toHaveLength(2);
+    expect(blobs.every((b) => b.content === null && b.expiredAt instanceof Date)).toBe(true);
+    expect((await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.patch).toContain(
+      'content not retained',
+    );
     expect(
       (await db.query.taskEvents.findMany({ where: eq(schema.taskEvents.taskId, meta.taskId) }))
         .map((e) => e.eventType)
         .sort(),
     ).toEqual([FIX_TEST_AFTER, FIX_TEST_BEFORE].sort());
+  });
+
+  it('records a refused begin explicitly when it no longer owns the step', async () => {
+    const meta = await seed();
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'pending' })
+      .where(eq(schema.taskSteps.id, meta.taskStepId));
+    await beginFixTestCapture(db, meta);
+    expect((await loadFixTestRecords(db, meta.taskId))[0]).toMatchObject({ state: 'not captured' });
+  });
+
+  it('discloses lost provisional before bytes after cache eviction without losing the manifest', async () => {
+    expect(FIX_TEST_PENDING_COUNT).toBe(128);
+    const first = await seed();
+    await beginFixTestCapture(db, first, { pendingCount: 1 });
+    const second = await seed();
+    await beginFixTestCapture(db, second, { pendingCount: 1 });
+    await writeFile(join(first.workspace, 'tests/a.test.ts'), 'after eviction');
+    await end(first.invocationId);
+    await finishFixTestCapture(db, first.invocationId);
+    const record = (await loadFixTestRecords(db, first.taskId))[0]!;
+    expect(record.state).toBe('captured');
+    expect(record.changes[0]!.beforeHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(record.changes[0]!.patch).toContain('content not retained');
+  });
+
+  it('withholds a deleted before file when the repository policy starts denying it', async () => {
+    const meta = await seed();
+    const secretContent = randomBytes(18).toString('hex');
+    await writeFile(join(meta.workspace, 'tests/.env.test'), secretContent);
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'evidence policy',
+        source: 'blank',
+        secretMaskAllow: ['**/.env.test'],
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ repositoryId: repo!.id })
+      .where(eq(schema.tasks.id, meta.taskId));
+    await beginFixTestCapture(db, meta);
+    await rm(join(meta.workspace, 'tests/.env.test'));
+    await db
+      .update(schema.repositories)
+      .set({ secretMaskAllow: [] })
+      .where(eq(schema.repositories.id, repo!.id));
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    const blobs = await db
+      .select()
+      .from(schema.fixTestBlobs)
+      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+    expect(blobs).toHaveLength(0);
+    expect((await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.patch).toContain(
+      'content withheld',
+    );
+  });
+
+  it('keeps unchanged passes manifest-only and bounds records before gate persistence', async () => {
+    expect(FIX_TEST_RECORD_LIMIT).toBe(30);
+    const meta = await seed();
+    await beginFixTestCapture(db, meta);
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    expect(
+      await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(eq(schema.fixTestBlobs.taskId, meta.taskId)),
+    ).toHaveLength(0);
+    const records = await loadFixTestRecords(db, meta.taskId);
+    expect(records[0]).toMatchObject({ state: 'captured', changes: [] });
+    const saved = await db.query.taskEvents.findFirst({
+      where: eq(schema.taskEvents.id, records[0]!.beforeEventId),
+    });
+    await db.insert(schema.taskEvents).values(
+      [1, 2].map((n) => ({
+        taskId: meta.taskId,
+        taskStepId: meta.taskStepId,
+        eventType: FIX_TEST_BEFORE,
+        payload: { ...saved!.payload, invocationId: randomUUID(), pass: n + 1 },
+        createdAt: new Date(Date.now() + n * 1000),
+      })),
+    );
+    const limited = await loadFixTestRecords(db, meta.taskId, 2);
+    expect(limited.map((r) => r.pass)).toEqual([2, 3]);
+  });
+
+  it('admits later tasks by evicting old bytes while preserving their hashes and events', async () => {
+    const first = await seed();
+    await beginFixTestCapture(db, first);
+    await writeFile(join(first.workspace, 'tests/a.test.ts'), 'first');
+    await end(first.invocationId);
+    await finishFixTestCapture(db, first.invocationId, { storeBytes: 12 });
+    const second = await seed();
+    await beginFixTestCapture(db, second);
+    await writeFile(join(second.workspace, 'tests/a.test.ts'), 'later');
+    await end(second.invocationId);
+    await finishFixTestCapture(db, second.invocationId, { storeBytes: 12 });
+    expect((await loadFixTestRecords(db, second.taskId))[0]!.changes[0]!.patch).toContain('+later');
+    expect((await loadFixTestRecords(db, first.taskId))[0]!.changes[0]!.patch).toContain(
+      'content not retained',
+    );
+    const live = await db.select().from(schema.fixTestBlobs);
+    expect(live.filter((b) => b.content).reduce((n, b) => n + b.sizeBytes, 0)).toBeLessThanOrEqual(
+      12,
+    );
   });
 });
 

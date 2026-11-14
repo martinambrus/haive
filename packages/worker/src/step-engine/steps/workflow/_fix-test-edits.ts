@@ -3,6 +3,7 @@ import { isUtf8 } from 'node:buffer';
 import { readdirSizesNoFollow, openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 import { fenceOpener } from '@haive/shared/markdown-fences';
 import type { StatusSummaryItem } from '@haive/shared';
+import type { SecretMaskPolicy } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
 import { asPlainText, sanitizeSimilarSites } from './_similar-sites.js';
 import { isTestEvidencePath } from './_test-paths.js';
@@ -30,11 +31,19 @@ const SKIP = new Set([
 export const sha256 = (data: string | Buffer): string =>
   createHash('sha256').update(data).digest('hex');
 
+export interface TestFile {
+  path: string;
+  hash?: string;
+  size?: number;
+  mode?: number;
+  status?: 'available' | 'content not retained' | 'content withheld' | 'refused';
+  base64?: string;
+}
 export interface TestImage {
   state: 'captured' | 'not captured';
   reason?: string;
   hash?: string;
-  files?: { path: string; hash: string; base64: string; mode?: number }[];
+  files?: TestFile[];
 }
 export interface TestEdit {
   path: string;
@@ -62,7 +71,13 @@ const safePath = (path: string): boolean =>
 export async function captureTestImage(
   anchor: string,
   prefix: string,
-  limits: { bytes?: number; files?: number; entries?: number; depth?: number } = {},
+  limits: {
+    bytes?: number;
+    files?: number;
+    entries?: number;
+    depth?: number;
+    policy?: SecretMaskPolicy;
+  } = {},
 ): Promise<TestImage> {
   const maxBytes = limits.bytes ?? TEST_IMAGE_BYTES;
   const maxFiles = limits.files ?? TEST_IMAGE_FILES;
@@ -110,6 +125,8 @@ export async function captureTestImage(
           bytes += data.length;
           files.push({
             path,
+            size: data.length,
+            status: 'available',
             hash: sha256(data),
             base64: data.toString('base64'),
             mode: Number(before.mode & 0o777n),
@@ -171,31 +188,40 @@ export function compareTestImages(
     const left = Buffer.from(a?.base64 ?? '', 'base64');
     const right = Buffer.from(b?.base64 ?? '', 'base64');
     const binary = !isUtf8(left) || !isUtf8(right) || left.includes(0) || right.includes(0);
-    const patch = binary
-      ? 'Binary content changed (whole bytes retained in the image).'
-      : [
-          ...(a?.mode !== b?.mode
-            ? [
-                `old mode ${a?.mode?.toString(8) ?? 'absent'}`,
-                `new mode ${b?.mode?.toString(8) ?? 'absent'}`,
-              ]
-            : []),
-          `--- ${a ? path : '/dev/null'}`,
-          `+++ ${b ? path : '/dev/null'}`,
-          `@@ -1,${a ? left.toString().split('\n').length : 0} +1,${b ? right.toString().split('\n').length : 0} @@`,
-          ...(a
-            ? left
-                .toString()
-                .split('\n')
-                .map((l) => `-${l}`)
-            : []),
-          ...(b
-            ? right
-                .toString()
-                .split('\n')
-                .map((l) => `+${l}`)
-            : []),
-        ].join('\n');
+    const unavailable = [a, b]
+      .filter((f): f is TestFile => !!f)
+      .find((f) => f.base64 === undefined);
+    const patch = unavailable
+      ? unavailable.status === 'content withheld'
+        ? 'content withheld by secret policy.'
+        : unavailable.status === 'refused'
+          ? 'Test path refused; content not captured.'
+          : 'content not retained (size, storage budget, restart or expiry); hashes and manifest retained.'
+      : binary
+        ? 'Binary content changed (whole bytes retained in the image).'
+        : [
+            ...(a?.mode !== b?.mode
+              ? [
+                  `old mode ${a?.mode?.toString(8) ?? 'absent'}`,
+                  `new mode ${b?.mode?.toString(8) ?? 'absent'}`,
+                ]
+              : []),
+            `--- ${a ? path : '/dev/null'}`,
+            `+++ ${b ? path : '/dev/null'}`,
+            `@@ -1,${a ? left.toString().split('\n').length : 0} +1,${b ? right.toString().split('\n').length : 0} @@`,
+            ...(a
+              ? left
+                  .toString()
+                  .split('\n')
+                  .map((l) => `-${l}`)
+              : []),
+            ...(b
+              ? right
+                  .toString()
+                  .split('\n')
+                  .map((l) => `+${l}`)
+              : []),
+          ].join('\n');
     const bounded = cutPatch(patch, Math.max(0, bytes), Math.max(0, lines));
     bytes -= Buffer.byteLength(bounded.patch);
     lines -= bounded.patch ? bounded.patch.split('\n').length : 0;

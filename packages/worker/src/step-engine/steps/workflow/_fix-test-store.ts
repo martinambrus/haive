@@ -1,12 +1,19 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import { resolveInvocationWorkerTree } from '../../../repo/worktree-git-boundary.js';
+import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
+import {
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+} from '../../../queues/cli-exec/secret-mask-policy.js';
 import { lockOwnedStep } from '../../step-ownership.js';
 import {
   captureTestImage,
   compareTestImages,
   type FixTestRecord,
   type TestImage,
+  type TestFile,
 } from './_fix-test-edits.js';
 
 export const FIX_TEST_BEFORE = 'fix_tests.before';
@@ -14,6 +21,8 @@ export const FIX_TEST_AFTER = 'fix_tests.after';
 export const FIX_TEST_RETENTION_DAYS = 30;
 export const FIX_TEST_TASK_BYTES = 16 * 1024 * 1024;
 export const FIX_TEST_STORE_BYTES = 64 * 1024 * 1024;
+export const FIX_TEST_RECORD_LIMIT = 30;
+export const FIX_TEST_PENDING_COUNT = 128;
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 interface CaptureMeta {
   invocationId: string;
@@ -25,36 +34,68 @@ interface CaptureMeta {
   workspace: string | null;
   epoch?: number | null;
 }
-
+type Reference = Omit<CaptureMeta, 'workspace'> & { manifest: TestImage; beforeEventId?: string };
 export interface CaptureOptions {
   capture?: typeof captureTestImage;
   taskBytes?: number;
   storeBytes?: number;
+  pendingBytes?: number;
+  pendingCount?: number;
 }
 
-/** Bounded retention: delete content only, retain hashes/references and disclose expiry.
- * Runs from the minute sweep even when no more repairs are dispatched. */
+// Before bytes are provisional, bounded process memory, never durable copies of unchanged
+// files. A restart/eviction preserves the manifest and loses old content unless a previous
+// changed-content blob already has that hash. No current-tree replay substitutes old bytes.
+const pending = new Map<string, TestImage>();
+let pendingBytes = 0;
+const imageBytes = (image: TestImage) =>
+  (image.files ?? []).reduce(
+    (n, f) => n + (f.base64 ? Buffer.byteLength(f.base64, 'base64') : 0),
+    0,
+  );
+function forget(id: string) {
+  const image = pending.get(id);
+  if (image) pendingBytes -= imageBytes(image);
+  pending.delete(id);
+}
+function remember(id: string, image: TestImage, options: CaptureOptions) {
+  forget(id);
+  const n = imageBytes(image);
+  const maxBytes = options.pendingBytes ?? FIX_TEST_STORE_BYTES;
+  const maxCount = options.pendingCount ?? FIX_TEST_PENDING_COUNT;
+  while ((pendingBytes + n > maxBytes || pending.size >= maxCount) && pending.size)
+    forget(pending.keys().next().value!);
+  if (n <= maxBytes && maxCount > 0) {
+    pending.set(id, image);
+    pendingBytes += n;
+  }
+}
+const manifest = (image: TestImage): TestImage => ({
+  ...image,
+  files: image.files?.map(({ base64: _bytes, ...f }) => f),
+});
+
+/** The partial index finds live metadata; never inspect/detoast content to expire it. */
 export async function expireFixTestImages(db: Database): Promise<void> {
   await db.execute(sql`
     with expired as (
-      select id from task_events
-      where event_type in (${FIX_TEST_BEFORE}, ${FIX_TEST_AFTER})
-        and payload ? 'image'
-        and created_at < now() - (${FIX_TEST_RETENTION_DAYS} * interval '1 day')
+      select task_id, content_hash from fix_test_blobs
+      where expired_at is null and created_at < now() - (${FIX_TEST_RETENTION_DAYS} * interval '1 day')
       order by created_at limit 100
     )
-    update task_events e set payload = (e.payload - 'image') || '{"expired":true}'::jsonb
-    from expired where e.id = expired.id
+    update fix_test_blobs b set content = null, expired_at = now()
+    from expired e where b.task_id = e.task_id and b.content_hash = e.content_hash
   `);
 }
 
-async function stored(db: Database | Tx, invocationId: string, eventType: string) {
+async function stored(db: Database | Tx, taskId: string, invocationId: string, eventType: string) {
   return (
     await db
       .select()
       .from(schema.taskEvents)
       .where(
         and(
+          eq(schema.taskEvents.taskId, taskId),
           eq(schema.taskEvents.eventType, eventType),
           sql`${schema.taskEvents.payload}->>'invocationId' = ${invocationId}`,
         ),
@@ -63,7 +104,7 @@ async function stored(db: Database | Tx, invocationId: string, eventType: string
   )[0];
 }
 
-/** Run -> step -> task is the Retry/Stop order. No repository I/O while these locks are held. */
+/** Run -> step -> task is the Retry/Stop order. No repository I/O under these locks. */
 async function owned(tx: Tx, meta: CaptureMeta, ended: boolean): Promise<boolean> {
   const [run] = await tx
     .select()
@@ -84,27 +125,88 @@ async function owned(tx: Tx, meta: CaptureMeta, ended: boolean): Promise<boolean
   );
 }
 
-/** Admission serialises only database storage, never filesystem work. Images are immutable
- * until explicit expiry; an exhausted budget stores 'not captured' instead of partial bytes. */
-async function budgeted(
-  tx: Tx,
-  taskId: string,
-  image: TestImage,
+async function capture(
+  db: Database,
+  meta: CaptureMeta,
   options: CaptureOptions,
 ): Promise<TestImage> {
+  const tree = meta.workspace ? workspaceAnchor(meta.workspace) : null;
+  if (!tree) return { state: 'not captured', reason: 'Invocation workspace unavailable.' };
+  const policy = await taskSecretMaskPolicy(db, meta.taskId);
+  return (options.capture ?? captureTestImage)(tree.anchor, tree.prefix, {
+    policy: policy ?? undefined,
+  });
+}
+
+/** Only changed contents enter the durable store. Caps account raw size metadata and
+ * evict oldest live blobs so earlier tasks cannot starve later ones. */
+async function retain(tx: Tx, taskId: string, files: TestFile[], options: CaptureOptions) {
+  const candidates = new Map(
+    files
+      .filter((f) => f.hash && f.base64 !== undefined && f.status === 'available')
+      .map((f) => [f.hash!, f]),
+  );
+  if (!candidates.size) return;
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext('haive.fix-test-image-budget'))`);
-  const rows = await tx.execute<{ total: string; task: string }>(sql`
-    select coalesce(sum(pg_column_size(payload->'image')), 0)::text as total,
-      coalesce(sum(pg_column_size(payload->'image')) filter (where task_id = ${taskId}), 0)::text as task
-    from task_events where event_type in (${FIX_TEST_BEFORE}, ${FIX_TEST_AFTER}) and payload ? 'image'
-  `);
-  const n = Buffer.byteLength(JSON.stringify(image));
-  if (
-    Number(rows[0]?.total ?? 0) + n > (options.storeBytes ?? FIX_TEST_STORE_BYTES) ||
-    Number(rows[0]?.task ?? 0) + n > (options.taskBytes ?? FIX_TEST_TASK_BYTES)
-  )
-    return { state: 'not captured', reason: 'Evidence storage budget exhausted.' };
-  return image;
+  const usage = await tx
+    .select({
+      taskId: schema.fixTestBlobs.taskId,
+      hash: schema.fixTestBlobs.contentHash,
+      size: schema.fixTestBlobs.sizeBytes,
+    })
+    .from(schema.fixTestBlobs)
+    .where(sql`${schema.fixTestBlobs.expiredAt} is null`)
+    .orderBy(asc(schema.fixTestBlobs.createdAt));
+  let total = usage.reduce((n, b) => n + b.size, 0);
+  let task = usage.filter((b) => b.taskId === taskId).reduce((n, b) => n + b.size, 0);
+  const evicted = new Set<object>();
+  for (const [hash, file] of candidates) {
+    const content = Buffer.from(file.base64!, 'base64');
+    if (
+      content.length > (options.taskBytes ?? FIX_TEST_TASK_BYTES) ||
+      content.length > (options.storeBytes ?? FIX_TEST_STORE_BYTES)
+    )
+      continue;
+    const existing = await tx
+      .select({ expiredAt: schema.fixTestBlobs.expiredAt })
+      .from(schema.fixTestBlobs)
+      .where(and(eq(schema.fixTestBlobs.taskId, taskId), eq(schema.fixTestBlobs.contentHash, hash)))
+      .limit(1);
+    if (existing.length) continue;
+    for (const b of usage) {
+      if (evicted.has(b)) continue;
+      if (
+        total + content.length <= (options.storeBytes ?? FIX_TEST_STORE_BYTES) &&
+        task + content.length <= (options.taskBytes ?? FIX_TEST_TASK_BYTES)
+      )
+        break;
+      if (task + content.length > (options.taskBytes ?? FIX_TEST_TASK_BYTES) && b.taskId !== taskId)
+        continue;
+      await tx
+        .update(schema.fixTestBlobs)
+        .set({ content: null, expiredAt: new Date() })
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, b.taskId),
+            eq(schema.fixTestBlobs.contentHash, b.hash),
+          ),
+        );
+      total -= b.size;
+      if (b.taskId === taskId) task -= b.size;
+      evicted.add(b);
+    }
+    if (
+      total + content.length > (options.storeBytes ?? FIX_TEST_STORE_BYTES) ||
+      task + content.length > (options.taskBytes ?? FIX_TEST_TASK_BYTES)
+    )
+      continue;
+    await tx
+      .insert(schema.fixTestBlobs)
+      .values({ taskId, contentHash: hash, sizeBytes: content.length, content })
+      .onConflictDoNothing();
+    total += content.length;
+    task += content.length;
+  }
 }
 
 export async function beginFixTestCapture(
@@ -112,113 +214,195 @@ export async function beginFixTestCapture(
   meta: CaptureMeta,
   options: CaptureOptions = {},
 ): Promise<void> {
-  if (await stored(db, meta.invocationId, FIX_TEST_BEFORE)) return;
-  const tree = meta.workspace ? workspaceAnchor(meta.workspace) : null;
-  const image: TestImage = tree
-    ? await (options.capture ?? captureTestImage)(tree.anchor, tree.prefix)
-    : { state: 'not captured', reason: 'Invocation workspace unavailable.' };
+  if (await stored(db, meta.taskId, meta.invocationId, FIX_TEST_BEFORE)) return;
+  const image = await capture(db, meta, options);
   await db.transaction(async (tx) => {
-    if (!(await owned(tx, meta, false))) return;
-    if (await stored(tx, meta.invocationId, FIX_TEST_BEFORE)) return;
-    const kept = await budgeted(tx, meta.taskId, image, options);
+    const owns = await owned(tx, meta, false);
+    if (await stored(tx, meta.taskId, meta.invocationId, FIX_TEST_BEFORE)) return;
+    const { workspace: _hostPath, ...ref } = meta;
     await tx.insert(schema.taskEvents).values({
       taskId: meta.taskId,
       taskStepId: meta.taskStepId,
       eventType: FIX_TEST_BEFORE,
-      payload: { ...meta, image: kept, imageHash: kept.hash },
+      payload: {
+        ...ref,
+        manifest: manifest(
+          owns ? image : { state: 'not captured', reason: 'Begin did not own the invocation.' },
+        ),
+      },
     });
+    if (owns) remember(meta.invocationId, image, options);
   });
 }
 
-/** Called before consuming a settled invocation or dispatching another pass. A crash before the
- * commit repeats the same key; a crash after it reads the existing immutable record. */
 export async function finishFixTestCapture(
   db: Database,
   invocationId: string,
   options: CaptureOptions = {},
 ): Promise<void> {
-  const before = await stored(db, invocationId, FIX_TEST_BEFORE);
-  if (!before || (await stored(db, invocationId, FIX_TEST_AFTER))) return;
-  const meta = before.payload as unknown as CaptureMeta & { image?: TestImage; expired?: boolean };
-  const tree = meta.workspace ? workspaceAnchor(meta.workspace) : null;
-  const after: TestImage = tree
-    ? await (options.capture ?? captureTestImage)(tree.anchor, tree.prefix)
-    : { state: 'not captured', reason: 'Invocation workspace unavailable.' };
+  // Primary-key lookup first; non-repair completions never scan other tasks' events.
+  const run = await db.query.cliInvocations.findFirst({
+    where: eq(schema.cliInvocations.id, invocationId),
+  });
+  if (!run) return;
+  const before = await stored(db, run.taskId, invocationId, FIX_TEST_BEFORE);
+  if (!before || (await stored(db, run.taskId, invocationId, FIX_TEST_AFTER))) return;
+  const ref = before.payload as unknown as Reference;
+  const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, run.taskId) });
+  const agentRun =
+    run.mode === 'dag_parallel'
+      ? await db.query.dagAgentRuns.findFirst({
+          where: eq(schema.dagAgentRuns.cliInvocationId, invocationId),
+        })
+      : undefined;
+  const issue = agentRun
+    ? await db.query.taskDagIssues.findFirst({
+        where: eq(schema.taskDagIssues.id, agentRun.dagIssueId),
+      })
+    : undefined;
+  const meta: CaptureMeta = {
+    ...ref,
+    workspace:
+      issue?.worktreePath ??
+      task?.worktreePath ??
+      (await resolveInvocationWorkerTree(db, run.taskId)),
+  };
+  const after = await capture(db, meta, options);
+  // Deleted/refused after paths cannot carry a withheld status. Recheck their before
+  // contents against the effective policy as well, before any bytes enter the store.
+  const finishPolicy = (await taskSecretMaskPolicy(db, meta.taskId)) ?? secretMaskPolicy({});
   await db.transaction(async (tx) => {
     if (!(await owned(tx, meta, true))) return;
-    if (await stored(tx, invocationId, FIX_TEST_AFTER)) return;
-    const image = await budgeted(tx, meta.taskId, after, options);
-    const [run] = await tx
-      .select({ exitCode: schema.cliInvocations.exitCode })
-      .from(schema.cliInvocations)
-      .where(eq(schema.cliInvocations.id, invocationId));
-    const interrupted = run?.exitCode == null || [-1, 137, 124].includes(run.exitCode);
-    const comparison = compareTestImages(
-      !interrupted && !meta.expired && meta.image
-        ? meta.image
-        : {
-            state: 'not captured',
-            reason: 'Before image missing, expired or invocation interrupted.',
-          },
-      image,
+    if (await stored(tx, run.taskId, invocationId, FIX_TEST_AFTER)) return;
+    const interrupted = run.exitCode == null || [-1, 137, 124].includes(run.exitCode);
+    const left = pending.get(invocationId) ?? ref.manifest;
+    const next = new Map(after.files?.map((f) => [f.path, f]));
+    const old = new Map(left.files?.map((f) => [f.path, f]));
+    const changed = [...new Set([...old.keys(), ...next.keys()])].filter(
+      (p) =>
+        old.get(p)?.hash !== next.get(p)?.hash ||
+        old.get(p)?.mode !== next.get(p)?.mode ||
+        old.get(p)?.status !== next.get(p)?.status,
     );
-    const record: FixTestRecord = {
-      invocationId,
-      stepId: meta.stepId,
-      pass: meta.pass,
-      round: meta.round,
-      beforeEventId: before.id,
-      ...comparison,
-    };
+    const withheld = new Set(
+      after.files?.filter((f) => f.status === 'content withheld').map((f) => f.path),
+    );
+    if (!interrupted && ref.manifest.state === 'captured' && after.state === 'captured')
+      await retain(
+        tx,
+        run.taskId,
+        changed
+          .filter((p) => !withheld.has(p) && !secretMaskDeniesPath(finishPolicy, p))
+          .flatMap((p) => [old.get(p), next.get(p)].filter((f): f is TestFile => !!f)),
+        options,
+      );
     await tx.insert(schema.taskEvents).values({
-      taskId: meta.taskId,
+      taskId: run.taskId,
       taskStepId: meta.taskStepId,
       eventType: FIX_TEST_AFTER,
-      payload: { ...record, image, imageHash: image.hash },
+      payload: {
+        invocationId,
+        stepId: ref.stepId,
+        pass: ref.pass,
+        round: ref.round,
+        beforeEventId: before.id,
+        manifest: manifest(
+          interrupted ? { state: 'not captured', reason: 'Invocation interrupted.' } : after,
+        ),
+      },
     });
   });
+  forget(invocationId);
 }
 
-/** Strip whole images in SQL: gates and prompts never receive the stored before/after bytes. */
-export async function loadFixTestRecords(db: Database, taskId: string): Promise<FixTestRecord[]> {
-  const events = await db
-    .select({
-      id: schema.taskEvents.id,
-      type: schema.taskEvents.eventType,
-      payload: sql<Record<string, unknown>>`${schema.taskEvents.payload} - 'image'`,
-    })
+/** Bound records BEFORE gate detect persists them; events and history carry no content. */
+export async function loadFixTestRecords(
+  db: Database,
+  taskId: string,
+  limit = FIX_TEST_RECORD_LIMIT,
+): Promise<FixTestRecord[]> {
+  const starts = await db
+    .select()
+    .from(schema.taskEvents)
+    .where(
+      and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, FIX_TEST_BEFORE)),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id))
+    .limit(Math.min(FIX_TEST_RECORD_LIMIT, Math.max(1, limit)));
+  if (!starts.length) return [];
+  const ids = starts.map((e) => String(e.payload?.invocationId));
+  const ends = await db
+    .select()
     .from(schema.taskEvents)
     .where(
       and(
         eq(schema.taskEvents.taskId, taskId),
-        sql`${schema.taskEvents.eventType} in (${FIX_TEST_BEFORE}, ${FIX_TEST_AFTER})`,
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+        inArray(sql`${schema.taskEvents.payload}->>'invocationId'`, ids),
       ),
-    )
-    .orderBy(asc(schema.taskEvents.createdAt), asc(schema.taskEvents.id));
-  const settled = new Map(
-    events.filter((e) => e.type === FIX_TEST_AFTER).map((e) => [e.payload.invocationId, e]),
+    );
+  const settled = new Map(ends.map((e) => [e.payload?.invocationId, e]));
+  const policy = await taskSecretMaskPolicy(db, taskId);
+  const hashes = new Set<string>();
+  for (const start of starts) {
+    const a = (start.payload as unknown as Reference).manifest;
+    const b = (
+      settled.get(start.payload?.invocationId)?.payload as unknown as Reference | undefined
+    )?.manifest;
+    const next = new Map(b?.files?.map((f) => [f.path, f]));
+    const old = new Map(a?.files?.map((f) => [f.path, f]));
+    for (const p of new Set([...old.keys(), ...next.keys()])) {
+      const x = old.get(p),
+        y = next.get(p);
+      if (x?.hash === y?.hash && x?.mode === y?.mode && x?.status === y?.status) continue;
+      if (secretMaskDeniesPath(policy ?? secretMaskPolicy({}), p)) continue;
+      if (x?.hash) hashes.add(x.hash);
+      if (y?.hash) hashes.add(y.hash);
+    }
+  }
+  const blobs = hashes.size
+    ? await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, taskId),
+            inArray(schema.fixTestBlobs.contentHash, [...hashes]),
+          ),
+        )
+    : [];
+  const bytes = new Map(
+    blobs
+      .filter((b) => b.content && !b.expiredAt)
+      .map((b) => [b.contentHash, b.content!.toString('base64')]),
   );
-  return events
-    .filter((e) => e.type === FIX_TEST_BEFORE)
-    .map((e) => {
-      const end = settled.get(e.payload.invocationId);
-      const p = e.payload;
-      return end
-        ? ({
-            ...end.payload,
-            ...(end.payload.expired || p.expired
-              ? { state: 'not captured', reason: 'Whole-image retention expired.' }
-              : {}),
-          } as unknown as FixTestRecord)
-        : {
-            invocationId: String(p.invocationId),
-            stepId: String(p.stepId),
-            round: Number(p.round),
-            pass: Number(p.pass),
-            beforeEventId: e.id,
-            state: 'not captured',
-            reason: 'Pass did not settle under ownership.',
-            changes: [],
-          };
-    });
+  const hydrate = (image?: TestImage): TestImage =>
+    image
+      ? {
+          ...image,
+          files: image.files?.map((f) =>
+            secretMaskDeniesPath(policy ?? secretMaskPolicy({}), f.path)
+              ? { ...f, status: 'content withheld', base64: undefined }
+              : {
+                  ...f,
+                  base64: f.status === 'available' && f.hash ? bytes.get(f.hash) : undefined,
+                },
+          ),
+        }
+      : { state: 'not captured', reason: 'Missing manifest.' };
+  return starts.reverse().map((e) => {
+    const p = e.payload as unknown as Reference;
+    const end = settled.get(p.invocationId);
+    return {
+      invocationId: p.invocationId,
+      stepId: p.stepId,
+      round: p.round,
+      pass: p.pass,
+      beforeEventId: e.id,
+      ...compareTestImages(
+        hydrate(p.manifest),
+        hydrate((end?.payload as unknown as Reference | undefined)?.manifest),
+      ),
+    };
+  });
 }
