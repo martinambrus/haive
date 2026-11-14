@@ -1652,6 +1652,92 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect((await send('DELETE', '/admin/task-types/tt-derived')).status).toBe(409);
   });
 
+  it('serializes concurrent Skips of different failed parked steps on a built-in task', async () => {
+    h.add.mockResolvedValue(undefined);
+    await db.update(schema.stepCatalog).set({ stepIndex: 0 });
+    await db
+      .update(schema.stepCatalog)
+      .set({ allowSkip: true })
+      .where(inArray(schema.stepCatalog.stepId, ['ta-a', 'ta-b']));
+    const { resetStepFlagsCache } = await import('../src/lib/step-flags.js');
+    resetStepFlagsCache();
+    const [task] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: ACTOR,
+        type: 'type_draft',
+        title: 'Concurrent Skips',
+        status: 'running',
+        metadata: { anchorRepositoryId: null },
+      })
+      .returning();
+    await db.insert(schema.taskSteps).values(
+      ['ta-a', 'ta-b'].map((stepId, stepIndex) => ({
+        taskId: task!.id,
+        stepId,
+        stepIndex,
+        title: stepId,
+        status: 'failed' as const,
+      })),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const blocker = db.transaction(async (tx) => {
+      await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, task!.id))
+        .for('update');
+      acquired();
+      await gate;
+    });
+    await held;
+    const requests = ['ta-a', 'ta-b'].map((stepId) =>
+      send('POST', '/tasks/' + task!.id + '/steps/' + stepId + '/action', { action: 'skip' }),
+    );
+    let blocked = false;
+    try {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const [waiting] = await db.execute<{ count: number }>(sql`
+          SELECT count(*)::int as count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+          AND strpos(query, 'derived_run_plan') > 0
+        `);
+        if (waiting?.count === 2) {
+          blocked = true;
+          break;
+        }
+      }
+    } finally {
+      release();
+    }
+    try {
+      await blocker;
+      const responses = await Promise.all(requests);
+      expect(
+        await Promise.all(
+          responses.map(async (res) => ({
+            status: res.status,
+            body: await res.json(),
+          })),
+        ),
+      ).toEqual([
+        { status: 200, body: { ok: true, status: 'skipped', nextStepId: null } },
+        { status: 200, body: { ok: true, status: 'skipped', nextStepId: null } },
+      ]);
+      expect(blocked).toBe(true);
+    } finally {
+      await Promise.all(requests);
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
+    }
+  });
+
   const waitForLock = async (fragment: string) => {
     for (let attempt = 0; attempt < 200; attempt++) {
       const rows = await db.execute(

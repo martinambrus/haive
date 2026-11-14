@@ -475,6 +475,22 @@ describe('the fake database', () => {
     }
   });
 
+  it('projects a nullable column presence check without returning its body', async () => {
+    const { db } = setup();
+    await db.update(schema.tasks).set({ derivedRunPlan: null }).where(eq(schema.tasks.id, TASK));
+    await db
+      .update(schema.tasks)
+      .set({ derivedRunPlan: { pinned: true } })
+      .where(eq(schema.tasks.id, TASK2));
+    expect(
+      await db
+        .select({
+          hasPlan: sql<boolean>`${schema.tasks.derivedRunPlan} IS NOT NULL`,
+        })
+        .from(schema.tasks),
+    ).toEqual([{ hasPlan: false }, { hasPlan: true }]);
+  });
+
   it('projects a select onto the columns it names', async () => {
     const { fake, row } = setup();
     fake.insert(t, row('b.md'));

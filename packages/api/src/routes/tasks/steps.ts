@@ -941,14 +941,14 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     if (stepId === '00-triage') {
       const [heldTask] = await tx
         .select({
-          derivedRunPlan: schema.tasks.derivedRunPlan,
+          hasDerivedRunPlan: sql<boolean>`${schema.tasks.derivedRunPlan} IS NOT NULL`,
           executionPath: schema.tasks.executionPath,
         })
         .from(schema.tasks)
         .where(eq(schema.tasks.id, id))
-        .for('share');
+        .for('no key update');
       if (
-        heldTask?.derivedRunPlan != null &&
+        heldTask?.hasDerivedRunPlan &&
         heldTask.executionPath !== null &&
         values.path !== heldTask.executionPath
       )
@@ -1786,16 +1786,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const [heldTask] = await tx
         .select({
           executionPath: schema.tasks.executionPath,
-          derivedRunPlan: schema.tasks.derivedRunPlan,
+          hasDerivedRunPlan: sql<boolean>`${schema.tasks.derivedRunPlan} IS NOT NULL`,
         })
         .from(schema.tasks)
         .where(eq(schema.tasks.id, id))
-        .for('share');
-      if (
-        stepId === '00-triage' &&
-        heldTask?.derivedRunPlan != null &&
-        heldTask.executionPath === null
-      )
+        .for('no key update');
+      if (stepId === '00-triage' && heldTask?.hasDerivedRunPlan && heldTask.executionPath === null)
         throw new HttpError(
           409,
           'Select a path before skipping derived triage',

@@ -493,13 +493,24 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return (row) => Object.fromEntries(parts.map(([k, value]) => [k, value(row)]));
   }
 
-  /** Column aliases and the supported millisecond clock in select/returning projections. */
+  /** Column aliases, null-presence checks and the millisecond clock in projections. */
   function project(table: PgTable, fields: Record<string, unknown>, row: FakeRow): FakeRow {
     const keyOf = columnKeys(table);
     return Object.fromEntries(
       Object.entries(fields).map(([alias, col]) => {
         const key = keyOf.get(col);
         if (key === undefined) {
+          if (is(col, SQL)) {
+            const chunks = col.queryChunks.filter((chunk) => text(chunk) !== '');
+            const testedKey = keyOf.get(chunks[0]);
+            if (
+              chunks.length === 2 &&
+              testedKey !== undefined &&
+              text(chunks[1]) === ' IS NOT NULL'
+            ) {
+              return [alias, row[testedKey] != null];
+            }
+          }
           // Only the millisecond clock projection used by a retained run's timing snapshot.
           // Read the existing logical clock without advancing it for every returned row.
           if (
