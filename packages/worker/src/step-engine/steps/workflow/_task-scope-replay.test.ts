@@ -8,6 +8,11 @@ import { codeReviewStep } from './08c-code-review.js';
 import { hydrateTaskBrief } from './_spec-artifact.js';
 import type { StepContext } from '../../step-definition.js';
 
+vi.mock('./_fix-test-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_fix-test-store.js')>()),
+  loadFixTestRecords: vi.fn(async () => []),
+}));
+
 const REQUEST = 'Install admin_toolbar only. Preserve existing permissions.';
 function context() {
   const findFirst = vi.fn(async () => ({ title: 'Install one module', description: REQUEST }));
