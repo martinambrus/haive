@@ -73,7 +73,7 @@ if (registry === null && (existsSync(externalFile) || selected[id] !== undefined
     else writeFileSync(local.selectionFile, before);
     fail('pnpm install --lockfile-only failed; local selection was reverted');
   }
-  const gen = spawnSync(process.execPath, [join(root, 'scripts/gen-modules.mjs')], {
+  const gen = spawnSync('node', [join(root, 'scripts/gen-modules.mjs')], {
     cwd: root,
     stdio: 'inherit',
   });
@@ -187,7 +187,7 @@ if (local.localMode()) {
   if (localLock.status !== 0) fail('public lock updated, but refreshing the local lock failed');
 }
 const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
-const gen = spawnSync(process.execPath, [join(root, 'scripts', 'gen-modules.mjs')], {
+const gen = spawnSync('node', [join(root, 'scripts', 'gen-modules.mjs')], {
   cwd: root,
   stdio: 'inherit',
   env: { ...process.env, [INSTALL_MAY_LAG]: '1' },
