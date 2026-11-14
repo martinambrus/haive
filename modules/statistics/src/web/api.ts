@@ -132,6 +132,9 @@ export interface StatsSummary {
     repositoryId: string | null;
     cliProviderId: string | null;
     taskClass: StatsTaskClass | null;
+    /** Plan attention shares the user/repository/class scope but ignores the provider facet.
+     * Whole receipt-hour rows count iff their UTC hour start is in [from, to). */
+    planActiveTime: { cliProviderId: null; windowAttribution: 'utc-hour-start' };
   };
   costDisplay: CostDisplay;
   spend: {
@@ -163,6 +166,9 @@ export interface StatsSummary {
     workMs: number;
     idleMs: number;
     userActiveMs: number;
+    /** Repository/hour attention in the activity window, separate from completed-task effort.
+     * Null means no measured row (or a class other than All/Plan); measured zero stays zero. */
+    planActiveMs: number | null;
     effortMs: number;
     agentDelta: StatsDelta;
     effortDelta: StatsDelta;

@@ -143,3 +143,6 @@ Migration `0237_plan_active_time.sql` creates `plan_active_time` idempotently. R
 user foreign keys both cascade on deletion. Undo by reverting the application commits; the
 unused table is harmless. Drop it only through a later numbered migration. The migration's
 header records this path before it is applied; applied migration checksums must stay fixed.
+
+The statistics summary reports this repository/hour attention separately as `time.planActiveMs`;
+see [Plan-page attention](statistics.md#plan-page-attention) for facets, nulls and UTC window edges.

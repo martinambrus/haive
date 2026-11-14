@@ -41,6 +41,7 @@ import {
   type StatsUnusedReport,
 } from './api.js';
 import { StatTile } from './components/stat-tile.js';
+import { PlanActiveTimeTile } from './components/plan-active-time-tile.js';
 import { ActivityHeatmap } from './components/activity-heatmap.js';
 import { StackedShareBar } from './components/stacked-share-bar.js';
 import { RankedBars, InlineBar } from './components/ranked-bars.js';
@@ -858,10 +859,14 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
                 Agent-hours counts concurrent agents separately; busy span is the clock during which
                 at least one ran. Effort is agent work plus your own focused time, and can only be
                 attributed to the tasks that FINISHED in this window — it carries no timestamps of
-                its own, so it cannot be charted per day.
+                its own, so it cannot be charted per day. Plan page measures attention during this
+                activity window separately from task effort, for All classes and Plan, across all
+                providers. Each UTC hour counts in full when its start falls in the window; edges
+                have hour precision. Reading stops after 1–5 idle minutes, or up to 15 minutes with
+                pending work or editor focus. A dash means no measured rows or an excluded class.
               </CardDescription>
             </CardHeader>
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
               <StatTile
                 label="Agent-hours"
                 value={formatAgentHours(summary.time.agentMs)}
@@ -890,6 +895,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
                 hint={`${formatDuration(summary.time.userActiveMs)} active`}
                 tone="text-amber-300"
               />
+              <PlanActiveTimeTile activeMs={summary.time.planActiveMs} />
             </div>
             <div className="mt-6">
               <ActivityChart days={timeline?.days ?? []} />

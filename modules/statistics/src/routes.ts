@@ -226,6 +226,27 @@ async function timeOver(
   return computeBusySpan(rows, { timeZone });
 }
 
+/** Plan-page attention has repository/user/hour attribution, never task attribution.
+ * Count a whole receipt-hour row iff its UTC hour start is in [from, to). A row
+ * straddling the lower edge is excluded; one straddling the upper edge is included
+ * in full. There is no event-time detail with which to prorate either row. */
+async function planActiveOver(db: Database, q: StatsQuery, userId: string): Promise<number | null> {
+  if (q.taskClass && q.taskClass !== 'plan') return null;
+  const [row] = await db
+    .select({ activeMs: sql<string | null>`sum(${schema.planActiveTime.activeMs})` })
+    .from(schema.planActiveTime)
+    .where(
+      and(
+        ...(q.allUsers ? [] : [eq(schema.planActiveTime.userId, userId)]),
+        ...(q.repositoryId ? [eq(schema.planActiveTime.repositoryId, q.repositoryId)] : []),
+        gte(schema.planActiveTime.hourStart, new Date(q.fromMs)),
+        lt(schema.planActiveTime.hourStart, new Date(q.toMs)),
+      ),
+    );
+  // SUM is null over no rows: periods before measurement must not read as zero activity.
+  return row?.activeMs == null ? null : Number(row.activeMs);
+}
+
 /** Effort (agent work + the user's own focused time) for the tasks that COMPLETED in a window.
  *
  *  Effort has no timestamps — `idle_ms` and `user_active_ms` are client-posted durations with
@@ -514,11 +535,12 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
   /**
    * Range summary: what this window cost, saved, ran and produced.
    *
-   * THREE CLOCKS, each labelled, because one window cannot mean the same thing for all of them:
+   * FOUR CLOCKS, each labelled, because one window cannot mean the same thing for all of them:
    *  - spend / tokens / agent-hours / busy span are scoped by `cli_invocations.started_at` —
    *    money is spent when the agent ran, whatever the task's own dates are;
    *  - `tasks.started` is scoped by `tasks.created_at` — what you set off in this window;
    *  - `tasks.completed` and all effort are scoped by `tasks.completed_at` — what finished.
+   *  - plan-page attention is scoped by its UTC receipt-hour start, independently of tasks.
    * A task started before the window and finished inside it therefore counts in `completed` but
    * not in `started`, which is the honest reading of both questions rather than a compromise
    * that answers neither.
@@ -543,12 +565,13 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
     // current and previous windows can never double-count it.
     const invocationWindow = (lo: Date, hi: Date): SQL => invocationWindowFilter(q, userId, lo, hi);
 
-    const [spend, prevSpend, breakdown, busy, prevBusy] = await Promise.all([
+    const [spend, prevSpend, breakdown, busy, prevBusy, planActiveMs] = await Promise.all([
       spendOver(db, invocationWindow(from, to)),
       spendOver(db, invocationWindow(prevFrom, prevTo)),
       sumProviderBreakdownWhere(db, invocationWindow(from, to)),
       timeOver(db, invocationWindow(from, to), q.timeZone),
       timeOver(db, invocationWindow(prevFrom, prevTo), q.timeZone),
+      planActiveOver(db, q, userId),
     ]);
 
     // What the abandoned half of the window consumed. Same window, restricted to tasks that
@@ -658,6 +681,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         repositoryId: q.repositoryId,
         cliProviderId: q.cliProviderId,
         taskClass: q.taskClass,
+        planActiveTime: { cliProviderId: null, windowAttribution: 'utc-hour-start' as const },
       },
       costDisplay,
       spend: {
@@ -683,6 +707,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         workMs: effort.workMs,
         idleMs: effort.idleMs,
         userActiveMs: effort.userActiveMs,
+        planActiveMs,
         effortMs: effort.effortMs,
         agentDelta: delta(busy.agentMs, prevBusy.agentMs),
         effortDelta: delta(effort.effortMs, prevEffort.effortMs),

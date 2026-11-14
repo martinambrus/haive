@@ -287,3 +287,32 @@ reports NO rows, since nothing can then be called unused. MCP rows are offered-m
 the runs' own `loaded.mcpServers`, never from `.claude/mcp_settings.json`, which is user-owned
 and not read here. The three failures — `no-repository`, `no-path`, `unreadable` — are answers,
 never a 404, so the rest of the tab still renders.
+
+## Plan-page attention
+
+`GET /m/statistics/summary` reports `time.planActiveMs` separately from the completed-task
+`userActiveMs` and `effortMs`. It sums `plan_active_time.active_ms` for the caller, or all
+users when an administrator requests `allUsers`, and honours the repository facet. Only All
+classes and Plan include it; other classes return null. Plan attention has no provider, so
+the provider facet does not apply: `scope.planActiveTime.cliProviderId` is always null even
+when `scope.cliProviderId` selects a provider for the invocation figures. There is no task
+join, task allocation or addition to completed-task effort, task rows, or task deltas.
+
+`scope.planActiveTime.windowAttribution` is `utc-hour-start`: a whole row counts iff its
+UTC `hour_start` falls in the half-open `[from, to)` window. An hour straddling the lower
+edge is excluded in full; one straddling the upper edge is included in full. There is no
+proration or invented event time. UTC wall-clock storage is interpreted independently of
+the requested display zone, and window edges are accurate to the hour. Recording attributes
+a flush wholly to its server receipt hour, adding up to one flush interval of displacement.
+
+No matching row produces null, not zero: periods before measurement are unmeasured. A
+recorded zero row remains zero. The Time tab shows a separate **Plan page** tile beside the
+human figures, a dash for null, and discloses the activity window, all-provider scope and
+UTC hour-start attribution. A dash can also mean the selected class excludes plan work.
+
+Attention follows the shared [human active time](human-time.md) allowance: visible, focused
+visits count while present, with visible words at 150 words/minute clamped to 1–5 minutes;
+pending work or editor focus can extend a still-present epoch to 15 minutes. Content changes
+restart only with recent real input. The task and plan pages share a browser-profile attention
+lease; additive delivery is best-effort without retries and the server caps each user/repo/hour
+at one hour. These are attention estimates, never proof of reading or completed-task effort.
