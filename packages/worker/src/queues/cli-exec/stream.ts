@@ -36,15 +36,16 @@ interface StreamJsonCollector {
   /** Count of stream-json lines that failed JSON.parse — non-zero means the
    *  stream got mangled (chunk corruption, partial flush, mixed protocol). */
   getMalformedLineCount: () => number;
-  /** Token usage: the result event's usage when present (claude/zai — wins,
-   *  never summed with assistant usages), else the sum of the per-message
+  /** Token usage: the sum of the result events' usage when present (claude/zai — wins,
+   *  never summed with assistant usages; each result of a steered run reports its own
+   *  turn), else the sum of the per-message
    *  assistant usages (amp emits no result usage). Either way peakPromptTokens is the
    *  largest single message's prompt, and contextWindow is the window the result's modelUsage
    *  entry for the init/served model reports. Null when no usage is reported or the
    *  assistant fallback is all zero (unknown on zai/muse, not a measured zero). */
   getTokenUsage: () => CliTokenUsage | null;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
-   *  run's turns, like its usage). Null when no result event carried one. */
+   *  run's turns, like its cost; its usage is per turn). Null when no result event carried one. */
   getApiDurationMs: () => number | null;
   /** Which model this stream ASKED for vs which one ANSWERED. Two distinct
    *  channels — see StreamModelReport / model-identity.ts. Null when the stream
@@ -238,8 +239,10 @@ export function createStreamJsonCollector(
       if (typeof subtype === 'string') lastResultSubtype = subtype;
       // Usage rides the result event on ANY subtype (an error_max_turns run
       // still burned tokens) — capture before the success early-return.
+      // Each result's usage covers its own turn while cost and modelUsage are cumulative
+      // (measured on claude-code 2.1.323), so a steered run's results are summed.
       const usage = normalizeClaudeUsage(event.usage);
-      if (usage) resultUsage = usage;
+      if (usage) resultUsage = sumTokenUsage(resultUsage, usage);
       if (typeof event.duration_api_ms === 'number' && Number.isFinite(event.duration_api_ms)) {
         resultApiDurationMs = event.duration_api_ms;
       }
@@ -498,7 +501,7 @@ export function createStreamJsonCollector(
         processLine(buffer);
         buffer = '';
       }
-      // The result event's usage is authoritative and already cumulative — prefer
+      // The result events' summed usage is authoritative — prefer
       // it outright. Before it arrives (live snapshots), use the per-message fallback.
       let assistantUsage: CliTokenUsage | null = null;
       let peakPrompt = 0;
