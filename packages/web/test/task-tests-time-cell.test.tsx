@@ -28,6 +28,43 @@ it('shows current and carried test-phase work as part of work, excluding review'
   expect(screen.getByText('tests').parentElement?.title).toContain('part of work');
 });
 it('renders a measured zero without hiding the cell', () => {
-  render(<TaskTestsTimeCell steps={[]} nowMs={1000} format={(ms) => `${ms}ms`} />);
+  render(
+    <TaskTestsTimeCell
+      steps={[
+        {
+          stepId: '08-phase-5-verify',
+          status: 'done',
+          startedAt: new Date(0),
+          endedAt: new Date(0),
+          idleMs: 0,
+          userActiveMs: 0,
+          waitingStartedAt: null,
+        },
+      ]}
+      nowMs={1000}
+      format={(ms) => `${ms}ms`}
+    />,
+  );
   expect(screen.getByText('0ms')).toBeTruthy();
+});
+
+it('shows no tests cell when the task type has no test-phase step', () => {
+  const { container } = render(
+    <TaskTestsTimeCell
+      steps={[
+        {
+          stepId: '00-onboarding',
+          status: 'done',
+          startedAt: new Date(0),
+          endedAt: new Date(1000),
+          idleMs: 0,
+          userActiveMs: 0,
+          waitingStartedAt: null,
+        },
+      ]}
+      nowMs={1000}
+      format={(ms) => `${ms}ms`}
+    />,
+  );
+  expect(container.textContent).toBe('');
 });

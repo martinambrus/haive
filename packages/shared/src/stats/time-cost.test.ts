@@ -221,5 +221,27 @@ describe('time and cost report', () => {
       testExecution: 'unrecorded',
     });
     expect(report.totals.workMs).toBe(0);
+    expect(report.totals.realUsd).toBeNull();
+    expect(report.rows[0]?.invocations).toBe(0);
+    const measuredZero = buildTimeCostReport({
+      tasks: [{ taskId: 't', completedAt: new Date(1000) }],
+      steps: [],
+      events: [],
+      invocations: [
+        {
+          taskId: 't',
+          stepId: '08-phase-5-verify',
+          agentMs: 0,
+          realUsd: 0,
+          notionalUsd: 0,
+          invocations: 1,
+          pricedInvocations: 1,
+          unpricedInvocations: 0,
+          unsnapshottedInvocations: 0,
+        },
+      ],
+    });
+    expect(measuredZero.rows[0]?.realUsd).toBe(0);
+    expect(measuredZero.totals.realUsd).toBe(0);
   });
 });

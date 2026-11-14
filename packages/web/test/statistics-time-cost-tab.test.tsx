@@ -42,6 +42,7 @@ it('shows absent task timing as unmeasured even though summary reconciliation to
   );
   expect(screen.getAllByText('Workflow work')[0]!.nextElementSibling?.textContent).toBe('—');
   expect(screen.getAllByText('Human active')[0]!.nextElementSibling?.textContent).toBe('—');
+  expect(screen.getAllByText('Billed')[0]!.nextElementSibling?.textContent).toBe('—');
 });
 
 it('loads only when opened, carries the filters and rejects an old window response', async () => {

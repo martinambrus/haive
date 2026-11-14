@@ -1,4 +1,4 @@
-import { computeWorkByCategory, type TaskTimingStep } from '@haive/shared/timing';
+import { computeWorkByCategory, timeCategoryOf, type TaskTimingStep } from '@haive/shared/timing';
 
 export function TaskTestsTimeCell({
   steps,
@@ -9,6 +9,7 @@ export function TaskTestsTimeCell({
   nowMs: number;
   format: (ms: number) => string;
 }) {
+  if (!steps.some((s) => timeCategoryOf(s.stepId) === 'tests')) return null;
   const testsMs = computeWorkByCategory(steps, nowMs).tests;
   return (
     <div

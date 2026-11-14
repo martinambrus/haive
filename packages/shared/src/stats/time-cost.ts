@@ -219,6 +219,7 @@ export function buildTimeCostReport(input: {
       userActiveMs: steps.length ? timing.userActiveMs : null,
       ...waits,
       agentMs: 0,
+      // No invocations means no recorded cost; a priced zero is assigned below.
       realUsd: null,
       notionalUsd: null,
       invocations: 0,
