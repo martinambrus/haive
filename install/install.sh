@@ -229,6 +229,7 @@ init_manifest_scratch() {
   CHANNEL_ENV_CREATED=0
   CHANNEL_FINAL_CLAIMED=0
   CHANNEL_PLACED=0
+  BUNDLE_STAGE=""
   cleanup_channel() {
     if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty || warn "could not restore terminal settings"; fi
     if [ -n "$CHANNEL_CONTAINER" ]; then
@@ -240,6 +241,7 @@ init_manifest_scratch() {
       if [ "$CHANNEL_ENV_CREATED" -eq 1 ]; then rm -f "$INSTALL_DIR/.env"; fi
     fi
     rm -rf "$CHANNEL_SCRATCH"
+    if [ -n "$BUNDLE_STAGE" ]; then rm -rf "$BUNDLE_STAGE"; fi
   }
   trap cleanup_channel 0
   trap 'exit 1' HUP INT TERM
@@ -761,26 +763,40 @@ fi
 
 mkdir -p "$INSTALL_DIR/snapshots"
 cd "$INSTALL_DIR"
+# Stage on the destination filesystem. Rename replaces a link instead of writing through it.
+BUNDLE_STAGE=$(mktemp -d "$INSTALL_DIR/.haive-install.XXXXXXXX")
+place_bundle_file() {
+  [ ! -d "$1" ] || die "bundle destination is a directory: $1"
+  case "$(uname -s)" in
+    Darwin) mv -fh "$BUNDLE_STAGE/$1" "$1" ;;
+    *)      mv -fT "$BUNDLE_STAGE/$1" "$1" ;;
+  esac
+}
 for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"}; do
-  cp "$CHANNEL_SCRATCH/bundle/$name" "$name"
+  cp "$CHANNEL_SCRATCH/bundle/$name" "$BUNDLE_STAGE/$name"
+  place_bundle_file "$name"
 done
 if [ -f "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" ]; then
-  cp "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" .haive-bundle.json
+  record_temp="$BUNDLE_STAGE/.haive-bundle.json"
+  cp "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" "$record_temp"
   # Match the root updater writer: install directory owner/group, mode 0644.
   if owner=$(stat -c '%u:%g' . 2>/dev/null); then :
   else owner=$(stat -f '%u:%g' .); fi
-  if current=$(stat -c '%u:%g' .haive-bundle.json 2>/dev/null); then :
-  else current=$(stat -f '%u:%g' .haive-bundle.json); fi
+  if current=$(stat -c '%u:%g' "$record_temp" 2>/dev/null); then :
+  else current=$(stat -f '%u:%g' "$record_temp"); fi
   if [ "$current" != "$owner" ]; then
-    if ! chown "$owner" .haive-bundle.json; then
+    if ! chown "$owner" "$record_temp"; then
       # Some shares reject chown even when ownership already matches.
-      if current=$(stat -c '%u:%g' .haive-bundle.json 2>/dev/null); then :
-      else current=$(stat -f '%u:%g' .haive-bundle.json); fi
+      if current=$(stat -c '%u:%g' "$record_temp" 2>/dev/null); then :
+      else current=$(stat -f '%u:%g' "$record_temp"); fi
       [ "$current" = "$owner" ] || die "cannot set bundle record owner; use an install directory whose ownership you can preserve"
     fi
   fi
-  chmod 644 .haive-bundle.json
+  chmod 644 "$record_temp"
+  place_bundle_file .haive-bundle.json
 fi
+rmdir "$BUNDLE_STAGE"
+BUNDLE_STAGE=""
 
 WEB_PORT=$(free_port 3000)
 API_PORT=$(free_port "$((WEB_PORT + 1))")

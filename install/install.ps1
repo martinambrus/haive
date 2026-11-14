@@ -607,9 +607,20 @@ if ($hasReleaseBundle) {
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
 Push-Location $Dir
-foreach ($name in $installedFiles) { Copy-Item -LiteralPath (Join-Path $bundleDir $name) -Destination (Join-Path $Dir $name) }
+# Stage on the destination filesystem. Rename replaces a link instead of writing through it.
+$bundleStage = Join-Path $Dir ('.haive-install.' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $bundleStage
+function Place-BundleFile([string]$name) {
+  $destination = Join-Path $Dir $name
+  if ([IO.Directory]::Exists($destination)) { throw "bundle destination is a directory: $name" }
+  Move-Item -LiteralPath (Join-Path $bundleStage $name) -Destination $destination -Force
+}
+foreach ($name in $installedFiles) {
+  Copy-Item -LiteralPath (Join-Path $bundleDir $name) -Destination (Join-Path $bundleStage $name)
+  Place-BundleFile $name
+}
 if ($hasReleaseBundle) {
-  $recordPath = Join-Path $Dir '.haive-bundle.json'
+  $recordPath = Join-Path $bundleStage '.haive-bundle.json'
   Copy-Item -LiteralPath (Join-Path $bundleDir '.haive-bundle.json') -Destination $recordPath
   # Windows inherits the install directory's ACL; POSIX installs match the updater's owner and mode.
   if ($env:OS -ne 'Windows_NT') {
@@ -626,7 +637,10 @@ if ($hasReleaseBundle) {
     }
     if ((Invoke-Native chmod @('644', $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record mode' }
   }
+  Place-BundleFile '.haive-bundle.json'
 }
+Remove-Item -LiteralPath $bundleStage -Force
+$bundleStage = $null
 
 $webPort     = Get-FreePort 3000
 $apiPort     = Get-FreePort ($webPort + 1)
@@ -1113,5 +1127,8 @@ Write-Host ""
   }
   if ($ChannelScratch) {
     Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if ($bundleStage) {
+    Remove-Item -LiteralPath $bundleStage -Recurse -Force -ErrorAction SilentlyContinue
   }
 }

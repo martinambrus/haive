@@ -264,7 +264,7 @@ printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile -and $Uri -like '*/release.json'){ Copy-Item (Join-Path $env:CASE_ROOT 'manifest.json') $OutFile; return }; if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; if($OutFile -like '*docker-compose.run.yml' -and $env:FAIL_AT -ne 'old-bundle'){ [IO.File]::WriteAllText($OutFile, "services:\`n  mailpit:\`n    environment:\`n      MP_UI_AUTH: x\`n") } else { [IO.File]::WriteAllText($OutFile, "services: {}\`n") } } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination,[switch]$Force); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile -and $Uri -like '*/release.json'){ Copy-Item (Join-Path $env:CASE_ROOT 'manifest.json') $OutFile; return }; if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; if($OutFile -like '*docker-compose.run.yml' -and $env:FAIL_AT -ne 'old-bundle'){ [IO.File]::WriteAllText($OutFile, "services:\`n  mailpit:\`n    environment:\`n      MP_UI_AUTH: x\`n") } else { [IO.File]::WriteAllText($OutFile, "services: {}\`n") } } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -389,6 +389,66 @@ for (const lang of ['sh', 'ps1']) {
       channel: publicInstall ? 'public' : 'customer',
       bundle: { files: hashes, env: [], known: [] },
     };
+    check(`force install replaces linked bundle entries (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall, data });
+      try {
+        mkdirSync(f.dir);
+        const names = ['.haive-bundle.json', 'docker-compose.yml', 'docker-compose.run.yml'];
+        const outside = names.map((name) => join(f.root, `outside-${name}`));
+        for (const [index, name] of names.entries()) {
+          writeFileSync(outside[index], `operator file ${index}`, { mode: 0o600 });
+          symlinkSync(outside[index], join(f.dir, name));
+        }
+        const before = outside.map((path) => ({ bytes: readFileSync(path), info: statSync(path) }));
+        const r = f.install([f.flag('force')]);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        for (const [index, name] of names.entries()) {
+          assert.deepEqual(readFileSync(outside[index]), before[index].bytes, name);
+          assert.equal(statSync(outside[index]).mode, before[index].info.mode, name);
+          assert.equal(statSync(outside[index]).uid, before[index].info.uid, name);
+          assert.equal(statSync(outside[index]).gid, before[index].info.gid, name);
+          const installed = join(f.dir, name);
+          assert.ok(lstatSync(installed).isFile(), name);
+          if (lang === 'sh' || process.platform !== 'win32') {
+            assert.equal(statSync(installed).mode & 0o777, 0o644, name);
+            assert.equal(statSync(installed).uid, statSync(f.dir).uid, name);
+            assert.equal(statSync(installed).gid, statSync(f.dir).gid, name);
+          }
+          if (name !== '.haive-bundle.json')
+            assert.equal(readFileSync(installed, 'utf8'), files[name]);
+        }
+        assert.deepEqual(JSON.parse(readFileSync(join(f.dir, names[0]), 'utf8')), {
+          version: '9.9.9',
+          files: Object.fromEntries(Object.entries(hashes).slice(0, 2)),
+        });
+        assert.ok(!readdirSync(f.dir).some((name) => name.startsWith('.haive-install.')));
+      } finally {
+        f.clean();
+      }
+    });
+    if (publicInstall)
+      for (const name of ['.haive-bundle.json', 'docker-compose.yml'])
+        for (const linked of [false, true])
+          check(`force install refuses a bundle directory (${name}, linked=${linked})`, () => {
+            const f = fixture(lang, { publicInstall, data });
+            try {
+              mkdirSync(f.dir);
+              const target = linked ? join(f.root, 'outside-directory') : join(f.dir, name);
+              mkdirSync(target);
+              writeFileSync(join(target, 'operator-file'), 'keep');
+              if (linked) symlinkSync(target, join(f.dir, name), 'dir');
+              const before = statSync(target);
+              const r = f.install([f.flag('force')]);
+              assert.notEqual(r.status, 0, r.stdout + r.stderr);
+              assert.match(r.stdout + r.stderr, /bundle destination is a directory/);
+              assert.deepEqual(readdirSync(target), ['operator-file']);
+              assert.equal(readFileSync(join(target, 'operator-file'), 'utf8'), 'keep');
+              assert.equal(statSync(target).mode, before.mode);
+              assert.ok(!readdirSync(f.dir).some((entry) => entry.startsWith('.haive-install.')));
+            } finally {
+              f.clean();
+            }
+          });
     check(`bundle record contains only installed verified files (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data, fail: 'record-chown' });
       try {
