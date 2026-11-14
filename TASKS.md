@@ -650,6 +650,16 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
+
+status: open · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/DT1-S/review-{1,2}.md`.
+
+1. Gate 2 (`09-gate-2-verify-approval`) and `06b-sprint-planning` declare hard needs in `composable-core.ts` that the runtime does not enforce; a composed type that satisfies the catalog but loses the producer at run time would read `null`. Either enforce them where the step reads its input or soften them to ordering.
+2. `04a-spec-audit` is ordered before `05` more strictly than its code needs; loosening it widens what a custom type may compose.
+3. A private module's task type that holds one of the 23 newly catalogued core steps is now composition-checked at task creation; no external module is installed on the dev install, so the effect on private modules is unmeasured.
+
 ### T676 · FNF[external-module-dev] · external module dev install lows, after #1179 (+8)
 
 status: open · kind: fix · found: #1179 reviews 2026-11-14 · priority: P4
@@ -2060,6 +2070,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Every built-in workflow step is composable, derived task types prerequisite 1 (#1182): 23 catalog entries (58 total) so a composed or derived workflow can hold any built-in step; sprint planning requires both implementation steps, repository writers require a worktree, and every shipped path validates with no issue. Lows filed as T677.
 
 - Updater reads the release bundle, T648 PR 4 (#1181): before an upgrade the updater fetches and hash-checks the release's compose bundle, refuses a modified or unreadable bundle with a typed refusal, refuses plain-http manifests when a bundle is present, and generates missing `hex` `.env` keys atomically; a required key written as a variable reference refuses (`env-key-interpolated`). Lows filed in T674.
 
