@@ -346,9 +346,9 @@ round, with a clear UI preview of its scope. Re-check provider ownership, enable
 capabilities when dispatching; no silent fallback to another model. Persist the override and the
 round transition in the existing fenced transaction so Retry cannot dispatch both choices.
 
-P4 is implemented; P5 remains pending. D11 is decided and implemented for plan chat as a
+P4 and P5 are implemented with local regression controls. D11 is implemented for all three writers as a
 versioned per-owned-dispatch snapshot outside the checkout and `.haive-data`, read-only in the
-sandbox and derived from the prompt's single read. P5 must adopt that mechanism for its writers;
+sandbox and derived from the prompt's single read. P5 reuses that mechanism for its writers;
 `rag_only` itself offers no versioned lookup. Retained oversized pending turns and pre-limit saved
 or queued form submissions take an explicit edit path without being silently cut or failing the
 step. The total dispatch budget reserves fixed instructions, the pending turn, attachments,
@@ -369,7 +369,7 @@ snapshot scope, line navigation, real runner repacking and ownership attachment,
 non-fatal removal and boot reaping, same-patch-created node updates, saved-submission recovery,
 and bounded derived-write CAS retries. Snapshot-bearing Redis jobs expire on completion and
 final failure. The live Ollama rerun and per-CLI snapshot readability checks remain session work;
-the dev stack was excluded from implementation. P5 remains pending.
+the dev stack was excluded from implementation.
 
 Two invariants.
 
@@ -407,7 +407,7 @@ size. D2 settles the transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
 
-**Status: pending; a later PR.**
+**Status: implemented 2026-11-14.**
 
 `11f-plan-reconcile` and `01f-external-plan-sync` move to the bounded index, keeping depth 4 where it
 fits, which needs a depth parameter on `renderBoundedPlanIndexParts`. P4's two rules apply to them
@@ -517,8 +517,8 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
   crash. It contains only the current user's plan from the prompt's single read, every node
   with its version and schema/user/repository/task/invocation ownership fields. The file is
   pretty-printed for line navigation. Removal and boot-reaping failures log at error without
-  replacing run outcomes or stopping boot. P4 implements it; P5 remains pending and must use
-  the same mechanism in its later PR.
+  replacing run outcomes or stopping boot. P4 implements it; P5 uses
+  the same mechanism.
 - **P3 manual only, no automatic switch (D3 stays open) (the owner, 2026-11-14).**
 - **P7 parked (owner, 2026-11-14).**
 
