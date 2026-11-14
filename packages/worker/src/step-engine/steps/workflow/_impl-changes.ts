@@ -178,9 +178,16 @@ async function readChangeDiff(
   worktreePath: string,
   baseBranch: string | null,
   signal?: AbortSignal,
+  denyContent?: (path: string) => boolean,
 ): Promise<string | null> {
   const base = await resolveDiffBase(worktreePath, baseBranch, undefined, false, signal);
   if (!base) return null;
+  const paths = denyContent
+    ? await readChangedPaths(worktreePath, baseBranch, { includeDeleted: true, signal })
+    : undefined;
+  if (paths === null) return null;
+  const pathspecs = paths?.filter((p) => !denyContent!(p)).map((p) => ':(literal)' + p);
+  if (pathspecs?.length === 0) return '';
   try {
     const { stdout } = await gitExec(
       // quotePath=false keeps a non-ASCII path literal so it still matches the file set.
@@ -195,6 +202,7 @@ async function readChangeDiff(
         '--no-renames',
         base,
         '--',
+        ...(pathspecs ?? []),
       ],
       { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES, signal },
     );
@@ -281,8 +289,9 @@ async function changedLineNotes(
   worktreePath: string,
   baseBranch: string | null,
   signal?: AbortSignal,
+  denyContent?: (path: string) => boolean,
 ): Promise<ChangedLineNotes> {
-  const diff = await readChangeDiff(worktreePath, baseBranch, signal);
+  const diff = await readChangeDiff(worktreePath, baseBranch, signal, denyContent);
   return diff === null ? {} : parseChangedLineRanges(diff);
 }
 
@@ -298,13 +307,18 @@ async function changedLineNotes(
 export async function collectImplementationFiles(
   ctx: StepContext,
   worktreePath: string,
-  options: { maxRound?: number; signal?: AbortSignal } = {},
+  options: {
+    maxRound?: number;
+    signal?: AbortSignal;
+    denyContent?: (path: string) => boolean;
+  } = {},
 ): Promise<ImplementationFileSet> {
   return collectChangeSet(
     worktreePath,
     await taskBaseBranch(ctx, options.maxRound),
     await reportedFiles(ctx, options.maxRound),
     options.signal,
+    options.denyContent,
   );
 }
 
@@ -314,6 +328,7 @@ export async function collectChangeSet(
   baseBranch: string | null,
   files: Set<string>,
   signal?: AbortSignal,
+  denyContent?: (path: string) => boolean,
 ): Promise<ImplementationFileSet> {
   const scan = await dirtyWorktreeFiles(worktreePath, signal);
   for (const f of scan.files) files.add(f);
@@ -321,7 +336,7 @@ export async function collectChangeSet(
   // Which lines of each file the change wrote. Measured against the fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const measured = await changedLineNotes(worktreePath, baseBranch, signal);
+  const measured = await changedLineNotes(worktreePath, baseBranch, signal, denyContent);
   for (const p of scan.untracked) {
     const nested = scan.nestedRepositories[p];
     measured[p] ??= nested ? `nested repository (${nested})` : 'new file';

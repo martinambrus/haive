@@ -9,6 +9,7 @@ import { parsePorcelainZ } from './_commit-diff.js';
 /** Unknown ownership is report-only just like upstream source; it never means owned. */
 export type UpstreamKind = 'infrastructure' | 'dependency' | 'unknown';
 export interface DependencyPolicy {
+  withheldPaths?: string[];
   baselineRef?: string;
   workspaceRoots?: string[];
   drupal: boolean;
@@ -151,7 +152,11 @@ async function readBaseline(
 export async function loadDependencyPolicy(
   ctx: StepContext,
   workspace: string,
-  options: { maxRound?: number; signal?: AbortSignal } = {},
+  options: {
+    maxRound?: number;
+    signal?: AbortSignal;
+    denyContent?: (path: string) => boolean;
+  } = {},
 ): Promise<DependencyPolicy> {
   const previous = await loadPreviousStepOutput(
     ctx.db,
@@ -174,20 +179,24 @@ export async function loadDependencyPolicy(
   if (base.code !== 0) {
     throw new Error('Cannot establish the repository baseline for dependency ownership.');
   }
-  const ownership = await readBaseline(
-    workspace,
-    `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
-    false,
-    options.signal,
+  const withheldPaths = [OWNERSHIP_POLICY_PATH, 'composer.json'].filter((p) =>
+    options.denyContent?.(p),
   );
-  const baselineComposer = await readBaseline(
-    workspace,
-    `${base.stdout.trim()}:composer.json`,
-    false,
-    options.signal,
-  );
+  const ownership = withheldPaths.includes(OWNERSHIP_POLICY_PATH)
+    ? null
+    : await readBaseline(
+        workspace,
+        `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
+        false,
+        options.signal,
+      );
+  const baselineComposer = withheldPaths.includes('composer.json')
+    ? null
+    : await readBaseline(workspace, `${base.stdout.trim()}:composer.json`, false, options.signal);
   const { anchor, prefix } = workspaceAnchor(workspace);
-  const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
+  const composer = withheldPaths.includes('composer.json')
+    ? null
+    : await readTextNoFollow(anchor, `${prefix}composer.json`);
   let drupal = false;
   const roots = [...DEFAULT_ROOTS];
   // Removing the framework from the working manifest cannot remove its protection.
@@ -218,6 +227,10 @@ export async function loadDependencyPolicy(
   const drupal7Roots: string[] = [];
   for (const root of new Set(roots)) {
     const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
+    if (options.denyContent?.(marker)) {
+      withheldPaths.push(marker);
+      continue;
+    }
     const baselineDrupal7 = await readBaseline(
       workspace,
       `${base.stdout.trim()}:${marker}`,
@@ -231,6 +244,7 @@ export async function loadDependencyPolicy(
   const drupal7 = drupal7Roots.length > 0;
   drupal ||= drupal7;
   return {
+    ...(withheldPaths.length ? { withheldPaths } : {}),
     baselineRef: base.stdout.trim(),
     workspaceRoots: [workspace, worktree?.sandboxWorktreePath, ctx.sandboxWorkdir]
       .filter((root): root is string => !!root)

@@ -224,7 +224,16 @@ export async function readReviewDiff(
     // A case-insensitive mount can resolve another spelling of a denied name. Either
     // policy verdict withholds it; folding must never override an exact deny with an allow.
     const denied = (canonical: string) => exactDeny(canonical) || foldedDeny(canonical);
-    scope = await collectImplementationFiles(ctx, worktree, limits);
+    const denyContent = (p: string) => {
+      try {
+        return toSafeRel(p) !== p || denied(p);
+      } catch (error) {
+        if (!isPathContainmentError(error, 'invalid-path')) throw error;
+        return true;
+      }
+    };
+    const readLimits = { ...limits, denyContent };
+    scope = await collectImplementationFiles(ctx, worktree, readLimits);
     if (scope.scanError) return unavailable(scope, 'The implementation scan failed.');
     if (!scope.files.length) return unavailable(scope, 'The review scope is empty.');
     const previous = await loadPreviousStepOutput(
@@ -238,7 +247,9 @@ export async function readReviewDiff(
     const forkPoint = (await run(['merge-base', 'HEAD', baseBranch])).trim();
     if (!/^[a-f0-9]{40,64}$/.test(forkPoint))
       return unavailable(scope, 'The task fork point is unreadable.');
-    const dependencyPolicy = await hostCall(ctx, () => loadDependencyPolicy(ctx, worktree, limits));
+    const dependencyPolicy = await hostCall(ctx, () =>
+      loadDependencyPolicy(ctx, worktree, readLimits),
+    );
     const dimensions = await hostCall(ctx, () => resolveTaskReviewDimensions(ctx.db, ctx.taskId));
     const prefix = relUnder(ctx.repoPath, worktree);
     const capture = async (retainContents: boolean): Promise<ReviewSnapshot> => {
@@ -520,7 +531,7 @@ export async function readReviewDiff(
         .digest('hex');
       return {
         forkPoint,
-        partial: withheld.size > 0,
+        partial: withheld.size > 0 || !!dependencyPolicy.withheldPaths?.length,
         changeHash,
         scope,
         dependencyPolicy,
@@ -530,7 +541,7 @@ export async function readReviewDiff(
       };
     };
     const first = await capture(true);
-    const again = await collectImplementationFiles(ctx, worktree, limits);
+    const again = await collectImplementationFiles(ctx, worktree, readLimits);
     if (
       JSON.stringify(ordered(canonicalScope(scope))) !==
       JSON.stringify(ordered(canonicalScope(again)))
