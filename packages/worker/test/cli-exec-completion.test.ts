@@ -77,6 +77,7 @@ function fakeDb(opts: {
   summaryLands?: { stepId: string; round: number };
   /** A Retry or a Stop superseded the run between the job's read and its start. */
   supersededBeforeStart?: boolean;
+  finalized?: boolean;
   /** The task the job's one read of the run returns with it. */
   task?: { status: string; deadAt: Date | null };
 }) {
@@ -87,7 +88,9 @@ function fakeDb(opts: {
       cliInvocations: {
         findFirst: async () => ({
           id: RUN,
-          endedAt: null,
+          endedAt: opts.finalized ? new Date() : null,
+          ...ok,
+          tokenUsage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 },
           supersededAt: null,
           task: opts.task ?? { status: 'running', deadAt: null },
         }),
@@ -161,6 +164,38 @@ beforeEach(() => {
 });
 
 describe('a cli run start', () => {
+  it('returns request evidence only in memory, keeping persisted columns unchanged', async () => {
+    const { db, writes } = fakeDb({});
+    const requestUsage = {
+      requests: [],
+      coverage: 'incomplete',
+      inputConvention: 'exclusive',
+      requestCount: null,
+      modelCoverage: 'unknown',
+      reasons: ['test'],
+    };
+    stubs.executeByKind.mockResolvedValue({ ...ok, requestUsage });
+    const result = await handleCliExecJob(db, base);
+    expect(result?.requestUsage).toEqual(requestUsage);
+    expect(writes.some((w) => 'requestUsage' in w.set)).toBe(false);
+    expect(writes.some((w) => JSON.stringify(w.set.tokenUsage ?? {}).includes('requests'))).toBe(
+      false,
+    );
+  });
+
+  it('records request coverage as unknown when a finished completion is recovered after worker death', async () => {
+    const { db, writes } = fakeDb({ finalized: true });
+    const result = await handleCliExecJob(db, base);
+    expect(result?.requestUsage).toMatchObject({
+      requests: null,
+      coverage: 'unknown',
+      requestCount: null,
+      reasons: ['recovered-completion'],
+    });
+    expect(result?.tokenUsage).toEqual({ inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+    expect(stubs.executeByKind).not.toHaveBeenCalled();
+    expect(writes).toHaveLength(0);
+  });
   it('records personality names before the executor starts or usage capture finishes', async () => {
     const { db, writes } = fakeDb({});
     stubs.executeByKind.mockImplementation(async () => {

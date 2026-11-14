@@ -102,6 +102,7 @@ import {
   resolveAgentDefinitionMasks,
 } from './agent-definition-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
+import { unknownRequestUsage } from '../../cli-executor/request-usage.js';
 import {
   buildOutputTruncationMessage,
   classifyAntigravityDiagnostic,
@@ -1136,6 +1137,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage,
+        requestUsage: unknownRequestUsage(),
         // codex names no model on any typed event (verified against a complete
         // successful run), so it carries the argv value only, served null.
         // antigravity's init event names none either; its --log-file is the one
@@ -1161,6 +1163,7 @@ export async function executeCliSpec(
         jsonlCollector.getNoResultReason() ??
         `${jsonlCliName} emitted no agent message`,
       tokenUsage,
+      requestUsage: unknownRequestUsage(),
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,
@@ -1316,6 +1319,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: extracted.tokenUsage,
+        requestUsage: extracted.requestUsage,
         apiDurationMs: extracted.apiDurationMs,
         // gemini names its models only as the keys of stats.models.
         modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
@@ -1340,6 +1344,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: null,
+        requestUsage: unknownRequestUsage(),
         modelIdentity: modelIdentityFrom(),
         toolUsage: unobservedToolUsage('stream'),
         ...persisted,
@@ -1363,7 +1368,7 @@ export async function executeCliSpec(
       result.error,
     ),
     tokenUsage: collector.getTokenUsage(),
-    requestUsage: collector.getRequestUsage(),
+    requestUsage: unknownRequestUsage(),
     // antigravity lands here. Its captured --log-file is the only place it names a
     // model, and then only as a human label ("Gemini 3.7 Flash (High)").
     modelIdentity: modelIdentityFrom({

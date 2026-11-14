@@ -196,6 +196,7 @@ export async function executeSubAgentSequential(
     parsedOutput: { collected: result.collected, synthesis: result.synthesis },
     errorMessage: failed ? describeFailedSubAgent(result) : null,
     tokenUsage: result.tokenUsage,
+    requestUsage: result.requestUsage,
     apiDurationMs: result.apiDurationMs,
     // N processes under one row and no stream: what each sub-step used is not observable here.
     toolUsage: unobservedToolUsage('stream'),
@@ -211,6 +212,7 @@ export function extractClaudeStreamSubStep(stdout: string) {
   return {
     text: collector.getResult(),
     tokenUsage: collector.getTokenUsage(),
+    requestUsage: collector.getRequestUsage(),
     apiDurationMs: collector.getApiDurationMs(),
   };
 }

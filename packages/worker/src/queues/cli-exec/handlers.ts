@@ -93,7 +93,9 @@ import {
   log,
   type CliExecDeps,
   type CliExecQueuePayload,
+  type ExecutionOutcome,
 } from './_shared.js';
+import { unknownRequestUsage } from '../../cli-executor/request-usage.js';
 import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
 import { STATIC_PARALLEL_AGENTS, currentAgentCap, publishAgentCap } from './agent-pool-cap.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
@@ -228,10 +230,12 @@ export async function handleCliExecJob(
   db: Database,
   payload: CliExecJobPayload,
   deps: CliExecDeps = defaultDeps,
-): Promise<void> {
+): Promise<ExecutionOutcome | void> {
   const house: { scoring?: Promise<void> } = {};
   try {
-    await whileTaskRunnersBusy(payload.taskId, () => runCliExecJob(db, payload, deps, house));
+    return await whileTaskRunnersBusy(payload.taskId, () =>
+      runCliExecJob(db, payload, deps, house),
+    );
   } finally {
     await house.scoring;
   }
@@ -242,7 +246,7 @@ async function runCliExecJob(
   payload: CliExecJobPayload,
   deps: CliExecDeps,
   house: { scoring?: Promise<void> },
-): Promise<void> {
+): Promise<ExecutionOutcome | void> {
   const row = await db.query.cliInvocations.findFirst({
     where: eq(schema.cliInvocations.id, payload.invocationId),
     with: { task: { columns: { status: true, deadAt: true } } },
@@ -260,7 +264,17 @@ async function runCliExecJob(
       { invocationId: payload.invocationId },
       'cli invocation already finalized; skipping redelivery',
     );
-    return;
+    // A completion recovered after worker death has only persisted evidence. PR 2
+    // deliberately records unknown here: totals alone cannot rebuild requests, and a
+    // retained stream may be missing/elided. Never rerun a model to recover usage.
+    return {
+      exitCode: row.exitCode,
+      rawOutput: row.rawOutput,
+      parsedOutput: row.parsedOutput,
+      errorMessage: row.errorMessage,
+      tokenUsage: row.tokenUsage,
+      requestUsage: unknownRequestUsage('recovered-completion'),
+    };
   }
   // The dead mark supersedes every open run; one dispatched or requeued after it ends here.
   if (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed') {
@@ -326,7 +340,7 @@ async function runCliExecJob(
   const gitEnv = await resolveGitEnv(db, { userId: payload.userId, taskId: payload.taskId });
   const secrets: Record<string, string> = { ...gitEnv, ...providerSecrets };
   const startedAt = Date.now();
-  let outcome: { exitCode: number | null; errorMessage: string | null; rawOutput: string | null };
+  let outcome: ExecutionOutcome;
   try {
     const result = await executeByKind(db, payload, deps, secrets);
     const durationMs = Date.now() - startedAt;
@@ -459,9 +473,9 @@ async function runCliExecJob(
       }
     });
     outcome = {
-      exitCode: result.exitCode,
+      ...result,
+      requestUsage: result.requestUsage ?? unknownRequestUsage(),
       errorMessage: finalErrorMessage,
-      rawOutput: result.rawOutput,
     };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
@@ -571,7 +585,7 @@ async function runCliExecJob(
       }
     }
     await cleanupAuthAfterTerminalSummary(db, payload.taskId);
-    return;
+    return outcome;
   }
 
   // Park-begin candidate: this invocation just ended. If it was the last one running for
@@ -581,6 +595,9 @@ async function runCliExecJob(
   if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
 
   await resumeStepIfLinked(payload, outcome.exitCode === 0, outcome.errorMessage);
+  // The BullMQ processor awaits and discards this value; request data never becomes
+  // a Redis job returnvalue or a database column.
+  return outcome;
 }
 
 /** Task completion deliberately does not wait for its best-effort summary invocation. That

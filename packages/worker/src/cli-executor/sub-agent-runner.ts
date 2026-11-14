@@ -8,6 +8,11 @@ import type { CliExecutionResult, CliSpawner, SpawnOptions } from './runner.js';
 import { extractCodexJsonlOutput, isCodexOutputLimitMessage } from './codex-jsonl.js';
 import { extractAntigravityStreamOutput } from './antigravity-stream.js';
 import { extractGeminiJsonOutput, sumTokenUsage } from './usage-extract.js';
+import {
+  aggregateRequestUsage,
+  unknownRequestUsage,
+  type RequestUsageCapture,
+} from './request-usage.js';
 
 export interface SubAgentStepTrace {
   id: string;
@@ -30,6 +35,7 @@ export interface SubAgentRunResult {
   exitCode: number;
   /** Whole-invocation usage: sum of every sub-step (incl. synthesis). */
   tokenUsage: CliTokenUsage | null;
+  requestUsage: RequestUsageCapture;
   /** Σ sub-step model time; null when a sub-step with usage reported none, so the tokens it
    *  divides always cover the same sub-steps. */
   apiDurationMs: number | null;
@@ -53,6 +59,7 @@ export type ClaudeStreamExtractor = (stdout: string) => {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
   apiDurationMs: number | null;
+  requestUsage?: RequestUsageCapture;
 } | null;
 
 export async function runSequentialSubAgent(
@@ -68,10 +75,19 @@ export async function runSequentialSubAgent(
 
   const collected: Record<string, unknown> = {};
   const trace: SubAgentStepTrace[] = [];
+  // Separate from trace: trace is serialized into raw_output, request evidence is not.
+  const requestParts: { id: string; usage: RequestUsageCapture }[] = [];
   let tokenUsage: CliTokenUsage | null = null;
 
   for (const step of invocation.steps) {
-    const traceEntry = await runOneStep(step, buildCli, spawner, opts, extractClaudeStream);
+    const { requestUsage, ...traceEntry } = await runOneStep(
+      step,
+      buildCli,
+      spawner,
+      opts,
+      extractClaudeStream,
+    );
+    requestParts.push({ id: step.id, usage: requestUsage });
     trace.push(traceEntry);
     tokenUsage = sumTokenUsage(tokenUsage, traceEntry.tokenUsage ?? null);
     if (traceEntry.exitCode !== 0 || traceEntry.error) {
@@ -81,6 +97,7 @@ export async function runSequentialSubAgent(
         trace,
         exitCode: traceEntry.exitCode ?? 1,
         tokenUsage,
+        requestUsage: aggregateRequestUsage(requestParts),
         apiDurationMs: totalApiDurationMs(trace),
       };
     }
@@ -90,13 +107,14 @@ export async function runSequentialSubAgent(
   }
 
   const synthesisPrompt = appendCollectedContext(invocation.synthesis.prompt, collected);
-  const synthesisTrace = await runOneStep(
+  const { requestUsage, ...synthesisTrace } = await runOneStep(
     { ...invocation.synthesis, prompt: synthesisPrompt },
     buildCli,
     spawner,
     opts,
     extractClaudeStream,
   );
+  requestParts.push({ id: invocation.synthesis.id, usage: requestUsage });
   trace.push(synthesisTrace);
   tokenUsage = sumTokenUsage(tokenUsage, synthesisTrace.tokenUsage ?? null);
 
@@ -106,6 +124,7 @@ export async function runSequentialSubAgent(
     trace,
     exitCode: synthesisTrace.exitCode ?? 1,
     tokenUsage,
+    requestUsage: aggregateRequestUsage(requestParts),
     apiDurationMs: totalApiDurationMs(trace),
   };
 }
@@ -116,7 +135,7 @@ async function runOneStep(
   spawner: CliSpawner,
   opts: SpawnOptions,
   extractClaudeStream: ClaudeStreamExtractor | undefined,
-): Promise<SubAgentStepTrace> {
+): Promise<SubAgentStepTrace & { requestUsage: RequestUsageCapture }> {
   const spec = buildCli(step.prompt);
   const result: CliExecutionResult = await spawner(spec, opts);
   // Structured-output CLIs wrap the answer (codex: JSONL events; gemini: a
@@ -125,6 +144,7 @@ async function runOneStep(
   // raw stdout — exactly the legacy behavior for older binaries.
   let text = result.stdout;
   let tokenUsage: CliTokenUsage | null = null;
+  let requestUsage = unknownRequestUsage();
   let apiDurationMs: number | null = null;
   let outputLimit: string | undefined;
   if (spec.outputFormat === 'codex-jsonl') {
@@ -148,6 +168,7 @@ async function runOneStep(
       if (extracted.text !== null) text = extracted.text;
       tokenUsage = extracted.tokenUsage;
       apiDurationMs = extracted.apiDurationMs;
+      requestUsage = extracted.requestUsage ?? unknownRequestUsage();
     }
   } else if (spec.outputFormat === 'gemini-json') {
     const extracted = extractGeminiJsonOutput(result.stdout);
@@ -155,6 +176,7 @@ async function runOneStep(
       text = extracted.responseText;
       tokenUsage = extracted.tokenUsage;
       apiDurationMs = extracted.apiDurationMs;
+      requestUsage = extracted.requestUsage;
     }
   }
   const parsed = outputLimit === undefined ? safeParse(step.expectJsonOutput, text) : null;
@@ -166,6 +188,7 @@ async function runOneStep(
     durationMs: result.durationMs,
     parsed,
     tokenUsage,
+    requestUsage,
     apiDurationMs,
     ...(result.error ? { error: result.error } : {}),
     ...(outputLimit === undefined ? {} : { outputLimit }),

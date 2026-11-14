@@ -1,0 +1,8 @@
+[
+  { "type": "thread.started", "thread_id": "thread-1" },
+  { "type": "item.completed", "item": { "type": "agent_message", "text": "done" } },
+  {
+    "type": "turn.completed",
+    "usage": { "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 15 }
+  }
+]

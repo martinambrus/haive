@@ -33,6 +33,43 @@ export function unknownRequestUsage(reason = 'no-request-channel'): RequestUsage
   };
 }
 
+/** Process-local sub-step evidence. Namespace identities because each CLI process can reuse ids.
+ * Any missing channel, convention or model prevents a complete aggregate. */
+export function aggregateRequestUsage(
+  parts: { id: string; usage?: RequestUsageCapture }[],
+): RequestUsageCapture {
+  if (!parts.length) return unknownRequestUsage('no-substeps');
+  const captures = parts.map((p) => p.usage ?? unknownRequestUsage());
+  const requests = parts.flatMap((p, i) =>
+    (p.usage?.requests ?? []).map((r) => ({
+      ...r,
+      requestId: JSON.stringify([i, p.id, r.requestId]),
+    })),
+  );
+  const conventions = new Set(captures.map((c) => c.inputConvention));
+  const inputConvention = conventions.size === 1 ? captures[0]!.inputConvention : 'unknown';
+  const modelCoverage = captures.some((c) => c.modelCoverage === 'mixed')
+    ? 'mixed'
+    : requestModelCoverage(requests);
+  const complete =
+    captures.every((c) => c.coverage === 'complete') &&
+    inputConvention !== 'unknown' &&
+    modelCoverage === 'single';
+  const count = captures.every((c) => c.requestCount !== null)
+    ? captures.reduce((n, c) => n + c.requestCount!, 0)
+    : null;
+  return {
+    requests: captures.some((c) => c.requests !== null) ? requests : null,
+    coverage: complete ? 'complete' : requests.length ? 'incomplete' : 'unknown',
+    inputConvention,
+    requestCount: count !== null && Number.isSafeInteger(count) ? count : null,
+    modelCoverage,
+    reasons: complete
+      ? []
+      : [...new Set(['substep-coverage', ...captures.flatMap((c) => c.reasons)])],
+  };
+}
+
 export function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
