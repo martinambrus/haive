@@ -19,6 +19,7 @@ type Shape = 'hangup-accept' | 'hangup-startup' | 'hangup-query' | 'never-answer
 interface FakeServer {
   port: number;
   connections: () => number;
+  active: () => number;
   close: () => Promise<void>;
 }
 
@@ -57,7 +58,11 @@ async function fakeServer(shape: Shape): Promise<FakeServer> {
       socket.destroy();
       return;
     }
-    if (shape === 'never-answer') return;
+    if (shape === 'never-answer') {
+      // Consume the startup bytes so the peer's eventual FIN is observed too.
+      socket.resume();
+      return;
+    }
     let started = false;
     socket.on('data', () => {
       if (shape === 'hangup-startup') {
@@ -76,6 +81,7 @@ async function fakeServer(shape: Shape): Promise<FakeServer> {
   return {
     port: (server.address() as AddressInfo).port,
     connections: () => count,
+    active: () => sockets.size,
     close: () =>
       new Promise<void>((resolve) => {
         for (const socket of sockets) socket.destroy();
@@ -108,6 +114,14 @@ async function runBegin(
     eager_types: opts.fetchTypes,
     onnotice: () => {},
   });
+  // A fake timer must never outrun an actual TCP attempt. Both peers must have
+  // observed the close before advancing the reconnect backoff. Pool stats include
+  // attempts whose sockets the server has not accepted yet.
+  const drainSockets = async (): Promise<void> => {
+    do {
+      await setImmediate();
+    } while (server.active() || sql.stats.opening || sql.stats.connections);
+  };
   try {
     const timer: { id?: NodeJS.Timeout } = {};
     let settled = false;
@@ -129,15 +143,26 @@ async function runBegin(
       settled = true;
     });
     for (let i = 0; i < opts.windowMs + 10 && !settled; i++) {
-      await setImmediate();
+      if (shape === 'never-answer') {
+        // This peer deliberately keeps its socket open: start the deadline only
+        // after it has accepted the client's attempt.
+        while (!server.connections()) await setImmediate();
+      } else {
+        await drainSockets();
+      }
       await vi.advanceTimersByTimeAsync(1);
     }
     expect(settled).toBe(true);
     const verdict = await work;
     clearTimeout(timer.id);
+    await drainSockets();
     const connections = server.connections();
-    await vi.advanceTimersByTimeAsync(500);
-    await setImmediate();
+    // Observe late retries one timer step at a time too; a retry must complete
+    // its real I/O before the clock can move on to another one.
+    for (let i = 0; i < 500; i++) {
+      await vi.advanceTimersByTimeAsync(1);
+      await drainSockets();
+    }
     return { ...verdict, connections, lateConnections: server.connections() - connections };
   } finally {
     const closing = sql.end({ timeout: 0 });
