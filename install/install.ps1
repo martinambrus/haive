@@ -761,7 +761,7 @@ switch ($Command) {
   'ps'      { docker compose @files ps }
   'version' { $e = Get-DotEnv; Invoke-RestMethod "http://localhost:$($e['HAIVE_API_PORT'])/version" | ConvertTo-Json }
   'upgrade' {
-    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v> [--replace-modified-bundle]"; Write-Host "For recovery, use -Version with the interrupted upgrade target; it selects the updater image."; exit 2 }
+    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v> [--replace-modified-bundle]"; Write-Host "For recovery, use -Version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run's journal record); it selects the updater image."; exit 2 }
     $e = Get-DotEnv
     $v = $Version -replace '^v',''
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and

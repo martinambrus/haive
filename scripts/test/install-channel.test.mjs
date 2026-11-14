@@ -128,8 +128,8 @@ function approvedPublicSecrets(lang, text) {
   const before = lang === 'sh' ? ' >&2; exit 2; }' : '"; exit 2 }';
   const after =
     lang === 'sh'
-      ? ' >&2; echo "For recovery, use --version with the interrupted upgrade target; it selects the updater image." >&2; exit 2; }'
-      : '"; Write-Host "For recovery, use -Version with the interrupted upgrade target; it selects the updater image."; exit 2 }';
+      ? ' >&2; echo "For recovery, use --version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run\'s journal record); it selects the updater image." >&2; exit 2; }'
+      : '"; Write-Host "For recovery, use -Version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run\'s journal record); it selects the updater image."; exit 2 }';
   assert.ok(text.includes(before), 'baseline contains the upgrade version refusal');
   text = text.replace(before, after);
   return text;
@@ -407,6 +407,7 @@ for (const lang of ['sh', 'ps1']) {
           const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), ['upgrade']);
           assert.equal(r.status, 2, r.stdout + r.stderr);
           assert.match(r.stdout + r.stderr, /recovery.*interrupted upgrade target.*updater image/i);
+          assert.match(r.stdout + r.stderr, /upgrade_runs\.to_version/);
           assert.ok(
             !f
               .calls()

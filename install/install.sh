@@ -961,7 +961,7 @@ ${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
     shift
     v=""
     while [ \$# -gt 0 ]; do case "\$1" in --version) v="\${2:-}"; shift 2 ;; *) break ;; esac; done
-    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--replace-modified-bundle] [--force]${CHANNEL_CHANGE_USAGE}" >&2; echo "For recovery, use --version with the interrupted upgrade target; it selects the updater image." >&2; exit 2; }
+    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--replace-modified-bundle] [--force]${CHANNEL_CHANGE_USAGE}" >&2; echo "For recovery, use --version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run's journal record); it selects the updater image." >&2; exit 2; }
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
     ${LOAD_INSTALL_ENV}
