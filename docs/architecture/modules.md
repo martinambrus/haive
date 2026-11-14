@@ -478,15 +478,19 @@ nothing unless it exits 0.
   prefix unless `--registry` says otherwise. What is pushed is the single platform image manifest the gate
   scanned: BuildKit attestation manifests that ride along with a `--load` build are left out, and the stock
   web is copied by the platform digest inside its recorded `repoDigest`.
-- Manifest: produced by the `build-release-manifest.mjs` and migrations of `record.commit` (`git archive`),
-  not the working tree, so `migrationHead` and `contracts` describe the tagged tree. `images` hold pinned
+- Manifest: produced by the `build-release-manifest.mjs`, migrations, shared schema source, compose
+  bundle and `install/bundle-env.json` of `record.commit` (`git archive`), not the working tree, so
+  `migrationHead`, `contracts` and target bundle hashes describe the tagged tree. The archived generator
+  imports its archived schema with the invoking checkout's installed dependencies and reads that checkout's
+  complete release-tag history. Base and run compose files are required; overlays may be absent. `images` hold pinned
   `<repository>@sha256:<digest>` refs, because a channel's images live in channel-named repositories a bare
   digest cannot be pulled from. `images.builder` is optional in the schema and set only by a channel publish;
   the public manifest has none. A public updater ignores `images` and composes refs from the version; a
   channel install upgrades to exactly these pins (see "Upgrading a channel install").
-- Manifest image: `haive-<channel>-release:<version>` is `FROM scratch` with one file, `/release.json`
-  (byte-identical to the local file), and the label `org.haive.release=1`. Its build context is a fresh
-  scratch directory holding only that file and the Dockerfile. It gets the same absence proof,
+- Manifest image: `haive-<channel>-release:<version>` is `FROM scratch` with `/release.json`
+  (byte-identical to the local file), `/bundle/<allowed compose files>` and the label `org.haive.release=1`.
+  Its payload context holds only the manifest and the staged compose files the generator hashed; the
+  Dockerfile is separate. The env declaration is removed before the build; `.env` is never archived. It gets the same absence proof,
   `--confirm-absent` and digest re-read as the others. An install reads it with `docker create`, `docker cp`
   and `docker rm`, so one registry credential reaches both the manifest and the images.
 - Absence proof, fail-closed: a tag counts as absent only when the authenticated
@@ -516,7 +520,10 @@ nothing unless it exits 0.
   leaves no manifest. A failure building or pushing the manifest image leaves the runtime tags public and
   keeps the local `release.json` (named in the error), with no install able to read it yet. Only then does the
   script print `recovery` lines: inspect the release ref first, then a shell-quoted command that rebuilds the
-  manifest image from the retained file and pushes it. They name paths and refs only, never a credential.
+  manifest image from the retained `<out>/release.json.image/context` and its separate Dockerfile, then
+  pushes it. This retains the bundle as well as the manifest after scratch cleanup. The retained context
+  is removed on success or a failure before the manifest write; an existing context refuses before any
+  push. Recovery lines name paths and refs only, never a credential.
 - Limits: the absence check and the push are not atomic (registry tag writes are unconditional), so two
   concurrent publishers of one version can race; only registry-side tag immutability closes that. The script
   imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and
