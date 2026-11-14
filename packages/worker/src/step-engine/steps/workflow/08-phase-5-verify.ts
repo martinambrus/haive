@@ -37,6 +37,7 @@ import {
 import { checkOutputExcerpt } from './_fix-loop.js';
 import { codeBlock } from './_plan-ops.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
+import { recordCheckRun } from './_check-runs.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 import { DRUPAL_CORE_MARKER, type TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
@@ -1088,11 +1089,27 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       await ensureDdevPlaywrightBrowsers(ddevHandle, '');
       await killStalePlaywrightRuns(ddevHandle);
     }
-    const testRun =
-      values.runTest && testCmd
-        ? await runSlotRaw('test', testCmd, ctx, ddevHandle)
-        : { check: skippedResult(), raw: '' };
-    let test = testRun.check;
+    const recorded = (
+      slot: 'test' | 'lint' | 'php_lint' | 'typecheck',
+      cmd: SlotCommand,
+      execute: () => Promise<CheckResult>,
+    ) =>
+      recordCheckRun(
+        ctx,
+        { stepId: '08-phase-5-verify', slot, iteration: args.iteration },
+        execute,
+        (r) => (!r.ran ? 'not_run' : r.passed ? 'passed' : 'failed'),
+        (outcome): CheckResult => ({
+          ran: outcome !== 'not_run',
+          passed: outcome === 'passed',
+          command: cmd.label,
+          output: `Reused recorded check: ${outcome}. Command output is not retained in check history.`,
+          ...(outcome === 'not_run'
+            ? { note: 'Previously recorded as not run in this attempt' }
+            : {}),
+        }),
+      );
+    let testEnvBlocker: ReturnType<typeof classifyTestEnvFailure> = null;
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
     // routes ANY failing check back to implementation — so without this a missing browser
     // burns a whole round on something no agent can repair, which is the exact failure 08b's
@@ -1100,27 +1117,36 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // is kept out, and the note below says so rather than letting it read as green.
     // A declared command may drive Playwright wherever 08b looked; its own error IDs decide then.
     const envFramework = testCmd?.source === 'declared' ? 'playwright' : (testFramework ?? null);
-    const testEnvBlocker =
-      test.ran && !test.passed ? classifyTestEnvFailure(envFramework, testRun.raw) : null;
-    if (testEnvBlocker) {
-      test = {
-        ...test,
-        ran: false,
-        note: 'test run stopped by its environment, not a test failure',
-      };
-    }
+    const test =
+      values.runTest && testCmd
+        ? await recorded('test', testCmd, async () => {
+            const testRun = await runSlotRaw('test', testCmd, ctx, ddevHandle);
+            const check = testRun.check;
+            testEnvBlocker =
+              check.ran && !check.passed ? classifyTestEnvFailure(envFramework, testRun.raw) : null;
+            return testEnvBlocker
+              ? {
+                  ...check,
+                  ran: false,
+                  note: 'test run stopped by its environment, not a test failure',
+                }
+              : check;
+          })
+        : skippedResult();
     const lint =
       values.runLint && lintCmd
-        ? await runLint(lintCmd, ctx, workspacePath, ddevHandle)
+        ? await recorded('lint', lintCmd, () => runLint(lintCmd, ctx, workspacePath, ddevHandle))
         : skippedResult();
     const phpLint = phpLintCmd
       ? values.runLint
-        ? await runLint(phpLintCmd, ctx, workspacePath, ddevHandle)
+        ? await recorded('php_lint', phpLintCmd, () =>
+            runLint(phpLintCmd, ctx, workspacePath, ddevHandle),
+          )
         : skippedResult()
       : undefined;
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await runSlot('typecheck', typeCmd, ctx, ddevHandle)
+        ? await recorded('typecheck', typeCmd, () => runSlot('typecheck', typeCmd, ctx, ddevHandle))
         : skippedResult();
 
     const passed =

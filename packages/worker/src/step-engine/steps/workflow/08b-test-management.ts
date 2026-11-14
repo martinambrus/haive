@@ -34,6 +34,7 @@ import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { runStepCommandInSandbox } from '../../../sandbox/step-command.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
+import { recordCheckRun } from './_check-runs.js';
 import {
   findMissingEnvFiles,
   hasExistingSpecFile,
@@ -1085,79 +1086,101 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           await killStalePlaywrightRuns(runnerHandleForTask(ctx.taskId, d.repoSubpath!));
         }
 
-        // A selective run is still minutes of silence — one spec file can hold ~50 browser
-        // tests — and a fixed "Running related tests…" line is indistinguishable from a stuck
-        // task. withDdevProgress is the same live status every long DDEV op already uses: the
-        // runner's latest line plus an elapsed counter that ticks through silent phases. Its
-        // name says ddev but its contract is just `emitProgress`, so the host branch gets the
-        // counter too, and the wait for an agent slot is the line it gives.
-        const run = await withDdevProgress(
+        const recorded = await recordCheckRun(
           ctx,
-          cmd.kind === 'ddev' ? 'Running related tests in DDEV' : 'Running related tests',
-          (onLine) => runTestCommand(ctx, d, cmd, 600_000, onLine),
-          { initialLine: cmd.args.join(' ') },
+          { stepId: '08b-test-management', slot: 'test', iteration: args.iteration },
+          async () => {
+            // A selective run is still minutes of silence — one spec file can hold ~50 browser
+            // tests — and a fixed "Running related tests…" line is indistinguishable from a stuck
+            // task. withDdevProgress is the same live status every long DDEV op already uses: the
+            // runner's latest line plus an elapsed counter that ticks through silent phases. Its
+            // name says ddev but its contract is just `emitProgress`, so the host branch gets the
+            // counter too, and the wait for an agent slot is the line it gives.
+            const run = await withDdevProgress(
+              ctx,
+              cmd.kind === 'ddev' ? 'Running related tests in DDEV' : 'Running related tests',
+              (onLine) => runTestCommand(ctx, d, cmd, 600_000, onLine),
+              { initialLine: cmd.args.join(' ') },
+            );
+            const notRun = run.notRun !== undefined;
+            testRun = {
+              ran: !notRun,
+              passed: !notRun && run.exitCode === 0,
+              command: run.command,
+              output: run.output,
+            };
+            testsPassed = notRun ? null : testRun.passed;
+            if (notRun) {
+              degradedNote =
+                `The related tests could not be run (${run.notRun}). They were written but never ` +
+                `executed, and the suite is NOT known to be green.`;
+            }
+
+            // An environment that cannot run a browser is not a test defect, and no fix pass can
+            // repair it from inside the sandbox — the CLI is given ddev_status/logs/restart and no
+            // `ddev exec`. Read from the RUN's own output, because the enumerate guard below cannot
+            // see this class at all: `--list` skips globalSetup, so a container with no browser
+            // binaries lists every test and exits 0. Applies from pass 0, unlike that guard — a
+            // browser missing from the container is never something the tester's own pass caused.
+            const blocked =
+              notRun || testRun.passed ? null : classifyTestEnvFailure(d.primary, run.output);
+            if (blocked) {
+              testRun = { ...testRun, ran: false };
+              testsPassed = null;
+              degradedNote =
+                `The related tests could not be run: ${blocked.reason}. They were written but never ` +
+                `executed, and the suite is NOT known to be green. No fix pass can repair this from ` +
+                `inside the sandbox.\n\nRun: ${testRun.command}\n\nRepair with:\n` +
+                `${repairInvocation(d, blocked.repair)}\n\n${run.output}` +
+                (provisionNote
+                  ? `\n\nProvisioning it automatically also failed:\n${provisionNote}`
+                  : '');
+            }
+
+            // A failed run is only worth a fix agent if the runner actually ran something. Ask it to
+            // ENUMERATE the same files: a non-zero exit there means it could enumerate NONE of them
+            // — a harness it cannot load, or files the tester reported but never wrote — and no fix
+            // pass can act on that. Skipped when the run passed, so the green path costs nothing.
+            //
+            // From the FIRST fix pass onward, never from the tester's own pass: a spec the tester
+            // just wrote with a syntax error also enumerates as nothing, and that IS the fixer's to
+            // repair. Giving it one pass keeps that repair while capping the failure this exists for
+            // — the observed task spent 5 passes and a whole round back through implementation on a
+            // playwright install its command never reached.
+            const collect =
+              blocked || notRun || testRun.passed || args.iteration === 0
+                ? null
+                : buildCollectCommand(d.primary, targets, buildOpts);
+            if (collect) {
+              const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS);
+              if (listed.notRun === undefined && listed.exitCode !== 0) {
+                testRun = { ...testRun, ran: false };
+                testsPassed = null;
+                degradedNote =
+                  `The ${d.primary} runner could not enumerate any of the tests this step wrote, so ` +
+                  `none of them were executed and further fix passes were stood down. The suite is ` +
+                  `NOT known to be green.\n\nRun: ${testRun.command}\nEnumerate: ${listed.command}` +
+                  `\n\n${listed.output}`;
+              }
+            }
+            return { testRun, testsPassed, degradedNote };
+          },
+          (r) => (!r.testRun.ran ? 'not_run' : r.testRun.passed ? 'passed' : 'failed'),
+          (outcome) => ({
+            testRun: {
+              ran: outcome !== 'not_run',
+              passed: outcome === 'passed',
+              command: cmd.args.join(' '),
+              output: `Reused recorded check: ${outcome}. Command output is not retained in check history.`,
+            },
+            testsPassed: outcome === 'not_run' ? null : outcome === 'passed',
+            degradedNote:
+              outcome === 'not_run' ? 'Previously recorded as not run in this attempt' : undefined,
+          }),
         );
-        const notRun = run.notRun !== undefined;
-        testRun = {
-          ran: !notRun,
-          passed: !notRun && run.exitCode === 0,
-          command: run.command,
-          output: run.output,
-        };
-        testsPassed = notRun ? null : testRun.passed;
-        if (notRun) {
-          degradedNote =
-            `The related tests could not be run (${run.notRun}). They were written but never ` +
-            `executed, and the suite is NOT known to be green.`;
-        }
-
-        // An environment that cannot run a browser is not a test defect, and no fix pass can
-        // repair it from inside the sandbox — the CLI is given ddev_status/logs/restart and no
-        // `ddev exec`. Read from the RUN's own output, because the enumerate guard below cannot
-        // see this class at all: `--list` skips globalSetup, so a container with no browser
-        // binaries lists every test and exits 0. Applies from pass 0, unlike that guard — a
-        // browser missing from the container is never something the tester's own pass caused.
-        const blocked =
-          notRun || testRun.passed ? null : classifyTestEnvFailure(d.primary, run.output);
-        if (blocked) {
-          testRun = { ...testRun, ran: false };
-          testsPassed = null;
-          degradedNote =
-            `The related tests could not be run: ${blocked.reason}. They were written but never ` +
-            `executed, and the suite is NOT known to be green. No fix pass can repair this from ` +
-            `inside the sandbox.\n\nRun: ${testRun.command}\n\nRepair with:\n` +
-            `${repairInvocation(d, blocked.repair)}\n\n${run.output}` +
-            (provisionNote
-              ? `\n\nProvisioning it automatically also failed:\n${provisionNote}`
-              : '');
-        }
-
-        // A failed run is only worth a fix agent if the runner actually ran something. Ask it to
-        // ENUMERATE the same files: a non-zero exit there means it could enumerate NONE of them
-        // — a harness it cannot load, or files the tester reported but never wrote — and no fix
-        // pass can act on that. Skipped when the run passed, so the green path costs nothing.
-        //
-        // From the FIRST fix pass onward, never from the tester's own pass: a spec the tester
-        // just wrote with a syntax error also enumerates as nothing, and that IS the fixer's to
-        // repair. Giving it one pass keeps that repair while capping the failure this exists for
-        // — the observed task spent 5 passes and a whole round back through implementation on a
-        // playwright install its command never reached.
-        const collect =
-          blocked || notRun || testRun.passed || args.iteration === 0
-            ? null
-            : buildCollectCommand(d.primary, targets, buildOpts);
-        if (collect) {
-          const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS);
-          if (listed.notRun === undefined && listed.exitCode !== 0) {
-            testRun = { ...testRun, ran: false };
-            testsPassed = null;
-            degradedNote =
-              `The ${d.primary} runner could not enumerate any of the tests this step wrote, so ` +
-              `none of them were executed and further fix passes were stood down. The suite is ` +
-              `NOT known to be green.\n\nRun: ${testRun.command}\nEnumerate: ${listed.command}` +
-              `\n\n${listed.output}`;
-          }
-        }
+        testRun = recorded.testRun;
+        testsPassed = recorded.testsPassed;
+        degradedNote = recorded.degradedNote;
       }
 
       if (dropped.size > 0) {
