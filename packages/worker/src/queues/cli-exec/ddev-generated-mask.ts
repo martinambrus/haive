@@ -29,11 +29,9 @@ import { log } from './_shared.js';
  * works, and the one the sibling clone of this very repo used successfully.
  *
  * An integrity control, not a secrecy one, so like the gitfile mask it is never gated by
- * SECRET_MASK_ENABLED. Unlike secret masking it fails OPEN: a partial mask still protects
- * the files it covers, and the pre-flight healthcheck guard
- * (sandbox/ddev-healthcheck-guard.ts) catches a broken config before the boot regardless.
- * Failing an invocation because `.ddev/` was briefly unreadable would trade a real outage
- * for a hypothetical one.
+ * SECRET_MASK_ENABLED. Unknown filesystem reads refuse the invocation: without the
+ * file's bytes we cannot protect it while preserving its readable content. Only confirmed
+ * absence skips a mask; the healthcheck guard remains a separate recovery backstop.
  */
 
 /** Subtrees DDEV rewrites on every start, or that hold snapshots/build state rather than
@@ -65,11 +63,22 @@ const MAX_MASK_FILE_BYTES = 256 * 1024;
  *  failure mode. */
 const MAX_MASKS = 120;
 
+export class DdevGeneratedMaskError extends Error {
+  readonly code = 'DDEV_GENERATED_MASK_FAILED';
+
+  constructor(cause: unknown) {
+    super('DDEV-generated config could not be protected; retry when the repository is readable', {
+      cause,
+    });
+    this.name = 'DdevGeneratedMaskError';
+  }
+}
+
 /**
  * Masks for the DDEV-generated files under the tree this invocation mounts.
  *
- * Returns `[]` — never throws — when the task has no repository, `.ddev/` is absent, or
- * the scan fails. See the fail-open reasoning above.
+ * Returns `[]` when the task has no repository or `.ddev/` is absent.
+ * A failed scan refuses the invocation with a stable, path-free error.
  */
 export async function resolveDdevGeneratedMasks(
   db: Database,
@@ -97,8 +106,8 @@ export async function resolveDdevGeneratedMasks(
     });
     return await computeDdevGeneratedMasks(workerRoot, repoMount?.target ?? SANDBOX_WORKDIR);
   } catch (err) {
-    log.warn({ err, taskId }, 'ddev-generated mask scan failed; continuing without it');
-    return [];
+    log.warn({ err, taskId }, 'ddev-generated mask scan failed; refusing the invocation');
+    throw new DdevGeneratedMaskError(err);
   }
 }
 
@@ -117,13 +126,13 @@ export async function computeDdevGeneratedMasks(
   // to the path itself in root mode, which is also what keeps a fixture tree working unchanged.
   const { anchor, prefix } = workspaceAnchor(workerRoot);
   const ddevRel = `${prefix}.ddev`;
-  const rootInfo = await lstatNoFollow(anchor, ddevRel);
+  const rootInfo = await lstatNoFollow(anchor, ddevRel, { strict: true });
   if (rootInfo?.kind !== 'directory') return [];
 
   const masks: SandboxExtraFile[] = [];
   const walk = async (relDir: string, rel: string): Promise<void> => {
     if (masks.length >= MAX_MASKS) return;
-    const entries = (await readdirNoFollow(anchor, relDir)) ?? [];
+    const entries = (await readdirNoFollow(anchor, relDir, { strict: true })) ?? [];
     for (const entry of entries) {
       if (masks.length >= MAX_MASKS) return;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -139,10 +148,10 @@ export async function computeDdevGeneratedMasks(
       if (isInertDoc(entry.name)) continue;
 
       const childRelPath = `${relDir}/${entry.name}`;
-      const info = await lstatNoFollow(anchor, childRelPath);
+      const info = await lstatNoFollow(anchor, childRelPath, { strict: true });
       if (info?.kind !== 'file' || info.stats.size > MAX_MASK_FILE_BYTES) continue;
 
-      const content = await readTextNoFollow(anchor, childRelPath);
+      const content = await readTextNoFollow(anchor, childRelPath, { strict: true });
       if (content === null) continue;
       if (!content.slice(0, MARKER_PROBE_BYTES).includes(DDEV_GENERATED_MARKER)) continue;
 
