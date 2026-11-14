@@ -24,10 +24,12 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
   const keyRef = useRef(contentKey);
   const updateRef = useRef<(() => void) | null>(null);
   const [display, setDisplay] = useState({ sink, total: baseMs });
+  const shown = useRef(display);
 
   useEffect(() => {
     const now = () => performance.now();
     const clock = clockRef.current ?? (clockRef.current = new ActivityClock(now()));
+    if (!enabled) return;
     let committed = latest.current.baseMs,
       unflushed = 0,
       lastFlush = now();
@@ -42,7 +44,25 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       /* fail closed */
     }
     const iframeFocused = () => document.activeElement?.tagName === 'IFRAME';
-    const show = () => setDisplay({ sink, total: committed + unflushed });
+    const show = () => {
+      const total = committed + unflushed;
+      if (shown.current.sink === sink && shown.current.total === total) return;
+      shown.current = { sink, total };
+      setDisplay(shown.current);
+    };
+    // Acquisition sets the baseline. Only ticks renew the lease after that.
+    let leaseTick = -1;
+    let held = false;
+    const touchLease = () => {
+      const tick = Math.floor(now() / ACTIVE_TIME_SAMPLE_MS);
+      if (tick !== leaseTick) {
+        leaseTick = tick;
+        held = lease?.touch() ?? false;
+      }
+      return held;
+    };
+    touchLease();
+    held = lease?.acquired ?? false;
     const flush = () => {
       let delta = Math.round(unflushed);
       if (delta <= 0) return;
@@ -63,7 +83,6 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     };
     const sample = () => {
       const eligible = enabled && foreground;
-      const held = eligible ? (lease?.touch() ?? false) : false;
       unflushed += clock.sample(now(), eligible && held);
       if (!eligible) lease?.release();
       show();
@@ -78,11 +97,10 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       }, READING_MEASURE_DELAY_MS);
     };
     const update = () => {
-      sample();
       clock.setModes(now(), latest.current.pending, iframeFocused());
       if (!Object.is(keyRef.current, latest.current.contentKey)) {
         keyRef.current = latest.current.contentKey;
-        clock.content(now());
+        clock.content(now(), true);
         scheduleMeasurement();
       }
     };
@@ -92,8 +110,7 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     scheduleMeasurement();
 
     const input = () => {
-      sample();
-      clock.input(now());
+      clock.input(now(), true);
       scheduleMeasurement();
     };
     const onInput = (event: Event) => {
@@ -135,7 +152,11 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       foreground = document.visibilityState === 'visible';
       clock.sample(now(), false);
       clock.setModes(now(), latest.current.pending, iframeFocused());
-      if (foreground) input();
+      if (foreground) {
+        touchLease(); // focus establishes a baseline; capture input never touches storage
+        held = lease?.acquired ?? false;
+        input();
+      }
     };
     const onVisibility = () => {
       sample();
@@ -164,6 +185,7 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibility);
     const interval = setInterval(() => {
+      held = foreground ? touchLease() : false;
       sample();
       // Leaving an iframe restores this epoch's reading deadline; staying never renews it.
       clock.setModes(now(), latest.current.pending, iframeFocused());

@@ -58,6 +58,52 @@ afterEach(() => {
 });
 
 describe('useActiveTime', () => {
+  it('does no input, timer, render or storage work without a waiting step', () => {
+    const renders = vi.fn();
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const interval = vi.spyOn(window, 'setInterval');
+    const h = renderHook(() => {
+      renders();
+      return useActiveTime({ enabled: false, pending: false, contentKey: null, sink });
+    });
+    function sink() {}
+    renders.mockClear();
+    writes.mockClear();
+    for (let i = 0; i < 20; i++) act(() => event('pointermove', { clientX: i, clientY: 0 }));
+    for (let i = 0; i < 10; i++) advance(1000);
+    expect(renders).not.toHaveBeenCalled();
+    expect(writes).not.toHaveBeenCalled();
+    expect(window.addEventListener).not.toHaveBeenCalled();
+    expect(interval).not.toHaveBeenCalled();
+    h.unmount();
+  });
+  it('publishes and touches storage at most once per tick during input bursts', () => {
+    const renders = vi.fn();
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const sink = vi.fn();
+    const h = renderHook(() => {
+      renders();
+      return useActiveTime({ enabled: true, pending: false, contentKey: 'a', sink });
+    });
+    renders.mockClear();
+    writes.mockClear();
+    for (let tick = 0; tick < 10; tick++) {
+      for (let i = 0; i < 20; i++) {
+        advance(25);
+        act(() => event('pointermove', { clientX: tick * 20 + i, clientY: 0 }));
+      }
+      expect(renders).toHaveBeenCalledTimes(tick);
+      expect(writes).toHaveBeenCalledTimes(tick);
+      advance(500);
+      expect(renders).toHaveBeenCalledTimes(tick + 1);
+      expect(writes).toHaveBeenCalledTimes(tick + 1);
+    }
+    expect(h.result.current).toBe(10000);
+    advance(90000);
+    renders.mockClear();
+    advance(10000);
+    expect(renders).not.toHaveBeenCalled();
+  });
   it('stops at the allowance, stays stopped on polls, and resumes on trusted input', () => {
     const h = setup();
     advance(90000);

@@ -10,6 +10,11 @@ export class AttentionLease {
     private ttl = ATTENTION_LEASE_MS,
   ) {}
 
+  /** Whether this tab acquired the baseline for the interval that follows. */
+  get acquired(): boolean {
+    return this.held;
+  }
+
   /** A fresh acquisition establishes a baseline; only a continuous holder counts. */
   touch(): boolean {
     try {

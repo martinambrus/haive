@@ -18,6 +18,7 @@ export class ActivityClock {
   private epochAt: number;
   private lastInput: number;
   private lastSample: number;
+  private unsampled = 0;
   private reading = MIN_READING_IDLE_MS;
   private measured = false;
   private deadline: number;
@@ -37,7 +38,9 @@ export class ActivityClock {
   sample(now: number, eligible: boolean): number {
     const start = Math.max(this.lastSample, this.epochAt);
     this.lastSample = now;
-    return eligible ? Math.max(0, Math.min(now, this.deadline) - start) : 0;
+    const delta = this.unsampled + Math.max(0, Math.min(now, this.deadline) - start);
+    this.unsampled = 0;
+    return eligible ? delta : 0;
   }
 
   private requestedModeAllowance(): number {
@@ -48,7 +51,14 @@ export class ActivityClock {
     return Math.max(this.reading, this.modeAllowance);
   }
 
-  private restart(now: number): void {
+  private restart(now: number, retainInterval = false): void {
+    // Input may arrive many times between ticks. Preserve those completed pieces
+    // for the next sample without publishing or touching browser storage on input.
+    if (retainInterval)
+      this.unsampled += Math.max(
+        0,
+        Math.min(now, this.deadline) - Math.max(this.lastSample, this.epochAt),
+      );
     this.epoch++;
     this.epochAt = this.lastSample = now;
     this.reading = MIN_READING_IDLE_MS;
@@ -57,14 +67,14 @@ export class ActivityClock {
     this.deadline = now + this.allowance();
   }
 
-  input(now: number): void {
+  input(now: number, retainInterval = false): void {
     this.lastInput = now;
-    this.restart(now);
+    this.restart(now, retainInterval);
   }
 
-  content(now: number): boolean {
+  content(now: number, retainInterval = false): boolean {
     if (now - this.lastInput > PENDING_WORK_IDLE_MS) return false;
-    this.restart(now);
+    this.restart(now, retainInterval);
     return true;
   }
 
