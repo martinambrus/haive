@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   chmod,
   chown,
@@ -158,14 +158,69 @@ it('refuses an env pin write through a link', async () => {
   expect(await readFile(join(outside, 'env'), 'utf8')).toBe('HAIVE_VERSION=1.0.0\n');
 });
 
-it('prunes older backup and pending/new directories, keeping the newest previous bytes', async () => {
+it('prunes older known backups and pending/new, keeping the newest previous bytes', async () => {
   const state = await prepare();
   await mkdir(join(dir, '.haive-upgrade/older/previous'), { recursive: true });
+  await writeFile(join(dir, '.haive-upgrade/older/previous/.haive-backup-kind'), 'legacy-known\n');
   await mkdir(join(dir, '.haive-upgrade/run/new'), { recursive: true });
   await pruneBundles(compose(), state);
   expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['run']);
   expect(await readdir(join(dir, '.haive-upgrade/run'))).toEqual(['previous']);
   expect(await readFile(join(dir, state.backupDir, names[0]!))).toEqual(body);
+});
+
+it.each(['modified', 'legacy-unknown', 'unclassified'])(
+  'retains and names an older %s backup after a later pristine upgrade',
+  async (kind) => {
+    if (kind === 'modified') {
+      await writeFile(
+        join(dir, '.haive-bundle.json'),
+        JSON.stringify({
+          version: '1.0.0',
+          files: Object.fromEntries(names.map((name) => [name, bundleHash(body)])),
+        }),
+      );
+      await writeFile(join(dir, names[0]!), 'operator edits');
+    }
+    const state = await prepare();
+    const saved = await readFile(join(dir, state.backupDir, names[0]!));
+    if (kind === 'unclassified')
+      await rm(join(dir, state.backupDir, '.haive-backup-kind'), { force: true });
+    await swapBundle(compose(), state, target.version);
+    const later = await backupBundle(compose(), 'later', target);
+    const log = vi.fn();
+    await pruneBundles(compose(), later, log);
+    expect(await readFile(join(dir, state.backupDir, names[0]!))).toEqual(saved);
+    expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['later', 'run']);
+    expect(log).toHaveBeenCalledWith(
+      'bundle-backup-retained',
+      expect.objectContaining({
+        backupDir: state.backupDir,
+      }),
+    );
+  },
+);
+
+it.each(['pristine', 'legacy-known'])('prunes an older %s backup', async (kind) => {
+  if (kind === 'pristine')
+    await writeFile(
+      join(dir, '.haive-bundle.json'),
+      JSON.stringify({
+        version: '1.0.0',
+        files: Object.fromEntries(names.map((name) => [name, bundleHash(body)])),
+      }),
+    );
+  const knownTarget = {
+    ...target,
+    bundle: {
+      ...target.bundle!,
+      known: [Object.fromEntries(names.map((name) => [name, bundleHash(body)]))],
+    },
+  };
+  await backupBundle(compose(), 'older', knownTarget);
+  const state = await prepare();
+  await pruneBundles(compose(), state);
+  expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['run']);
 });
 
 it('rejects incomplete journal hashes and traversal in the journal backup location', async () => {

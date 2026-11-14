@@ -458,7 +458,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   await finishRun(ctx.sql, ctx.runId, 'done');
   if (ctx.bundle) {
     try {
-      await pruneBundles(ctx.compose, ctx.bundle);
+      await pruneBundles(ctx.compose, ctx.bundle, ctx.log);
     } catch {
       ctx.log('bundle-prune-failed', {
         reason: 'commit succeeded; keeping remaining backup and staging files',

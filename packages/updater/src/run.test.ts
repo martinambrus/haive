@@ -798,6 +798,12 @@ describe('bundle recovery across the commit pivot', () => {
     );
     expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['run-1']);
     expect(await readdir(join(dir, '.haive-upgrade/run-1'))).toEqual(['previous']);
+    expect(logFields).toContainEqual(
+      expect.objectContaining({
+        event: 'bundle-backup-retained',
+        backupDir: ctx.bundle!.backupDir,
+      }),
+    );
     expect(logs).toContain('done');
     expect(logs).not.toContain('rolled-back');
   });

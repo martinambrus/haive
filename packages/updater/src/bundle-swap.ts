@@ -1,6 +1,6 @@
 import { RELEASE_BUNDLE_FILES, type ReleaseManifest } from '@haive/shared/release';
 import { safeErrorMessage } from '@haive/shared/logger';
-import { bundleHash } from './bundle.js';
+import { bundleHash, classifyBundleHashes } from './bundle.js';
 import type { ComposeContext } from './docker.js';
 import { inDirectories, inInstall } from './install-files.js';
 
@@ -68,13 +68,22 @@ export async function backupBundle(
   return inInstall(compose.dir, async (root) => {
     const from: BundleState['from'] = {};
     const to: BundleState['to'] = {};
+    let record: string | undefined;
     await inDirectories(root, backupDir.split('/'), true, async (backup) => {
       for (const name of NAMES) {
         const current = await root.read(name);
         from[name] = current ? bundleHash(current.bytes) : null;
         to[name] = null;
         if (current) await backup.atomic(name, current.bytes, current.owner);
+        if (name === RECORD) record = current?.bytes.toString('utf8');
       }
+      const classification = classifyBundleHashes(
+        compose.files,
+        target.bundle!,
+        new Map(RELEASE_BUNDLE_FILES.map((name) => [name, from[name] ?? undefined])),
+        record,
+      );
+      await backup.atomic('.haive-backup-kind', Buffer.from(`${classification.kind}\n`));
     });
     for (const name of RELEASE_BUNDLE_FILES) {
       // Never add a GPU overlay to an install that did not have it.
@@ -175,16 +184,40 @@ export async function restoreBundle(compose: ComposeContext, state: BundleState)
   compose.files = selectedFiles(state.from);
 }
 
-/** Only called after done: keep this run's previous/, discard older backups and staged payloads. */
-export async function pruneBundles(compose: ComposeContext, state: BundleState): Promise<void> {
+/** Only called after done: prune known backups; edits and unclassified backups need manual deletion. */
+export async function pruneBundles(
+  compose: ComposeContext,
+  state: BundleState,
+  log: (event: string, fields: Record<string, unknown>) => void = () => {},
+): Promise<void> {
   const runId = state.backupDir.split('/')[1]!;
   await inInstall(compose.dir, (root) =>
     inDirectories(root, ['.haive-upgrade'], false, async (upgrades) => {
       for (const name of await upgrades.names()) {
-        if (name !== runId) await upgrades.removeTree(name);
+        if (name === runId) continue;
+        const prunable =
+          name === 'pending' ||
+          (await inDirectories(upgrades, [name, 'previous'], false, async (backup) => {
+            const kind = (await backup.read('.haive-backup-kind'))?.bytes.toString('utf8');
+            return kind === 'pristine\n' || kind === 'legacy-known\n';
+          }).catch((error: unknown) => {
+            // A run directory without a backup has no operator edits to retain.
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+            throw error;
+          }));
+        if (prunable) await upgrades.removeTree(name);
+        else
+          log('bundle-backup-retained', {
+            backupDir: `.haive-upgrade/${name}/previous`,
+            reason: 'may contain operator edits; delete manually when no longer needed',
+          });
       }
       await inDirectories(upgrades, [runId], false, async (run) => {
         for (const name of await run.names()) if (name !== 'previous') await run.removeTree(name);
+      });
+      log('bundle-backup-retained', {
+        backupDir: state.backupDir,
+        reason: 'newest backup; delete manually when no longer needed',
       });
     }),
   );

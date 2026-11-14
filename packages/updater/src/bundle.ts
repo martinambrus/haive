@@ -36,6 +36,16 @@ export async function classifyBundle(
       throw error;
     },
   );
+  return classifyBundleHashes(compose.files, bundle, installed, record);
+}
+
+/** Also classify the copied backup snapshot, so retention follows the bytes actually saved. */
+export function classifyBundleHashes(
+  activeFiles: readonly string[],
+  bundle: Bundle,
+  installed: ReadonlyMap<string, string | undefined>,
+  record: string | undefined,
+): BundleClassification {
   const differingFiles = (files: Partial<Record<Name, string>>, names: readonly string[]) =>
     names.filter((name) => !files[name as Name] || files[name as Name] !== installed.get(name));
   if (record !== undefined) {
@@ -60,20 +70,20 @@ export async function classifyBundle(
     const differingFile = differingFiles(
       files,
       RELEASE_BUNDLE_FILES.filter(
-        (name) => compose.files.includes(name) || Object.hasOwn(files, name),
+        (name) => activeFiles.includes(name) || Object.hasOwn(files, name),
       ),
     )[0];
     return differingFile ? { kind: 'modified', differingFile } : { kind: 'pristine' };
   }
   let closest: string[] | undefined;
   for (const files of bundle.known) {
-    const differences = differingFiles(files, compose.files);
+    const differences = differingFiles(files, activeFiles);
     if (differences.length === 0) return { kind: 'legacy-known' };
     if (!closest || differences.length < closest.length) closest = differences;
   }
   return {
     kind: 'legacy-unknown',
-    differingFile: (closest ?? differingFiles(bundle.files, compose.files))[0] ?? compose.files[0],
+    differingFile: (closest ?? differingFiles(bundle.files, activeFiles))[0] ?? activeFiles[0],
   };
 }
 
