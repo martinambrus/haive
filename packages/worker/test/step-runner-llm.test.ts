@@ -285,13 +285,22 @@ function makeProvider(): CliProviderRecord {
 }
 
 describe('repair evidence at the dispatch boundary', () => {
-  const dispatch = async (pass: number, id = '08b-test-management') => {
+  beforeEach(() => {
+    vi.mocked(beginFixTestCapture).mockClear();
+    vi.mocked(finishFixTestCapture).mockReset();
+  });
+  const dispatch = async (pass: number, id = '08b-test-management', repair = false) => {
     const state = freshState();
     const original = baseStep();
     const step: StepDefinition = {
       ...original,
       metadata: { ...original.metadata, id },
-      loop: { maxIterations: 5, shouldContinue: () => false },
+      detect: async () => ({ foo: 'bar', ...(repair ? { fixContext: 'repair' } : {}) }),
+      loop: {
+        maxIterations: 5,
+        shouldContinue: () => false,
+        resolveRole: () => (repair ? 'fixer' : 'default'),
+      },
     };
     state.taskStepRow.stepId = id;
     state.taskStepRow.round = 2;
@@ -333,12 +342,43 @@ describe('repair evidence at the dispatch boundary', () => {
     await advanceStep(params);
     expect(finishFixTestCapture).toHaveBeenLastCalledWith(expect.anything(), invocationId);
   });
+  it.each(['07-phase-2-implement', '07b-phase-4-validate'])(
+    'captures %s repair before enqueue and settles before consuming',
+    async (id) => {
+      const before = vi.mocked(beginFixTestCapture).mock.calls.length;
+      await dispatch(0, id);
+      expect(vi.mocked(beginFixTestCapture).mock.calls).toHaveLength(before);
+      const { result, enqueue, state, params } = await dispatch(0, id, true);
+      expect(result.status).toBe('waiting_cli');
+      expect(beginFixTestCapture).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ stepId: id }),
+      );
+      expect(vi.mocked(beginFixTestCapture).mock.invocationCallOrder.at(-1)).toBeLessThan(
+        enqueue.mock.invocationCallOrder[0]!,
+      );
+      const invocationId = String(state.cliInvocationRow!.id);
+      Object.assign(state.cliInvocationRow!, { endedAt: new Date(), exitCode: 0, rawOutput: '{}' });
+      const apply = vi.fn(params.stepDef.apply);
+      params.stepDef.apply = apply;
+      vi.mocked(finishFixTestCapture).mockImplementationOnce(async () => {
+        expect(state.updates.some((u) => u.consumedAt)).toBe(false);
+        expect(apply).not.toHaveBeenCalled();
+      });
+      await advanceStep(params);
+      expect(finishFixTestCapture).toHaveBeenLastCalledWith(expect.anything(), invocationId);
+      expect(vi.mocked(finishFixTestCapture).mock.invocationCallOrder.at(-1)).toBeLessThan(
+        apply.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
   it('refuses dispatch when its required evidence write fails', async () => {
     vi.mocked(beginFixTestCapture).mockRejectedValueOnce(new Error('evidence write failed'));
     const { result, enqueue } = await dispatch(1);
     expect(result.status).toBe('failed');
     expect(enqueue).not.toHaveBeenCalled();
   });
+
   it('adds only measured paths to 07b, never the saved patch or arbitrary record prose', async () => {
     vi.mocked(loadFixTestRecords).mockResolvedValueOnce([
       {
