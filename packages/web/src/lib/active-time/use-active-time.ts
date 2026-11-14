@@ -4,6 +4,8 @@ import { ActivityClock } from './activity-clock';
 import { AttentionLease } from './attention-lease';
 import { visibleWords } from './visible-words';
 
+let ownerSequence = 0;
+
 export const ACTIVE_TIME_SAMPLE_MS = 1000;
 export const ACTIVE_TIME_FLUSH_MS = 60000;
 export const READING_MEASURE_DELAY_MS = 2000;
@@ -39,9 +41,14 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     let measureTimer: ReturnType<typeof setTimeout> | undefined;
     let lease: AttentionLease | null = null;
     try {
-      lease = new AttentionLease(window.localStorage, crypto.randomUUID());
+      // Local identity only: plain HTTP installations have no randomUUID.
+      const owner =
+        Date.now().toString(36) +
+        (++ownerSequence).toString(36) +
+        Math.random().toString(36).slice(2);
+      lease = new AttentionLease(window.localStorage, owner);
     } catch {
-      /* fail closed */
+      /* Storage may be blocked; focused tabs still count independently. */
     }
     const iframeFocused = () => document.activeElement?.tagName === 'IFRAME';
     const show = () => {
@@ -57,12 +64,12 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       const tick = Math.floor(now() / ACTIVE_TIME_SAMPLE_MS);
       if (tick !== leaseTick) {
         leaseTick = tick;
-        held = lease?.touch() ?? false;
+        held = lease?.touch() ?? true;
       }
       return held;
     };
     touchLease();
-    held = lease?.acquired ?? false;
+    held = lease?.acquired ?? true;
     const flush = () => {
       let delta = Math.round(unflushed);
       if (delta <= 0) return;
@@ -154,7 +161,7 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       clock.setModes(now(), latest.current.pending, iframeFocused());
       if (foreground) {
         touchLease(); // focus establishes a baseline; capture input never touches storage
-        held = lease?.acquired ?? false;
+        held = lease?.acquired ?? true;
         input();
       }
     };

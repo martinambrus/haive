@@ -45,9 +45,9 @@ export class AttentionLease {
       this.held = true;
       return !!continuous;
     } catch {
-      // With storage unavailable, fail closed rather than let every tab count.
-      this.held = false;
-      return false;
+      // Storage is optional; document focus still gates per-tab counting.
+      this.held = true;
+      return true;
     }
   }
 

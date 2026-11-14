@@ -54,6 +54,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -103,6 +104,21 @@ describe('useActiveTime', () => {
     renders.mockClear();
     advance(10000);
     expect(renders).not.toHaveBeenCalled();
+  });
+  it('counts when randomUUID is unavailable on an insecure origin', () => {
+    vi.stubGlobal('crypto', { randomUUID: undefined });
+    const h = setup();
+    advance(2000);
+    expect(h.result.current).toBe(2100);
+    expect(crypto.randomUUID).toBeUndefined();
+  });
+  it('counts when accessing localStorage throws', () => {
+    vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => {
+      throw new Error('blocked site data');
+    });
+    const h = setup();
+    advance(2000);
+    expect(h.result.current).toBe(2100);
   });
   it('stops at the allowance, stays stopped on polls, and resumes on trusted input', () => {
     const h = setup();
@@ -312,13 +328,13 @@ describe('useActiveTime', () => {
     advance(1000);
     expect(h.result.current).toBe(1100);
   });
-  it('storage failure fails closed', () => {
+  it('storage failure fails open', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('unavailable');
     });
     const h = setup();
     advance(2000);
-    expect(h.result.current).toBe(100);
+    expect(h.result.current).toBe(2100);
   });
   it.each(['rejected', 'thrown'])('never retries an ambiguous %s flush', async (kind) => {
     const sink = vi.fn(() => {
