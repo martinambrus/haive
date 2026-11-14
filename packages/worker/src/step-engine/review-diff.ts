@@ -163,6 +163,7 @@ export function serializeReviewPayload(
       }
     }
   }
+  payload.coverage.partial ||= omittedContents.some((omission) => omission.reason === 'maxBytes');
   const content = encode();
   return {
     status: 'ready',
