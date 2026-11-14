@@ -164,6 +164,23 @@ describe('host fix-pass test evidence', () => {
     expect(row.body).not.toMatch(/[\r\u0085\u2028\u2029]/);
   });
 
+  it('classifies common ecosystems and only tool config basenames', () => {
+    // Evidence coverage must not change 08b's existing runner target selection.
+    expect(TEST_FILE_RE.test('pkg/foo_test.go')).toBe(false);
+    for (const path of [
+      'pkg/foo_test.go',
+      'spec/models/user_spec.rb',
+      'lib/a_spec.rb',
+      'FooTest.java',
+      'FooTest.kt',
+      'src/test/resources/data',
+      'FooTests.cs',
+    ])
+      expect(isTestEvidencePath(path), path).toBe(true);
+    for (const path of ['ava-profile.png', 'src/mocha.ts'])
+      expect(isTestEvidencePath(path), path).toBe(false);
+  });
+
   it('renders the saved record with multiline fenced patches, explicit cuts and safe paths', () => {
     const row = fixTestEditsRow([
       record({
