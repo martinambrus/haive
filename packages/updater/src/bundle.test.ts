@@ -71,7 +71,9 @@ it('does not substitute a different target overlay when the installed overlay is
     { ...bundle, files },
     new Map(Object.keys(files).map((name) => [name, body])),
   );
-  expect(staged.files).toHaveLength(2);
+  expect(staged.files).toHaveLength(3);
+  expect(staged.files[2]).toBe(join(dir, 'docker-compose.gpu.yml'));
+  expect(await readFile(staged.files[2]!)).toEqual(body);
 });
 
 it('rejects a malformed installed record as modified', async () => {

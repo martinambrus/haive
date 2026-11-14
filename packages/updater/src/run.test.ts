@@ -1,10 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { InstallDirectory } from './install-files.js';
 import { ConfigUnavailableError, configService } from '@haive/shared';
 import * as dk from './docker.js';
-import { phaseDraining, phaseMaintenance, rollback, type UpgradeContext } from './run.js';
+import {
+  phaseDraining,
+  phaseMaintenance,
+  phaseVerify,
+  recordBundleBackup,
+  resume,
+  rollback,
+  type UpgradeContext,
+} from './run.js';
+import { parseReleaseManifest } from '@haive/shared/release';
+import { bundleHash, stageBundle } from './bundle.js';
+import { ensureEnvKeys } from './envkeys.js';
 
 const FENCE = 'haive-new-work-fence';
 
@@ -657,5 +669,126 @@ describe('maintenance state while the config store is unavailable', () => {
     await expect(rollback(rollbackContext(), 'verify failed')).rejects.toThrow('redis down');
 
     expect(configService.set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('bundle recovery across the commit pivot', () => {
+  let dir: string;
+  let ctx: UpgradeContext;
+  let generatedLine: string;
+  const names = ['docker-compose.yml', 'docker-compose.run.yml', 'docker-compose.gpu.yml'];
+  const old = new Map(names.map((name) => [name, Buffer.from(`old ${name} # local edits\n`)]));
+  const next = new Map(names.map((name) => [name, Buffer.from(`new ${name}\n`)]));
+  const record = Buffer.from('{"version":"1.0.0","files":{}}\n');
+  const assertOld = async () => {
+    for (const name of names) expect(await readFile(join(dir, name))).toEqual(old.get(name));
+    expect(await readFile(join(dir, '.haive-bundle.json'))).toEqual(record);
+  };
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'bundle-run-'));
+    for (const [name, bytes] of old) await writeFile(join(dir, name), bytes);
+    await writeFile(join(dir, '.haive-bundle.json'), record);
+    await writeFile(join(dir, '.env'), 'HAIVE_VERSION=1.0.0\n');
+    await ensureEnvKeys(join(dir, '.env'), [
+      { key: 'MAILPIT_UI_PASSWORD', generate: 'hex', bytes: 24 },
+    ]);
+    generatedLine = (await readFile(join(dir, '.env'), 'utf8')).split('\n')[1]!;
+    const bundle = {
+      files: Object.fromEntries([...next].map(([name, bytes]) => [name, bundleHash(bytes)])),
+      known: [],
+      env: [],
+    };
+    ctx = context(fakeSql(), {
+      compose: { dir, files: [...names] },
+      envFile: join(dir, '.env'),
+      fromVersion: '1.0.0',
+      registry: 'example',
+      target: parseReleaseManifest({
+        manifestVersion: 1,
+        version: '1.1.0',
+        builtAt: '2026-11-14',
+        migrationHead: '0221',
+        bundle,
+      }),
+    });
+    await stageBundle(ctx.compose, bundle as NonNullable<UpgradeContext['target']['bundle']>, next);
+    vi.spyOn(dk, 'composeUp').mockResolvedValue(undefined);
+    vi.spyOn(dk, 'runOneShot').mockResolvedValue('ok');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ version: '1.1.0', migrationHead: '0221' }))),
+    );
+    await recordBundleBackup(ctx);
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('journals the backup and hashes before verification and restores bytes before old pins restart', async () => {
+    const patch = statements.find((s) =>
+      s.values.some((v) => typeof v === 'object' && v !== null && 'bundle' in v),
+    );
+    expect(patch).toBeDefined();
+    expect(
+      await readFile(join(dir, '.haive-upgrade/run-1/previous/docker-compose.run.yml')),
+    ).toEqual(old.get(names[1]!));
+    vi.mocked(dk.composeUp).mockRejectedValueOnce(new Error('verify boot failed'));
+    await expect(phaseVerify(ctx)).rejects.toThrow('verify boot failed');
+    expect(await readFile(join(dir, names[0]!))).toEqual(next.get(names[0]!));
+    vi.mocked(dk.composeUp).mockImplementationOnce(async () => {
+      await assertOld();
+      expect(await readFile(ctx.envFile, 'utf8')).toContain('HAIVE_VERSION=1.0.0');
+    });
+    await rollback(ctx, 'verify boot failed');
+    await assertOld();
+    expect(await readFile(ctx.envFile, 'utf8')).toContain(generatedLine);
+    expect(logs).toContain('rolled-back');
+  });
+
+  it('restores a crash between file renames from round-tripped journal metadata', async () => {
+    const atomic = InstallDirectory.prototype.atomic;
+    let renames = 0;
+    const crash = vi.spyOn(InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+      this: InstallDirectory,
+      ...args
+    ) {
+      if (args[0].startsWith('docker-compose') && ++renames === 2)
+        throw new Error('updater killed mid-swap');
+      return atomic.call(this, ...args);
+    });
+    await expect(phaseVerify(ctx)).rejects.toThrow('updater killed mid-swap');
+    crash.mockRestore();
+    expect(await readFile(join(dir, names[0]!))).toEqual(next.get(names[0]!));
+    expect(await readFile(join(dir, names[1]!))).toEqual(old.get(names[1]!));
+    const recovered = { ...ctx, bundle: JSON.parse(JSON.stringify(ctx.bundle)) };
+    await resume(recovered, 'verify');
+    await assertOld();
+    expect(logs).toContain('rolled-back');
+  });
+
+  it('retains the backup and staging when commit has not succeeded', async () => {
+    expect(await phaseVerify(ctx)).toBe(true);
+    vi.mocked(dk.runOneShot).mockRejectedValueOnce(new Error('commit failed'));
+    await expect(resume(ctx, 'commit')).rejects.toThrow('commit failed');
+    expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['pending', 'run-1']);
+    expect(await readFile(join(dir, '.haive-upgrade/run-1/previous/docker-compose.yml'))).toEqual(
+      old.get(names[0]!),
+    );
+    expect(logs).not.toContain('done');
+  });
+
+  it('resumes commit forward with the new files, retaining the newest backup and pruning staging', async () => {
+    expect(await phaseVerify(ctx)).toBe(true);
+    const recovered = { ...ctx, bundle: JSON.parse(JSON.stringify(ctx.bundle)) };
+    await resume(recovered, 'commit');
+    for (const name of names) expect(await readFile(join(dir, name))).toEqual(next.get(name));
+    expect(JSON.parse(await readFile(join(dir, '.haive-bundle.json'), 'utf8')).version).toBe(
+      '1.1.0',
+    );
+    expect(await readdir(join(dir, '.haive-upgrade'))).toEqual(['run-1']);
+    expect(await readdir(join(dir, '.haive-upgrade/run-1'))).toEqual(['previous']);
+    expect(logs).toContain('done');
+    expect(logs).not.toContain('rolled-back');
   });
 });

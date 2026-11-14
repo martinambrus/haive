@@ -10,6 +10,7 @@ import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
 import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
 import { ensureEnvKeys } from './envkeys.js';
+import { readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
@@ -31,6 +32,7 @@ import {
   phaseVerify,
   readEnvVar,
   recordSnapshot,
+  recordBundleBackup,
   resume,
   rollback,
   type UpgradeContext,
@@ -349,6 +351,7 @@ export async function main(): Promise<number> {
           typeof live.metadata.imageRegistry === 'string' ? live.metadata.imageRegistry : registry,
         previousImages: journalImages(live.metadata.previousImages),
         targetImages: journalImages(live.metadata.targetImages),
+        bundle: readBundleState(live.metadata.bundle),
         apiUrl,
         postgresVolume: pgVolume,
         network,
@@ -516,6 +519,7 @@ export async function main(): Promise<number> {
 
     let verifyFailed = false;
     try {
+      await recordBundleBackup(ctx);
       await phaseDraining(ctx);
       await phaseMaintenance(ctx);
       if (pgVolume) {

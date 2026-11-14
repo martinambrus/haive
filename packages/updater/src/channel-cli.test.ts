@@ -18,6 +18,7 @@ vi.mock('./journal.js', () => ({
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
+  mergeMetadata: vi.fn(),
   recordAttempt: vi.fn(),
   startRun: vi.fn(),
   tryLock: vi.fn(),
@@ -192,6 +193,22 @@ describe('bundle preflight', () => {
           replaceModifiedBundle: true,
         }),
       }),
+    );
+    expect(
+      await readFile(join(dir, '.haive-upgrade/new-run/previous/docker-compose.run.yml'), 'utf8'),
+    ).toBe('edited');
+    expect(journal.mergeMetadata).toHaveBeenCalledWith(
+      h.sql,
+      'new-run',
+      expect.objectContaining({
+        bundle: expect.objectContaining({ backupDir: '.haive-upgrade/new-run/previous' }),
+      }),
+    );
+    expect(vi.mocked(journal.startRun).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(journal.mergeMetadata).mock.invocationCallOrder[0]!,
+    );
+    expect(vi.mocked(journal.mergeMetadata).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(run.phaseDraining).mock.invocationCallOrder[0]!,
     );
     expect(await readFile(join(dir, 'docker-compose.run.yml'), 'utf8')).toBe('edited');
     const value = (await readFile(join(dir, '.env'), 'utf8')).match(
