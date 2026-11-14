@@ -115,3 +115,9 @@ describe('isUnknownModel', () => {
     expect(isUnknownModel(CATALOG, 'vendor/retired')).toBe(true);
   });
 });
+
+it('shows unknown prices for a variable-price router', () => {
+  expect(
+    optionLabel(model({ id: 'openrouter/auto', promptPrice: null, completionPrice: null })),
+  ).toContain('?/? per M');
+});

@@ -155,3 +155,14 @@ it('ignores only known override price fields, never an unknown condition', () =>
   expect(parse({ region: '1' }).pricingReason).toBe('unsupported-condition');
   expect(parse({ unknown_price: '1' }).pricingReason).toBe('unsupported-condition');
 });
+
+it('marks negative OpenRouter base and tier rates as variable-price', () => {
+  for (const pricing of [
+    { prompt: '-1', completion: '-1' },
+    { prompt: '1', completion: '2', overrides: [{ min_prompt_tokens: 100, prompt: '-1' }] },
+  ]) {
+    const [model] = trimOpenRouterModels({ data: [{ id: 'openrouter/auto', pricing }] });
+    expect(model).toMatchObject({ pricingState: 'unsupported', pricingReason: 'variable-price' });
+    expect(model!.promptPrice).not.toBe(-1);
+  }
+});

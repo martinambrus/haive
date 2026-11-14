@@ -212,7 +212,11 @@ export const openrouterModelCache = pgTable('openrouter_model_cache', {
           | null;
         pricingState?: 'unsupported';
         pricingReason?:
-          'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window';
+          | 'unsupported-tier'
+          | 'invalid-tier'
+          | 'unsupported-condition'
+          | 'time-window'
+          | 'variable-price';
         unsupportedOverrideCount?: number;
         /** From `supported_parameters`. `reasoning` drives whether the effort
          *  selector is worth showing; `tools` decides usability outright, since

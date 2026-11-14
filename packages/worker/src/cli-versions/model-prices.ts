@@ -9,6 +9,8 @@ import {
   ECB_DAILY_FX_URL,
   LITELLM_PRICES_URL,
   hasAnyRate,
+  isVariablePriceRate,
+  parseRate,
   litellmRowsForProviders,
   logger,
   parseEcbDailyRates,
@@ -141,21 +143,44 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       }
       for (const m of models) {
         const rates: ModelPriceRates = {
-          inputRate: m.promptPrice,
-          outputRate: m.completionPrice,
-          cacheReadRate: m.cacheReadPrice,
-          cacheWriteRate: m.cacheWritePrice,
-          cacheWrite1hRate: m.cacheWrite1hPrice,
+          inputRate: parseRate(m.promptPrice),
+          outputRate: parseRate(m.completionPrice),
+          cacheReadRate: parseRate(m.cacheReadPrice),
+          cacheWriteRate: parseRate(m.cacheWritePrice),
+          cacheWrite1hRate: parseRate(m.cacheWrite1hPrice),
           ...(m.tiers?.length ? { tiers: structuredClone(m.tiers) } : {}),
           ...(m.pricingState
             ? { pricingState: m.pricingState, pricingReason: m.pricingReason }
             : {}),
         };
+        if (
+          [
+            m.promptPrice,
+            m.completionPrice,
+            m.cacheReadPrice,
+            m.cacheWritePrice,
+            m.cacheWrite1hPrice,
+            ...(m.tiers ?? []).flatMap((tier) => [
+              tier.inputRate,
+              tier.outputRate,
+              tier.cacheReadRate,
+              tier.cacheWriteRate,
+              tier.cacheWrite1hRate,
+            ]),
+          ].some(isVariablePriceRate)
+        ) {
+          rates.pricingState = 'unsupported';
+          rates.pricingReason = 'variable-price';
+          delete rates.tiers;
+        }
         if (!hasAnyRate(rates) && rates.pricingState !== 'unsupported') continue;
         const modelKey = m.id.trim().toLowerCase();
         if (!modelKey) continue;
         desired.push({ provider: 'openrouter', modelKey, source: 'openrouter', rates });
-        if (rates.pricingState === 'unsupported' && rates.pricingReason === 'time-window')
+        if (
+          rates.pricingState === 'unsupported' &&
+          (rates.pricingReason === 'time-window' || rates.pricingReason === 'variable-price')
+        )
           unsupported.push({ model: modelKey, reason: rates.pricingReason });
         else if (rates.pricingState === 'unsupported')
           errors.push({

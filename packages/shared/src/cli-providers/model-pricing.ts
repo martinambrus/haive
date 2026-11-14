@@ -37,7 +37,7 @@ export interface ModelPriceRates {
 }
 
 export type PricingUnsupportedReason =
-  'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window';
+  'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window' | 'variable-price';
 export type BasePriceRates = Pick<
   ModelPriceRates,
   'inputRate' | 'outputRate' | 'cacheReadRate' | 'cacheWriteRate' | 'cacheWrite1hRate'
@@ -178,6 +178,15 @@ export function ratesEqual(a: ModelPriceRates, b: ModelPriceRates): boolean {
 /** Feeds send rates as decimal strings ("0.00001") or numbers. Anything else, and
  *  anything non-finite or negative, is null — see the ModelPriceRates note on why
  *  null must not collapse to 0. */
+/** OpenRouter uses finite negative rates for variable-price routers. */
+export function isVariablePriceRate(value: unknown): boolean {
+  return (
+    (typeof value === 'number' || typeof value === 'string') &&
+    Number.isFinite(Number(value)) &&
+    Number(value) < 0
+  );
+}
+
 export function parseRate(value: unknown): number | null {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
   if (typeof value !== 'string' || value.trim() === '') return null;

@@ -226,3 +226,41 @@ it('counts known time windows as successful catalog refreshes', async () => {
     { id: 'timed', pricingState: 'unsupported', pricingReason: 'time-window' },
   ]);
 });
+
+it('closes an existing negative OpenRouter price with a variable-price marker', async () => {
+  await fake.db
+    .update(schema.cliPricingSync)
+    .set({ autoUpdateEnabled: true })
+    .where(eq(schema.cliPricingSync.name, 'openrouter'));
+  fake.insert(schema.cliModelPrices, {
+    provider: 'openrouter',
+    modelKey: 'x',
+    source: 'openrouter',
+    rates: { ...base, inputRate: -1, outputRate: -1 },
+    effectiveTo: null,
+  });
+  // An old catalog cache can still carry negative prices until its next refresh.
+  const [model] = trimOpenRouterModels({ data: [{ id: 'x', pricing: { prompt: '1' } }] });
+  fake.insert(schema.openrouterModelCache, {
+    name: 'openrouter',
+    models: [{ ...model!, promptPrice: -1, completionPrice: -1 }],
+  });
+  const result = await refreshModelPrices(db);
+  expect(result).toMatchObject({
+    ok: true,
+    errors: [],
+    unsupported: [{ model: 'x', reason: 'variable-price' }],
+  });
+  const rows = (await fake.db.select().from(schema.cliModelPrices)).filter(
+    (r) => r.provider === 'openrouter',
+  );
+  expect(rows).toHaveLength(2);
+  expect(rows.filter((r) => r.effectiveTo !== null)).toHaveLength(1);
+  expect((await live()).find((r) => r.provider === 'openrouter')!.rates).toMatchObject({
+    inputRate: null,
+    outputRate: null,
+    pricingState: 'unsupported',
+    pricingReason: 'variable-price',
+  });
+  expect(await cost('openrouter')).toMatchObject({ source: 'none' });
+});

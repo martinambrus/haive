@@ -10,6 +10,7 @@
 
 import {
   normalizePriceRates,
+  isVariablePriceRate,
   parseRate,
   parseTierRate,
   type ModelPriceRates,
@@ -104,8 +105,20 @@ function parseOverrides(
   OpenRouterModelEntry,
   'tiers' | 'pricingState' | 'pricingReason' | 'unsupportedOverrideCount'
 > {
-  if (!pricing || !('overrides' in pricing)) return {};
+  if (!pricing) return {};
   const overrides = pricing.overrides;
+  if (
+    [pricing, ...(Array.isArray(overrides) ? overrides : [])].some(
+      (entry) =>
+        entry &&
+        typeof entry === 'object' &&
+        Object.keys(OVERRIDE_RATE_FIELDS).some((field) =>
+          isVariablePriceRate((entry as Record<string, unknown>)[field]),
+        ),
+    )
+  )
+    return { pricingState: 'unsupported', pricingReason: 'variable-price' };
+  if (!('overrides' in pricing)) return {};
   if (!Array.isArray(overrides))
     return {
       pricingState: 'unsupported',
