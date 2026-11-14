@@ -599,7 +599,7 @@ if ($hasReleaseBundle) {
   $hashes = [ordered]@{}
   foreach ($name in $installedFiles) {
     $actual = 'sha256:' + (Get-FileHash -LiteralPath (Join-Path $bundleDir $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -cne $releaseManifest.bundle.files.$name) { Die "release bundle hash mismatch: $name" }
+    if ($actual -cne $releaseManifest.bundle.files.$name) { Die "release bundle hash mismatch: $name; retry the installer; if it persists, report this release to its publisher" }
     $hashes[$name] = $actual
   }
   $record = [ordered]@{ version = $pinned; files = $hashes } | ConvertTo-Json -Depth 10 -Compress

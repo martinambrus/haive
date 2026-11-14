@@ -453,6 +453,7 @@ for (const lang of ['sh', 'ps1']) {
         const r = f.install();
         assert.notEqual(r.status, 0);
         assert.match(r.stdout + r.stderr, /hash mismatch.*docker-compose.run.yml/i);
+        assert.match(r.stdout + r.stderr, /retry the installer.*report.*publisher/i);
         assert.ok(!existsSync(f.dir), 'no half-installed tree');
         mkdirSync(f.dir);
         writeFileSync(join(f.dir, 'docker-compose.yml'), 'operator file');

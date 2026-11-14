@@ -751,7 +751,7 @@ if [ -s "$CHANNEL_SCRATCH/bundle-files" ]; then
     else
       die "bundle verification requires sha256sum or shasum -a 256"
     fi
-    [ "sha256:${actual%% *}" = "$expected" ] || die "release bundle hash mismatch: $name"
+    [ "sha256:${actual%% *}" = "$expected" ] || die "release bundle hash mismatch: $name; retry the installer; if it persists, report this release to its publisher"
     printf '%s"%s":"%s"' "$separator" "$name" "$expected" >> "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
     separator=","
   done
