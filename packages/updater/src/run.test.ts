@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InstallDirectory } from './install-files.js';
@@ -806,5 +806,44 @@ describe('bundle recovery across the commit pivot', () => {
     );
     expect(logs).toContain('done');
     expect(logs).not.toContain('rolled-back');
+  });
+
+  it.each(['filesystem', 'bound-query'])(
+    'keeps a successful commit and reports a safe %s prune cause',
+    async (kind) => {
+      expect(await phaseVerify(ctx)).toBe(true);
+      const error =
+        kind === 'filesystem'
+          ? new Error('backup cleanup refused')
+          : Object.assign(new Error(generatedLine), {
+              query: 'SELECT $1',
+              params: [generatedLine],
+            });
+      vi.spyOn(InstallDirectory.prototype, 'removeTree').mockRejectedValueOnce(error);
+      await resume(ctx, 'commit');
+      expect(logFields).toContainEqual(
+        expect.objectContaining({
+          event: 'bundle-prune-failed',
+          message: kind === 'filesystem' ? error.message : 'Database operation failed',
+        }),
+      );
+      expect(statements.some((s) => s.values.includes('done'))).toBe(true);
+      expect(logs).toContain('done');
+      expect(JSON.stringify(logFields)).not.toContain(generatedLine);
+    },
+  );
+
+  it('reports a linked prune entry without following it or undoing commit', async () => {
+    expect(await phaseVerify(ctx)).toBe(true);
+    await symlink(dir, join(dir, '.haive-upgrade/linked'));
+    await resume(ctx, 'commit');
+    expect(logFields).toContainEqual(
+      expect.objectContaining({
+        event: 'bundle-prune-failed',
+        message: expect.any(String),
+      }),
+    );
+    expect(await readFile(join(dir, names[0]!))).toEqual(next.get(names[0]!));
+    expect(logs).toContain('done');
   });
 });

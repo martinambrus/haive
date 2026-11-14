@@ -11,6 +11,7 @@ import {
   type MaintenanceState,
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
+import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
 import { inInstall } from './install-files.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
@@ -459,9 +460,10 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   if (ctx.bundle) {
     try {
       await pruneBundles(ctx.compose, ctx.bundle, ctx.log);
-    } catch {
+    } catch (err) {
       ctx.log('bundle-prune-failed', {
         reason: 'commit succeeded; keeping remaining backup and staging files',
+        message: safeErrorMessage(err),
       });
     }
   }
