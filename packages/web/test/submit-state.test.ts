@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldClearSubmitting } from '../src/lib/submit-state.js';
+import { nextFormPark, shouldClearSubmitting } from '../src/lib/submit-state.js';
 
 const step = (
   stepId: string,
@@ -66,5 +66,23 @@ describe('shouldClearSubmitting', () => {
     it('clears for a first park seen after a submit from an unstamped row', () => {
       expect(shouldClearSubmitting('s1', parked(SENT), null)).toBe(true);
     });
+  });
+});
+
+describe('nextFormPark', () => {
+  const A = '2026-09-13T11:08:31.100Z';
+  const B = '2026-09-13T11:09:02.400Z';
+
+  it('keeps the current park while an answer is in flight', () => {
+    expect(nextFormPark(A, null)).toBe(A);
+  });
+
+  it('moves to a new park when the worker reoffers the form', () => {
+    expect(nextFormPark(A, B)).toBe(B);
+    expect(nextFormPark(null, A)).toBe(A);
+  });
+
+  it('stays on the same park across polls', () => {
+    expect(nextFormPark(A, A)).toBe(A);
   });
 });

@@ -58,7 +58,12 @@ import {
 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { useActiveTime } from '@/lib/active-time/use-active-time';
-import { isAwaitingFormInput, shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
+import {
+  isAwaitingFormInput,
+  nextFormPark,
+  shouldClearSubmitting,
+  submitErrorFor,
+} from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import {
@@ -3677,6 +3682,10 @@ function StepCardImpl({
   // spam). Failed tasks keep theirs — the runtime may still be up for debugging.
   const runtimeTornDown = taskCancelled || taskStatus === 'completed';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
+  // Remount the form on each new park (see nextFormPark), adjusting state during render.
+  const [formPark, setFormPark] = useState(step.waitingStartedAt);
+  const nextPark = nextFormPark(formPark, step.waitingStartedAt);
+  if (nextPark !== formPark) setFormPark(nextPark);
   const panelCtx: PanelContext = {
     formOpen: !!showForm,
     runtimeTornDown,
@@ -4234,7 +4243,7 @@ function StepCardImpl({
               </div>
             )}
             <FormRenderer
-              key={supportsPresets ? `${step.stepId}-${formKey}` : undefined}
+              key={`${step.stepId}-${formPark ?? ''}${supportsPresets ? `-${formKey}` : ''}`}
               schema={schema}
               initialValues={supportsPresets ? (appliedValues ?? initialValues) : initialValues}
               disabled={taskDead}

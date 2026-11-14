@@ -21,6 +21,14 @@ export function shouldClearSubmitting(
   return park !== null && park !== submittedPark;
 }
 
+/** The park a step's form belongs to: the latest non-null `waitingStartedAt`. A new park
+ *  remounts the form so a reoffered gate shows its refreshed fields rather than the answer it
+ *  refused; the submit route's null stamp keeps the previous park, so an answer in flight keeps
+ *  what the person typed. */
+export function nextFormPark(previous: string | null, stamp: string | null): string | null {
+  return stamp ?? previous;
+}
+
 /** A step parked on its form for an answer. Status alone is not enough: the submit route clears
  *  `waitingStartedAt` and leaves the row `waiting_form` until the worker picks the job up. */
 export function isAwaitingFormInput(
