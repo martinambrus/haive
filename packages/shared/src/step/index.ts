@@ -714,3 +714,10 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   };
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }
+
+export type {
+  ImplementationFileSet,
+  ChangedLineNotes,
+  FileCoverage,
+  Insight,
+} from './review-types.js';

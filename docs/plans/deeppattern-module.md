@@ -215,7 +215,7 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
 2. The step SDK seam: the step types and helpers a module step needs without importing
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
-   Status: PR1 of 4 implemented.
+   Status: PR2 of 4 implemented.
 3. Derived types. **PR2 of 4 implemented:** pure shared schemas/evaluator and versioned plan type,
    ordered base catalog adapter/parity, plus additive derived storage (enum, nullable columns,
    guarded CHECKs/self-FK and commented guarded cleanup). Existing rows remain unchanged; derived

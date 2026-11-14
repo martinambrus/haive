@@ -1,9 +1,10 @@
 # Prompt containment
 
 Every agent reads text somebody else wrote, and no agent can tell an honest comment from one
-placed to steer it. `steps/_untrusted-repo.ts` is the one home for the rules that answer that,
-and `prompt-agent-paths.test.ts` is what stops them drifting: it builds every prompt the step
-registry can reach — loop arms and detect variants included — and asserts these properties over
+placed to steer it. `packages/shared/src/step/prompts.ts` is the canonical home for the portable
+containment rules, banner constants and fence helpers, re-exported by the worker's
+`steps/_untrusted-repo.ts`. `prompt-agent-paths.test.ts` is what stops the worker prompts drifting: it builds every
+prompt the step registry can reach — loop arms and detect variants included — and asserts these properties over
 each one INDIVIDUALLY, never over their concatenation. A joined text passes as soon as one arm
 carries the guard, which is how `01-plan-build`'s expand wave and `08b`'s fix pass each shipped
 unguarded.

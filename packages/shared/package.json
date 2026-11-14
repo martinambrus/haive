@@ -242,6 +242,14 @@
     "./step": {
       "types": "./dist/step/index.d.ts",
       "import": "./dist/step/index.js"
+    },
+    "./step/prompts": {
+      "types": "./dist/step/prompts.d.ts",
+      "import": "./dist/step/prompts.js"
+    },
+    "./step/review": {
+      "types": "./dist/step/review.d.ts",
+      "import": "./dist/step/review.js"
     }
   },
   "scripts": {

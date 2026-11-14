@@ -1,3 +1,6 @@
+import type { Insight } from '@haive/shared/step';
+export type { Insight } from '@haive/shared/step';
+export { INSIGHTS_INSTRUCTION } from '@haive/shared/step/prompts';
 import { and, asc, eq, ilike } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { reviewerOutputSchema, type FormSchema } from '@haive/shared';
@@ -21,24 +24,6 @@ import { parseAgentJson } from './_agent-json.js';
 // applies the chosen ones, which the downstream gate re-verifies. Single-run
 // triage — insights are NOT written to the knowledge base. Skipped when no
 // insights were surfaced.
-
-/** Appended to agent prompts that can surface optional improvements. The
- *  `## INSIGHTS` section sits AFTER the agent's fenced-JSON output (a sibling
- *  markdown block), so it never disturbs existing output parsing. 08e scans the
- *  raw agent output for these. */
-export const INSIGHTS_INSTRUCTION = [
-  'OPTIONAL: after your main output, you MAY add a `## INSIGHTS` section listing OUT-OF-SCOPE',
-  'improvements you noticed but did NOT make, one per line as:',
-  '`- INSIGHT: <title> | <file:line> | <short description>`. Omit the section entirely if none.',
-].join('\n');
-
-export interface Insight {
-  id: string;
-  sourceStep: string;
-  title: string;
-  location: string;
-  description: string;
-}
 
 interface TriageDetect {
   worktreePath: string;

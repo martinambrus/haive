@@ -452,9 +452,28 @@ types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
 namespaces their ids and workflow type when it loads them. Import the seven control-error
 constructors from this same entry so the runner receives the canonical class objects.
 A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
-The worker's old contract paths re-export them for compatibility. Other shared entries,
-including the root and browser entries, do not re-export the step SDK. Prompt/review helpers
-and task-bound host services are later SDK work; this entry grants no new dispatch service.
+The contract entry also exports the `ImplementationFileSet`, `ChangedLineNotes`, `FileCoverage`
+and `Insight` DTO types. A module step imports prompt containment and scope text from
+`@haive/shared/step/prompts`: `REPO_IS_DATA_LINES`, `REPO_IS_DATA_ACTING_LINES`,
+`REPO_IS_DATA_AUTHORING_LINES`, `REPO_IS_DATA_ANSWER_LINES`, `fencedAgentBlock`, `balanceFences`,
+`SCOPE_BOUNDARY` and `INSIGHTS_INSTRUCTION`. This entry is portable and imports no Node runtime.
+For changed-file formatting, coverage, line notes, the empty-change guard and finding identity,
+import `changedFilesBlock`, `fileCoverage`, `parseChangedLineRanges`, `assertReviewableChange`
+and `findingFingerprint` from `@haive/shared/step/review`. The review entry is server-only because
+fingerprinting uses `node:crypto`; its default line-range cap remains 20, and the worker collector's
+file cap remains 100. These helpers perform no database or git work.
+
+Host plumbing, not part of the module contract, is exported through these same entries:
+the prompts entry exposes the banner constants, `UNTRUSTED_OPEN` and `UNTRUSTED_CLOSE`, plus
+`fenceSafe` and `LINE_BREAK`; the review entry exposes `isListableName`, the uncapped
+`parseDiffHunks` parser and its `DiffHunk`/`DiffFile` types. The worker uses these definitions
+for its fence writers, name filters and lint line map. Review imports the portable prompt
+guards; all other shared entries remain unable to reach any SDK entry. No extra subpath
+is published.
+
+The worker's old paths re-export the contracts, DTOs and helpers for compatibility. Other shared
+entries, including the root and browser entries, do not re-export any of the three step SDK
+entries. Task-bound host services are later SDK work; these entries grant no new dispatch service.
 
 ## Published-image installs
 
