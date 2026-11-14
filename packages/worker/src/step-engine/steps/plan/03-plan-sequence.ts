@@ -625,21 +625,26 @@ export async function foldSequenceResults(
     }
     const self = sequenceSelfNodeId(result.agentId);
     try {
-      const outcome = await applyAgentPatchOnce(
-        ctx,
-        result.agentId,
-        (tx) =>
-          applyAgentPatch(
-            tx,
-            { ...patch, ops },
-            {
-              repositoryId,
-              sourceTaskId: ctx.taskId,
-              ...(self ? { selfNodeId: self } : {}),
-            },
-          ),
-        // The partial note 01 and 02 record, so a thinner reply stays visible.
-        (landed) => partialApplyNote([...notes, ...landed.dropped]),
+      // keepOrderingOps removed every content/status update and caller version.
+      // Retry the whole claim transaction so a CAS race does not discard this
+      // ordering reply or keep its mining row locked between attempts.
+      const outcome = await retryPlanConflict(() =>
+        applyAgentPatchOnce(
+          ctx,
+          result.agentId,
+          (tx) =>
+            applyAgentPatch(
+              tx,
+              { ...patch, ops },
+              {
+                repositoryId,
+                sourceTaskId: ctx.taskId,
+                ...(self ? { selfNodeId: self } : {}),
+              },
+            ),
+          // The partial note 01 and 02 record, so a thinner reply stays visible.
+          (landed) => partialApplyNote([...notes, ...landed.dropped]),
+        ),
       );
       // Folded by a pass running beside this one.
       if (!outcome) continue;
