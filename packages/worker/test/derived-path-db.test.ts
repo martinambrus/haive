@@ -6,7 +6,6 @@ import { EXECUTION_PATHS } from '@haive/shared';
 import { parseDerivedRunPlan, type DerivedRunPlan } from '@haive/shared/modularity';
 import { pinDerivedWorkflowPath } from '../src/step-engine/derived-path.js';
 import { stepRegistry, StepRegistry } from '../src/step-engine/registry.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { handleResult } from '../src/queues/task-queue.js';
 import { deadTaskResolution, reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
 
@@ -86,11 +85,18 @@ const registry = (omit?: string) => {
     .filter((id) => id !== omit)
     .forEach((id, index) =>
       r.register({
-        metadata: { id, index, workflowType: 'workflow', title: id, description: id },
+        metadata: {
+          id,
+          index,
+          workflowType: 'workflow',
+          title: id,
+          description: id,
+          requiresCli: false,
+        },
         detect: async () => ({}),
         form: () => ({ title: id, fields: [] }),
         apply: async () => ({}),
-      } as StepDefinition),
+      }),
     );
   return r;
 };

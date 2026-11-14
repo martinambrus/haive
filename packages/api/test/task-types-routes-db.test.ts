@@ -1931,7 +1931,15 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
             taskId: task!.id,
             mode: 'cli',
             prompt: 'fixture',
-            integrations: [{ categoryId: 'forge', providerId: 'module.acme.forge' }],
+            integrations: [
+              {
+                requirementId: 'forge',
+                categoryId: 'forge',
+                providerId: 'module.acme.forge',
+                connectionId: connection!.id,
+                access: 'read',
+              },
+            ],
           });
         const depends = async () =>
           (
