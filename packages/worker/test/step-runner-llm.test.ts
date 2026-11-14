@@ -337,6 +337,7 @@ describe('plan chat through the real runner dispatch', () => {
       repoPath: '/tmp',
       workspacePath: '/tmp',
       stepDef,
+      cliProviderId: 'prov-1',
       providers: [makeProvider()],
       deps: { enqueueCliInvocation: enqueue },
     });
@@ -403,6 +404,7 @@ describe('plan chat through the real runner dispatch', () => {
         repoPath: '/tmp',
         workspacePath: '/tmp',
         stepDef: { ...planChatStep, shouldRun: async () => true },
+        cliProviderId: 'prov-1',
         providers: [makeProvider()],
         deps: { enqueueCliInvocation: enqueue },
         ...(source === 'job' ? { formValues: { message } } : {}),

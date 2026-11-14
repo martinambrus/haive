@@ -1774,7 +1774,12 @@ const workerDeps: WorkerDeps = {
     };
     // Plan chat carries its immutable read until execution ends. Results are
     // consumed from Postgres, so Redis need not retain the private plan payload.
-    if (payload.spec?.planSnapshot) {
+    if (
+      payload.spec &&
+      typeof payload.spec === 'object' &&
+      'planSnapshot' in payload.spec &&
+      payload.spec.planSnapshot
+    ) {
       opts.removeOnComplete = true;
       opts.removeOnFail = true;
     }
