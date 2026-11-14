@@ -51,6 +51,9 @@ export const textFieldSchema = baseField.extend({
 export const textareaFieldSchema = baseField.extend({
   type: z.literal('textarea'),
   default: z.string().optional(),
+  /** Prefills the editor only. Unlike default, it is never restored for a blank
+   *  submission or used by unattended auto-submit. Explicit initialValues win. */
+  initialValue: z.string().optional(),
   placeholder: z.string().optional(),
   rows: z.number().int().positive().optional(),
   /** Never shown and never required of the person, but its value is still submitted: for a field another page fills in. */

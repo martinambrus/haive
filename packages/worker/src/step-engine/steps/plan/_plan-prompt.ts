@@ -296,6 +296,7 @@ export async function applyAgentPatch(
     /** The node this reply is ABOUT, addressable as `self` so the agent never
      *  transcribes its uuid. Set by the expansion fan-out. */
     selfNodeId?: string;
+    requireAllUpdateVersions?: boolean;
   },
 ): Promise<ApplyPlanPatchResult> {
   return applyPlanPatch(db, patch, {
@@ -316,6 +317,7 @@ export async function applyAgentPatch(
     // An agent's reply can land minutes after it read the plan, so its edits to
     // existing nodes must be checked against what a person changed meanwhile.
     requireExpectedVersion: true,
+    ...(opts.requireAllUpdateVersions ? { requireAllUpdateVersions: true } : {}),
     ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
   });
 }

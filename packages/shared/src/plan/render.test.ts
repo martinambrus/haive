@@ -61,6 +61,14 @@ const WITH_SIBLING: PlanNodeRecord[] = [
 ];
 
 describe('renderPlanMarkdownFrom', () => {
+  it('shows a link target version even when that target is below the displayed depth', () => {
+    const nodes = NODES.map((n) => ({ ...n, version: n.id === AUTH ? 7 : 3 }));
+    const edges = [{ fromNodeId: ROOT, toNodeId: AUTH, kind: 'affects' as const, note: null }];
+    const prompt = renderPlanMarkdownFrom(nodes, edges, { withVersions: true, maxDepth: 0 });
+    expect(prompt).toContain(`(\`node:${AUTH}\`, version 7)`);
+    expect(renderPlanMarkdownFrom(nodes, edges)).not.toContain('version');
+  });
+
   it('nests headings by depth and numbers them in build order', () => {
     // Post-order: the deepest node is 1 and the root is last, because a
     // container is finished when the things inside it are.

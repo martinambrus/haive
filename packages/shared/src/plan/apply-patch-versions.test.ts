@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { applyPlanPatch } from './apply-patch.js';
 import { PlanPatchError } from './errors.js';
 
 const NODE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 /** One plan node held in memory: a select returns it, an update merges into it. */
-function fakeDb(version: number, afterUpdate?: (row: Record<string, unknown>) => void) {
+function fakeDb(
+  version: number,
+  afterUpdate?: (row: Record<string, unknown>) => void,
+  beforeUpdate?: (row: Record<string, unknown>) => void,
+) {
   const row: Record<string, unknown> = {
     id: NODE,
     parentId: null,
@@ -29,9 +35,21 @@ function fakeDb(version: number, afterUpdate?: (row: Record<string, unknown>) =>
     }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
-        where: async () => {
-          Object.assign(row, values);
-          afterUpdate?.(row);
+        where: (condition: SQL) => {
+          // Evaluate the actual UPDATE's version bind, so a query with only an id
+          // predicate cannot accidentally pass the concurrent-write control.
+          const expected = new PgDialect().sqlToQuery(condition).params.at(-1);
+          const write = async () => {
+            beforeUpdate?.(row);
+            if (typeof expected === 'number' && row.version !== expected) return [];
+            Object.assign(row, values);
+            afterUpdate?.(row);
+            return [{ id: NODE }];
+          };
+          return {
+            then: (resolve: (v: unknown) => unknown) => write().then(resolve),
+            returning: write,
+          };
         },
       }),
     }),
@@ -44,6 +62,45 @@ const OPTS = { repositoryId: 'repo-1', origin: 'user', requireExpectedVersion: t
 const op = (fields: Record<string, unknown>) => ({ op: 'upsert', nodeRef: NODE, ...fields });
 
 describe('applyPlanPatch node versions', () => {
+  it('describes an unversioned CAS race using the read version, not a caller expectation', async () => {
+    const { db } = fakeDb(3, undefined, (row) => {
+      row.version = 4;
+    });
+    const err = await applyPlanPatch(
+      db,
+      { ops: [op({ ordinal: 2 })] },
+      { repositoryId: 'repo-1', origin: 'user' },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ kind: 'conflict' });
+    expect((err as Error).message).toContain('read version 3');
+    expect((err as Error).message).not.toContain('expected version');
+  });
+  it('compares the version atomically when an edit commits after the applier read', async () => {
+    const { db, row } = fakeDb(3, undefined, (current) => {
+      current.version = 4;
+      current.body = 'Canvas edit';
+    });
+    await expect(
+      applyPlanPatch(db, { ops: [op({ body: 'Agent change', expectedVersion: 3 })] }, OPTS),
+    ).rejects.toMatchObject({ kind: 'conflict' });
+    expect(row).toMatchObject({ version: 4, body: 'Canvas edit' });
+  });
+
+  it('refuses even an ordinal-only update when a chat requires every update version', async () => {
+    const { db, row } = fakeDb(3);
+    const out = await applyPlanPatch(
+      db,
+      { ops: [op({ ordinal: 2 })] },
+      {
+        ...OPTS,
+        onUnresolvableRef: 'drop',
+        requireAllUpdateVersions: true,
+      },
+    );
+    expect(out.dropped).toHaveLength(1);
+    expect(row.version).toBe(3);
+  });
+
   it('lets two upserts for one node expect the same version and applies both', async () => {
     const { db, row } = fakeDb(3);
     const out = await applyPlanPatch(

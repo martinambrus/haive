@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRenderer, findAll, fire } from '../../../test/render-tree';
+import { createRenderer, findAll, fire, textOf } from '../../../test/render-tree';
 import type { PlanNodeTask, PlanNodeDetail } from '@/lib/api-client';
+import { PlanChat } from './plan-chat';
 import { PlanDetailPanel } from './plan-detail-panel';
 
 vi.mock('react', async (original) => ({
@@ -20,6 +21,8 @@ vi.mock('lucide-react', async (original) =>
   Object.fromEntries(Object.keys(await original<object>()).map((name) => [name, () => null])),
 );
 const net = vi.hoisted(() => ({
+  chat: null as Record<string, unknown> | null,
+  chatTask: null as Record<string, unknown> | null,
   tasks: [] as PlanNodeTask[],
   advisory: null as PlanNodeTask | null,
 }));
@@ -55,10 +58,13 @@ vi.mock('@/lib/api-client', async (original) => ({
     tasks: net.tasks,
     advisoryTask: net.advisory,
   }),
-  getPlanMessages: async () => ({ messages: [], conversations: [] }),
+  getPlanMessages: async () => net.chat ?? { messages: [], conversations: [] },
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
   markPlanNodeRead: async () => undefined,
-  api: { get: async () => ({ providers: [] }) },
+  api: {
+    get: async (path: string) =>
+      path.startsWith('/tasks/') && net.chatTask ? net.chatTask : { providers: [] },
+  },
 }));
 vi.mock('@/components/markdown/markdown-view', () => ({ MarkdownView: () => null }));
 
@@ -66,6 +72,8 @@ let dispose = () => {};
 afterEach(() => {
   dispose();
   vi.unstubAllGlobals();
+  net.chat = null;
+  net.chatTask = null;
 });
 
 it('keeps each node’s draft through a switch from A to B and back in PlanDetailPanel', async () => {
@@ -181,3 +189,92 @@ describe.each(['node', 'advisory'] as const)('%s work', (source) => {
     expect(reportActivity.mock.lastCall?.[1]).toBe(pending);
   });
 });
+
+it('refuses an oversized new message without sending or losing the draft', async () => {
+  const fetcher = vi.fn(() => {
+    throw new Error('Unexpected network');
+  });
+  vi.stubGlobal('fetch', fetcher);
+  let visible = true;
+  const view = createRenderer(() =>
+    visible ? <PlanChat repositoryId="repo" nodeId="node" onPatched={() => {}} /> : null,
+  );
+  dispose = () => {
+    visible = false;
+    view.draw();
+  };
+  await view.flush();
+  const message = 'x'.repeat(20_001);
+  fire.type(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!, message);
+  view.draw();
+  fire.click(findAll(view.tree(), (e) => e.tag === 'button' && textOf(e) === 'Send')[0]!);
+  await view.flush();
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!.props.value).toBe(message);
+  expect(
+    findAll(view.tree(), (e) => textOf(e).includes('20,000 characters')).length,
+  ).toBeGreaterThan(0);
+});
+
+it.each(['initialValue', 'default'] as const)(
+  'offers the whole legacy pending message for an explicit edit in the plan panel (%s)',
+  async (key) => {
+    const original = 'legacy '.repeat(3000);
+    net.chat = {
+      messages: [
+        {
+          id: 'pending',
+          taskId: 'task',
+          nodeId: 'node',
+          role: 'user',
+          body: original,
+          patch: null,
+          cliLabel: null,
+          createdAt: '2026-11-14',
+        },
+      ],
+      conversations: [
+        {
+          taskId: 'task',
+          title: 'Chat',
+          status: 'waiting_user',
+          createdAt: '2026-11-14',
+          cliProviderId: null,
+        },
+      ],
+    };
+    net.chatTask = {
+      task: { id: 'task', status: 'waiting_user', deadAt: null },
+      steps: [
+        {
+          stepId: '01-plan-chat',
+          status: 'waiting_form',
+          waitingStartedAt: '2026-11-14',
+          formSchema: {
+            title: 'Edit message',
+            description: 'The stored message must be edited.',
+            fields: [{ id: 'message', type: 'textarea', [key]: original }],
+          },
+        },
+      ],
+    };
+    let visible = true;
+    const view = createRenderer(() =>
+      visible ? <PlanChat repositoryId="repo" nodeId="node" onPatched={() => {}} /> : null,
+    );
+    dispose = () => {
+      visible = false;
+      view.draw();
+    };
+    await view.flush();
+    await view.flush();
+    const edit = findAll(
+      view.tree(),
+      (e) => e.tag === 'button' && textOf(e) === 'Edit stored message',
+    );
+    expect(edit).toHaveLength(1);
+    fire.click(edit[0]!);
+    view.draw();
+    expect(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!.props.value).toBe(original);
+  },
+);

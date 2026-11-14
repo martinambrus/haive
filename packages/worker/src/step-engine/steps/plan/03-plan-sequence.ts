@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
   PlanPatchError,
+  retryPlanConflict,
   PLAN_NODE_REF_PREFIX,
   SEQUENCE_AGENTS_PER_PASS,
   SEQUENCE_MAX_RUN_CHILDREN,
@@ -266,22 +267,26 @@ function childrenByParent(nodes: PlanNodeSkeleton[]): Map<string, PlanNodeSkelet
  * commit.
  *
  * No `expectedVersion`: this records a fact derived from edges that are already
- * in the database, and a conflict would drop the whole run's ordering to protect
- * a field nobody was editing. Same reasoning as `completePlanNodesForTask`.
+ * in the database. The atomic write still detects races; a conflict rebuilds the
+ * whole pass from fresh nodes and edges, with a bounded attempt count.
  */
-async function applyDeterministicOrder(
+export async function applyDeterministicOrder(
   ctx: StepContext,
   repositoryId: string,
   nodes: PlanNodeSkeleton[],
   edges: PlanEdgeRecord[],
 ): Promise<number> {
-  const ops: { op: 'upsert'; nodeRef: string; ordinal: number }[] = [];
-  for (const run of childrenByParent(nodes).values()) {
-    const { ordered } = orderSiblingsByDependency(run, edges);
-    ordered.forEach((child, index) => {
-      if (child.ordinal !== index) ops.push({ op: 'upsert', nodeRef: child.id, ordinal: index });
-    });
-  }
+  const orderingOps = (nodes: PlanNodeSkeleton[], edges: PlanEdgeRecord[]) => {
+    const ops: { op: 'upsert'; nodeRef: string; ordinal: number }[] = [];
+    for (const run of childrenByParent(nodes).values()) {
+      const { ordered } = orderSiblingsByDependency(run, edges);
+      ordered.forEach((child, index) => {
+        if (child.ordinal !== index) ops.push({ op: 'upsert', nodeRef: child.id, ordinal: index });
+      });
+    }
+    return ops;
+  };
+  const ops = orderingOps(nodes, edges);
   if (ops.length === 0) return 0;
   // Chunked: this pass covers the WHOLE plan at once and a patch is capped at
   // PLAN_PATCH_MAX_OPS. On the dev install's 4106-node plan a first run moves
@@ -293,17 +298,34 @@ async function applyDeterministicOrder(
   // an idempotent assignment derived from edges that are not changing, so a run
   // interrupted between chunks leaves a partly reordered tree that the next run
   // finishes. It is a projection being brought up to date, not a unit of intent.
-  for (let i = 0; i < ops.length; i += PLAN_PATCH_MAX_OPS) {
-    await applyPlanPatch(
-      ctx.db,
-      {
-        ops: ops.slice(i, i + PLAN_PATCH_MAX_OPS),
-        summary: 'build order from declared dependencies',
-      },
-      { repositoryId, origin: 'llm', sourceTaskId: ctx.taskId },
-    );
-  }
-  return ops.length;
+  //
+  // A conflict restarts the WHOLE pass from a fresh read rather than retrying the one chunk: a
+  // changed dependency can move a node no earlier chunk named, so a chunk-filtered retry would
+  // write half of the new order. Chunks already written match the fresh order and drop out.
+  let reordered = 0;
+  let fresh = false;
+  await retryPlanConflict(async () => {
+    const all = fresh
+      ? orderingOps(
+          await loadPlanSkeletons(ctx.db, repositoryId),
+          await loadPlanEdges(ctx.db, repositoryId),
+        )
+      : ops;
+    fresh = true;
+    for (let i = 0; i < all.length; i += PLAN_PATCH_MAX_OPS) {
+      const chunk = all.slice(i, i + PLAN_PATCH_MAX_OPS);
+      await applyPlanPatch(
+        ctx.db,
+        {
+          ops: chunk,
+          summary: 'build order from declared dependencies',
+        },
+        { repositoryId, origin: 'llm', sourceTaskId: ctx.taskId },
+      );
+      reordered += chunk.length;
+    }
+  });
+  return reordered;
 }
 
 /** The runs an agent still has to decide, in plan order so the fan-out works
@@ -607,21 +629,26 @@ export async function foldSequenceResults(
     }
     const self = sequenceSelfNodeId(result.agentId);
     try {
-      const outcome = await applyAgentPatchOnce(
-        ctx,
-        result.agentId,
-        (tx) =>
-          applyAgentPatch(
-            tx,
-            { ...patch, ops },
-            {
-              repositoryId,
-              sourceTaskId: ctx.taskId,
-              ...(self ? { selfNodeId: self } : {}),
-            },
-          ),
-        // The partial note 01 and 02 record, so a thinner reply stays visible.
-        (landed) => partialApplyNote([...notes, ...landed.dropped]),
+      // keepOrderingOps removed every content/status update and caller version.
+      // Retry the whole claim transaction so a CAS race does not discard this
+      // ordering reply or keep its mining row locked between attempts.
+      const outcome = await retryPlanConflict(() =>
+        applyAgentPatchOnce(
+          ctx,
+          result.agentId,
+          (tx) =>
+            applyAgentPatch(
+              tx,
+              { ...patch, ops },
+              {
+                repositoryId,
+                sourceTaskId: ctx.taskId,
+                ...(self ? { selfNodeId: self } : {}),
+              },
+            ),
+          // The partial note 01 and 02 record, so a thinner reply stays visible.
+          (landed) => partialApplyNote([...notes, ...landed.dropped]),
+        ),
       );
       // Folded by a pass running beside this one.
       if (!outcome) continue;

@@ -114,6 +114,8 @@ export interface ApplyPlanPatchOptions {
    * so an agent removes a subtree leaf by leaf.
    */
   requireExpectedVersion?: boolean;
+  /** Plan chat versions even reorders/code-link-only updates. Sequencing retains its exemption. */
+  requireAllUpdateVersions?: boolean;
 }
 
 export interface ApplyPlanPatchResult {
@@ -770,7 +772,12 @@ async function applyOps(
       op.status !== undefined ||
       op.taskable !== undefined ||
       op.parentRef !== undefined;
-    if (opts.requireExpectedVersion && writesFields && op.expectedVersion === undefined) {
+    if (
+      opts.requireExpectedVersion &&
+      !result.created.includes(row.id) &&
+      (writesFields || opts.requireAllUpdateVersions) &&
+      op.expectedVersion === undefined
+    ) {
       throw new UnresolvableRefError(
         'invalid',
         `plan node ${row.id} was changed without its expectedVersion`,
@@ -853,7 +860,19 @@ async function applyOps(
       }
     }
 
-    await tx.update(schema.planNodes).set(set).where(eq(schema.planNodes.id, row.id));
+    // Check the version at the write as well as the read: every writer uses
+    // this applier, and a canvas edit may commit between those statements.
+    const updated = await tx
+      .update(schema.planNodes)
+      .set(set)
+      .where(and(eq(schema.planNodes.id, row.id), eq(schema.planNodes.version, row.version)))
+      .returning({ id: schema.planNodes.id });
+    if (updated.length === 0)
+      throw new PlanPatchError(
+        'conflict',
+        `plan node ${row.id} was modified while applying the patch (read version ${row.version})`,
+        opIndex,
+      );
     versionAfterOwnWrite.set(row.id, row.version + 1);
     refs.set(op.nodeRef, row.id);
     if (!result.updated.includes(row.id)) result.updated.push(row.id);
@@ -933,7 +952,16 @@ async function applyOps(
             opIndex,
           );
         }
-        await tx.delete(schema.planNodes).where(eq(schema.planNodes.id, row.id));
+        const deleted = await tx
+          .delete(schema.planNodes)
+          .where(and(eq(schema.planNodes.id, row.id), eq(schema.planNodes.version, row.version)))
+          .returning({ id: schema.planNodes.id });
+        if (deleted.length === 0)
+          throw new PlanPatchError(
+            'conflict',
+            `plan node ${row.id} was modified while applying the patch (read version ${row.version})`,
+            opIndex,
+          );
         // The cascade takes this subtree's edges with it, so a dependency graph
         // cached before now would report paths that no longer exist.
         dependsOnGraph = null;

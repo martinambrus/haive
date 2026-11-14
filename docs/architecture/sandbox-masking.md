@@ -114,6 +114,29 @@ The `.haive-data` boundary (always on, agent sandboxes only): `haiveDataBoundary
 
 The whole directory is the unit because nothing narrower holds. MEASURED on Docker 29.8.2: with `.haive-data` read-only and `knowledge_base/` read-write, writes and creates under `state/` and the plan files fail (EROFS), `mv .haive-data` fails (EBUSY), KB writes work, and host-side rewrites underneath do not detach the mount; a mount of `state/` alone is beaten by `mv .haive-data` plus a forged `state/`, and per-file plan mounts are dropped by the mirror's own rename-over rewrites. Docker refuses a subpath that does not exist, so a missing `.haive-data/` and `learnings/` are created first, owned like the mount root. `knowledge_base/` is NEVER created there, because it is an onboarding marker: a missing one gets no mount, and so does a child that is a file or a link, which the read-only parent keeps an agent from replacing. A `.haive-data` that is itself a file or a link, or a mount root that is not a directory, refuses the run instead, since an agent could put a directory of its own in its place; docker's volume subpath follows a relative link inside the volume (MEASURED), so a worktree path turned into a link would otherwise mount the tree it points to with no boundary at all. A protected file with more hard links than names in the read-only part refuses the run too: an agent cannot make a new link across the mounts (`Cross-device link`, MEASURED), but one made before the boundary existed, from the checkout or a knowledge dir, lets it rewrite the record through that other name. Nothing created is ever removed: removing a stub after one run detached the mounts of sibling runs. Every lookup is a no-follow lstat walked from the repository-root anchor (`lookupInRepoMount`, which `repoGitDataBoundary` shares), so a worktree subpath is split into `<userId>/<repoId>` plus a relative prefix, and a malformed subpath throws instead of being looked up. Only ENOENT and ENOTDIR read as absent, so an absent path still means no mask. Every other failure of that lookup (running out of descriptors, EACCES, EIO, a link in any component of the path) refuses the run in every caller (all cli-exec kinds, step commands, `01b-install-plugins`, the IDE and the Terminal) before any container starts, instead of leaving `.git` or `.haive-data` unmasked.
 
+Plan-chat dispatch snapshots are separate from the repository and its `.haive-data` record.
+The owned dispatch carries its single immutable plan read in the CLI spec. Before any mount,
+`createSandboxSpawner` re-reads the invocation's actual task, user and repository and refuses a
+scope mismatch. `runInSandbox` creates `plan-chat-snapshots/<random UUID>/plan.json` through
+`@haive/shared/fs-safe` in the wrappers volume and mounts only that file read-only at
+`/haive/plan-chat-snapshot.json`. No caller-supplied path is opened and no parent containing
+another dispatch is mounted. The pretty-printed JSON records schema version, owner/repository/task/invocation
+scope and all nodes with their read versions and bodies, plus edges. Node fields occupy
+separate lines, so the prompt tells the agent to search by node id and read adjacent fields. It is never tracked or
+written under `.haive-data`.
+
+The runner attempts and awaits fs-safe removal last in `finally`, including spawn failure
+and a cancelled create. A removal failure logs at error, preserves the run's result and cannot
+skip wrapper, extra-file, capture-dir or gateway cleanup. The boot reaper is the backstop.
+After attempting to reap old CLI containers on worker boot, `reapPlanChatSnapshots` removes the
+previous worker's snapshot entries before job recovery. Each failed entry logs at error and
+reaping continues; a missing snapshot directory is a no-op. A listing failure is also logged
+at error by the boot caller and never prevents worker boot. Runner and reaper share one
+wrapper-root resolver. A retry or app-server fallback materializes its own fresh file from
+the same dispatch read and removes it at the end of that sandbox run. Snapshot-bearing Redis
+jobs remove themselves on completion and final failure; Postgres retains the prompt rebuild
+checkpoint and invocation result.
+
 The worktrees boundary (always on, agent sandboxes mounted at the repository root only):
 `worktreesBoundary` (`packages/worker/src/queues/cli-exec/worktrees-boundary.ts`) mounts
 `.haive/worktrees` READ-ONLY. A sandbox at the root (onboarding, steps before `01-worktree-setup`,

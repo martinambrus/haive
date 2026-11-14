@@ -409,6 +409,16 @@ describe('foldSequenceResults', () => {
     }
   });
 
+  it('retries an unversioned ordering reply after a CAS race without re-asking the agent', async () => {
+    vi.mocked(applyAgentPatch)
+      .mockRejectedValueOnce(new PlanPatchError('conflict', 'content edit raced'))
+      .mockResolvedValueOnce(outcome({ updated: [A, B] }));
+    const { db, stamps } = fakeDb();
+    expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(2);
+    expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+    expect(stamps).toEqual([]);
+  });
+
   it('records a reply that lost ops under the partial prefix, not as a failure', async () => {
     // One mistyped id used to throw away the whole ordering; now the applier
     // skips that op, and the row must still say the reply came back thinner.

@@ -1028,6 +1028,7 @@ async function resolveLlmPhase(
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
 
+  const basePrompt = prompt;
   if (stepDef.metadata.id === '07b-phase-4-validate') {
     const notice = fixTestReviewNotice(
       await loadFixTestRecords(db, params.taskId, 30, { patches: false }),
@@ -1097,6 +1098,27 @@ async function resolveLlmPhase(
     preferredProviderId,
     steeringRequested,
     worktreeRel,
+    ...(llmSpec.promptBudget
+      ? {
+          promptBudget: {
+            maxChars: llmSpec.promptBudget.maxChars,
+            outputReserveChars: llmSpec.promptBudget.outputReserveChars,
+            repack: (maxChars: number) => {
+              const at = prompt.indexOf(basePrompt);
+              if (at < 0)
+                throw new Error(
+                  'Cannot locate the plan chat prompt within its dispatch additions.',
+                );
+              const additions = prompt.length - basePrompt.length;
+              const packed = llmSpec.promptBudget!.buildPrompt(
+                { detected, formValues: formValues ?? {}, integrationAccounts },
+                maxChars - additions,
+              );
+              return prompt.slice(0, at) + packed + prompt.slice(at + basePrompt.length);
+            },
+          },
+        }
+      : {}),
     input: {
       kind: 'prompt',
       prompt,
@@ -1215,6 +1237,17 @@ async function resolveLlmPhase(
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
   if ('failure' in invRow) return failDispatch(db, current, invRow.failure);
+  const planRead = llmSpec.planSnapshot?.({ detected, formValues: formValues ?? {} });
+  if (planRead && plan.invocation.kind === 'cli') {
+    plan.invocation.spec.planSnapshot = {
+      schemaVersion: 1,
+      userId: params.userId,
+      taskId: params.taskId,
+      invocationId: invRow.id,
+      repositoryId: (detected as { repositoryId: string }).repositoryId,
+      ...planRead,
+    };
+  }
   // Setup that must not run unless THIS job won. The insert above IS the reservation — the
   // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
   // so everything destructive belongs on this side of it. `prepare` cannot: it runs before
@@ -3017,6 +3050,29 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         detectCliProviderId: ctx.cliProviderId ?? null,
         statusMessage: null,
       });
+    }
+
+    // Recover a pre-limit saved answer before worker validation can fail it.
+    // Keep the whole value and its edit form in one owned row write; a restart
+    // can then offer the same edit without copying the rejected answer again.
+    const legacyValues =
+      current.formValues ??
+      (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
+    const recovered =
+      legacyValues && stepDef.recoverLegacyFormValues?.(detected, legacyValues as FormValues);
+    if (recovered) {
+      const formSchema = stepDef.form?.(ctx, recovered);
+      if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
+      current = await updateRow(db, current.id, {
+        detectOutput: recovered,
+        formValues: null,
+        formSchema,
+        status: 'waiting_form',
+        waitingStartedAt: new Date(),
+        pauseFormOnRetry: false,
+        statusMessage: null,
+      });
+      return { status: 'waiting_form', row: current, formSchema };
     }
 
     // --- Pre-form LLM phase ---
@@ -5351,9 +5407,22 @@ function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>):
 }
 
 /** A schema default is a source of answers, including a legacy default restored by validation.
- *  Scope Git semantics to the known gate before any schema copy or Retry/reopen return. */
+ *  Normalize stored forms before validation, keeping editor text separate from answer defaults. */
 function normalizeStepSchemaDefaults(stepId: string, schema: FormSchema | null): FormSchema | null {
-  if (!schema || stepId !== '11a-gate-4-push') return schema;
+  if (!schema) return schema;
+  if (stepId === '01-plan-chat') {
+    let changed = false;
+    const fields = schema.fields.map((field) => {
+      if (field.type !== 'textarea' || field.id !== 'message' || field.default === undefined)
+        return field;
+      changed = true;
+      const { default: original, ...rest } = field;
+      return { ...rest, initialValue: field.initialValue ?? original };
+    });
+    return changed ? { ...schema, fields } : schema;
+  }
+  // Scope Git semantics to the known gate before any schema copy or Retry/reopen return.
+  if (stepId !== '11a-gate-4-push') return schema;
   const defaults = extractFormDefaults(schema);
   const normalized = normalizeStepFormValues(stepId, defaults);
   if (!normalized.success) throw new Error(normalized.issues.join('; '));

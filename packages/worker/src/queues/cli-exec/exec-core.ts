@@ -1,3 +1,4 @@
+import { assertSnapshotOwner } from '../../plan/chat-snapshot.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -1586,6 +1587,25 @@ export function createSandboxSpawner(
   appReach: AppReach | null = null,
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
+    if (spec.planSnapshot) {
+      if (!taskId || !invocationId) throw new Error('Plan snapshot requires an owned invocation.');
+      const db = getDb();
+      const [invocation] = await db
+        .select({ taskId: schema.cliInvocations.taskId })
+        .from(schema.cliInvocations)
+        .where(eq(schema.cliInvocations.id, invocationId))
+        .limit(1);
+      if (!invocation || invocation.taskId !== taskId)
+        throw new Error('Plan snapshot invocation owner is unavailable.');
+      const [task] = await db
+        .select({ userId: schema.tasks.userId, repositoryId: schema.tasks.repositoryId })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, taskId))
+        .limit(1);
+      if (!task) throw new Error('Plan snapshot task owner is unavailable.');
+      const owner = { ...task, taskId, invocationId };
+      assertSnapshotOwner(spec.planSnapshot, owner);
+    }
     const allMounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) allMounts.push(repoMount);
     if (appReach) allMounts.push(...appReach.mounts);
@@ -1638,6 +1658,7 @@ export function createSandboxSpawner(
     const result = await runInSandbox(
       {
         command: spec.command,
+        planSnapshot: spec.planSnapshot,
         args: finalArgs,
         // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
         env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },

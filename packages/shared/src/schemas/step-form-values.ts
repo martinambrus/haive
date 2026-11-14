@@ -1,12 +1,24 @@
+import { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from './plan-chat.js';
 import { gitRemoteUrlSchema } from './git-url.js';
 import type { FormValidationFailure, FormValidationSuccess } from '../step-engine/schemas.js';
 
-/** Only this core gate's named field is a Git destination. Other forms may use the
- *  same field name for arbitrary text; normalize before any answer or default is saved. */
+/** Apply step-specific answer rules before any answer or default is saved. */
 export function normalizeStepFormValues(
   stepId: string,
   values: Record<string, unknown>,
 ): FormValidationSuccess | FormValidationFailure {
+  if (stepId === '01-plan-chat' && Object.hasOwn(values, 'message')) {
+    // Optional textarea validation represents a blank answer as null; blank ends the chat.
+    if (values.message == null) return { success: true, data: values };
+    if (
+      typeof values.message !== 'string' ||
+      values.message.trim().length > PLAN_CHAT_MESSAGE_MAX_CHARS
+    )
+      return { success: false, issues: [PLAN_CHAT_MESSAGE_LIMIT_TEXT] };
+    return { success: true, data: values };
+  }
+  // Only this core gate's named field is a Git destination. Other forms may use
+  // the same field name for arbitrary text.
   if (stepId !== '11a-gate-4-push' || !Object.hasOwn(values, 'remoteUrl'))
     return { success: true, data: values };
   const raw = values.remoteUrl;

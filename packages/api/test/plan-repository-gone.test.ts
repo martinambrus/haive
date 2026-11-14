@@ -76,6 +76,43 @@ describe('a plan write for a repository that was deleted meanwhile', () => {
 });
 
 describe('deleting a plan after its repository disappears', () => {
+  it.each(['plan', 'node'] as const)(
+    'retries a CAS conflict deleting a %s without a caller version',
+    async (target) => {
+      const fake = createFakeDb({
+        repositories: schema.repositories,
+        tasks: schema.tasks,
+        planNodes: schema.planNodes,
+        planNodeEdges: schema.planNodeEdges,
+        planMirrorState: schema.planMirrorState,
+      });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+      fake.insert(schema.planNodes, {
+        id: FROM,
+        repositoryId: REPO,
+        parentId: null,
+        title: 'Plan',
+        path: `/${FROM}/`,
+        version: 1,
+      });
+      h.db = fake.db;
+      vi.spyOn(configService, 'get').mockResolvedValue('true');
+      const patch = vi
+        .spyOn(fake.db, 'transaction')
+        .mockRejectedValueOnce(new PlanPatchError('conflict', 'concurrent edit'))
+        .mockResolvedValue({ deleted: [FROM] });
+      const response = await app.request(
+        `/${REPO}/plan${target === 'node' ? `/nodes/${FROM}` : ''}`,
+        {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirm: 'repo' }),
+        },
+      );
+      expect(patch).toHaveBeenCalledTimes(2);
+      expect(response.status).toBe(200);
+    },
+  );
   it('maps the applier refusal to 404 and does not enqueue a refresh', async () => {
     const fake = createFakeDb({
       repositories: schema.repositories,

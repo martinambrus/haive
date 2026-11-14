@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from './plan-chat.js';
+export { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from './plan-chat.js';
 
 /**
  * The plan-canvas wire contract.
@@ -501,7 +503,7 @@ export const planMergeStartRequestSchema = z.object({
 export type PlanMergeStartRequest = z.infer<typeof planMergeStartRequestSchema>;
 
 export const planChatRequestSchema = z.object({
-  message: z.string().trim().min(1).max(20_000),
+  message: z.string().trim().min(1).max(PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT),
   cliProviderId: z.string().uuid().optional(),
 });
 export type PlanChatRequest = z.infer<typeof planChatRequestSchema>;

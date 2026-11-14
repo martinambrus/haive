@@ -170,5 +170,6 @@ export function codexExecFallbackSpec(spec: CliCommandSpec): CliCommandSpec | nu
     cwd: spec.cwd,
     outputFormat: 'codex-jsonl',
     stdinPrompt: turn.prompt,
+    ...(spec.planSnapshot ? { planSnapshot: spec.planSnapshot } : {}),
   };
 }
