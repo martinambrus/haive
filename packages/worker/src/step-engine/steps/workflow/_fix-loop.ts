@@ -701,6 +701,16 @@ export async function loadSameCheckRepeat(ctx: StepContext): Promise<SameCheckRe
   };
 }
 
+/** Repair passes use the approved behaviour as their contract, without claiming a hidden grader. */
+export const BEHAVIOUR_FIX_LINES = [
+  'Fix the behaviour required by the approved spec; do not weaken tests to make the run pass.',
+  'Change a test expectation only where the approved spec proves it wrong; name the spec section',
+  'and explain that mismatch in your notes. Without that evidence, fix the application behaviour.',
+  'Final checks are the workflow validation, related test run and code review that actually run,',
+  'using the current tree, including your test edits. There is no private or unseen grader.',
+  'Report checks that did not run as unknown; do not claim independent verification from them.',
+];
+
 export const ROOT_CAUSE_LINES = [
   'Before you edit anything, state the root cause of what is reported below (why it happens,',
   'not only where it shows), then fix that cause.',

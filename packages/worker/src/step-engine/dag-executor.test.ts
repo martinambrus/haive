@@ -4435,6 +4435,14 @@ describe('the fix coder prompt asks for the root cause and says when a file was 
   } as unknown as Parameters<typeof fixCoderPrompt>[0];
   const finding = (file: string) => ({ severity: 'high', file, description: 'stale cache bug' });
 
+  it('keeps the behaviour and approved spec as the fix contract', () => {
+    const p = fixCoderPrompt(issue, [finding('a.ts')], 'SPEC');
+    expect(p).toContain('Fix the behaviour');
+    expect(p).toContain('approved spec proves');
+    expect(p).toContain('name the spec section');
+    expect(p).toContain('no private or unseen grader');
+  });
+
   it('asks once, above the findings fence, and says nothing of a repeat by default', () => {
     const p = fixCoderPrompt(issue, [finding('a.ts')], 'SPEC');
     expect(p.split(ROOT_CAUSE)).toHaveLength(2);

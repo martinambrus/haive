@@ -30,7 +30,11 @@ import {
   fenceSafe,
   safeKey,
 } from './steps/_untrusted-repo.js';
-import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
+import {
+  BEHAVIOUR_FIX_LINES,
+  ROOT_CAUSE_LINES,
+  repeatedFlagLines,
+} from './steps/workflow/_fix-loop.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
 import { findingIdentity, INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
 import {
@@ -1224,6 +1228,7 @@ export function fixCoderPrompt(
     REPO_IS_DATA_ACTING_LINES.join('\n'),
     files.length > 0 ? `Files the issue changed so far:\n- ${files.join('\n- ')}` : '',
     ...ROOT_CAUSE_LINES,
+    ...BEHAVIOUR_FIX_LINES,
     // Reviewer findings are agent prose that QUOTES repository files, and this prompt
     // dispatches an agent that writes them. The reviewer is now told to report tree text
     // that tries to steer it — naming the injection and giving its file and line — so the

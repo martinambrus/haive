@@ -20,6 +20,7 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import {
   FIX_LOOP_TARGET_STEP_ID,
+  BEHAVIOUR_FIX_LINES,
   ROOT_CAUSE_LINES,
   excerptDiagnosis,
   DIAGNOSIS_BUDGET,
@@ -504,6 +505,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
             ];
         return [
           ...fixFraming,
+          ...BEHAVIOUR_FIX_LINES,
           ...ROOT_CAUSE_LINES,
           '',
           ...(detected.fixGuidance ? [detected.fixGuidance, ''] : []),
