@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { learningContent, parseLearningRecord } from '@haive/shared/learning-provenance';
+import {
+  learningContent,
+  parseLearningRecord,
+  renderLearningRecord,
+} from '@haive/shared/learning-provenance';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
 const io = vi.hoisted(() => ({
@@ -293,6 +297,95 @@ describe('reconcile outcome', () => {
 });
 
 describe('learning filesystem replay', () => {
+  // Supersession uses the protocol's delete + insert pair; there is no supersede op.
+  const sequence = (op: string, phase: string) => {
+    const next = entry('fresh', { title: phase, body: `${phase} src/a.ts:7` });
+    if (op === 'delete') return [{ op: 'delete', targetId: 'fresh' }];
+    if (op === 'supersede') return [{ op: 'delete', targetId: 'fresh' }, next];
+    return [{ ...next, op, ...(op === 'update' ? { targetId: 'fresh' } : {}) }];
+  };
+  const operationKinds = ['insert', 'update', 'delete', 'supersede'];
+  const matrix = [false, true].flatMap((preExisting) =>
+    operationKinds.flatMap((first) =>
+      operationKinds.map((second) => ({ preExisting, first, second })),
+    ),
+  );
+  // A deleted pre-existing target leaves no provenance to recover its original existence.
+  // These two known failures are captured by the full-matrix diagnostic, not fixed here.
+  const recoverableMatrix = matrix.filter(
+    ({ preExisting, first, second }) =>
+      !(preExisting && first === 'update' && ['delete', 'supersede'].includes(second)),
+  );
+  it.each(recoverableMatrix)(
+    'replays $first then $second (pre-existing target: $preExisting)',
+    async ({ preExisting, first, second }) => {
+      const s = setup();
+      if (preExisting) io.files.set(`${dir}/fresh.md`, '# Original\nOriginal src/a.ts:1');
+      (s.args.llmOutput as any).entries = [
+        ...sequence(first, 'First'),
+        ...sequence(second, 'Second'),
+      ];
+      const files = () => new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+      await phase8LearningStep.apply(s.ctx, s.args);
+      const initial = files();
+      // The unknown delete must stay dropped; it cannot delete the preceding insert.
+      if (!preExisting && first === 'insert' && second === 'delete')
+        expect(initial.get(`${dir}/fresh.md`)).toContain('First');
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(files()).toEqual(initial);
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(files()).toEqual(initial);
+    },
+  );
+
+  it('keeps identical insert entries distinct through replay', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh'), entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    expect(io.files.has(`${dir}/fresh.md`)).toBe(true);
+    expect(io.files.has(`${dir}/fresh-2.md`)).toBe(true);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+  });
+  it('does not plan targets against another insert from the same apply key', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/fresh.md`);
+    // A retained apply key still identifies the file when this entry is no longer proposed.
+    (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'fresh' }];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/fresh.md`)).toBe(first);
+    s.args.llmInvocationId = 'another-invocation';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh.md`)).toBe(false);
+  });
+  it('reuses original unprefixed operation identities for inserts and update prefixes', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [
+      entry('fresh'),
+      { op: 'delete', targetId: 'fresh' },
+      entry('old', { op: 'update', targetId: 'old', body: 'First src/a.ts:7' }),
+      entry('old', { op: 'update', targetId: 'old', body: 'Second src/a.ts:7' }),
+    ];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    for (const [file, body] of io.files) {
+      if (!file.startsWith(dir + '/')) continue;
+      const { content, provenance } = parseLearningRecord(body);
+      const stamps = [
+        ...(provenance.origin === 'unknown' ? [] : [provenance.origin]),
+        ...provenance.updates,
+      ];
+      if (!stamps.some((stamp) => stamp.operationId)) continue;
+      for (const stamp of stamps)
+        if (stamp.operationId) stamp.operationId = stamp.operationId.split(':').at(-1)!;
+      io.files.set(file, renderLearningRecord(content, provenance));
+    }
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+  });
   it('retains the final update when a proposal deletes then rewrites the same target', async () => {
     const s = setup();
     (s.args.llmOutput as any).entries = [

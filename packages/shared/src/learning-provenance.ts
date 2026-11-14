@@ -7,10 +7,10 @@ export const LEARNING_UPDATE_HISTORY_MAX = 5;
 const stampSchema = z.object({
   taskId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
   date: z.iso.datetime(),
-  /** Stable writer operation, retained across recovery and Retry of the same proposal. */
+  /** Stable operation: apply hash + entry hash; accepts the original entry-only hash. */
   operationId: z
     .string()
-    .regex(/^[a-f0-9]{64}$/)
+    .regex(/^[a-f0-9]{64}(?::[a-f0-9]{64})?$/)
     .optional(),
 });
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);

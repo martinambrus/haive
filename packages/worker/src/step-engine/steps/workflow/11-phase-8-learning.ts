@@ -803,23 +803,33 @@ export function planLearningReconciliation(
   counts?: LearningOutcome['learnings']['downgraded'],
   writer?: LearningStamp,
 ): PlannedLearningOp[] {
-  const byId = new Map(existing.map((e) => [e.id, e]));
-  const taken = new Set(existing.map((e) => e.id));
-  const insertedByOperation = new Map<string, ExistingLearning>();
-  if (writer?.operationId) {
-    for (const item of existing) {
-      const { origin } = parseLearningRecord(item.body).provenance;
-      if (origin !== 'unknown' && origin.operationId)
-        insertedByOperation.set(origin.operationId, item);
-    }
-  }
-  const plan: PlannedLearningOp[] = [];
-  for (const [index, e] of entries.entries()) {
-    const operationId = writer?.operationId
+  // Keep the apply key visible so target planning can exclude this apply's inserts,
+  // including entries dropped on the original pass. Still reserve every on-disk id.
+  const operationHashes = entries.map((e, index) =>
+    writer?.operationId
       ? createHash('sha256')
           .update(JSON.stringify([writer.operationId, index, e]))
           .digest('hex')
-      : undefined;
+      : undefined,
+  );
+  const priorOperationHashes = new Set(operationHashes);
+  const byId = new Map<string, ExistingLearning>();
+  const taken = new Set(existing.map((e) => e.id));
+  const insertedByOperation = new Map<string, ExistingLearning>();
+  for (const item of existing) {
+    const { origin } = parseLearningRecord(item.body).provenance;
+    const originId = origin !== 'unknown' ? origin.operationId : undefined;
+    if (writer?.operationId && originId) {
+      insertedByOperation.set(originId, item);
+      if (originId.startsWith(`${writer.operationId}:`) || priorOperationHashes.has(originId))
+        continue;
+    }
+    byId.set(item.id, item);
+  }
+  const plan: PlannedLearningOp[] = [];
+  for (const [index, e] of entries.entries()) {
+    const operationHash = operationHashes[index];
+    const operationId = operationHash ? `${writer!.operationId}:${operationHash}` : undefined;
     if (e.op === 'delete') {
       const target = e.targetId ? byId.get(e.targetId) : undefined;
       if (!target) {
@@ -858,7 +868,9 @@ export function planLearningReconciliation(
     // slugify the AGENT's id, not just the title fallback: it names a file
     // (`<id>.md`) in the learnings dir and in the draft staging dir, and nothing
     // downstream re-checks it — an id of `../../x` would write outside both.
-    const prior = operationId ? insertedByOperation.get(operationId) : undefined;
+    const prior = operationId
+      ? (insertedByOperation.get(operationId) ?? insertedByOperation.get(operationHash!))
+      : undefined;
     const id = prior?.id ?? resolveInsertId(slugify(e.id) || slugify(e.title), taken);
     taken.add(id);
     plan.push({
@@ -876,9 +888,12 @@ export function planLearningReconciliation(
   for (const [index, p] of plan.entries()) {
     if (!p.operationId) continue;
     const record = parseLearningRecord(p.oldBody).provenance;
+    const matchesOperation = (id: string | undefined) =>
+      id === p.operationId ||
+      (id !== undefined && `${writer?.operationId}:${id}` === p.operationId);
     if (
-      (record.origin !== 'unknown' && record.origin.operationId === p.operationId) ||
-      record.updates.some((update) => update.operationId === p.operationId)
+      (record.origin !== 'unknown' && matchesOperation(record.origin.operationId)) ||
+      record.updates.some((update) => matchesOperation(update.operationId))
     )
       completedThrough.set(p.id, index);
   }
