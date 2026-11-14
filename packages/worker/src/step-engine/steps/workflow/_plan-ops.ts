@@ -132,9 +132,12 @@ export function boundedPlanWriterPrompt(
   return prompt;
 }
 
-export function planFocusTooLarge(build: () => string): boolean {
+export function planFocusTooLarge(
+  build: (maxChars: number) => string,
+  maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
+): boolean {
   try {
-    build();
+    build(maxChars);
     return false;
   } catch (err) {
     if (err instanceof PlanFocusTooLargeError) return true;

@@ -142,7 +142,9 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     nodeTitles: Object.fromEntries(nodes.map((n) => [n.id, n.title])),
     nodeCount: nodes.length,
   };
-  detected.focusTooLarge = planFocusTooLarge(() => buildReconcilePrompt(detected));
+  detected.focusTooLarge = planFocusTooLarge((maxChars) =>
+    buildReconcilePrompt(detected, maxChars),
+  );
   return detected;
 }
 
@@ -264,7 +266,8 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
           return n ? [{ id: n.id, title: n.title, version: n.version }] : [];
         });
       }
-      if (d.planRead) d.focusTooLarge = planFocusTooLarge(() => buildReconcilePrompt(d));
+      if (d.planRead)
+        d.focusTooLarge = planFocusTooLarge((maxChars) => buildReconcilePrompt(d, maxChars));
       return d.focusTooLarge ? false : undefined;
     },
     planSnapshot: ({ detected }) => (detected as PlanReconcileDetect).planRead,

@@ -228,7 +228,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       nodeCount: nodes.length,
       linksMarkedStale: marked,
     };
-    detected.focusTooLarge = planFocusTooLarge(() => buildPrompt(detected));
+    detected.focusTooLarge = planFocusTooLarge((maxChars) => buildPrompt(detected, maxChars));
     return detected;
   },
 
@@ -242,7 +242,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
         d.nodeCount = d.planRead.nodes.length;
         d.nodeTitles = Object.fromEntries(d.planRead.nodes.map((n) => [n.id, n.title]));
       }
-      if (d.planRead) d.focusTooLarge = planFocusTooLarge(() => buildPrompt(d));
+      if (d.planRead) d.focusTooLarge = planFocusTooLarge((maxChars) => buildPrompt(d, maxChars));
       return d.focusTooLarge ? false : undefined;
     },
     planSnapshot: ({ detected }) => (detected as ExternalPlanSyncDetect).planRead,
@@ -350,7 +350,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       d.commits.length > 0 &&
       d.nodeCount > 0 &&
       d.planRead &&
-      (d.focusTooLarge || planFocusTooLarge(() => buildPrompt(d)))
+      (d.focusTooLarge || planFocusTooLarge((maxChars) => buildPrompt(d, maxChars)))
     ) {
       warnHold('focus_too_large');
       return {

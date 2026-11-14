@@ -28,7 +28,7 @@ vi.mock('./_external-drift.js', async (importOriginal) => ({
   resolveExternalDrift: vi.fn(),
   stampExternalWatermark: vi.fn(),
 }));
-import { boundedPlanWriterPrompt, PlanFocusTooLargeError } from './_plan-ops.js';
+import { boundedPlanWriterPrompt, planFocusTooLarge, PlanFocusTooLargeError } from './_plan-ops.js';
 import { renderBoundedPlanOutline } from '../plan/_plan-index.js';
 import { stampExternalWatermark } from './_external-drift.js';
 
@@ -97,19 +97,22 @@ it('keeps depth four when it fits without changing the default depth three', () 
   expect(render(read, '', 10_000).text).not.toContain(read.nodes[4]!.id);
 });
 
-it('bounds the entire 800-node 11f prompt and gives every shown ref its read version', () => {
-  const read = fixture(800);
+it('bounds the writer prompt at an injected limit and gives every shown ref its read version', () => {
+  const maxChars = 4_000;
+  const read = fixture(8);
   for (const n of read.nodes) {
-    n.title += ' long title'.repeat(30);
-    n.body = `Whole body for ${n.id}:\n` + 'body'.repeat(100);
+    n.title += ' long title'.repeat(10);
+    n.body = `Whole body for ${n.id}:\n` + 'body'.repeat(10);
   }
-  const focus = read.nodes.slice(-3);
+  const focus = read.nodes.slice(-1);
   read.codeLinks = focus.map((n) => ({ nodeId: n.id, repoPath: 'src/changed.ts' }));
-  const prompt = planReconcileStep.llm!.buildPrompt({
-    detected: detected(read),
-  } as never) as string;
-  expect(PLAN_EXPANSION_CONTEXT_MAX_CHARS).toBe(96_000);
-  expect(prompt.length).toBeLessThanOrEqual(PLAN_EXPANSION_CONTEXT_MAX_CHARS);
+  const prompt = boundedPlanWriterPrompt(
+    detected(read),
+    (context) => `Bring the project plan in line with this task.\n${context}`,
+    maxChars,
+  );
+  expect(prompt.length).toBeLessThanOrEqual(maxChars);
+  expect(prompt).toMatch(/bounded to|omitted for size/);
   const shownVersions = [
     ...prompt
       .replaceAll('` · `', ', ')
@@ -150,14 +153,32 @@ it.each([planReconcileStep, externalPlanSyncStep])(
 
 it('holds the external watermark when the whole affected focus cannot fit', async () => {
   const read = fixture(2);
-  read.nodes[1]!.body = 'x'.repeat(96_000);
+  read.nodes[1]!.body = 'x'.repeat(2_000);
   read.codeLinks.push({ nodeId: read.nodes[1]!.id, repoPath: 'src/changed.ts' });
   vi.mocked(stampExternalWatermark).mockClear();
   const warn = vi.fn();
+  const d = { ...detected(read), focusTooLarge: false };
+  const build = vi.fn((maxChars: number) =>
+    boundedPlanWriterPrompt(d, (context) => context, maxChars),
+  );
+  expect(
+    planFocusTooLarge(
+      (maxChars) =>
+        boundedPlanWriterPrompt(
+          { ...d, planRead: { ...read, codeLinks: [] } },
+          (context) => context,
+          maxChars,
+        ),
+      4_000,
+    ),
+  ).toBe(false);
+  d.focusTooLarge = planFocusTooLarge(build, 4_000);
+  expect(d.focusTooLarge).toBe(true);
+  expect(build).toHaveBeenCalledWith(4_000);
   const result = await externalPlanSyncStep.apply(
     { logger: { warn } } as never,
     {
-      detected: detected(read),
+      detected: d,
       llmOutput: null,
       formValues: {},
     } as never,
@@ -212,6 +233,13 @@ it.each([planReconcileStep, externalPlanSyncStep])(
     }
   },
 );
+
+it('defaults writer sizing to the production budget', () => {
+  const build = vi.fn(() => 'fits');
+  expect(planFocusTooLarge(build)).toBe(false);
+  expect(build).toHaveBeenCalledWith(PLAN_EXPANSION_CONTEXT_MAX_CHARS);
+  expect(PLAN_EXPANSION_CONTEXT_MAX_CHARS).toBe(96_000);
+});
 
 it('repacking accounts for fixed evidence and refuses a focus rather than cutting it', () => {
   const read = fixture(2);
