@@ -238,6 +238,30 @@ describe('derived editor', () => {
     });
   });
 
+  it('merges stale warnings by operation and lets server wording win', async () => {
+    mocks.previewDerivedTaskType.mockResolvedValue({
+      ...preview,
+      warnings: [0, 1].map((operationIndex) => ({
+        kind: 'stale-target',
+        operationIndex,
+        stepId: 'old-name',
+        candidates: [null, 'quick_bugfix'],
+      })),
+    });
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    for (let index = 0; index < 2; index++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
+      fireEvent.change(screen.getAllByLabelText(/^Target step/)[index]!, {
+        target: { value: 'old-name' },
+      });
+    }
+    const stale = within(screen.getByRole('region', { name: 'Stale targets' }));
+    expect(stale.getAllByText(/Base no longer includes this step/)).toHaveLength(2);
+    await advance();
+    expect(stale.getAllByText(/Base no longer includes this step/)).toHaveLength(2);
+    expect(stale.getAllByText(/Paths: pre-triage, quick_bugfix/)).toHaveLength(2);
+  });
+
   it('makes 403 non-retryable and retains the existing 409 Reload flow', async () => {
     await mount({ slug: 'mine', duplicateBaseSlug: '' });
     mocks.updateTaskType.mockRejectedValueOnce({ status: 403, message: 'Admin access required' });

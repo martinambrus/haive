@@ -62,21 +62,17 @@ export function DerivedTaskTypeChanges({
           `Change ${o.operationIndex + 1}: skipped on ${c.executionPath ?? 'pre-triage'}. Target is not on this path.`,
       ),
   );
-  const stale = [
-    ...new Set(
-      evaluation.warnings
-        .filter((w) => w.kind === 'stale-target')
-        .map(
-          (w) =>
-            `Change ${w.operationIndex + 1}, ${w.stepId}: Base no longer includes this step; this change will be skipped.`,
-        ),
-    ),
-  ];
+  const stale = new Map<string, string>();
+  for (const warning of evaluation.warnings) {
+    if (warning.kind === 'stale-target')
+      stale.set(
+        `${warning.operationIndex}:${warning.kind}`,
+        `Change ${warning.operationIndex + 1}, ${warning.stepId}: Base no longer includes this step; this change will be skipped.`,
+      );
+  }
   for (const warning of diagnostics?.warnings ?? []) {
-    if (warning.kind === 'stale-target') {
-      const body = describeDerivedWarning(warning);
-      if (!stale.includes(body)) stale.push(body);
-    }
+    if (warning.kind === 'stale-target')
+      stale.set(`${warning.operationIndex}:${warning.kind}`, describeDerivedWarning(warning));
   }
   const describe = (issue: { kind: string; [key: string]: unknown }) => {
     const stepIds = candidates.find((c) => c.executionPath === issue.executionPath)?.stepIds ?? [];
@@ -230,8 +226,8 @@ export function DerivedTaskTypeChanges({
       </section>
       <section aria-label="Stale targets">
         <h4 className="text-sm font-medium text-amber-200">Stale targets</h4>
-        {stale.map((body) => (
-          <InlineMarkdown key={body} className="text-sm text-amber-300" body={body} />
+        {[...stale].map(([key, body]) => (
+          <InlineMarkdown key={key} className="text-sm text-amber-300" body={body} />
         ))}
       </section>
       <section aria-label="Live validation">
