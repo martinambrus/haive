@@ -96,7 +96,10 @@ export function chatPlanContext(read: ChatPlanRead, focusId: string, budget: num
     blocks.push(rendered);
     used += rendered.length + 2;
   }
-  const result = `## Focus neighbourhood with bodies\n${blocks.join('\n\n')}\nNeighbourhood: ${omitted} whole node(s) omitted for size; read their bodies and versions in the dispatch snapshot.\n\n${indexBlock}`;
+  const notice = omitted
+    ? `\nNeighbourhood: ${omitted} whole node(s) omitted for size; read their bodies and versions in the dispatch snapshot.`
+    : '';
+  const result = `## Focus neighbourhood with bodies\n${blocks.join('\n\n')}${notice}\n\n${indexBlock}`;
   if (result.length > max) throw new Error('Plan chat context allocation exceeded its budget.');
   return result;
 }

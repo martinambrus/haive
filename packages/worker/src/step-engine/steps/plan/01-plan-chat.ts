@@ -146,6 +146,7 @@ function buildChatPrompt(d: PlanChatDetect, maxChars = PLAN_EXPANSION_CONTEXT_MA
       '',
       'Send `expectedVersion` with every change to an existing node, using the version shown',
       'beside it above or in the versioned dispatch snapshot. Unversioned updates are refused.',
+      'Nodes created earlier in this same patch need no expectedVersion for later updates.',
       '',
       PLAN_PATCH_CONTRACT,
     ].join('\n');

@@ -14,12 +14,14 @@ vi.mock('../src/plan/mirror.js', () => ({ writePlanMirror: vi.fn(async () => {})
 const id = (n: number) => `aaaaaaaa-0000-4000-8000-${String(n).padStart(12, '0')}`;
 async function fixture() {
   const fake = createFakeDb({
+    repositories: schema.repositories,
     tasks: schema.tasks,
     planNodes: schema.planNodes,
     planNodeEdges: schema.planNodeEdges,
     planNodeMessages: schema.planNodeMessages,
     planMirrorState: schema.planMirrorState,
   });
+  fake.insert(schema.repositories, { id: id(92), userId: id(91), name: 'repo' });
   fake.insert(schema.tasks, {
     id: id(90),
     userId: id(91),
@@ -85,6 +87,34 @@ async function fixture() {
 }
 
 describe('plan chat patches use the dispatch read', () => {
+  it('allows an unversioned update to a node created earlier in the same chat patch', async () => {
+    const f = await fixture();
+    const result = await applyAgentPatch(
+      f.db,
+      {
+        ops: [
+          { op: 'upsert', nodeRef: 'new-child', parentRef: id(1), title: 'New child', ordinal: 0 },
+          { op: 'upsert', nodeRef: 'new-child', body: 'Added in this patch', ordinal: 1 },
+        ],
+      },
+      { repositoryId: id(92), sourceTaskId: id(90), requireAllUpdateVersions: true },
+    );
+    expect(result.dropped).toEqual([]);
+    expect(result.created).toHaveLength(1);
+    expect(result.updated).toEqual(result.created);
+    const [created] = await f.db
+      .select()
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.id, result.created[0]!));
+    expect(created).toMatchObject({ body: 'Added in this patch', ordinal: 1 });
+  });
+
+  it('states the existing-node version rule and omits a zero-omission notice', async () => {
+    const f = await fixture();
+    const prompt = planChatStep.llm!.buildPrompt({ detected: f.detected, formValues: {} });
+    expect(prompt).toContain('Nodes created earlier in this same patch');
+    expect(prompt).not.toContain('0 whole node(s) omitted');
+  });
   it.each(['Edited replacement', ''])(
     'collects a legacy edit or an explicit end without stranding the stored turn: %s',
     async (message) => {

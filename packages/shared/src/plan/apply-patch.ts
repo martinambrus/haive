@@ -774,6 +774,7 @@ async function applyOps(
       op.parentRef !== undefined;
     if (
       opts.requireExpectedVersion &&
+      !result.created.includes(row.id) &&
       (writesFields || opts.requireAllUpdateVersions) &&
       op.expectedVersion === undefined
     ) {
