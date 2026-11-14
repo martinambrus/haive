@@ -6,14 +6,28 @@
 //   node scripts/build-release-manifest.mjs --version v0.2.0 \
 //     --api sha256:… --worker sha256:… --web sha256:… > release.json
 //
+// Opt in with --bundle-dir <tree>: read compose files and install/bundle-env.json from that
+// directory, and earlier release bundles from the invoking checkout's git tags (full history).
+// An archived channel tree need not carry its own .git directory.
+//
 // Everything else is derived from the tree, so a release cannot forget to update it:
 // `migrationHead` is the highest migration the corpus ships, and `contracts` is computed from
 // whether any migration after the baseline removes something.
 
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MIGRATIONS = fileURLToPath(new URL('../packages/database/migrations/', import.meta.url));
+// Kept equal to RELEASE_BUNDLE_FILES by build-release-manifest.test.mjs's schema round-trip.
+const BUNDLE_FILES = [
+  'docker-compose.yml',
+  'docker-compose.run.yml',
+  'docker-compose.gpu.yml',
+  'docker-compose.vulkan.yml',
+];
 
 function die(message) {
   console.error(`[release-manifest] ${message}`);
@@ -31,6 +45,47 @@ function arg(name, fallback = undefined) {
 /** Strip a leading `v`, so `v0.2.0` and `0.2.0` mean the same release. */
 function normalizeVersion(v) {
   return v.replace(/^v/, '');
+}
+
+const sha256 = (body) => `sha256:${createHash('sha256').update(body).digest('hex')}`;
+const git = (...args) => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+function buildBundle(dir, version) {
+  // Read only fixed names, in allowlist order. A missing overlay is legitimate; other I/O
+  // failures must abort rather than publish a hash record that silently omits a file.
+  const present = new Set(readdirSync(dir));
+  const files = Object.fromEntries(
+    BUNDLE_FILES.filter((name) => present.has(name)).map((name) => [
+      name,
+      sha256(readFileSync(join(dir, name))),
+    ]),
+  );
+  const env = JSON.parse(readFileSync(join(dir, 'install/bundle-env.json'), 'utf8'));
+  const tags = git('tag', '--list', 'v*', '--sort=refname')
+    .toString('utf8')
+    .trim()
+    .split('\n')
+    .filter((tag) => tag && normalizeVersion(tag) !== version);
+  const known = [];
+  for (const tag of tags) {
+    const ref = `refs/tags/${tag}`;
+    // Listing the tree distinguishes absent historical files from a failed git read. Do not
+    // turn every failed `git show` (including corruption) into an apparently missing file.
+    const names = new Set(
+      git('ls-tree', '--name-only', ref, '--', ...BUNDLE_FILES)
+        .toString('utf8')
+        .trim()
+        .split('\n'),
+    );
+    const record = Object.fromEntries(
+      BUNDLE_FILES.filter((name) => names.has(name)).map((name) => [
+        name,
+        sha256(git('show', `${ref}:${name}`)),
+      ]),
+    );
+    if (Object.keys(record).length > 0) known.push(record);
+  }
+  return { files, env, known };
 }
 
 const version = normalizeVersion(arg('version') ?? die('--version is required'));
@@ -74,6 +129,15 @@ const manifest = {
     ['api', 'worker', 'web'].map((k) => [k, arg(k)]).filter(([, v]) => v !== undefined),
   ),
 };
+
+const bundleDir = arg('bundle-dir');
+if (bundleDir !== undefined) {
+  try {
+    manifest.bundle = buildBundle(bundleDir, version);
+  } catch (error) {
+    die(`could not build compose bundle: ${error.message}`);
+  }
+}
 
 if (contracting.length > 0) {
   console.error(`[release-manifest] contracts: ${contracting.join(', ')}`);
