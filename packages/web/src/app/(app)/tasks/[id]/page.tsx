@@ -13,6 +13,7 @@ import type { FormSchema } from '@haive/shared';
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
 // browser bundle. timing.ts has no imports, so this subpath is browser-safe.
 import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing';
+import { TaskTestsTimeCell } from '@/components/task-tests-time-cell';
 import {
   api,
   getPlanOverview,
@@ -3407,6 +3408,7 @@ function TaskTotalTime({
             <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
             <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
           </div>
+          <TaskTestsTimeCell steps={liveSteps} nowMs={endMs} format={fmt} />
           <div className="flex flex-col items-end">
             <span className="font-mono text-lg text-amber-300">{fmt(idleMs)}</span>
             <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>
