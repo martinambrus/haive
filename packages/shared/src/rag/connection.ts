@@ -1,10 +1,11 @@
+import { isIP } from 'node:net';
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
-import { guardedPgSocket } from '../egress/index.js';
+import { assertUserPostgresDsn, guardedPgSocket, validateAllowlist } from '../egress/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
 const CONNECTION_CHECK_MS = 500;
@@ -114,16 +115,20 @@ export async function ragRowsAwaitReembed(
 
 /** The host a stored connection string dials, read as postgres.js reads it for the guarded socket:
  *  one name, no socket path, no slash. Null when that socket would refuse the string whatever the
- *  allowlist says, or when it does not parse. The parse error is dropped: Node's invalid-URL error
- *  carries its input, a password included. */
+ *  allowlist says, or when the driver parsed an invalid hostname (v4 preserves a nonnumeric
+ *  host:port as the host). Keep real IPv6 literals as dialled, without brackets. The parse error
+ *  is dropped: Node's invalid-URL error carries its input, a password included. */
 export function dsnDialHost(dsn: string): string | null {
   let client: postgres.Sql | undefined;
   try {
+    assertUserPostgresDsn(dsn);
     client = postgres(dsn, { max: 1 });
     const hosts = client.options.host as string[] | undefined;
     if (client.options.path || hosts?.length !== 1) return null;
     const host = hosts[0]!;
-    return host.includes('/') ? null : host;
+    if (isIP(host)) return host;
+    const verdict = validateAllowlist(host);
+    return verdict.ok && verdict.entries === 1 && !/[\s,:/[\]]/.test(host) ? host : null;
   } catch {
     return null;
   } finally {
@@ -261,6 +266,7 @@ function resolveExternal(
   embeddingDimensions: number,
   opts: RagConnectOptions,
 ): RagConnection {
+  assertUserPostgresDsn(connectionString);
   const pg = postgres(connectionString, {
     ...poolOptions(opts),
     ...(opts.trustedTarget ? {} : { socket: guardedPgSocket }),

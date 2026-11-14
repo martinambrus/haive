@@ -1,6 +1,6 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
 import { maintenanceStateSchema, type MaintenanceState } from '@haive/shared';
-import type { Sql } from 'postgres';
+import type { ISql, Sql } from 'postgres';
 import { attemptVersion } from './attempt-fields.js';
 import type { RunStatus, UpgradePhase } from './phases.js';
 
@@ -23,7 +23,7 @@ export interface UpgradeRun {
 }
 
 export async function ensureJournal(sql: Sql): Promise<void> {
-  await sql.unsafe(UPGRADE_JOURNAL_DDL, [], { simple: true } as Parameters<Sql['unsafe']>[2]);
+  await sql.unsafe(UPGRADE_JOURNAL_DDL, [], { simple: true });
 }
 
 /** The interrupted run, if any. At most one can exist — the partial unique index says so. */
@@ -124,7 +124,7 @@ export async function mergeMetadata(sql: Sql, id: string, patch: RunMetadata): P
 
 /** The right operand of jsonb `||` wins, so a state already recorded is never replaced. */
 export async function recordFoundState(
-  sql: Sql,
+  sql: ISql<{}>,
   id: string,
   state: MaintenanceState,
 ): Promise<void> {

@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';
 import postgres from 'postgres';
@@ -9,6 +10,7 @@ const CONNECTION_ERROR_CODES = new Set([
   'CONNECTION_DESTROYED',
   'CONNECTION_ENDED',
   'CONNECT_TIMEOUT',
+  'ECONNRESET', // An immediate accept-and-close can surface the native socket reset.
 ]);
 const unhandled: unknown[] = [];
 
@@ -17,6 +19,7 @@ type Shape = 'hangup-accept' | 'hangup-startup' | 'hangup-query' | 'never-answer
 interface FakeServer {
   port: number;
   connections: () => number;
+  active: () => number;
   close: () => Promise<void>;
 }
 
@@ -55,7 +58,11 @@ async function fakeServer(shape: Shape): Promise<FakeServer> {
       socket.destroy();
       return;
     }
-    if (shape === 'never-answer') return;
+    if (shape === 'never-answer') {
+      // Consume the startup bytes so the peer's eventual FIN is observed too.
+      socket.resume();
+      return;
+    }
     let started = false;
     socket.on('data', () => {
       if (shape === 'hangup-startup') {
@@ -74,6 +81,7 @@ async function fakeServer(shape: Shape): Promise<FakeServer> {
   return {
     port: (server.address() as AddressInfo).port,
     connections: () => count,
+    active: () => sockets.size,
     close: () =>
       new Promise<void>((resolve) => {
         for (const socket of sockets) socket.destroy();
@@ -98,13 +106,22 @@ async function runBegin(
     host: '127.0.0.1',
     port: server.port,
     username: 'u',
-    password: 'p',
+    password: randomBytes(12).toString('hex'),
     database: 'd',
     max: 1,
     connect_timeout: opts.connectTimeout,
     fetch_types: opts.fetchTypes,
+    eager_types: opts.fetchTypes,
     onnotice: () => {},
   });
+  // A fake timer must never outrun an actual TCP attempt. Both peers must have
+  // observed the close before advancing the reconnect backoff. Pool stats include
+  // attempts whose sockets the server has not accepted yet.
+  const drainSockets = async (): Promise<void> => {
+    do {
+      await setImmediate();
+    } while (server.active() || sql.stats.opening || sql.stats.connections);
+  };
   try {
     const timer: { id?: NodeJS.Timeout } = {};
     let settled = false;
@@ -126,15 +143,26 @@ async function runBegin(
       settled = true;
     });
     for (let i = 0; i < opts.windowMs + 10 && !settled; i++) {
-      await setImmediate();
+      if (shape === 'never-answer') {
+        // This peer deliberately keeps its socket open: start the deadline only
+        // after it has accepted the client's attempt.
+        while (!server.connections()) await setImmediate();
+      } else {
+        await drainSockets();
+      }
       await vi.advanceTimersByTimeAsync(1);
     }
     expect(settled).toBe(true);
     const verdict = await work;
     clearTimeout(timer.id);
+    await drainSockets();
     const connections = server.connections();
-    await vi.advanceTimersByTimeAsync(500);
-    await setImmediate();
+    // Observe late retries one timer step at a time too; a retry must complete
+    // its real I/O before the clock can move on to another one.
+    for (let i = 0; i < 500; i++) {
+      await vi.advanceTimersByTimeAsync(1);
+      await drainSockets();
+    }
     return { ...verdict, connections, lateConnections: server.connections() - connections };
   } finally {
     const closing = sql.end({ timeout: 0 });
@@ -146,6 +174,7 @@ async function runBegin(
 
 const expectRejectedWithoutStorm = (out: Outcome): void => {
   expect(out.settled, `settled (${out.connections} connections)`).toBe('rejected');
+  expect([...CONNECTION_ERROR_CODES], 'stable connection error code').toContain(out.code);
   expect(out.connections, 'connections the server saw').toBeLessThanOrEqual(15);
   expect(out.lateConnections, 'connections in the 500 ms after the rejection').toBe(0);
 };
@@ -155,8 +184,8 @@ describe('a store that hangs up while a connection starts', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] }),
   );
   afterEach(() => vi.useRealTimers());
-  // postgres.js starts its array-type query unawaited, so destroying a pool that is still starting
-  // rejects it with nobody listening; that is not what this file measures, and vitest would fail the run on it.
+  // Observe startup type loading and pool shutdown too: v4 must settle their errors without
+  // an unhandled rejection. Restore Vitest's listeners before asserting, even on failure.
   const saved: Array<(...args: unknown[]) => void> = [];
   beforeAll(() => {
     unhandled.length = 0;
@@ -168,9 +197,7 @@ describe('a store that hangs up while a connection starts', () => {
     await setImmediate();
     process.removeAllListeners('unhandledRejection');
     for (const listener of saved) process.on('unhandledRejection', listener);
-    // Only the driver's own unawaited type query may reject unheard, and only with a connection error.
-    const codes = unhandled.map((r) => (r as { code?: unknown } | null)?.code);
-    expect(codes.filter((c) => !CONNECTION_ERROR_CODES.has(String(c)))).toEqual([]);
+    expect(unhandled).toEqual([]);
   });
 
   const cases: Array<{ shape: Shape; fetchTypes: boolean }> = [
@@ -184,7 +211,9 @@ describe('a store that hangs up while a connection starts', () => {
 
   for (const { shape, fetchTypes } of cases) {
     it(`pg.begin rejects without a reconnect storm: ${shape}, fetch_types ${fetchTypes ? 'on' : 'off'}`, async () => {
-      const out = await runBegin(shape, { fetchTypes, connectTimeout: 2, windowMs: 1500 });
+      // v4 retries startup closes with backoff until connect_timeout, rather than a fixed
+      // number of attempts. Keep the observation beyond that deadline, at a small test limit.
+      const out = await runBegin(shape, { fetchTypes, connectTimeout: 0.1, windowMs: 1500 });
       expectRejectedWithoutStorm(out);
     }, 15_000);
   }

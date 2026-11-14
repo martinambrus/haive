@@ -1,3 +1,4 @@
+import type postgres from 'postgres';
 import dns from 'node:dns';
 import http from 'node:http';
 import https from 'node:https';
@@ -326,17 +327,20 @@ export function createGuardedFetch(baseSeams: ProbeSeams = {}) {
 
 export const guardedFetch = createGuardedFetch();
 
-type PgSocketOptions = { host: string[]; port: number[]; path?: string | undefined };
+// Node's overloaded Socket.end accepts optional bytes at runtime, but its callback-first
+// overload does not structurally match v4's SocketLike.end. Keep the cast at this boundary.
+type PgSocket = net.Socket & postgres.SocketLike;
+type PgSocketOptions = { host: string[]; port: number[]; path?: string | false | undefined };
 
-function refusedSocket(host: string): net.Socket {
+function refusedSocket(host: string): PgSocket {
   warnRefused(host);
-  const socket = new net.Socket();
+  const socket = new net.Socket() as PgSocket;
   setImmediate(() => socket.destroy(notFound(host)));
   return socket;
 }
 
 export function createGuardedPgSocket(seams: ProbeSeams = {}) {
-  return async (options: PgSocketOptions): Promise<net.Socket> => {
+  return async (options: PgSocketOptions): Promise<PgSocket> => {
     const host = options.host?.[0] ?? '';
     const lazy = lazyAllowlist(seams);
     if (
@@ -351,7 +355,7 @@ export function createGuardedPgSocket(seams: ProbeSeams = {}) {
       host,
       port: options.port[0]!,
       lookup: probeLookup(host, seams, lazy),
-    });
+    }) as PgSocket;
     (socket as net.Socket & { host?: string }).host = host;
     return socket;
   };

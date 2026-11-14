@@ -107,7 +107,13 @@ beforeAll(async () => {
     pg.conns += 1;
     socket.once('data', (chunk) => {
       pg.first.push(Buffer.from(chunk));
-      socket.end();
+      // This fixture measures reachability, not retry deadlines. A stable authentication FATAL
+      // settles both guarded and plain clients; v4 retries a startup EOF until connect_timeout.
+      const body = Buffer.from('SFATAL\0C28000\0Mprobe fixture refuses authentication\0\0');
+      const header = Buffer.alloc(5);
+      header[0] = 'E'.charCodeAt(0);
+      header.writeInt32BE(body.length + 4, 1);
+      socket.end(Buffer.concat([header, body]));
     });
     socket.on('error', () => {});
   });
@@ -192,7 +198,7 @@ function within<T>(promise: Promise<T>, ms = DEADLINE_MS): Promise<T | typeof NO
 
 // A real wait: the negative checks prove a refused probe never connects, which a single
 // event-loop turn is too short to show.
-const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 function sseEvents(text: string): Array<{ event: string; data: any }> {
   return text
@@ -307,6 +313,7 @@ describe('PR-8 the counters count', () => {
     expect(pg.conns).toBe(0);
     await new Promise<void>((resolve) => {
       const socket = net.connect(pg.port, '127.0.0.1', () => socket.write('x'));
+      socket.resume(); // Drain the fixture's PostgreSQL error response so FIN can close it.
       socket.on('close', () => resolve());
       socket.on('error', () => resolve());
     });

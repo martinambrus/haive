@@ -42,7 +42,7 @@
     "@types/node": "^26.6.4",
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
-    "postgres": "^3.4.5",
+    "postgres": "^4.1.1",
     "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "turbo": "^2.11.7",
@@ -83,9 +83,6 @@
       "@haive/shared": "workspace:*",
       "@haive/database": "workspace:*",
       "@haive/web-kit": "workspace:*"
-    },
-    "patchedDependencies": {
-      "postgres@3.4.9": "patches/postgres@3.4.9.patch"
     }
   }
 }

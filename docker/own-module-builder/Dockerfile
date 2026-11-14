@@ -7,7 +7,6 @@ RUN apk add --no-cache python3 make g++ libc6-compat git docker-cli docker-cli-b
  && corepack prepare pnpm@10.34.5 --activate
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
-COPY patches ./patches
 COPY packages/database ./packages/database
 COPY packages/shared ./packages/shared
 COPY packages/web-kit ./packages/web-kit

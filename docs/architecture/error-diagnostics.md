@@ -320,3 +320,28 @@ gate's ALWAYS_OPEN by exact path (`/^\/admin\/health$/`), still behind `requireA
 The stalled sweep re-drives step, cancel and start work; a lost stop-settle has no re-drive.
 `addOrRefuse` throws 503 `queue_unavailable` with a generic body: use it when nothing else will queue
 the work and a repeat is safe (auto-continue, merge abort).
+
+## PostgreSQL DSNs supplied through the application
+
+`assertUserPostgresDsn` (`@haive/shared/egress`) runs before postgres.js parses a typed or
+stored external/ddev RAG DSN, an external global KB DSN, a tooling probe DSN, or a stored DSN
+read by `dsnDialHost`. The rekey script checks an explicit `GLOBAL_KB_DB_URL` override too.
+It refuses the presence of `sslrootcert`, `sslcert` and `sslkey` (including empty values and
+`sslrootcert=system`), and explicit socket hosts in the authority or `host` query parameter.
+postgres.js v4 reads certificate files during construction, before a socket guard can run,
+and a CA file without verify-full can disable hostname checking. Refuse these parameters;
+never strip them and silently change TLS policy. Install `DATABASE_URL` and pools derived
+from it keep their configured policy. Ordinary `sslmode` choices stay supported.
+
+The guard follows the driver's tail/authority split, last-@ userinfo rule, duplicate-query
+precedence and authority percent decoding; a WHATWG parse of the entire DSN is different.
+An already stored `ragConnectionString` is refused at use with a fixed message naming only
+the parameter; the row stays stored and there is no migration. Seed-host extraction returns
+null before constructing the driver for such a DSN. Change the configuration to resume use.
+
+Both catches in `POST /tooling/test-postgres` and the catch in `POST /global-kb/test-db` use
+`userPostgresErrorMessage`: fixed copy for refused parameters, connection refusal, DNS,
+connection timeout and authentication codes, with a fixed generic fallback for other
+parser, TLS, filesystem and server errors. Never return a raw driver message here, even
+when no query parameters were bound: an ENOENT message previously exposed a file-existence
+oracle. `safeErrorMessage` keeps its existing contract for other callers.

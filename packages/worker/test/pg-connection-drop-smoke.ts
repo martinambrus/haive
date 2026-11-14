@@ -72,8 +72,14 @@ async function settles(p: Promise<unknown>, ms: number): Promise<boolean> {
   }
 }
 
-const errorCode = (err: unknown): string =>
-  (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err));
+// Drizzle wraps a query failure in cause; sql.begin in v4 preserves the server FATAL.
+const isBackendTermination = (err: unknown): boolean => {
+  for (let current = err, depth = 0; current != null && depth < 5; depth++) {
+    if (current instanceof postgres.PostgresError && current.code === '57P01') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+};
 
 async function main(): Promise<void> {
   const db = createDatabase(url);
@@ -84,14 +90,14 @@ async function main(): Promise<void> {
         .transaction(async (tx) => {
           await tx.execute(sql.raw(sleeper(marker)));
         })
-        .then(() => 'committed', errorCode),
+        .then(() => false, isBackendTermination),
       dropBackend(marker),
     ]);
     await sleep(500);
     check('the backend under a transaction was dropped', dropped === 1, dropped);
     check(
-      'the transaction is rejected as a closed connection',
-      outcome === 'CONNECTION_CLOSED',
+      'the transaction is rejected with the backend termination SQLSTATE',
+      outcome === true,
       outcome,
     );
     check('the drop kills nothing', uncaught.length === 0, uncaught);

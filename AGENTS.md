@@ -157,26 +157,23 @@ in-progress task steps.
 - Zod is used for both validation and for generating `FormSchema` field metadata where possible.
 - Server logs use `pino` from `@haive/shared/logger`, never `console.log`. The CLI in `packages/database/src/migrate/` emits JSON through its own `emit()`: shared depends on database, so importing shared would create a cycle.
 - Host-side IO on a repository path goes through `@haive/shared/fs-safe`, never through a path-based `node:fs` call. The worker and the api run as root over trees that repositories and sandboxed agents write, so a path resolved by name is a path they can redirect; the primitives take `(anchor, rel)`, resolve `rel` one held directory descriptor at a time, refuse a link in any component, and verify the held inode through `/proc/self/fd` (Node-only, Linux-only, out of the root barrel and of every subpath web imports). Anchors are `<storage>/<userId>/<repoId>` or a repository's `localPath` — never `.haive`, a worktree or an uploads dir, since the sandbox mounts the whole repository root read-write. `packages/shared/test/fs-ratchet.test.ts` pins the remaining path-based calls per file (`fs-ratchet.json`, exact counts): a conversion lowers its entry, and a new call needs a reason in the PR. A child process follows the same rule: `runTool` (`worker/src/repo/tool-spawn.ts`) hands `tar`, `unzip` and `pdftotext` what they read and write as held descriptors, named `/proc/self/fd/N` in the child, never a path they would resolve by name, and runs them with PATH and LANG only, as uid 65534 under a root worker. A tool that re-opens its input (unzip seeks) needs that uid to be able to read it. Every upload is written 0644, and a file that is not is copied through the descriptor into a private, already unlinked file the uid can read (`toolReadable`), so the original's mode is never changed.
-- postgres.js 3.4.9 is patched (`patches/postgres@3.4.9.patch`, pnpm `patchedDependencies`)
-  in `src/` and `cjs/src/`. The closed-socket hunk stops ROLLBACK's
-  `setImmediate` throwing a fatal TypeError (porsager/postgres#1209 was folded into v4).
-  Job pools need `end({ timeout: 5 })`: bare `end()` can hang after a drop.
-  `smoke:pg-drop` shows whether a later release carries the fix and the patch can go.
-  The startup hunk bounds `closed()` to `hosts × 3` closes; unpatched 3.4.9 reconnects forever
-  (600–1000+ connections in 1.5 s on a hanging-up store, even with `fetch_types: false`).
-  `pg-startup-storm.test.ts` pins every shape. Unchanged startup guards and `smoke:pg-drop`
-  go red on v4 for deadline/error-code differences (57P01 vs CONNECTION_CLOSED); re-key on upgrade.
-  The third hunk fences closed, rejected AND committed transactions: a kept `tx` cannot write
-  through a reused connection. Savepoints share the flag; failed savepoints can roll back and
-  continue their parent. Close rejects pending queries.
-  `pg-transaction-fence.test.ts` (database, CI) covers both builds. On upgrade run it against a
-  scratch **unpatched** install with `PG_TX_FENCE_TEST_URL`; drop the hunk only when it passes.
-  v4.1.1 passed it unpatched before the committed case was added.
-  Api/worker error-level handlers mitigate unawaited `fetchArrayTypes` rejection
-  (`api/src/lib/unhandled-rejection.ts`, `worker/src/index.ts`); `tsx watch` does not restart a crash.
-  Images copy `patches/` before install; patch/lockfile changes reach dev via `pnpm docker rebuild`.
-  Dependabot leaves postgres to a person (`.github/dependabot.yml`): a bump without updating
-  its patch fails install with `ERR_PNPM_UNUSED_PATCH`.
+- postgres.js v4.1.1 is unpatched; the 3.4.9 patch and its pnpm entry are gone.
+  `pg-startup-storm.test.ts` pins bounded startup retries through `connect_timeout`, stable
+  connection error codes and zero unhandled rejections, with `eager_types` on for type loading.
+  Retries now back off until the deadline, rather than stopping after `hosts × 3` closes;
+  disabling `connect_timeout` permits indefinite retries.
+  `pg-transaction-fence.test.ts` (database, CI) covers closed, rejected and committed handles,
+  nested savepoints and parent recovery on unpatched v4 through ESM and Node 26's
+  `require().default` (the same ESM implementation). Keep it green on upgrades.
+  `smoke:pg-drop` pins backend-drop survival, pool reuse and RAG/global-KB closure. A terminated
+  transaction reports the server's `PostgresError` SQLSTATE `57P01`; a later query on its closed
+  connection reports `CONNECTION_CLOSED`. Decisions use codes and classes, never messages.
+  Keep `end({ timeout: 5 })` on job pools to bound shutdown while queries are outstanding.
+  `pg-end-timeout.test.ts` pins shutdown: in-flight, queued, begin and reserve work reject
+  with `CONNECTION_DESTROYED` at the fake-clock deadline.
+  Api/worker error-level unhandled-rejection handlers remain as defense in depth; v4's pool
+  handles type-loading rejections itself. `tsx watch` does not restart a crash.
+  Dependabot may update postgres again. Deploy dependency changes with `pnpm docker rebuild`.
 - Secrets are stored via envelope encryption: per-user DEK encrypts the secret, master KEK from `CONFIG_ENCRYPTION_KEY` encrypts the DEK. AES-256-GCM throughout.
 - Drizzle schema lives in `packages/database/src/schema/`. Migrations are hand-written SQL in `packages/database/migrations/`, applied in filename order by the runner in `packages/database/src/migrate/`, one transaction per file with its `schema_migrations` row written inside it. **To add one:** iterate with `pnpm db:push`, then write `NNNN_name.sql` in that directory, keeping the guarded idempotent style (`ADD COLUMN IF NOT EXISTS`, `DO $$ … EXCEPTION WHEN duplicate_object`) — a developer's database is often legitimately AHEAD of the baseline and must survive your file. Declare a new column LAST in its Drizzle table: `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes the two schemas differ by column ORDER and turns `schema-parity` red — a failure no migration can fix. Never edit an applied migration: its sha256 is recorded, and a change hard-fails every install that ran it. `0000_baseline.sql` is generated and FROZEN; re-cutting the schema means a later numbered baseline, never an edit to that one. `pre-baseline/` is the record written before the directory was executable and is NEVER run — see its README: 19 of those files are unsafe to replay and one is destructive.
 - Each router in `api/src/routes/` mounts its own `requireAuth`, except the WebSocket, task/MCP-token and

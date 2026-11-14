@@ -90,11 +90,9 @@ export async function waitForPing(sql: Sql, timeoutMs = 30_000): Promise<void> {
  * internal semicolons. The simple protocol accepts multiple statements in one message, which is
  * what makes splitting unnecessary.
  *
- * The cast is required, not sloppy: postgres.js READS `options.simple` at runtime
- * (`src/index.js:118-126`) but its `UnsafeQueryOptions` type declares only `prepare`. Passing it
- * explicitly rather than relying on the `args.length === 0` default keeps the intent visible and
- * survives a change to that default.
+ * postgres.js v4 exposes `simple` in UnsafeQueryOptions. Keep it explicit so the
+ * whole script uses one simple-protocol message even if the driver's defaults change.
  */
 export async function runSqlScript(sql: Sql | TransactionSql, text: string): Promise<void> {
-  await sql.unsafe(text, [], { simple: true } as Parameters<Sql['unsafe']>[2]);
+  await sql.unsafe(text, [], { simple: true });
 }

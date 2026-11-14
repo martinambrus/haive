@@ -19,6 +19,7 @@ import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { globalKbEntries } from '@haive/shared/global-kb';
+import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { globalKbTopicKey } from '../src/step-engine/steps/_global-kb-promote.js';
 
 const apply = process.argv.includes('--apply');
@@ -31,6 +32,7 @@ const kbUrl =
     return u.toString();
   })();
 
+if (process.env.GLOBAL_KB_DB_URL) assertUserPostgresDsn(kbUrl);
 const pg = postgres(kbUrl, { max: 2 });
 const db = drizzle(pg);
 
@@ -40,9 +42,14 @@ try {
   for (const r of rows) {
     const next = globalKbTopicKey(r.category, r.facets ?? {});
     if (next && next !== r.topicKey) {
-      console.log(`[rekey] ${r.status.padEnd(8)} "${r.title}": ${r.topicKey ?? '(none)'} -> ${next}`);
+      console.log(
+        `[rekey] ${r.status.padEnd(8)} "${r.title}": ${r.topicKey ?? '(none)'} -> ${next}`,
+      );
       if (apply) {
-        await db.update(globalKbEntries).set({ topicKey: next }).where(eq(globalKbEntries.id, r.id));
+        await db
+          .update(globalKbEntries)
+          .set({ topicKey: next })
+          .where(eq(globalKbEntries.id, r.id));
       }
       changed += 1;
     }

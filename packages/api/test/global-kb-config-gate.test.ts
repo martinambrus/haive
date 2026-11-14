@@ -1257,7 +1257,7 @@ describe('POST /global-kb/test-db', () => {
     expect(refused.status).toBe(200);
     expect(await refused.json()).toEqual({
       ok: false,
-      message: 'connect ECONNREFUSED 169.254.169.254:5432',
+      message: 'PostgreSQL connection failed',
     });
   });
 });

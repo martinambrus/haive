@@ -1,4 +1,5 @@
 import { safeErrorMessage } from '@haive/shared/logger';
+import { userPostgresErrorMessage } from '@haive/shared/egress';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
@@ -715,7 +716,7 @@ globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
       message: mode === 'internal' ? 'Internal global KB DB reachable' : 'External DB reachable',
     });
   } catch (err) {
-    return c.json({ ok: false, message: safeErrorMessage(err) });
+    return c.json({ ok: false, message: userPostgresErrorMessage(err) });
   } finally {
     if (conn) await conn.close().catch(() => {});
   }

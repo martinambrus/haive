@@ -34,7 +34,7 @@ test('the upgrade banner keeps its actions on a phone screen', async ({ page, sq
   // The empty override owes this repository no AGENTS.md rules block. Unset, it follows Haive's
   // default rules and, recording no block, is owed that one as a new item: each step below would
   // then also have the block to review.
-  await sql`update repositories set applicable_template_ids = ${sql.array([template.id])},
+  await sql`update repositories set applicable_template_ids = ${[template.id]},
                                     agent_rules_override = ''
             where id = ${repoId}`;
   const [onboarding] = await sql<{ id: string }[]>`
