@@ -254,6 +254,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   `step-ownership.ts`, `queues/boot-requeue.ts`, `queues/stalled-redrive.ts`, `dead-task-boot.ts`.
 - [Merge conflicts](docs/architecture/merge-conflicts.md): the shared git merge core, fixer
   baselines and leftovers. `git-merge.ts`, `12-worktree-cleanup`, `01-plan-merge`.
+- [Learning reconcile](docs/architecture/learning-reconcile.md): step 11 telemetry event.
 - [Workflow commits](docs/architecture/workflow-commits.md): gate-3 message, excerpts, approval, gitlinks.
   `10-gate-3-commit`, `_commit-diff.ts`, `_gitlink-registration.ts`.
 
@@ -339,9 +340,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 - [Human active time](docs/architecture/human-time.md): presence epochs, reading estimates, the
   fail-open tab lease and task-page delivery. `ActivityClock`, `useActiveTime`, `visibleWords`.
-
 - [Sessions](docs/architecture/session-recovery.md): browser recovery.
-
 - [Diff viewer](docs/architecture/diff-viewer.md): text highlights, change maps and pane scrolling.
   `CommitDiffViewer`, `buildDiffRows`, `buildChangeMarkers`.
 - [Markdown rendering](docs/architecture/markdown-rendering.md): one renderer, images as links,

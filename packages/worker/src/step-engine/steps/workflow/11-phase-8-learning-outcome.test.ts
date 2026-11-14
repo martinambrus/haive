@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { writeFile } from 'node:fs/promises';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
 const io = vi.hoisted(() => ({
@@ -430,7 +429,6 @@ describe('behavior fixture', () => {
     };
     // The real investigation renderer receives the clock; normalize only its timestamp.
     const serialized = JSON.stringify(fixture).replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<now>');
-    if (process.env.AMR_FIXTURE_OUT) await writeFile(process.env.AMR_FIXTURE_OUT, serialized);
     expect(JSON.parse(serialized)).toMatchSnapshot();
   });
 });
