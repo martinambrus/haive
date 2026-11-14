@@ -3,7 +3,7 @@
 `11-phase-8-learning` records one `learning.reconciled` task event (payload version 1)
 for each logical apply attempt, including refinement submissions and failed applies.
 The event is measurement telemetry. It changes no prompt, form, learning bytes, promotion,
-or step output. P1.2 learning provenance and P1.3 RAG attribution remain separate work.
+or step output. Learning files now carry separate P1.2 provenance (below); P1.3 RAG attribution remains separate work.
 
 ## Identity and replay
 
@@ -81,8 +81,8 @@ the timing backfill scripts all filter by type; the only unfiltered reader is
 `11-phase-8-learning-outcome.test.ts` exercises each stage, replay and deliberate Retry,
 partial insert/update/delete/investigation/promotion failures, failed event insertion,
 and body-free payloads. Its snapshot was captured on unchanged production code: prompt,
-form, apply output, written bytes and promotion arguments compare identically after
-normalizing only the investigation clock. `step-runner-park-fold.test.ts` pins captured
+form, apply output, learning content and promotion arguments compare identically after
+normalizing the investigation clock and stripping the separately tested P1.2 footer. `step-runner-park-fold.test.ts` pins captured
 generation delivery. The committed tests pin deduplication through a fake store; the real
 `ON CONFLICT` path was checked once on a throwaway PostgreSQL before merge (one row after
 replay, two after an explicit Retry) and has no committed test.
@@ -96,3 +96,67 @@ exists gets a suffixed id (a pre-existing behaviour of the insert path), so a re
 events over-state real inserts if summed across generations. Drafts rejected in full are
 re-rolled before the form (`shouldRetryPreForm`); only the final invocation's reply is
 counted, so machine rejections on earlier re-rolls leave no trace.
+
+## Learning provenance (P1.2)
+
+Each learning written by `applyLearningOps` carries a trailing HTML comment in the reserved
+`haive-learning-provenance` namespace. Its JSON has `version: 1`, `origin` and `updates`. An
+insert's origin records the writer's task id, UTC ISO timestamp and `bodyHash`; an update
+retains that origin and appends its own task id, UTC timestamp, `beforeHash` and `afterHash`.
+`LEARNING_UPDATE_HISTORY_MAX` is **5**: origin is retained indefinitely, the last five updates
+are retained, and older update records are dropped. Within one apply, repeated updates to one
+target chain from the bytes the preceding operation successfully wrote. An update whose
+after-hash equals its before-hash returns the prior file byte-for-byte, without a new date or
+history slot, including for legacy files.
+
+Hashes are SHA-256 over the heading and prose with reserved metadata removed, CRLF normalised
+to LF, and exactly one final LF. Rendering and both sides of an update use that same
+normalisation, so the origin and successive update hashes form one chain. They identify
+content, not a signature against direct file changes. No new telemetry is added, and no body
+or transcript is copied into a new record. A file without supported provenance reads as
+`origin: "unknown"`; updating it keeps that unknown origin while recording the correction.
+Never infer an origin from a filename, commit date, task title or the task that first reads
+it. Malformed, duplicate, non-trailing or unsupported metadata is also unknown.
+
+The deterministic writer owns the footer. It strips reserved blocks from proposed content to a
+fixpoint: removing an inner block can reassemble a marker, so stripping repeats until no
+further block can be removed. This includes malformed/unclosed blocks and quoted samples.
+Origin comes only from the prior stored file. Removing or forging metadata in a proposed or
+staged full-body rewrite cannot remove or replace that origin. A staged draft cleared of prose
+is removed even if its footer remains; metadata-only edits do not count as human body edits.
+Apply rebuilds the footer after reviewer edits, so hashes describe approved content and dates
+for content-changing updates describe the write rather than its earlier preview.
+
+A trailing comment alone leaks into a short learning's 200-character excerpt and RAG chunks.
+`learningContent` strips it before `learningExcerpt` takes its heading-free excerpt and before
+`extractMarkdownSections` extracts learning sections. Onboarding's `10-rag-populate` and the
+workflow's pre-sync/reindex use that same extractor: metadata reaches neither indexed text,
+embeddings, chunk hashes nor the step-11 listing. Legacy text without a reserved marker stays
+byte-identical. Adding the footer leaves its indexed chunks and hashes identical: **no reindex
+is required**. Body corrections use the normal incremental sync.
+
+The existing human knowledge diff shows origin task/date in the step-11 preview and the stored
+file at the 11b commit gate. Raw file downloads and Editor/Terminal retain the record. An
+agent opening the raw file also sees the footer; provenance is absent from listed and
+retrieved text, not from raw-file reads. There is no separate learning management UI/API to
+extend. Retrieval and the playground keep showing learning content only. Prompt, form,
+admission rules, reconciliation decisions, event counts and apply output retain their
+contracts.
+
+Learnings remain repository markdown, not database rows. Commit/push/merge,
+clone/import/export, legacy relocation and reset carry or remove the whole file, including
+provenance. Learning bodies are not onboarding templates; no manifest or schema-version change
+is needed. Local investigations are distinct KB runbooks. Global candidates/promoted
+investigations already carry `sourceTaskId`, `createdAt` and supersession links in the global
+KB; their formats stay unchanged. Files authored outside the deterministic writer have no
+trustworthy task stamp and read as unknown unless they already carry a supported record;
+import never invents one.
+
+`shared/test/learning-provenance.test.ts` pins origin, bounded history, before/after identity,
+unknown legacy records, nested-marker stripping at depths 3 and 6, unchanged-update replay,
+CRLF hash continuity and stable parse/render. Worker `11-phase-8-learning-provenance.test.ts`
+pins actual file writes, staged edits, both reader exclusions, nested markers through preview
+and staged full-body replacement, unchanged indexed hashes, repeated-target updates and
+clearing prose with a footer left. The reconcile snapshot strips only the separately tested
+footer from learning files; its original prompt/form/output/content snapshot remains
+unchanged.
