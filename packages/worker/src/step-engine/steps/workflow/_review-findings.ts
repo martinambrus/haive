@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { findingFingerprint } from '@haive/shared/step/review';
+export { findingFingerprint } from '@haive/shared/step/review';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
@@ -20,9 +21,6 @@ const log = logger.child({ module: 'review-findings' });
 /* must not be able to fail a review step.                             */
 /* ------------------------------------------------------------------ */
 
-const FP_UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const FP_DIGITS_RE = /\d+/g;
-
 /**
  * A concrete `path/to/file.ext:123` citation. The extension must start with a letter so
  * a version string (`1.2:30`) or a clock time (`12:30`) cannot pose as evidence.
@@ -36,26 +34,6 @@ const FILE_LINE_EVIDENCE_RE = /[\w./-]*\w\.[A-Za-z][A-Za-z0-9]{0,11}:\d+/;
 /** Does any of these texts cite a file and a line? */
 export function hasFileLineEvidence(...texts: (string | undefined | null)[]): boolean {
   return texts.some((t) => typeof t === 'string' && FILE_LINE_EVIDENCE_RE.test(t));
-}
-
-/** Stable signature of a finding, namespaced by the reviewer that raised it.
- *
- *  Unlike `fixLoopFingerprint`, this KEEPS the path: there, the path is incidental
- *  detail in a prose diagnosis; here it is half the finding's identity — "npe in
- *  a.ts" and "npe in b.ts" are two findings, not one. Line numbers and ids are
- *  stripped so the same defect still hashes equal after the file around it moves.
- */
-export function findingFingerprint(reviewerId: string, path: string, issue: string): string {
-  const normalized = issue
-    .toLowerCase()
-    .replace(FP_UUID_RE, '')
-    .replace(FP_DIGITS_RE, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return createHash('sha256')
-    .update(`${reviewerId}\0${path.trim().toLowerCase()}\0${normalized}`)
-    .digest('hex')
-    .slice(0, 64);
 }
 
 /** Split a reviewer's line reference into a start/end pair.

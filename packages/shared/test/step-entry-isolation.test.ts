@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = path.join(ROOT, 'src');
-const STEP = path.join(SRC, 'step/index.ts');
+const ENTRIES = new Map([
+  ['./step', path.join(SRC, 'step/index.ts')],
+  ['./step/prompts', path.join(SRC, 'step/prompts.ts')],
+  ['./step/review', path.join(SRC, 'step/review.ts')],
+]);
 const manifest = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
   exports: Record<string, { import: string }>;
 };
@@ -49,14 +53,19 @@ const cachedSpecifiers = (file: string): string[] => {
   return found;
 };
 
-function closureOf(entry: string, seen = new Set<string>()): Set<string> {
+function closureOf(entry: string, seen = new Set<string>(), emitted = false): Set<string> {
   if (seen.has(entry)) return seen;
   seen.add(entry);
   for (const spec of cachedSpecifiers(entry)) {
     if (spec.startsWith('.')) {
-      closureOf(path.resolve(path.dirname(entry), spec.replace(/\.js$/, '.ts')), seen);
-    } else if (spec === '@haive/shared/step') {
-      seen.add(STEP);
+      closureOf(
+        path.resolve(path.dirname(entry), emitted ? spec : spec.replace(/\.js$/, '.ts')),
+        seen,
+        emitted,
+      );
+    } else {
+      const stepEntry = ENTRIES.get(spec.replace('@haive/shared/', './'));
+      seen.add(stepEntry ?? spec);
     }
   }
   return seen;
@@ -67,12 +76,35 @@ describe('step SDK entry isolation', () => {
     expect(specifiersOf(parse(path.resolve(ROOT, manifest.exports['./step']!.import)))).toEqual([]);
   });
 
+  it('maps each SDK entry to its own emitted types and JavaScript', () => {
+    for (const [name, source] of ENTRIES) {
+      const output = source.replace(SRC, './dist').replace(/\.ts$/, '');
+      expect(manifest.exports[name], name).toEqual({
+        types: `${output}.d.ts`,
+        import: `${output}.js`,
+      });
+    }
+  });
+
+  it('keeps prompt runtime portable and review runtime limited to the designed crypto import', () => {
+    for (const name of ['./step/prompts', './step/review']) {
+      const entry = path.resolve(ROOT, manifest.exports[name]!.import);
+      const external = [...closureOf(entry, new Set(), true)].filter(
+        (file) => !file.startsWith(path.join(ROOT, 'dist') + path.sep),
+      );
+      expect(external, name).toEqual(name === './step/review' ? ['node:crypto'] : []);
+    }
+  });
+
   it('is unreachable from every other shared entry, including the root and web-used entries', () => {
     // Check all public entries, so a new web import needs no separate allowlist update.
     for (const [name, target] of Object.entries(manifest.exports)) {
-      if (name === './step') continue;
       const source = path.join(SRC, target.import.replace('./dist/', '').replace(/\.js$/, '.ts'));
-      expect([...closureOf(source)], name).not.toContain(STEP);
+      const closure = closureOf(source);
+      for (const [stepName, stepEntry] of ENTRIES) {
+        if (name !== stepName)
+          expect([...closure], `${name} -> ${stepName}`).not.toContain(stepEntry);
+      }
     }
   });
 });

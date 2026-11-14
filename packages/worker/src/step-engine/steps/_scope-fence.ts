@@ -1,3 +1,5 @@
+import { SCOPE_BOUNDARY } from '@haive/shared/step/prompts';
+export { SCOPE_BOUNDARY } from '@haive/shared/step/prompts';
 import { TASK_SCOPE_RULES } from '@haive/shared';
 
 // Single source of truth for the review SCOPE FENCE, shared across the always-on
@@ -18,43 +20,6 @@ import { TASK_SCOPE_RULES } from '@haive/shared';
 //
 // The intent is unchanged: reviewers still SEE and REPORT pre-existing problems.
 // What changes is what a finding outside the change costs.
-
-/** The boundary itself, worded identically for every disposition below.
- *
- *  Blast radius is IN scope — this is the same rule 08c2's auditor already applies —
- *  so a stale caller or a broken consumer of a changed contract is never fenced out.
- *  Ownership is independent of causality: upstream code can supply evidence and
- *  observations, but newly reaching it never authorizes rewriting it.
- *
- *  The unit is LINES, not files. It was files, because a list of paths was all a reviewer
- *  had — which made a pre-existing defect anywhere in a 5,000-line file a legitimate
- *  blocking finding against a three-line edit, and a reviewer reading that file could not
- *  have told the difference anyway. `changedFilesBlock` now annotates each path with the
- *  lines the change actually wrote, so the boundary can say what it always meant. The
- *  enclosing function or block stays in scope with them: an edit's effect is not confined
- *  to the edited line, and a defect the edit created three lines below it is this change's.
- *
- *  Unmeasured stays WIDE. A file whose note is missing (an agent-reported path git never
- *  saw, a diff that could not be read) is wholly in scope — the same behaviour as before
- *  notes existed. Narrowing on a measurement nobody made is how a real defect gets waved
- *  through, and it is the one direction this fence must never fail in. */
-const SCOPE_BOUNDARY = [
-  ...TASK_SCOPE_RULES,
-  '',
-  'SCOPE FENCE. IN SCOPE = the lines this change wrote — listed per file in the changed-files',
-  'block — together with the function or block each changed line sits in, PLUS any code whose',
-  'contract this change alters: a caller of a signature that changed, a consumer of a schema,',
-  'format or return value that changed, and any path this change makes newly reachable. A',
-  'problem in code this change did not write and does not newly expose is OUT OF SCOPE,',
-  'however real it is — including code inside a file this change touched but outside the lines',
-  'it wrote. Where a file carries no line note its lines were not recorded, and the WHOLE file',
-  'is in scope for review, subject to the ownership boundary above. Being newly reachable',
-  'does not authorize upstream repairs. If causality is uncertain, investigate and report the',
-  'uncertainty; do not broaden the editing scope to make it disappear.',
-  'A nested repository entry describes a checkout boundary, not changed file contents.',
-  'Its contents are not all new or wholly in scope: review its integration, and only review',
-  'files inside it when separately listed as changed or reached by demonstrated blast radius.',
-] as const;
 
 /** Disposition A — a reviewer with a `findings` list and a `## INSIGHTS` sink.
  *  Used by peer / operational / performance / simplicity. Mirrors what
