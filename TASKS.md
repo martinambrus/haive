@@ -650,6 +650,22 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T675 · FNF[plan-chat-bound] · bounded plan chat and plan write fence lows, after #1178 (+9)
+
+status: open · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md).
+
+1. An oversized original message is kept only in `detect_output`; a reset that nulls step output loses it.
+2. `retryPlanConflict` is safe by convention only: nothing stops a caller from passing a closure that reuses a stale read.
+3. The 00b, 01-build and 02-coverage ordinal upserts can now hit a version conflict and have no retry.
+4. A failed snapshot removal is logged and never retried until the next boot reap.
+5. Failed plan jobs are removed, so their failure is visible only in logs.
+6. No runner-level test that an oversized edit is refused on the converted edit form (shared and worker unit tests cover it).
+7. No multi-chunk test that chunks written before a sequencing conflict drop out of the rebuilt pass (needs more than 500 ops).
+8. AGENTS.md is within a few bytes of the 32 KiB Codex limit; any addition must trim first.
+9. Owed live checks: each CLI reads the per-turn snapshot from its sandbox path; the Docker file-subpath mount works; rerun a large plan chat on Ollama.
+
 ### T674 · FNF[release-bundle-publish] · release bundle publish lows, after #1180 (+5)
 
 status: open · kind: fix · found: #1180 review 2026-11-14 · priority: P4
@@ -2016,6 +2032,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Bounded plan chat, AIDE² P4 (#1178): plan chat sends the answered turn plus the newest earlier turns that fit, reads the plan from a versioned per-turn snapshot outside the tracked tree (removed after the run, reaped at boot), and a plan write retries a version conflict from a fresh read. Lows filed as T675.
 
 - Release bundle image, T648 PR 3 (#1180): every release and channel build publishes `haive-release:<v>` holding `release.json` and the compose bundle, built before the GitHub Release. Lows filed as T674.
 
