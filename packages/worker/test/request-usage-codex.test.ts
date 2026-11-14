@@ -75,8 +75,15 @@ describe('Codex request watermarks', () => {
     const events = structuredClone(fixture);
     let suffix = '';
     const u = events[5].params.tokenUsage;
-    if (kind === 'jump') u.total.inputTokens++;
-    if (kind === 'reset') u.total.inputTokens = 500;
+    if (kind === 'jump') {
+      u.total.inputTokens++;
+      u.total.totalTokens++;
+    }
+    if (kind === 'reset') {
+      u.total.inputTokens = 500;
+      u.total.cachedInputTokens = 400;
+      u.total.totalTokens = u.total.inputTokens + u.total.outputTokens;
+    }
     if (kind === 'missing-last') delete u.last;
     if (kind === 'bad-last') u.last.cachedInputTokens++;
     if (kind === 'negative') u.last.outputTokens = -1;
@@ -87,7 +94,11 @@ describe('Codex request watermarks', () => {
     if (kind === 'malformed') suffix = '{bad';
     if (kind === 'no-completion') events.pop();
     if (kind === 'no-start') events.splice(3, 1);
-    expect(read(events, suffix).getRequestUsage().coverage).toBe('incomplete');
+    const capture = read(events, suffix).getRequestUsage();
+    expect(capture.coverage).toBe('incomplete');
+    if (kind === 'jump' || kind === 'reset') {
+      expect(capture.reasons).toEqual(['watermark-delta', 'final-usage-mismatch']);
+    }
   });
   it('retains request models across rerouting and marks mixed coverage incomplete', () => {
     const events = structuredClone(fixture);

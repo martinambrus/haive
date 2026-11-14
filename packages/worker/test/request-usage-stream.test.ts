@@ -11,7 +11,12 @@ const read = (events = structuredClone(fixture), suffix = '') => {
   return c.getRequestUsage();
 };
 describe('Claude request coverage', () => {
-  const billingCases = JSON.parse(
+  const billingCases: {
+    name: string;
+    events: typeof fixture;
+    coverage: 'complete' | 'incomplete';
+    reasons: string[];
+  }[] = JSON.parse(
     readFileSync(
       new URL('./fixtures/streams/request-claude-billing.json', import.meta.url),
       'utf8',
@@ -123,6 +128,18 @@ describe('Claude request coverage', () => {
     expect(capture.modelCoverage).toBe('mixed');
     expect(capture.coverage).toBe('incomplete');
     expect(capture.requests?.map((r) => r.model)).toEqual(['model-a', 'model-b']);
+  });
+  it('rejects two results after all assistant events solely for result-count', () => {
+    const events = structuredClone(fixture);
+    const second = structuredClone(events[3]);
+    second.usage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    };
+    events.push(second);
+    expect(read(events)).toMatchObject({ coverage: 'incomplete', reasons: ['result-count'] });
   });
   it('keeps steered coverage incomplete even with reconciled per-turn sums', () => {
     const events = structuredClone(fixture);
