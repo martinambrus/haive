@@ -612,25 +612,17 @@ export function createStreamJsonCollector(
         sum.cacheCreationTokens === billed.cacheCreationTokens &&
         (!outputKnown || sum.outputTokens === billed.outputTokens);
       const billedUsages = [...billedUsageByModel.values()];
-      // If the ledger itself partitions the priced prompt, every observed model
-      // must have a matching vector. This catches multiple billing aliases whose
-      // combined tokens are inside result.usage. Otherwise unrelated ledger-only
-      // calls (even a ledger containing only titling) cannot disprove coverage.
-      const billingCoversPricedPrompt =
-        billedUsages.length > 0 &&
-        billedUsages.every((billed) => billed !== null) &&
-        (['inputTokens', 'cacheReadTokens', 'cacheCreationTokens'] as const).every(
-          (key) => billedUsages.reduce((n, billed) => n + billed![key], 0) === sum(key),
-        );
-      for (const [model, sum] of modelSums) {
+      for (const [model, modelSum] of modelSums) {
         // Mixed/unknown models already withhold coverage. Probe aliases only for
         // the single observed model, keeping reconciliation linear in stream size.
+        // With no same-name entry, some billed entry must carry exactly the observed
+        // vector: a ledger that only holds other calls (titling, another model)
+        // cannot corroborate it, so coverage stays incomplete.
         if (modelCoverage !== 'single' || billedUsageByModel.size === 0) break;
         const matches =
           model !== null && billedUsageByModel.has(model)
-            ? billedMatches(sum, billedUsageByModel.get(model))
-            : !billingCoversPricedPrompt ||
-              billedUsages.some((billed) => billedMatches(sum, billed));
+            ? billedMatches(modelSum, billedUsageByModel.get(model))
+            : billedUsages.some((billed) => billedMatches(modelSum, billed));
         if (!matches) reasons.add('model-usage-mismatch');
       }
       const complete = reasons.size === 0;

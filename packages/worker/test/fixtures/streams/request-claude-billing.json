@@ -201,6 +201,77 @@
     "reasons": []
   },
   {
+    "name": "message_start output with titling",
+    "events": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "model": "claude-sonnet-4-6"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "id": "a",
+          "model": "claude-sonnet-4-6",
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 2,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 10,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 10,
+              "ephemeral_1h_input_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "id": "b",
+          "model": "claude-sonnet-4-6",
+          "usage": {
+            "input_tokens": 200,
+            "output_tokens": 3,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 20,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 20,
+              "ephemeral_1h_input_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "done",
+        "usage": {
+          "input_tokens": 300,
+          "output_tokens": 5000,
+          "cache_read_input_tokens": 70,
+          "cache_creation_input_tokens": 30
+        },
+        "modelUsage": {
+          "claude-haiku-4-5": {
+            "inputTokens": 11,
+            "outputTokens": 7,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "claude-sonnet-4-6": {
+            "inputTokens": 300,
+            "outputTokens": 5000,
+            "cacheReadInputTokens": 70,
+            "cacheCreationInputTokens": 30
+          }
+        }
+      }
+    ],
+    "coverage": "complete",
+    "reasons": []
+  },
+  {
     "name": "included second model",
     "events": [
       {
@@ -333,8 +404,8 @@
         }
       }
     ],
-    "coverage": "complete",
-    "reasons": []
+    "coverage": "incomplete",
+    "reasons": ["model-usage-mismatch"]
   },
   {
     "name": "zero side model",
@@ -398,8 +469,8 @@
         }
       }
     ],
-    "coverage": "complete",
-    "reasons": []
+    "coverage": "incomplete",
+    "reasons": ["model-usage-mismatch"]
   },
   {
     "name": "two billing aliases inside priced totals",
@@ -465,6 +536,83 @@
             "outputTokens": 5,
             "cacheReadInputTokens": 70,
             "cacheCreationInputTokens": 30
+          }
+        }
+      }
+    ],
+    "coverage": "incomplete",
+    "reasons": ["model-usage-mismatch"]
+  },
+  {
+    "name": "alias plus a second model and titling inside priced totals",
+    "events": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "model": "claude-sonnet-4-6"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "id": "a",
+          "model": "claude-sonnet-4-6",
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 2,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 10,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 10,
+              "ephemeral_1h_input_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "id": "b",
+          "model": "claude-sonnet-4-6",
+          "usage": {
+            "input_tokens": 200,
+            "output_tokens": 3,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 20,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 20,
+              "ephemeral_1h_input_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "done",
+        "usage": {
+          "input_tokens": 300,
+          "output_tokens": 5,
+          "cache_read_input_tokens": 70,
+          "cache_creation_input_tokens": 30
+        },
+        "modelUsage": {
+          "claude-haiku-4-5": {
+            "inputTokens": 11,
+            "outputTokens": 7,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "claude-sonnet-4-6-build": {
+            "inputTokens": 280,
+            "outputTokens": 5,
+            "cacheReadInputTokens": 70,
+            "cacheCreationInputTokens": 30
+          },
+          "model-b": {
+            "inputTokens": 20,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
           }
         }
       }
