@@ -251,6 +251,79 @@ it.each(['EMFILE', 'ENFILE'])('rethrows %s for the step retry boundary', async (
   await expect(readReviewDiff(ctx, '/repo', options)).rejects.toBe(error);
 });
 
+it.each(['read', 'before-stat', 'after-stat'])(
+  'keeps an ordinary %s failure local to its file',
+  async (stage) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', 'b'],
+      total: 2,
+    });
+    const open = vi.mocked(openFileNoFollow).getMockImplementation()!;
+    vi.mocked(openFileNoFollow).mockImplementation(async (...args) => {
+      const fh = (await open(...args))!;
+      if (args[1] !== 'a') return fh;
+      let stats = 0;
+      const failed = () => {
+        throw Object.assign(new Error('read failed'), { code: 'EIO' });
+      };
+      return {
+        ...fh,
+        stat: async () => {
+          if (++stats === (stage === 'after-stat' ? 2 : 1) && stage !== 'read') failed();
+          return stat;
+        },
+        read: stage === 'read' ? failed : fh.read,
+      } as never;
+    });
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result.status, JSON.stringify(result)).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(result.partial).toBe(true);
+    expect(JSON.parse(result.content).files).toContainEqual({
+      path: 'a',
+      kind: 'unreadable',
+      size: stat.size,
+      mode: stat.mode,
+    });
+    expect(JSON.parse(result.content).files).toContainEqual(
+      expect.objectContaining({ path: 'b', kind: 'text' }),
+    );
+    for (const [, args] of vi
+      .mocked(gitRun)
+      .mock.calls.filter(([, args]) => args.includes('--full-index'))) {
+      expect(args).not.toContain(':(literal)a');
+      expect(args).toContain(':(literal)b');
+    }
+    expect(close).toHaveBeenCalledTimes(4);
+  },
+);
+
+it.each(['EMFILE', 'ENFILE'])('rethrows %s after opening a file and closes it', async (code) => {
+  const error = Object.assign(new Error(code), { code });
+  vi.mocked(openFileNoFollow).mockResolvedValue({
+    stat: async () => stat,
+    close,
+    read: async () => {
+      throw error;
+    },
+  } as never);
+  await expect(readReviewDiff(ctx, '/repo', options)).rejects.toBe(error);
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it('rejects a file that changes during its held read', async () => {
+  const open = vi.mocked(openFileNoFollow).getMockImplementation()! as typeof openFileNoFollow;
+  const fh = (await open('/repo', 'a', 'read', { strict: true }))!;
+  let stats = 0;
+  vi.mocked(openFileNoFollow).mockResolvedValue({
+    ...fh,
+    stat: async () => ({ ...stat, ctimeMs: ++stats }),
+  } as never);
+  expect((await readReviewDiff(ctx, '/repo', options)).status).toBe('unavailable');
+  expect(close).toHaveBeenCalledOnce();
+});
+
 it('disables optional locks on review git reads and forwards the abort signal', async () => {
   expect((await readReviewDiff(ctx, '/repo', options)).status).toBe('ready');
   for (const call of vi.mocked(gitRun).mock.calls) {

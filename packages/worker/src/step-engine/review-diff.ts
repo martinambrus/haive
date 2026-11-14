@@ -15,6 +15,7 @@ import type {
   ReviewDiffOptions,
   StepContext,
 } from '@haive/shared/step';
+import { TaskCancelledError } from '@haive/shared/step';
 import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { compileSecretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 import { gitRun } from '../repo/git-exec.js';
@@ -184,6 +185,7 @@ interface CaptureLimits {
   gitlinkPathspecBytes?: number;
 }
 class DiffTooLarge extends Error {}
+class ReviewContentChanged extends Error {}
 const EMPTY_SCOPE: ImplementationFileSet = {
   files: [],
   total: 0,
@@ -519,7 +521,7 @@ export async function readReviewDiff(
             before.ctimeMs !== after.ctimeMs ||
             before.mode !== after.mode
           )
-            throw new Error('A changed file changed during its read.');
+            throw new ReviewContentChanged('A changed file changed during its read.');
           const content =
             retain && size <= options.maxBytes && size <= remainingContentBytes
               ? decodeUtf8Strict(Buffer.concat(chunks))
@@ -543,6 +545,15 @@ export async function readReviewDiff(
             ...(untracked.has(p) ? { untracked: true } : {}),
             ...(!binary && content !== undefined && content !== null ? { content } : {}),
           });
+        } catch (error) {
+          checkHostCancellation(ctx);
+          if (
+            error instanceof TaskCancelledError ||
+            error instanceof ReviewContentChanged ||
+            isResourceLimitError(error)
+          )
+            throw error;
+          files.push({ path: p, kind: 'unreadable', ...metadata });
         } finally {
           await fh.close();
         }
@@ -606,7 +617,7 @@ export async function readReviewDiff(
     return serializeReviewPayload(first, options);
   } catch (error) {
     checkHostCancellation(ctx);
-    if (isResourceLimitError(error)) throw error;
+    if (error instanceof TaskCancelledError || isResourceLimitError(error)) throw error;
     if (error instanceof DiffTooLarge)
       return {
         status: 'too-large',
