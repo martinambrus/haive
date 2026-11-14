@@ -1,12 +1,20 @@
 # Sandbox
 
-`packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
+`packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. The cloned repository and the run-owned files described below are mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
 
 **A run sees only its own files.** `runInSandbox` writes a run's wrapper script and extra files (MCP
 configs, the `haive-custom` and `haive-integrations` token files) into the shared wrappers volume under
 the run's own directory and mounts each one by subpath at its sandbox path, read-only. The volume's
 root is never mounted: a whole-volume mount let any sandbox list the volume and read the token file of
-another live run, of any task or user.
+another live run, of any task or user. A plan-chat run also sees its own versioned snapshot at
+`/haive/plan-chat-snapshot.json`: one read-only file subpath from a random directory under
+`plan-chat-snapshots/` in that same volume, outside the checkout and `.haive-data`. The worker
+checks its user, repository, task and invocation against the owned run before mounting. Its
+pretty-printed JSON carries all nodes with bodies and read versions, plus edges and owner/schema
+fields; the prompt explains searching by node id. Snapshot removal is awaited last in `finally`;
+a failure logs at error and preserves both the run result and every other cleanup. Boot reaping
+tries entries independently after CLI-container reaping, treats a missing directory as empty and
+logs failures at error without stopping boot. See [Secret and git-data masking](sandbox-masking.md).
 
 **The shared npm cache is read-only in a sandbox; each run seeds a private copy.** The `npm_cache`
 volume keeps what `npx` fetched, so an MCP server such as chrome-devtools-mcp does not repeat a cold

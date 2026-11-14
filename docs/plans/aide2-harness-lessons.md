@@ -346,18 +346,30 @@ round, with a clear UI preview of its scope. Re-check provider ownership, enable
 capabilities when dispatching; no silent fallback to another model. Persist the override and the
 round transition in the existing fenced transaction so Retry cannot dispatch both choices.
 
-P4/P5 below remain pending in the current tree: plan chat still calls `renderPlanMarkdown`,
-and its `rag_only` surface cannot be assumed to offer a versioned plan lookup. D11's snapshot or
-lookup is a prerequisite. Retained chat messages exceeding a new submit limit must have an explicit
-legacy path (show the oversized pending turn and require a user edit, or a bounded continuation);
-otherwise a new limit strands a message that already exists. A snapshot is scoped to one owned
-dispatch, uses repository-safe IO and a bounded lifetime, and cannot expose another user's plan.
-The total prompt budget must reserve fixed instructions, the pending user turn, attachments,
-agent/house rules and output before packing optional context. A plan-context constant alone is
-not a model-context bound. Apply reports partial/version-refused ops through `applyAgentPatch`,
-never silently retries against a newer version or advances an external watermark over unseen work.
+P4 is implemented; P5 remains pending. D11 is decided and implemented for plan chat as a
+versioned per-owned-dispatch snapshot outside the checkout and `.haive-data`, read-only in the
+sandbox and derived from the prompt's single read. P5 must adopt that mechanism for its writers;
+`rag_only` itself offers no versioned lookup. Retained oversized pending turns and pre-limit saved
+or queued form submissions take an explicit edit path without being silently cut or failing the
+step. The total dispatch budget reserves fixed instructions, the pending turn, attachments,
+agent/house rules and output before optional context. A stale agent version is reported through
+`applyAgentPatch`, never retried against a newer read or used to advance an external watermark.
 
 ### P4. Bound plan chat's whole prompt
+
+**Status (2026-11-14): implemented with local regression controls.** A single plan read feeds a
+bounded neighbourhood, versioned index and per-owned-dispatch read-only snapshot outside the
+checkout. Opening and follow-up submits share the 20,000-character message limit; retained
+oversized pending turns park for an explicit user edit. Dispatch accounts for actual augmenters
+and reserves output before optional context. Every chat upsert of an existing node requires a
+version, including an ordinal-only upsert; updates and deletes compare that version atomically
+at the write. Tests cover the 800-node/long-body/long-history fixtures, pending limits, legacy
+edit/end, outside-neighbourhood and index-omitted updates, stale/unversioned/raced writes,
+snapshot scope, line navigation, real runner repacking and ownership attachment,
+non-fatal removal and boot reaping, same-patch-created node updates, saved-submission recovery,
+and bounded derived-write CAS retries. Snapshot-bearing Redis jobs expire on completion and
+final failure. The live Ollama rerun and per-CLI snapshot readability checks remain session work;
+the dev stack was excluded from implementation. P5 remains pending.
 
 Two invariants.
 
@@ -373,7 +385,7 @@ part gets a share and is cut by whole units, with the cut stated:
   else is packed; then earlier turns, whole, selected from the newest backward until the rest of the
   share is spent; all rendered in chronological order after a line counting the turns dropped. A
   message larger than its reserved share is refused when submitted, with the limit stated, rather than
-  cut or left out: it is the person's own words, and the chat form sets no length limit today.
+  cut or left out: it is the person's own words. The shared submit limit is now 20,000 characters.
 
 **Every node stays patchable, and every update is checked against the state its content was read
 from (F14).** A plan chat turn exists to patch nodes beyond the one in focus, so bounding must not
@@ -394,6 +406,8 @@ refused and reported; an update with no version is refused; the ollama run in F4
 size. D2 settles the transcript's scope. Rollback: revert.
 
 ### P5. Bound the remaining plan renders
+
+**Status: pending; a later PR.**
 
 `11f-plan-reconcile` and `01f-external-plan-sync` move to the bounded index, keeping depth 4 where it
 fits, which needs a depth parameter on `renderBoundedPlanIndexParts`. P4's two rules apply to them
@@ -498,9 +512,13 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 - **D2 (the owner, 2026-11-14).** One plan-chat conversation per node across tasks, as today.
   The cap keeps the answered turn plus the newest earlier turns that fit and states how many
   were dropped.
-- **D11 (the owner, 2026-11-14).** A versioned snapshot is written for each dispatch, kept out
-  of the repository's tracked tree and removed after the run. One choice serves plan chat, 11f
-  and 01f.
+- **D11 (2026-11-14).** A versioned snapshot for each owned dispatch, outside the repository's
+  tracked tree and `.haive-data`, written and removed through fs-safe and reaped after a worker
+  crash. It contains only the current user's plan from the prompt's single read, every node
+  with its version and schema/user/repository/task/invocation ownership fields. The file is
+  pretty-printed for line navigation. Removal and boot-reaping failures log at error without
+  replacing run outcomes or stopping boot. P4 implements it; P5 remains pending and must use
+  the same mechanism in its later PR.
 - **P3 manual only, no automatic switch (D3 stays open) (the owner, 2026-11-14).**
 - **P7 parked (owner, 2026-11-14).**
 
