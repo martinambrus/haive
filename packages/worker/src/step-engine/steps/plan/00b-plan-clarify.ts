@@ -23,7 +23,12 @@ import {
   type PlanBuildDetect,
 } from './01-plan-build.js';
 import { renderBoundedPlanOutline } from './_plan-index.js';
-import { applyAgentPatch, applyAgentPatchOnce, parsePlanPatch } from './_plan-prompt.js';
+import {
+  applyAgentPatch,
+  applyAgentPatchOnce,
+  retryUnversionedPlanConflict,
+  parsePlanPatch,
+} from './_plan-prompt.js';
 import { loadLiveAttachments } from './00-plan-inputs.js';
 import {
   isOutlineAgent,
@@ -184,7 +189,8 @@ async function foldPatch(
       throw new Error('The plan stayed busy. Retry this step to ask the planner again.');
     }
     if (err.kind === 'conflict') {
-      throw new Error(
+      throw new PlanPatchError(
+        'conflict',
         'The plan was edited while the planner was working on it. Retry this step to fold the answers into the plan as it is now.',
       );
     }
@@ -205,54 +211,56 @@ async function foldOutline(
   if (!patch || patch.ops.length === 0) unusable(result, finalAttempt, 'no outline in the reply');
   const { kept, dropped } = outsideOutline(patch.ops, null);
   await foldPatch(result, finalAttempt, () =>
-    applyAgentPatchOnce(
-      ctx,
-      result.agentId,
-      async (tx) => {
-        const applied = await applyAgentPatch(
-          tx,
-          { ...patch, ops: withMinedStatus(openQuestionsTodo(kept), d.build.mode) },
-          { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
-        );
-        // Round 0 names the root THIS task drafted (see `assertOwnOutline`). A redrafted outline,
-        // after a re-roll or after its root was deleted, folds again over the same row.
-        const [root] = await tx
-          .select({ id: schema.planNodes.id })
-          .from(schema.planNodes)
-          .where(
-            and(
-              eq(schema.planNodes.repositoryId, d.build.repositoryId!),
-              isNull(schema.planNodes.parentId),
-            ),
-          )
-          .limit(1);
-        // Only a root THIS patch created: one another writer added since detect is not ours,
-        // and leaving it unnamed makes `assertOwnOutline` refuse it.
-        const rootId = root && applied.created.includes(root.id) ? root.id : null;
-        const marked = await tx
-          .update(schema.planClarifyRounds)
-          .set({ rootId })
-          .where(
-            and(
-              eq(schema.planClarifyRounds.taskId, ctx.taskId),
-              eq(schema.planClarifyRounds.round, 0),
-            ),
-          )
-          .returning({ id: schema.planClarifyRounds.id });
-        if (marked.length === 0) {
-          const now = new Date();
-          await tx.insert(schema.planClarifyRounds).values({
-            taskId: ctx.taskId,
-            round: 0,
-            action: 'continue',
-            answeredAt: now,
-            integratedAt: now,
-            rootId,
-          });
-        }
-        return applied;
-      },
-      (applied) => partialApplyNote([...dropped, ...applied.dropped]),
+    retryUnversionedPlanConflict(patch.ops, () =>
+      applyAgentPatchOnce(
+        ctx,
+        result.agentId,
+        async (tx) => {
+          const applied = await applyAgentPatch(
+            tx,
+            { ...patch, ops: withMinedStatus(openQuestionsTodo(kept), d.build.mode) },
+            { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
+          );
+          // Round 0 names the root THIS task drafted (see `assertOwnOutline`). A redrafted outline,
+          // after a re-roll or after its root was deleted, folds again over the same row.
+          const [root] = await tx
+            .select({ id: schema.planNodes.id })
+            .from(schema.planNodes)
+            .where(
+              and(
+                eq(schema.planNodes.repositoryId, d.build.repositoryId!),
+                isNull(schema.planNodes.parentId),
+              ),
+            )
+            .limit(1);
+          // Only a root THIS patch created: one another writer added since detect is not ours,
+          // and leaving it unnamed makes `assertOwnOutline` refuse it.
+          const rootId = root && applied.created.includes(root.id) ? root.id : null;
+          const marked = await tx
+            .update(schema.planClarifyRounds)
+            .set({ rootId })
+            .where(
+              and(
+                eq(schema.planClarifyRounds.taskId, ctx.taskId),
+                eq(schema.planClarifyRounds.round, 0),
+              ),
+            )
+            .returning({ id: schema.planClarifyRounds.id });
+          if (marked.length === 0) {
+            const now = new Date();
+            await tx.insert(schema.planClarifyRounds).values({
+              taskId: ctx.taskId,
+              round: 0,
+              action: 'continue',
+              answeredAt: now,
+              integratedAt: now,
+              rootId,
+            });
+          }
+          return applied;
+        },
+        (applied) => partialApplyNote([...dropped, ...applied.dropped]),
+      ),
     ),
   );
   if (!(await findPlanRoot(ctx.db, d.build.repositoryId!))) {
@@ -293,37 +301,39 @@ async function foldAnswers(
   const raw = result.output ?? result.rawOutput;
   const patch = parsePlanPatch(raw);
   if (!patch) unusable(result, finalAttempt, 'no plan patch in the reply');
-  const root = await findPlanRoot(ctx.db, d.build.repositoryId!);
-  const { kept, dropped } = outsideOutline(patch.ops, root?.id ?? null);
   await foldPatch(result, finalAttempt, () =>
-    applyAgentPatchOnce(
-      ctx,
-      result.agentId,
-      async (tx) => {
-        const applied = await applyAgentPatch(
-          tx,
-          { ...patch, ops: kept },
-          { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
-        );
-        const outcome: ClarifyOutcome = {
-          summary: patch.summary ?? '',
-          verdicts: parseVerdicts(raw, round.answers ?? []),
-          dropped: [...dropped, ...applied.dropped],
-        };
-        await tx
-          .update(schema.planClarifyRounds)
-          .set({ outcome, integratedAt: new Date() })
-          .where(
-            and(
-              eq(schema.planClarifyRounds.taskId, ctx.taskId),
-              eq(schema.planClarifyRounds.round, round.round),
-              isNull(schema.planClarifyRounds.integratedAt),
-            ),
+    retryUnversionedPlanConflict(patch.ops, async () => {
+      const root = await findPlanRoot(ctx.db, d.build.repositoryId!);
+      const { kept, dropped } = outsideOutline(patch.ops, root?.id ?? null);
+      return applyAgentPatchOnce(
+        ctx,
+        result.agentId,
+        async (tx) => {
+          const applied = await applyAgentPatch(
+            tx,
+            { ...patch, ops: kept },
+            { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
           );
-        return applied;
-      },
-      (applied) => partialApplyNote([...dropped, ...applied.dropped]),
-    ),
+          const outcome: ClarifyOutcome = {
+            summary: patch.summary ?? '',
+            verdicts: parseVerdicts(raw, round.answers ?? []),
+            dropped: [...dropped, ...applied.dropped],
+          };
+          await tx
+            .update(schema.planClarifyRounds)
+            .set({ outcome, integratedAt: new Date() })
+            .where(
+              and(
+                eq(schema.planClarifyRounds.taskId, ctx.taskId),
+                eq(schema.planClarifyRounds.round, round.round),
+                isNull(schema.planClarifyRounds.integratedAt),
+              ),
+            );
+          return applied;
+        },
+        (applied) => partialApplyNote([...dropped, ...applied.dropped]),
+      );
+    }),
   );
 }
 

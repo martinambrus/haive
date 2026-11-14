@@ -2,9 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { planBuildStep } from './01-plan-build.js';
 import { CODE_LINKS_DROPPED } from './_plan-events.js';
 import { applyAgentPatch } from './_plan-prompt.js';
+import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { PlanPatchError } from '@haive/shared/plan';
 import { MiningRetryError } from '../../step-definition.js';
 
+vi.mock('../../../repo/git-exec.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../repo/git-exec.js')>()),
+  gitExec: vi.fn(async () => {
+    throw new Error('no commit');
+  }),
+}));
 vi.mock('./_plan-prompt.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
   return { ...actual, applyAgentPatch: vi.fn() };
@@ -81,7 +88,7 @@ describe('plan build wave re-roll', () => {
     vi.mocked(applyAgentPatch).mockReset();
   });
 
-  const foldOneAgentWave = () =>
+  const foldOneAgentWave = (ops: unknown[] = agent.output.ops, mode = 'from_repo') =>
     planBuildStep
       .apply(
         {
@@ -93,14 +100,50 @@ describe('plan build wave re-roll', () => {
           logger: { warn: () => {}, info: () => {} },
         } as never,
         {
-          detected: { repositoryId: 'r1', mode: 'from_repo' },
+          detected: { repositoryId: 'r1', mode },
           formValues: {},
-          agentMiningResults: [agent],
-          newAgentMiningResults: [agent],
+          agentMiningResults: [{ ...agent, output: { ops } }],
+          newAgentMiningResults: [{ ...agent, output: { ops } }],
           isFinalMiningAttempt: false,
         } as never,
       )
       .catch((err: unknown) => err);
+
+  it('retries an unversioned fold after a conflict and re-reads its derived input', async () => {
+    vi.mocked(ensureSemanticExpansionResolution).mockClear();
+    vi.mocked(applyAgentPatch)
+      .mockRejectedValueOnce(new PlanPatchError('conflict', 'raced'))
+      .mockResolvedValue({ created: [], updated: [], dropped: [], strippedCodeLinks: [] } as never);
+    const out = await foldOneAgentWave([{ op: 'upsert', nodeRef: NODE, ordinal: 2 }], 'greenfield');
+    expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+    expect(ensureSemanticExpansionResolution).toHaveBeenCalledTimes(2);
+    expect(out).not.toBeInstanceOf(MiningRetryError);
+    expect((out as Error).message).toContain('did not produce a root node');
+  });
+
+  it('fails persistent unversioned conflicts by name after three attempts', async () => {
+    const conflict = new PlanPatchError('conflict', 'raced');
+    vi.mocked(applyAgentPatch).mockRejectedValue(conflict);
+    expect(
+      await foldOneAgentWave([{ op: 'upsert', nodeRef: NODE, ordinal: 2 }], 'greenfield'),
+    ).toBe(conflict);
+    expect(applyAgentPatch).toHaveBeenCalledTimes(3);
+    expect(writes.stamps).toBe(0);
+  });
+
+  it('stamps stale caller versions and re-asks the agent without retrying the patch', async () => {
+    vi.mocked(applyAgentPatch).mockRejectedValue(
+      new PlanPatchError('conflict', 'stale caller version'),
+    );
+    const out = await foldOneAgentWave([
+      { op: 'upsert', nodeRef: NODE, ordinal: 2, expectedVersion: 1 },
+    ]);
+    expect(out).toBeInstanceOf(MiningRetryError);
+    expect((out as MiningRetryError).agentIds).toEqual([agent.agentId]);
+    expect((out as Error).message).toContain('stale caller version');
+    expect(applyAgentPatch).toHaveBeenCalledTimes(1);
+    expect(writes.stamps).toBe(1);
+  });
 
   it('does not re-roll a one-agent wave whose reply landed with a dropped op', async () => {
     vi.mocked(applyAgentPatch).mockResolvedValueOnce({

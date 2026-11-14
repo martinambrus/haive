@@ -28,6 +28,8 @@ import {
   PLAN_PATCH_CONTRACT,
   applyAgentPatch,
   applyAgentPatchOnce,
+  retryUnversionedPlanConflict,
+  hasCallerPlanVersion,
   parsePlanPatch,
 } from './_plan-prompt.js';
 import {
@@ -742,41 +744,43 @@ export async function foldCoverageResults(
     }
     const self = coverageSelfNodeId(result.agentId);
     try {
-      const ops = await ensureSemanticExpansionResolution(
-        ctx.db,
-        detected.repositoryId!,
-        self,
-        patch.ops,
-      );
-      // A document-coverage agent may legitimately conclude that the section
-      // was already represented. It has no single focus node to mark.
-      if (ops.length === 0) continue;
-      const applied = await applyAgentPatchOnce(
-        ctx,
-        result.agentId,
-        async (tx) => {
-          await assertPlanPatchWithinBreadth(
-            ctx.db,
-            detected.repositoryId!,
-            ops,
-            self,
-            breadthCap(detected.buildFormValues),
-          );
-          return applyAgentPatch(
-            tx,
-            {
-              ...patch,
-              ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
-            },
-            {
-              repositoryId: detected.repositoryId!,
-              sourceTaskId: ctx.taskId,
-              ...(self ? { selfNodeId: self } : {}),
-            },
-          );
-        },
-        (outcome) => partialApplyNote(outcome.dropped),
-      );
+      const applied = await retryUnversionedPlanConflict(patch.ops, async () => {
+        const ops = await ensureSemanticExpansionResolution(
+          ctx.db,
+          detected.repositoryId!,
+          self,
+          patch.ops,
+        );
+        // A document-coverage agent may legitimately conclude that the section
+        // was already represented. It has no single focus node to mark.
+        if (ops.length === 0) return null;
+        return applyAgentPatchOnce(
+          ctx,
+          result.agentId,
+          async (tx) => {
+            await assertPlanPatchWithinBreadth(
+              ctx.db,
+              detected.repositoryId!,
+              ops,
+              self,
+              breadthCap(detected.buildFormValues),
+            );
+            return applyAgentPatch(
+              tx,
+              {
+                ...patch,
+                ops: withMinedStatus(ops, detected.buildDetect?.mode ?? 'from_md'),
+              },
+              {
+                repositoryId: detected.repositoryId!,
+                sourceTaskId: ctx.taskId,
+                ...(self ? { selfNodeId: self } : {}),
+              },
+            );
+          },
+          (outcome) => partialApplyNote(outcome.dropped),
+        );
+      });
       // Folded by a pass running beside this one.
       if (!applied) continue;
       if (applied.dropped.length > 0) hadFailure = true;
@@ -788,8 +792,13 @@ export async function foldCoverageResults(
         await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
       }
     } catch (err) {
-      // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
-      if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
+      // Only derived-write conflicts used the retry bound. A stale agent read
+      // is stamped below so a later wave asks it again with fresh versions.
+      if (
+        err instanceof PlanPatchError &&
+        (err.kind === 'busy' || (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
+      )
+        throw err;
       hadFailure = true;
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'coverage decomposition patch failed');

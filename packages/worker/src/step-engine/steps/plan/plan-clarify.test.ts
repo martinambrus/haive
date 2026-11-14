@@ -365,6 +365,52 @@ describe('00b-plan-clarify apply', () => {
     expect(err.message).toContain('Retry this step');
   });
 
+  it.each(['outline', 'answers'] as const)(
+    'retries an unversioned %s fold in-process',
+    async (kind) => {
+      if (kind === 'answers') plan.root = { id: ROOT };
+      const { mined, apply, fake } = setup();
+      if (kind === 'answers') {
+        await thrown(apply([mined('clarify-ask-r1', questions)]));
+        await thrown(
+          apply([], { [answerFieldId(1, 'payments')]: 'Stripe', [actionFieldId(1)]: 'continue' }),
+        );
+      }
+      vi.mocked(applyAgentPatch).mockClear();
+      vi.mocked(applyAgentPatch).mockRejectedValueOnce(new PlanPatchError('conflict', 'raced'));
+      const reply = mined(
+        kind === 'outline' ? 'clarify-outline' : 'clarify-integrate-r1',
+        json({
+          ops:
+            kind === 'outline'
+              ? [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }]
+              : [{ op: 'upsert', nodeRef: ROOT, ordinal: 2 }],
+        }),
+      );
+      const result = await thrown(apply([reply], {}, false));
+      expect(result).toBeInstanceOf(MiningWaveError);
+      expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+      expect(
+        fake.rows(schema.taskStepAgentMinings).find((r) => r.agentId === reply.agentId)?.consumedAt,
+      ).not.toBeNull();
+    },
+  );
+
+  it('fails persistent unversioned conflicts by name after three attempts', async () => {
+    const { mined, apply, fake } = setup();
+    vi.mocked(applyAgentPatch).mockClear();
+    plan.refuse = new PlanPatchError('conflict', 'raced');
+    const reply = mined(
+      'clarify-outline',
+      json({ ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] }),
+    );
+    const err = await thrown(apply([reply], {}, false));
+    expect(err).toBeInstanceOf(PlanPatchError);
+    expect(err).toMatchObject({ name: 'PlanPatchError', kind: 'conflict' });
+    expect(applyAgentPatch).toHaveBeenCalledTimes(3);
+    expect(fake.rows(schema.taskStepAgentMinings)[0]?.consumedAt).toBeNull();
+  });
+
   it('fails persistent busy truthfully without spending another planner turn', async () => {
     vi.useFakeTimers();
     try {
