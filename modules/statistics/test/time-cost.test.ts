@@ -111,15 +111,16 @@ describe('completed-task report endpoint', () => {
     );
     const eventPredicates = f.predicates.filter((p) => p.includes('"task_events"'));
     expect(eventPredicates).toHaveLength(2);
-    expect(FORM_WAIT_EVENT_TYPES).toHaveLength(20);
+    expect(FORM_WAIT_EVENT_TYPES).toHaveLength(21);
+    expect(FORM_WAIT_EVENT_TYPES).toContain('step.clarified');
     const eventParams = f.parameters[f.predicates.indexOf(eventPredicates[0]!)];
     expect(eventParams?.slice(0, 2)).toEqual([
       '00000000-0000-4000-8000-000000000001',
       '00000000-0000-4000-8000-000000000002',
     ]);
     expect(eventParams?.slice(2)).toEqual(FORM_WAIT_EVENT_TYPES);
-    expect(eventPredicates[0]?.match(/\$/g)).toHaveLength(2 + 20);
-    expect(eventPredicates[1]?.match(/\$/g)).toHaveLength(1 + 20);
+    expect(eventPredicates[0]?.match(/\$/g)).toHaveLength(2 + FORM_WAIT_EVENT_TYPES.length);
+    expect(eventPredicates[1]?.match(/\$/g)).toHaveLength(1 + FORM_WAIT_EVENT_TYPES.length);
     expect(eventPredicates.join('\n')).not.toContain('"created_at"');
     expect(eventPredicates.every((p) => p.includes('"event_type" in ('))).toBe(true);
   });
