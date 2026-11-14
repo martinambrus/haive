@@ -592,7 +592,7 @@ status: open · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 4. The `unsupported` list (time-window, variable-price models) is persisted in the refresh result but shown nowhere on `/admin/pricing`.
 5. A future LiteLLM text-rate key whose base name contains a modality word (audio, image, ...) would be ignored by `LITELLM_NON_TEXT_RATE_FAMILIES` instead of failing loud. Hypothetical.
 
-### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+8)
+### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
 status: open · kind: fix · found: human time PR 1-2 · priority: P3
 
@@ -1173,6 +1173,8 @@ status: parked · was modular #231 · reason: diminishing returns (2026-11-01 sc
 In 9 grok runs, tool-result chars/4 come to 1.14-2.25x the recorded prompt tokens; e.g. run e3d08fb4… (09-qa).
 Candidates:
 
+- #1166 Time tab grid went lg:grid-cols-6 -> 4, so 7 tiles lay out 4+3 (reflows existing tiles); pick a layout. LOW cosmetic.
+- #1166 Plan page tile hint does not say a dash can also mean the selected class excludes plan work (card description does). LOW.
 - usage under-reports;
 - chars/4 overstates;
 - grok drops old tool results.
@@ -1909,6 +1911,8 @@ All low unless marked.
 9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
 
 ## Done
+
+- Human time PR 3 (#1166): plan page attention as `time.planActiveMs` on the statistics summary and a Plan page tile on the Time tab; lows filed under T666.
 
 - human time PR 2 (`docs/plans/human-time-idle-detection.md`) — plan page time per repository, user and UTC hour (`plan_active_time`, migration 0237), `POST /repositories/:id/plan/user-active` (owner only, atomic upsert clamped to one hour), plan-page pending registry (queued/running work only, no new polls) — PR #1165 (720a0209e), 2026-11-14; 0237 applied, route mounted. Browser check and lows T666.
 - human time PR 1 (`docs/plans/human-time-idle-detection.md`) — idle-aware task-page timer: presence epochs on a monotonic clock, reading allowance from visible words (150 wpm, 60 s to 5 min), trusted-input rules, fail-open attention lease, waiting step picked by `isAwaitingFormInput`; topic docs/architecture/human-time.md — PR #1163 (4888d3e15), 2026-11-14; browser check owed, lows T666.
