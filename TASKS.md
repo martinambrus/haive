@@ -1923,7 +1923,17 @@ All low unless marked.
   - 'learning.reconciled' string duplicated in worker `_learning-outcome.ts` and web `activity-events.ts`; move to shared event-type constants (`shared/src/schemas/tasks.ts`). LOW.
   - Live check owed: a real task's step 11 writes the event with nonzero counts (plan P1 verification). OWED.
 
+- T668 FNF[time-cost-lows]: time and cost report follow-ups (+6)
+  - Waits parked at fix-loop escalation gates (`task-queue.ts` oscillation ~:2456, cap-reached ~:2527) emit `fix_loop.*` but no `step.waiting_form`, so their later submit is an orphan; `task.paused`/`task.resumed` do not invalidate an open wait (`_helpers.ts` ~:1134). PRE-EXISTING event design; disclosed as unmeasured. Emit `step.waiting_form` at those parks or treat the two events as parks.
+  - Provider card and Money tab per-provider rows drop stored costs after a provider is deleted (`shared/src/stats-server/cost.ts` `if (!row.provider) continue;`), so Money total and its rows can disagree. PRE-EXISTING.
+  - Money SQL for the report (priced/legacy rule, recap coalesce) has only SQL-substring and proxy-DB tests; add a DB-backed test when a harness exists. LOW.
+  - `computeWorkByCategory` shares park suppression structurally only; no test can detect un-sharing today (pre-run parks have 0 work). LOW, note only.
+  - Empty report reads "0 of 0 tasks ran a test command · 0 not run · 0 execution not recorded"; show a dash. NIT.
+  - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
+
 ## Done
+
+- Time and cost report PR 1 (#1169): "Time & cost report" statistics tab (test phase, workflow work by category, human active, waiting for a person, billed and at-API-rates) plus the task page tests cell. Live: tab totals equal /summary (50 tasks, work and active ms exact). Lows filed as T668.
 
 - Agent-memory P1.1 (#1168): step 11 records one versioned `learning.reconciled` event per apply (counts only; replay-safe id); docs/architecture/learning-reconcile.md. Lows filed as T667.
 
