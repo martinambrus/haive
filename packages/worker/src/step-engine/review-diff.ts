@@ -161,6 +161,7 @@ export function serializeReviewPayload(
   };
 }
 
+export const REVIEW_METADATA_BYTES = 16 * 1024 * 1024;
 export const REVIEW_RETAINED_CONTENT_BYTES = 16 * 1024 * 1024;
 interface CaptureLimits {
   retainedContentBytes?: number;
@@ -183,14 +184,17 @@ export async function readReviewDiff(
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0)
     return unavailable(scope, 'maxBytes must be a positive safe integer.');
   const limits = { maxRound: ctx.round, signal: ctx.signal };
-  const run = async (args: string[], budget = options.maxBytes) => {
+  const run = async (args: string[], budget = REVIEW_METADATA_BYTES, change = false) => {
     checkHostCancellation(ctx);
     const result = await gitRun(worktree, ['--no-optional-locks', ...args], undefined, {
       signal: ctx.signal,
       maxBuffer: budget,
     });
     checkHostCancellation(ctx);
-    if (result.noExit === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw new DiffTooLarge();
+    if (result.noExit === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      if (change) throw new DiffTooLarge();
+      throw new Error('Review metadata exceeds the internal limit.');
+    }
     if (result.code !== 0) throw new Error('Git could not read the review change.');
     return result.stdout;
   };
@@ -245,12 +249,6 @@ export async function readReviewDiff(
         )
       )
         throw new Error('The implementation scope is inconsistent with git.');
-      const gitlinks = new Set(
-        (await run(['ls-files', '--stage', '-z'])).split('\0').flatMap((record) => {
-          const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
-          return match ? [match[1]!] : [];
-        }),
-      );
       const files: ReviewFile[] = [];
       // The cap limits delivered review evidence, not retry identity. Hash omitted changes
       // too, so a partial payload cannot reuse an earlier identity after those files change.
@@ -271,6 +269,26 @@ export async function readReviewDiff(
         }
         withheld.set(p, { path: p, kind: 'withheld', ...metadata });
       }
+      const indexPaths = withholdAll
+        ? []
+        : allPaths
+            .filter((p) => !denied(p))
+            .flatMap((p) => {
+              try {
+                return [':(literal)' + toSafeRel(p)];
+              } catch (error) {
+                if (!isPathContainmentError(error, 'invalid-path')) throw error;
+                return [];
+              }
+            });
+      const gitlinks = new Set(
+        (indexPaths.length ? await run(['ls-files', '--stage', '-z', '--', ...indexPaths]) : '')
+          .split('\0')
+          .flatMap((record) => {
+            const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
+            return match ? [match[1]!] : [];
+          }),
+      );
       for (const p of allPaths) {
         checkHostCancellation(ctx);
         const deniedFile = withheld.get(p);
@@ -425,24 +443,28 @@ export async function readReviewDiff(
         )
         .map((file) => ':(literal)' + toSafeRel(file.path));
       const diff = pathspecs.length
-        ? await run([
-            '-c',
-            'core.quotePath=false',
-            'diff',
-            '--no-color',
-            '--no-renames',
-            '--no-relative',
-            '--src-prefix=a/',
-            '--dst-prefix=b/',
-            '--full-index',
-            '--diff-algorithm=myers',
-            '--no-indent-heuristic',
-            '--unified=3',
-            '--submodule=short',
-            forkPoint,
-            '--',
-            ...pathspecs,
-          ])
+        ? await run(
+            [
+              '-c',
+              'core.quotePath=false',
+              'diff',
+              '--no-color',
+              '--no-renames',
+              '--no-relative',
+              '--src-prefix=a/',
+              '--dst-prefix=b/',
+              '--full-index',
+              '--diff-algorithm=myers',
+              '--no-indent-heuristic',
+              '--unified=3',
+              '--submodule=short',
+              forkPoint,
+              '--',
+              ...pathspecs,
+            ],
+            options.maxBytes,
+            true,
+          )
         : '';
       const changeHash = createHash('sha256')
         .update(JSON.stringify(ordered(files.map(fileIdentity))))

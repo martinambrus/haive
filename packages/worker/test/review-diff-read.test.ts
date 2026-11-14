@@ -363,3 +363,51 @@ it.each(['deleted', 'missing'])(
     expect(openFileNoFollow).not.toHaveBeenCalled();
   },
 );
+
+it('returns a small change ready when the index exceeds maxBytes', async () => {
+  const maxBytes = 1024;
+  const index = Array.from(
+    { length: 20 },
+    (_, i) => '100644 ' + 'a'.repeat(40) + ' 0\tunchanged-' + i + '\0',
+  ).join('');
+  expect(Buffer.byteLength(index)).toBeGreaterThan(maxBytes);
+  const run = vi.mocked(gitRun).getMockImplementation()!;
+  vi.mocked(gitRun).mockImplementation(async (...args) => {
+    if (!args[1].includes('--stage')) return run(...args);
+    const stdout = args[1].includes(':(literal)a') ? '' : index;
+    return Buffer.byteLength(stdout) > args[3]!.maxBuffer!
+      ? { code: -1, noExit: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stdout: '', stderr: '' }
+      : { code: 0, stdout, stderr: '' };
+  });
+  expect(await readReviewDiff(ctx, '/repo', { ...options, maxBytes })).toMatchObject({
+    status: 'ready',
+    partial: false,
+  });
+  const stageCalls = vi.mocked(gitRun).mock.calls.filter((call) => call[1].includes('--stage'));
+  expect(stageCalls).toHaveLength(2);
+  for (const call of stageCalls)
+    expect(call[1]).toEqual([
+      '--no-optional-locks',
+      'ls-files',
+      '--stage',
+      '-z',
+      '--',
+      ':(literal)a',
+    ]);
+  for (const call of vi
+    .mocked(gitRun)
+    .mock.calls.filter((call) => !call[1].includes('--full-index')))
+    expect(call[3]!.maxBuffer).toBe(16 * 1024 * 1024);
+});
+it('reports overflowing metadata as unavailable rather than a large change', async () => {
+  vi.mocked(gitRun).mockResolvedValueOnce({
+    code: -1,
+    noExit: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    stdout: '',
+    stderr: '',
+  });
+  expect(await readReviewDiff(ctx, '/repo', options)).toMatchObject({
+    status: 'unavailable',
+    partial: true,
+  });
+});
