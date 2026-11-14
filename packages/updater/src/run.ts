@@ -183,12 +183,19 @@ export async function liveWorkCount(
   sql: ISql<{}>,
   state: MaintenanceState = 'normal',
 ): Promise<number> {
+  // Draining precedes migration: released source schemas before 0197 have no dead marker.
+  // Resolve the same table as the count (including its search_path), rather than assuming public.
+  const [columns] = await sql<{ has_dead_at: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'tasks'::regclass AND attname = 'dead_at' AND NOT attisdropped
+    ) AS has_dead_at`;
   // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
     SELECT (
       (SELECT count(*) FROM tasks
         WHERE status = ANY(${drainTaskStatuses(state)}::task_status[])
-          AND dead_at IS NULL)
+          ${columns?.has_dead_at ? sql`AND dead_at IS NULL` : sql``})
       + (SELECT count(*) FROM repositories WHERE status = 'cloning')
       + (SELECT count(*) FROM custom_bundles WHERE status = 'syncing')
       + (SELECT count(*) FROM cli_providers

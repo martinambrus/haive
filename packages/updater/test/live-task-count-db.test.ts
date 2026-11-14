@@ -59,6 +59,30 @@ describe.skipIf(!url)('liveWorkCount on Postgres', () => {
     expect(await liveWorkCount(sql)).toBe(LIVE.length);
   });
 
+  it('counts legacy live tasks before migration 0197, including the fenced recount', async () => {
+    await sql.begin(async (tx) => {
+      // A session-local copy of the migrated table without 0197's two additions is the
+      // counter's pre-0197 schema. Shadowing also proves detection follows the query's table.
+      await tx`CREATE TEMP TABLE tasks (LIKE public.tasks INCLUDING DEFAULTS) ON COMMIT DROP`;
+      await tx`ALTER TABLE pg_temp.tasks DROP COLUMN dead_at, DROP COLUMN dead_reason`;
+      for (const status of [...LIVE, 'created', ...FINISHED]) {
+        await tx`INSERT INTO tasks (user_id, type, title, status)
+                 VALUES (${OWNER}, ${TYPE}, 'Legacy task', ${status})`;
+      }
+      // max: 1: use the held transaction for every fixture write too.
+      const [repo] = await tx<{ id: string }[]>`
+        INSERT INTO repositories (user_id, name, source, status)
+        VALUES (${OWNER}, 'legacy-repo', 'local_path', 'cloning') RETURNING id`;
+      await tx`INSERT INTO custom_bundles (user_id, repository_id, name, source_type, storage_root, status)
+               VALUES (${OWNER}, ${repo!.id}, 'legacy-bundle', 'git', '/bundles/legacy', 'syncing')`;
+      await tx`INSERT INTO cli_providers (user_id, name, label, sandbox_image_build_status, model_provision_status)
+               VALUES (${OWNER}, 'claude-code', 'legacy-provider', 'building', 'provisioning')`;
+
+      expect(await liveWorkCount(tx, 'draining')).toBe(LIVE.length + 3);
+      expect(await liveWorkCount(tx, 'maintenance')).toBe(2 + 3);
+    });
+  });
+
   it('counts a queued task and not a created one, a draft that never ran, beside it', async () => {
     await task('queued');
     await task('created');
