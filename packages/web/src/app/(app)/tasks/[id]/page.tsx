@@ -780,6 +780,8 @@ export default function TaskDetailPage() {
   const [summaryCliError, setSummaryCliError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
+  // The step's park stamp when its answer was sent (see shouldClearSubmitting).
+  const submittedPark = useRef<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -1326,6 +1328,7 @@ export default function TaskDetailPage() {
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setActionNotice(null);
+    submittedPark.current = step.waitingStartedAt;
     setSubmitting(step.stepId);
     setSubmitError(null);
     try {
@@ -1342,7 +1345,8 @@ export default function TaskDetailPage() {
       await reload();
       // Keep button disabled here. The effect below clears `submitting` once the
       // step's status leaves `waiting_form`, which is when the form unmounts
-      // (success) or is replaced by a retry button (failure). Clearing in a
+      // (success) or is replaced by a retry button (failure), or once the worker
+      // reoffers the form under a new park stamp (a refused answer). Clearing in a
       // `finally` re-enabled the button between reload and backend transition.
     } catch (err) {
       setSubmitError({
@@ -1354,7 +1358,7 @@ export default function TaskDetailPage() {
   }
 
   useEffect(() => {
-    if (shouldClearSubmitting(submitting, steps)) {
+    if (shouldClearSubmitting(submitting, steps, submittedPark.current)) {
       setSubmitting(null);
     }
   }, [steps, submitting]);

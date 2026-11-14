@@ -44,4 +44,27 @@ describe('shouldClearSubmitting', () => {
     const steps = [step('s1', 'done'), step('s2', 'waiting_form')];
     expect(shouldClearSubmitting('s1', steps)).toBe(true);
   });
+
+  describe('a form reoffered under a new park stamp', () => {
+    const SENT = '2026-09-13T11:08:31.100Z';
+    const parked = (stamp: string | null) => [
+      { ...step('s1', 'waiting_form'), waitingStartedAt: stamp },
+    ];
+
+    it('keeps state while the answer is in flight', () => {
+      // A poll from before the submit route cleared the stamp, then the cleared stamp.
+      expect(shouldClearSubmitting('s1', parked(SENT), SENT)).toBe(false);
+      expect(shouldClearSubmitting('s1', parked(null), SENT)).toBe(false);
+    });
+
+    it('clears when the worker parks the step on its form again', () => {
+      // A refused answer re-parks the gate in one transaction, so the status never leaves
+      // waiting_form; only the stamp moves.
+      expect(shouldClearSubmitting('s1', parked('2026-09-13T11:09:02.400Z'), SENT)).toBe(true);
+    });
+
+    it('clears for a first park seen after a submit from an unstamped row', () => {
+      expect(shouldClearSubmitting('s1', parked(SENT), null)).toBe(true);
+    });
+  });
 });
