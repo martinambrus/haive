@@ -9,8 +9,18 @@ import {
   buildUpcomingCliSteps,
   resolveCurrentStepCliProviderIds,
 } from '../src/routes/tasks/_helpers.js';
+import { eq } from 'drizzle-orm';
 import { STEP_MINING_SEATS } from '@haive/shared';
 import { staticStepFlags } from './step-flags-fixture.js';
+
+// Exercise the real worker resolver without pulling its source tree into the API's
+// TypeScript root (the same runtime-import seam as park-fold-db). Load it with the
+// fixture so module initialization is outside the individual test's timeout.
+const workerPath = new URL(
+  '../../worker/src/step-engine/steps/workflow/_fix-round-cli.ts',
+  import.meta.url,
+).pathname;
+const { FixRoundCliUnavailable, resolveFixRoundCli } = await import(workerPath);
 
 const flags = staticStepFlags();
 const USER = '00000000-0000-4000-8000-0000000000a1';
@@ -151,6 +161,112 @@ describe("a step card's CLI", () => {
 
 describe('active fix-round CLI readers', () => {
   const stepId = '07-phase-2-implement';
+  it.each(['deleted', 'missing', 'foreign', 'disabled', 'enabled'])(
+    'matches worker refusal for an active %s round choice without fallback',
+    async (state) => {
+      const { db, choose, save } = setup();
+      choose(stepId, state === 'deleted' ? null : PICKED_CLI, 'fix:2:default');
+      save(stepId, SAVED_CLI);
+      const change =
+        state === 'disabled'
+          ? { enabled: false }
+          : state === 'foreign'
+            ? { userId: 'another-owner' }
+            : state === 'missing'
+              ? { id: 'no-longer-listed' }
+              : {};
+      await db
+        .update(schema.cliProviders)
+        .set(change)
+        .where(eq(schema.cliProviders.id, PICKED_CLI));
+      let refused = false;
+      try {
+        await resolveFixRoundCli(db, USER, TASK, stepId, 'default', 2);
+      } catch (error) {
+        expect(error).toBeInstanceOf(FixRoundCliUnavailable);
+        refused = true;
+      }
+      expect(refused).toBe(state !== 'enabled');
+      const [card] = await enrichStepsWithCliPreferences(
+        db,
+        flags,
+        USER,
+        [{ stepId, round: 2 }],
+        TASK,
+      );
+      expect(Boolean((card as { roundCliUnavailable?: true }).roundCliUnavailable)).toBe(refused);
+      const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+        {
+          id: TASK,
+          currentStepId: stepId,
+          currentRound: 2,
+          cliProviderId: TASK_CLI,
+          ignoreSavedStepClis: false,
+        },
+      ]);
+      expect(listing.get(TASK)).toEqual(refused ? [] : [PICKED_CLI]);
+      const upcoming = await buildUpcomingCliSteps(
+        db,
+        flags,
+        USER,
+        TASK,
+        'workflow',
+        [],
+        false,
+        [stepId],
+        2,
+      );
+      expect(Boolean((upcoming[0] as { roundCliUnavailable?: true }).roundCliUnavailable)).toBe(
+        refused,
+      );
+    },
+  );
+
+  it('lists no usage provider behind a deleted round slot', async () => {
+    const { db, choose } = setup();
+    choose(stepId, null, 'fix:2:default');
+    const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      {
+        id: TASK,
+        currentStepId: stepId,
+        currentRound: 2,
+        cliProviderId: TASK_CLI,
+        ignoreSavedStepClis: false,
+      },
+    ]);
+    expect(listing.get(TASK)).toEqual([]);
+  });
+
+  it.each(['later', 'tie', 'other-round', 'other-step', 'no-choice'])(
+    'keeps ordinary clear and no-override output unchanged: %s',
+    async (state) => {
+      const { db, choose } = setup();
+      if (state !== 'no-choice') choose(stepId, null, 'fix:2:default', new Date(1));
+      if (state === 'later' || state === 'tie')
+        choose(stepId, null, 'default', new Date(state === 'later' ? 2 : 1));
+      const target = state === 'other-step' ? '08c-code-review' : stepId;
+      const round = state === 'other-round' ? 3 : 2;
+      const [card] = await enrichStepsWithCliPreferences(
+        db,
+        flags,
+        USER,
+        [{ stepId: target, round }],
+        TASK,
+      );
+      expect(card).not.toHaveProperty('roundCliUnavailable');
+      const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+        {
+          id: TASK,
+          currentStepId: target,
+          currentRound: round,
+          cliProviderId: TASK_CLI,
+          ignoreSavedStepClis: false,
+        },
+      ]);
+      expect(listing.get(TASK)).toEqual([TASK_CLI]);
+    },
+  );
+
   it('shows and meters the round choice above an older card choice, only for that round', async () => {
     const { db, choose } = setup();
     choose(stepId, TASK_CLI);

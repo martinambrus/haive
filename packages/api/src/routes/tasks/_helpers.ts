@@ -201,6 +201,7 @@ async function loadTouchedRoles(
 interface TaskCliChoice {
   cliProviderId: string | null;
   effortLevel: string | null;
+  roundChoice?: boolean;
 }
 
 /** `task_step_cli_choices` as taskId -> stepId -> role -> choice: what was picked for a slot
@@ -239,7 +240,19 @@ function taskCliSlot(
   if (stepId !== '07-phase-2-implement' || role !== 'default' || round < 1)
     return choices?.get(role);
   const roundRole = `fix:${round}:default`;
-  return [...(choices ?? [])].find(([slot]) => slot === role || slot === roundRole)?.[1];
+  const match = [...(choices ?? [])].find(([slot]) => slot === role || slot === roundRole);
+  return match ? { ...match[1], roundChoice: match[0] === roundRole } : undefined;
+}
+
+/** The worker refuses an active round slot when its provider was deleted, is no longer
+ * owned, or is disabled. An ordinary NULL choice still clears the slot and falls through. */
+function unavailableRoundChoice(
+  choice: TaskCliChoice | undefined,
+  ownedProviders: readonly { id: string; enabled: boolean }[],
+): boolean {
+  return (
+    !!choice?.roundChoice && !ownedProviders.some((p) => p.id === choice.cliProviderId && p.enabled)
+  );
 }
 
 export async function enrichStepsWithCliPreferences<T extends { stepId: string; round?: number }>(
@@ -253,6 +266,8 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
 ): Promise<
   (T & {
     preferredCliProviderId: string | null;
+    /** Active round choice cannot dispatch; never interpret it as a cleared slot. */
+    roundCliUnavailable?: true;
     /** Per-step effort override (null = use the provider's configured effort);
      *  drives the per-step effort dropdown's selected value. */
     preferredEffortLevel: string | null;
@@ -288,6 +303,16 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       ? ((await loadTaskCliChoices(db, [taskId])).get(taskId) ??
         new Map<string, Map<string, TaskCliChoice>>())
       : new Map<string, Map<string, TaskCliChoice>>();
+  const hasRoundChoice = steps.some(
+    (s) =>
+      taskCliSlot(choicesByStep.get(s.stepId), s.stepId, 'default', s.round ?? round)?.roundChoice,
+  );
+  const ownedProviders = hasRoundChoice
+    ? await db
+        .select({ id: schema.cliProviders.id, enabled: schema.cliProviders.enabled })
+        .from(schema.cliProviders)
+        .where(eq(schema.cliProviders.userId, userId))
+    : [];
   return steps.map((s) => {
     const roles = flags.get(s.stepId)?.cliRoles ?? undefined;
     const seats = STEP_MINING_SEATS[s.stepId];
@@ -315,6 +340,12 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       ...s,
       preferredCliProviderId: provider('default', byStep.get(s.stepId) ?? null),
       preferredEffortLevel: effort('default', byStepEffort.get(s.stepId) ?? null),
+      ...(unavailableRoundChoice(
+        taskCliSlot(choices, s.stepId, 'default', s.round ?? round),
+        ownedProviders,
+      )
+        ? { roundCliUnavailable: true as const }
+        : {}),
       ...(roles
         ? {
             cliRoles: roles,
@@ -403,6 +434,15 @@ export async function resolveCurrentStepCliProviderIds(
     const stepId = task.currentStepId;
     const touchedRoles = stepId ? touched.get(task.id)?.get(stepId) : undefined;
     const stepChoices = stepId ? choices.get(task.id)?.get(stepId) : undefined;
+    if (
+      unavailableRoundChoice(
+        taskCliSlot(stepChoices, stepId ?? '', 'default', task.currentRound),
+        providerRows,
+      )
+    ) {
+      out.set(task.id, []);
+      continue;
+    }
     const honor = (role: string, value: string | null): string | null =>
       !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
     const slot = (role: string, saved: string | null): string | null => {

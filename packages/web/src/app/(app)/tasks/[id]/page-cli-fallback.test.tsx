@@ -170,8 +170,12 @@ afterAll(() => {
   vi.unstubAllGlobals();
 });
 
-async function mount(task: Record<string, unknown>, steps: unknown[] = []): Promise<Renderer> {
-  net.detail = { task: taskRow(task), steps, upcomingCliSteps: [upcoming] };
+async function mount(
+  task: Record<string, unknown>,
+  steps: unknown[] = [],
+  upcomingCliSteps: unknown[] = [upcoming],
+): Promise<Renderer> {
+  net.detail = { task: taskRow(task), steps, upcomingCliSteps };
   const view = createRenderer(() => <TaskDetailPage />);
   for (let i = 0; i < 8; i += 1) await view.flush();
   return view;
@@ -394,4 +398,66 @@ it('does not open a terminal when the task-bound provider is the only provider a
   } finally {
     net.providers = null;
   }
+});
+
+const REMOVED_ROUND_CLI =
+  'The chosen CLI was removed. Pick another on the step card or at the gate.';
+
+it('shows a removed round choice on the card and no fallback usage meter', async () => {
+  const view = await mount(
+    {
+      cliProviderId: 'p-claude',
+      effectiveCliProviderId: 'p-claude',
+      currentStepId: '07-phase-2-implement',
+    },
+    [{ ...stepRow(), stepId: '07-phase-2-implement', round: 2, roundCliUnavailable: true }],
+  );
+  expect(textOf(view.tree())).toContain(REMOVED_ROUND_CLI);
+  const select = findAll(
+    view.tree(),
+    (h) => h.tag === 'select' && h.props.id === 'cli-07-phase-2-implement',
+  )[0];
+  expect(select?.props.value).not.toBe('p-claude');
+  expect(usageTitles(view)).toEqual([]);
+});
+
+it('shows a removed round choice in the CLIs tab before a step row exists', async () => {
+  const view = await mount(
+    {
+      cliProviderId: 'p-claude',
+      effectiveCliProviderId: 'p-claude',
+      currentStepId: upcoming.stepId,
+    },
+    [],
+    [{ ...upcoming, roundCliUnavailable: true }],
+  );
+  await cliTab(view);
+  expect(textOf(view.tree())).toContain(REMOVED_ROUND_CLI);
+  const select = findAll(
+    view.tree(),
+    (h) => h.tag === 'select' && h.props.id === 'upcoming-cli-07-implement',
+  )[0];
+  expect(select?.props.value).not.toBe('p-claude');
+  expect(usageTitles(view)).toEqual([]);
+});
+
+it('does not show a fallback meter for a pending implementation round card', async () => {
+  const view = await mount(
+    {
+      cliProviderId: 'p-claude',
+      effectiveCliProviderId: 'p-claude',
+      currentStepId: '07-phase-2-implement',
+      currentRound: 2,
+    },
+    [
+      {
+        ...stepRow(),
+        stepId: '07-phase-2-implement',
+        round: 2,
+        status: 'pending',
+        roundCliUnavailable: true,
+      },
+    ],
+  );
+  expect(usageTitles(view)).toEqual([]);
 });

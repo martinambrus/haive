@@ -638,6 +638,7 @@ interface TaskDetailResponse {
 type CliPreferenceFields = Pick<
   TaskStep,
   | 'preferredCliProviderId'
+  | 'roundCliUnavailable'
   | 'preferredEffortLevel'
   | 'cliRoles'
   | 'cliRoleProviders'
@@ -654,7 +655,12 @@ function applyCliPreference<T extends CliPreferenceFields>(
 ): T {
   const effort = effortLevel ?? null;
   if (!role) {
-    return { ...step, preferredCliProviderId: cliProviderId, preferredEffortLevel: effort };
+    return {
+      ...step,
+      preferredCliProviderId: cliProviderId,
+      preferredEffortLevel: effort,
+      roundCliUnavailable: undefined,
+    };
   }
   if (step.cliRoles?.some((r) => r.id === role)) {
     return {
@@ -1715,7 +1721,11 @@ export default function TaskDetailPage() {
   // prompt covered only that one, so a dead token on a seat CLI failed the step in silence.
   const taskEffectiveCliProviderId = task.effectiveCliProviderId ?? task.cliProviderId ?? null;
   const usageProviderIds = stepCliProviderIds({
-    step: currentStep ?? null,
+    step:
+      currentStep ??
+      steps.find((s) => s.stepId === task.currentStepId && s.round === task.currentRound) ??
+      upcomingCliSteps.find((s) => s.stepId === task.currentStepId) ??
+      null,
     taskCliProviderId: taskEffectiveCliProviderId,
     listedProviderIds: new Set(providers.map((p) => p.id)),
   });
@@ -2665,7 +2675,12 @@ function UpcomingCliPanel({
             idPrefix={`upcoming-cli-${s.stepId}`}
             roles={s.cliRoles}
             seats={s.miningSeats}
-            defaultProviderId={s.preferredCliProviderId ?? taskCliProviderId ?? ''}
+            defaultProviderId={
+              s.roundCliUnavailable
+                ? (s.preferredCliProviderId ?? '')
+                : (s.preferredCliProviderId ?? taskCliProviderId ?? '')
+            }
+            roundCliUnavailable={s.roundCliUnavailable}
             defaultEffortLevel={s.preferredEffortLevel}
             roleProviders={s.cliRoleProviders}
             roleEfforts={s.cliRoleEfforts}
@@ -3703,7 +3718,9 @@ function StepCardImpl({
   const cliPickerId = `cli-${step.stepId}`;
   // Per-step preference wins; otherwise fall back to the task default. Empty
   // string for "no preference" so the dropdown shows the (none) option.
-  const effectiveCliProviderId = step.preferredCliProviderId ?? taskCliProviderId ?? '';
+  const effectiveCliProviderId = step.roundCliUnavailable
+    ? (step.preferredCliProviderId ?? '')
+    : (step.preferredCliProviderId ?? taskCliProviderId ?? '');
   // Per-step lock: only locked while THIS step is running/waiting on CLI.
   const cliLocked = step.status === 'running' || step.status === 'waiting_cli';
   // Multi-CLI alternating steps (cliRoles) count one user-facing round per N
@@ -3858,6 +3875,7 @@ function StepCardImpl({
               roles={step.cliRoles}
               seats={step.miningSeats}
               defaultProviderId={effectiveCliProviderId}
+              roundCliUnavailable={step.roundCliUnavailable}
               defaultEffortLevel={step.preferredEffortLevel}
               roleProviders={step.cliRoleProviders}
               roleEfforts={step.cliRoleEfforts}
