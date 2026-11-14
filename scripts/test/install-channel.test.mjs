@@ -389,6 +389,37 @@ for (const lang of ['sh', 'ps1']) {
       channel: publicInstall ? 'public' : 'customer',
       bundle: { files: hashes, env: [], known: [] },
     };
+    check(`force install replaces linked helpers safely (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall, data });
+      try {
+        mkdirSync(f.dir);
+        const names = lang === 'sh' ? ['haive', 'uninstall.sh'] : ['haive.ps1', 'uninstall.ps1'];
+        const outside = names.map((name) => join(f.root, `outside-${name}`));
+        for (const [index, name] of names.entries()) {
+          writeFileSync(outside[index], `operator file ${index}`, { mode: 0o600 });
+          symlinkSync(outside[index], join(f.dir, name));
+        }
+        const envTarget = join(f.root, 'outside-env');
+        if (lang === 'sh') symlinkSync(envTarget, join(f.dir, '.env'));
+        const before = outside.map((path) => ({
+          bytes: readFileSync(path),
+          mode: statSync(path).mode,
+        }));
+        const r = f.install([f.flag('force')]);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.ok(!existsSync(envTarget), 'dangling env target stays absent');
+        assert.ok(lstatSync(join(f.dir, '.env')).isFile());
+        for (const [index, name] of names.entries()) {
+          assert.deepEqual(readFileSync(outside[index]), before[index].bytes, name);
+          assert.equal(statSync(outside[index]).mode, before[index].mode, name);
+          assert.ok(lstatSync(join(f.dir, name)).isFile(), name);
+          if (lang === 'sh') assert.equal(statSync(join(f.dir, name)).mode & 0o777, 0o755);
+        }
+        assert.ok(!readdirSync(f.dir).some((name) => name.startsWith('.haive-install.')));
+      } finally {
+        f.clean();
+      }
+    });
     check(`force install replaces linked bundle entries (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data });
       try {

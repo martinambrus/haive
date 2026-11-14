@@ -653,8 +653,6 @@ if ($hasReleaseBundle) {
 }
 # Ownership checks can refuse too, so finish them before the first destination file changes.
 foreach ($name in $placedFiles) { Place-BundleFile $name }
-Remove-Item -LiteralPath $bundleStage -Force
-$bundleStage = $null
 
 $webPort     = Get-FreePort 3000
 $apiPort     = Get-FreePort ($webPort + 1)
@@ -705,7 +703,8 @@ if (-not (Test-Path $envPath)) {
   # LF, not CRLF, and written without a BOM: compose reads this file itself and a stray carriage
   # return lands inside the VALUE of the last variable on every line.
   if ($Channel -cne 'public') { $channelEnvCreated = $true }
-  [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText((Join-Path $bundleStage '.env'), ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  Place-BundleFile '.env'
   Write-Note "secrets           generated (.env)"
 }
 
@@ -825,7 +824,8 @@ switch ($Command) {
       '--version', $v,
 '@)
 }
-[System.IO.File]::WriteAllText((Join-Path $Dir 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $bundleStage 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
+Place-BundleFile 'haive.ps1'
 
 # Uninstall deliberately does NOT use `down -v`. Five volumes in docker-compose.yml carry an
 # explicit global name, so they are shared with any other Haive on this machine and `-v` would
@@ -1042,7 +1042,10 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.docker')) {
 # `down` first
 '@)
 }
-[System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $bundleStage 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
+Place-BundleFile 'uninstall.ps1'
+Remove-Item -LiteralPath $bundleStage -Force
+$bundleStage = $null
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
 
 if ($NoStart) {
