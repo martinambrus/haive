@@ -156,35 +156,40 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
               </tr>
             </thead>
             <tbody>
-              {report.rows.map((r) => (
-                <tr key={r.taskId} className="border-t border-neutral-800 align-top">
-                  <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
-                    <Link
-                      className="text-neutral-200 underline hover:text-white"
-                      href={`/tasks/${r.taskId}`}
-                    >
-                      {r.title}
-                    </Link>
-                  </td>
-                  <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
-                    {r.repository ?? '—'}
-                  </td>
-                  <td className="break-words px-1 py-3">
-                    {reportTestPhase(r.testsMs, r.testExecution)}
-                  </td>
-                  <td className="break-words px-1 py-3" title={reportCheckCoverage(r)}>
-                    {reportTestSuite(r)}
-                    <div className="mt-1 text-neutral-400">{reportCheckCoverage(r)}</div>
-                  </td>
-                  <td className="break-words px-1 py-3 font-mono">{reportDuration(r.workMs)}</td>
-                  <td className="break-words px-1 py-3 font-mono">
-                    {reportDuration(r.userActiveMs)}
-                  </td>
-                  <td className="break-words px-1 py-3 font-mono">{reportDuration(r.waitMs)}</td>
-                  <td className="break-words px-1 py-3 font-mono">{money(r.realUsd)}</td>
-                  <td className="break-words px-1 py-3 font-mono">{apiRates(r)}</td>
-                </tr>
-              ))}
+              {report.rows.map((r) => {
+                const coverage = Object.values(r.testCheckCounts).some((n) => n > 0)
+                  ? reportCheckCoverage(r)
+                  : undefined;
+                return (
+                  <tr key={r.taskId} className="border-t border-neutral-800 align-top">
+                    <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
+                      <Link
+                        className="text-neutral-200 underline hover:text-white"
+                        href={`/tasks/${r.taskId}`}
+                      >
+                        {r.title}
+                      </Link>
+                    </td>
+                    <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
+                      {r.repository ?? '—'}
+                    </td>
+                    <td className="break-words px-1 py-3">
+                      {reportTestPhase(r.testsMs, r.testExecution)}
+                    </td>
+                    <td className="break-words px-1 py-3" title={coverage}>
+                      {reportTestSuite(r)}
+                      {coverage && <div className="mt-1 text-neutral-400">{coverage}</div>}
+                    </td>
+                    <td className="break-words px-1 py-3 font-mono">{reportDuration(r.workMs)}</td>
+                    <td className="break-words px-1 py-3 font-mono">
+                      {reportDuration(r.userActiveMs)}
+                    </td>
+                    <td className="break-words px-1 py-3 font-mono">{reportDuration(r.waitMs)}</td>
+                    <td className="break-words px-1 py-3 font-mono">{money(r.realUsd)}</td>
+                    <td className="break-words px-1 py-3 font-mono">{apiRates(r)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {report.truncated && (

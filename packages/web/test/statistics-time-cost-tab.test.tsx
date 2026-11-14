@@ -62,11 +62,13 @@ it('shows durable recording coverage, suite totals and incomplete checks alongsi
   expect(screen.getByText(/Recording began 2026-11-14/)).toBeTruthy();
   expect(screen.getAllByText(/Pass share: n=1.*1 incomplete/)).toHaveLength(2);
   const oldRow = screen.getByRole('link', { name: 'old' }).closest('tr');
-  expect(oldRow?.children[3]?.textContent).toContain('—');
+  expect(oldRow?.children[3]?.textContent).toBe('—');
+  expect(oldRow?.children[3]?.hasAttribute('title')).toBe(false);
 });
 
 it('shows absent task timing as unmeasured even though summary reconciliation totals are zero', () => {
   const report = buildTimeCostReport({
+    recordingStartedAt: '2026-11-14T00:00:00.000Z',
     tasks: [{ taskId: 't', completedAt: new Date(1000) }],
     steps: [],
     events: [],
@@ -86,6 +88,9 @@ it('shows absent task timing as unmeasured even though summary reconciliation to
   expect(screen.getAllByText('Workflow work')[0]!.nextElementSibling?.textContent).toBe('—');
   expect(screen.getAllByText('Human active')[0]!.nextElementSibling?.textContent).toBe('—');
   expect(screen.getAllByText('Billed')[0]!.nextElementSibling?.textContent).toBe('—');
+  expect(screen.getByText(/Pass share: — · 0 passed.*Recording began 2026-11-14/)).toBeTruthy();
+  const row = screen.getByRole('link', { name: 'Historical task' }).closest('tr');
+  expect(row?.children[3]?.textContent).toBe('—');
 });
 
 it('loads only when opened, carries the filters and rejects an old window response', async () => {
