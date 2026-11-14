@@ -120,6 +120,17 @@ describe('host fix-pass test evidence', () => {
     expect(fixTestReviewNotice([record(result)])).toBe('');
   });
 
+  it('discloses uncaptured passes without an empty changed-path fence', () => {
+    expect(
+      fixTestReviewNotice([
+        record(),
+        record({ state: 'not captured', reason: 'Missing manifest.' }),
+      ]),
+    ).toBe('1 repair passes were not captured; absence of edits is unknown.');
+    expect(fixTestReviewNotice([record()])).toBe('');
+    expect(fixTestReviewNotice([])).toBe('');
+  });
+
   it('ignores retention budget status flips but measures becoming or stopping refused', () => {
     const file = { path: 'tests/a', hash: 'same', mode: 420, status: 'available' as const };
     const image = { state: 'captured' as const, files: [file] };
