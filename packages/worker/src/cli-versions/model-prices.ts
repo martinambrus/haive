@@ -8,6 +8,7 @@ import {
   configService,
   ECB_DAILY_FX_URL,
   LITELLM_PRICES_URL,
+  PROVIDER_LITELLM_VENDORS,
   hasAnyRate,
   isVariablePriceRate,
   parseRate,
@@ -77,7 +78,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       return {
         ok: false,
         refreshed: [],
-        errors: [{ name: 'price:config', error: safeErrorMessage(err) }],
+        errors: [{ name: 'price:config', error: safeErrorMessage(err).slice(0, 2000) }],
       };
     }
     log.debug({ err }, 'pricing auto-update config unavailable; proceeding');
@@ -102,7 +103,10 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
   const unsupported: NonNullable<RefreshCliVersionsJobResult['unsupported']> = [];
 
   // --- LiteLLM: direct-vendor rates for everything except the gateway ---
-  const litellmProviders = [...enabled];
+  const synced = new Set<CliProviderName>();
+  const litellmProviders = [...enabled].filter(
+    (provider) => PROVIDER_LITELLM_VENDORS[provider]?.length,
+  );
   try {
     const resp = await fetch(LITELLM_PRICES_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!resp.ok) throw new Error(`${LITELLM_PRICES_URL} HTTP ${resp.status}`);
@@ -116,11 +120,12 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       if (row.rates.pricingState === 'unsupported')
         errors.push({
           name: `price:${row.provider}`,
-          error: `${row.modelKey}: ${row.rates.pricingReason}`,
+          error: safeErrorMessage(`${row.modelKey}: ${row.rates.pricingReason}`).slice(0, 2000),
         });
     }
+    for (const provider of litellmProviders) synced.add(provider);
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh litellm model prices');
     for (const provider of litellmProviders) errors.push({ name: `price:${provider}`, error });
     await recordSyncError(db, litellmProviders, error);
@@ -181,15 +186,21 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
           rates.pricingState === 'unsupported' &&
           (rates.pricingReason === 'time-window' || rates.pricingReason === 'variable-price')
         )
-          unsupported.push({ model: modelKey, reason: rates.pricingReason });
+          unsupported.push({
+            model: safeErrorMessage(modelKey).slice(0, 2000),
+            reason: rates.pricingReason,
+          });
         else if (rates.pricingState === 'unsupported')
           errors.push({
             name: 'price:openrouter',
-            error: `${modelKey}: ${rates.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
+            error: safeErrorMessage(
+              `${modelKey}: ${rates.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
+            ).slice(0, 2000),
           });
       }
+      synced.add('openrouter');
     } catch (err) {
-      const error = safeErrorMessage(err);
+      const error = safeErrorMessage(err).slice(0, 2000);
       log.warn({ err, error }, 'failed to read openrouter catalog for pricing');
       errors.push({ name: 'price:openrouter', error });
       await recordSyncError(db, ['openrouter'], error);
@@ -210,26 +221,28 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
         rates: row.rates,
       });
     }
+    if (pageErrors.length === 0 || rows.length > 0) synced.add('ollama');
     if (pageErrors.length > 0) {
-      const error = pageErrors.join('; ');
+      const error = safeErrorMessage(pageErrors.join('; ')).slice(0, 2000);
       errors.push({ name: 'price:ollama', error });
       await recordSyncError(db, ['ollama'], error);
     }
   }
 
-  if (desired.length === 0) {
-    return { ok: errors.length === 0, refreshed: [], errors, unsupported };
-  }
-
-  const { inserted, closed, unchanged, perProvider } = await applyDesiredRows(db, desired);
+  const { inserted, closed, unchanged, perProvider } = desired.length
+    ? await applyDesiredRows(db, desired)
+    : { inserted: 0, closed: 0, unchanged: 0, perProvider: new Map<CliProviderName, number>() };
+  // A successful empty feed also clears its prior failure. A failed feed preserves
+  // its last-good count and fetchedAt through recordSyncError instead.
+  for (const provider of synced) if (!perProvider.has(provider)) perProvider.set(provider, 0);
 
   const now = new Date();
   for (const [provider, count] of perProvider) {
-    const fetchError =
-      errors
-        .filter((e) => e.name === `price:${provider}`)
-        .map((e) => e.error)
-        .join('; ') || null;
+    const providerErrors = errors
+      .filter((e) => e.name === `price:${provider}`)
+      .map((e) => e.error)
+      .join('; ');
+    const fetchError = providerErrors ? safeErrorMessage(providerErrors).slice(0, 2000) : null;
     await db
       .insert(schema.cliPricingSync)
       .values({
@@ -331,7 +344,10 @@ async function applyDesiredRows(
 
   const perProvider = new Map<CliProviderName, number>();
   for (const row of desired) {
-    perProvider.set(row.provider, (perProvider.get(row.provider) ?? 0) + 1);
+    perProvider.set(
+      row.provider,
+      (perProvider.get(row.provider) ?? 0) + Number(row.rates.pricingState !== 'unsupported'),
+    );
   }
   return { inserted: toInsert.length, closed: toClose.length, unchanged, perProvider };
 }
@@ -385,7 +401,7 @@ export async function refreshFxRates(db: Database): Promise<RefreshCliVersionsJo
     log.info({ date, count: rates.length }, 'refreshed fx rates');
     return { ok: true, refreshed: [{ name: 'fx', count: rates.length, latest: date }], errors: [] };
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh fx rates');
     return { ok: false, refreshed: [], errors: [{ name: 'fx', error }] };
   }

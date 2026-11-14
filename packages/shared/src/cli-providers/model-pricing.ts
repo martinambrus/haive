@@ -175,9 +175,6 @@ export function ratesEqual(a: ModelPriceRates, b: ModelPriceRates): boolean {
   );
 }
 
-/** Feeds send rates as decimal strings ("0.00001") or numbers. Anything else, and
- *  anything non-finite or negative, is null — see the ModelPriceRates note on why
- *  null must not collapse to 0. */
 /** OpenRouter uses finite negative rates for variable-price routers. */
 export function isVariablePriceRate(value: unknown): boolean {
   return (
@@ -187,6 +184,9 @@ export function isVariablePriceRate(value: unknown): boolean {
   );
 }
 
+/** Feeds send rates as decimal strings ("0.00001") or numbers. Anything else, and
+ *  anything non-finite or negative, is null — see the ModelPriceRates note on why
+ *  null must not collapse to 0. */
 export function parseRate(value: unknown): number | null {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
   if (typeof value !== 'string' || value.trim() === '') return null;

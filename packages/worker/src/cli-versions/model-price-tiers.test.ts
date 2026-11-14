@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { CLI_PROVIDER_LIST, configService, trimOpenRouterModels } from '@haive/shared';
+import * as ollama from './ollama-model-prices.js';
 import { refreshOpenRouterModels } from './openrouter-models.js';
 import { refreshModelPrices } from './model-prices.js';
 import { resolveInvocationCost } from '../queues/cli-exec/invocation-cost.js';
@@ -164,7 +165,7 @@ describe('tier refresh lifecycle', () => {
   });
 });
 
-it('counts unsupported catalog overrides in the refresh result and retains cache on network failure', async () => {
+it('retains unsupported catalog metadata and cache on network failure', async () => {
   feed = {
     data: [
       {
@@ -180,15 +181,7 @@ it('counts unsupported catalog overrides in the refresh result and retains cache
     ],
   };
   const result = await refreshOpenRouterModels(db);
-  expect(result).toMatchObject({
-    ok: false,
-    errors: [
-      {
-        name: 'price:openrouter',
-        error: expect.stringContaining('timed: unsupported-condition (2 overrides)'),
-      },
-    ],
-  });
+  expect(result).toMatchObject({ ok: true, errors: [] });
   const stored = await fake.db.query.openrouterModelCache!.findFirst();
   expect(stored!.models).toMatchObject([
     { pricingState: 'unsupported', unsupportedOverrideCount: 2 },
@@ -208,7 +201,7 @@ it('syncs live Gemini modality shapes without a price error', async () => {
   expect(result.ok).toBe(true);
   expect(result.errors).toEqual([]);
   expect((await live()).filter((r) => r.provider === 'gemini')).toHaveLength(2);
-  expect((await live()).every((r) => !r.rates.pricingState)).toBe(true);
+  for (const row of await live()) expect(row.rates).not.toHaveProperty('pricingState');
 });
 
 it('counts known time windows as successful catalog refreshes', async () => {
@@ -263,4 +256,95 @@ it('closes an existing negative OpenRouter price with a variable-price marker', 
     pricingReason: 'variable-price',
   });
   expect(await cost('openrouter')).toMatchObject({ source: 'none' });
+});
+
+it('keeps fetch errors scoped to the feed that produced each provider', async () => {
+  for (const name of ['openrouter', 'ollama'] as const) {
+    await fake.db
+      .update(schema.cliPricingSync)
+      .set({ autoUpdateEnabled: true, fetchError: 'old outage' })
+      .where(eq(schema.cliPricingSync.name, name));
+  }
+  vi.spyOn(ollama, 'fetchOllamaModelPrices').mockResolvedValue({
+    rows: [{ modelKey: 'kimi:cloud', rates: base }],
+    errors: [],
+  });
+  fake.insert(schema.openrouterModelCache, {
+    name: 'openrouter',
+    models: trimOpenRouterModels({ data: [{ id: 'x', pricing: { prompt: '1' } }] }),
+  });
+  vi.mocked(fetch).mockRejectedValue(new Error('LiteLLM unavailable'));
+  const result = await refreshModelPrices(db);
+  expect(result.errors).toEqual([{ name: 'price:codex', error: 'LiteLLM unavailable' }]);
+  for (const name of ['openrouter', 'ollama'] as const) {
+    expect(
+      await fake.db.query.cliPricingSync!.findFirst({
+        where: eq(schema.cliPricingSync.name, name),
+      }),
+    ).toMatchObject({ fetchError: null, priceCount: 1 });
+  }
+});
+it('resets a successful empty feed without touching another feed failure', async () => {
+  for (const name of ['openrouter', 'ollama'] as const) {
+    await fake.db
+      .update(schema.cliPricingSync)
+      .set({ autoUpdateEnabled: true, fetchError: 'old outage' })
+      .where(eq(schema.cliPricingSync.name, name));
+  }
+  vi.spyOn(ollama, 'fetchOllamaModelPrices').mockResolvedValue({ rows: [], errors: [] });
+  vi.mocked(fetch).mockRejectedValue(new Error('LiteLLM unavailable'));
+  await refreshModelPrices(db);
+  for (const name of ['openrouter', 'ollama'] as const) {
+    expect(
+      await fake.db.query.cliPricingSync!.findFirst({
+        where: eq(schema.cliPricingSync.name, name),
+      }),
+    ).toMatchObject({ fetchError: null, priceCount: 0 });
+  }
+});
+it('excludes markers from the priced-model count', async () => {
+  feed = { x: raw, marker: { ...raw, tiered_pricing: [] } };
+  const result = await refreshModelPrices(db);
+  expect(result.refreshed).toContainEqual({ name: 'price:codex', count: 1, latest: null });
+  expect(
+    await fake.db.query.cliPricingSync!.findFirst({
+      where: eq(schema.cliPricingSync.name, 'codex'),
+    }),
+  ).toMatchObject({ priceCount: 1 });
+  feed = { x: { ...raw, tiered_pricing: [] } };
+  expect((await refreshModelPrices(db)).refreshed).toContainEqual({
+    name: 'price:codex',
+    count: 0,
+    latest: null,
+  });
+});
+it('bounds unreadable model errors and sanitizes original database failures', async () => {
+  feed = { ['x'.repeat(2100)]: { ...raw, tiered_pricing: [] } };
+  const result = await refreshModelPrices(db);
+  expect(result.errors).toHaveLength(1);
+  expect(result.errors[0]!.error.length).toBeLessThanOrEqual(2000);
+  vi.mocked(fetch).mockRejectedValue(
+    Object.assign(new Error('query with private values'), {
+      params: ['private value'],
+    }),
+  );
+  expect((await refreshModelPrices(db)).errors).toEqual([
+    { name: 'price:codex', error: 'Database operation failed' },
+  ]);
+});
+it('emits unreadable OpenRouter prices once in the price sync, honoring admin ownership', async () => {
+  feed = {
+    data: [{ id: 'x', pricing: { prompt: '1', overrides: [{ region: 'new', prompt: '3' }] } }],
+  };
+  expect(await refreshOpenRouterModels(db)).toMatchObject({ ok: true, errors: [] });
+  feed = { x: raw };
+  expect((await refreshModelPrices(db)).errors).toEqual([]);
+  await fake.db
+    .update(schema.cliPricingSync)
+    .set({ autoUpdateEnabled: true })
+    .where(eq(schema.cliPricingSync.name, 'openrouter'));
+  const result = await refreshModelPrices(db);
+  expect(result.errors.filter((e) => e.name === 'price:openrouter')).toEqual([
+    { name: 'price:openrouter', error: 'x: unsupported-condition (1 overrides)' },
+  ]);
 });

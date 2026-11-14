@@ -57,24 +57,15 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
         },
       });
     log.info({ count: models.length }, 'refreshed openrouter model catalog');
-    const errors = models
-      .filter(
-        (m) =>
-          m.pricingState === 'unsupported' &&
-          m.pricingReason !== 'time-window' &&
-          m.pricingReason !== 'variable-price',
-      )
-      .map((m) => ({
-        name: 'price:openrouter',
-        error: `${m.id}: ${m.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
-      }));
     return {
-      ok: errors.length === 0,
+      ok: true,
       refreshed: [{ name: 'openrouter', count: models.length, latest: null }],
-      errors,
+      // Pricing diagnostics belong to refreshModelPrices, which honors the
+      // per-provider switch. The catalog remains useful for an unpriced model.
+      errors: [],
     };
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh openrouter model catalog');
     await db
       .insert(schema.openrouterModelCache)

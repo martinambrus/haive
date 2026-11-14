@@ -166,3 +166,10 @@ it('marks negative OpenRouter base and tier rates as variable-price', () => {
     expect(model!.promptPrice).not.toBe(-1);
   }
 });
+
+it('treats null overrides as absent while refusing malformed overrides', () => {
+  const parse = (overrides: unknown) =>
+    trimOpenRouterModels({ data: [{ id: 'x', pricing: { prompt: '1', overrides } }] })[0]!;
+  expect(parse(null).pricingState).toBeUndefined();
+  expect(parse({}).pricingReason).toBe('invalid-tier');
+});

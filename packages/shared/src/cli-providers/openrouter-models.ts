@@ -118,7 +118,7 @@ function parseOverrides(
     )
   )
     return { pricingState: 'unsupported', pricingReason: 'variable-price' };
-  if (!('overrides' in pricing)) return {};
+  if (!('overrides' in pricing) || overrides === null) return {};
   if (!Array.isArray(overrides))
     return {
       pricingState: 'unsupported',
