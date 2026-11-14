@@ -28,6 +28,7 @@ export const refreshRuns = pgTable('refresh_runs', {
     runId?: string;
     startedAt?: string;
     skipped?: string[];
+    unsupported?: { model: string; reason: 'time-window' | 'variable-price' }[];
     refreshed: { name: string; count: number; latest: string | null }[];
     errors: { name: string; error: string }[];
   }>(),
