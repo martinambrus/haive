@@ -17,6 +17,7 @@ import {
   eligibleFixRoundProviders,
   FIX_ROUND_CLI_FIELD,
   fixRoundCliRole,
+  fixRoundCliField,
 } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
 
 const provider = (id: string, over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
@@ -147,6 +148,12 @@ describe('next-round CLI', () => {
         needsSubagents,
       ),
     ).toEqual([]);
+  });
+
+  it('explains when no enabled provider is eligible', () => {
+    expect(fixRoundCliField({ round: 2, providers: [] }).description).toBe(
+      'No enabled CLI is eligible for the next fix round; your existing CLI choice will be used.',
+    );
   });
 
   it.each(['cap', 'oscillation'])(
