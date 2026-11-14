@@ -584,7 +584,7 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 
 ### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+17)
 
-status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+status: open (OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 and 1 only; context-tiered PR 3 still waits for the complete-coverage rate measured on dev runs; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change; earlier: OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
 1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
 2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
@@ -606,7 +606,7 @@ status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the
 
 ### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
-status: open · kind: fix · found: human time PR 1-2 · priority: P3
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) for items 2-10; item 1 owed live check rides the overnight capped workflow run (owner 2026-11-14) · kind: fix · found: human time PR 1-2 · priority: P3
 
 1. The real-browser check of the task-page timer, and of the plan page (#1165: time accumulates during input, stops at the allowance, keeps counting through a running chat turn up to 15 minutes; `plan_active_time` rows for the hour), is owed (no live non-plan-chat task was parked at a form on 2026-11-14): allowance ~2 min inline spec, ~5 min maximized, ~1 min short form; stops with the mouse still; poll/auto-scroll does not restart; `visibleWords` cost and null rate on a real gate page.
 2. A paused task still counts as plan-page pending work: pausing sets `pausedAt` and leaves the status, and the node payload (`GET /plan/nodes/:id` tasks) does not carry `pausedAt` (web plan-detail-panel.tsx ~:106). Bounded by the 15-minute pending window. Add `pausedAt` to the payload and exclude it.
@@ -621,7 +621,7 @@ status: open · kind: fix · found: human time PR 1-2 · priority: P3
 
 ### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+13)
 
-status: open · kind: fix · found: T655 run · priority: P3
+status: open (queued 2026-11-14 overnight: items 5 and 10; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: T655 run · priority: P3
 
 1. Every in-repo `connect_timeout` / `connectTimeoutSeconds` is a positive constant (api rag.ts, tooling.ts, tooling-upgrades.ts, global-kb.ts; worker global-kb-context.ts, data-migrations.ts; database migrate/client.ts, cli-auth-lock.ts), and unset defaults to 30 s. Only a user DSN `connect_timeout=0` or env `PGCONNECT_TIMEOUT=0` disables the bound, and on v4 that means startup retries until the caller's own timeout. Refuse or clamp it in the user DSN guard. Low (admin-supplied DSN).
 2. `pg-startup-storm.test.ts` drain waits are bounded by count, not time; the end test restores real timers outside `finally`; one bound (15) is loose. Tests only.
@@ -639,7 +639,7 @@ status: open · kind: fix · found: T655 run · priority: P3
 
 ### T662 · FNF[relink-reconcile-lows] · remote relink reconcile lows, after #1158 (+8)
 
-status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · priority: P3
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); owner 2026-11-14: items 1-3 relink races parked; item 4 (log a skipped fenced repository) is a cheap ride-along · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · priority: P3
 
 1. The sweep's own reconcile is not a registered writer, and the relink route does not wait for an in-process writer before its Git writes (`api/lib/remote-reconcile.ts` `reconcileRemote` ~:110-150, `api/routes/repos.ts` relink). A reconcile whose database connection drops during its Git calls keeps writing the old remote after the row lock is released; a concurrent relink can commit and clear a newer remote first, leaving Git on the older one with no intent left. Needs a connection drop inside a few ms of Git calls plus a concurrent relink of the same repository; the next relink repairs it. Fix direction: register the reconcile callback as a writer through its settlement, and have the route await outstanding writers for the repository before its own Git writes. Codex bot P2 on cbb25ae10.
 2. Window between committing the intent and taking the writer fence in the route (the fence begins before the relink transaction, the intent row is written earlier); a sweep tick in between acts on a live request's intent on a folder import. The request answers 409 and a retry restores the origin.
@@ -685,7 +685,7 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
 
-status: open · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md` and `SD2-S/review-{1,2}.md`.
 
@@ -699,7 +699,7 @@ Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md` and `SD2-S/review-{
 
 ### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
 
-status: open · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 1 queued inside derived types prerequisite 4 (owner 2026-11-14) · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/DT1-S/review-{1,2}.md`.
 
@@ -709,7 +709,7 @@ Reviews in `.claude/tmp/codex-run/DT1-S/review-{1,2}.md`.
 
 ### T676 · FNF[external-module-dev] · external module dev install lows, after #1179 (+8)
 
-status: open · kind: fix · found: #1179 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1179 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
 
@@ -724,7 +724,7 @@ Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
 
 ### T675 · FNF[plan-chat-bound] · bounded plan chat, plan writers and plan write fence lows, after #1178 and #1183 (+18)
 
-status: open · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
+status: open (queued 2026-11-14 overnight: items 10 REGRESSION, 1 and 3; item 9 owed live check rides the capped workflow run; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md).
 
@@ -752,7 +752,7 @@ From #1183 (bounded plan writers 11f/01f), reviews in `.claude/tmp/codex-run/PB5
 
 ### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+33)
 
-status: open · kind: fix · found: #1180 review 2026-11-14 · priority: P4
+status: open (queued 2026-11-14 overnight: items 16, 26, 27 plus any finding of the two-install check, one bundle; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1180 review 2026-11-14 · priority: P4
 
 Review in `.claude/tmp/codex-run/RBP-S/review-1.md`; installer items in `IN6-S/review-{1,2,3}.md`.
 
@@ -795,7 +795,7 @@ From #1181 (updater reads the bundle), reviews in `.claude/tmp/codex-run/RBR-S/r
 
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
-status: open · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 9 owed live check rides the overnight capped workflow run · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/NRC-S/`.
 
@@ -811,13 +811,13 @@ Reviews in `.claude/tmp/codex-run/NRC-S/`.
 
 ### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+1)
 
-status: open · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
+status: open (queued 2026-11-14 overnight, with T667 item 1 which is the same defect) · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
 
 1. PRE-EXISTING, consequential. A re-run of step 11 apply re-reads existing learnings (`11-phase-8-learning.ts` ~:1722) and re-plans, so an insert already written is "taken" and `resolveInsertId` (~:763) returns `<id>-2`: a duplicate learning file, and the staged draft (keyed by the old id) is lost for the copy. Fix direction: make a replayed insert idempotent (match the already-written body or the reconcile event's attempt key) rather than suffixing.
 
 ### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
 
-status: open · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 8 owed live check rides the overnight capped workflow run · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/TC2-S/` (review-2.md, review-3.md).
 
@@ -832,7 +832,7 @@ Reviews in `.claude/tmp/codex-run/TC2-S/` (review-2.md, review-3.md).
 
 ### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+9)
 
-status: open · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
+status: open (OWNER DECISION 2026-11-14: one rule for both sinks: run the committed-secret scanner over stored test-edit content and the gate-3 diff viewer, redact matches with a withheld marker; add `.auth/**` to the default deny globs; queued overnight with items 3 and 9; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, review-6/review-2.md).
 
@@ -860,7 +860,7 @@ Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-ana
 
 ### T663 · FNF[plan-canvas-smoke-lows] · plan-canvas smoke check lows, after #1161 (+4)
 
-status: open · kind: fix · found: #1161 review 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1161 review 2026-11-14 · priority: P4
 
 1. (connected, PRE-EXISTING, by reading) The check "child added under a node being deleted" most likely never reaches the stray-child guard: the editor's patch holds the plan-patch lock and the reconcile waits on that first (`packages/worker/test/plan-canvas-smoke.ts`, `plan/mirror.ts`). Confirm at runtime; if so, reorder the check so the guard is exercised.
 2. The `settling` helper discards the peer's outcome, so an early unrelated peer failure still passes the check (same as the old sleep).
@@ -869,7 +869,7 @@ status: open · kind: fix · found: #1161 review 2026-11-14 · priority: P4
 
 ### T661 · FNF[provider-shell-close-lows] · provider shell revocation lows, after #1156 (+6)
 
-status: open · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
 
 1. `api/routes/cli-providers.ts` ~:258: `publish` returns the receiver count and it is ignored; a close-provider sent while the worker's subscriber reconnects is lost silently (open shells then outlive the disable). Log or retry on zero receivers.
 2. Design, documented: the tmux process tree keeps running in the container for the 2-minute grace plus up to a 30 s sweep after revocation; input is dead and the socket closed.
@@ -1168,7 +1168,7 @@ PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInR
 
 ### T657 · FNF[reset-claim-sweep-lows] · onboarding reset claim sweep lows, after #1151 (+4)
 
-status: open · kind: fix · found: #1151 review 2026-11-13 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1151 review 2026-11-13 · priority: P4
 api `routes/repos.ts` `resetOnboardingArtifacts`. All minor.
 
 1. Own change: a canonical git-data claim over `maxFileBytes` survives with no log and no `skipped` entry (~:2606 `if (read.truncated) return;`). Safe to keep, but silent. Fix: push a `skipped` entry when the file cap, not the byte budget, truncated it.
@@ -1178,7 +1178,7 @@ api `routes/repos.ts` `resetOnboardingArtifacts`. All minor.
 
 ### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+9)
 
-status: open · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
+status: open (queued 2026-11-14 overnight, items 1-2; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
 PRE-EXISTING unless marked. Worker unless named.
 
 1. Consequential: `queues/cli-exec/ddev-generated-mask.ts` ~:120 skips the `#ddev-generated` protections when a read fails.
@@ -1193,7 +1193,7 @@ PRE-EXISTING unless marked. Worker unless named.
 
 ### T641 · FNF[stored-failure-paths] · raw storage paths persist in stored failure text (+3)
 
-status: open · kind: fix · found: #1126 driver and review 2026-11-13 · priority: P3
+status: open (queued 2026-11-14 overnight, items 1-2) · kind: fix · found: #1126 driver and review 2026-11-13 · priority: P3
 PRE-EXISTING. Worker unless named.
 
 1. Consequential: `queues/cli-exec/handlers.ts` ~:468 stores `safeErrorMessage(err)` in `cli_invocations.error_message` and the mining row; a filesystem failure (now thrown by the sandbox boundaries on EACCES/EIO/EMFILE) carries the worker storage path `/var/lib/haive/repos/<userId>/<repoId>`, shown in the task UI. Route filesystem failures through `scrubErrorPaths` there (error-diagnostics.md rule).
@@ -1208,7 +1208,7 @@ PRE-EXISTING, consequential (data loss). Worker `sandbox/ddev-runner.ts`: `ensur
 
 ### T643 · FNF[runner-probe-lows] · runner presence leftovers after #1127 (+9)
 
-status: open · kind: fix · found: #1127 reviews 2026-11-13 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1127 reviews 2026-11-13 · priority: P4
 PRE-EXISTING unless marked. Worker `sandbox/`.
 
 1. `ide-runner.ts` ~:623 `stopIdeRunner` swallows `docker stop`/`rm` failures and returns `true`, so a surviving editor is reported stopped (reaper deletes its session key; repository cleanup goes on to `volumeRemove`, which fails on an in-use volume).
@@ -1228,7 +1228,7 @@ Since #1128 a failed warm start keeps the runner; its error names the container 
 
 ### T651 · FNF[two-install-isolation-lows] · cross-install sweep leftovers after #1140 (+4)
 
-status: open · kind: fix · found: #1140 review 2026-11-13 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1140 review 2026-11-13 · priority: P4
 
 1. Low, PRE-EXISTING. `agent-preemption.ts` ~:255 and `runtime-runner-reaper.ts` ~:238 remove a container they matched by invocation or task id alone, with no `haive.install` filter. Another install matches only on a uuid collision or a database cloned between installs. Add the install label filter.
 2. Low, theoretical. `auth-volume-reaper.ts` ~:79 has the same id-only match on auth volumes.
@@ -1269,7 +1269,7 @@ On Docker Desktop, sandboxes on the default bridge (`full` policy, every provide
 
 ### T650 · FNF[ollama-gate-followups] · gate and release-doc leftovers (+3)
 
-status: open · kind: fix · found: #1136 reviews 2026-11-13 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1136 reviews 2026-11-13 · priority: P4
 
 1. Low. `docker/ollama-gate/server.mjs` logs nothing, not even a refused admin call, and has no SIGTERM handler, so `docker stop` waits out the grace period. The sibling proxies (`ollama-thinking-proxy`, `openrouter-compat-proxy`) are the same. Log refusals (method and path only, never bodies) and close on SIGTERM in all three.
 2. Low, PRE-EXISTING. `docs/architecture/release.md` ~:9 and the `docker-compose.run.yml` header are stale about which images a release builds and publishes (now api, worker, web, updater, builder and three proxies).
@@ -1767,7 +1767,7 @@ Executable verification scope: Only members3/4: Stop-failed state overwritten an
 
 ### T660 · FNF[apply-receipt-lows] · apply receipt and save generation lows, after #1155 (+5)
 
-status: open · kind: fix · found: #1155 reviews 2026-11-13 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1155 reviews 2026-11-13 · priority: P4
 
 1. `06a-db-migrate.ts` ~:286-298: a project with no DB service (`ddevConfigOmitsDatabase`) gets a non-zero `ddev snapshot`, so its success receipt stays unmarked and a lost-done-write redelivery fails "outcome unknown" instead of replaying. Safe direction; distinguish "no database" from "snapshot failed".
 2. `06a` ~:294: the marker write is not retried; a transient DB error after a long migration + snapshot leaves the receipt unmarked, so recovery is a Retry that re-runs the command. Rare.
