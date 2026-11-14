@@ -10,7 +10,7 @@
     "dev": "node ../../scripts/gen-modules.mjs && tsx watch src/index.ts",
     "build": "node ../../scripts/gen-modules.mjs && tsc",
     "start": "node dist/index.js",
-    "typecheck": "node ../../scripts/gen-modules.mjs && tsc -p tsconfig.typecheck.json",
+    "typecheck": "node ../../scripts/gen-modules.mjs && tsc -p test/fixtures/step-sdk/tsconfig.json --noEmit && tsc -p tsconfig.typecheck.json",
     "test": "node ../../scripts/gen-modules.mjs && vitest run",
     "test:watch": "vitest",
     "smoke:onboarding": "tsx test/onboarding-smoke.ts",

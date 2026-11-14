@@ -444,6 +444,18 @@ published, so the root `package.json` pins `@haive/shared`, `@haive/database` an
 is checked when the api and worker load the module, so a mismatch builds and they then refuse to
 start, naming the package.
 
+## Step SDK
+
+A module's `./steps` entry imports `StepDefinition`, its phase contracts, form and metadata
+types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
+`satisfies StepDefinition<Detect, Apply>` and default-export a readonly array; the worker
+namespaces their ids and workflow type when it loads them. Import the seven control-error
+constructors from this same entry so the runner receives the canonical class objects.
+A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
+The worker's old contract paths re-export them for compatibility. Other shared entries,
+including the root and browser entries, do not re-export the step SDK. Prompt/review helpers
+and task-bound host services are later SDK work; this entry grants no new dispatch service.
+
 ## Published-image installs
 
 An install that runs published images (`docker-compose.run.yml`, see

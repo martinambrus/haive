@@ -1,0 +1,19 @@
+{
+  "name": "@haive/module-sdk-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./manifest": {
+      "types": "./src/manifest.ts",
+      "import": "./dist/manifest.js"
+    },
+    "./steps": {
+      "types": "./src/steps.ts",
+      "import": "./dist/steps.js"
+    }
+  },
+  "peerDependencies": {
+    "@haive/shared": "0.1.0"
+  }
+}

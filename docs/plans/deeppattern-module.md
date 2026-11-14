@@ -126,6 +126,7 @@ A replacement must keep every reader of the replaced step working:
 2. The step SDK seam: the step types and helpers a module step needs without importing
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
+   Status: PR1 of 4 implemented.
 3. Derived types: storage, run-list builder, editor ("Duplicate and customize" on a built-in, the
    changes list, live validation), task creation.
 4. Output contracts and `replaces` for 08c and 08c2, and the role-resolving reader helper.

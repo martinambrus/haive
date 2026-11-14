@@ -238,6 +238,10 @@
     "./commit-diff-artifact": {
       "types": "./dist/commit-diff-artifact.d.ts",
       "import": "./dist/commit-diff-artifact.js"
+    },
+    "./step": {
+      "types": "./dist/step/index.d.ts",
+      "import": "./dist/step/index.js"
     }
   },
   "scripts": {

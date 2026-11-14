@@ -56,7 +56,16 @@ export function checkPublicModules(files) {
     let text = String(bytes);
     if (file.endsWith('/package.json') || file === 'package.json') {
       try {
-        text = JSON.stringify(JSON.parse(text));
+        const pkg = JSON.parse(text);
+        // This synthetic package is outside workspace globs. Only its own private name is
+        // exempt: its dependencies and every install/runtime reference still pass the guard.
+        if (
+          file === 'packages/worker/test/fixtures/step-sdk/package.json' &&
+          pkg.private === true &&
+          moduleName.exec(pkg.name)?.[1] === 'sdk-fixture'
+        )
+          delete pkg.name;
+        text = JSON.stringify(pkg);
       } catch {
         errors.push(`${file}: unreadable package manifest`);
       }
