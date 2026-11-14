@@ -254,6 +254,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'knowledge',
     dispatchesCli: true,
     requires: [
+      needWorktree,
       needRepository('Measures external commits and updates the repository knowledge base.'),
     ],
     provides: ['external-kb-synced'],

@@ -528,6 +528,20 @@ describe('core composable catalog', () => {
     );
   });
 
+  it('requires a prior worktree for external knowledge-base sync', () => {
+    expect(validateComposition(['01e-external-kb-sync'], catalog)).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '01e-external-kb-sync',
+        needs: 'worktree',
+      }),
+    );
+    expect(
+      validateComposition(['01e-external-kb-sync', '01-worktree-setup'], catalog),
+    ).toContainEqual(expect.objectContaining({ kind: 'unmet-need', needs: 'worktree' }));
+    expect(validateComposition(['01-worktree-setup', '01e-external-kb-sync'], catalog)).toEqual([]);
+  });
+
   it('requires the DAG planner before execution and run configuration before planning', () => {
     expect(validateComposition(['01-worktree-setup', '06c-dag-execute'], catalog)).toContainEqual(
       expect.objectContaining({
