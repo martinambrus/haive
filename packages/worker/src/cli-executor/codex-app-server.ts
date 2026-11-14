@@ -1,5 +1,7 @@
 import { APP_VERSION, type CliTokenUsage, type InvocationToolUsage } from '@haive/shared';
 import { tokenUsageFromCodexUsage } from './usage-extract.js';
+import { createCodexRequestUsageCollector } from './codex-request-usage.js';
+import type { RequestUsageCapture } from './request-usage.js';
 import { createToolUsageTally, type ToolUsageTally } from './tool-usage.js';
 
 /* ------------------------------------------------------------------ */
@@ -316,6 +318,7 @@ export interface CodexAppServerSession {
   isTurnAccepted(): boolean;
   getResult(): string | null;
   getTokenUsage(): CliTokenUsage | null;
+  getRequestUsage(): RequestUsageCapture;
   /** requested = the model `thread/start` resolved; served = a `model/rerouted` target, the only
    *  channel that names what answered. */
   getModelReport(): { requested: string | null; served: string | null; billed: string[] } | null;
@@ -356,6 +359,7 @@ export function createCodexAppServerSession(
   const toolUsage = opts.toolUsage ?? createToolUsageTally({ workdir: null });
   let lastAgentMessage: string | null = null;
   let usage: CliTokenUsage | null = null;
+  const requestUsage = createCodexRequestUsageCollector();
   let peakPrompt = 0;
   let contextWindow: number | null = null;
   let promptSeen = false;
@@ -448,6 +452,13 @@ export function createCodexAppServerSession(
       }
       case 'thread/tokenUsage/updated': {
         if (typeof params.threadId === 'string' && params.threadId !== threadId) return;
+        requestUsage.onUsage(
+          params.tokenUsage,
+          servedModel ?? requestedModel,
+          typeof params.threadId === 'string' ? params.threadId : null,
+          typeof params.turnId === 'string' ? params.turnId : null,
+          turnId,
+        );
         // codex input already includes the cached prefix, so a request's prompt is its input alone.
         const requestContext = readCodexRequestContext(params.tokenUsage);
         if (requestContext.peak !== null) peakPrompt = Math.max(peakPrompt, requestContext.peak);
@@ -587,6 +598,9 @@ export function createCodexAppServerSession(
         ...(peakPrompt > 0 ? { peakPromptTokens: peakPrompt } : {}),
         ...(contextWindow !== null ? { contextWindow } : {}),
       };
+    },
+    getRequestUsage(): RequestUsageCapture {
+      return requestUsage.get(turnStarted && turnCompleted, client.getMalformedLineCount(), usage);
     },
     getModelReport() {
       if (requestedModel === null && servedModel === null) return null;

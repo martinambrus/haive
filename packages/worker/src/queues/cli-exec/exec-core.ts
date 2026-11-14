@@ -102,6 +102,7 @@ import {
   resolveAgentDefinitionMasks,
 } from './agent-definition-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
+import { unknownRequestUsage } from '../../cli-executor/request-usage.js';
 import {
   buildOutputTruncationMessage,
   classifyAntigravityDiagnostic,
@@ -1083,6 +1084,7 @@ export async function executeCliSpec(
         parsedOutput: tryJsonParse(text),
         errorMessage: formatCliErrorMessage(result.exitCode, result.stderr, text, result.error),
         tokenUsage: appServer.getTokenUsage(),
+        requestUsage: appServer.getRequestUsage(),
         modelIdentity,
         toolUsage: appServer.getToolUsage(),
         ...persisted,
@@ -1100,6 +1102,7 @@ export async function executeCliSpec(
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         'codex emitted no agent message',
       tokenUsage: appServer.getTokenUsage(),
+      requestUsage: appServer.getRequestUsage(),
       modelIdentity,
       toolUsage: appServer.getToolUsage(),
       ...persisted,
@@ -1134,6 +1137,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage,
+        requestUsage: unknownRequestUsage(),
         // codex names no model on any typed event (verified against a complete
         // successful run), so it carries the argv value only, served null.
         // antigravity's init event names none either; its --log-file is the one
@@ -1159,6 +1163,7 @@ export async function executeCliSpec(
         jsonlCollector.getNoResultReason() ??
         `${jsonlCliName} emitted no agent message`,
       tokenUsage,
+      requestUsage: unknownRequestUsage(),
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,
@@ -1243,6 +1248,7 @@ export async function executeCliSpec(
             `${failedMcp.length === 1 ? 'that server' : 'those servers'}, so its result cannot be trusted.`
           : null),
       tokenUsage: collector.getTokenUsage(),
+      requestUsage: collector.getRequestUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       compaction: compactionFrom(collector.getCompactions()),
       apiDurationMs: collector.getApiDurationMs(),
@@ -1279,6 +1285,7 @@ export async function executeCliSpec(
         reason,
       // Tokens were burned even without a result event (e.g. error_max_turns).
       tokenUsage: collector.getTokenUsage(),
+      requestUsage: collector.getRequestUsage(),
       // Worth keeping on a failed run: the init event still names what was asked
       // for, which is how a task that died on "unrecognized model" shows which
       // model it tried. served stays null unless a turn came back before the fault.
@@ -1312,6 +1319,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: extracted.tokenUsage,
+        requestUsage: extracted.requestUsage,
         apiDurationMs: extracted.apiDurationMs,
         // gemini names its models only as the keys of stats.models.
         modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
@@ -1336,6 +1344,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: null,
+        requestUsage: unknownRequestUsage(),
         modelIdentity: modelIdentityFrom(),
         toolUsage: unobservedToolUsage('stream'),
         ...persisted,
@@ -1359,6 +1368,7 @@ export async function executeCliSpec(
       result.error,
     ),
     tokenUsage: collector.getTokenUsage(),
+    requestUsage: unknownRequestUsage(),
     // antigravity lands here. Its captured --log-file is the only place it names a
     // model, and then only as a human label ("Gemini 3.7 Flash (High)").
     modelIdentity: modelIdentityFrom({

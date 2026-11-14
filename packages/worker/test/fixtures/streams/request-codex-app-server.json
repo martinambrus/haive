@@ -1,0 +1,66 @@
+[
+  { "id": 1, "result": { "userAgent": "haive/0.154.0" } },
+  {
+    "id": 2,
+    "result": { "thread": { "id": "thread-1", "cliVersion": "0.154.0" }, "model": "model-a" }
+  },
+  { "id": 3, "result": { "turn": { "id": "turn-1", "status": "inProgress" } } },
+  { "method": "turn/started", "params": { "threadId": "thread-1", "turn": { "id": "turn-1" } } },
+  {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "tokenUsage": {
+        "total": {
+          "inputTokens": 1000,
+          "cachedInputTokens": 800,
+          "outputTokens": 50,
+          "totalTokens": 1050
+        },
+        "last": {
+          "inputTokens": 1000,
+          "cachedInputTokens": 800,
+          "outputTokens": 50,
+          "totalTokens": 1050
+        }
+      }
+    }
+  },
+  {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "tokenUsage": {
+        "total": {
+          "inputTokens": 3000,
+          "cachedInputTokens": 1700,
+          "outputTokens": 110,
+          "totalTokens": 3110
+        },
+        "last": {
+          "inputTokens": 2000,
+          "cachedInputTokens": 900,
+          "outputTokens": 60,
+          "totalTokens": 2060
+        }
+      }
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "item": { "type": "agentMessage", "id": "answer", "text": "done" }
+    }
+  },
+  {
+    "method": "turn/completed",
+    "params": {
+      "threadId": "thread-1",
+      "turn": { "id": "turn-1", "status": "completed", "error": null, "items": [] }
+    }
+  }
+]

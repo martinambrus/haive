@@ -1,0 +1,11 @@
+{
+  "response": "done",
+  "stats": {
+    "models": {
+      "model-a": {
+        "api": { "totalRequests": 1 },
+        "tokens": { "prompt": 100, "candidates": 10, "cached": 20, "thoughts": 5, "total": 115 }
+      }
+    }
+  }
+}

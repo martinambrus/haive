@@ -1,0 +1,3 @@
+{
+  "bytes": "{\"tokenUsage\":{\"inputTokens\":1357,\"outputTokens\":141,\"totalTokens\":1498,\"costUsd\":0.023059999999999997,\"peakPromptTokens\":1490,\"contextWindow\":200000},\"cost\":{\"costUsd\":0.0061860000000000005,\"currency\":\"USD\",\"source\":\"manual\",\"billable\":true,\"modelKey\":\"qwen3:1.7b\",\"priceRowId\":\"manual\",\"rates\":{\"inputRate\":0.000003,\"outputRate\":0.000015,\"cacheReadRate\":3e-7,\"cacheWriteRate\":0.00000375,\"cacheWrite1hRate\":0.000006},\"cacheTtl\":\"5m\",\"unpricedBuckets\":[]}}"
+}

@@ -16,6 +16,67 @@ Rates live in `cli_model_prices`, effective-dated and append-only. A sync CLOSES
 
 Prompt-size price tiers are stored inside each rate jsonb as complete rate sets: `tiers: [{ aboveTokens, inclusive, inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate }]`. The shared ingress schema (`modelPriceRatesSchema` / `normalizePriceRates`) accepts finite nonnegative rates or explicit nulls, rejects unsafe, nonpositive or duplicate thresholds, caps tiers at four and sorts them ascending. Missing, null and empty tier arrays compare equal in `ratesEqual`, so untiered rows do not churn. This is a jsonb type extension only: no SQL migration or snapshot backfill. PR 1 stores tiers; it does not select tiers in `computeInvocationCost`. `tierRatesFor` is a pure helper with no production caller until per-request pricing lands.
 
+PR 2 captures request evidence on the worker's in-process `ExecutionOutcome.requestUsage`
+(`cli-executor/request-usage.ts`), beside the unchanged `tokenUsage`. A request keeps its
+stable identity, turn when observable, model, input/cache buckets, nullable output and
+observable 5-minute/1-hour cache-write split. The capture declares its input convention:
+Claude input excludes cache; Codex/Gemini input includes it. Collection never subtracts
+cache from inclusive input; only a future pricer may do so, once.
+
+Coverage is conservative. Claude deduplicates by assistant message id, checks each prompt
+bucket against whole-run result usage, and requires one result, valid identity/model and
+intact evidence. Per-request output is known only when every output is observable and
+their sum equals the result's observed output. Missing output is null, including a zero
+sum next to an absent result output. Unknown cache-write TTL, contradictory events and
+mixed request models prevent complete coverage. Duplicate message events are compared
+across all request fields, including output; differing output is conservatively contradictory.
+The result's `num_turns` is not a request count.
+
+Billing keys alone never establish an unseen priced model. The collector reconciles each
+observed model's input, cache-read and cache-creation sums with its same-name
+`result.modelUsage` entry; output is checked only when the request output sum is independently
+observable and reconciles with `result.usage`. A contradictory or unreadable same-name entry
+withholds coverage. With no same-name entry, a differently named entry must carry exactly
+the observed vector, corroborating it without renaming the served model (Grok's build suffix,
+GLM's context variant). Ledger-only tokens outside the priced totals, such as Claude's Haiku
+titling call, do not block coverage beside a matching main-model or alias entry, but a
+ledger holding only other calls cannot corroborate the observed model, so coverage stays
+incomplete. Two billing aliases splitting the priced totals cannot pass as one model. Each
+prompt bucket must still equal `result.usage`, regardless of aliases or ledger-only calls.
+The collector already sums each steered turn's `result.usage` (#1160); cost and model time
+remain the last cumulative values. Several result events still mean incomplete request
+coverage: a reconciled run total alone does not independently prove each turn's inventory.
+
+Codex app-server uses the measured 0.154.0 notification shapes already covered by the
+session tests. They carry no stable request id and several requests share a turn, so the
+request identity uses the cumulative input/cache-read/cache-write/output watermark.
+Each accepted `last` must equal the increase in every cumulative bucket, and all accepted
+requests must reconcile to final usage. Gaps, resets, repeated watermarks, invalid counts,
+missing start/completion evidence or malformed lines prevent complete coverage. Repeats
+are deduplicated without claiming completeness. Cache writes with no observable TTL
+remain unknown; the legacy Codex token mapping is unchanged.
+
+Codex `exec --json`, Gemini and antigravity return no request list. Gemini additionally
+carries the sum of `stats.models.*.api.totalRequests`, only when every count is a safe
+nonnegative integer; a missing or invalid count stays null. Sequential sub-agent runs
+namespace request ids across processes and carry coverage and counts through both the
+success and early-failure returns. Request evidence is kept outside the serialized trace.
+Mixed-model runs remain incomplete, preserving every observed request model for the
+later pricing work rather than assigning all tokens to the invocation's model.
+
+Nothing new is persisted in PR 2: no schema, `token_usage`, raw trace, cost, snapshot or
+statistics change. `handleCliExecJob` now returns an in-memory outcome to direct callers:
+`exitCode`, `rawOutput`, `parsedOutput`, `errorMessage`, `tokenUsage` and `requestUsage`.
+It copies those fields explicitly, retaining neither `streamLog` nor `cleanTranscript` in
+the returned outcome. The BullMQ processor discards its return value. A finalized invocation
+recovered after worker death returns that outcome with unknown request coverage
+(`recovered-completion`), preserving its stored tokens. Redelivery still performs no writes
+or model calls, and does not resume the linked step again.
+It does not reconstruct requests from totals, write a snapshot, or rerun a model.
+The existing Ollama recording has a byte comparison of full exec `tokenUsage` and the
+resolved cost snapshot against a baseline captured on unchanged code. Generated fixtures
+cover every other channel; no account or development stack is used.
+
 LiteLLM's standard `*_above_<N>k_tokens` fields inherit absent buckets from the base at each threshold, with explicit nulls kept unknown. Service-tier variants and 12-hour cache-write rates are ignored. The VOLATILE `LITELLM_NON_TEXT_RATE_FAMILIES` list also ignores non-text base families `*_audio_*`, `*_image_*`, `*_video_*`, `*_character_*`, `*_per_second_*` and `*_per_query_*` (including a family at the end of the base name). Classification examines the base before `_above_`; an unknown text-token threshold or an unclassified base still fails loud, as does `tiered_pricing`. No additional non-text `_above_` family was found in the saved live feed. `litellmRowsForProviders` marks xAI thresholds inclusive; other LiteLLM vendors are strict.
 
 OpenRouter overrides are materialized in the model cache as complete tiers: at each unique `min_prompt_tokens`, all matching overrides apply in feed order, later entries winning per bucket. Its boundaries remain strict, including x-ai. The VOLATILE `IGNORED_OVERRIDE_PRICE_FIELDS` list ignores the price keys outside Haive's five text buckets: `audio`, `audio_output`, `input_audio_cache`, `image`, `image_output`, `web_search` and `internal_reasoning`. An override whose only condition is `min_prompt_tokens` remains a tier when it carries those fields. `utc_start`, `utc_end` and unknown non-price keys remain conditions; numeric-looking values never turn an unknown key into a recognized price. `overrides: null` means no overrides; other malformed non-array values fail loud. Inheritance never occurs during cost computation. Fixtures include the live vertex Gemini flash audio shape, Gemma modality thresholds and Google's Gemini 2.5 Pro override. Tests use local fixtures, never network requests.

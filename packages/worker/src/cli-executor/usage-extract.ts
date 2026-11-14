@@ -1,4 +1,10 @@
 import type { CliTokenUsage } from '@haive/shared';
+import {
+  record,
+  tokenCount,
+  unknownRequestUsage,
+  type RequestUsageCapture,
+} from './request-usage.js';
 
 /** Pure token-usage extraction helpers shared by the cli-exec stream
  *  collectors (queues/cli-exec) and the sequential sub-agent runner. Token
@@ -84,6 +90,7 @@ export interface ExtractedGeminiOutput {
   /** Σ `stats.models.*.api.totalLatencyMs`: the summed duration of every API response (gemini-cli
    *  `uiTelemetry`), i.e. model time. Null when no model reported one. */
   apiDurationMs: number | null;
+  requestUsage: RequestUsageCapture;
 }
 
 /** Parse `gemini --output-format json` stdout: one JSON document
@@ -107,6 +114,7 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
   let tokenUsage: CliTokenUsage | null = null;
   let apiDurationMs: number | null = null;
   const modelNames: string[] = [];
+  let requestCount: number | null = 0;
   const stats = doc.stats as Record<string, unknown> | undefined;
   const models =
     stats && typeof stats === 'object' ? (stats.models as Record<string, unknown>) : undefined;
@@ -118,6 +126,11 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       const api = (entry as Record<string, unknown> | null)?.api as
         Record<string, unknown> | undefined;
       const latency = num(api?.totalLatencyMs);
+      const count = tokenCount(record(api)?.totalRequests);
+      requestCount =
+        requestCount !== null && count !== null && Number.isSafeInteger(requestCount + count)
+          ? requestCount + count
+          : null;
       if (latency !== null) apiDurationMs = (apiDurationMs ?? 0) + latency;
       const tokens = (entry as Record<string, unknown> | null)?.tokens as
         Record<string, unknown> | undefined;
@@ -136,5 +149,17 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       tokenUsage = sumTokenUsage(tokenUsage, modelUsage);
     }
   }
-  return { responseText: doc.response, tokenUsage, models: modelNames, apiDurationMs };
+  return {
+    responseText: doc.response,
+    tokenUsage,
+    models: modelNames,
+    apiDurationMs,
+    requestUsage: {
+      ...unknownRequestUsage('aggregate-only'),
+      inputConvention: 'inclusive',
+      requestCount: modelNames.length > 0 ? requestCount : null,
+      modelCoverage:
+        modelNames.length > 1 ? 'mixed' : modelNames.length === 1 ? 'single' : 'unknown',
+    },
+  };
 }

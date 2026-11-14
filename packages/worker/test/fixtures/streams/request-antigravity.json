@@ -1,0 +1,22 @@
+[
+  { "type": "init", "conversation_id": "conversation-1", "init": { "tools": [] } },
+  {
+    "type": "step_update",
+    "step_update": {
+      "step_index": 0,
+      "step_type": "model_response",
+      "state": "completed",
+      "text_delta": "done",
+      "usage": { "input_tokens": 100, "output_tokens": 15 }
+    }
+  },
+  {
+    "type": "result",
+    "result": {
+      "status": "SUCCESS",
+      "response": "done",
+      "num_turns": 1,
+      "usage": { "input_tokens": 100, "output_tokens": 15, "total_tokens": 115 }
+    }
+  }
+]
