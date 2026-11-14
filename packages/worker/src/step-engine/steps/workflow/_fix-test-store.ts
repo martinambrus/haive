@@ -11,6 +11,7 @@ import { lockOwnedStep } from '../../step-ownership.js';
 import {
   captureTestImage,
   compareTestImages,
+  testFileChanged,
   type FixTestRecord,
   type TestImage,
   type TestFile,
@@ -278,11 +279,8 @@ export async function finishFixTestCapture(
     const left = pending.get(invocationId) ?? ref.manifest;
     const next = new Map(after.files?.map((f) => [f.path, f]));
     const old = new Map(left.files?.map((f) => [f.path, f]));
-    const changed = [...new Set([...old.keys(), ...next.keys()])].filter(
-      (p) =>
-        old.get(p)?.hash !== next.get(p)?.hash ||
-        old.get(p)?.mode !== next.get(p)?.mode ||
-        old.get(p)?.status !== next.get(p)?.status,
+    const changed = [...new Set([...old.keys(), ...next.keys()])].filter((p) =>
+      testFileChanged(old.get(p), next.get(p)),
     );
     const withheld = new Set(
       after.files?.filter((f) => f.status === 'content withheld').map((f) => f.path),
@@ -354,7 +352,7 @@ export async function loadFixTestRecords(
     for (const p of new Set([...old.keys(), ...next.keys()])) {
       const x = old.get(p),
         y = next.get(p);
-      if (x?.hash === y?.hash && x?.mode === y?.mode && x?.status === y?.status) continue;
+      if (!testFileChanged(x, y)) continue;
       if (secretMaskDeniesPath(policy ?? secretMaskPolicy({}), p)) continue;
       if (x?.hash) hashes.add(x.hash);
       if (y?.hash) hashes.add(y.hash);

@@ -12,6 +12,7 @@ import {
   captureTestImage,
   compareTestImages,
   fixTestEditsRow,
+  fixTestReviewNotice,
   testEditPaths,
   TEST_IMAGE_BYTES,
   TEST_PATCH_BYTES,
@@ -103,6 +104,32 @@ describe('host fix-pass test evidence', () => {
       ]),
     );
     expect(image.files).toHaveLength(3);
+  });
+
+  it('counts unchanged refused paths separately without telling reviewers they changed', async () => {
+    const anchor = await fixture();
+    await writeFile(join(anchor, 'tests/a'), 'same');
+    await symlink('a', join(anchor, 'tests/link'));
+    const result = compareTestImages(
+      await captureTestImage(anchor, ''),
+      await captureTestImage(anchor, ''),
+    );
+    expect(result.changes).toEqual([]);
+    expect(result.couldNotMeasure).toBe(1);
+    expect(testEditPaths([record(result)])).toEqual([]);
+    expect(fixTestReviewNotice([record(result)])).toBe('');
+  });
+
+  it('ignores retention budget status flips but measures becoming or stopping refused', () => {
+    const file = { path: 'tests/a', hash: 'same', mode: 420, status: 'available' as const };
+    const image = { state: 'captured' as const, files: [file] };
+    expect(
+      compareTestImages(image, { ...image, files: [{ ...file, status: 'content not retained' }] })
+        .changes,
+    ).toEqual([]);
+    const refused = { ...image, files: [{ path: file.path, status: 'refused' as const, size: 1 }] };
+    expect(compareTestImages(image, refused).changes).toHaveLength(1);
+    expect(compareTestImages(refused, image).changes).toHaveLength(1);
   });
 
   it('shows a mid-file expectation change in a contextual hunk', async () => {
