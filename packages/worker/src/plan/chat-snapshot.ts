@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { logger } from '@haive/shared';
 import {
   ensureDirNoFollow,
   writeFileNoFollow,
@@ -15,6 +16,7 @@ export interface PlanChatSnapshot extends ChatPlanRead {
   invocationId: string;
 }
 const ROOT = 'plan-chat-snapshots';
+const log = logger.child({ module: 'plan-chat-snapshot' });
 export const snapshotWorkerRoot = () =>
   process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 
@@ -60,6 +62,11 @@ export async function createPlanChatSnapshot(
 /** Called only after boot has reaped the previous worker's CLI containers. */
 export async function reapPlanChatSnapshots(anchor = snapshotWorkerRoot()): Promise<void> {
   const entries = await readdirNoFollow(anchor, ROOT, { strict: true });
-  for (const entry of entries ?? [])
-    await removeNoFollow(anchor, `${ROOT}/${entry.name}`, { recursive: true });
+  for (const entry of entries ?? []) {
+    try {
+      await removeNoFollow(anchor, `${ROOT}/${entry.name}`, { recursive: true });
+    } catch (err) {
+      log.error({ err, entry: entry.name }, 'failed to reap plan chat snapshot');
+    }
+  }
 }

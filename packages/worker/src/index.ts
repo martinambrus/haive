@@ -101,8 +101,10 @@ async function main(): Promise<void> {
     logger.warn({ err }, 'cli sandbox reap on boot failed');
   });
   // Reap private files left by the prior worker after its container cleanup.
-  // Failure stops boot rather than leaving another user's plan bytes behind.
-  await reapPlanChatSnapshots();
+  // A failed removal or listing is logged, but cannot prevent worker recovery.
+  await reapPlanChatSnapshots().catch((err) => {
+    logger.error({ err }, 'plan chat snapshot reap on boot failed');
+  });
   // Reap CLI auth volumes whose task ended or whose provider or user is gone, among them the
   // per-task copies a prior worker that died mid-teardown left behind.
   await reapOrphanedAuthVolumes(getDb()).catch((err) => {
