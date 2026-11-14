@@ -404,7 +404,6 @@ export async function runInSandbox(
     }
     return { ...result, resolvedCommand, wrapperId, capturedLog };
   } finally {
-    if (planSnapshot) await planSnapshot.remove();
     if (wrapperWorkerPath) {
       const wrapperDir = dirname(wrapperWorkerPath);
       rm(wrapperDir, { recursive: true, force: true }).catch((err: unknown) => {
@@ -426,6 +425,12 @@ export async function runInSandbox(
         log.warn({ err }, 'egress gateway cleanup failed');
       });
     }
+    // Cleanup must preserve the run's outcome and cannot skip other teardown.
+    // Boot reaping is the backstop if this private file cannot be removed now.
+    if (planSnapshot)
+      await planSnapshot.remove().catch((err: unknown) => {
+        log.error({ err }, 'failed to remove plan chat snapshot; worker boot will retry');
+      });
   }
 }
 
