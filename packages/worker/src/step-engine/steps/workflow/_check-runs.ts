@@ -10,9 +10,9 @@ type Tx = Parameters<Parameters<StepContext['db']['transaction']>[0]>[0];
  *  runs in a transaction of its own under a server-side `statement_timeout`, which also bounds a
  *  wait on a row lock, and a statement past it is cancelled by the server and logged. */
 export const CHECK_RUN_WRITE_TIMEOUT_MS = 5_000;
-const bounded = <R>(ctx: StepContext, run: (tx: Tx) => Promise<R>): Promise<R> =>
+const bounded = <R>(ctx: StepContext, ms: number, run: (tx: Tx) => Promise<R>): Promise<R> =>
   ctx.db.transaction(async (tx) => {
-    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${CHECK_RUN_WRITE_TIMEOUT_MS}ms'`));
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${Math.trunc(ms)}ms'`));
     return run(tx);
   });
 
@@ -24,7 +24,9 @@ export async function recordCheckRun<T>(
   check: { stepId: string; slot: CheckSlot; iteration: number },
   execute: () => Promise<T>,
   classify: (result: T) => SettledOutcome,
+  limits: { writeTimeoutMs?: number } = {},
 ): Promise<T> {
+  const writeTimeoutMs = limits.writeTimeoutMs ?? CHECK_RUN_WRITE_TIMEOUT_MS;
   const t = schema.taskCheckRuns;
   const attemptId = JSON.stringify([
     ctx.taskStepId,
@@ -35,7 +37,7 @@ export async function recordCheckRun<T>(
   let id: string | undefined;
   const startedAt = new Date();
   try {
-    id = await bounded(ctx, async (tx) => {
+    id = await bounded(ctx, writeTimeoutMs, async (tx) => {
       const inserted = await tx
         .insert(t)
         .values({
@@ -97,7 +99,7 @@ export async function recordCheckRun<T>(
     if (id) {
       try {
         const rowId = id;
-        await bounded(ctx, (tx) =>
+        await bounded(ctx, writeTimeoutMs, (tx) =>
           tx
             .update(t)
             .set({ outcome, endedAt: new Date() })

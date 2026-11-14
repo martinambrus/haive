@@ -173,6 +173,30 @@ it('bounds every recording write with a statement timeout of its own', async () 
   expect(s.rows()).toMatchObject([{ outcome: 'passed' }]);
 });
 
+it('takes a shorter write timeout from the caller', async () => {
+  const s = fixture();
+  const sets: string[] = [];
+  const transaction = s.f.db.transaction.bind(s.f.db);
+  vi.spyOn(s.f.db, 'transaction').mockImplementation((fn) =>
+    transaction((tx) => {
+      const execute = tx.execute.bind(tx);
+      tx.execute = async (query: unknown) => {
+        const chunks = (query as { queryChunks?: { value?: string[] }[] }).queryChunks ?? [];
+        sets.push(chunks.map((c) => c.value?.join('') ?? '').join(''));
+        return execute(query);
+      };
+      return fn(tx);
+    }),
+  );
+  await recordCheckRun(s.ctx, identity, async () => ({ ran: true, passed: true }), verdict, {
+    writeTimeoutMs: 25,
+  });
+  expect(sets).toEqual([
+    "SET LOCAL statement_timeout = '25ms'",
+    "SET LOCAL statement_timeout = '25ms'",
+  ]);
+});
+
 it('a recording write the server cancels at its timeout warns and the check still runs', async () => {
   const s = fixture();
   const cancelled = Object.assign(new Error('canceling statement due to statement timeout'), {
