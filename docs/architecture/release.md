@@ -156,8 +156,9 @@ before starting a run. A config refusal uses `bundle-config-invalid`. Only this 
 discards Compose output and error details. Pull, up and stop retain their original process errors,
 including exit status, signals, timeouts and stderr. Docker Compose can echo `.env` fragments in
 those errors; that pre-existing third-party behavior remains outside this change.
-Staging and key additions can remain after a later preparation failure. Published bundles need
-Docker Compose 2.24 or later for the existing `!reset` tags.
+Staging and key additions can remain after a later preparation failure. Both the host helper and the updater need
+Docker Compose 2.24 or later for the published bundle's existing `!reset` tags. Update the host's
+Compose plugin or Docker Desktop before upgrading when it is older.
 
 Immediately after `startRun`, before draining, the updater copies every installed allowlisted
 compose file and `.haive-bundle.json` into `.haive-upgrade/<runId>/previous/`. It journals
@@ -214,8 +215,26 @@ Failed commits and rollbacks retain their backup and staging. A pruning failure 
 `bundle-prune-failed` with `safeErrorMessage(err)` and keeps the successful commit; remaining
 prunable files may be cleaned by a later successful bundle upgrade.
 No compose call adds `--remove-orphans`; removed services remain a separate follow-up.
-PR6 adds the installer's initial local record. See the approved
-[compose bundle plan](../plans/release-compose-bundle.md).
+Both installers fetch the chosen release's manifest once: public installs download the GitHub
+Release asset, and channel installs read it from the authenticated release image. When it declares
+`bundle.files`, they require the allowlisted base/run hashes and verify every fetched compose file,
+including the selected GPU or Vulkan overlay, before writing anything in the destination directory.
+Hash mismatches and a missing hash for the selected overlay refuse with the filename and guidance
+to retry and report persistent failures to the publisher. Missing base or run hashes fail during
+manifest parsing with the generic manifest message. Both paths remove scratch downloads and leave
+a fresh destination absent (or a forced destination's existing files unchanged). Unselected overlays
+are neither downloaded nor recorded; Windows continues to install base and run only.
+A POSIX install of such a release needs `sha256sum` or `shasum`; the installer checks for one
+before any bundle download, and a legacy release does not need either.
+
+After verification, the installers write `<install>/.haive-bundle.json` as
+`{ "version": "<version>", "files": { "<installed name>": "sha256:<hex>" } }`, with the install
+directory's owner/group and mode 0644 on POSIX; Windows inherits the install directory's ACL.
+The record contains no secrets and covers only installed files, so the updater classifies a fresh
+install as pristine. A release without `bundle` retains the legacy install behavior and writes no
+record; the updater later classifies it as `legacy-known` or `legacy-unknown` using the target's
+history. The generated host helpers document and forward `--replace-modified-bundle` on their upgrade command.
+See the approved [compose bundle plan](../plans/release-compose-bundle.md).
 
 To run a published release instead of building from source:
 

@@ -1,6 +1,6 @@
 # T648 plan: the release manifest image carries the compose bundle; `haive upgrade` swaps it
 
-PR1 shipped #1157; PR2 shipped #1172; PR3 shipped #1180; PR4 shipped #1181; PR5 implemented: journalled bundle backup, atomic swap, rollback/resume restoration and post-commit pruning (newest and edited/unknown backups retained).
+PR1 shipped #1157; PR2 shipped #1172; PR3 shipped #1180; PR4 shipped #1181; PR5 shipped #1185: journalled bundle backup, atomic swap, rollback/resume restoration and post-commit pruning (newest and edited/unknown backups retained). PR6 is done: installers verify and record the bundle; operator docs and helper usage are updated.
 
 ## Context
 - The installer downloads the compose bundle once, at the install tag: `install/install.sh:662-664`, plus the GPU or Vulkan overlay at `:688-696`. `install/install.ps1:557-558` does the same.
@@ -157,9 +157,10 @@ If the updater itself dies mid-swap, the next `haive upgrade` finds the run in t
      - `run.test.ts`: a verify failure leaves the files byte-identical to before; a crash between file renames then a resume restores; the forward commit keeps the new files.
      - `test/rollback-failure-db.test.ts`: a run left `running` with `metadata.bundle` finishes its restore.
      - `phases.test.ts` unchanged, pinning that the swap stays before the commit pivot.
-6. **PR6: installers and docs.**
-   - Change: `install.sh` and `install.ps1` download `release.json` (`install.sh:607-611` already probes it), check the fetched files against `bundle.files` when present, and write `.haive-bundle.json`. Update `docs/architecture/release.md`, `modules.md:487` and `sandbox.md:317-320`, and the `./haive upgrade` usage text for `--replace-modified-bundle`.
-   - Controls: `scripts/test/install-manifest.test.mjs` and `install-channel.test.mjs` (hash mismatch refused, record written), plus shellcheck (ci.yml:101).
+6. **PR6: installers and docs — done.**
+   - Implemented: `install.sh` and `install.ps1` reuse their existing manifest fetch for the chosen version, stage fetched compose files, verify every installed file against `bundle.files` when present, then write `.haive-bundle.json` with the version and installed hashes. The POSIX record uses the install directory's owner/group and mode 0644; Windows inherits its ACL. A mismatch names the file and leaves the destination untouched; a legacy manifest writes no record. Unselected overlays are not recorded.
+   - Updated: `docs/architecture/release.md`, `modules.md`, `sandbox.md`, and both generated helpers' upgrade usage for `--replace-modified-bundle`. The docs state the host/updater Compose minimum (2.24) and that generated keys stay after rollback.
+   - Controls: `scripts/test/install-manifest.test.mjs` and `install-channel.test.mjs` cover hash refusal, selected overlays, record content/owner/mode and legacy absence in both installers, plus shellcheck in CI's pinned invocation.
 
 ## Verification
 - **Unit and DB suites** per PR, as above; CI rows at ci.yml:592-600.
@@ -186,11 +187,11 @@ If the updater itself dies mid-swap, the next `haive upgrade` finds the run in t
 - **No signatures.** The bundle trust equals today's manifest trust (registry repository or TLS). A compromised registry could already ship images, so the swap adds no new exposure; cosign is a follow-up.
 - **The updater runs as root** on a bind-mounted host directory. Every file it creates must copy owner and mode from the file it replaces or from the install directory, or the operator ends up with root-owned files.
 - **`.env` is edited by the updater while the api reads it** (the api does not re-read it). The atomic rename avoids a torn read. An operator editing `.env` at the same moment can lose their edit; the lock does not cover humans.
-- **Compose across versions.** The new bundle is validated with the updater image's compose version, but the host helper uses the host's version. `!reset` already needs compose 2.24 or later. Document the minimum.
+- **Compose across versions.** The new bundle is validated with the updater image's compose version, but the host helper uses the host's version. `!reset` already needs compose 2.24 or later. The host and updater minimum, Compose 2.24, is documented in release.md.
 - **Removed services** become orphans: `compose up` does not remove them. Do not add `--remove-orphans` in this task; record it as a follow-up.
 - **`known` hash list.** Any hand-patched release, including hotfix tags that rewrote a file, makes a legacy install read as `legacy-unknown` and refused. The flag is the way out, and the refusal message must name it.
 - **Hardcoded file names** in the generated `./haive` helper and `uninstall.sh` mean a future bundle cannot add a file. The allowlist enforces that until a helper-refresh task exists.
-- **Generated keys stay after a rollback.** This is intended. Document it so operators are not surprised.
+- **Generated keys stay after a rollback.** This is intended and documented in the release, module and sandbox operator guidance.
 
 ### Critical Files for Implementation
 - /home/zathrus/haive/packages/updater/src/cli.ts
