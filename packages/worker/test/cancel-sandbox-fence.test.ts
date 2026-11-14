@@ -273,6 +273,38 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     ).toEqual([FIX_TEST_AFTER, FIX_TEST_BEFORE].sort());
   });
 
+  it('re-stores expired changed content when a later pass has those bytes again', async () => {
+    const meta = await seed();
+    await beginFixTestCapture(db, meta);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after');
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    const hash = (await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.beforeHash!;
+    await db
+      .update(schema.fixTestBlobs)
+      .set({ content: null, expiredAt: new Date() })
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), eq(schema.fixTestBlobs.contentHash, hash)),
+      );
+    const [next] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: meta.taskId, taskStepId: meta.taskStepId, mode: 'cli', prompt: 'next' })
+      .returning();
+    await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2 });
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'before');
+    await end(next!.id);
+    await finishFixTestCapture(db, next!.id);
+    const restored = await db.query.fixTestBlobs.findFirst({
+      where: and(
+        eq(schema.fixTestBlobs.taskId, meta.taskId),
+        eq(schema.fixTestBlobs.contentHash, hash),
+      ),
+    });
+    expect(restored!.expiredAt).toBeNull();
+    expect(restored!.content!.toString()).toBe('before');
+    expect((await loadFixTestRecords(db, meta.taskId))[1]!.changes[0]!.patch).toContain('+before');
+  });
+
   it('records a refused begin explicitly when it no longer owns the step', async () => {
     const meta = await seed();
     await db

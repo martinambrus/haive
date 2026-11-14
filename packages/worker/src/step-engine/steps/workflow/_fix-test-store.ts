@@ -245,7 +245,7 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
       .from(schema.fixTestBlobs)
       .where(and(eq(schema.fixTestBlobs.taskId, taskId), eq(schema.fixTestBlobs.contentHash, hash)))
       .limit(1);
-    if (existing.length) continue;
+    if (existing.length && existing[0]!.expiredAt === null) continue;
     for (const b of usage) {
       if (evicted.has(b)) continue;
       if (
@@ -276,7 +276,10 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
     await tx
       .insert(schema.fixTestBlobs)
       .values({ taskId, contentHash: hash, sizeBytes: content.length, content })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: [schema.fixTestBlobs.taskId, schema.fixTestBlobs.contentHash],
+        set: { content, sizeBytes: content.length, expiredAt: null, createdAt: new Date() },
+      });
     total += content.length;
     task += content.length;
   }
