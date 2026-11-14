@@ -205,7 +205,9 @@ Each hunk has three context lines and a 40-line/6-KiB cap; each pass has an 80-l
 cap; the gate caps patches at 240 lines/32 KiB, allocates newest-first and states cuts.
 Once that budget is spent, remaining paths keep identities without computing another LCS. Only the latest 30 passes
 are loaded as metadata before gate detect persists them; patch text is loaded in form preparation, and the row states that limit. No measured
-change reads no change to the classified test paths, not a claim of universal coverage.
+change reads no change to the classified test paths, not a claim of universal coverage. When a
+withheld secret test file kept its size and mode, the pass says so and reads no measurable change
+instead, since a same-size content edit to it cannot be seen.
 
 The row inherits the similar-sites trust boundary. Paths are re-sanitised and escaped.
 Before patch construction and again before display, CRLF/lone CR become LF and U+0085,

@@ -415,11 +415,12 @@ export function fixTestReviewNotice(records: readonly FixTestRecord[]): string {
   if (!records.length) return '';
   const paths = testEditPaths(records);
   const unknown = records.filter((r) => r.state !== 'captured').length;
-  const withheld = records.reduce((n, r) => n + (r.contentUnknown ?? 0), 0);
+  // Per pass, not summed: the same file reappears in every pass that left it alone.
+  const withheld = Math.max(0, ...records.map((r) => r.contentUnknown ?? 0));
   const unknownLine = [
     unknown ? `${unknown} repair passes were not captured; absence of edits is unknown.` : '',
     withheld
-      ? `${withheld} withheld secret test files kept their size and mode; a content edit to them cannot be measured.`
+      ? `Withheld secret test files that kept their size and mode: ${withheld}; a content edit to them cannot be measured.`
       : '',
   ]
     .filter(Boolean)
@@ -468,7 +469,7 @@ export function fixTestEditsRow(
       );
     if (r.contentUnknown)
       body.push(
-        `${r.contentUnknown} withheld secret test files kept their size and mode; a content edit to them cannot be measured.`,
+        `Withheld secret test files that kept their size and mode: ${r.contentUnknown}; a content edit to them cannot be measured.`,
       );
     if (!r.changes.length)
       body.push(

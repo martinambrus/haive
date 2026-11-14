@@ -162,10 +162,10 @@ describe('host fix-pass test evidence', () => {
     expect(same.contentUnknown).toBe(1);
     const notice = fixTestReviewNotice([record(same)]);
     expect(notice).toBe(
-      '1 withheld secret test files kept their size and mode; a content edit to them cannot be measured.',
+      'Withheld secret test files that kept their size and mode: 1; a content edit to them cannot be measured.',
     );
     const row = fixTestEditsRow([record(same)]);
-    expect(row?.body).toContain('1 withheld secret test files kept their size and mode');
+    expect(row?.body).toContain('Withheld secret test files that kept their size and mode: 1');
     expect(row?.body).toContain('No measurable change to the classified test paths.');
     expect(row?.body).not.toContain('No change to the classified test paths.');
   });
