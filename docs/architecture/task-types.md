@@ -224,6 +224,14 @@ review revises at `03b-business-requirements`. None of those review gates closes
 a runtime. Pre-sync and final RAG indexing have separate scope tokens. Consumers still read core
 outputs by their literal ids; these entries do not implement replacement roles or derived types.
 
+A mode selector entails every execution route it can choose: `06b-sprint-planning` requires both
+`06c-dag-execute` and `07-phase-2-implement` later in the list, covering single-agent overrides and
+planner fallbacks as well as DAG mode. `08a-browser-setup` likewise requires both automated
+`08a-browser-verify` and manual `09-gate-2-verify-approval` destinations. Without setup, browser
+verification keeps its automated default. External KB sync, external plan sync, spec-warning
+resolution and plan reconciliation require a prior worktree; their file, commit or mirror writes
+therefore cannot compose without the root-write admission provided by `01-worktree-setup`.
+
 Optional providers constrain ordering when present. For example, `11b-kb-commit` needs the captured
 learnings, but not skill sync: `plan_tasklist` ships without `11d-skill-sync`. Skill sync precedes the
 knowledge commit when included, using `knowledge-committed`. Run configuration precedes the newly
