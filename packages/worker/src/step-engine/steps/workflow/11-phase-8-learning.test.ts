@@ -356,8 +356,9 @@ describe('phase8LearningStep apply refine/accept routing', () => {
     const ctx = {
       db: {
         insert: () => ({
-          values: async (v: { eventType: string; payload: { instruction?: string } }) => {
+          values: (v: { eventType: string; payload: { instruction?: string } }) => {
             events.push(v);
+            return { onConflictDoNothing: async () => {} };
           },
         }),
       },
@@ -374,7 +375,8 @@ describe('phase8LearningStep apply refine/accept routing', () => {
     expect(out.refineRequested).toBe(true);
     expect(out.written).toEqual([]);
     expect(out.promotedCandidates).toEqual([]);
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
+    expect(events[1]!.eventType).toBe('learning.reconciled');
     expect(events[0]!.eventType).toBe('learning.refine');
     expect(events[0]!.payload.instruction).toBe('limit the DDEV article to v1.25.2');
   });

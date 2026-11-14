@@ -47,6 +47,14 @@ import {
 } from './_learning-feedback.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { gitRun } from '../../../repo/git-exec.js';
+import {
+  countLearningOps,
+  learningOutcome,
+  observeCandidateWrite,
+  recordLearningOutcome,
+  type LearningAdmissionCounts,
+  type LearningOutcome,
+} from './_learning-outcome.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -403,7 +411,10 @@ export function parseSkillSync(raw: unknown, existingSkillIds: Set<string>): Ski
  *  portable article and must carry no repo-specific names or paths — so the citation is
  *  read, checked, and dropped. A global article about a public tech that nothing in this
  *  run demonstrates is exactly the generic advice that dilutes every repo's rag_search. */
-export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
+export function parseGlobalCandidates(
+  raw: unknown,
+  counts?: LearningAdmissionCounts,
+): GlobalCandidate[] {
   let obj: Record<string, unknown> | null = null;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     obj = raw as Record<string, unknown>;
@@ -415,17 +426,28 @@ export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
   }
   const arr = obj?.globalCandidates ?? obj?.global_candidates;
   if (!Array.isArray(arr)) return [];
+  if (counts) counts.proposed = arr.length;
   const out: GlobalCandidate[] = [];
   const taken = new Set<string>();
   for (const item of arr) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') {
+      if (counts) counts.invalid++;
+      continue;
+    }
     const c = item as Record<string, unknown>;
     const title = typeof c.title === 'string' ? c.title.trim() : '';
     const body = typeof c.body === 'string' ? c.body : '';
     const tech = typeof c.tech === 'string' ? c.tech.trim() : '';
-    if (!title || !body.trim() || !tech) continue;
+    if (!title || !body.trim() || !tech) {
+      if (counts) counts.invalid++;
+      continue;
+    }
+    if (counts) counts.parsed++;
     const evidence = typeof c.evidence === 'string' ? c.evidence : undefined;
-    if (!hasFileLineEvidence(evidence)) continue;
+    if (!hasFileLineEvidence(evidence)) {
+      if (counts) counts.rejected.file_line_evidence++;
+      continue;
+    }
     const category =
       typeof c.category === 'string' && GLOBAL_CANDIDATE_CATEGORIES.has(c.category)
         ? (c.category as GlobalCandidate['category'])
@@ -483,28 +505,31 @@ function slugify(input: string): string {
     .slice(0, 48);
 }
 
-export function parseLearningOutput(raw: unknown): LearningEntry[] | null {
+export function parseLearningOutput(
+  raw: unknown,
+  counts?: LearningAdmissionCounts,
+): LearningEntry[] | null {
   if (!raw) return null;
   let text: string;
   if (typeof raw === 'string') {
     text = raw;
   } else if (Array.isArray(raw)) {
-    return normaliseEntries(raw);
+    return normaliseEntries(raw, counts);
   } else if (typeof raw === 'object') {
     const asObj = raw as Record<string, unknown>;
-    if (Array.isArray(asObj.entries)) return normaliseEntries(asObj.entries);
+    if (Array.isArray(asObj.entries)) return normaliseEntries(asObj.entries, counts);
     return null;
   } else {
     return null;
   }
   const parsed = parseJsonLoose(text);
-  if (Array.isArray(parsed)) return normaliseEntries(parsed);
+  if (Array.isArray(parsed)) return normaliseEntries(parsed, counts);
   if (
     typeof parsed === 'object' &&
     parsed !== null &&
     Array.isArray((parsed as Record<string, unknown>).entries)
   ) {
-    return normaliseEntries((parsed as Record<string, unknown>).entries as unknown[]);
+    return normaliseEntries((parsed as Record<string, unknown>).entries as unknown[], counts);
   }
   return null;
 }
@@ -519,10 +544,14 @@ function hasRawLearningEntries(raw: unknown): boolean {
   return Array.isArray(entries) && entries.length > 0;
 }
 
-function normaliseEntries(raw: unknown[]): LearningEntry[] {
+function normaliseEntries(raw: unknown[], counts?: LearningAdmissionCounts): LearningEntry[] {
+  if (counts) counts.proposed = raw.length;
   const out: LearningEntry[] = [];
   for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') {
+      if (counts) counts.invalid++;
+      continue;
+    }
     const entry = item as Record<string, unknown>;
     const op =
       typeof entry.op === 'string' && KB_SYNC_OPS.has(entry.op)
@@ -534,18 +563,29 @@ function normaliseEntries(raw: unknown[]): LearningEntry[] {
     const body = typeof entry.body === 'string' ? entry.body : '';
     // A delete only needs its targetId; insert/update need real content.
     if (op === 'delete') {
-      if (!targetId) continue;
+      if (!targetId) {
+        if (counts) counts.invalid++;
+        continue;
+      }
+      if (counts) counts.parsed++;
       out.push({ id: targetId, title: title || targetId, body, op: 'delete', targetId });
       continue;
     }
-    if (!title || !body) continue;
+    if (!title || !body) {
+      if (counts) counts.invalid++;
+      continue;
+    }
+    if (counts) counts.parsed++;
     // ADMISSION BAR: a lesson that cannot point at a file and line in this run is either
     // something CI already catches or something the model knew before the run started.
     // Either way it dilutes every later rag_search, so it is never written. Checked
     // against the BODY first, so the citation lives on in the artifact rather than in a
     // field we would discard; a separate `evidence` field is accepted as well.
     const evidence = typeof entry.evidence === 'string' ? entry.evidence : undefined;
-    if (!hasFileLineEvidence(body, evidence)) continue;
+    if (!hasFileLineEvidence(body, evidence)) {
+      if (counts) counts.rejected.file_line_evidence++;
+      continue;
+    }
     const id = typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : slugify(title);
     out.push({ id, title, body, op, targetId });
   }
@@ -737,6 +777,7 @@ export function planLearningReconciliation(
   entries: LearningEntry[],
   existing: ExistingLearning[],
   logger?: StepContext['logger'],
+  counts?: LearningOutcome['learnings']['downgraded'],
 ): PlannedLearningOp[] {
   const byId = new Map(existing.map((e) => [e.id, e]));
   const taken = new Set(existing.map((e) => e.id));
@@ -745,6 +786,7 @@ export function planLearningReconciliation(
     if (e.op === 'delete') {
       const target = e.targetId ? byId.get(e.targetId) : undefined;
       if (!target) {
+        if (counts) counts.deleteDropped++;
         logger?.warn({ targetId: e.targetId }, 'learning delete names an unknown id — dropped');
         continue;
       }
@@ -769,6 +811,7 @@ export function planLearningReconciliation(
       continue;
     }
     if (e.op === 'update') {
+      if (counts) counts.updateToInsert++;
       logger?.warn(
         { targetId: e.targetId },
         'learning update names an unknown id — inserting instead',
@@ -861,6 +904,7 @@ async function readStagedDraft(worktree: string, rel: string): Promise<string | 
 export async function applyStagedLearningEdits(
   worktree: string,
   plan: PlannedLearningOp[],
+  counts?: LearningOutcome['learnings']['human'],
 ): Promise<PlannedLearningOp[]> {
   const out: PlannedLearningOp[] = [];
   for (const p of plan) {
@@ -873,7 +917,11 @@ export async function applyStagedLearningEdits(
       out.push(p);
       continue;
     }
-    if (staged.trim().length === 0) continue;
+    if (staged.trim().length === 0) {
+      if (counts) counts.removed++;
+      continue;
+    }
+    if (counts && staged.replace(/\n+$/, '') !== p.newBody.replace(/\n+$/, '')) counts.edited++;
     // applyLearningOps appends the trailing newline; keep exactly one however
     // many the editor left.
     out.push({ ...p, newBody: staged.replace(/\n+$/, '') });
@@ -905,6 +953,7 @@ export function learningOpsToDiffFiles(
 export async function applyLearningOps(
   worktree: string,
   plan: PlannedLearningOp[],
+  counts?: LearningOutcome['learnings']['writes'],
 ): Promise<{ written: string[]; deleted: string[] }> {
   // Hoisted out of the delete branch: both sides anchor at the repository root, and the `mkdir` is
   // now `createParents`. `rel` is exactly what `path.relative(worktree, file)` returned, so the
@@ -914,14 +963,21 @@ export async function applyLearningOps(
   const deleted: string[] = [];
   for (const p of plan) {
     const rel = `${LEARNINGS_DIR}/${p.id}.md`;
-    if (p.op === 'delete') {
-      await removeNoFollow(wa.anchor, `${wa.prefix}${rel}`);
-      deleted.push(rel);
-    } else {
-      await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, `${p.newBody}\n`, {
-        createParents: true,
-      });
-      written.push(rel);
+    if (counts) counts.attempted[p.op]++;
+    try {
+      if (p.op === 'delete') {
+        await removeNoFollow(wa.anchor, `${wa.prefix}${rel}`);
+        deleted.push(rel);
+      } else {
+        await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, `${p.newBody}\n`, {
+          createParents: true,
+        });
+        written.push(rel);
+      }
+      if (counts) counts.succeeded[p.op]++;
+    } catch (err) {
+      if (counts) counts.failed[p.op]++;
+      throw err;
     }
   }
   return { written, deleted };
@@ -1582,204 +1638,287 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   },
 
   async apply(ctx, args): Promise<LearningApply> {
-    const values = args.formValues as {
-      writeFiles?: boolean;
-      keepKbSync?: boolean;
-      keepSkillSync?: boolean;
-      applySkillRemovals?: boolean;
-      writeInvestigation?: boolean;
-      promoteInvestigationGlobal?: boolean;
-      acceptGlobalCandidates?: string[];
-      instruction?: string;
-    };
-    const instruction = (values.instruction ?? '').trim();
-    // A non-blank instruction is a STEER, not content: record it and bounce back into
-    // this step (reviseLoop self-target) to regenerate the drafts honoring it. Nothing
-    // is written this pass — writes happen only on a blank "accept" submit.
-    if (instruction) {
-      await recordLearningInstruction(ctx, instruction);
-      ctx.logger.info({ instruction }, 'learning refinement requested; re-running with directive');
-      return {
-        entries: [],
-        written: [],
-        deleted: [],
-        investigationWritten: null,
-        kbSync: null,
-        kbSyncSkipped: null,
-        kbReverted: false,
-        skillSync: null,
-        promotedCandidates: [],
-        refineRequested: true,
-        source: 'llm',
+    const listed = (args.detected?.existingLearnings ?? []).filter((e) => isListableName(e.id));
+    const outcome = learningOutcome({
+      total: listed.length,
+      withExcerpt: listed.filter((e) => collapseToLine(e.excerpt) !== '').length,
+      omitted:
+        (args.detected?.omittedLearningCount ?? 0) +
+        (args.detected?.existingLearnings?.length ?? 0) -
+        listed.length,
+    });
+    try {
+      const observedParsed = parseLearningOutput(args.llmOutput ?? null, outcome.learnings);
+      outcome.source = observedParsed !== null ? 'llm' : 'stub';
+      outcome.learnings.kept = countLearningOps(observedParsed ?? []);
+      const observedGlobals = parseGlobalCandidates(
+        args.llmOutput ?? null,
+        outcome.globalCandidates,
+      );
+      const raw =
+        typeof args.llmOutput === 'string' ? parseJsonLoose(args.llmOutput) : args.llmOutput;
+      outcome.investigation.proposed =
+        raw && typeof raw === 'object' && 'investigation' in raw && raw.investigation != null
+          ? 1
+          : 0;
+      outcome.investigation.parsed = parseInvestigation(args.llmOutput ?? null) ? 1 : 0;
+      const values = args.formValues as {
+        writeFiles?: boolean;
+        keepKbSync?: boolean;
+        keepSkillSync?: boolean;
+        applySkillRemovals?: boolean;
+        writeInvestigation?: boolean;
+        promoteInvestigationGlobal?: boolean;
+        acceptGlobalCandidates?: string[];
+        instruction?: string;
       };
-    }
-    // Accept (blank submit): close the refine channel so a later unrelated run starts
-    // clean, then write the drafts the reviewer approved.
-    await recordLearningAccepted(ctx);
-
-    // Write into the worktree (the feature branch), NOT the main checkout. ctx.repoPath
-    // is the repo root; 01-worktree-setup created the worktree the rest of the pipeline
-    // (07/10/11a/12) operates in, so KB/learnings must land there to be on the branch,
-    // committed (11b-kb-commit), pushed (11a) and merged (12). Mirrors 10-gate-3-commit.
-    const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-    const worktreePath =
-      (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
-
-    // Feature KB Sync: the agent edited the knowledge base in the worktree during
-    // the LLM phase. Revert those edits when the reviewer unticked "keep KB sync". Done
-    // BEFORE writing the investigation (which lands under knowledge_base/investigations/),
-    // so a kept investigation survives the revert.
-    const kbSync = args.detected.kbSyncSkipped ? null : parseKbSync(args.llmOutput ?? null);
-    const kbHasChanges = (kbSync?.changes.length ?? 0) > 0;
-    let kbReverted = false;
-    if (kbHasChanges && values.keepKbSync === false) {
-      await revertKnowledgeBase(worktreePath);
-      kbReverted = true;
-      ctx.logger.info({ files: kbSync!.changes.length }, 'feature KB sync reverted by reviewer');
-    }
-
-    const parsed = parseLearningOutput(args.llmOutput ?? null);
-    const source: 'llm' | 'stub' = parsed !== null ? 'llm' : 'stub';
-    const entries = parsed ?? stubLearning(args.detected);
-    const existingLearnings = await readExistingLearnings(worktreePath);
-    // The reviewer's staged edits win over the agent's drafts, and an emptied draft
-    // drops that entry — the gate's inline editor is the same decision as unticking
-    // a checkbox, just finer-grained.
-    const plan = await applyStagedLearningEdits(
-      worktreePath,
-      planLearningReconciliation(entries, existingLearnings, ctx.logger),
-    );
-    let written: string[] = [];
-    let deleted: string[] = [];
-    if (values.writeFiles !== false) {
-      const res = await applyLearningOps(worktreePath, plan);
-      written = res.written;
-      deleted = res.deleted;
-    }
-
-    // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
-    // retry never duplicates them (no-op when the global KB is off).
-    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
-    let investigationWritten: string | null = null;
-    const investigation = args.detected.isBugFix
-      ? parseInvestigation(args.llmOutput ?? null)
-      : null;
-    // An investigation the reviewer emptied at the gate is dropped, whichever
-    // destination the checkboxes name; an unstaged one keeps the agent's draft.
-    const stagedInvestigation = investigation
-      ? await readStagedDraft(worktreePath, investigationDraftRel())
-      : null;
-    const investigationCleared = stagedInvestigation !== null && stagedInvestigation.trim() === '';
-    if (investigation && values.writeInvestigation !== false && !investigationCleared) {
-      if (investigation.scope === 'global' || values.promoteInvestigationGlobal) {
-        // Promote as a draft to the cross-repo KB instead of writing it into this
-        // repo's knowledge_base/investigations/ (which the local RAG indexes), so
-        // the local store stays clean. Facets are left empty — the user scopes the
-        // draft in Settings -> Global KB before activating it. With no scope, nothing could tell
-        // its subject from a project named after it, so the project name is not scrubbed either.
-        const promo = await promoteToGlobalKbDraft(
-          ctx.db,
-          {
-            userId: ctx.userId,
-            taskId: ctx.taskId,
-            title: investigation.title,
-            body: stagedInvestigation
-              ? stripFrontmatter(stagedInvestigation)
-              : `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
-            category: 'anti_pattern',
-            facets: {},
-          },
-          ctx.logger,
+      const instruction = (values.instruction ?? '').trim();
+      // A non-blank instruction is a STEER, not content: record it and bounce back into
+      // this step (reviseLoop self-target) to regenerate the drafts honoring it. Nothing
+      // is written this pass — writes happen only on a blank "accept" submit.
+      if (instruction) {
+        await recordLearningInstruction(ctx, instruction);
+        outcome.status = 'refine_requested';
+        ctx.logger.info(
+          { instruction },
+          'learning refinement requested; re-running with directive',
         );
-        investigationWritten = promo ? `global-kb:${promo.id}` : null;
-      } else if (!args.detected.kbSyncSkipped) {
-        investigationWritten = await writeInvestigation(
-          worktreePath,
-          investigation,
-          args.detected.taskTitle,
-          new Date().toISOString(),
-          args.detected.feature,
-          args.detected.affectedClients,
-          stagedInvestigation ?? undefined,
-        );
+        return {
+          entries: [],
+          written: [],
+          deleted: [],
+          investigationWritten: null,
+          kbSync: null,
+          kbSyncSkipped: null,
+          kbReverted: false,
+          skillSync: null,
+          promotedCandidates: [],
+          refineRequested: true,
+          source: 'llm',
+        };
       }
-    }
+      // Accept (blank submit): close the refine channel so a later unrelated run starts
+      // clean, then write the drafts the reviewer approved.
+      outcome.globalCandidates.kept = args.detected?.repoStack
+        ? observedGlobals.filter((c) => (values.acceptGlobalCandidates ?? []).includes(c.id)).length
+        : 0;
+      await recordLearningAccepted(ctx);
 
-    // General house-standard candidates: promote each ticked candidate as a global
-    // KB draft, version-anchored from the repo's onboarding stack so the topicKey
-    // matches/updates an existing article deterministically (the LLM's free-form
-    // facets drift). Investigations above stay standalone (no topicKey) by design.
-    const globalCandidates = parseGlobalCandidates(args.llmOutput ?? null);
-    const acceptedIds = new Set(values.acceptGlobalCandidates ?? []);
-    const promotedCandidates: string[] = [];
-    if (acceptedIds.size > 0 && args.detected.repoStack) {
-      const { anchors, projectName } = args.detected.repoStack;
-      for (const c of globalCandidates.filter((c) => acceptedIds.has(c.id))) {
-        const facets = techAnchorFacets(c.tech, {}, anchors);
-        const promo = await promoteToGlobalKbDraft(
-          ctx.db,
-          {
-            userId: ctx.userId,
-            taskId: ctx.taskId,
-            title: c.title,
-            body: c.body,
-            category: c.category,
-            facets,
-            description: c.description,
-            topicKey: globalKbTopicKey(c.category, facets, c.tech) ?? undefined,
-            projectName: projectName ?? undefined,
-          },
-          ctx.logger,
-        );
-        if (promo) promotedCandidates.push(`global-kb:${promo.id}`);
+      // Write into the worktree (the feature branch), NOT the main checkout. ctx.repoPath
+      // is the repo root; 01-worktree-setup created the worktree the rest of the pipeline
+      // (07/10/11a/12) operates in, so KB/learnings must land there to be on the branch,
+      // committed (11b-kb-commit), pushed (11a) and merged (12). Mirrors 10-gate-3-commit.
+      const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+      const worktreePath =
+        (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
+
+      // Feature KB Sync: the agent edited the knowledge base in the worktree during
+      // the LLM phase. Revert those edits when the reviewer unticked "keep KB sync". Done
+      // BEFORE writing the investigation (which lands under knowledge_base/investigations/),
+      // so a kept investigation survives the revert.
+      const kbSync = args.detected.kbSyncSkipped ? null : parseKbSync(args.llmOutput ?? null);
+      const kbHasChanges = (kbSync?.changes.length ?? 0) > 0;
+      let kbReverted = false;
+      if (kbHasChanges && values.keepKbSync === false) {
+        await revertKnowledgeBase(worktreePath);
+        kbReverted = true;
+        ctx.logger.info({ files: kbSync!.changes.length }, 'feature KB sync reverted by reviewer');
       }
-    }
 
-    // Skill Sync: carry the reviewer-approved decisions to 11d-skill-sync (which
-    // generates/updates/deletes the skill files). new/update gated by keepSkillSync
-    // (default on); removals gated by applySkillRemovals (default off). No generation
-    // here — 11d does the bounded per-skill CLI work post-approval.
-    const skillOps = parseSkillSync(
-      args.llmOutput ?? null,
-      new Set(args.detected.existingSkills.map((s) => s.id)),
-    );
-    const skillNewUpdate =
-      values.keepSkillSync !== false ? skillOps.filter((o) => o.op !== 'feature_removal') : [];
-    const skillRemovals =
-      values.applySkillRemovals === true ? skillOps.filter((o) => o.op === 'feature_removal') : [];
-    const skillSync =
-      skillNewUpdate.length > 0 || skillRemovals.length > 0
-        ? { newUpdate: skillNewUpdate, remove: skillRemovals }
+      const parsed = observedParsed;
+      const source: 'llm' | 'stub' = parsed !== null ? 'llm' : 'stub';
+      const entries = parsed ?? stubLearning(args.detected);
+      const existingLearnings = await readExistingLearnings(worktreePath);
+      // The reviewer's staged edits win over the agent's drafts, and an emptied draft
+      // drops that entry — the gate's inline editor is the same decision as unticking
+      // a checkbox, just finer-grained.
+      const reconciled = planLearningReconciliation(
+        entries,
+        existingLearnings,
+        ctx.logger,
+        outcome.learnings.downgraded,
+      );
+      outcome.learnings.planned = countLearningOps(reconciled);
+      const plan = await applyStagedLearningEdits(
+        worktreePath,
+        reconciled,
+        outcome.learnings.human,
+      );
+      outcome.learnings.reviewed = true;
+      if (values.writeFiles === false) outcome.learnings.human.excluded = plan.length;
+      else outcome.learnings.approved = countLearningOps(plan);
+      let written: string[] = [];
+      let deleted: string[] = [];
+      if (values.writeFiles !== false) {
+        const res = await applyLearningOps(worktreePath, plan, outcome.learnings.writes);
+        written = res.written;
+        deleted = res.deleted;
+      }
+
+      // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
+      // retry never duplicates them (no-op when the global KB is off).
+      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
+      let investigationWritten: string | null = null;
+      const investigation = args.detected.isBugFix
+        ? parseInvestigation(args.llmOutput ?? null)
         : null;
+      // An investigation the reviewer emptied at the gate is dropped, whichever
+      // destination the checkboxes name; an unstaged one keeps the agent's draft.
+      const stagedInvestigation = investigation
+        ? await readStagedDraft(worktreePath, investigationDraftRel())
+        : null;
+      const investigationCleared =
+        stagedInvestigation !== null && stagedInvestigation.trim() === '';
+      outcome.investigation.reviewed = true;
+      outcome.investigation.humanRemoved = investigationCleared ? 1 : 0;
+      // A staging timestamp is generated for the form, before apply. Compare content
+      // without that date so merely reviewing a draft is not counted as a human edit.
+      if (investigation && stagedInvestigation !== null && !investigationCleared) {
+        const withoutDate = (body: string) =>
+          body.replace(/^date: .*$/m, 'date: <staged>').replace(/\n+$/, '');
+        outcome.investigation.humanEdited = Number(
+          withoutDate(stagedInvestigation) !==
+            withoutDate(
+              renderInvestigation(
+                investigation,
+                args.detected.taskTitle,
+                '',
+                args.detected.feature,
+                args.detected.affectedClients,
+              ),
+            ),
+        );
+      }
+      if (investigation && values.writeInvestigation !== false && !investigationCleared) {
+        outcome.investigation.kept = Number(
+          investigation.scope === 'global' ||
+            values.promoteInvestigationGlobal ||
+            !args.detected.kbSyncSkipped,
+        );
+        if (investigation.scope === 'global' || values.promoteInvestigationGlobal) {
+          // Promote as a draft to the cross-repo KB instead of writing it into this
+          // repo's knowledge_base/investigations/ (which the local RAG indexes), so
+          // the local store stays clean. Facets are left empty — the user scopes the
+          // draft in Settings -> Global KB before activating it. With no scope, nothing could tell
+          // its subject from a project named after it, so the project name is not scrubbed either.
+          const promo = await observeCandidateWrite(outcome.investigation.writes, () =>
+            promoteToGlobalKbDraft(
+              ctx.db,
+              {
+                userId: ctx.userId,
+                taskId: ctx.taskId,
+                title: investigation.title,
+                body: stagedInvestigation
+                  ? stripFrontmatter(stagedInvestigation)
+                  : `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
+                category: 'anti_pattern',
+                facets: {},
+              },
+              ctx.logger,
+            ),
+          );
+          investigationWritten = promo ? `global-kb:${promo.id}` : null;
+        } else if (!args.detected.kbSyncSkipped) {
+          investigationWritten = await observeCandidateWrite(outcome.investigation.writes, () =>
+            writeInvestigation(
+              worktreePath,
+              investigation,
+              args.detected.taskTitle,
+              new Date().toISOString(),
+              args.detected.feature,
+              args.detected.affectedClients,
+              stagedInvestigation ?? undefined,
+            ),
+          );
+        }
+      }
 
-    ctx.logger.info(
-      {
-        entries: entries.length,
-        written: written.length,
-        deleted: deleted.length,
+      // General house-standard candidates: promote each ticked candidate as a global
+      // KB draft, version-anchored from the repo's onboarding stack so the topicKey
+      // matches/updates an existing article deterministically (the LLM's free-form
+      // facets drift). Investigations above stay standalone (no topicKey) by design.
+      const globalCandidates = observedGlobals;
+      const acceptedIds = new Set(values.acceptGlobalCandidates ?? []);
+      const promotedCandidates: string[] = [];
+      if (acceptedIds.size > 0 && args.detected.repoStack) {
+        outcome.globalCandidates.kept = globalCandidates.filter((c) =>
+          acceptedIds.has(c.id),
+        ).length;
+        const { anchors, projectName } = args.detected.repoStack;
+        for (const c of globalCandidates.filter((c) => acceptedIds.has(c.id))) {
+          const facets = techAnchorFacets(c.tech, {}, anchors);
+          const promo = await observeCandidateWrite(outcome.globalCandidates.writes, () =>
+            promoteToGlobalKbDraft(
+              ctx.db,
+              {
+                userId: ctx.userId,
+                taskId: ctx.taskId,
+                title: c.title,
+                body: c.body,
+                category: c.category,
+                facets,
+                description: c.description,
+                topicKey: globalKbTopicKey(c.category, facets, c.tech) ?? undefined,
+                projectName: projectName ?? undefined,
+              },
+              ctx.logger,
+            ),
+          );
+          if (promo) promotedCandidates.push(`global-kb:${promo.id}`);
+        }
+      }
+
+      // Skill Sync: carry the reviewer-approved decisions to 11d-skill-sync (which
+      // generates/updates/deletes the skill files). new/update gated by keepSkillSync
+      // (default on); removals gated by applySkillRemovals (default off). No generation
+      // here — 11d does the bounded per-skill CLI work post-approval.
+      const skillOps = parseSkillSync(
+        args.llmOutput ?? null,
+        new Set(args.detected.existingSkills.map((s) => s.id)),
+      );
+      const skillNewUpdate =
+        values.keepSkillSync !== false ? skillOps.filter((o) => o.op !== 'feature_removal') : [];
+      const skillRemovals =
+        values.applySkillRemovals === true
+          ? skillOps.filter((o) => o.op === 'feature_removal')
+          : [];
+      const skillSync =
+        skillNewUpdate.length > 0 || skillRemovals.length > 0
+          ? { newUpdate: skillNewUpdate, remove: skillRemovals }
+          : null;
+
+      outcome.status = 'completed';
+      ctx.logger.info(
+        {
+          entries: entries.length,
+          written: written.length,
+          deleted: deleted.length,
+          investigationWritten,
+          kbClassification: kbSync?.classification ?? null,
+          kbChanged: kbHasChanges,
+          kbSyncSkipped: args.detected.kbSyncSkipped ?? null,
+          kbReverted,
+          skillSyncOps: (skillSync?.newUpdate.length ?? 0) + (skillSync?.remove.length ?? 0),
+          promotedCandidates: promotedCandidates.length,
+          source,
+        },
+        'learning capture complete',
+      );
+      return {
+        entries,
+        written,
+        deleted,
         investigationWritten,
-        kbClassification: kbSync?.classification ?? null,
-        kbChanged: kbHasChanges,
+        kbSync,
         kbSyncSkipped: args.detected.kbSyncSkipped ?? null,
         kbReverted,
-        skillSyncOps: (skillSync?.newUpdate.length ?? 0) + (skillSync?.remove.length ?? 0),
-        promotedCandidates: promotedCandidates.length,
+        skillSync,
+        promotedCandidates,
+        refineRequested: false,
         source,
-      },
-      'learning capture complete',
-    );
-    return {
-      entries,
-      written,
-      deleted,
-      investigationWritten,
-      kbSync,
-      kbSyncSkipped: args.detected.kbSyncSkipped ?? null,
-      kbReverted,
-      skillSync,
-      promotedCandidates,
-      refineRequested: false,
-      source,
-    };
+      };
+    } finally {
+      await recordLearningOutcome(ctx, outcome, args.llmInvocationId);
+    }
   },
 };

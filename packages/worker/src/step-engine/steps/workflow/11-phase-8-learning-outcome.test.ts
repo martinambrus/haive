@@ -292,6 +292,126 @@ describe('reconcile outcome', () => {
   });
 });
 
+describe('remaining reconcile outcomes', () => {
+  it.each([
+    ['', 1, 0, 0],
+    ['# changed\nprivate revision', 0, 1, 1],
+  ])(
+    'counts an investigation cleared or edited inline (%j)',
+    async (staged, removed, edited, kept) => {
+      const s = setup();
+      io.files.set('.haive/learning-drafts/investigation.md', staged as string);
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(s.event()).toMatchObject({
+        investigation: {
+          humanRemoved: removed,
+          humanEdited: edited,
+          kept,
+          writes: { succeeded: kept },
+        },
+      });
+    },
+  );
+  it('does not count an unedited staged investigation as a human edit when the clock advances', async () => {
+    const s = setup();
+    io.files.set(
+      '.haive/learning-drafts/investigation.md',
+      [
+        '---',
+        'title: private investigation',
+        'type: bug-investigation',
+        'date: 2026-01-01T00:00:00.000Z',
+        'task: private task',
+        '---',
+        '',
+        '# private investigation',
+        '',
+        '## Root cause',
+        'private cause',
+        '',
+        '## Lesson',
+        'private lesson',
+      ].join('\n'),
+    );
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(s.event()).toMatchObject({ investigation: { humanEdited: 0, kept: 1 } });
+  });
+  it('distinguishes a proposed malformed investigation and an ineligible valid investigation', async () => {
+    const s = setup();
+    s.args.llmOutput = { entries: [], investigation: { title: 'private broken' } };
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(s.event()).toMatchObject({ investigation: { proposed: 1, parsed: 0, kept: 0 } });
+    s.rows.clear();
+    s.args.detected.isBugFix = false;
+    s.args.llmOutput = raw();
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(s.event()).toMatchObject({ investigation: { proposed: 1, parsed: 1, kept: 0 } });
+  });
+  it('records deterministic fallback separately from agent proposals', async () => {
+    const s = setup();
+    s.args.llmOutput = null;
+    s.args.llmInvocationId = null;
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(s.event()).toMatchObject({
+      source: 'stub',
+      learnings: {
+        proposed: 0,
+        parsed: 0,
+        kept: ops(),
+        approved: ops(1),
+        writes: { succeeded: ops(1) },
+      },
+      attempt: { invocationId: null },
+    });
+  });
+  it('records a failed delete and keeps prior completed writes', async () => {
+    const s = setup();
+    io.failAt = `${dir}/gone.md`;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('remove refused');
+    expect(s.event()).toMatchObject({
+      status: 'failed',
+      learnings: {
+        writes: {
+          attempted: ops(1, 1, 1),
+          succeeded: ops(1, 1),
+          failed: ops(0, 0, 1),
+        },
+      },
+    });
+  });
+  it('records a failed local investigation after successful learning writes', async () => {
+    const s = setup();
+    io.failAt = '.haive-data/knowledge_base/investigations/private-investigation.md';
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    expect(s.event()).toMatchObject({
+      status: 'failed',
+      learnings: { writes: { succeeded: ops(3, 1, 1) } },
+      investigation: { kept: 1, writes: { attempted: 1, succeeded: 0, failed: 1 } },
+      globalCandidates: { kept: 1 },
+    });
+  });
+  it('records failed promotion after the investigation and learnings were written', async () => {
+    const s = setup();
+    io.promote.mockRejectedValueOnce(new Error('promotion refused'));
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('promotion refused');
+    expect(s.event()).toMatchObject({
+      status: 'failed',
+      investigation: { writes: { succeeded: 1 } },
+      globalCandidates: { kept: 1, writes: { attempted: 1, succeeded: 0, failed: 1 } },
+    });
+  });
+  it('leaves the original write failure intact even when recording it fails', async () => {
+    const s = setup();
+    s.refuse();
+    io.failAt = `${dir}/old.md`;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    expect(s.warn).toHaveBeenCalledWith(
+      expect.any(Object),
+      'learning reconcile event insert failed (non-fatal)',
+    );
+  });
+});
+
 describe('behavior fixture', () => {
   it('compares prompt, form, output and exact written bytes against unchanged code', async () => {
     const s = setup();
