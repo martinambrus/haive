@@ -946,7 +946,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
                 tone="text-indigo-300"
               />
               <StatTile
-                label="Waiting on you"
+                label="Idle"
                 value={formatDuration(summary.time.idleMs)}
                 hint={`${formatDuration(summary.time.userActiveMs)} active`}
                 tone="text-amber-300"

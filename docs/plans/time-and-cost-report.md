@@ -1,7 +1,7 @@
 # Time and cost report: tests, human, AI
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **PR 1 shipped as #1169. PR 2 IMPLEMENTED on `feat/check-run-records`; isolated checks passed. PR 3 not started.** Written 2026-11-09 from the tree at `18a6cde1d` and read-only queries on the dev
+> **PR 1 shipped as #1169, PR 2 as #1170. PR 3 shipped: the idle tile relabel; its note line waits on `human-time-idle-detection` PR 1.** Written 2026-11-09 from the tree at `18a6cde1d` and read-only queries on the dev
 > install. Three independently revertible PRs, in the order below. PR 1 needs no schema change and shows history.
 
 ## Context
