@@ -730,7 +730,7 @@ From #1183 (bounded plan writers 11f/01f), reviews in `.claude/tmp/codex-run/PB5
 17. The boundary tests now reach 01f/11f's sizing lambdas only through the helper; dropping the `maxChars` argument from a lambda would pass.
 18. A losing concurrent dispatch pass can overwrite the winner's checkpointed `detected` (runner checkpoint after `prepare`); safe direction (drops), theoretical.
 
-### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+32)
+### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+33)
 
 status: open · kind: fix · found: #1180 review 2026-11-14 · priority: P4
 
@@ -771,6 +771,7 @@ From #1181 (updater reads the bundle), reviews in `.claude/tmp/codex-run/RBR-S/r
 30. (#1189) The public PS helper now ignores extra arguments to `up`/`down`/`logs` instead of failing on them (`install.ps1` ~:713-723), and unquoted `--replace-modified-bundle` on PowerShell 5.1 is untested.
 31. (#1189) Tests: no base-file hash mismatch control (only run file and GPU overlay) and no public bundle version/channel mismatch case (`scripts/test/install-channel.test.mjs` ~:442).
 32. (#1189) A relative `TMPDIR` breaks the public path, since the scratch copy runs after `cd "$INSTALL_DIR"` (`install.sh` ~:758-765). Resolve the scratch dir to an absolute path.
+33. (#1189) `install.ps1` reads owners with GNU-only `stat -c` on every non-Windows host (`install.ps1` ~:627-634), so pwsh on macOS fails at the record write. Found by the DeepPattern smoke audit. macOS installs use `install.sh`; add a BSD `stat -f` fallback or refuse pwsh on macOS by name.
 
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
