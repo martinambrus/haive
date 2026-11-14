@@ -89,6 +89,7 @@ export type CliOutputFormat =
   | 'gemini-json';
 
 export interface CliCommandSpec {
+  planSnapshot?: import('../plan/chat-snapshot.js').PlanChatSnapshot;
   command: string;
   args: string[];
   env: Record<string, string>;

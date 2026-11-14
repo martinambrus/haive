@@ -1,4 +1,5 @@
 import './fs-recovery.js';
+import { reapPlanChatSnapshots } from './plan/chat-snapshot.js';
 import { finalizeModuleDrains } from '@haive/shared/modularity-server';
 import { logger, configService, CONFIG_KEYS, retryWhileConfigUnavailable } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
@@ -99,6 +100,9 @@ async function main(): Promise<void> {
   await reapAllCliSandboxes('worker boot').catch((err) => {
     logger.warn({ err }, 'cli sandbox reap on boot failed');
   });
+  // Reap private files left by the prior worker after its container cleanup.
+  // Failure stops boot rather than leaving another user's plan bytes behind.
+  await reapPlanChatSnapshots();
   // Reap CLI auth volumes whose task ended or whose provider or user is gone, among them the
   // per-task copies a prior worker that died mid-teardown left behind.
   await reapOrphanedAuthVolumes(getDb()).catch((err) => {

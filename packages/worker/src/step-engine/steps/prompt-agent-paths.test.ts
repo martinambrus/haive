@@ -1367,6 +1367,12 @@ const CHANGE_SET = {
  * proxy.
  */
 const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
+  // The chat index consumes an immutable read rather than a live DB-like proxy.
+  '01-plan-chat': {
+    planRead: { nodes: [], edges: [] },
+    transcript: [],
+    pendingQuestion: 'Adjust this node.',
+  },
   // A fresh build: no root and no rounds, so 00b dispatches its planner's outline. Any root it did
   // not draft (no round 0) is refused before anything is dispatched (`assertOwnOutline`).
   '00b-plan-clarify': { rootId: null, rounds: [] },

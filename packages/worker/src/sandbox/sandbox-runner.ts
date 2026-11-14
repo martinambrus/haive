@@ -1,3 +1,5 @@
+import { createPlanChatSnapshot, type PlanChatSnapshot } from '../plan/chat-snapshot.js';
+import { PLAN_CHAT_SNAPSHOT_PATH } from '../step-engine/steps/plan/_plan-chat-context.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, chown, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -130,6 +132,7 @@ export function assertNoAuthVolumeNesting(
 }
 
 export interface SandboxRunSpec {
+  planSnapshot?: PlanChatSnapshot;
   command: string;
   args: string[];
   env?: Record<string, string>;
@@ -242,8 +245,18 @@ export async function runInSandbox(
   let gateway: EgressGateway | null = null;
   const extraFileDirs: string[] = [];
   let captureHostDir: string | null = null;
+  let planSnapshot: Awaited<ReturnType<typeof createPlanChatSnapshot>> | null = null;
 
   try {
+    if (spec.planSnapshot) {
+      planSnapshot = await createPlanChatSnapshot(wrapperWorkerRoot, spec.planSnapshot);
+      mounts.push({
+        source: volumeName,
+        subpath: planSnapshot.subpath,
+        target: PLAN_CHAT_SNAPSHOT_PATH,
+        readOnly: true,
+      });
+    }
     const egress = options.egressDomains ?? [];
     if (policy?.mode === 'allowlist') {
       // Allowlist: the user's domains plus the CLI's own model/auth domains, so
@@ -391,6 +404,7 @@ export async function runInSandbox(
     }
     return { ...result, resolvedCommand, wrapperId, capturedLog };
   } finally {
+    if (planSnapshot) await planSnapshot.remove();
     if (wrapperWorkerPath) {
       const wrapperDir = dirname(wrapperWorkerPath);
       rm(wrapperDir, { recursive: true, force: true }).catch((err: unknown) => {

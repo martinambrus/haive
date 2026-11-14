@@ -1,4 +1,6 @@
 'use client';
+import { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from '@haive/shared/schemas';
+import type { FormSchema } from '@haive/shared';
 import { LinkButton } from '@/components/ui';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -224,6 +226,16 @@ export function PlanChat({
     };
   }, [repositoryId]);
 
+  const chatForm = liveStep?.formSchema as FormSchema | null | undefined;
+  const legacyField = chatForm?.fields.find((f) => f.id === 'message' && f.type === 'textarea');
+  const legacyMessage =
+    legacyField &&
+    'default' in legacyField &&
+    typeof legacyField.default === 'string' &&
+    legacyField.default.length > PLAN_CHAT_MESSAGE_MAX_CHARS
+      ? legacyField.default
+      : null;
+
   const firstUnreadId = firstUnreadMessageId(messages, unreadAtOpen);
 
   const groups = groupPlanConversations(messages, conversations);
@@ -336,6 +348,10 @@ export function PlanChat({
   async function send(): Promise<void> {
     const message = draft.trim();
     if (!message) return;
+    if (message.length > PLAN_CHAT_MESSAGE_MAX_CHARS) {
+      setError(PLAN_CHAT_MESSAGE_LIMIT_TEXT);
+      return;
+    }
     setSending(true);
     setError(null);
     setDraft('');
@@ -537,6 +553,14 @@ export function PlanChat({
         </p>
       )}
 
+      {parked && chatForm?.description && (
+        <MarkdownView body={chatForm.description} className="text-xs text-neutral-400" />
+      )}
+      {parked && legacyMessage && (
+        <Button size="sm" variant="secondary" onClick={() => setDraft(legacyMessage)}>
+          Edit stored message
+        </Button>
+      )}
       <textarea
         ref={composerRef}
         value={draft}
@@ -545,6 +569,10 @@ export function PlanChat({
         disabled={locked}
         placeholder="e.g. split Auth into signup and login, and note that the mobile app depends on both"
         className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 disabled:opacity-50"
+      />
+      <MarkdownView
+        body={`${draft.trim().length.toLocaleString('en-US')} / ${PLAN_CHAT_MESSAGE_MAX_CHARS.toLocaleString('en-US')} characters`}
+        className="text-xs text-neutral-500"
       />
       <FormError message={error} />
       <div className="flex gap-2">

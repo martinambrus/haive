@@ -140,6 +140,11 @@ export interface DispatchPlan {
 }
 
 export interface DispatchRequest {
+  promptBudget?: {
+    maxChars: number;
+    outputReserveChars: number;
+    repack: (maxChars: number) => string;
+  };
   providers: CliProviderRecord[];
   preferredProviderId?: string | null;
   input: DispatchInput;
@@ -810,7 +815,18 @@ function buildCliSidePlan(
     const assignedAgentIds = assignedPersonaIds(req, [stripHaivePreamble(req.input.prompt)]);
     let rulesText = rules.text;
     let houseBlock = house.block;
-    let effectivePrompt = adaptPrompt(req.input.prompt, rulesText, houseBlock);
+    let sourcePrompt = req.input.prompt;
+    let effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
+    if (req.promptBudget) {
+      const limit = req.promptBudget.maxChars - req.promptBudget.outputReserveChars;
+      const overhead = effectivePrompt.length - sourcePrompt.length;
+      sourcePrompt = req.promptBudget.repack(limit - overhead);
+      effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
+      if (effectivePrompt.length > limit)
+        throw new Error(
+          `The plan chat prompt exceeds its input budget after reserving output and dispatch instructions (${effectivePrompt.length} > ${limit}; source ${sourcePrompt.length}, overhead ${overhead}).`,
+        );
+    }
     let agentRules = rules.stamp;
     let houseRules = house.stamp;
     let spec: CliCommandSpec | undefined;
@@ -823,7 +839,7 @@ function buildCliSidePlan(
       } catch (err) {
         // gemini takes its prompt only as an argument, and rules must never be what pushes a prompt
         // that fits past that limit: drop the house rules, then the agent rules, and say so.
-        if (!(err instanceof PromptTooLargeError)) throw err;
+        if (!(err instanceof PromptTooLargeError) || req.promptBudget) throw err;
         if (houseBlock !== null) {
           houseBlock = null;
           houseRules = house.droppedStamp;

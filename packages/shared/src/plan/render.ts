@@ -69,6 +69,7 @@ export function renderPlanMarkdownFrom(
 
   const byParent = indexChildren(nodes);
   const titleById = new Map(nodes.map((n) => [n.id, n.title]));
+  const versionById = new Map(nodes.map((n) => [n.id, n.version]));
   const outgoing = new Map<string, typeof edges>();
   for (const e of [...edges].sort(byEdge)) {
     const run = outgoing.get(e.fromNodeId);
@@ -124,7 +125,7 @@ export function renderPlanMarkdownFrom(
       if (!target) continue;
       const note = link.note ? ` — ${collapseToLine(link.note)}` : '';
       lines.push(
-        `- ${EDGE_LABEL[link.kind]}: ${collapseToLine(target)} (\`${PLAN_NODE_REF_PREFIX}${link.toNodeId}\`)${note}`,
+        `- ${EDGE_LABEL[link.kind]}: ${collapseToLine(target)} (\`${PLAN_NODE_REF_PREFIX}${link.toNodeId}\`${opts.withVersions ? `, version ${versionById.get(link.toNodeId)}` : ''})${note}`,
       );
     }
 

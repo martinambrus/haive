@@ -1,5 +1,17 @@
 import type { Database } from '@haive/database';
-import { renderPlanMarkdown } from '@haive/shared/plan';
+import {
+  renderPlanMarkdown,
+  renderPlanMarkdownFrom,
+  type PlanNodeRecord,
+  type PlanEdgeRecord,
+} from '@haive/shared/plan';
+
+export interface PlanIndexSnapshot {
+  nodes: PlanNodeRecord[];
+  edges: PlanEdgeRecord[];
+  withVersions?: boolean;
+}
+type IndexParts = { text: string; notice?: string };
 
 /** The deepest the index is ever rendered, and the character budget that shrinks it
  *  when a plan is too big for that depth to be affordable.
@@ -97,11 +109,48 @@ export function planIndexOmissionNotice(depth: number, omitted: number): string 
  * Shared by the spec writer (04-phase-0b), which spends the full budget, and by the
  * coverage gate's document-section repairs, which pass a smaller one.
  */
-export async function renderBoundedPlanIndexParts(
+export function renderBoundedPlanIndexParts(
+  snapshot: PlanIndexSnapshot,
+  repositoryId: string,
+  maxChars: number,
+): IndexParts;
+export function renderBoundedPlanIndexParts(
   db: Database,
   repositoryId: string,
+  maxChars?: number,
+): Promise<IndexParts>;
+export function renderBoundedPlanIndexParts(
+  db: Database | PlanIndexSnapshot,
+  repositoryId: string,
   maxChars: number = PLAN_INDEX_MAX_CHARS,
-): Promise<{ text: string; notice?: string }> {
+): IndexParts | Promise<IndexParts> {
+  if ('nodes' in db) {
+    let rendered = '';
+    let depth = PLAN_INDEX_MAX_DEPTH;
+    for (; depth >= 1; depth--) {
+      rendered = renderPlanMarkdownFrom(db.nodes, db.edges, {
+        titlesOnly: true,
+        maxDepth: depth,
+        withVersions: db.withVersions,
+      });
+      if (rendered.length <= maxChars) break;
+    }
+    depth = Math.max(depth, 1);
+    if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= maxChars) return { text: rendered };
+    const { text, omitted } = trimPlanIndexToWholeNodes(
+      rendered,
+      Math.max(0, maxChars - PLAN_INDEX_NOTICE_RESERVE),
+    );
+    return { text, notice: planIndexOmissionNotice(depth, omitted) };
+  }
+  return renderDbIndexParts(db, repositoryId, maxChars);
+}
+
+async function renderDbIndexParts(
+  db: Database,
+  repositoryId: string,
+  maxChars: number,
+): Promise<IndexParts> {
   let rendered = '';
   let depth = PLAN_INDEX_MAX_DEPTH;
   for (; depth >= 1; depth--) {

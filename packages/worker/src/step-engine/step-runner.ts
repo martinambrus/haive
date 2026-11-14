@@ -1028,6 +1028,7 @@ async function resolveLlmPhase(
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
 
+  const basePrompt = prompt;
   if (stepDef.metadata.id === '07b-phase-4-validate') {
     const notice = fixTestReviewNotice(
       await loadFixTestRecords(db, params.taskId, 30, { patches: false }),
@@ -1097,6 +1098,27 @@ async function resolveLlmPhase(
     preferredProviderId,
     steeringRequested,
     worktreeRel,
+    ...(llmSpec.promptBudget
+      ? {
+          promptBudget: {
+            maxChars: llmSpec.promptBudget.maxChars,
+            outputReserveChars: llmSpec.promptBudget.outputReserveChars,
+            repack: (maxChars: number) => {
+              const at = prompt.indexOf(basePrompt);
+              if (at < 0)
+                throw new Error(
+                  'Cannot locate the plan chat prompt within its dispatch additions.',
+                );
+              const additions = prompt.length - basePrompt.length;
+              const packed = llmSpec.promptBudget!.buildPrompt(
+                { detected, formValues: formValues ?? {}, integrationAccounts },
+                maxChars - additions,
+              );
+              return prompt.slice(0, at) + packed + prompt.slice(at + basePrompt.length);
+            },
+          },
+        }
+      : {}),
     input: {
       kind: 'prompt',
       prompt,
@@ -1215,6 +1237,17 @@ async function resolveLlmPhase(
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
   if ('failure' in invRow) return failDispatch(db, current, invRow.failure);
+  const planRead = llmSpec.planSnapshot?.({ detected, formValues: formValues ?? {} });
+  if (planRead && plan.invocation.kind === 'cli') {
+    plan.invocation.spec.planSnapshot = {
+      schemaVersion: 1,
+      userId: params.userId,
+      taskId: params.taskId,
+      invocationId: invRow.id,
+      repositoryId: (detected as { repositoryId: string }).repositoryId,
+      ...planRead,
+    };
+  }
   // Setup that must not run unless THIS job won. The insert above IS the reservation — the
   // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
   // so everything destructive belongs on this side of it. `prepare` cannot: it runs before

@@ -73,6 +73,16 @@ export interface LlmBuildArgs {
 export interface LlmInvocationSpec {
   requiredCapabilities: StepCapability[];
   buildPrompt: (args: LlmBuildArgs) => string;
+  /** Repack optional context after all dispatch additions have been measured. */
+  promptBudget?: {
+    maxChars: number;
+    outputReserveChars: number;
+    buildPrompt: (args: LlmBuildArgs, maxChars: number) => string;
+  };
+  /** Immutable plan read, carried only by this owned dispatch into its sandbox. */
+  planSnapshot?: (
+    args: LlmBuildArgs,
+  ) => import('./steps/plan/_plan-chat-context.js').ChatPlanRead | undefined;
   parseOutput?: (raw: string, parsed: unknown) => unknown;
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
