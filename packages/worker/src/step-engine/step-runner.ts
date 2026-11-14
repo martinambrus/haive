@@ -46,6 +46,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
+import { disabledProvider } from '../orchestrator/provider-hold.js';
 import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -4055,7 +4056,15 @@ async function maybeEnqueueStepSummary(
       },
     });
     const invocation = plan.invocation;
-    if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;
+    if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') {
+      if (disabledProvider(providers, preferredProviderId)) {
+        logger.warn(
+          { taskId: params.taskId, stepId: stepDef.metadata.id, providerId: preferredProviderId },
+          'step summary skipped: the resolved CLI provider is disabled',
+        );
+      }
+      return;
+    }
 
     const [invRow] = await db
       .insert(schema.cliInvocations)
