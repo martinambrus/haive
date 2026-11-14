@@ -361,6 +361,94 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
     }
   });
 
+  it.each(['enabled', 'disabled', 'deleted'])(
+    'a later step-card choice replaces an %s gate choice in the same round',
+    async (state) => {
+      const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+      stepRegistry.override({
+        ...target,
+        llm: { requiredCapabilities: ['tool_use'], buildPrompt: () => 'fix' },
+      });
+      const providers = await db
+        .insert(schema.cliProviders)
+        .values([
+          { userId, name: 'claude-code', label: 'card pick' },
+          { userId, name: 'codex', label: 'gate pick' },
+        ])
+        .returning();
+      const [card, picked] = providers;
+      try {
+        const { id, gate } = await parked(REVIEW, LOOP);
+        await db.insert(schema.taskStepCliChoices).values({
+          taskId: id,
+          stepId: FIX_LOOP_TARGET_STEP_ID,
+          role: 'default',
+          cliProviderId: card!.id,
+          updatedAt: new Date(0),
+        });
+        await resolveFixLoopGate(db, ctxFor(id, LOOP), gate, 'continue', 0, '', picked!.id);
+        expect(
+          (
+            await resolvePreferredCli(
+              db,
+              userId,
+              FIX_LOOP_TARGET_STEP_ID,
+              null,
+              providers,
+              'default',
+              id,
+              false,
+              1,
+            )
+          ).cliProviderId,
+        ).toBe(picked!.id);
+        if (state === 'disabled')
+          await db
+            .update(schema.cliProviders)
+            .set({ enabled: false })
+            .where(eq(schema.cliProviders.id, picked!.id));
+        if (state === 'deleted')
+          await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
+        // The step-card writer updates its default slot at the time of the new pick.
+        await db
+          .update(schema.taskStepCliChoices)
+          .set({
+            cliProviderId: card!.id,
+            effortLevel: 'high',
+            updatedAt: new Date(Date.now() + 1000),
+          })
+          .where(
+            and(
+              eq(schema.taskStepCliChoices.taskId, id),
+              eq(schema.taskStepCliChoices.stepId, FIX_LOOP_TARGET_STEP_ID),
+              eq(schema.taskStepCliChoices.role, 'default'),
+            ),
+          );
+        expect(
+          await resolvePreferredCli(
+            db,
+            userId,
+            FIX_LOOP_TARGET_STEP_ID,
+            null,
+            providers,
+            'default',
+            id,
+            false,
+            1,
+          ),
+        ).toEqual({ cliProviderId: card!.id, effortLevel: 'high' });
+      } finally {
+        stepRegistry.override(target);
+        await db.delete(schema.cliProviders).where(
+          inArray(
+            schema.cliProviders.id,
+            providers.map((p) => p.id),
+          ),
+        );
+      }
+    },
+  );
+
   it('rolls the next-round CLI back when Retry wins the task fence', async () => {
     const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
     stepRegistry.override({

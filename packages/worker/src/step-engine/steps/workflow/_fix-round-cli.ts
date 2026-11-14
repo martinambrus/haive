@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_DISPATCH_STEP_IDS, type FormSchema } from '@haive/shared';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
@@ -74,18 +74,18 @@ async function loadRoundProvider(
 ): Promise<CliProviderRecord> {
   if (!providerId)
     throw new Error(
-      'Next fix round CLI was deleted; Retry the escalation gate and choose another CLI.',
+      'Next fix round CLI was deleted; choose another CLI on the implementation step card or at the escalation gate.',
     );
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
   });
   if (!provider || provider.userId !== userId)
     throw new Error(
-      'Next fix round CLI is not available or owned by you; Retry the escalation gate and choose another CLI.',
+      'Next fix round CLI is not available or owned by you; choose another CLI on the implementation step card or at the escalation gate.',
     );
   if (!provider.enabled)
     throw new Error(
-      `Next fix round CLI "${provider.label}" is disabled; enable it before retrying.`,
+      `Next fix round CLI "${provider.label}" is disabled; enable it or choose another CLI on the implementation step card.`,
     );
   return provider;
 }
@@ -103,10 +103,15 @@ export async function resolveFixRoundCli(
     where: and(
       eq(schema.taskStepCliChoices.taskId, taskId),
       eq(schema.taskStepCliChoices.stepId, stepId),
-      eq(schema.taskStepCliChoices.role, fixRoundCliRole(round)),
+      inArray(schema.taskStepCliChoices.role, ['default', fixRoundCliRole(round)]),
     ),
+    // Compare in Postgres: Date loses the stored timestamp's sub-millisecond precision.
+    // A later card pick (including clearing it) replaces the round override.
+    orderBy: [desc(schema.taskStepCliChoices.updatedAt), asc(schema.taskStepCliChoices.role)],
   });
-  return choice ? loadRoundProvider(db, userId, choice.cliProviderId) : undefined;
+  return choice?.role === fixRoundCliRole(round)
+    ? loadRoundProvider(db, userId, choice.cliProviderId)
+    : undefined;
 }
 
 /** Called only inside the gate's existing fenced close/round-transition transaction. */

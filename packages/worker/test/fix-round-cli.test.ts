@@ -36,14 +36,20 @@ const original = provider('original');
 const picked = provider('picked');
 const dialect = new PgDialect();
 
-function database(choice?: string | null, fresh: CliProviderRecord | undefined = picked) {
+function database(
+  choice?: string | null,
+  fresh: CliProviderRecord | undefined = picked,
+  laterChoice?: string | null,
+) {
   return {
     query: {
       taskStepCliChoices: {
         findFirst: async ({ where }: { where: SQL }) => {
           const params = dialect.sqlToQuery(where).params;
+          if (laterChoice !== undefined && params.includes('default'))
+            return { role: 'default', cliProviderId: laterChoice, effortLevel: 'high' };
           return choice !== undefined && params.includes('fix:2:default')
-            ? { cliProviderId: choice, effortLevel: null }
+            ? { role: fixRoundCliRole(2), cliProviderId: choice, effortLevel: null }
             : undefined;
         },
       },
@@ -110,6 +116,16 @@ describe('next-round CLI', () => {
       resolve(database(fresh ? picked.id : null, fresh ?? undefined), 2),
     ).rejects.toThrow(/next fix round.*(disabled|owned|deleted|available)/i);
   });
+
+  it.each(['enabled', 'disabled', 'deleted'])(
+    'honors a later step-card pick over an %s round provider',
+    async (state) => {
+      const fresh = provider(picked.id, { enabled: state !== 'disabled' });
+      expect(
+        await resolve(database(state === 'deleted' ? null : picked.id, fresh, original.id), 2),
+      ).toEqual({ cliProviderId: original.id, effortLevel: 'high' });
+    },
+  );
 
   it('offers only eligible owned providers even though the implement step requiresCli is false', () => {
     expect(phase2ImplementStep.metadata.requiresCli).toBe(false);

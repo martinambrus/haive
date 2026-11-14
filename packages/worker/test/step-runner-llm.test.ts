@@ -183,7 +183,7 @@ function makeMockDb(state: MockState): Database {
       taskStepCliChoices: {
         findFirst: async ({ where }: { where: SQL }) =>
           state.roundChoice && new PgDialect().sqlToQuery(where).params.includes('fix:2:default')
-            ? { cliProviderId: state.roundChoice.id, effortLevel: null }
+            ? { role: 'fix:2:default', cliProviderId: state.roundChoice.id, effortLevel: null }
             : undefined,
       },
       cliProviders: { findFirst: async () => state.roundChoice },
