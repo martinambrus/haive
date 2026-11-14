@@ -1,4 +1,4 @@
-import { lstatNoFollow, toSafeRel } from '@haive/shared/fs-safe';
+import { isPathContainmentError, lstatNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 
 /** What was taken out of an article, and why. Surfaced on the step output so the removal is
@@ -268,7 +268,8 @@ export function citationCandidates(block: string): string[] {
  *  RESOLVED string against the root, which cannot tell a real directory from a link standing where
  *  one should be. The walk refuses a link at any component instead, and `toSafeRel` rejects the
  *  traversal before a descriptor is opened at all. A refused candidate is simply not a citation,
- *  which is the same answer the old null carried. */
+ *  which is the same answer the old null carried. Unknown reads instead abort the scrub:
+ *  keeping an unverified block would persist repository citations in a shared KB draft. */
 export async function repoHoldsCitation(repoPath: string, candidate: string): Promise<boolean> {
   let rel: string;
   try {
@@ -277,7 +278,14 @@ export async function repoHoldsCitation(repoPath: string, candidate: string): Pr
     return false;
   }
   if (rel === '') return false;
-  return (await lstatNoFollow(repoPath, rel)) !== null;
+  try {
+    return (await lstatNoFollow(repoPath, rel, { strict: true })) !== null;
+  } catch (err) {
+    // A proved refusal names something outside the repository's readable tree. A failed
+    // verification proves nothing, so it must stop the draft write like any other I/O fault.
+    if (isPathContainmentError(err) && err.reason !== 'unverifiable') return false;
+    throw err;
+  }
 }
 
 /**
