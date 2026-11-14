@@ -87,6 +87,28 @@ async function fixture() {
 }
 
 describe('plan chat patches use the dispatch read', () => {
+  it.each(['Edited replacement', ''])(
+    'preserves a recovered submitted original in history when edited or ended: %s',
+    async (message) => {
+      const f = await fixture();
+      const original = 'old '.repeat(5001);
+      const detected = planChatStep.recoverLegacyFormValues!(f.detected, { message: original })!;
+      expect(planChatStep.llm!.skipIf!({ detected, formValues: {} })).toBe(true);
+      await planChatStep.apply(f.ctx as never, {
+        detected,
+        formValues: { message },
+        llmOutput: null,
+        llmInvocationId: null,
+        iteration: 0,
+        previousIterations: [],
+      });
+      const messages = await f.db.select().from(schema.planNodeMessages);
+      expect(messages.at(-2)).toMatchObject({ role: 'user', body: original });
+      expect(messages.at(-1)).toMatchObject(
+        message ? { role: 'user', body: message } : { role: 'assistant' },
+      );
+    },
+  );
   it('allows an unversioned update to a node created earlier in the same chat patch', async () => {
     const f = await fixture();
     const result = await applyAgentPatch(

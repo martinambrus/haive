@@ -66,6 +66,9 @@ interface PlanChatDetect {
   /** The turn this pass is answering — the newest user message with no reply
    *  after it. Null when the conversation is up to date, which is what ends it. */
   pendingQuestion: string | null;
+  /** A pre-limit submitted answer checkpointed for editing before apply could
+   * append it to the conversation. Preserve it in history when the edit lands. */
+  pendingFromLegacySubmission?: true;
 }
 
 interface PlanChatApply {
@@ -309,6 +312,13 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
     };
   },
 
+  recoverLegacyFormValues(detected, values) {
+    const message = values.message;
+    if (typeof message !== 'string' || message.trim().length <= PLAN_CHAT_MESSAGE_MAX_CHARS)
+      return null;
+    return { ...detected, pendingQuestion: message, pendingFromLegacySubmission: true };
+  },
+
   reviseLoop: {
     // Self-target: the conversation continues on ONE card instead of
     // accumulating a step per turn. Uncapped and human-gated — an answer pass
@@ -463,6 +473,14 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
 
     const next = String((args.formValues as { message?: unknown }).message ?? '').trim();
     if (next.length > PLAN_CHAT_MESSAGE_MAX_CHARS) throw new Error(PLAN_CHAT_MESSAGE_LIMIT_TEXT);
+    if (d.pendingFromLegacySubmission && d.pendingQuestion) {
+      await ctx.db.insert(schema.planNodeMessages).values({
+        nodeId: d.nodeId,
+        taskId: ctx.taskId,
+        role: 'user',
+        body: d.pendingQuestion,
+      });
+    }
     if (needsEdit(d) && !next) {
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,

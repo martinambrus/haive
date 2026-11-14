@@ -372,6 +372,51 @@ describe('plan chat through the real runner dispatch', () => {
     });
     expect(f.enqueue).not.toHaveBeenCalled();
   });
+
+  it.each(['saved', 'job'] as const)(
+    'reopens an oversized pre-limit %s submission for editing',
+    async (source) => {
+      const message = 'x'.repeat(20_001);
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: null,
+      };
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: planChatStep.form!({} as never, detected),
+        formValues: source === 'saved' ? { message } : null,
+      });
+      const enqueue = vi.fn();
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true },
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        ...(source === 'job' ? { formValues: { message } } : {}),
+      });
+      expect(result.status).toBe('waiting_form');
+      expect(state.taskStepRow.formValues).toBeNull();
+      expect(state.taskStepRow.detectOutput).toMatchObject({ pendingQuestion: message });
+      expect(state.taskStepRow.formSchema).toMatchObject({
+        fields: [{ id: 'message', default: message }],
+      });
+      expect(state.taskStepRow.waitingStartedAt).toBeInstanceOf(Date);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('repair evidence at the dispatch boundary', () => {

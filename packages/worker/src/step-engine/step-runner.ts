@@ -3052,6 +3052,29 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    // Recover a pre-limit saved answer before worker validation can fail it.
+    // Keep the whole value and its edit form in one owned row write; a restart
+    // can then offer the same edit without copying the rejected answer again.
+    const legacyValues =
+      current.formValues ??
+      (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
+    const recovered =
+      legacyValues && stepDef.recoverLegacyFormValues?.(detected, legacyValues as FormValues);
+    if (recovered) {
+      const formSchema = stepDef.form?.(ctx, recovered);
+      if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
+      current = await updateRow(db, current.id, {
+        detectOutput: recovered,
+        formValues: null,
+        formSchema,
+        status: 'waiting_form',
+        waitingStartedAt: new Date(),
+        pauseFormOnRetry: false,
+        statusMessage: null,
+      });
+      return { status: 'waiting_form', row: current, formSchema };
+    }
+
     // --- Pre-form LLM phase ---
     let llmOutput: unknown = undefined;
     // The invocation llmOutput came from, so a step that records review findings can

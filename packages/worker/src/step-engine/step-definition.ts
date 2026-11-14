@@ -609,6 +609,11 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
   form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;
+  /** A saved or redelivered answer may predate a new submit limit. Return a
+   * detection that shows the whole legacy value for editing, or null. The runner
+   * atomically checkpoints it and re-parks before validating or dispatching. API
+   * submission validation still governs every new answer. */
+  recoverLegacyFormValues?(detected: TDetect, values: FormValues): TDetect | null;
   /** Optional async side-effect run AFTER the preForm llm phase and BEFORE the
    *  (synchronous) form() is built — the seam where a step writes an artifact the
    *  form's web viewer points at (e.g. 11-phase-8-learning's knowledge-diff JSON,
