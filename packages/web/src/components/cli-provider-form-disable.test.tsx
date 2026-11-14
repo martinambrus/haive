@@ -174,3 +174,52 @@ it('gates the rebuild immediately, defers polling until accepted, and restores a
     vi.useRealTimers();
   }
 });
+
+it.each(['Save', 'Rebuild image'])(
+  'refuses a competing action while %s awaits its disable preview and settles cancellation',
+  async (first) => {
+    let preview!: (value: { taskCount: number; stepCount: number }) => void;
+    h.get.mockImplementation((path: string) => {
+      if (path.endsWith('/disable-impact'))
+        return new Promise((resolve) => {
+          preview = resolve;
+        });
+      if (path.endsWith('/secrets')) return Promise.resolve({ secrets: [] });
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    await act(async () => {
+      render(<CliProviderForm mode="edit" metadata={metadata} provider={provider} />);
+    });
+    fireEvent.click(screen.getByLabelText('Enabled'));
+    const save = screen.getByRole('button', { name: 'Save' });
+    const rebuild = screen.getByRole('button', { name: 'Rebuild image' });
+    // Both events land before React commits any disabled-button state.
+    await act(async () => {
+      fireEvent.click(first === 'Save' ? save : rebuild);
+      fireEvent.click(first === 'Save' ? rebuild : save);
+    });
+    expect(h.get.mock.calls.filter(([path]) => path.endsWith('/disable-impact'))).toHaveLength(1);
+    await act(async () => {
+      preview({ taskCount: 1, stepCount: 1 });
+    });
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Rebuild image' }).hasAttribute('disabled')).toBe(
+      false,
+    );
+    expect(h.patch).not.toHaveBeenCalled();
+    expect(h.post).not.toHaveBeenCalled();
+    // The guard was released: a new action can request another preview.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    });
+    expect(h.get.mock.calls.filter(([path]) => path.endsWith('/disable-impact'))).toHaveLength(2);
+    await act(async () => {
+      preview({ taskCount: 0, stepCount: 0 });
+    });
+    expect(h.patch).toHaveBeenCalledTimes(1);
+  },
+);

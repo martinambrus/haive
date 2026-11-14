@@ -186,6 +186,8 @@ export function CliProviderForm({
 
   const networkIssues = (issues ?? []).filter((i) => i.path?.startsWith('networkPolicy') === true);
   const [submitting, setSubmitting] = useState(false);
+  // A ref takes the gate before either action awaits or React renders disabled controls.
+  const persistenceInFlight = useRef(false);
   const [disableImpact, setDisableImpact] = useState<{
     taskCount: number;
     stepCount: number;
@@ -603,7 +605,8 @@ export function CliProviderForm({
   }
 
   async function handleRebuildImage() {
-    if (mode !== 'edit' || !provider?.id) return;
+    if (mode !== 'edit' || !provider?.id || persistenceInFlight.current) return;
+    persistenceInFlight.current = true;
     setBuildRequesting(true);
     clearError();
     const previousBuildState = buildState;
@@ -634,12 +637,15 @@ export function CliProviderForm({
         // Best effort refetch; leave optimistic 'building' in place.
       }
     } finally {
+      persistenceInFlight.current = false;
       setBuildRequesting(false);
     }
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (persistenceInFlight.current) return;
+    persistenceInFlight.current = true;
     clearError();
     setSubmitting(true);
     try {
@@ -698,6 +704,7 @@ export function CliProviderForm({
     } catch (err) {
       captureError(err, 'Failed to save provider');
     } finally {
+      persistenceInFlight.current = false;
       setSubmitting(false);
     }
   }
@@ -1163,7 +1170,7 @@ export function CliProviderForm({
                 type="button"
                 variant="ghost"
                 onClick={handleRebuildImage}
-                disabled={buildRequesting || buildState.status === 'building'}
+                disabled={submitting || buildRequesting || buildState.status === 'building'}
               >
                 {buildState.status === 'building'
                   ? 'Building...'
@@ -1457,7 +1464,7 @@ export function CliProviderForm({
       </div>
 
       <div className="flex gap-2">
-        <Button type="submit" disabled={submitting}>
+        <Button type="submit" disabled={submitting || buildRequesting}>
           {submitting ? 'Saving...' : mode === 'create' ? 'Create' : 'Save'}
         </Button>
         <Button type="button" variant="ghost" onClick={() => router.back()}>
