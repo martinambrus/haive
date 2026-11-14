@@ -587,6 +587,19 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 status: open · kind: fix · found: PGF driver 2026-11-13 · priority: P2
 MEASURED 2026-11-13 (`.claude/tmp/codex-run/PGF-S/codex-1/decision-data.md`): unpatched postgres.js v4.1.1 already fixes every defect `patches/postgres@3.4.9.patch` works around (closed-socket write, unbounded startup reconnects) plus two more: an abandoned transaction callback writing after its connection reopened (fenced in the 3.4.9 patch by the PGF PR), and a handle kept after a successful COMMIT still writing outside its transaction (3.4.9 only, NOT fenced: consequential, third-party). Upstream folded porsager/postgres #1209, #1215, #1201 into v4 (06cf28470), so nothing needs filing upstream. Blockers measured on v4.1.1: two migration overload type errors (`packages/database/src/migrate/client.ts` ~:99), the startup guards' deadlines differ (`pg-startup-storm.test.ts`, 2 mismatches), and `smoke:pg-drop` gets `57P01` where it expects `CONNECTION_CLOSED`. Do: upgrade, fix the typing, re-key the guards on v4's error class/code (not wording), keep the fence control and `smoke:pg-drop` green unpatched, remove the patch and its AGENTS.md paragraph, and lift the dependabot hold in `.github/dependabot.yml`. Read v4's CHANGELOG for every breaking change against the inventory in decision-data.md.
 
+### T662 · FNF[relink-reconcile-lows] · remote relink reconcile lows, after #1158 (+8)
+
+status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · priority: P3
+
+1. The sweep's own reconcile is not a registered writer, and the relink route does not wait for an in-process writer before its Git writes (`api/lib/remote-reconcile.ts` `reconcileRemote` ~:110-150, `api/routes/repos.ts` relink). A reconcile whose database connection drops during its Git calls keeps writing the old remote after the row lock is released; a concurrent relink can commit and clear a newer remote first, leaving Git on the older one with no intent left. Needs a connection drop inside a few ms of Git calls plus a concurrent relink of the same repository; the next relink repairs it. Fix direction: register the reconcile callback as a writer through its settlement, and have the route await outstanding writers for the repository before its own Git writes. Codex bot P2 on cbb25ae10.
+2. Window between committing the intent and taking the writer fence in the route (the fence begins before the relink transaction, the intent row is written earlier); a sweep tick in between acts on a live request's intent on a folder import. The request answers 409 and a retry restores the origin.
+3. Relink vs relink after a dropped connection: the second request takes the released lock while the first's Git writes may still run; the fence only stops the sweep.
+4. No log line when the sweep skips a fenced or locked repository; a repository stuck behind a leaked fence would be invisible.
+5. `server.close()` is never called in the relink test's fixture server (`api/test/git-relink-probes.test.ts`).
+6. A partial `git remote add` (origin added, pushurl write failed) is reconciled only on the next tick; covered by the intent but untested.
+7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
+8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
+
 ### T661 · FNF[provider-shell-close-lows] · provider shell revocation lows, after #1156 (+6)
 
 status: open · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
@@ -885,11 +898,6 @@ PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInR
 
 status: open · kind: fix · found: PR #1157 CI 2026-11-13 (run 43519214885) · priority: P3
 PRE-EXISTING. `smoke:plan-canvas` failed once with check "three-way: an edge a canvas patch inserted during the reconcile keeps its note and holds the reconcile" (detail `{"edging":"merged","depends":[{"note":"from the canvas"}]}`); unrelated PR (updater-only diff), rerun of the failed job passed. The check races a canvas patch against the reconcile; find what orders them (`plan/mirror.ts` reconcile, the smoke's hold point) and make the smoke wait on a structural signal, not timing. No CI change, no retry.
-
-### T658 · FNF[ci-flakes-2] · relink SIGTERM lock-file assertion flakes in CI
-
-status: open · kind: fix · found: PR #1150 CI 2026-11-13 (run 43513569849, job 132189652198) · priority: P3
-PRE-EXISTING. `packages/api/test/repo-link-remote.test.ts` ~:433 "stops a timed-out git write with SIGTERM, so git removes its own lock file" failed once with `existsSync(config.lock)` true after the 409 answer; unrelated PR (worker-only diff), rerun of the failed job only. Likely cause: the route answers before the SIGTERMed git child has exited (git removes `config.lock` in its signal handler), so the assertion races the child's exit. Find the real cause first (does the relink wait for the child's `exit`/`close` before answering? `relink-git.ts` on the open T508 branch reshapes this path), then make the test deterministic (await the child's exit, not wall time) or make the route wait for the child; no CI change, no retry.
 
 ### T657 · FNF[reset-claim-sweep-lows] · onboarding reset claim sweep lows, after #1151 (+4)
 
@@ -1533,19 +1541,6 @@ From the T385 F7 round 2 review (2026-10-31). PRE-EXISTING; minor (test fidelity
 2. `ne`, `inArray` and `notInArray` on timestamp columns compare Date objects by reference (~:335, ~:343-346; `eq` handles Date at ~:314-317): for an equal-time distinct Date, ne is true (PostgreSQL false), inArray false (true), notInArray true (false).
 3. Optional: the negated correlated EXISTS gate keeps 8 of 19 shape checks unpinned (`ch.length === 2`, `text(ch[0]) === 'not '`, `is(ch[1], SQL)`, `sub.length === 11`, `is(sub[3], PgUUID)`, `is(sub[5], PgUUID)`, `is(sub[7], Column)`, `is(sub[9], Column)`); no current input differs.
 
-### T508 · FNF[relink-commit-unknown] [verify-first] · after a lost COMMIT acknowledgement the relink restores git blindly, leaving the row new and git old
-
-status: open (VERIFIED 2026-11-13, opt-in controls `GIT_PROBES=1` on branch `verify/git-probes` (worktree sec-GIT), red on main 9eb52c34e, re-run by the session on a throwaway PostgreSQL: `api/test/git-relink-probes.test.ts`. CONFIRMED: dropping the real COMMIT reply gives `CONNECTION_CLOSED`, row and audit persist new, git is restored to the old URL; killing the api child after its git write and before COMMIT leaves git new, row old, no audit, and a later GET keeps the drift. Fix: reconcile git to a fresh database read after a connection-class error (`repos.ts` ~:2924) and on read / at boot for process death (~:2801). THIRD-PARTY PART DONE: the postgres.js abandoned-callback fence shipped in #1153 (b3d30756b), deployed 2026-11-13 (patch hash 8b6e39ee0439); the reconcile is in review on branch `fix/T508-relink-reconcile`. NEEDS LIVE EVIDENCE: the uninterruptible git child and the killed-after-rename exit) · executable: reconcile · priority: P2
-From the T376 fifth review (2026-10-31). PRE-EXISTING on the T376 branch (80cb7aa97), documented, minor (needs a connection loss at COMMIT).
-
-The remote relink (api routes/repos.ts, the outer catch after `db.transaction`) restores git's remote after a COMMIT failure or a lost connection without learning whether the transaction committed. A COMMIT whose acknowledgement was lost leaves the row's `remote_url` and credential binding new, the `repository.remote.update` audit row present, and git on the old remote. Fix direction: after a connection-class error, read the row on a fresh connection and align git to it instead of restoring blindly. Related, third-party (needs approval, not started): postgres.js 3.4.9 keeps running an abandoned transaction callback after `onclose` rejects `begin`, and its `tx` handle can write through a connection the pool has re-opened (`index.js` ~:243-246, ~:291-296, ~:421-427), so a late `UPDATE` could land outside its transaction.
-
-Also (T376 sixth review, by reading): the relink has no hard deadline and no process-death recovery. A git child in uninterruptible I/O (a `localPath` repository on 9p) survives SIGKILL, so the request, the repository row lock and a pooled connection stay held; and an api restart or crash between BEGIN and COMMIT leaves git on the new URL with the row old and no audit row. The reconcile-on-read direction above repairs the drift; a hard deadline on the helper that fails the request and logs the stuck pid bounds the hold.
-
-T376 review9 carry-forward: a mutating git child killed after its config rename but before exit returns exitedClean:false, so restoration may not be armed (repos.ts ~:2791-2807). PRE-EXISTING, narrow; internal git ordering unmeasured. Share the reconcile-to-database direction above rather than another branch-local restore rule.
-
-Executable verification scope: Bounded COMMIT-acknowledgement and process-death drift reproduction, then a reconciliation design. Third-party dependency changes require their own reviewed scope; no broad transaction rewrite. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
-
 ### T509 · FNF[swallow-rule-shape] [design] · the CI swallow pin lists failure-masking shapes instead of judging what follows `||`
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Hypothetical failure-masking spellings do not occur in pinned jobs today; resume when resume when a real workflow uses an unrecognized masking form · priority: P4
@@ -1867,6 +1862,8 @@ All low unless marked.
 
 ## Done
 
+- T508 — a remote relink records a durable intent on the row; a fresh locked read reconciles Git's origin after a lost connection, failed COMMIT or process death, on the request path and through a sweep that skips locked and in-process-fenced repositories; lows in T662 — PR #1158 (8305c3d2d), 2026-11-14
+- T658 — relink SIGTERM lock-file flake: the test now waits on a FIFO open handshake instead of wall time — PR #1158 (8305c3d2d), 2026-11-14
 - T654 — close live provider shells when the provider is disabled — PR #1156 (846c1ee9a), 2026-11-14
 - T501 — redelivery-safe deterministic applies (receipts, durable-snapshot replay gate, save generations) — PR #1155 (9fbfad0cc), 2026-11-14
 - T519 — PR poller catches each task's poll on its own and logs settled rejections; a failed merged-task re-drive saves prPollError and a later success clears it; member 3 invalid (held by `holdStepAdvance`) — PR #1150 (7c13cd38a), 2026-11-13
