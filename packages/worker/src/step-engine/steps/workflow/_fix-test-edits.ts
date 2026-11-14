@@ -3,17 +3,26 @@ import { isUtf8 } from 'node:buffer';
 import { readdirSizesNoFollow, openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 import { fenceOpener } from '@haive/shared/markdown-fences';
 import type { StatusSummaryItem } from '@haive/shared';
-import type { SecretMaskPolicy } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
 import { asPlainText, sanitizeSimilarSites } from './_similar-sites.js';
 import { isTestEvidencePath } from './_test-paths.js';
+import {
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+  type SecretMaskPolicy,
+} from '../../../queues/cli-exec/secret-mask-policy.js';
 
 export const TEST_IMAGE_BYTES = 512 * 1024;
-export const TEST_IMAGE_FILES = 512;
 export const TEST_PATCH_BYTES = 12 * 1024;
 export const TEST_PATCH_LINES = 80;
 export const TEST_GATE_BYTES = 32 * 1024;
 export const TEST_GATE_LINES = 240;
+export const TEST_HUNK_LINES = 40;
+export const TEST_HUNK_BYTES = 6 * 1024;
+export const TEST_DIFF_CELLS = 1_000_000;
+export const TEST_IMAGE_CONTENT_BYTES = 64 * 1024 * 1024;
+export const TEST_IMAGE_ENTRIES = 1_000_000;
+export const TEST_IMAGE_DEPTH = 128;
 const SKIP = new Set([
   '.git',
   '.haive',
@@ -66,82 +75,107 @@ export interface FixTestRecord {
 const safePath = (path: string): boolean =>
   sanitizeSimilarSites([{ path, reason: '' }])[0]?.path === path && !path.includes('\\');
 
-/** Strict traversal: an unreadable directory or refused test entry invalidates the image.
- * No git status or agent-written list can hide a same-size, ignored or untracked test edit. */
+/** Complete manifests; per-file content caps never erase other evidence. Large files
+ * are hashed through the held descriptor without allocating their entire contents. */
 export async function captureTestImage(
   anchor: string,
   prefix: string,
   limits: {
     bytes?: number;
-    files?: number;
     entries?: number;
     depth?: number;
+    contentBytes?: number;
     policy?: SecretMaskPolicy;
   } = {},
 ): Promise<TestImage> {
   const maxBytes = limits.bytes ?? TEST_IMAGE_BYTES;
-  const maxFiles = limits.files ?? TEST_IMAGE_FILES;
-  let remaining = limits.entries ?? 10000;
-  let bytes = 0;
+  const policy = limits.policy ?? secretMaskPolicy({});
+  let remaining = limits.entries ?? TEST_IMAGE_ENTRIES;
+  let contentBytes = limits.contentBytes ?? TEST_IMAGE_CONTENT_BYTES;
   const files: NonNullable<TestImage['files']> = [];
   const visit = async (rel: string, depth: number): Promise<void> => {
-    if (depth > (limits.depth ?? 32)) throw new Error('depth budget');
+    if (depth > (limits.depth ?? TEST_IMAGE_DEPTH)) throw new Error('depth budget');
     const entries = await readdirSizesNoFollow(anchor, `${prefix}${rel}`.replace(/\/$/, ''));
     if (entries === null) throw new Error('missing directory');
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (--remaining < 0) throw new Error('entry budget');
       if (SKIP.has(entry.name)) continue;
-      // A link may hide an entire test directory behind an innocuous name such as src.
-      if (!entry.isDirectory && entry.size === null) throw new Error('refused entry');
+      if (--remaining < 0) throw new Error('entry budget');
       const path = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory) await visit(path, depth + 1);
       else if (isTestEvidencePath(path)) {
-        if (!safePath(path) || entry.size === null) throw new Error('refused test path');
-        if (files.length >= maxFiles || bytes + entry.size > maxBytes)
-          throw new Error('image budget');
-        const fh = await openFileNoFollow(anchor, `${prefix}${path}`, 'read', { strict: true });
-        if (!fh) throw new Error('missing test file');
+        const file: TestFile = { path, size: entry.size ?? undefined, status: 'refused' };
+        files.push(file);
+        if (!safePath(path) || entry.size === null) continue;
         try {
-          const before = await fh.stat({ bigint: true });
-          if (before.size > BigInt(maxBytes - bytes)) throw new Error('image budget');
-          const data = Buffer.alloc(Number(before.size));
-          let filled = 0;
-          while (filled < data.length) {
-            const { bytesRead } = await fh.read(data, filled, data.length - filled, filled);
-            if (!bytesRead) throw new Error('incomplete read');
-            filled += bytesRead;
+          const fh = await openFileNoFollow(anchor, `${prefix}${path}`, 'read', { strict: true });
+          if (!fh) continue;
+          try {
+            const before = await fh.stat({ bigint: true });
+            file.size = Number(before.size);
+            file.mode = Number(before.mode & 0o777n);
+            const withheld = false;
+            const keep = !withheld && file.size <= maxBytes && file.size <= contentBytes;
+            const hash = createHash('sha256');
+            const chunks: Buffer[] = [];
+            const data = Buffer.alloc(Math.min(file.size, 64 * 1024));
+            let filled = 0;
+            while (filled < file.size) {
+              const { bytesRead } = await fh.read(
+                data,
+                0,
+                Math.min(data.length, file.size - filled),
+                filled,
+              );
+              if (!bytesRead) throw new Error('incomplete read');
+              hash.update(data.subarray(0, bytesRead));
+              if (keep) chunks.push(Buffer.from(data.subarray(0, bytesRead)));
+              filled += bytesRead;
+            }
+            const after = await fh.stat({ bigint: true });
+            const named = await lstatNoFollow(anchor, `${prefix}${path}`, { strict: true });
+            if (
+              before.size !== after.size ||
+              before.mtimeNs !== after.mtimeNs ||
+              before.ctimeNs !== after.ctimeNs ||
+              named?.kind !== 'file' ||
+              BigInt(named.stats.ino) !== before.ino ||
+              BigInt(named.stats.dev) !== before.dev
+            )
+              throw new Error('test entry changed during read');
+            file.hash = hash.digest('hex');
+            file.status = withheld
+              ? 'content withheld'
+              : keep
+                ? 'available'
+                : 'content not retained';
+            if (keep) {
+              file.base64 = Buffer.concat(chunks).toString('base64');
+              contentBytes -= file.size;
+            }
+          } finally {
+            await fh.close();
           }
-          const after = await fh.stat({ bigint: true });
-          const named = await lstatNoFollow(anchor, `${prefix}${path}`, { strict: true });
-          if (
-            before.size !== after.size ||
-            before.mtimeNs !== after.mtimeNs ||
-            before.ctimeNs !== after.ctimeNs ||
-            named?.kind !== 'file' ||
-            BigInt(named.stats.ino) !== before.ino ||
-            BigInt(named.stats.dev) !== before.dev
-          )
-            throw new Error('test entry changed during read');
-          bytes += data.length;
-          files.push({
-            path,
-            size: data.length,
-            status: 'available',
-            hash: sha256(data),
-            base64: data.toString('base64'),
-            mode: Number(before.mode & 0o777n),
-          });
-        } finally {
-          await fh.close();
+        } catch {
+          file.status = 'refused';
+          delete file.base64;
+          delete file.hash;
         }
       }
     }
   };
   try {
     await visit('', 0);
-    return { state: 'captured', files, hash: sha256(JSON.stringify(files)) };
+    return {
+      state: 'captured',
+      files,
+      hash: sha256(JSON.stringify(files.map(({ base64: _data, ...f }) => f))),
+    };
   } catch {
-    return { state: 'not captured', reason: 'Image missing, refused or over the capture budget.' };
+    return {
+      state: 'not captured',
+      files,
+      reason: 'Manifest traversal missing, unreadable or over its safety limit.',
+    };
   }
 }
 

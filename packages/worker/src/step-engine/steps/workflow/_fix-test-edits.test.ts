@@ -2,6 +2,10 @@ import { randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { isTestEvidencePath, TEST_FILE_RE } from './_test-paths.js';
+import { secretMaskPolicy } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { scanFences } from '@haive/shared/markdown-fences';
 import {
@@ -10,9 +14,14 @@ import {
   fixTestEditsRow,
   testEditPaths,
   TEST_IMAGE_BYTES,
-  TEST_IMAGE_FILES,
   TEST_PATCH_BYTES,
   TEST_PATCH_LINES,
+  TEST_HUNK_LINES,
+  TEST_HUNK_BYTES,
+  TEST_DIFF_CELLS,
+  TEST_IMAGE_CONTENT_BYTES,
+  TEST_IMAGE_ENTRIES,
+  TEST_IMAGE_DEPTH,
   type FixTestRecord,
 } from './_fix-test-edits.js';
 
@@ -73,14 +82,27 @@ describe('host fix-pass test evidence', () => {
     expect(result.changes[0]!.patch).toContain('Binary');
   });
 
-  it('never reports no edit when a whole image cannot fit or a test path is a link', async () => {
+  it('keeps manifests beyond the per-file cap and refuses only a linked test entry', async () => {
     const anchor = await fixture();
     await writeFile(join(anchor, 'tests/a'), '12345');
-    const over = await captureTestImage(anchor, '', { bytes: 4 });
-    expect(over.state).toBe('not captured');
-    expect(compareTestImages(over, over).state).toBe('not captured');
+    await writeFile(join(anchor, 'tests/b'), 'ok');
     await symlink('a', join(anchor, 'tests/link'));
-    expect((await captureTestImage(anchor, '')).state).toBe('not captured');
+    await symlink('tests', join(anchor, 'unrelated'));
+    const image = await captureTestImage(anchor, '', { bytes: 4 });
+    expect(image.state).toBe('captured');
+    expect(image.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: 'tests/a',
+          size: 5,
+          hash: expect.any(String),
+          status: 'content not retained',
+        }),
+        expect.objectContaining({ path: 'tests/b', base64: Buffer.from('ok').toString('base64') }),
+        expect.objectContaining({ path: 'tests/link', status: 'refused' }),
+      ]),
+    );
+    expect(image.files).toHaveLength(3);
   });
 
   it('renders the saved record with multiline fenced patches, explicit cuts and safe paths', () => {
@@ -117,9 +139,15 @@ describe('host fix-pass test evidence', () => {
   });
 
   it('pins production bounds while exercising patch limits on a small input', async () => {
-    expect([TEST_IMAGE_BYTES, TEST_IMAGE_FILES, TEST_PATCH_BYTES, TEST_PATCH_LINES]).toEqual([
-      524288, 512, 12288, 80,
-    ]);
+    expect([TEST_IMAGE_BYTES, TEST_PATCH_BYTES, TEST_PATCH_LINES]).toEqual([524288, 12288, 80]);
+    expect([
+      TEST_HUNK_LINES,
+      TEST_HUNK_BYTES,
+      TEST_DIFF_CELLS,
+      TEST_IMAGE_CONTENT_BYTES,
+      TEST_IMAGE_ENTRIES,
+      TEST_IMAGE_DEPTH,
+    ]).toEqual([40, 6144, 1000000, 67108864, 1000000, 128]);
     const anchor = await fixture();
     await writeFile(join(anchor, 'tests/a'), 'one\ntwo\nthree');
     const before = await captureTestImage(anchor, '');
