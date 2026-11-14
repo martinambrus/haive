@@ -836,11 +836,16 @@ Reviews in `.claude/tmp/codex-run/NRC-S/`.
 8. A preset's `appliedValues` can override values after a re-park.
 9. Owed live check: the gate UI picks a next-round CLI on a real escalation.
 
-### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+1)
+### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+6)
 
-status: open (queued 2026-11-14 overnight, with T667 item 1 which is the same defect) · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
+status: open (item 1 resolved 2026-11-15 in #1194; items 2-3 consequential, need durable deletion identity; the rest parked: diminishing returns) · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
 
 1. PRE-EXISTING, consequential. A re-run of step 11 apply re-reads existing learnings (`11-phase-8-learning.ts` ~:1722) and re-plans, so an insert already written is "taken" and `resolveInsertId` (~:763) returns `<id>-2`: a duplicate learning file, and the staged draft (keyed by the old id) is lost for the copy. Fix direction: make a replayed insert idempotent (match the already-written body or the reconcile event's attempt key) rather than suffixing.
+2. (#1194) PRE-EXISTING, consequential. An update then delete, or update then supersede, of a PRE-EXISTING learning resurrects it on replay: the delete leaves no identity on disk, so the replayed plan re-applies the update to a file it no longer finds (`11-phase-8-learning.ts` ~:861). Needs durable deletion identity (a tombstone or the reconcile event's attempt key); the two matrix rows are excluded in `11-phase-8-learning-outcome.test.ts` ~:315-318 with no `it.fails`.
+3. (#1194) PRE-EXISTING, narrow. Delete then insert of the same slug with a crash between the two operations can lose the staged draft.
+4. (#1194) `prepareForm` plans without an apply key (~:1347), so a replay that re-stages the form computes ids differently from apply; reachable only with a null invocation id (test bypass). LOW, parked.
+5. (#1194) No control for two identical entries in one proposal (the `index` key input) or a different task, round or step row. LOW, parked.
+6. (#1194) `parseLearningRecord` runs for every existing learning even without an operation id writer. Cost only. LOW, parked.
 
 ### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
 
@@ -2175,6 +2180,7 @@ All low unless marked.
 
 ## Done
 
+- Learning insert replay (#1194, 9ed6cd004): learning provenance records a stable, apply-keyed operation id; a replay of step 11 apply reuses the file its first run wrote (suffix and staged draft kept) and plans against the pre-apply state, so dropped operations stay dropped (an insert-then-delete no longer erases the learning). T672 item 1 (also T667 item 1).
 - Plan chat bound follow-ups (#1193, 587b868a7): budgeted dispatch again drops house rules then agent rules for an argv-only adapter (pre-#1178 contract, required plan chat included); an oversized original is kept durably in `plan_node_messages` in the same transaction as the edit-form park, ordered before its replacement; clarification, build and coverage folds retry unversioned conflicts up to three times and re-ask a stale agent version. T675 items 1, 3 and 10.
 - Derived task types PR 4 (#1191, af136c094): the web editor for derived types: "Duplicate and customize" on the built-in workflow (no write until save; other bases show the catalog's reason), an ordered changes editor with a read-only path preview, live shared validation plus a debounced server preview, split skipped/stale warnings, gate-removal warning, overlay-only saves, 403/409 handling. Prerequisite 3 complete. Browser-checked on the dev stack 2026-11-14. Lows filed as T679 items 14-19.
 - Derived task types PR 2 (#1187): migrations 0240 (the `derived` run-list strategy) and 0241 (nullable `base_slug`, `changes` and `tasks.derived_run_plan`, named shape CHECKs, a restrictive self foreign key) with every existing row unchanged; readers refuse a derived type explicitly until PR3; the header's guarded manual cleanup refuses while any task uses a derived type. Applied to the dev database 2026-11-14. Its PR3 hazard is filed in T679 item 6.
