@@ -1,3 +1,5 @@
+-- Undo: revert the application commits; the unused table is harmless.
+-- Drop the table only in a later numbered migration.
 CREATE TABLE IF NOT EXISTS "plan_active_time" (
   "repository_id" uuid NOT NULL,
   "user_id" uuid NOT NULL,
