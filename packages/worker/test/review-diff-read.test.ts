@@ -7,7 +7,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { TaskCancelledError, type StepContext } from '@haive/shared/step';
-import { readReviewDiff, REVIEW_RETAINED_CONTENT_BYTES } from '../src/step-engine/review-diff.js';
+import {
+  readReviewDiff,
+  serializeReviewPayload,
+  REVIEW_RETAINED_CONTENT_BYTES,
+} from '../src/step-engine/review-diff.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
@@ -421,3 +425,35 @@ it.each(['EMFILE', 'ENFILE'])('rethrows git spawn %s for step retry', async (cod
   });
   await expect(readReviewDiff(ctx, '/repo', options)).rejects.toMatchObject({ code });
 });
+
+it.each(['collector', 'serializer'])(
+  'scrubs scan stderr at the %s unavailable boundary',
+  async (source) => {
+    const failedScope = {
+      ...scope,
+      scanError: 'git ended without an exit status in /host/private/tree (EACCES)',
+    };
+    vi.mocked(collectImplementationFiles).mockResolvedValue(failedScope);
+    const result =
+      source === 'collector'
+        ? await readReviewDiff(ctx, '/repo', options)
+        : serializeReviewPayload(
+            {
+              forkPoint: 'a'.repeat(40),
+              changeHash: 'hash',
+              scope: failedScope,
+              dependencyPolicy: {},
+              reviewDimensions: [],
+              diff: '',
+              files: [],
+            },
+            options,
+          );
+    expect(result).toMatchObject({
+      status: 'unavailable',
+      scope: { scanError: 'git ended without an exit status in [path] (EACCES)' },
+    });
+    expect(JSON.stringify(result)).not.toContain('/host/private/tree');
+    expect(failedScope.scanError).toContain('/host/private/tree');
+  },
+);

@@ -79,7 +79,17 @@ function snapshotIdentity(snapshot: ReviewSnapshot) {
   return { ...snapshot, files: snapshot.files.map(fileIdentity) };
 }
 function unavailable(scope: ImplementationFileSet, reason: string): ReviewDiff {
-  return { status: 'unavailable', partial: true, scope, reason };
+  return {
+    status: 'unavailable',
+    partial: true,
+    scope: {
+      ...scope,
+      scanError: scope.scanError
+        ? scrubErrorPaths(safeErrorMessage(scope.scanError))
+        : scope.scanError,
+    },
+    reason: scrubErrorPaths(safeErrorMessage(reason)),
+  };
 }
 
 /** All mandatory evidence is measured before optional full-file contents are packed. */
