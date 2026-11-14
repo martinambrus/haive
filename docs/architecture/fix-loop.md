@@ -249,3 +249,96 @@ findings on 2026-10-03. `recordFixLoopRequest` stamps `machineFenced: true` on e
 defect block, the repeat quote, the honored block, the prior-rounds block, the learning digest)
 does so only for a marked row, and treats an unmarked one as machine text. Keyed on the field, never
 on the wording.
+
+## Test edits during a repair
+
+The implementation fix prompt, 08b's fix passes and the DAG fix coder share
+`BEHAVIOUR_FIX_LINES`: fix approved behaviour, and change an expectation only when
+a named section of the spec proves it wrong. A human directive revising the spec or an
+expectation takes precedence. The 08b-to-07 hand-off carries that contract once.
+Final validation, related tests and review use the current tree, including test edits;
+only checks that actually ran count as evidence. This phase does not replay old tests.
+
+Before enqueueing each 07 fix invocation, 08b pass after its author pass, DAG review
+fix coder, and 07b validator fixer, the host measures a complete classified-path manifest.
+It captures the after manifest before consuming the ended invocation or starting another
+pass. Each `fix_tests.before` / `fix_tests.after` event carries only invocation/pass/round,
+manifest hash, file count, state/reason and before-event reference, never full manifests, file content, patches
+or the workspace's host path. The before-event id pins that pass through later passes and
+step resets. `/events` and the history digest carry only these small references, independent of repository file count.
+
+Migration `0238_fix_test_content.sql` creates `fix_test_blobs`, keyed by task and SHA-256,
+with raw content size metadata, nullable content bytea and an appended `manifest_gzip` bytea,
+creation and expiry stamps, a cascading task foreign key and a partial live-content expiry index
+(`expired_at IS NULL AND content IS NOT NULL`).
+Only contents of changed files enter the content column. Complete manifest JSON is gzip
+compressed and stored under `manifest:<SHA-256>` in the same table. Both deduplicate within
+the task; pass N after and pass N+1 before share a manifest row when identical. Manifest
+rows have zero content size and remain available after content expiry/eviction; task deletion
+removes them. Undo the column with a later migration after reverting its readers. The migration strips experimental legacy content/patch/path payloads
+and marks them unavailable rather than copying bytes whose secret policy was not checked.
+Undo: revert the code first; a later migration may drop the table. Reference-only events
+remain harmless. Never edit an applied migration or reconstruct old bytes from today's tree.
+
+Before bytes are provisional worker memory, bounded to 64 MiB of raw content and 128 pending
+invocations, evicting oldest pending entries. The durable before manifest survives a restart;
+old bytes survive only if that hash was already retained from a previous changed file.
+A restart or pending eviction can therefore leave the old side hash-only. This is disclosed
+as content not retained, never replaced by a later file. Settled changed-content blobs and
+both manifests remain durable. An interrupted or ownership-lost pass is not captured. Missing or undecodable manifests
+also read as not captured, without preventing other passes from loading.
+
+Both event writes lock invocation, owned step and task in that order, then storage admission
+where needed; repository reads and policy resolution happen outside those transactions.
+Lookups start at the invocation primary key and always constrain events by task. A replay
+rechecks its event under the invocation lock. A begin that lost ownership records not captured;
+a finish that lost ownership publishes no complete after record. Required event/blob write
+failures prevent dispatch/settlement rather than becoming best-effort.
+
+`_test-paths.ts` covers JS/TS, PHP, Python, Go `_test.go`, Ruby `_spec.rb` and `spec/`,
+Java/Kotlin `*Test` and `src/test/`, C# `*Tests.cs`, test/fixture/snapshot/harness/e2e
+directories, runner config basenames and setup files, package/build manifests, scripts
+and CI workflows. This is a conservative classifier, not discovery of arbitrary commands.
+Every manifest uses repository-root fs-safe held-descriptor traversal, including ignored
+and untracked files, without an agent-written list. Git/Haive metadata, dependency, build,
+coverage and virtual-environment trees are skipped at every depth. These skips are a blind
+spot: test edits inside them are not measured or reported, even when a command runs them. A symlink, FIFO or other nonregular
+classified entry refuses that path only; unrelated nonregular entries are ignored.
+Two refused endpoints contribute only to a separate could-not-be-measured count, never
+to changes or reviewer notices. Becoming or stopping refused is a change; retention-budget
+status flips alone are not. Ordinary comparisons use content identity and mode.
+An unreadable directory, over one million traversed entries or depth over 128 makes the
+manifest incomplete and the pass not captured. Renames are delete/add endpoints.
+
+The per-file content cap is 512 KiB; larger regular files are hashed in bounded chunks and
+kept as hash/size/mode with content not retained. Complete manifests have no 512-file or
+512-KiB aggregate cap. Provisional content allocation per capture is bounded to 64 MiB;
+excess paths remain in the manifest with content not retained. The task/install durable
+caps (16 MiB / 64 MiB raw content) apply only to changed content, under one database advisory
+lock, shared with expiry. Both order old rows by `(created_at, task_id, content_hash)`.
+An expired hit is re-stored with content, a fresh creation stamp and cleared expiry under
+that same lock when it fits. Admission reads keys and integer sizes, never detoasts old content. It evicts oldest
+previous live content to admit later work, preserving hashes/events and marking expiry;
+content that still cannot fit stays hash-only. Thus earlier heavy tasks cannot hold later
+tasks out for 30 days. The repository-sized probe captured over 2,000 paths and 23 MB while
+retaining only the two changed versions. Task deletion cascades its blobs and events.
+
+Content for any path matching the effective secret globs is withheld, including tracked
+paths: capture is an at-rest copy, unlike the sandbox's untracked-only masking. The same
+`taskSecretMaskPolicy` supplies per-repo allow/extend and shared carve-outs, even when masking
+is switched off. `.auth/**` and storage-state JSON names are shared defaults. Policy failure
+never means unrestricted capture. Policy is resolved again at finish and display; newly
+denied old content is not retained or shown. Path/size/mode remain as evidence. Withheld files use only `withheld:present`, never a plain
+content hash; their bytes are neither read nor hashed. Size and mode changes to withheld
+files are detected; same-size content edits are not. Display replaces identities of newly denied paths with that marker.
+
+Gate detect persists only metadata, paths and identities for at most the newest 30 passes.
+Patches are loaded from retained content during form preparation, with policy resolved again;
+a legacy detect patch is stripped. The resulting displayed form schema is a stored snapshot,
+not a live expiry-aware view after a form has already been built. Patch text never enters events
+or detect output. Newest passes receive the shared gate budget first; once it is spent no more
+LCS comparisons run. Reviewer path notices load metadata only, without content or LCS. Secret-policy matchers
+compile once per capture, finish or load; only changed paths are evaluated during a load.
+The minute sweep's independent expiry pass removes up to 100 live contents older than
+30 days per tick through the partial index, leaving hashes and expiry stamps; missing,
+budgeted or expired content is explicitly hash-only. See [Worker restarts](worker-restarts.md).

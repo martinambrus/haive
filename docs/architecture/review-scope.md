@@ -194,3 +194,29 @@ gate 3 shows it when no gate-2 decision exists. 08e's picks are subtracted by ti
 across every round, since its `i-N` ids are positions. The row is display copy under the same rules
 as similar sites: each field collapsed to one line of at most 200 chars and escaped, the list cut
 at 30 with the rest counted, and nothing of it entering a prompt.
+
+## Test edits measured during repair
+
+Gate 2 shows repair test records in an informational row; gate 3 loads it when no gate-2
+approve/reject decision exists. It identifies invocation, round, pass and immutable before
+reference, and shows hashes plus contextual line-diff hunks. LCS strips equal ends before
+its one-million-cell safety bound; larger comparisons honestly say too large to diff.
+Each hunk has three context lines and a 40-line/6-KiB cap; each pass has an 80-line/12-KiB
+cap; the gate caps patches at 240 lines/32 KiB, allocates newest-first and states cuts.
+Once that budget is spent, remaining paths keep identities without computing another LCS. Only the latest 30 passes
+are loaded as metadata before gate detect persists them; patch text is loaded in form preparation, and the row states that limit. No measured
+change reads no change to the classified test paths, not a claim of universal coverage.
+
+The row inherits the similar-sites trust boundary. Paths are re-sanitised and escaped.
+Before patch construction and again before display, CRLF/lone CR become LF and U+0085,
+U+2028/U+2029 become visible escapes. The shared CommonMark fence helper measures the
+real normalized patch before choosing a longer outer fence. A react-markdown regression
+renders hostile CR/fence/link content and proves it stays in the code block; fixing the
+fence to three backticks makes that control fail. Patches are display evidence, never a
+verdict on weakening and never a gate-decision change.
+
+Only host-measured, re-sanitised paths reach 07b validators and 08c reviewer/refuter seats,
+inside their own data fence, capped at 100 paths with omissions and unavailable captures
+disclosed. Empty notices add no prompt whitespace. Stored patches, content and arbitrary
+record prose never enter a prompt or the task ledger. Capture and content availability
+are described in [Fix loop](fix-loop.md#test-edits-during-a-repair).

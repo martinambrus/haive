@@ -406,6 +406,8 @@ node lies outside the index still gets a proposal for it. Rollback: revert.
 
 ### P6. Make test edits during a fix visible, and ask for the behaviour fix
 
+**Status (2026-11-14): Cheap half implemented and regression-tested: spec-bound prompts, complete per-pass manifests, changed-content blobs, contextual gate patches and paths-only reviewer notices. Probes capture this repository; production field counts and old-test replay remain outside this phase. Content availability after restart/expiry is disclosed.**
+
 Cheap half first:
 
 - Each fix prompt (07's fix pass, 08b's fix pass and the DAG fix coder) asks for a behaviour
