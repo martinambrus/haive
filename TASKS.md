@@ -586,7 +586,7 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 
 status: open · kind: fix · found: T655 run · priority: P3
 
-1. `connectTimeoutSeconds: 0` from settings is forwarded to postgres.js; on v4 a 0 or unset `connect_timeout` means retry forever at startup instead of the old hosts x 3 bound. Also a DSN or env `connect_timeout=0`. Clamp to a positive minimum where Haive builds the options. PRE-EXISTING value path, REGRESSION in consequence (unbounded startup).
+1. Every in-repo `connect_timeout` / `connectTimeoutSeconds` is a positive constant (api rag.ts, tooling.ts, tooling-upgrades.ts, global-kb.ts; worker global-kb-context.ts, data-migrations.ts; database migrate/client.ts, cli-auth-lock.ts), and unset defaults to 30 s. Only a user DSN `connect_timeout=0` or env `PGCONNECT_TIMEOUT=0` disables the bound, and on v4 that means startup retries until the caller's own timeout. Refuse or clamp it in the user DSN guard. Low (admin-supplied DSN).
 2. `pg-startup-storm.test.ts` drain waits are bounded by count, not time; the end test restores real timers outside `finally`; one bound (15) is loose. Tests only.
 3. No `ssl: false` case pinned for user DSNs. Tests only.
 4. `dsnDialHost`: a non-numeric port claims NaN handling the code does not have (comment overclaims); dropped positive password cases; the tests depend on ambient `PGHOST`; the `skipped.invalid` count shrank with the v4 parser. Tests and comment.
