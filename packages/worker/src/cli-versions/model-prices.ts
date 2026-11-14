@@ -88,7 +88,15 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
     return { ok: true, refreshed: [], errors: [], skipped: ['prices'] };
   }
 
-  const syncRows = await db.select().from(schema.cliPricingSync);
+  let syncRows: (typeof schema.cliPricingSync.$inferSelect)[];
+  try {
+    syncRows = await db.select().from(schema.cliPricingSync);
+  } catch (err) {
+    const error = safeErrorMessage(err).slice(0, 2000);
+    log.warn({ err, error }, 'failed to read model price sync settings');
+    // Without the switches, no provider can safely be treated as enabled.
+    return { ok: false, refreshed: [], errors: [{ name: 'price:database', error }] };
+  }
   const enabled = new Set<CliProviderName>(
     syncRows.filter((r) => r.autoUpdateEnabled).map((r) => r.name as CliProviderName),
   );
@@ -128,7 +136,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
     const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh litellm model prices');
     for (const provider of litellmProviders) errors.push({ name: `price:${provider}`, error });
-    await recordSyncError(db, litellmProviders, error);
+    await recordSyncError(db, litellmProviders, error, errors);
   }
 
   // --- OpenRouter: the gateway's own resale rates, from the cache the sibling
@@ -203,7 +211,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       const error = safeErrorMessage(err).slice(0, 2000);
       log.warn({ err, error }, 'failed to read openrouter catalog for pricing');
       errors.push({ name: 'price:openrouter', error });
-      await recordSyncError(db, ['openrouter'], error);
+      await recordSyncError(db, ['openrouter'], error, errors);
     }
   }
 
@@ -212,20 +220,27 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
   // the truth for a local model and a LIE for the four CLOUD models the feed also
   // carries — and a stored 0 is a PRICE, so it would record a real $0.00 cost.
   if (enabled.has('ollama')) {
-    const { rows, errors: pageErrors } = await fetchOllamaModelPrices(db);
-    for (const row of rows) {
-      desired.push({
-        provider: 'ollama',
-        modelKey: row.modelKey,
-        source: 'ollama',
-        rates: row.rates,
-      });
-    }
-    if (pageErrors.length === 0 || rows.length > 0) synced.add('ollama');
-    if (pageErrors.length > 0) {
-      const error = safeErrorMessage(pageErrors.join('; ')).slice(0, 2000);
+    try {
+      const { rows, errors: pageErrors } = await fetchOllamaModelPrices(db);
+      for (const row of rows) {
+        desired.push({
+          provider: 'ollama',
+          modelKey: row.modelKey,
+          source: 'ollama',
+          rates: row.rates,
+        });
+      }
+      if (pageErrors.length === 0 || rows.length > 0) synced.add('ollama');
+      if (pageErrors.length > 0) {
+        const error = safeErrorMessage(pageErrors.join('; ')).slice(0, 2000);
+        errors.push({ name: 'price:ollama', error });
+        await recordSyncError(db, ['ollama'], error, errors);
+      }
+    } catch (err) {
+      const error = safeErrorMessage(err).slice(0, 2000);
+      log.warn({ err, error }, 'failed to discover ollama model prices');
       errors.push({ name: 'price:ollama', error });
-      await recordSyncError(db, ['ollama'], error);
+      await recordSyncError(db, ['ollama'], error, errors);
     }
   }
 
@@ -261,19 +276,25 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       .map((e) => e.error)
       .join('; ');
     const fetchError = providerErrors ? safeErrorMessage(providerErrors).slice(0, 2000) : null;
-    await db
-      .insert(schema.cliPricingSync)
-      .values({
-        name: provider,
-        fetchedAt: now,
-        fetchError,
-        priceCount: count,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: schema.cliPricingSync.name,
-        set: { fetchedAt: now, fetchError, priceCount: count, updatedAt: now },
-      });
+    try {
+      await db
+        .insert(schema.cliPricingSync)
+        .values({
+          name: provider,
+          fetchedAt: now,
+          fetchError,
+          priceCount: count,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: schema.cliPricingSync.name,
+          set: { fetchedAt: now, fetchError, priceCount: count, updatedAt: now },
+        });
+    } catch (err) {
+      const error = safeErrorMessage(err).slice(0, 2000);
+      log.warn({ err, error, provider }, 'failed to record model price sync success');
+      errors.push({ name: 'price:database', error });
+    }
   }
 
   log.info({ inserted, closed, unchanged }, 'refreshed model prices');
@@ -389,18 +410,26 @@ async function recordSyncError(
   db: Database,
   providers: CliProviderName[],
   error: string,
+  errors: RefreshCliVersionsJobResult['errors'],
 ): Promise<void> {
   const now = new Date();
   for (const provider of providers) {
-    await db
-      .insert(schema.cliPricingSync)
-      .values({ name: provider, fetchError: error, updatedAt: now })
-      .onConflictDoUpdate({
-        target: schema.cliPricingSync.name,
-        // Only the error moves — fetched_at and price_count keep describing the last
-        // GOOD sync, which is what makes staleness visible instead of invisible.
-        set: { fetchError: error, updatedAt: now },
-      });
+    try {
+      await db
+        .insert(schema.cliPricingSync)
+        .values({ name: provider, fetchError: error, updatedAt: now })
+        .onConflictDoUpdate({
+          target: schema.cliPricingSync.name,
+          // Only the error moves — fetched_at and price_count keep describing the last
+          // GOOD sync, which is what makes staleness visible instead of invisible.
+          set: { fetchError: error, updatedAt: now },
+        });
+    } catch (err) {
+      const error = safeErrorMessage(err).slice(0, 2000);
+      log.warn({ err, error, provider }, 'failed to record model price sync error');
+      // Preserve the original source failure, even when its diagnostic cannot be stored.
+      errors.push({ name: 'price:database', error });
+    }
   }
 }
 

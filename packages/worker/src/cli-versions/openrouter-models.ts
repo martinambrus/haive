@@ -67,20 +67,27 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
   } catch (err) {
     const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh openrouter model catalog');
-    await db
-      .insert(schema.openrouterModelCache)
-      .values({
-        name: 'openrouter',
-        models: [],
-        fetchedAt: null,
-        fetchError: error,
-        updatedAt: new Date(),
-      })
-      // Only the error moves on conflict — a previously good `models` array survives.
-      .onConflictDoUpdate({
-        target: schema.openrouterModelCache.name,
-        set: { fetchError: error, updatedAt: new Date() },
-      });
-    return { ok: false, refreshed: [], errors: [{ name: 'openrouter', error }] };
+    const errors = [{ name: 'openrouter', error }];
+    try {
+      await db
+        .insert(schema.openrouterModelCache)
+        .values({
+          name: 'openrouter',
+          models: [],
+          fetchedAt: null,
+          fetchError: error,
+          updatedAt: new Date(),
+        })
+        // Only the error moves on conflict — a previously good `models` array survives.
+        .onConflictDoUpdate({
+          target: schema.openrouterModelCache.name,
+          set: { fetchError: error, updatedAt: new Date() },
+        });
+    } catch (recordErr) {
+      const error = safeErrorMessage(recordErr).slice(0, 2000);
+      log.warn({ err: recordErr, error }, 'failed to record openrouter catalog refresh error');
+      errors.push({ name: 'openrouter', error });
+    }
+    return { ok: false, refreshed: [], errors };
   }
 }
