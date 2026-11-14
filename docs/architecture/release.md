@@ -27,7 +27,7 @@ from that tree, including base or run. Unknown file names are rejected by both r
 `known` contains the historical bundle hash records; it will
 let the updater recognise an unmodified older install that predates a local bundle record.
 An older manifest still parses without `bundle`, and an older reader's plain zod `z.object`
-strips the new field. The updater and upgrade API keep their existing behavior.
+strips the new field. Targets without a bundle retain the existing upgrade behavior and emit `bundle-absent`.
 
 `node scripts/build-release-manifest.mjs --version <tag> --bundle-dir <tree>` hashes the required
 base/run files and any allowed overlays present in `<tree>`. It validates
@@ -85,10 +85,59 @@ its separate Dockerfile; the printed, shell-quoted recovery command rebuilds and
 The context is removed after success or a failure before the local manifest write. See
 [Modules](modules.md#publishing-a-channel-scriptspublish-channelmjs) for the channel gates.
 
-Publication does not yet install the bundle. Classification, required-key writes, swapping and
-rollback follow the approved [compose bundle plan](../plans/release-compose-bundle.md). That plan
-refuses a modified or unknown legacy bundle with `bundle-modified` unless
-`--replace-modified-bundle` is supplied; those runtime behaviors remain for the later PRs.
+The updater now reads and prepares the bundle before `startRun` or any maintenance hold. Channel
+manifests and their files come from one release-image container. Public manifests still come from
+the requested HTTPS URL or an operator-controlled local file, which supplies the hash trust anchor;
+files come from `<registry>/haive-release:<version>` or `--release-image <ref>`. An HTTP manifest
+that declares a bundle refuses with `bundle-manifest-insecure`, including when
+`--replace-modified-bundle` is supplied. An HTTPS redirect ending on HTTP is also refused. Local
+manifest files are allowed and involve no manifest fetch.
+Each allowlisted `/bundle/<name>` is copied separately from the same never-started container.
+The bounded tar reader accepts exactly one regular entry of that exact name, with no prefix,
+links or additional entries, and caps each bundle file at 256 KiB. Missing, malformed, oversized
+or hash-mismatched files refuse with `bundle-invalid` before install files are changed. The public
+image's own manifest never replaces the supplied manifest's hashes. A target without `bundle` needs no public
+release-image pull and introduces no classification or required-key refusal.
+
+`bundle.ts` classifies the installed base/run files and installed GPU or Vulkan overlay. A valid
+`.haive-bundle.json` record whose files match is `pristine`; a differing or malformed record is
+`modified`. Without a record, an entry in `bundle.known` matching the installed file list is
+`legacy-known`; otherwise it is `legacy-unknown`. Historical hashes for an uninstalled overlay do
+not require that overlay to exist. Modified and unknown installs refuse with `bundle-modified`,
+exit 3, and a preflight attempt naming the first differing file and `--replace-modified-bundle`.
+For unknown legacy installs, the updater picks the known record with the fewest differing installed
+files and names its first difference; ties retain historical record order. With no known records,
+it compares against the target bundle instead.
+`--replace-modified-bundle` acknowledges replacement intent and is recorded in run metadata; it does not swap
+files in this PR. `--check` validates classification and required keys without generating keys,
+staging files, pulling service images, recording an attempt or starting a run.
+
+After classification, `envkeys.ts` checks every `never` declaration before writing anything.
+A missing, empty or commented-out `never` key refuses with `env-key-missing` and the key's name.
+Missing or empty `hex` keys get `crypto.randomBytes(bytes).toString('hex')`; existing non-empty
+values are retained. The updater appends the additions through an exclusively created
+`.env.haive-tmp`, applies the original uid/gid with `fchown` and the original mode, fsyncs it and
+renames it over `.env`. Before the exclusive open it unlinks any stale temp entry, ignoring only
+ENOENT; a leftover symlink is removed without touching its target. A second run adds nothing.
+The key writer emits names only and discards write error details; journal `metadata.envAdded`
+also contains names only. Added keys intentionally remain after a later failure or rollback,
+because removing them could reopen missing auth.
+
+Verified files are staged in `<install>/.haive-upgrade/pending/new/`, with the install directory's
+owner/group and file mode 0644. The installed overlay selects its target counterpart when present.
+`prepareImages` pulls using staged absolute compose paths with `--project-directory <install>`;
+then the updater runs `docker compose ... config -q` against the target pins and updated `.env`,
+before starting a run. A config refusal uses `bundle-config-invalid`. Only this validation call
+discards Compose output and error details. Pull, up and stop retain their original process errors,
+including exit status, signals, timeouts and stderr. Docker Compose can echo `.env` fragments in
+those errors; that pre-existing third-party behavior remains outside this change.
+Staging and key additions can remain after a later preparation failure. Published bundles need
+Docker Compose 2.24 or later for the existing `!reset` tags.
+
+The installed bundle and `.haive-bundle.json` remain unchanged: PR5 adds backup, swap, rollback,
+resume restoration and pruning; PR6 adds the installer's initial record. Verification and rollback
+continue to use the installed compose context until the swap implementation lands. See the
+approved [compose bundle plan](../plans/release-compose-bundle.md).
 
 To run a published release instead of building from source:
 
