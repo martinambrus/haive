@@ -1,6 +1,6 @@
 import { RELEASE_BUNDLE_FILES, type ReleaseManifest } from '@haive/shared/release';
 import { safeErrorMessage } from '@haive/shared/logger';
-import { bundleHash, classifyBundleHashes } from './bundle.js';
+import { bundleHash, bundleSwapFiles, classifyBundleHashes } from './bundle.js';
 import type { ComposeContext } from './docker.js';
 import { inDirectories, inInstall } from './install-files.js';
 
@@ -68,28 +68,22 @@ export async function backupBundle(
   return inInstall(compose.dir, async (root) => {
     const from: BundleState['from'] = {};
     const to: BundleState['to'] = {};
+    const installed = new Map<string, string | undefined>();
     let record: string | undefined;
     await inDirectories(root, backupDir.split('/'), true, async (backup) => {
       for (const name of NAMES) {
         const current = await root.read(name);
         from[name] = current ? bundleHash(current.bytes) : null;
+        installed.set(name, from[name] ?? undefined);
         to[name] = null;
         if (current) await backup.atomic(name, current.bytes, current.owner);
         if (name === RECORD) record = current?.bytes.toString('utf8');
       }
-      const classification = classifyBundleHashes(
-        compose.files,
-        target.bundle!,
-        new Map(RELEASE_BUNDLE_FILES.map((name) => [name, from[name] ?? undefined])),
-        record,
-      );
+      const classification = classifyBundleHashes(target.bundle!, installed, record);
       await backup.atomic('.haive-backup-kind', Buffer.from(`${classification.kind}\n`));
     });
-    for (const name of RELEASE_BUNDLE_FILES) {
-      // Never add a GPU overlay to an install that did not have it.
-      if (name === 'docker-compose.yml' || name === 'docker-compose.run.yml' || from[name])
-        to[name] = target.bundle!.files[name] ?? from[name] ?? null;
-    }
+    for (const name of bundleSwapFiles(installed))
+      to[name] = target.bundle!.files[name] ?? from[name] ?? null;
     const files = Object.fromEntries(
       RELEASE_BUNDLE_FILES.filter((name) => to[name]).map((name) => [name, to[name]]),
     );

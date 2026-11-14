@@ -120,6 +120,53 @@ describe('bundle preflight', () => {
     expect(journal.startRun).not.toHaveBeenCalled();
     expect(run.phaseDraining).not.toHaveBeenCalled();
   });
+  it.each([false, true])(
+    'refuses an edited inactive overlay before writes or holds (recorded=%s)',
+    async (recorded) => {
+      const allFiles = {
+        ...files,
+        'docker-compose.gpu.yml': hash,
+        'docker-compose.vulkan.yml': hash,
+      };
+      const release = {
+        ...manifest,
+        bundle: { ...manifest.bundle, files: allFiles, known: [allFiles] },
+      };
+      await writeFile(join(dir, 'docker-compose.gpu.yml'), body);
+      await writeFile(join(dir, 'docker-compose.vulkan.yml'), 'operator Vulkan edits');
+      if (recorded)
+        await writeFile(
+          join(dir, '.haive-bundle.json'),
+          JSON.stringify({ version: '1.0.0', files: allFiles }),
+        );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(JSON.stringify(release))),
+      );
+
+      vi.mocked(dk.readReleaseManifestImage).mockResolvedValue({
+        text: JSON.stringify(release),
+        bundle: new Map(Object.keys(allFiles).map((name) => [name, body])),
+      });
+
+      expect(await main()).toBe(3);
+
+      expect(journal.recordAttempt).toHaveBeenCalledWith(
+        h.sql,
+        expect.objectContaining({
+          metadata: { refusal: 'bundle-modified' },
+          error: expect.stringContaining('docker-compose.vulkan.yml'),
+        }),
+      );
+      expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+      expect(await readFile(join(dir, 'docker-compose.vulkan.yml'), 'utf8')).toBe(
+        'operator Vulkan edits',
+      );
+      expect(journal.startRun).not.toHaveBeenCalled();
+      expect(run.phaseDraining).not.toHaveBeenCalled();
+      expect(images.prepareImages).not.toHaveBeenCalled();
+    },
+  );
   it('records env-key-missing before changing anything', async () => {
     await writeFile(join(dir, '.env'), '');
     expect(await main()).toBe(3);

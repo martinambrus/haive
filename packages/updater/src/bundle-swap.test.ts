@@ -14,7 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReleaseManifest } from '@haive/shared/release';
-import { bundleHash, stageBundle } from './bundle.js';
+import { bundleHash, classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
+import { readComposeContext } from './compose-context.js';
 import {
   backupBundle,
   pruneBundles,
@@ -244,3 +245,58 @@ it('retains an installed overlay omitted by the target so the generated helper s
   expect(context.files).toEqual([...names, 'docker-compose.gpu.yml']);
   expect(await readFile(join(dir, 'docker-compose.gpu.yml'))).toEqual(body);
 });
+
+it.each([
+  { recorded: false, edited: true },
+  { recorded: true, edited: true },
+  { recorded: false, edited: false },
+  { recorded: true, edited: false },
+])(
+  'protects the inactive overlay across swaps and pruning (recorded=$recorded, edited=$edited)',
+  async ({ recorded, edited }) => {
+    const allNames = [...names, 'docker-compose.gpu.yml', 'docker-compose.vulkan.yml'];
+    for (const name of allNames.slice(2)) await writeFile(join(dir, name), body);
+    const oldFiles = Object.fromEntries(allNames.map((name) => [name, bundleHash(body)]));
+    if (recorded)
+      await writeFile(
+        join(dir, '.haive-bundle.json'),
+        JSON.stringify({ version: '1.0.0', files: oldFiles }),
+      );
+    const inactive = 'docker-compose.vulkan.yml';
+    const saved = edited ? Buffer.from('operator Vulkan edits\n') : body;
+    await writeFile(join(dir, inactive), saved);
+    const release = {
+      ...target,
+      bundle: {
+        ...target.bundle!,
+        files: Object.fromEntries(allNames.map((name) => [name, bundleHash(next)])),
+        known: [oldFiles],
+      },
+    };
+    const context = await readComposeContext(dir);
+    expect(context.files).toEqual([...names, 'docker-compose.gpu.yml']);
+    const classification = await classifyBundle(context, release.bundle);
+    // The override authorizes saving and replacing edits. Refusal is covered at the CLI.
+    requireUnmodifiedBundle(classification, true);
+    await stageBundle(context, release.bundle, new Map(allNames.map((name) => [name, next])));
+    const state = await backupBundle(context, 'older', release);
+    expect(await readFile(join(dir, state.backupDir, '.haive-backup-kind'), 'utf8')).toBe(
+      (edited
+        ? recorded
+          ? 'modified'
+          : 'legacy-unknown'
+        : recorded
+          ? 'pristine'
+          : 'legacy-known') + '\n',
+    );
+    expect(await readFile(join(dir, state.backupDir, inactive))).toEqual(saved);
+    await swapBundle(context, state, release.version);
+    expect(await readFile(join(dir, inactive))).toEqual(next);
+    expect(context.files).toEqual([...names, 'docker-compose.gpu.yml']);
+
+    const later = await backupBundle(context, 'later', release);
+    await pruneBundles(context, later);
+    if (edited) expect(await readFile(join(dir, state.backupDir, inactive))).toEqual(saved);
+    else await expect(stat(join(dir, state.backupDir))).rejects.toMatchObject({ code: 'ENOENT' });
+  },
+);

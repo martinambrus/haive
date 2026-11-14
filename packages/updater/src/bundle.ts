@@ -16,8 +16,20 @@ export interface BundleClassification {
   differingFile?: string;
 }
 
-/** Historical manifests include both overlays, but an installer writes just its selected overlay.
- * Records describe the actual install: check all recorded files as well as the active file list. */
+type InstalledHashes = ReadonlyMap<string, string | undefined>;
+
+/** Base/run and every installed overlay are swap candidates, including an inactive overlay.
+ * A candidate omitted by the target is retained; an absent overlay is never enabled. */
+export function bundleSwapFiles(installed: InstalledHashes): Name[] {
+  return RELEASE_BUNDLE_FILES.filter(
+    (name) =>
+      name === 'docker-compose.yml' ||
+      name === 'docker-compose.run.yml' ||
+      installed.get(name) !== undefined,
+  );
+}
+
+/** Check the whole swap set; Compose's selected overlay alone does not cover what we replace. */
 export async function classifyBundle(
   compose: ComposeContext,
   bundle: Bundle,
@@ -36,16 +48,16 @@ export async function classifyBundle(
       throw error;
     },
   );
-  return classifyBundleHashes(compose.files, bundle, installed, record);
+  return classifyBundleHashes(bundle, installed, record);
 }
 
 /** Also classify the copied backup snapshot, so retention follows the bytes actually saved. */
 export function classifyBundleHashes(
-  activeFiles: readonly string[],
   bundle: Bundle,
-  installed: ReadonlyMap<string, string | undefined>,
+  installed: InstalledHashes,
   record: string | undefined,
 ): BundleClassification {
+  const swapFiles = bundleSwapFiles(installed);
   const differingFiles = (files: Partial<Record<Name, string>>, names: readonly string[]) =>
     names.filter((name) => !files[name as Name] || files[name as Name] !== installed.get(name));
   if (record !== undefined) {
@@ -69,21 +81,19 @@ export function classifyBundleHashes(
     }
     const differingFile = differingFiles(
       files,
-      RELEASE_BUNDLE_FILES.filter(
-        (name) => activeFiles.includes(name) || Object.hasOwn(files, name),
-      ),
+      RELEASE_BUNDLE_FILES.filter((name) => swapFiles.includes(name) || Object.hasOwn(files, name)),
     )[0];
     return differingFile ? { kind: 'modified', differingFile } : { kind: 'pristine' };
   }
   let closest: string[] | undefined;
   for (const files of bundle.known) {
-    const differences = differingFiles(files, activeFiles);
+    const differences = differingFiles(files, swapFiles);
     if (differences.length === 0) return { kind: 'legacy-known' };
     if (!closest || differences.length < closest.length) closest = differences;
   }
   return {
     kind: 'legacy-unknown',
-    differingFile: (closest ?? differingFiles(bundle.files, activeFiles))[0] ?? activeFiles[0],
+    differingFile: (closest ?? differingFiles(bundle.files, swapFiles))[0] ?? swapFiles[0],
   };
 }
 
