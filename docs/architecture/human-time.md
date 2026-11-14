@@ -108,10 +108,12 @@ clears its entry on unmount, and the callbacks are optional for components reuse
   overview supplies an `activeTaskId` without the task's status; that id alone cannot prove
   work is running, and the page adds no task-status fetch.
 - The selected node reports its linked implementation tasks and its separate `advisoryTask`
-  only when they are alive and their status is `queued` or `running`. `created`,
-  `waiting_user`, `waiting_pr` and terminal tasks do not extend attention. A paused task
-  keeps status `running` (pausing sets `pausedAt`, which the node payload does not carry),
-  so it still counts; the 15-minute pending bound caps that over-count per absence.
+  only when their status is `queued` or `running` and they carry no `deadAt` (the advisory
+  payload has no dead flag, so a dead advisory task is judged by status alone). `created`,
+  `waiting_user`, `waiting_pr` and terminal tasks do not extend attention. Pausing sets
+  `pausedAt`, which the node payload does not carry, and leaves the task's status as it was,
+  so a paused `queued` or `running` task still counts; the 15-minute pending bound caps that
+  over-count per absence.
 - Plan chat reports a send or live working turn, excluding a dead task or a parked form.
 - Merge reports its start request, answer submission or live working turn, excluding a dead
   task or a parked form.
