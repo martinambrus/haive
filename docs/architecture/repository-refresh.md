@@ -158,7 +158,13 @@ request pool is used only to collect the page, never held across sweep Git.
 Each selected repository is rechecked under the fresh-client lock, taken with
 `SKIP LOCKED`: a repository a relink holds is passed over, not waited for, so the
 sweep never acts on a live request's intent the moment that request rolls back;
-the next tick sees it again. A repository without intent runs no Git. Repair
+the next tick sees it again. A dropped database connection releases that lock
+before the request's Git writes finish, so the lock alone is not enough: a relink
+also holds an in-process writer fence from before its transaction until its Git
+writes and its own reconcile have settled, and the sweep passes over a fenced
+repository too. The fence is per API process, which matches the single API the
+stack runs; process death ends both the writes and the fence. A repository
+without intent runs no Git. Repair
 errors warn and retry on a later rotation. The route's own reconcile after a
 connection loss still waits for the lock. `GET /repos/:id` remains passive: it
 reads database columns without reconciliation, Git work or database writes, and
