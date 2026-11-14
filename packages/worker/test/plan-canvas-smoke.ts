@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { pendingConflictUnits, upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { blocksUpgrade } from '@haive/shared/project-state-conflicts';
@@ -68,6 +68,51 @@ function check(label: string, cond: boolean, detail?: unknown): void {
   }
   failures.push(label);
   log.error({ label, detail }, 'FAILED');
+}
+
+/** Keep the editor's transaction open until its peer actually reaches the held lock.
+ * A peer can also finish without waiting (e.g. a busy plan-patch lock holds a reconcile).
+ * The deadline only fails a broken fixture; elapsed time never releases the editor. */
+async function waitForDatabaseRace(
+  db: Pick<Database, 'execute'>,
+  holder: Pick<Database, 'execute'>,
+  peer: Promise<unknown>,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const [owner] = await holder.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+  if (!owner) throw new Error('race fixture has no transaction pid');
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const blocked = async () => {
+    while (!stopped) {
+      const [row] = await db.execute<{ blocked: boolean }>(sql`
+        select exists (
+          select 1 from pg_stat_activity
+          where datname = current_database()
+            and ${owner.pid}::int = any(pg_blocking_pids(pid))
+        ) as blocked
+      `);
+      if (row?.blocked) return;
+    }
+  };
+  try {
+    await Promise.race([
+      blocked(),
+      peer.then(
+        () => undefined,
+        () => undefined,
+      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('race peer neither blocked nor settled')),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+  }
 }
 
 async function expectPatchError(
@@ -2382,7 +2427,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, racing);
   });
   check(
     'three-way: a canvas edit committed during a reconcile is kept and the reconcile holds',
@@ -2531,7 +2576,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, moving);
   });
   const rAfterRace = (await nodeRows()).find((n) => n.id === rId);
   check(
@@ -2574,7 +2619,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, noting);
   });
   const notes = await db
     .select({ note: schema.planNodeEdges.note })
@@ -2611,7 +2656,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, edging);
   });
   const depends = await db
     .select({ note: schema.planNodeEdges.note })
@@ -2652,7 +2697,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, dropping);
   });
   check(
     'three-way: a child added under a node being deleted holds the reconcile and survives',
@@ -2969,7 +3014,7 @@ async function main(): Promise<void> {
       .set({ title: 'Y third' })
       .where(eq(schema.planNodes.id, yId));
     settling = writePlanMirror(db, sId, sDir).catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, settling);
   });
   await settling;
   check(
@@ -3017,7 +3062,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error) => err.name,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, asking);
   });
   const raceRows = await pendingPlanRows(sId);
   check(
@@ -3038,7 +3083,7 @@ async function main(): Promise<void> {
       () => 'merged',
       (err: Error & { code?: string }) => `${err.name}:${err.code}`,
     );
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitForDatabaseRace(db, edit, duringMerge);
     await writeFile(path.join(sDir, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`);
   });
   check(
