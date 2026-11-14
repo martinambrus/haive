@@ -2715,6 +2715,7 @@ function buildStepContext(
     cliProviderId: resolveTaskCliProviderId(params.cliProviderId, params.providers ?? []),
     round,
     epoch: params.epoch,
+    rerunGeneration: row.rerunGeneration,
     db,
     logger: log.child({ stepId: params.stepDef.metadata.id, taskId, taskStepId: row.id }),
     signal,

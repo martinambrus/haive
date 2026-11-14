@@ -1,7 +1,7 @@
 # What Anthropic's agent-memory research offers Haive: close the learning loop, measure it, then consolidate
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **Not started** (2026-11-11), apart from P0, which landed with T580 (`a3d71d4f7` and `dfa43bf68`).
+> **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). P1.2/P1.3 remain not started. P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
 > Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
 > Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
 > Fix the step 11 defects that keep the loop from closing (P0), add the records the next benchmark

@@ -26,6 +26,8 @@ export interface StepContext {
   round: number;
   /** The task epoch this pass runs under; unset where no pass is fenced on one. */
   epoch?: number | null;
+  /** Explicit rerun identity, captured from the step row; recovery preserves it. */
+  rerunGeneration?: number;
   db: Database;
   logger: Logger;
   signal: AbortSignal;

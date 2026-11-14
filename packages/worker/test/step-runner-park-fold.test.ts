@@ -193,6 +193,21 @@ describe('advanceStep park fold on resume', () => {
     expect(result.status).toBe('done');
   });
 
+  it('captures the explicit rerun generation in the apply context', async () => {
+    const state: MockState = {
+      taskStepRow: { ...stepRow('waiting_cli', true), rerunGeneration: 5 },
+      updates: [],
+    };
+    const params = runParams(state);
+    params.stepDef.apply = async (ctx) => {
+      state.taskStepRow.rerunGeneration = 6;
+      return { generation: ctx.rerunGeneration };
+    };
+    const result = await advanceStep(params);
+    expect(result.status).toBe('done');
+    if (result.status === 'done') expect(result.output).toEqual({ generation: 5 });
+  });
+
   it('still folds on the pending -> running flip (runtime-slot park unchanged)', async () => {
     const state: MockState = { taskStepRow: stepRow('pending', true), updates: [] };
 

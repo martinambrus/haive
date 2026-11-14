@@ -40,6 +40,7 @@ import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ActionMenu } from '@/components/action-menu';
 import { DdevRebuildDialog, canRebuildDdev } from '@/components/ddev-rebuild-dialog';
 import { TaskHistoryBell, TaskHistoryPanel, useTaskHistory } from '@/components/task-history';
+import { activityEvents } from '@/lib/activity-events';
 import {
   ArrowLeft,
   Ban,
@@ -759,6 +760,7 @@ export default function TaskDetailPage() {
   const [historyStepToFocus, setHistoryStepToFocus] = useState<string | null>(null);
   const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
+  const visibleActivityEvents = activityEvents(events);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
@@ -2456,8 +2458,10 @@ export default function TaskDetailPage() {
 
       {tab === 'activity' && (
         <div className="flex flex-col gap-2">
-          {events.length === 0 && <div className="text-sm text-neutral-500">No events yet.</div>}
-          {events.map((ev) => (
+          {visibleActivityEvents.length === 0 && (
+            <div className="text-sm text-neutral-500">No events yet.</div>
+          )}
+          {visibleActivityEvents.map((ev) => (
             <Card key={ev.id} className="flex flex-col gap-1 p-4">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-neutral-100">{ev.eventType}</span>
