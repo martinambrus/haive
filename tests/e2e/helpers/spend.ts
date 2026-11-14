@@ -113,5 +113,5 @@ export async function seedSpend(
 /** Invocations cascade with their task, so this is only for a fixture that outlives one. */
 export async function cleanupSpend(sql: postgres.Sql, invocationIds: string[]): Promise<void> {
   if (invocationIds.length === 0) return;
-  await sql`delete from cli_invocations where id = any(${sql.array(invocationIds)}::uuid[])`;
+  await sql`delete from cli_invocations where id = any(${invocationIds}::uuid[])`;
 }
