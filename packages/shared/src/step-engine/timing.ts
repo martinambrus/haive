@@ -107,30 +107,7 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
   return { workMs: 0, idleMs: c.idleMs + c.workMs, userActiveMs: c.userActiveMs };
 }
 
-/** Active-work / idle / user-active breakdown for a task, summed across its steps.
- *
- *  `nowMs` is the task's EFFECTIVE now — `completedAt ?? Date.now()` — never a bare wall
- *  clock. A step whose `ended_at` was never stamped (a cancel or crash left it open) bills
- *  `start -> nowMs` as work, so evaluating a terminal task at the live clock makes its "work"
- *  grow on every poll: one such row read 670h against a 1.78h wall before this was fixed.
- *  Callers hold the task row, so they cap; this function cannot, as it only sees steps.
- *
-
- *  Each step's CURRENT run (via `computeStepContribution`) plus any timing carried
- *  over from prior runs (`carried_*`, folded in by a retry/reset), so the totals
- *  report the full step across all restarts, not just the latest attempt. Pure, so
- *  the api list endpoint and the web detail page compute identical numbers. Wall
- *  clock (start -> end of the whole task) is the caller's job — it comes from the
- *  task row, not the steps.
- *
- *  One task-level rule the per-step function cannot enforce: a task waits for ONE slot at a
- *  time, but several rows can hold an open pre-run park marker at once. Each runtime-slot park
- *  enqueues its own delayed re-drive, so a step parked before the task moved on keeps both its
- *  marker and its own poll loop alive (observed: 07b-phase-4-validate round 1 and 06a-db-migrate
- *  round 0 parked together, billing 12s of idle per 6s of wall). Only the NEWEST such park —
- *  the live one — contributes here; the others are summed as if unmarked. Their own step cards
- *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
- *  was already folded into carried_idle_ms. */
+/** Per-step contributions with task-wide park suppression and carried timing. */
 function taskContributions(steps: TaskTimingStep[], nowMs: number): TaskTiming[] {
   // A task with a live step is not queued for a slot, so NO pre-run park counts: whatever the
   // orchestrator is doing now is the task's real state. This matters because a park's poll chain
@@ -160,6 +137,30 @@ function taskContributions(steps: TaskTimingStep[], nowMs: number): TaskTiming[]
   });
 }
 
+/** Active-work / idle / user-active breakdown for a task, summed across its steps.
+ *
+ *  `nowMs` is the task's EFFECTIVE now — `completedAt ?? Date.now()` — never a bare wall
+ *  clock. A step whose `ended_at` was never stamped (a cancel or crash left it open) bills
+ *  `start -> nowMs` as work, so evaluating a terminal task at the live clock makes its "work"
+ *  grow on every poll: one such row read 670h against a 1.78h wall before this was fixed.
+ *  Callers hold the task row, so they cap; this function cannot, as it only sees steps.
+ *
+
+ *  Each step's CURRENT run (via `computeStepContribution`) plus any timing carried
+ *  over from prior runs (`carried_*`, folded in by a retry/reset), so the totals
+ *  report the full step across all restarts, not just the latest attempt. Pure, so
+ *  the api list endpoint and the web detail page compute identical numbers. Wall
+ *  clock (start -> end of the whole task) is the caller's job — it comes from the
+ *  task row, not the steps.
+ *
+ *  One task-level rule the per-step function cannot enforce: a task waits for ONE slot at a
+ *  time, but several rows can hold an open pre-run park marker at once. Each runtime-slot park
+ *  enqueues its own delayed re-drive, so a step parked before the task moved on keeps both its
+ *  marker and its own poll loop alive (observed: 07b-phase-4-validate round 1 and 06a-db-migrate
+ *  round 0 parked together, billing 12s of idle per 6s of wall). Only the NEWEST such park —
+ *  the live one — contributes here; the others are summed as if unmarked. Their own step cards
+ *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
+ *  was already folded into carried_idle_ms. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
   return taskContributions(steps, nowMs).reduce(
     (total, c) => ({
