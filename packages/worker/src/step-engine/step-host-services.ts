@@ -1,10 +1,16 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { openDirNoFollow, relUnder } from '@haive/shared/fs-safe';
+import {
+  isResourceLimitError,
+  lstatNoFollow,
+  openDirNoFollow,
+  relUnder,
+} from '@haive/shared/fs-safe';
 import { TaskCancelledError, type StepContext, type StepHostServices } from '@haive/shared/step';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
+import { loadTaskWorktreeDecision, decidedWorktreePath } from '../repo/task-worktree.js';
 import { readReviewDiff } from './review-diff.js';
 
 export class StepHostBindingError extends Error {
@@ -68,14 +74,13 @@ export function createStepHostServices(context: StepContext): StepHostServices {
       task.currentRound < ctx.round
     )
       throw new StepHostBindingError('Task step or round does not match the context.');
-    const previous = task.worktreePath
-      ? null
-      : await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup', ctx.round);
+    const decision = await loadTaskWorktreeDecision(ctx.db, {
+      taskId: ctx.taskId,
+      columnBranch: task.worktreeBranch,
+      columnPath: task.worktreePath,
+    });
     checkHostCancellation(ctx);
-    const worktree =
-      task.worktreePath ??
-      (previous?.output as { worktreePath?: string } | null)?.worktreePath ??
-      ctx.workspacePath;
+    const worktree = decidedWorktreePath(decision, ctx.repoPath) ?? ctx.repoPath;
     const resolved = path.resolve(worktree);
     if (boundWorktree !== undefined && boundWorktree !== resolved)
       throw new StepHostBindingError('The context worktree changed after binding.');
@@ -88,9 +93,16 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     } catch {
       throw new StepHostBindingError('Context worktree is outside its repository.');
     }
-    if (rel) {
-      const held = await openDirNoFollow(ctx.repoPath, rel);
-      await held.close();
+    try {
+      if (rel) {
+        const held = await openDirNoFollow(ctx.repoPath, rel);
+        await held.close();
+      } else if ((await lstatNoFollow(ctx.repoPath, '', { strict: true }))?.kind !== 'directory') {
+        throw new StepHostBindingError('Context repository directory is unavailable.');
+      }
+    } catch (error) {
+      if (isResourceLimitError(error)) throw error;
+      throw new StepHostBindingError('Context worktree directory is unavailable or refused.');
     }
     checkHostCancellation(ctx);
     return resolved;

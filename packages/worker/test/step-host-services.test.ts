@@ -133,3 +133,5 @@ it('normalizes cancellation during an awaited read, using fake time', async () =
   await rejected;
   await vi.advanceTimersByTimeAsync(100);
 });
+
+vi.mock('../src/queues/cli-exec/secret-mask.js', () => ({ taskSecretMaskPolicy: vi.fn() }));
