@@ -650,6 +650,18 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T674 · FNF[release-bundle-publish] · release bundle publish lows, after #1180 (+5)
+
+status: open · kind: fix · found: #1180 review 2026-11-14 · priority: P4
+
+Review in `.claude/tmp/codex-run/RBP-S/review-1.md`.
+
+1. `publish-channel.mjs` ~:408 stages files by the invoking checkout's allowlist while the archived generator hashes by its own; nothing asserts the staged names equal `Object.keys(manifest.bundle.files)`. Latent until the allowlist grows. Add one equality check after the manifest parse.
+2. A commit without `install/bundle-env.json` or `manifest.ts` (any commit before #1172) fails as a bare `git archive failed (exit N)`; the generator's shallow/tagless refusals also lose their stderr, and `publish-channel` cannot pass `--allow-no-history`. Surface stderr or a named message; say pre-#1172 commits cannot be published.
+3. A stale `<out>/release.json.image/` after a hard kill refuses every later publish, and a successful manual recovery leaves it behind. Document the manual delete.
+4. The token-holding `release` job now runs `pnpm install` with checkout credentials persisted. `persist-credentials: false` on checkouts of token-holding jobs (release `build`/`merge`/`release` and CI); no workflow sets it today. Related first-party.
+5. `release-bundle.test.mjs` always writes all four compose files, so the workflow's overlay-absent branch is untested.
+
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
 status: open · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
@@ -1102,7 +1114,7 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 ### T648 · upgrades never refresh the compose bundle (design)
 
-status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 done 2026-11-14 #1172 (9233cfc97): the release manifest describes the bundle (`install/bundle-env.json`, `build-release-manifest.mjs --bundle-dir`); PR4 must also refuse a non-https manifest URL when a bundle is present (updater `cli.ts` ~:132 accepts http via operator override); PR3 next) · kind: design · found: #1136 review 2026-11-13 · priority: P2
+status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 done 2026-11-14 #1172 (9233cfc97): the release manifest describes the bundle (`install/bundle-env.json`, `build-release-manifest.mjs --bundle-dir`); PR3 done 2026-11-14 #1180 (a08f46568): `release.yml` and `publish-channel.mjs` publish `haive-release:<v>` with `/release.json` and `/bundle/`; owed at the first rc tag: the filtered `pnpm --filter @haive/shared install` runs green and the new GHCR package `haive-release` is public and linked (PR4 pulls it anonymously); PR4 must also refuse a non-https manifest URL when a bundle is present (updater `cli.ts` ~:132 accepts http via operator override); PR4 next) · kind: design · found: #1136 review 2026-11-13 · priority: P2
 PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
 Also from #1139: an existing install whose bundle predates MP_UI_AUTH keeps an open Mailpit UI after any upgrade, and a refreshed bundle installed over an `.env` with no `MAILPIT_UI_PASSWORD` fails open (empty value = no auth). Whatever refreshes the bundle must also generate missing keys it needs.
 
@@ -2004,6 +2016,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Release bundle image, T648 PR 3 (#1180): every release and channel build publishes `haive-release:<v>` holding `release.json` and the compose bundle, built before the GitHub Release. Lows filed as T674.
 
 - Next-round CLI choice at the fix-loop escalation gates (#1175): the user picks the CLI for the next fix round; an unavailable CLI re-parks the gate. Lows filed as T673.
 
