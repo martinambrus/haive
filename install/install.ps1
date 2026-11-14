@@ -608,7 +608,7 @@ if ($hasReleaseBundle) {
 # Refuse known destination conflicts before placing any part of the bundle.
 $placedFiles = @($installedFiles)
 if ($hasReleaseBundle) { $placedFiles += '.haive-bundle.json' }
-foreach ($name in $placedFiles) {
+foreach ($name in ($placedFiles + @('.env', 'haive.ps1', 'uninstall.ps1'))) {
   if ([IO.Directory]::Exists((Join-Path $Dir $name))) { throw "bundle destination is a directory: $name" }
 }
 # Generate and validate secrets before the first destination write too.

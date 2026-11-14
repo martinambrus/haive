@@ -762,7 +762,7 @@ if [ -s "$CHANNEL_SCRATCH/bundle-files" ]; then
 fi
 
 # Refuse known destination conflicts before placing any part of the bundle.
-for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"} .haive-bundle.json; do
+for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"} .haive-bundle.json .env haive uninstall.sh; do
   if [ "$name" = .haive-bundle.json ] && [ ! -f "$CHANNEL_SCRATCH/bundle/$name" ]; then continue; fi
   [ ! -d "$INSTALL_DIR/$name" ] || die "bundle destination is a directory: $name"
 done

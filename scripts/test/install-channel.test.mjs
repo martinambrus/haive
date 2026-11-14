@@ -486,10 +486,16 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
-    if (publicInstall)
-      for (const name of ['.haive-bundle.json', 'docker-compose.yml'])
-        for (const linked of [false, true])
-          check(`force install refuses a bundle directory (${name}, linked=${linked})`, () => {
+    for (const name of [
+      '.haive-bundle.json',
+      'docker-compose.yml',
+      '.env',
+      ...(lang === 'sh' ? ['haive', 'uninstall.sh'] : ['haive.ps1', 'uninstall.ps1']),
+    ])
+      for (const linked of [false, true])
+        check(
+          `force install refuses a bundle directory (${name}, linked=${linked}, public=${publicInstall})`,
+          () => {
             const f = fixture(lang, { publicInstall, data });
             try {
               mkdirSync(f.dir);
@@ -500,7 +506,12 @@ for (const lang of ['sh', 'ps1']) {
               const before = statSync(target);
               const r = f.install([f.flag('force')]);
               assert.notEqual(r.status, 0, r.stdout + r.stderr);
-              assert.match(r.stdout + r.stderr, /bundle destination is a directory/);
+              assert.match(
+                r.stdout + r.stderr,
+                lang === 'ps1' && name === '.env'
+                  ? /already holds a Haive install/
+                  : /bundle destination is a directory/,
+              );
               assert.ok(
                 !existsSync(join(f.dir, 'docker-compose.run.yml')),
                 'refuse before placing any bundle file',
@@ -512,7 +523,8 @@ for (const lang of ['sh', 'ps1']) {
             } finally {
               f.clean();
             }
-          });
+          },
+        );
     check(`bundle record contains only installed verified files (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data, fail: 'record-chown' });
       try {
