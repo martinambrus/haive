@@ -27,6 +27,7 @@ import {
   applyAgentPatch,
   applyAgentPatchOnce,
   retryUnversionedPlanConflict,
+  hasCallerPlanVersion,
   parsePlanPatch,
 } from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
@@ -884,8 +885,12 @@ export function createPlanBuildStep(
             await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
           }
         } catch (err) {
-          // Busy or conflict retries are exhausted; preserve the named refusal.
-          if (err instanceof PlanPatchError && (err.kind === 'busy' || err.kind === 'conflict'))
+          // Only derived-write conflicts used the retry bound. A stale agent read
+          // is stamped below so a later wave asks it again with fresh versions.
+          if (
+            err instanceof PlanPatchError &&
+            (err.kind === 'busy' || (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
+          )
             throw err;
           notApplied += 1;
           const message = err instanceof Error ? err.message : String(err);

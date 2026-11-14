@@ -223,16 +223,22 @@ describe('foldCoverageResults', () => {
     expect(stamps).toEqual([]);
   });
 
-  it('does not retry caller-versioned patches against a fresh read', async () => {
+  it('stamps stale caller versions for a later wave without retrying against a fresh read', async () => {
     const conflict = new PlanPatchError('conflict', 'stale caller version');
     vi.mocked(applyAgentPatch).mockRejectedValue(conflict);
     const versioned = {
       ...reply,
       output: { ops: [{ op: 'upsert', nodeRef: 'n1', ordinal: 2, expectedVersion: 1 }] },
     };
-    const { db, claims } = fakeDb();
-    await expect(foldCoverageResults(ctx(db), detected, [versioned])).rejects.toBe(conflict);
+    const { db, claims, stamps } = fakeDb();
+    expect((await foldCoverageResults(ctx(db), detected, [versioned])).hadFailure).toBe(true);
     expect(claims).toHaveLength(1);
+    expect(stamps).toEqual([
+      expect.objectContaining({
+        values: { errorMessage: 'plan patch not applied: stale caller version' },
+        inTransaction: false,
+      }),
+    ]);
   });
 
   it('retries a busy coverage fold without discarding its reply', async () => {

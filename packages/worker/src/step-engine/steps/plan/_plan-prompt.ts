@@ -331,7 +331,12 @@ export function retryUnversionedPlanConflict<T>(
   ops: unknown[],
   foldFresh: () => Promise<T>,
 ): Promise<T> {
-  const hasVersion = ops.some(
+  return hasCallerPlanVersion(ops) ? foldFresh() : retryPlanConflict(foldFresh);
+}
+
+/** A caller version describes the agent's read and must never be refreshed by a fold retry. */
+export function hasCallerPlanVersion(ops: unknown[]): boolean {
+  return ops.some(
     (op) =>
       op !== null &&
       typeof op === 'object' &&
@@ -339,7 +344,6 @@ export function retryUnversionedPlanConflict<T>(
       op.expectedVersion !== undefined &&
       op.expectedVersion !== null,
   );
-  return hasVersion ? foldFresh() : retryPlanConflict(foldFresh);
 }
 
 /**

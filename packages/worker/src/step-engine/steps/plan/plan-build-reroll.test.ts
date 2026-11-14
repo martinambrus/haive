@@ -131,6 +131,20 @@ describe('plan build wave re-roll', () => {
     expect(writes.stamps).toBe(0);
   });
 
+  it('stamps stale caller versions and re-asks the agent without retrying the patch', async () => {
+    vi.mocked(applyAgentPatch).mockRejectedValue(
+      new PlanPatchError('conflict', 'stale caller version'),
+    );
+    const out = await foldOneAgentWave([
+      { op: 'upsert', nodeRef: NODE, ordinal: 2, expectedVersion: 1 },
+    ]);
+    expect(out).toBeInstanceOf(MiningRetryError);
+    expect((out as MiningRetryError).agentIds).toEqual([agent.agentId]);
+    expect((out as Error).message).toContain('stale caller version');
+    expect(applyAgentPatch).toHaveBeenCalledTimes(1);
+    expect(writes.stamps).toBe(1);
+  });
+
   it('does not re-roll a one-agent wave whose reply landed with a dropped op', async () => {
     vi.mocked(applyAgentPatch).mockResolvedValueOnce({
       created: ['c'],
