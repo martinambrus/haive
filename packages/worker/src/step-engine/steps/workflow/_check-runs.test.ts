@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { recordCheckRun } from './_check-runs.js';
+import { CHECK_RUN_WRITE_TIMEOUT_MS, recordCheckRun } from './_check-runs.js';
 import { TaskCancelledError, type StepContext } from '../../step-definition.js';
 
 const m = vi.hoisted(() => ({
@@ -149,6 +149,49 @@ it.each(['insert', 'update'] as const)(
     expect(s.ctx.logger.warn).toHaveBeenCalled();
   },
 );
+
+it('bounds every recording write with a statement timeout of its own', async () => {
+  const s = fixture();
+  const sets: string[] = [];
+  const transaction = s.f.db.transaction.bind(s.f.db);
+  vi.spyOn(s.f.db, 'transaction').mockImplementation((fn) =>
+    transaction((tx) => {
+      const execute = tx.execute.bind(tx);
+      tx.execute = async (query: unknown) => {
+        const chunks = (query as { queryChunks?: { value?: string[] }[] }).queryChunks ?? [];
+        sets.push(chunks.map((c) => c.value?.join('') ?? '').join(''));
+        return execute(query);
+      };
+      return fn(tx);
+    }),
+  );
+  expect(await run(s.ctx)).toEqual({ ran: true, passed: true });
+  expect(sets).toEqual([
+    `SET LOCAL statement_timeout = '${CHECK_RUN_WRITE_TIMEOUT_MS}ms'`,
+    `SET LOCAL statement_timeout = '${CHECK_RUN_WRITE_TIMEOUT_MS}ms'`,
+  ]);
+  expect(s.rows()).toMatchObject([{ outcome: 'passed' }]);
+});
+
+it('a recording write the server cancels at its timeout warns and the check still runs', async () => {
+  const s = fixture();
+  const cancelled = Object.assign(new Error('canceling statement due to statement timeout'), {
+    code: '57014',
+  });
+  s.f.hooks.beforeInsert = async () => {
+    throw cancelled;
+  };
+  const execute = vi.fn(async () => ({ ran: true, passed: false }));
+  expect(await recordCheckRun(s.ctx, identity, execute, verdict)).toEqual({
+    ran: true,
+    passed: false,
+  });
+  expect(execute).toHaveBeenCalledTimes(1);
+  expect(s.ctx.logger.warn).toHaveBeenCalledWith(
+    { err: cancelled },
+    'check run insert/read/takeover failed (non-fatal)',
+  );
+});
 
 const cmd = { kind: 'host' as const, label: 'npm run check', argv: ['npm', 'run', 'check'] };
 const verifyArgs = (over = {}) => ({

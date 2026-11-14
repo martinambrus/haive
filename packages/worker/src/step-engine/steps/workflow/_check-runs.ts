@@ -1,9 +1,20 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CheckOutcome, CheckSlot } from '@haive/database/schema';
 import type { StepContext } from '../../step-definition.js';
 
 type SettledOutcome = Exclude<CheckOutcome, 'running' | 'interrupted'>;
+type Tx = Parameters<Parameters<StepContext['db']['transaction']>[0]>[0];
+
+/** A recording write is observation only, so it may never hold up the check it observes: each
+ *  runs in a transaction of its own under a server-side `statement_timeout`, which also bounds a
+ *  wait on a row lock, and a statement past it is cancelled by the server and logged. */
+export const CHECK_RUN_WRITE_TIMEOUT_MS = 5_000;
+const bounded = <R>(ctx: StepContext, run: (tx: Tx) => Promise<R>): Promise<R> =>
+  ctx.db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${CHECK_RUN_WRITE_TIMEOUT_MS}ms'`));
+    return run(tx);
+  });
 
 /** Like step 11's learningOutcomeId (#1168), identity survives recovery's epoch
  * bump and changes on explicit Retry. The loop iteration identifies 08b's passes.
@@ -24,49 +35,52 @@ export async function recordCheckRun<T>(
   let id: string | undefined;
   const startedAt = new Date();
   try {
-    const inserted = await ctx.db
-      .insert(t)
-      .values({
-        taskId: ctx.taskId,
-        taskStepId: ctx.taskStepId,
-        stepId: check.stepId,
-        slot: check.slot,
-        attemptId,
-        outcome: 'running',
-        startedAt,
-      })
-      .onConflictDoNothing({ target: [t.taskId, t.stepId, t.slot, t.attemptId] })
-      .returning({ id: t.id });
-    id = inserted[0]?.id;
-    if (!id) {
-      const [existing] = await ctx.db
-        .select({ id: t.id, outcome: t.outcome, startedAt: t.startedAt })
-        .from(t)
-        .where(
-          and(
-            eq(t.taskId, ctx.taskId),
-            eq(t.stepId, check.stepId),
-            eq(t.slot, check.slot),
-            eq(t.attemptId, attemptId),
-          ),
-        );
-      if (existing) {
-        // Recovery repeats the command as before recording existed. Only the
-        // observation is replaced; a lost CAS must never prevent execution.
-        const [taken] = await ctx.db
-          .update(t)
-          .set({ outcome: 'running', startedAt, endedAt: null })
+    id = await bounded(ctx, async (tx) => {
+      const inserted = await tx
+        .insert(t)
+        .values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          stepId: check.stepId,
+          slot: check.slot,
+          attemptId,
+          outcome: 'running',
+          startedAt,
+        })
+        .onConflictDoNothing({ target: [t.taskId, t.stepId, t.slot, t.attemptId] })
+        .returning({ id: t.id });
+      let taken = inserted[0]?.id;
+      if (!taken) {
+        const [existing] = await tx
+          .select({ id: t.id, outcome: t.outcome, startedAt: t.startedAt })
+          .from(t)
           .where(
             and(
-              eq(t.id, existing.id),
-              eq(t.outcome, existing.outcome),
-              eq(t.startedAt, existing.startedAt),
+              eq(t.taskId, ctx.taskId),
+              eq(t.stepId, check.stepId),
+              eq(t.slot, check.slot),
+              eq(t.attemptId, attemptId),
             ),
-          )
-          .returning({ id: t.id });
-        id = taken?.id;
+          );
+        if (existing) {
+          // Recovery repeats the command as before recording existed. Only the
+          // observation is replaced; a lost CAS must never prevent execution.
+          const [row] = await tx
+            .update(t)
+            .set({ outcome: 'running', startedAt, endedAt: null })
+            .where(
+              and(
+                eq(t.id, existing.id),
+                eq(t.outcome, existing.outcome),
+                eq(t.startedAt, existing.startedAt),
+              ),
+            )
+            .returning({ id: t.id });
+          taken = row?.id;
+        }
       }
-    }
+      return taken;
+    });
   } catch (err) {
     ctx.logger.warn({ err }, 'check run insert/read/takeover failed (non-fatal)');
   }
@@ -82,10 +96,13 @@ export async function recordCheckRun<T>(
   } finally {
     if (id) {
       try {
-        await ctx.db
-          .update(t)
-          .set({ outcome, endedAt: new Date() })
-          .where(and(eq(t.id, id), eq(t.outcome, 'running'), eq(t.startedAt, startedAt)));
+        const rowId = id;
+        await bounded(ctx, (tx) =>
+          tx
+            .update(t)
+            .set({ outcome, endedAt: new Date() })
+            .where(and(eq(t.id, rowId), eq(t.outcome, 'running'), eq(t.startedAt, startedAt))),
+        );
       } catch (err) {
         ctx.logger.warn({ err }, 'check run finalization failed (non-fatal)');
       }
