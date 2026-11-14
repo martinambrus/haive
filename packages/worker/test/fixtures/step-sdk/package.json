@@ -5,11 +5,11 @@
   "type": "module",
   "exports": {
     "./manifest": {
-      "types": "./dist/manifest.d.ts",
+      "types": "./src/manifest.ts",
       "import": "./dist/manifest.js"
     },
     "./steps": {
-      "types": "./dist/steps.d.ts",
+      "types": "./src/steps.ts",
       "import": "./dist/steps.js"
     }
   },

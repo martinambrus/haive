@@ -1,7 +1,10 @@
 import { execFileSync } from 'node:child_process';
+import { copyFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared/logger';
 import type { Database } from '@haive/database';
 import type { StepContext } from '@haive/shared/step';
@@ -9,19 +12,55 @@ import * as worker from '../src/step-engine/step-definition.js';
 import { registerModuleSteps } from '../src/modules/loader.js';
 import { StepRegistry } from '../src/step-engine/registry.js';
 
+// This module has no composable steps; its registration never reads the built-in workflow catalogue.
+vi.mock('../src/step-engine/steps/index.js', () => ({ emitsLoop: vi.fn() }));
+
 const require = createRequire(import.meta.url);
 let entries: typeof import('./fixtures/step-sdk/host.typecheck.js').entries;
-let errors: typeof import('./fixtures/step-sdk/dist/steps.js').errors;
+let errors: typeof import('./fixtures/step-sdk/src/steps.js').errors;
+let fixtureRoot: string | undefined;
 
 beforeAll(async () => {
-  // Build once through real package exports; this directory is outside the workspace package globs.
+  // Build once outside the source tree, including when tests run as root in a container.
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'haive-step-sdk-'));
+  copyFileSync(
+    new URL('./fixtures/step-sdk/package.json', import.meta.url),
+    join(fixtureRoot, 'package.json'),
+  );
+  // Resolve the host's existing peer installation, preserving the six constructors' identity.
+  symlinkSync(
+    fileURLToPath(new URL('../node_modules', import.meta.url)),
+    join(fixtureRoot, 'node_modules'),
+  );
   execFileSync(process.execPath, [
     require.resolve('typescript/bin/tsc'),
     '-p',
     fileURLToPath(new URL('./fixtures/step-sdk/tsconfig.json', import.meta.url)),
+    '--outDir',
+    join(fixtureRoot, 'dist'),
   ]);
-  ({ entries } = await import('./fixtures/step-sdk/host.typecheck.js'));
-  ({ errors } = await import('./fixtures/step-sdk/dist/steps.js'));
+  // Import through the copied package's self-reference and real runtime export conditions.
+  const entryPath = join(fixtureRoot, 'entry.mjs');
+  writeFileSync(
+    entryPath,
+    [
+      "export { default as manifest } from '@haive/module-sdk-fixture/manifest';",
+      "export { default, errors } from '@haive/module-sdk-fixture/steps';",
+    ].join('\n'),
+  );
+  const built = (await import(
+    pathToFileURL(entryPath).href
+  )) as typeof import('./fixtures/step-sdk/src/steps.js') & {
+    manifest: typeof import('./fixtures/step-sdk/src/manifest.js').default;
+  };
+  entries = [
+    { packageName: '@haive/module-sdk-fixture', manifest: built.manifest, steps: built.default },
+  ];
+  errors = built.errors;
+}, 30_000);
+
+afterAll(() => {
+  if (fixtureRoot) rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
 describe('compiled module step SDK consumer', () => {
