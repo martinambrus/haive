@@ -5,10 +5,19 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
+import {
+  PLAN_CHAT_TOTAL_MAX_CHARS,
+  PLAN_CHAT_OUTPUT_RESERVE_CHARS,
+} from '../plan/_plan-chat-context.js';
 import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import { isListableName } from './_impl-changes.js';
 import {
   MAX_PROPOSED_OPS,
+  boundedPlanWriterPrompt,
+  planFocusTooLarge,
+  describeOversizedPlanFocus,
+  filterProposalReadVersions,
+  type WorkflowPlanRead,
   describeDropped,
   describePlanOp,
   describeStrippedLinks,
@@ -54,6 +63,8 @@ export interface ExternalPlanSyncDetect {
   pathsOmitted: number;
   reason: string | null;
   planMarkdown: string;
+  planRead?: WorkflowPlanRead;
+  focusTooLarge?: boolean;
   /** Every node id to its title, so form() — which is synchronous and cannot read the
    *  database — can NAME what each op touches. */
   nodeTitles: Record<string, string>;
@@ -80,66 +91,71 @@ export interface ExternalPlanSyncApply {
   summary: string;
 }
 
-function buildPrompt(d: ExternalPlanSyncDetect): string {
+function buildPrompt(d: ExternalPlanSyncDetect, maxChars?: number): string {
   const paths = d.changedPaths.filter(isListableName);
   const pathsOmitted = d.pathsOmitted + (d.changedPaths.length - paths.length);
-  return [
-    // This step reads repository files and emits plan-patch ops, so what it writes becomes
-    // a task description like any other plan node — and its proposals reach a form where
-    // every one is ticked by default, which makes the human gate weak evidence. Joined
-    // into one element so the block's blank lines survive.
-    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
-    '',
-    'Commits reached this repository WITHOUT going through this workflow — a teammate',
-    'pushed, someone committed from their own editor, or a pull merged other work in.',
-    'Bring the PROJECT PLAN back in line with what now exists.',
-    '',
-    'The plan is a durable statement of what the project is MEANT to be. It is not a',
-    'changelog and not a description of the diff — do not add a node for a bug that was',
-    'fixed or for a refactor that changed no capability.',
-    '',
-    '## The plan as it stands',
-    '',
-    d.planMarkdown,
-    '',
-    '## Commits made outside the workflow',
-    '',
-    externalCommitBlock(d),
-    '',
-    '## Files those commits touched',
-    '',
-    ...paths.map((p) => `- ${p}`),
-    ...(pathsOmitted > 0 ? [`- (+${pathsOmitted} further path(s) not listed)`] : []),
-    '',
-    '## What to propose',
-    '',
-    'Exactly three kinds of change, and nothing else:',
-    '',
-    '1. STATUS. Mark a node `done` when this work actually finished the thing it describes.',
-    '   A node these commits merely touched is NOT finished, and marking one done when it',
-    '   is not is worse than leaving it alone — the plan is what someone reads to decide',
-    '   what is left.',
-    '2. CODE LINKS. Add `codeLinks` for files above that belong to an existing node. Only',
-    '   for a file you can see in the list, and say in `evidence` why it belongs. A guessed',
-    '   path makes the impact view lie. Set `"role": "covers"` for a TEST file and leave the',
-    '   default `implements` for production code.',
-    '3. NEW NODES. Add a node only for a real capability this work built that the plan does',
-    '   not describe anywhere. Check the plan above first — a node that duplicates an',
-    '   existing one is worse than a missing one.',
-    '',
-    'You are reading commit subjects, not a specification: they say WHERE the work landed',
-    'and rarely what it was for. Read the files before you claim a node is finished, and',
-    'propose nothing where the subjects and the diff do not support a claim.',
-    '',
-    `Propose at most ${MAX_PROPOSED_OPS} operations. Propose NOTHING (an empty \`ops\` array)`,
-    'if the plan already describes what happened — that is a good answer, and the common one',
-    'for maintenance work.',
-    '',
-    'Every change you propose is shown to a developer who ticks the ones they want. Write',
-    'each one so it can be judged on its own.',
-    '',
-    PLAN_PATCH_CONTRACT,
-  ].join('\n');
+  return boundedPlanWriterPrompt(
+    d,
+    (context) =>
+      [
+        // This step reads repository files and emits plan-patch ops, so what it writes becomes
+        // a task description like any other plan node — and its proposals reach a form where
+        // every one is ticked by default, which makes the human gate weak evidence. Joined
+        // into one element so the block's blank lines survive.
+        REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+        '',
+        'Commits reached this repository WITHOUT going through this workflow — a teammate',
+        'pushed, someone committed from their own editor, or a pull merged other work in.',
+        'Bring the PROJECT PLAN back in line with what now exists.',
+        '',
+        'The plan is a durable statement of what the project is MEANT to be. It is not a',
+        'changelog and not a description of the diff — do not add a node for a bug that was',
+        'fixed or for a refactor that changed no capability.',
+        '',
+        '## The plan as it stands',
+        '',
+        context,
+        '',
+        '## Commits made outside the workflow',
+        '',
+        externalCommitBlock(d),
+        '',
+        '## Files those commits touched',
+        '',
+        ...paths.map((p) => `- ${p}`),
+        ...(pathsOmitted > 0 ? [`- (+${pathsOmitted} further path(s) not listed)`] : []),
+        '',
+        '## What to propose',
+        '',
+        'Exactly three kinds of change, and nothing else:',
+        '',
+        '1. STATUS. Mark a node `done` when this work actually finished the thing it describes.',
+        '   A node these commits merely touched is NOT finished, and marking one done when it',
+        '   is not is worse than leaving it alone — the plan is what someone reads to decide',
+        '   what is left.',
+        '2. CODE LINKS. Add `codeLinks` for files above that belong to an existing node. Only',
+        '   for a file you can see in the list, and say in `evidence` why it belongs. A guessed',
+        '   path makes the impact view lie. Set `"role": "covers"` for a TEST file and leave the',
+        '   default `implements` for production code.',
+        '3. NEW NODES. Add a node only for a real capability this work built that the plan does',
+        '   not describe anywhere. Check the plan above first — a node that duplicates an',
+        '   existing one is worse than a missing one.',
+        '',
+        'You are reading commit subjects, not a specification: they say WHERE the work landed',
+        'and rarely what it was for. Read the files before you claim a node is finished, and',
+        'propose nothing where the subjects and the diff do not support a claim.',
+        '',
+        `Propose at most ${MAX_PROPOSED_OPS} operations. Propose NOTHING (an empty \`ops\` array)`,
+        'if the plan already describes what happened — that is a good answer, and the common one',
+        'for maintenance work.',
+        '',
+        'Every change you propose is shown to a developer who ticks the ones they want. Write',
+        'each one so it can be judged on its own.',
+        '',
+        PLAN_PATCH_CONTRACT,
+      ].join('\n'),
+    maxChars,
+  );
 }
 
 export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, ExternalPlanSyncApply> = {
@@ -202,18 +218,40 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       drift.changedPaths,
     );
 
-    const [planMarkdown, nodes] = await readPlanSnapshot(ctx.db, drift.repositoryId);
-    return {
+    const planRead = await readPlanSnapshot(ctx.db, drift.repositoryId);
+    const { nodes } = planRead;
+    const detected: ExternalPlanSyncDetect = {
       ...empty,
-      planMarkdown,
+      planMarkdown: '',
+      planRead,
       nodeTitles: Object.fromEntries(nodes.map((n) => [n.id, n.title])),
       nodeCount: nodes.length,
       linksMarkedStale: marked,
     };
+    detected.focusTooLarge = planFocusTooLarge((maxChars) => buildPrompt(detected, maxChars));
+    return detected;
   },
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    prepare: async ({ ctx, detected }) => {
+      const d = detected as ExternalPlanSyncDetect;
+      if (!d.planRead && d.repositoryId) {
+        d.planRead = await readPlanSnapshot(ctx.db, d.repositoryId);
+        d.planMarkdown = '';
+        d.nodeCount = d.planRead.nodes.length;
+        d.nodeTitles = Object.fromEntries(d.planRead.nodes.map((n) => [n.id, n.title]));
+      }
+      if (d.planRead) d.focusTooLarge = planFocusTooLarge((maxChars) => buildPrompt(d, maxChars));
+      return d.focusTooLarge ? false : undefined;
+    },
+    planSnapshot: ({ detected }) => (detected as ExternalPlanSyncDetect).planRead,
+    promptBudget: {
+      maxChars: PLAN_CHAT_TOTAL_MAX_CHARS,
+      outputReserveChars: PLAN_CHAT_OUTPUT_RESERVE_CHARS,
+      buildPrompt: ({ detected }, maxChars) =>
+        buildPrompt(detected as ExternalPlanSyncDetect, maxChars),
+    },
     // It reads the plan, a commit list and a file list; it has no reason to drive a
     // browser or a container. Same profile as 11f, which asks the same question.
     toolProfile: 'rag_only',
@@ -226,7 +264,9 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     optional: true,
     skipIf: (args) => {
       const d = args.detected as ExternalPlanSyncDetect | null;
-      return !d?.repositoryId || d.nodeCount === 0 || d.commits.length === 0;
+      return (
+        !d?.repositoryId || d.focusTooLarge === true || d.nodeCount === 0 || d.commits.length === 0
+      );
     },
     buildPrompt: (args) => buildPrompt(args.detected as ExternalPlanSyncDetect),
     bypassStub: () => ({ ops: [] }),
@@ -287,10 +327,45 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       summary: '',
     };
 
+    const warnHold = (reason: string): void => {
+      ctx.logger.warn(
+        {
+          repositoryId: d.repositoryId,
+          since: d.since,
+          reason,
+          commitsOmitted: d.commitsOmitted,
+          pathsOmitted: d.pathsOmitted,
+        },
+        'external plan sync held its watermark',
+      );
+    };
+
     // Same rule as the knowledge-base catch-up: only a MEASURED range may advance the
     // watermark, because "nothing changed" and "could not tell" are the same empty list.
     if (!d.repositoryId || !d.measured || !d.branchPoint) {
+      warnHold('range_not_measured');
       return { ...base, summary: d.reason ?? 'external changes could not be measured' };
+    }
+    if (
+      d.commits.length > 0 &&
+      d.nodeCount > 0 &&
+      d.planRead &&
+      (d.focusTooLarge || planFocusTooLarge((maxChars) => buildPrompt(d, maxChars)))
+    ) {
+      warnHold('focus_too_large');
+      return {
+        ...base,
+        summary: `The external range was not reviewed. ${describeOversizedPlanFocus(d)} The watermark is held.`,
+      };
+    }
+    if (d.commits.length > 0 && d.nodeCount > 0 && d.planRead && !args.llmOutput) {
+      warnHold('no_agent_output');
+      return {
+        ...base,
+        summary:
+          'The external range was not reviewed because no agent output was available ' +
+          '(no provider, failed CLI, or optional dispatch refusal). The watermark is held.',
+      };
     }
     const stamp = async (): Promise<void> => {
       await stampExternalWatermark(ctx.db, d.repositoryId!, 'plan', d.branchPoint!);
@@ -350,9 +425,10 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     // its own op rather than the developer's whole approved set.
     let applied;
     try {
+      const proposal = filterProposalReadVersions(chosen, d.planRead);
       applied = await applyPlanPatch(
         ctx.db,
-        { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
+        { ops: proposal.ops, summary: 'plan catch-up for commits made outside the workflow' },
         {
           repositoryId: d.repositoryId,
           origin: 'user',
@@ -364,9 +440,11 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
           requireExpectedVersion: true,
         },
       );
+      applied.dropped.unshift(...proposal.dropped);
     } catch (err) {
       if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
       // Not stamped: the range stays unreviewed, so the next run proposes against the new plan.
+      warnHold('plan_conflict');
       return {
         ...base,
         decision: 'conflict',

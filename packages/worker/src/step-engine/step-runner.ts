@@ -102,6 +102,7 @@ import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
   AdvisedStepError,
+  PromptBudgetExceededError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -992,6 +993,11 @@ async function resolveLlmPhase(
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
     const prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    // Preparation may hydrate a saved detection from before versioned plan reads.
+    // Checkpoint it through the same owned write as detect, before dispatch: a
+    // completed invocation returns above without preparing again, and its form
+    // and approval must use the exact read and titles the agent was shown.
+    current = await updateRow(db, current.id, { detectOutput: detected });
     if (prepared === false) {
       ctx.logger.info({ phase: 'llm' }, 'preparation skipped an unnecessary invocation');
       return { resolved: true, llmOutput: null, llmInvocationId: null, current };
@@ -1143,8 +1149,13 @@ async function resolveLlmPhase(
       disallowedTools: miningDisallowedTools(stepDef.metadata.id),
       disableTools: llmSpec.disableTools,
     },
+  }).catch((err: unknown) => {
+    if (!llmSpec.optional || !(err instanceof PromptBudgetExceededError)) throw err;
+    ctx.logger.warn({ err }, 'optional llm prompt cannot fit whole; degrading to null');
+    return null;
   });
 
+  if (!plan) return { resolved: true, llmOutput: null, llmInvocationId: null, current };
   if (plan.mode === 'skip' || !plan.invocation) {
     // The worker supplies providers/deps even when every provider is disabled or
     // incompatible. Optional enrichment must degrade here just as it does when

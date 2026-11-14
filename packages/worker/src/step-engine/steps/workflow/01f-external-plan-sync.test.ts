@@ -1,13 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import {
-  applyPlanPatch,
-  findPlanRoot,
-  loadPlanSkeletons,
-  PlanPatchError,
-  renderPlanMarkdown,
-  renderPlanMarkdownFrom,
-} from '@haive/shared/plan';
+import { applyPlanPatch, findPlanRoot, loadPlanNodes, PlanPatchError } from '@haive/shared/plan';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { externalPlanSyncStep, type ExternalPlanSyncDetect } from './01f-external-plan-sync.js';
@@ -19,8 +12,8 @@ vi.mock('@haive/shared/plan', async (importOriginal) => {
     ...actual,
     applyPlanPatch: vi.fn(),
     findPlanRoot: vi.fn(),
-    loadPlanSkeletons: vi.fn(),
-    renderPlanMarkdown: vi.fn(),
+    loadPlanNodes: vi.fn(),
+    loadPlanEdges: vi.fn(async () => []),
   };
 });
 vi.mock('./_external-drift.js', async (importOriginal) => {
@@ -43,7 +36,9 @@ function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
   const stamps: Record<string, unknown>[] = [];
   const db = {
     execute: async () => [],
-    select: () => ({ from: () => ({ where: () => ({ for: async () => [{}] }) }) }),
+    select: () => ({
+      from: () => ({ where: () => Object.assign(Promise.resolve([]), { for: async () => [{}] }) }),
+    }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: async () => undefined }) }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
@@ -294,10 +289,7 @@ describe('node versions', () => {
       worktreePath: '/tmp',
     } as never);
     vi.mocked(findPlanRoot).mockResolvedValueOnce({ id: NODE } as never);
-    vi.mocked(loadPlanSkeletons).mockResolvedValueOnce(nodes);
-    vi.mocked(renderPlanMarkdown).mockImplementationOnce(async (_db, _repo, opts) =>
-      renderPlanMarkdownFrom(nodes, [], opts),
-    );
+    vi.mocked(loadPlanNodes).mockResolvedValueOnce(nodes);
     const d = await externalPlanSyncStep.detect!(ctx(fakeDb().db));
     const prompt = externalPlanSyncStep.llm!.buildPrompt({ detected: d } as never) as string;
     expect(prompt).toContain('`version 3`');
@@ -329,6 +321,7 @@ describe('buildPrompt', () => {
   it('leaves out a path the prompt cannot show as itself, and counts it as not listed', () => {
     const prompt = externalPlanSyncStep.llm!.buildPrompt({
       detected: detect({
+        planRead: { nodes: [], edges: [], codeLinks: [] },
         changedPaths: [
           'src/billing/export.ts',
           'docs/API====Security.md',

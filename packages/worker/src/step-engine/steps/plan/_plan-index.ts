@@ -2,6 +2,8 @@ import type { Database } from '@haive/database';
 import {
   renderPlanMarkdown,
   renderPlanMarkdownFrom,
+  loadPlanNodes,
+  loadPlanEdges,
   type PlanNodeRecord,
   type PlanEdgeRecord,
 } from '@haive/shared/plan';
@@ -81,12 +83,14 @@ export function trimPlanIndexToWholeNodes(
  *  The warning against inventing ids is the point of it: the reader must name
  *  components from this index, so it has to know the index is PARTIAL rather than
  *  read a missing component as one that does not exist. */
-export function planIndexOmissionNotice(depth: number, omitted: number): string {
+export function planIndexOmissionNotice(
+  depth: number,
+  omitted: number,
+  maxDepth = PLAN_INDEX_MAX_DEPTH,
+): string {
   const notes: string[] = [];
-  if (depth < PLAN_INDEX_MAX_DEPTH) {
-    notes.push(
-      `bounded to ${depth} level(s) of the plan because the full ${PLAN_INDEX_MAX_DEPTH} do not fit`,
-    );
+  if (depth < maxDepth) {
+    notes.push(`bounded to ${depth} level(s) of the plan because the full ${maxDepth} do not fit`);
   }
   if (omitted > 0) notes.push(`${omitted} further component(s) omitted for size`);
   return (
@@ -113,20 +117,23 @@ export function renderBoundedPlanIndexParts(
   snapshot: PlanIndexSnapshot,
   repositoryId: string,
   maxChars: number,
+  maxDepth?: number,
 ): IndexParts;
 export function renderBoundedPlanIndexParts(
   db: Database,
   repositoryId: string,
   maxChars?: number,
+  maxDepth?: number,
 ): Promise<IndexParts>;
 export function renderBoundedPlanIndexParts(
   db: Database | PlanIndexSnapshot,
   repositoryId: string,
   maxChars: number = PLAN_INDEX_MAX_CHARS,
+  maxDepth = PLAN_INDEX_MAX_DEPTH,
 ): IndexParts | Promise<IndexParts> {
   if ('nodes' in db) {
     let rendered = '';
-    let depth = PLAN_INDEX_MAX_DEPTH;
+    let depth = maxDepth;
     for (; depth >= 1; depth--) {
       rendered = renderPlanMarkdownFrom(db.nodes, db.edges, {
         titlesOnly: true,
@@ -136,23 +143,24 @@ export function renderBoundedPlanIndexParts(
       if (rendered.length <= maxChars) break;
     }
     depth = Math.max(depth, 1);
-    if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= maxChars) return { text: rendered };
+    if (depth === maxDepth && rendered.length <= maxChars) return { text: rendered };
     const { text, omitted } = trimPlanIndexToWholeNodes(
       rendered,
       Math.max(0, maxChars - PLAN_INDEX_NOTICE_RESERVE),
     );
-    return { text, notice: planIndexOmissionNotice(depth, omitted) };
+    return { text, notice: planIndexOmissionNotice(depth, omitted, maxDepth) };
   }
-  return renderDbIndexParts(db, repositoryId, maxChars);
+  return renderDbIndexParts(db, repositoryId, maxChars, maxDepth);
 }
 
 async function renderDbIndexParts(
   db: Database,
   repositoryId: string,
   maxChars: number,
+  maxDepth: number,
 ): Promise<IndexParts> {
   let rendered = '';
-  let depth = PLAN_INDEX_MAX_DEPTH;
+  let depth = maxDepth;
   for (; depth >= 1; depth--) {
     rendered = await renderPlanMarkdown(db, repositoryId, { titlesOnly: true, maxDepth: depth });
     if (rendered.length <= maxChars) break;
@@ -162,12 +170,12 @@ async function renderDbIndexParts(
   // Everything else gets one, and the notice is part of what reaches the prompt — so
   // the trim has to hold room for it, or the finished index exceeds the very bound the
   // notice announces (MEASURED: content trimmed to 119,999 returned 120,256).
-  if (depth === PLAN_INDEX_MAX_DEPTH && rendered.length <= maxChars) return { text: rendered };
+  if (depth === maxDepth && rendered.length <= maxChars) return { text: rendered };
   const { text, omitted } = trimPlanIndexToWholeNodes(
     rendered,
     maxChars - PLAN_INDEX_NOTICE_RESERVE,
   );
-  return { text, notice: planIndexOmissionNotice(depth, omitted) };
+  return { text, notice: planIndexOmissionNotice(depth, omitted, maxDepth) };
 }
 
 /** The index and its notice JOINED, exactly as this function has always returned them.
@@ -183,4 +191,28 @@ export async function renderBoundedPlanIndex(
 ): Promise<string> {
   const { text, notice } = await renderBoundedPlanIndexParts(db, repositoryId, maxChars);
   return `${text}${notice ?? ''}`;
+}
+
+export const PLAN_OUTLINE_MAX_CHARS = 48_000;
+
+/** Clarification works on its complete small outline, with bodies and versions.
+ * Refuse an oversized outline whole rather than silently losing an open question. */
+export async function renderBoundedPlanOutline(
+  db: Database,
+  repositoryId: string,
+  maxChars = PLAN_OUTLINE_MAX_CHARS,
+): Promise<string> {
+  return db.transaction(
+    async (tx) => {
+      const nodes = await loadPlanNodes(tx, repositoryId);
+      const edges = await loadPlanEdges(tx, repositoryId);
+      const text = renderPlanMarkdownFrom(nodes, edges, { withVersions: true });
+      if (text.length > maxChars)
+        throw new Error(
+          'The plan outline is too large for clarification. Reduce it before retrying.',
+        );
+      return text;
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
 }

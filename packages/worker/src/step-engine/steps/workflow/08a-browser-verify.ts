@@ -86,9 +86,11 @@ interface BrowserVerifyDetect {
   envImageTag: string | null;
   repoSubpath: string | null;
   /** Result of the deterministic app login, set by `prepare` immediately before the
-   *  tester is dispatched — NOT by detect(), and deliberately never persisted into
-   *  detect_output. A retry re-runs prepare and logs in again, which is right: the
-   *  runner (and its cookie jar) may have been recreated in between. */
+   *  tester is dispatched, NOT by detect(). The runner persists `detected` after
+   *  `prepare`, so apply (and 08d through this step's output) sees the real outcome.
+   *  It holds no credential (those travel only in env). Every dispatch re-runs prepare
+   *  and logs in again, which is right: the runner (and its cookie jar) may have been
+   *  recreated in between; a Retry clears detect_output. */
   appLogin?: AppLoginOutcome;
   /** Spec + changed files for the MCP tester prompts. */
   spec: string;

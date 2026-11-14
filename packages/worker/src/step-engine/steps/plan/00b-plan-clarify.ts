@@ -1,7 +1,7 @@
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService } from '@haive/shared';
-import { PlanPatchError, findPlanRoot, renderPlanMarkdown } from '@haive/shared/plan';
+import { PlanPatchError, findPlanRoot } from '@haive/shared/plan';
 import type {
   AgentMiningDispatch,
   AgentMiningResult,
@@ -22,6 +22,7 @@ import {
   withMinedStatus,
   type PlanBuildDetect,
 } from './01-plan-build.js';
+import { renderBoundedPlanOutline } from './_plan-index.js';
 import { applyAgentPatch, applyAgentPatchOnce, parsePlanPatch } from './_plan-prompt.js';
 import { loadLiveAttachments } from './00-plan-inputs.js';
 import {
@@ -103,7 +104,7 @@ async function loadRounds(ctx: StepContext): Promise<ClarifyRound[]> {
 }
 
 async function planView(ctx: StepContext, repositoryId: string): Promise<string> {
-  return renderPlanMarkdown(ctx.db, repositoryId, { withVersions: true });
+  return renderBoundedPlanOutline(ctx.db, repositoryId);
 }
 
 async function dispatchFor(

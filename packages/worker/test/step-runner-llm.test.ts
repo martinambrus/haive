@@ -50,10 +50,17 @@ import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
+import { PromptTooLargeError } from '../src/cli-adapters/prompt-delivery.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
+import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-reconcile.js';
+import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
 import { planChatStep } from '../src/step-engine/steps/plan/01-plan-chat.js';
 import * as attachmentsContext from '../src/step-engine/attachments-context.js';
 import * as taskLedger from '../src/step-engine/task-ledger.js';
+import * as planOps from '../src/step-engine/steps/workflow/_plan-ops.js';
+import * as patchRetry from '../src/plan/patch-retry.js';
+import * as planMirror from '../src/plan/mirror.js';
+import * as externalDrift from '../src/step-engine/steps/workflow/_external-drift.js';
 
 interface MockState {
   roundChoice?: CliProviderRecord;
@@ -296,18 +303,33 @@ function makeProvider(): CliProviderRecord {
   } as CliProviderRecord;
 }
 
-describe('plan chat through the real runner dispatch', () => {
+describe('plan writers through the real runner dispatch', () => {
   afterEach(() => vi.restoreAllMocks());
-  const run = async (broken = false) => {
+  const run = async (
+    broken = false,
+    writer: StepDefinition = planChatStep as StepDefinition,
+    maxChars = writer.metadata.id === '01-plan-chat' ? 18_000 : 32_000,
+  ) => {
     const state = freshState();
-    state.taskStepRow.stepId = '01-plan-chat';
+    state.taskStepRow.stepId = writer.metadata.id;
     const detected = {
       repositoryId: 'repo-1',
       nodeId: 'focus',
       nodeTitle: 'Focus',
       nodeVersion: 7,
       planMarkdown: '',
-      planRead: { nodes: [], edges: [] },
+      planRead: { nodes: [], edges: [], codeLinks: [] },
+      changedPaths: ['src/changed.ts'],
+      branchPoint: 'a'.repeat(40),
+      since: 'b'.repeat(40),
+      firstRun: false,
+      measured: true,
+      affected: [],
+      spec: '',
+      nodeCount: 1,
+      commits: [{ sha: 'a'.repeat(40), subject: 'Changed capability' }],
+      commitsOmitted: 0,
+      pathsOmitted: 0,
       transcript: [{ role: 'user', body: 'Keep this pending turn whole.' }],
       pendingQuestion: 'Keep this pending turn whole.',
     };
@@ -319,14 +341,14 @@ describe('plan chat through the real runner dispatch', () => {
     vi.spyOn(taskLedger, 'augmentPromptWithLedger').mockImplementation(
       async (_db, _task, p) => p + suffix,
     );
-    const buildPrompt = vi.fn(planChatStep.llm!.promptBudget!.buildPrompt);
+    const buildPrompt = vi.fn(writer.llm!.promptBudget!.buildPrompt);
     const stepDef = {
-      ...planChatStep,
+      ...writer,
       shouldRun: async () => true,
       detect: async () => detected,
       llm: {
-        ...planChatStep.llm!,
-        promptBudget: { maxChars: 18_000, outputReserveChars: 2_000, buildPrompt },
+        ...writer.llm!,
+        promptBudget: { maxChars, outputReserveChars: 2_000, buildPrompt },
       },
     };
     const enqueue = vi.fn();
@@ -344,26 +366,179 @@ describe('plan chat through the real runner dispatch', () => {
     return { result, state, detected, enqueue, buildPrompt, prefix, suffix };
   };
 
-  it('repackages the real prompt around additions and attaches the same owned plan read', async () => {
-    const f = await run();
-    expect(f.result.status).toBe('waiting_cli');
-    expect(f.buildPrompt).toHaveBeenCalledOnce();
-    expect(f.buildPrompt.mock.calls[0]![1]).toBeLessThanOrEqual(
-      16_000 - f.prefix.length - f.suffix.length,
-    );
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
-    expect(String(f.state.cliInvocationRow!.prompt).length).toBeLessThanOrEqual(16_000);
-    expect(f.enqueue.mock.calls[0]![0].spec.planSnapshot).toEqual({
-      schemaVersion: 1,
-      userId: 'user-1',
-      taskId: 'task-1',
-      invocationId: f.state.cliInvocationRow!.id,
-      repositoryId: 'repo-1',
-      ...f.detected.planRead,
-    });
-  });
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'persists a hydrated legacy read before dispatch and filters approval after reload ($metadata.id)',
+    async (writer) => {
+      const state = freshState();
+      const id = '00000000-0000-4000-8000-000000000001';
+      const read = {
+        nodes: [
+          {
+            id,
+            parentId: null,
+            path: `/${id}/`,
+            ordinal: 0,
+            title: 'Current title',
+            body: 'Whole body',
+            version: 7,
+            kind: 'component',
+            status: 'todo',
+            taskable: false,
+          },
+        ],
+        edges: [],
+        codeLinks: [],
+      };
+      vi.spyOn(planOps, 'readPlanSnapshot').mockResolvedValue(read as never);
+      const patch = vi.spyOn(patchRetry, 'applyPlanPatchWithRetry').mockResolvedValue({
+        created: [],
+        updated: [id],
+        deleted: [],
+        linked: 0,
+        unlinked: 0,
+        codeLinked: 0,
+        refs: {},
+        dropped: [],
+        strippedCodeLinks: [],
+      });
+      vi.spyOn(planMirror, 'writePlanMirror').mockResolvedValue(undefined as never);
+      vi.spyOn(externalDrift, 'stampExternalWatermark').mockResolvedValue(undefined);
+      const legacy = {
+        repositoryId: 'repo-1',
+        planMarkdown: 'stale markdown',
+        nodeTitles: { [id]: 'Stale title' },
+        nodeCount: 1,
+        affected: [{ id, title: 'Stale title' }],
+        spec: '',
+        changedPaths: ['src/changed.ts'],
+        branchPoint: 'a'.repeat(40),
+        since: 'b'.repeat(40),
+        firstRun: false,
+        measured: true,
+        commits: [{ sha: 'a'.repeat(40), subject: 'Changed capability' }],
+        commitsOmitted: 0,
+        pathsOmitted: 0,
+        reason: null,
+        linksMarkedStale: 0,
+      };
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        stepId: writer.metadata.id,
+        status: 'running',
+        detectOutput: structuredClone(legacy),
+      };
+      let durable: unknown = structuredClone(legacy);
+      const enqueue = vi.fn(async () => {
+        // JSON storage has no reference to the object prepare mutates in memory.
+        const writes = state.updates.filter((u) => u.table === 'task_steps' && 'detectOutput' in u);
+        durable = JSON.parse(JSON.stringify(writes.at(-1)?.detectOutput ?? legacy));
+      });
+      const stepDef = { ...writer, shouldRun: async () => true, detect: vi.fn() };
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef,
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+      };
+      expect((await advanceStep(params)).status).toBe('waiting_cli');
+      expect(enqueue).toHaveBeenCalledOnce();
+      expect(durable).toMatchObject({
+        planRead: read,
+        planMarkdown: '',
+        nodeTitles: { [id]: 'Current title' },
+      });
+      if (writer === planReconcileStep)
+        expect(durable).toMatchObject({ affected: [{ id, title: 'Current title', version: 7 }] });
+      const valid = { op: 'upsert', nodeRef: id, status: 'done', expectedVersion: 7 };
+      const reply = { ops: [{ op: 'upsert', nodeRef: id, ordinal: 2 }, valid] };
+      state.cliInvocationRow = {
+        ...state.cliInvocationRow!,
+        endedAt: new Date(),
+        exitCode: 0,
+        errorMessage: null,
+        parsedOutput: reply,
+        rawOutput: JSON.stringify(reply),
+      };
+      state.taskStepRow.detectOutput = structuredClone(durable);
+      const completed = await advanceStep(params);
+      expect(completed.status).toBe('waiting_form');
+      expect(JSON.stringify(completed.row.formSchema)).toContain('Current title');
+      expect(JSON.stringify(completed.row.formSchema)).not.toContain('Stale title');
+      state.taskStepRow.detectOutput = structuredClone(durable);
+      state.taskStepRow.formValues = { applyOps: ['0', '1'] };
+      const approved = await advanceStep(params);
+      expect(approved.status).toBe('done');
+      expect(approved.row.output).toMatchObject({
+        applied: 1,
+        dropped: [expect.stringContaining('read version')],
+      });
+      expect(patch.mock.lastCall?.[1]).toMatchObject({ ops: [valid] });
+      expect(planOps.readPlanSnapshot).toHaveBeenCalledOnce();
+      expect(stepDef.detect).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([planChatStep, planReconcileStep, externalPlanSyncStep])(
+    'repackages $metadata.id and attaches the same owned plan read',
+    async (writer) => {
+      const f = await run(false, writer as StepDefinition);
+      expect(f.result.status, 'error' in f.result ? String(f.result.error) : '').toBe(
+        'waiting_cli',
+      );
+      expect(f.buildPrompt).toHaveBeenCalledOnce();
+      const cap = writer.metadata.id === '01-plan-chat' ? 16_000 : 30_000;
+      expect(f.buildPrompt.mock.calls[0]![1]).toBeLessThanOrEqual(
+        cap - f.prefix.length - f.suffix.length,
+      );
+      expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
+      expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
+      if (writer.metadata.id === '01-plan-chat')
+        expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
+      expect(String(f.state.cliInvocationRow!.prompt).length).toBeLessThanOrEqual(cap);
+      expect(f.enqueue.mock.calls[0]![0].spec.planSnapshot).toEqual({
+        schemaVersion: 1,
+        userId: 'user-1',
+        taskId: 'task-1',
+        invocationId: f.state.cliInvocationRow!.id,
+        repositoryId: 'repo-1',
+        ...f.detected.planRead,
+      });
+    },
+  );
+
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'finishes optional $metadata.id without dispatch when whole mandatory input cannot fit',
+    async (writer) => {
+      const f = await run(false, writer as StepDefinition, 8_000);
+      expect(f.result.status).toBe('done');
+      expect(f.enqueue).not.toHaveBeenCalled();
+      if (writer.metadata.id === '01f-external-plan-sync')
+        expect(f.result.row.output).toMatchObject({ reviewedThrough: null });
+    },
+  );
+
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'keeps the argv-size failure visible for optional $metadata.id without dropping rules',
+    async (writer) => {
+      const build = vi
+        .spyOn(cliAdapterRegistry.get('claude-code'), 'buildCliInvocation')
+        .mockImplementation(() => {
+          throw new PromptTooLargeError('claude-code', 123456);
+        });
+      const f = await run(false, writer as StepDefinition);
+      expect(f.result.status).toBe('failed');
+      expect(f.result).toMatchObject({
+        error: expect.stringContaining('no documented way to read a prompt from stdin'),
+      });
+      expect(build).toHaveBeenCalledOnce();
+      expect(f.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it('refuses dispatch when an augmenter has replaced the base prompt', async () => {
     const f = await run(true);
