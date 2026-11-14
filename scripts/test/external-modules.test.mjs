@@ -118,3 +118,39 @@ test('failed external install restores selection, and a missing selected clone c
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /selected external module.*missing/);
 });
+
+test('selected external web parts follow the current clone exports without a selection snapshot', (t) => {
+  const tree = makeTree(t, { modules: { privateone: { exports: ['./manifest'] } } });
+  renameSync(join(tree.root, 'modules/privateone'), join(tree.root, 'external-modules/privateone'));
+  assert.equal(tree.run('module.mjs', ['add', 'privateone']).status, 0);
+  assert.equal(
+    'web' in JSON.parse(tree.read('external-modules/.selection.json')).privateone,
+    false,
+  );
+  const file = join(tree.root, 'external-modules/privateone/package.json');
+  const pkg = JSON.parse(tree.read('external-modules/privateone/package.json'));
+  for (const part of ['./web', './dashboard']) {
+    pkg.exports[part] = `./dist/${part.slice(2)}.js`;
+    writeFileSync(file, JSON.stringify(pkg));
+    const result = tree.run('gen-modules.mjs');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(tree.read('packages/web/src/generated/modules.json'), new RegExp(part.slice(2)));
+    delete pkg.exports[part];
+    writeFileSync(file, JSON.stringify(pkg));
+    const removed = tree.run('gen-modules.mjs');
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.doesNotMatch(tree.read('packages/web/src/generated/modules.json'), /privateone/);
+  }
+});
+
+test('selected external web mismatch advice names module add rather than a tracked manifest edit', (t) => {
+  const tree = makeTree(t, {
+    modules: { privateone: { exports: ['./manifest'] } },
+    web: ['@haive/module-privateone'],
+  });
+  renameSync(join(tree.root, 'modules/privateone'), join(tree.root, 'external-modules/privateone'));
+  const result = tree.run('module.mjs', ['add', 'privateone']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /run pnpm module add privateone/);
+  assert.doesNotMatch(result.stderr, /from packages\/web\/package.json/);
+});

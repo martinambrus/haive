@@ -19,7 +19,7 @@ function selection() {
   if (!value || Array.isArray(value) || typeof value !== 'object')
     throw new Error('invalid external module selection');
   for (const [id, entry] of Object.entries(value)) {
-    if (moduleId.exec(entry?.name)?.[1] !== id || typeof entry.web !== 'boolean')
+    if (moduleId.exec(entry?.name)?.[1] !== id)
       throw new Error('invalid external module selection');
   }
   return value;
@@ -27,8 +27,16 @@ function selection() {
 function effectivePackage(pkg) {
   if (!['@haive/api', '@haive/worker', '@haive/web'].includes(pkg.name)) return pkg;
   const dependencies = { ...pkg.dependencies };
-  for (const entry of Object.values(selection())) {
-    if (pkg.name !== '@haive/web' || entry.web) dependencies[entry.name] = 'workspace:*';
+  for (const [id, entry] of Object.entries(selection())) {
+    const file = join(directory, id, 'package.json');
+    if (!existsSync(file))
+      throw new Error(
+        `selected external module ${entry.name} is missing; restore its clone or run pnpm module remove ${id}`,
+      );
+    const clone = JSON.parse(readFileSync(file, 'utf8'));
+    const web =
+      clone.exports?.['./web'] !== undefined || clone.exports?.['./dashboard'] !== undefined;
+    if (pkg.name !== '@haive/web' || web) dependencies[entry.name] = 'workspace:*';
   }
   return { ...pkg, dependencies };
 }

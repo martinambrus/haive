@@ -61,10 +61,7 @@ if (registry === null && (existsSync(externalFile) || selected[id] !== undefined
       pkg.exports?.['./manifest'] === undefined
     )
       fail(`${externalFile} needs a matching module name and ./manifest export`);
-    selected[id] = {
-      name: pkg.name,
-      web: pkg.exports['./web'] !== undefined || pkg.exports['./dashboard'] !== undefined,
-    };
+    selected[id] = { name: pkg.name };
   } else delete selected[id];
   mkdirSync(local.directory, { recursive: true });
   if (Object.keys(selected).length)

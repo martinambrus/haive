@@ -267,6 +267,8 @@ ${workerEntries.join('\n')}
 ];
 `;
 
+const selectedExternal = (pkg) =>
+  pkg.location === 'external-modules' && local.selection()[pkg.dir] !== undefined;
 const webModuleFor = (pkg, part) => {
   if (pkg.exports?.['./manifest'] === undefined) {
     console.error(
@@ -284,7 +286,7 @@ const webModuleFor = (pkg, part) => {
   }
   if (webPackage.dependencies?.[pkg.name] === undefined) {
     console.error(
-      `gen-modules: ${pkg.name} exports ${part} but is not a dependency of @haive/web; add "${pkg.name}": "${specOf(pkg)}" to packages/web/package.json`,
+      `gen-modules: ${pkg.name} exports ${part} but is not a dependency of @haive/web; ${selectedExternal(pkg) ? `run pnpm module add ${pkg.dir}` : `add "${pkg.name}": "${specOf(pkg)}" to packages/web/package.json`}`,
     );
     process.exit(1);
   }
@@ -302,7 +304,7 @@ for (const pkg of apiModules) {
   const hasWebPart = pkg.exports['./web'] !== undefined || pkg.exports['./dashboard'] !== undefined;
   if (!hasWebPart && dependsOn(webPackage, pkg)) {
     console.error(
-      `gen-modules: ${pkg.name} is a dependency of @haive/web but exports neither ./web nor ./dashboard; remove "${pkg.name}" from packages/web/package.json`,
+      `gen-modules: ${pkg.name} is a dependency of @haive/web but exports neither ./web nor ./dashboard; ${selectedExternal(pkg) ? `run pnpm module add ${pkg.dir}` : `remove "${pkg.name}" from packages/web/package.json`}`,
     );
     process.exit(1);
   }
