@@ -57,15 +57,10 @@ export interface PlanWriterContext {
 
 export class PlanFocusTooLargeError extends PromptBudgetExceededError {}
 
-/** Fixed instructions and evidence reserve their actual size first. Focus nodes
- * are indivisible; only the optional index spends the remaining dispatch share. */
-export function boundedPlanWriterPrompt(
-  d: PlanWriterContext,
-  assemble: (context: string) => string,
-  maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
-): string {
+/** Keep the sizing diagnosis tied to the same indivisible blocks the prompt sends. */
+function planFocusBlocks(d: PlanWriterContext): { id: string; text: string }[] {
   const read = d.planRead;
-  if (!read) throw new Error('The proposal needs a versioned plan read before dispatch.');
+  if (!read) return [];
   const changed = new Set(d.changedPaths);
   const directories = d.changedPaths.filter((p) => p.endsWith('/'));
   const focusIds = new Set(
@@ -73,10 +68,11 @@ export function boundedPlanWriterPrompt(
       .filter((l) => changed.has(l.repoPath) || directories.some((p) => l.repoPath.startsWith(p)))
       .map((l) => l.nodeId),
   );
-  const focus = read.nodes
+  return read.nodes
     .filter((n) => focusIds.has(n.id))
-    .map((n) =>
-      fencedAgentBlock(
+    .map((n) => ({
+      id: n.id,
+      text: fencedAgentBlock(
         `node:${n.id}, version ${n.version}\n` +
           JSON.stringify(
             {
@@ -88,7 +84,33 @@ export function boundedPlanWriterPrompt(
             2,
           ),
       ),
-    )
+    }));
+}
+
+export function describeOversizedPlanFocus(d: PlanWriterContext): string {
+  const largest = planFocusBlocks(d).reduce<{ id: string; text: string } | null>(
+    (best, block) => (!best || block.text.length > best.text.length ? block : best),
+    null,
+  );
+  return (
+    'The whole plan focus and required evidence exceed the prompt budget.' +
+    (largest
+      ? ` Largest focus node: node:${largest.id}.`
+      : ' No nodes are code-linked to the changed paths.')
+  );
+}
+
+/** Fixed instructions and evidence reserve their actual size first. Focus nodes
+ * are indivisible; only the optional index spends the remaining dispatch share. */
+export function boundedPlanWriterPrompt(
+  d: PlanWriterContext,
+  assemble: (context: string) => string,
+  maxChars = PLAN_EXPANSION_CONTEXT_MAX_CHARS,
+): string {
+  const read = d.planRead;
+  if (!read) throw new Error('The proposal needs a versioned plan read before dispatch.');
+  const focus = planFocusBlocks(d)
+    .map((n) => n.text)
     .join('\n\n');
   const mandatory = [
     UNTRUSTED_FENCE_LEGEND.join('\n'),
@@ -103,16 +125,11 @@ export function boundedPlanWriterPrompt(
   ].join('\n\n');
   const budget =
     Math.min(maxChars, PLAN_EXPANSION_CONTEXT_MAX_CHARS) - assemble(mandatory).length - 800;
-  if (budget < 800)
-    throw new PlanFocusTooLargeError(
-      'The whole plan focus and required evidence are too large; this range was not reviewed.',
-    );
+  if (budget < 800) throw new PlanFocusTooLargeError(describeOversizedPlanFocus(d));
   const index = renderBoundedPlanIndexParts({ ...read, withVersions: true }, '', budget, 4);
   const prompt = assemble(`${mandatory}\n${fencedAgentBlock(index.text)}${index.notice ?? ''}`);
   if (prompt.length > Math.min(maxChars, PLAN_EXPANSION_CONTEXT_MAX_CHARS))
-    throw new PlanFocusTooLargeError(
-      'The whole plan focus and required evidence are too large; this range was not reviewed.',
-    );
+    throw new PlanFocusTooLargeError(describeOversizedPlanFocus(d));
   return prompt;
 }
 

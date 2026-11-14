@@ -15,6 +15,7 @@ import {
   MAX_PROPOSED_OPS,
   boundedPlanWriterPrompt,
   planFocusTooLarge,
+  describeOversizedPlanFocus,
   filterProposalReadVersions,
   type WorkflowPlanRead,
   describeDropped,
@@ -349,13 +350,21 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       d.commits.length > 0 &&
       d.nodeCount > 0 &&
       d.planRead &&
-      (d.focusTooLarge || !args.llmOutput || planFocusTooLarge(() => buildPrompt(d)))
+      (d.focusTooLarge || planFocusTooLarge(() => buildPrompt(d)))
     ) {
-      warnHold(d.focusTooLarge ? 'focus_too_large' : 'no_agent_output_or_focus_too_large');
+      warnHold('focus_too_large');
+      return {
+        ...base,
+        summary: `The external range was not reviewed. ${describeOversizedPlanFocus(d)} The watermark is held.`,
+      };
+    }
+    if (d.commits.length > 0 && d.nodeCount > 0 && d.planRead && !args.llmOutput) {
+      warnHold('no_agent_output');
       return {
         ...base,
         summary:
-          'The external range was not reviewed: the whole plan focus could not be sent. The watermark is held.',
+          'The external range was not reviewed because no agent output was available ' +
+          '(no provider, failed CLI, or optional dispatch refusal). The watermark is held.',
       };
     }
     const stamp = async (): Promise<void> => {

@@ -15,6 +15,7 @@ import {
   MAX_PROPOSED_OPS,
   boundedPlanWriterPrompt,
   planFocusTooLarge,
+  describeOversizedPlanFocus,
   filterProposalReadVersions,
   type WorkflowPlanRead,
   describeDropped,
@@ -343,8 +344,14 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     };
     if (!d.repositoryId) return result;
 
-    if (d.focusTooLarge || (d.planRead && d.changedPaths.length > 0 && !args.llmOutput)) {
-      result.summary = 'The whole plan focus could not be reviewed; no proposal was requested.';
+    if (d.focusTooLarge) {
+      result.summary = `Plan reconciliation was skipped. ${describeOversizedPlanFocus(d)} No proposal was requested.`;
+      return result;
+    }
+    if (d.planRead && d.changedPaths.length > 0 && !args.llmOutput) {
+      result.summary =
+        'Plan reconciliation was skipped because no agent output was available ' +
+        '(no provider, failed CLI, or optional dispatch refusal). No plan changes were applied.';
       return result;
     }
 

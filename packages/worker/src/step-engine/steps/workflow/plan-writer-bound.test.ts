@@ -494,3 +494,69 @@ it.each([planReconcileStep, externalPlanSyncStep])(
     }
   },
 );
+
+it.each([planReconcileStep, externalPlanSyncStep])(
+  'names missing agent output without blaming focus size ($metadata.id)',
+  async (step) => {
+    const warn = vi.fn();
+    vi.mocked(stampExternalWatermark).mockClear();
+    const d = detected();
+    const result = await step.apply(
+      { logger: { warn } } as never,
+      {
+        detected: d,
+        llmOutput: null,
+        formValues: {},
+      } as never,
+    );
+    expect(result.decision).toBe(step === externalPlanSyncStep ? 'not_measured' : 'nothing_to_do');
+    expect(result.summary).toContain('no agent output');
+    expect(result.summary).not.toMatch(/whole plan focus|too large|already described/);
+    expect(stampExternalWatermark).not.toHaveBeenCalled();
+    if (step === externalPlanSyncStep) {
+      expect(result.summary).toContain('watermark is held');
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repositoryId: d.repositoryId,
+          since: d.since,
+          reason: 'no_agent_output',
+        }),
+        expect.any(String),
+      );
+    }
+  },
+);
+
+it.each([planReconcileStep, externalPlanSyncStep])(
+  'names the largest linked focus node when the review is skipped for size ($metadata.id)',
+  async (step) => {
+    const read = fixture(3);
+    read.nodes[1]!.body = 'small';
+    read.nodes[2]!.body = 'largest'.repeat(50);
+    read.codeLinks = read.nodes.slice(1).map((n) => ({ nodeId: n.id, repoPath: 'src/changed.ts' }));
+    const d = { ...detected(read), focusTooLarge: true };
+    const warn = vi.fn();
+    vi.mocked(stampExternalWatermark).mockClear();
+    const result = await step.apply(
+      { logger: { warn } } as never,
+      {
+        detected: d,
+        llmOutput: null,
+        formValues: {},
+      } as never,
+    );
+    expect(result.summary).toMatch(/exceed.*budget/);
+    expect(result.summary).toContain('Largest focus node: node:' + read.nodes[2]!.id);
+    expect(result.decision).toBe(step === externalPlanSyncStep ? 'not_measured' : 'nothing_to_do');
+    expect(stampExternalWatermark).not.toHaveBeenCalled();
+    if (step === externalPlanSyncStep)
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repositoryId: d.repositoryId,
+          since: d.since,
+          reason: 'focus_too_large',
+        }),
+        expect.any(String),
+      );
+  },
+);
