@@ -1,5 +1,65 @@
 type RefusedParameter = 'sslrootcert' | 'sslcert' | 'sslkey' | 'host';
 
+/** Reviewed against postgres.js 4.1.1's parsed options and consumed DSN selectors.
+ * Includes programmatic options so any parser expansion requires a security review;
+ * certificates disappear before sql.options is returned. The compatibility test
+ * compares this inventory with the installed parser, including those consumed keys. */
+export const USER_POSTGRES_DSN_KNOWN_OPTIONS = [
+  'backoff',
+  'cancel_timeout',
+  'channel_binding',
+  'connect_timeout',
+  'connection',
+  'database',
+  'debug',
+  'eager_types',
+  'fetch_types',
+  'host',
+  'idle_timeout',
+  'infer',
+  'keep_alive',
+  'max',
+  'max_lifetime',
+  'max_pipeline',
+  'min',
+  'no_subscribe',
+  'onclose',
+  'onnotice',
+  'onnotify',
+  'onparameter',
+  'onread',
+  'open',
+  'parameters',
+  'parsers',
+  'pass',
+  'passfile',
+  'path',
+  'port',
+  'prepare',
+  'publications',
+  'query_timeout',
+  'queue_timeout',
+  'resolve',
+  'scheduler',
+  'serializers',
+  'shared',
+  'shared_types',
+  'slot',
+  'socket',
+  'ssl',
+  'sslcert',
+  'sslkey',
+  'sslmode',
+  'sslnegotiation',
+  'sslrootcert',
+  'target_session_attrs',
+  'timers',
+  'transform',
+  'types',
+  'unref_sockets',
+  'user',
+] as const;
+
 export class UserPostgresDsnError extends Error {
   readonly code = 'user_postgres_dsn_refused';
   constructor(readonly parameter: RefusedParameter) {
