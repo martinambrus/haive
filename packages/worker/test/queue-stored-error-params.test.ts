@@ -161,6 +161,27 @@ it.each([true, false])('fix6 stores safe task queue failures (bound: %s)', async
   ).toBe(true);
   safe([writes, lines]);
 });
+it.each(['/var/lib/haive/repos/user/repo', '/host-fs/private/repo'])(
+  'scrubs task failure storage paths while preserving container diagnostics (%s)',
+  async (root) => {
+    const message = 'EIO: open ' + root + '; config /etc/nginx/x.conf:5';
+    h.error = Object.assign(new Error(message), { code: 'EIO' });
+    (h.db as ReturnType<typeof dbFake>).query.tasks.findFirst = async () => {
+      throw h.error;
+    };
+    await expect(
+      processTaskJob({
+        name: TASK_JOB_NAMES.START,
+        data: { taskId: 'task', epoch: 0 },
+      } as never),
+    ).rejects.toBe(h.error);
+    expect(
+      writes.some((row) => row.errorMessage === 'EIO: open [path]; config /etc/nginx/x.conf:5'),
+    ).toBe(true);
+    expect(lines.some((line) => line.includes(message))).toBe(true);
+  },
+);
+
 it.each([true, false])('fix6 returns safe ddev failures (bound: %s)', async (bound) => {
   h.error = failure(bound);
   const result = await runDdevControl({ taskId: 'task', action: 'status' });

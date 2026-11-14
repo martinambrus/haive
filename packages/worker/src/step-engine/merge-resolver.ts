@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubWorkerErrorPaths } from '../repo/stored-error.js';
 import {
   lockRepositoryTasksKey,
   schema,
@@ -1005,7 +1006,7 @@ async function halt(
   const record = (conn: DbHandle) =>
     setStepStatus(conn, current.id, {
       status: 'failed',
-      errorMessage: message,
+      errorMessage: scrubWorkerErrorPaths(message),
       endedAt: new Date(),
     });
   if (!state) {

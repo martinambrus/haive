@@ -12,6 +12,7 @@ import {
   type IntegrationBlock,
 } from '../step-engine/step-integrations.js';
 import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubWorkerErrorPaths } from '../repo/stored-error.js';
 import { safeProcessor } from './safe-processor.js';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
@@ -836,7 +837,7 @@ async function writeTaskFailed(
     .update(schema.tasks)
     .set({
       status: 'failed',
-      errorMessage: message,
+      errorMessage: scrubWorkerErrorPaths(message),
       completedAt: new Date(),
       updatedAt: new Date(),
     })
