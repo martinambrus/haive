@@ -48,6 +48,12 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { PromptStepEditor } from '@/components/prompt-step-editor';
 
 interface TaskTypeComposerProps {
+  /** Derived path order stays read-only; palette actions append overlay operations. */
+  overlay?: {
+    onInsert?: (target: string, step: string) => void;
+    onRemove?: (step: string) => void;
+    limitsEditable: boolean;
+  };
   catalog: TaskTypeCatalog;
   stepIds: string[] | null;
   loopLimits: Record<string, number>;
@@ -161,6 +167,7 @@ function groupedSteps(catalog: TaskTypeCatalog, query: string) {
 
 export function TaskTypeComposer({
   catalog,
+  overlay,
   stepIds,
   loopLimits,
   requiresRepository,
@@ -178,7 +185,9 @@ export function TaskTypeComposer({
   onLoopLimitsChange,
 }: TaskTypeComposerProps) {
   const prompt =
-    !readOnly && onPromptStepsChange !== undefined && typeSlug !== undefined
+    (!readOnly || overlay !== undefined) &&
+    onPromptStepsChange !== undefined &&
+    typeSlug !== undefined
       ? { typeSlug, set: onPromptStepsChange }
       : null;
   const entries: CatalogEntries = useMemo(() => {
@@ -270,6 +279,13 @@ export function TaskTypeComposer({
 
   function commit(next: string[], message: string, focusTo?: { index: number; kind: FocusKind }) {
     if (next === stepIds) return;
+    if (overlay) {
+      for (const id of stepIds ?? []) if (!next.includes(id)) overlay.onRemove?.(id);
+      for (const [index, id] of next.entries())
+        if (!stepIds?.includes(id)) overlay.onInsert?.(next[index - 1] ?? '', id);
+      setAnnouncement(message);
+      return;
+    }
     const pruned = pruneLoopLimits(loopLimits, next);
     onStepIdsChange(next);
     if (pruned !== loopLimits) onLoopLimitsChange(pruned);
@@ -437,7 +453,8 @@ export function TaskTypeComposer({
                     promptEntry.tools.some((tool) => isToolIssue(issue, tool)),
                   )
                 : [];
-            const limitEditable = !readOnly && entry?.loopBudgetEditable === true;
+            const limitEditable =
+              (!readOnly || overlay?.limitsEditable === true) && entry?.loopBudgetEditable === true;
             return (
               <li
                 key={`${stepId}-${index}`}
@@ -558,7 +575,7 @@ export function TaskTypeComposer({
                         />
                       </label>
                     )}
-                    {readOnly && loopLimits[stepId] !== undefined && (
+                    {readOnly && !limitEditable && loopLimits[stepId] !== undefined && (
                       <p className="mt-1 text-xs text-neutral-400">{`Loop limit ${loopLimits[stepId]}`}</p>
                     )}
                   </div>
@@ -665,7 +682,11 @@ export function TaskTypeComposer({
               type="button"
               variant="secondary"
               className="h-11"
-              disabled={disabled || slugProblem(prompt.typeSlug) !== null}
+              disabled={
+                disabled ||
+                (overlay !== undefined && !overlay.onInsert) ||
+                slugProblem(prompt.typeSlug) !== null
+              }
               onClick={addPromptStep}
             >
               Add prompt step
@@ -681,7 +702,7 @@ export function TaskTypeComposer({
           {announcement}
         </p>
       </section>
-      {!readOnly && (
+      {(!readOnly || overlay?.onInsert !== undefined) && (
         <section aria-label="Step palette" className="min-w-0">
           <Button
             type="button"

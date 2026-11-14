@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import type { CompositionIssue } from '@haive/shared/modularity';
+import {
+  MAX_DERIVED_CHANGES,
+  promptStepId,
+  type DerivedChange,
+  type CompositionIssue,
+} from '@haive/shared/modularity';
 import {
   changedTaskType,
   createTaskType,
@@ -38,12 +43,23 @@ import {
   slugProblem,
   taskTypeFormSchema,
 } from '@/lib/task-type-form';
+import {
+  buildDerivedCreateBody,
+  buildDerivedUpdateBody,
+  evaluateDerivedEditor,
+  renameDerivedPromptIds,
+} from '@/lib/derived-task-type-form';
+import { useDerivedPreview } from '@/lib/use-derived-preview';
+import { TaskTypeDuplicateAction } from './task-type-duplicate-action';
+import { DerivedTaskTypeChanges } from './derived-task-type-changes';
+import { InlineMarkdown } from './markdown/inline-markdown';
 import { editorStateForAgent, loadDraftIntoEditor } from '@/lib/task-type-draft-load';
 import { useComposerIntegrations } from '@/lib/use-composer-integrations';
 import { usePageTitle } from '@/lib/use-page-title';
 import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 import type { TaskTypeAvailability } from '@haive/shared/modularity';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
+import { PromptStepEditor } from './prompt-step-editor';
 import { TaskTypeComposer } from '@/components/task-type-composer';
 import {
   forgetDraftConversation,
@@ -94,7 +110,13 @@ function initialValuesOf(row: AdminTaskType): FormValues {
   };
 }
 
-export function TaskTypeEditor({ slug }: { slug: string | null }) {
+export function TaskTypeEditor({
+  slug,
+  duplicateBaseSlug = null,
+}: {
+  slug: string | null;
+  duplicateBaseSlug?: string | null;
+}) {
   const router = useRouter();
   const creating = slug === null;
   usePageTitle(creating ? 'New task type' : `Task type ${slug}`);
@@ -105,6 +127,10 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [row, setRow] = useState<AdminTaskType | null>(null);
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [baseSlug, setBaseSlug] = useState<string | null>(creating ? duplicateBaseSlug : null);
+  const [changes, setChanges] = useState<DerivedChange[]>([]);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [previewPath, setPreviewPath] = useState<string>('pre-triage');
   const [stepIds, setStepIds] = useState<string[]>([]);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
   const [promptSteps, setPromptSteps] = useState<PromptSteps>({});
@@ -112,6 +138,9 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [values, setValues] = useState<FormValues>(creating ? NEW_TYPE_DEFAULTS : {});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [serverDerivedIssues, setServerDerivedIssues] = useState<
+    { kind: string; [key: string]: unknown }[]
+  >([]);
   const [serverIssues, setServerIssues] = useState<CompositionIssue[]>([]);
   const [saved, setSaved] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -124,6 +153,8 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
 
   const applyRow = useCallback((taskType: AdminTaskType) => {
     setRow(taskType);
+    setBaseSlug(taskType.runListStrategy === 'derived' ? (taskType.baseSlug ?? '') : null);
+    setChanges(taskType.changes ?? []);
     setChangedRow(null);
     setStepIds(taskType.stepIds ?? []);
     setLoopLimits(taskType.stepLoopLimitDefaults);
@@ -138,11 +169,38 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setCatalog(null);
     setRow(null);
     setLoadError(null);
-    void Promise.all([getTaskTypeCatalog(), slug === null ? null : getAdminTaskType(slug)])
+    void Promise.all([
+      getTaskTypeCatalog(),
+      slug === null
+        ? duplicateBaseSlug
+          ? getAdminTaskType(duplicateBaseSlug)
+          : null
+        : getAdminTaskType(slug),
+    ])
       .then(([cat, one]) => {
         if (!current) return;
         setCatalog(cat);
-        if (one) {
+        if (one && creating && duplicateBaseSlug) {
+          const eligibility = cat.bases?.find((b) => b.slug === duplicateBaseSlug)?.eligibility;
+          if (!eligibility?.eligible) {
+            setLoadError(
+              eligibility?.eligible === false ? eligibility.message : 'This base is unavailable.',
+            );
+            return;
+          }
+          const copied = {
+            ...NEW_TYPE_DEFAULTS,
+            displayName: one.taskType.displayName,
+            description: one.taskType.description ?? '',
+            requiresRepository: one.taskType.requiresRepository,
+            sortOrder: one.taskType.sortOrder,
+          };
+          setBaseSlug(duplicateBaseSlug);
+          setChanges([]);
+          setValues(copied);
+          setLoadedValues(copied);
+          setFormRevision((n) => n + 1);
+        } else if (one) {
           applyRow(one.taskType);
           setAvailability(one.availability);
           setServerPromptIssues(promptStepIssuesOf(one.promptStepIssues));
@@ -156,10 +214,15 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     return () => {
       current = false;
     };
-  }, [slug, applyRow]);
+  }, [slug, duplicateBaseSlug, creating, applyRow]);
 
-  const editableFields = creating ? CREATE_FIELDS : (row?.editableFields ?? []);
-  const composable = editableFields.includes('stepIds');
+  const derived = baseSlug !== null;
+  const editableFields = creating
+    ? derived
+      ? [...CREATE_FIELDS.filter((f) => f !== 'stepIds' && f !== 'requiresRepository'), 'changes']
+      : CREATE_FIELDS
+    : (row?.editableFields ?? []);
+  const composable = !derived && editableFields.includes('stepIds');
   const entries = useMemo(() => (catalog ? catalogEntries(catalog) : null), [catalog]);
   const requiresRepository = values.requiresRepository === true;
   const promptEditable = editableFields.includes('promptSteps');
@@ -205,18 +268,89 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       integrationCategories,
     ],
   );
+  const derivedEvaluation = useMemo(
+    () =>
+      derived && catalog
+        ? evaluateDerivedEditor({
+            catalog,
+            baseSlug: baseSlug!,
+            changes,
+            typeSlug,
+            requiresRepository,
+            promptSteps,
+            loopLimits,
+            preAnswerDefaults: row?.preAnswerDefaults ?? {},
+            integrationCategoryIds: new Set(integrationCategories.map((c) => c.id)),
+          })
+        : null,
+    [
+      derived,
+      catalog,
+      baseSlug,
+      changes,
+      typeSlug,
+      requiresRepository,
+      promptSteps,
+      loopLimits,
+      row?.preAnswerDefaults,
+      integrationCategories,
+    ],
+  );
+  const overlayEdited =
+    derived &&
+    (JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
+      compositionChanged(
+        { stepIds: [], loopLimits, promptSteps },
+        {
+          stepIds: [],
+          stepLoopLimitDefaults: row?.stepLoopLimitDefaults ?? {},
+          promptSteps: row?.promptSteps ?? {},
+        },
+      ));
+  const previewBody =
+    derived && catalog && slugProblem(typeSlug) === null
+      ? buildDerivedCreateBody(
+          { ...values, slug: typeSlug },
+          {
+            baseSlug: baseSlug!,
+            changes,
+            loopLimits,
+            promptSteps,
+            preAnswerDefaults: row?.preAnswerDefaults ?? {},
+          },
+        )
+      : null;
+  const preview = useDerivedPreview(previewBody);
+  const overlayStructureEdited =
+    derived &&
+    (JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
+      compositionChanged(
+        { stepIds: [], loopLimits: {}, promptSteps },
+        { stepIds: [], stepLoopLimitDefaults: {}, promptSteps: row?.promptSteps ?? {} },
+      ));
+  const limitsEdited =
+    JSON.stringify(loopLimits) !== JSON.stringify(row?.stepLoopLimitDefaults ?? {});
+  const derivedBlocked =
+    derived &&
+    (((creating || overlayStructureEdited) && (derivedEvaluation?.issues.length ?? 0) > 0) ||
+      ((creating || limitsEdited) &&
+        (derivedEvaluation?.defaultIssues.some((issue) => issue.field !== 'preAnswerDefaults') ??
+          false)));
   const compositionEdited =
     row !== null && compositionChanged({ stepIds, loopLimits, promptSteps }, row);
   // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
   const compositionTouched =
     creating || compositionEdited || requiresRepository !== row?.requiresRepository;
   const blocked =
-    composable &&
-    compositionTouched &&
-    (clientProblems.composition.length > 0 ||
-      clientProblems.defaults.length > 0 ||
-      clientProblems.prompt.length > 0 ||
-      catalog?.synced === false);
+    permissionDenied ||
+    preview.forbidden ||
+    derivedBlocked ||
+    (composable &&
+      compositionTouched &&
+      (clientProblems.composition.length > 0 ||
+        clientProblems.defaults.length > 0 ||
+        clientProblems.prompt.length > 0 ||
+        catalog?.synced === false));
   const schema = useMemo(
     () => taskTypeFormSchema(editableFields, creating ? 'create' : 'edit'),
     [editableFields, creating],
@@ -228,7 +362,8 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const dirty =
     initialValues !== undefined &&
     (Object.keys(values).some((k) => values[k] !== initialValues[k]) ||
-      compositionChanged({ stepIds, loopLimits, promptSteps }, row ?? NO_COMPOSITION));
+      compositionChanged({ stepIds, loopLimits, promptSteps }, row ?? NO_COMPOSITION) ||
+      overlayEdited);
   const leaveDialog = useUnsavedChangesGuard(dirty && !leaving);
 
   function leaveTo(path: string) {
@@ -241,6 +376,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setRefreshError(null);
     setSaveError(null);
     setServerIssues([]);
+    setServerDerivedIssues([]);
     setServerPromptIssues([]);
   }
 
@@ -274,6 +410,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setSaved(false);
     setRefreshError(null);
     setServerIssues([]);
+    setServerDerivedIssues([]);
     setServerPromptIssues([]);
     try {
       if (creating) {
@@ -282,30 +419,59 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           setSaveError(problem);
           return;
         }
-        const body = buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
+        const body = derived
+          ? buildDerivedCreateBody(submitted, {
+              baseSlug: baseSlug!,
+              changes,
+              loopLimits,
+              promptSteps,
+            })
+          : buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
         await createTaskType(body);
         forgetDraftConversation(null);
         leaveTo(`/admin/task-types/${encodeURIComponent(body.slug)}`);
         return;
       }
-      const body = buildUpdateBody(
-        submitted,
-        editableFields,
-        composable && compositionEdited
-          ? { stepIds, loopLimits, promptSteps, typeSlug: row!.slug, saved: row! }
-          : null,
-        initialValuesOf(row!),
-      );
+      const body = derived
+        ? buildDerivedUpdateBody(
+            submitted,
+            editableFields,
+            { changes, loopLimits, promptSteps },
+            { ...row! },
+          )
+        : buildUpdateBody(
+            submitted,
+            editableFields,
+            composable && compositionEdited
+              ? { stepIds, loopLimits, promptSteps, typeSlug: row!.slug, saved: row! }
+              : null,
+            initialValuesOf(row!),
+          );
       const res = await updateTaskType(row!.slug, { ...body, expectedUpdatedAt: row!.updatedAt });
       applyRow(res.taskType);
       setSaved(true);
       await refreshAvailability(row!.slug);
     } catch (err) {
       const error = err as ApiError;
+      if (error.status === 403) {
+        setPermissionDenied(true);
+        setSaveError(error.message ?? 'Admin access is required. Saving is unavailable.');
+        return;
+      }
       const changed = changedTaskType(error);
       if (changed) {
         setChangedRow(changed);
         return;
+      }
+      if (derived) {
+        const issues = (error.body as { issues?: unknown } | undefined)?.issues;
+        if (Array.isArray(issues))
+          setServerDerivedIssues(
+            issues.filter(
+              (issue): issue is { kind: string; [key: string]: unknown } =>
+                typeof issue === 'object' && issue !== null && typeof issue.kind === 'string',
+            ),
+          );
       }
       const issues = splitServerIssues((error.body as { issues?: unknown } | undefined)?.issues);
       const promptIssues = promptStepIssuesOf(
@@ -342,6 +508,9 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     return <p className="text-sm text-neutral-400">Loading…</p>;
   }
 
+  const candidates = preview.diagnostics?.candidates ?? derivedEvaluation?.candidates ?? [];
+  const selectedCandidate =
+    candidates.find((c) => (c.executionPath ?? 'pre-triage') === previewPath) ?? candidates[0];
   const lastField = schema.fields.at(-1)?.id;
   const composer = (readOnly: boolean) => (
     <>
@@ -354,13 +523,40 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         }}
         typeSlug={typeSlug}
         promptSteps={promptSteps}
-        stepIds={readOnly ? (row?.stepIds ?? null) : stepIds}
+        stepIds={
+          derived
+            ? [...(selectedCandidate?.stepIds ?? [])]
+            : readOnly
+              ? (row?.stepIds ?? null)
+              : stepIds
+        }
         loopLimits={loopLimits}
         requiresRepository={requiresRepository}
         readOnly={readOnly}
-        disabled={saving}
+        disabled={saving || permissionDenied || preview.forbidden}
+        {...(derived
+          ? {
+              overlay: {
+                onInsert:
+                  editableFields.includes('changes') && changes.length < MAX_DERIVED_CHANGES
+                    ? (target: string, step: string) => {
+                        touch();
+                        setChanges((prev) => [...prev, { insertAfter: target, step }]);
+                      }
+                    : undefined,
+                onRemove:
+                  editableFields.includes('changes') && changes.length < MAX_DERIVED_CHANGES
+                    ? (step: string) => {
+                        touch();
+                        setChanges((prev) => [...prev, { remove: step }]);
+                      }
+                    : undefined,
+                limitsEditable: editableFields.includes('stepLoopLimitDefaults'),
+              },
+            }
+          : {})}
         serverIssues={serverIssues}
-        {...(promptEditable && !readOnly
+        {...(promptEditable && (!readOnly || derived)
           ? {
               serverPromptIssues,
               onPromptStepsChange: (next: PromptSteps) => {
@@ -405,7 +601,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         {availability && !availability.available && (
           <p className="mt-2 text-sm text-amber-300">{describeAvailability(availability)}</p>
         )}
-        {row && !composable && (
+        {row && !composable && !derived && (
           <p className="mt-2 text-sm text-neutral-400">
             Only some fields of this task type can be changed. Its steps are fixed.
           </p>
@@ -416,7 +612,10 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           </p>
         )}
       </div>
-      {(creating || row?.source === 'admin') && (
+      {row?.source === 'builtin' && (
+        <TaskTypeDuplicateAction slug={row.slug} bases={catalog.bases} />
+      )}
+      {!derived && (creating || row?.source === 'admin') && (
         <TaskTypeCreatorPanel
           slug={creating ? null : row!.slug}
           editorState={editorStateForAgent({
@@ -427,6 +626,110 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           })}
           onLoad={loadDraft}
         />
+      )}
+      {derived && derivedEvaluation && (
+        <Card>
+          <InlineMarkdown
+            className="mb-3 text-sm text-neutral-300"
+            body={`Base: ${baseSlug}. The base and strategy cannot be changed after creation.`}
+          />
+          <DerivedTaskTypeChanges
+            changes={changes}
+            evaluation={derivedEvaluation}
+            diagnostics={preview.diagnostics}
+            serverIssues={serverDerivedIssues}
+            error={preview.error}
+            disabled={saving || permissionDenied || preview.forbidden}
+            editable={editableFields.includes('changes')}
+            revision={formRevision}
+            entries={withPrompts!}
+            requiresRepository={requiresRepository}
+            onChange={(next) => {
+              touch();
+              setChanges(next);
+            }}
+          />
+          <label className="mt-4 flex flex-col gap-2 text-sm text-neutral-200">
+            Path preview
+            <select
+              className="h-11 rounded border border-neutral-600 bg-neutral-950 px-3"
+              value={selectedCandidate?.executionPath ?? 'pre-triage'}
+              onChange={(e) => setPreviewPath(e.target.value)}
+            >
+              {candidates.map((c) => (
+                <option
+                  key={c.executionPath ?? 'pre-triage'}
+                  value={c.executionPath ?? 'pre-triage'}
+                >
+                  {c.executionPath ?? 'pre-triage'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <InlineMarkdown
+            className="my-3 text-sm text-neutral-300"
+            body="The path order is read-only. Use changes to insert, remove or replace steps. Presets and loop limits belong to this type."
+          />
+          {composer(true)}
+          {Object.keys(loopLimits)
+            .filter((id) => !derivedEvaluation.stepIds.includes(id))
+            .map((id) => (
+              <div key={id} className="mt-3">
+                <InlineMarkdown
+                  className="text-sm text-amber-300"
+                  body={`Saved loop limit for ${id} is outside the resulting paths. It will be omitted from new tasks.`}
+                />
+                {editableFields.includes('stepLoopLimitDefaults') && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={saving || permissionDenied || preview.forbidden}
+                    aria-label={`Clear obsolete loop limit for ${id}`}
+                    onClick={() => {
+                      touch();
+                      setLoopLimits((prev) => {
+                        const next = { ...prev };
+                        delete next[id];
+                        return next;
+                      });
+                    }}
+                  >
+                    Clear loop limit
+                  </Button>
+                )}
+              </div>
+            ))}
+          {promptEditable &&
+            Object.values(promptSteps)
+              .filter(
+                (entry) => !derivedEvaluation.stepIds.includes(promptStepId(typeSlug, entry.slug)),
+              )
+              .map((entry) => (
+                <div key={entry.slug} className="mt-3">
+                  <InlineMarkdown
+                    className="text-sm text-amber-300"
+                    body={`Prompt ${entry.slug} is not on a resulting path. Restore its insertion or remove the definition.`}
+                  />
+                  <PromptStepEditor
+                    entry={entry}
+                    integrationCategories={integrationCategories}
+                    disabled={saving || permissionDenied || preview.forbidden}
+                    onChange={(next) => {
+                      touch();
+                      setPromptSteps((prev) => ({ ...prev, [entry.slug]: next }));
+                    }}
+                    onRemove={() => {
+                      touch();
+                      setPromptSteps((prev) => {
+                        const next = { ...prev };
+                        delete next[entry.slug];
+                        return next;
+                      });
+                    }}
+                  />
+                </div>
+              ))}
+        </Card>
       )}
       <Card>
         <FormRenderer
@@ -442,6 +745,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
             if (creating && typeof next.slug === 'string' && next.slug.trim() !== typeSlug) {
               const toSlug = next.slug.trim();
               setStepIds((prev) => renamePromptStepIds(prev, typeSlug, toSlug));
+              if (derived) setChanges((prev) => renameDerivedPromptIds(prev, typeSlug, toSlug));
               setPromptSteps((prev) => renamePromptStepTokens(prev, typeSlug, toSlug));
             }
             setValues((prev) => ({ ...prev, ...next }));
@@ -487,7 +791,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           </p>
         )}
       </Card>
-      {!composable && row && (
+      {!composable && !derived && row && (
         <Card>
           <h3 className="mb-2 text-sm font-semibold text-neutral-200">Steps</h3>
           {composer(true)}

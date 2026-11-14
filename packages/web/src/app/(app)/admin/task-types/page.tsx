@@ -2,10 +2,20 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { api, listAdminTaskTypes, type AdminTaskTypeListed, type ApiError } from '@/lib/api-client';
+import {
+  api,
+  getTaskTypeCatalog,
+  listAdminTaskTypes,
+  type TaskTypeCatalog,
+  type AdminTaskTypeListed,
+  type ApiError,
+} from '@/lib/api-client';
 import { describeAvailability } from '@/lib/composition-messages';
 import { usePageTitle } from '@/lib/use-page-title';
 import { TaskTypeDeleteDialog } from '@/components/task-type-delete-dialog';
+import { TaskTypeDuplicateAction } from '@/components/task-type-duplicate-action';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { describeDerivedWarning } from '@/lib/derived-diagnostics';
 import { Badge, Card, FormError } from '@/components/ui';
 
 function sourceLabel(source: string): string {
@@ -18,6 +28,7 @@ export default function TaskTypesPage() {
   usePageTitle('Task types');
 
   const [rows, setRows] = useState<AdminTaskTypeListed[] | null>(null);
+  const [bases, setBases] = useState<TaskTypeCatalog['bases']>();
   const [error, setError] = useState<string | null>(null);
   const [customEnabled, setCustomEnabled] = useState<boolean | null>(null);
   const [deleting, setDeleting] = useState<AdminTaskTypeListed | null>(null);
@@ -33,6 +44,9 @@ export default function TaskTypesPage() {
 
   useEffect(() => {
     void load();
+    void getTaskTypeCatalog()
+      .then((catalog) => setBases(catalog.bases))
+      .catch(() => {});
     api
       .get<{ customEnabled: boolean }>('/admin/config/task-types')
       .then((c) => setCustomEnabled(c.customEnabled))
@@ -104,7 +118,18 @@ export default function TaskTypesPage() {
                 {`${row.taskCount} task${row.taskCount === 1 ? '' : 's'}`}
               </p>
             </div>
-            <div className="flex shrink-0 gap-2">
+            {row.runListStrategy === 'derived' &&
+              row.diagnostics?.warnings.map((warning) => (
+                <InlineMarkdown
+                  key={warning.operationIndex}
+                  className="text-sm text-amber-300"
+                  body={describeDerivedWarning(warning)}
+                />
+              ))}
+            <div className="flex flex-wrap shrink-0 gap-2">
+              {row.source === 'builtin' && (
+                <TaskTypeDuplicateAction slug={row.slug} bases={bases} />
+              )}
               <Link
                 href={`/admin/task-types/${encodeURIComponent(row.slug)}`}
                 className="inline-flex h-11 items-center rounded-md border border-neutral-700 bg-neutral-800 px-4 text-sm text-neutral-100 hover:bg-neutral-700"
