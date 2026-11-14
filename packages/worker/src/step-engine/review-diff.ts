@@ -303,7 +303,10 @@ export async function readReviewDiff(
       }
       const indexPaths = withholdAll
         ? []
-        : [...safePaths.values()].filter((p) => !deniedPaths.has(p)).map((p) => ':(literal)' + p);
+        : [...safePaths.values()].filter((p) => !deniedPaths.has(p));
+      // A name over the argument budget cannot be a real path (PATH_MAX is far smaller), so it is
+      // disclosed as invalid instead of voiding the capture.
+      const oversized = new Set<string>();
       // Bound argv bytes, not just count: git paths can have very different lengths.
       const pathspecBudget = Math.min(
         captureLimits.gitlinkPathspecBytes ?? REVIEW_GITLINK_PATHSPEC_BYTES,
@@ -322,10 +325,13 @@ export async function readReviewDiff(
       };
       let batch: string[] = [];
       let batchBytes = 0;
-      for (const pathspec of indexPaths) {
+      for (const indexPath of indexPaths) {
+        const pathspec = ':(literal)' + indexPath;
         const bytes = Buffer.byteLength(pathspec) + 1;
-        if (bytes > pathspecBudget)
-          throw new Error('A review path exceeds the gitlink argument budget.');
+        if (bytes > pathspecBudget) {
+          oversized.add(indexPath);
+          continue;
+        }
         if (batchBytes + bytes > pathspecBudget) {
           await readGitlinks(batch);
           batch = [];
@@ -337,18 +343,18 @@ export async function readReviewDiff(
       if (batch.length) await readGitlinks(batch);
       for (const p of allPaths) {
         checkHostCancellation(ctx);
+        if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
+          files.push({ path: p, kind: 'nested-repository' });
+          continue;
+        }
         const safe = safePaths.get(p);
-        if (safe === undefined) {
+        if (safe === undefined || oversized.has(safe)) {
           files.push({ path: p, kind: 'invalid' });
           continue;
         }
         const deniedFile = withheld.get(safe);
         if (deniedFile) {
           files.push(deniedFile);
-          continue;
-        }
-        if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
-          files.push({ path: p, kind: 'nested-repository' });
           continue;
         }
         const rel = (prefix ? prefix + '/' : '') + safe;

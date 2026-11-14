@@ -671,3 +671,38 @@ it('batches gitlink pathspecs within an injected argv-byte budget across the unc
       ':(literal)d',
     ]);
 });
+
+it('discloses an untracked nested repository by kind', async () => {
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'nested/'],
+    total: 2,
+    nestedRepositories: { 'nested/': 'with commits' },
+  });
+  const run = vi.mocked(gitRun).getMockImplementation()!;
+  vi.mocked(gitRun).mockImplementation(async (...args) =>
+    args[1].includes('--others') ? { code: 0, stderr: '', stdout: 'nested/\0' } : run(...args),
+  );
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.files).toContainEqual({ path: 'nested/', kind: 'nested-repository' });
+  expect(payload.fileContents).toContainEqual({ path: 'a', content: 'z' });
+});
+
+it('discloses a reported name over the gitlink argument budget as invalid', async () => {
+  const long = 'x'.repeat(40);
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', long],
+    total: 2,
+  });
+  const result = await readReviewDiff(ctx, '/repo', options, { gitlinkPathspecBytes: 24 });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.files).toContainEqual({ path: long, kind: 'invalid' });
+  expect(payload.fileContents).toContainEqual({ path: 'a', content: 'z' });
+  expect(vi.mocked(openFileNoFollow).mock.calls.every((call) => call[1] === 'a')).toBe(true);
+});
