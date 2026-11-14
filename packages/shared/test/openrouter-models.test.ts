@@ -114,6 +114,20 @@ describe('trimOpenRouterModels', () => {
     expect(trimOpenRouterModels({})).toEqual([]);
     expect(trimOpenRouterModels({ data: 'nope' })).toEqual([]);
   });
+
+  it('keeps the rest of the catalog when one entry has a non-object pricing value', () => {
+    const out = trimOpenRouterModels({
+      data: [
+        { id: 'vendor/broken', pricing: 'free' },
+        { id: 'vendor/numeric', pricing: 7 },
+        { id: 'vendor/ok', pricing: { prompt: '0.000001', completion: '0.000002' } },
+      ],
+    });
+    expect(out.map((m) => m.id)).toEqual(['vendor/broken', 'vendor/numeric', 'vendor/ok']);
+    expect(out[0]!.promptPrice).toBeNull();
+    expect(out[0]!.tiers).toBeUndefined();
+    expect(out[2]!.promptPrice).toBe(0.000001);
+  });
 });
 
 it('materializes the live Gemini override with non-text price keys', () => {

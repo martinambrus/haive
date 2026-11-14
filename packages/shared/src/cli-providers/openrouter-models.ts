@@ -105,7 +105,9 @@ function parseOverrides(
   OpenRouterModelEntry,
   'tiers' | 'pricingState' | 'pricingReason' | 'unsupportedOverrideCount'
 > {
-  if (!pricing) return {};
+  // A malformed entry (pricing as a string or number) must not throw at the `in`
+  // check below and stop the whole catalog refresh; it simply has no overrides.
+  if (!pricing || typeof pricing !== 'object') return {};
   const overrides = pricing.overrides;
   if (
     [pricing, ...(Array.isArray(overrides) ? overrides : [])].some(
