@@ -66,16 +66,60 @@ describe('visible words', () => {
     geometry(() => [box(-100, 0, 100, 100)]);
     expect(visibleWords()).toBe(1);
   });
+  it('prunes 20k offscreen and hidden descendants before visible-content budgets', () => {
+    document.body.innerHTML =
+      '<aside style=overflow:hidden></aside>' +
+      '<section style=display:none></section><p>' +
+      'word '.repeat(600) +
+      '</p>';
+    const offscreen = document.querySelector('aside')!;
+    const hidden = document.querySelector('section')!;
+    // Build the requested large-page regression once; each rejected root skips 10k nodes.
+    offscreen.replaceChildren(
+      ...Array.from({ length: 10000 }, () => document.createElement('span')),
+    );
+    hidden.replaceChildren(...Array.from({ length: 10000 }, () => document.createElement('span')));
+    vi.spyOn(offscreen, 'getBoundingClientRect').mockReturnValue(
+      box(0, 2000, 100, 2100) as DOMRect,
+    );
+    const styles = vi.spyOn(window, 'getComputedStyle');
+    geometry();
+    expect(visibleWords()).toBeCloseTo(600, -1);
+    expect(styles.mock.calls.length).toBeLessThan(10);
+  });
+  it('bounds rejected siblings separately from visible content', () => {
+    document.body.innerHTML = '<section hidden></section><section hidden></section><p>one two</p>';
+    geometry();
+    expect(visibleWords(document, { ...VISIBLE_WORD_LIMITS, work: 2 })).toBeNull();
+    expect(visibleWords(document, { ...VISIBLE_WORD_LIMITS, nodes: 2, work: 4 })).toBe(2);
+  });
+  it('prunes offscreen elements even without an overflow style', () => {
+    document.body.innerHTML = '<aside>offscreen words</aside><p>visible words</p>';
+    vi.spyOn(document.querySelector('aside')!, 'getBoundingClientRect').mockReturnValue(
+      box(0, 2000, 100, 2100) as DOMRect,
+    );
+    geometry();
+    expect(visibleWords(document, { ...VISIBLE_WORD_LIMITS, nodes: 2 })).toBe(2);
+  });
+  it('keeps visible positioned descendants of an offscreen wrapper', () => {
+    document.body.innerHTML = '<aside><p style=position:fixed>visible words</p></aside>';
+    vi.spyOn(document.querySelector('aside')!, 'getBoundingClientRect').mockReturnValue(
+      box(0, 2000, 100, 2100) as DOMRect,
+    );
+    geometry();
+    expect(visibleWords(document, { ...VISIBLE_WORD_LIMITS, nodes: 2 })).toBe(2);
+  });
   it('pins production budgets and returns fallback on each overflow', () => {
     expect(VISIBLE_WORD_LIMITS).toEqual({
       nodes: 2000,
+      work: 50000,
       characters: 48000,
       rectangles: 2048,
       chunk: 2048,
     });
     document.body.innerHTML = '<p>one two</p>';
     geometry();
-    for (const limit of ['nodes', 'characters', 'rectangles'] as const) {
+    for (const limit of ['nodes', 'work', 'characters', 'rectangles'] as const) {
       expect(visibleWords(document, { ...VISIBLE_WORD_LIMITS, [limit]: 0 })).toBeNull();
     }
   });

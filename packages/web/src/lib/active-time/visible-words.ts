@@ -1,6 +1,7 @@
 /** A bounded heuristic. Only the numeric estimate leaves this function. */
 export const VISIBLE_WORD_LIMITS = {
   nodes: 2000,
+  work: 50000,
   characters: 48000,
   rectangles: 2048,
   chunk: 2048,
@@ -58,7 +59,23 @@ export function visibleWords(
       clips.set(el, clip);
       return clip;
     };
-    const walker = doc.createTreeWalker(doc.body, 1 | 4); // elements AND text bound traversal
+    let inspected = 0;
+    const walker = doc.createTreeWalker(doc.body, 1 | 4, {
+      acceptNode(node) {
+        // Rejected siblings also cost work. Abort inside the filter so nextNode
+        // cannot scan an unbounded number of them before returning.
+        if (++inspected > limits.work) throw new Error('Visible-word work limit');
+        const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
+        if (!el) return 2; // FILTER_REJECT prunes the entire subtree.
+        const clip = clipFor(el);
+        if (!area(clip)) return 2;
+        const rect = el.getBoundingClientRect();
+        // An offscreen wrapper can have fixed/positioned visible descendants.
+        // Skip the wrapper itself, but prune only when its inherited clip is empty.
+        if (area(rect) && !area(intersect(rect, clip))) return node.nodeType === 1 ? 3 : 2;
+        return 1; // FILTER_ACCEPT: only these nodes consume the content budgets.
+      },
+    });
     const range = doc.createRange();
     let nodes = 0,
       characters = 0,
