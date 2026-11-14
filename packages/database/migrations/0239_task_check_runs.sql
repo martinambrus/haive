@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS "task_check_runs" (
   CONSTRAINT "task_check_runs_attempt_unique" UNIQUE ("task_id", "step_id", "slot", "attempt_id")
 );
 CREATE INDEX IF NOT EXISTS "task_check_runs_task_id_idx" ON "task_check_runs" ("task_id");
+CREATE INDEX IF NOT EXISTS "task_check_runs_task_step_id_idx" ON "task_check_runs" ("task_step_id");
 
 CREATE TABLE IF NOT EXISTS "task_check_recording" (
   "id" integer PRIMARY KEY NOT NULL,

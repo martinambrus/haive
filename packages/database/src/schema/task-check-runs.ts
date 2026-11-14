@@ -32,6 +32,7 @@ export const taskCheckRuns = pgTable(
     ),
     unique('task_check_runs_attempt_unique').on(t.taskId, t.stepId, t.slot, t.attemptId),
     index('task_check_runs_task_id_idx').on(t.taskId),
+    index('task_check_runs_task_step_id_idx').on(t.taskStepId),
   ],
 );
 

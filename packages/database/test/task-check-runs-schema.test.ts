@@ -26,6 +26,11 @@ it('keeps check history without repository text, with attempt uniqueness and saf
     'attempt_id',
   ]);
   expect(c.indexes[0]?.config.columns.map((v) => 'name' in v && v.name)).toEqual(['task_id']);
+  expect(
+    c.indexes
+      .find((v) => v.config.name === 'task_check_runs_task_step_id_idx')
+      ?.config.columns.map((v) => 'name' in v && v.name),
+  ).toEqual(['task_step_id']);
   expect(c.foreignKeys.map((v) => v.onDelete)).toEqual(['cascade', 'set null']);
 });
 
