@@ -40,9 +40,8 @@ export function checkPublicModules(files) {
       errors.push(`${file}: external module state/source must not be tracked`);
     // Prose and synthetic tests document arbitrary package names without installing
     // them. Manifests and lockfiles are always checked, even under test directories.
-    const installInput = /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$/.test(
-      file,
-    );
+    const installInput =
+      /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.pnpmfile\.cjs)$/.test(file);
     if (
       file === 'tests/fixtures/registry-module/package.json' ||
       file === 'scripts/smoke/check-registry-list.mjs' ||

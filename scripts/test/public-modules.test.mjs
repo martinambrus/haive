@@ -75,6 +75,8 @@ for (const [file, text] of [
   ['scripts/nested/build.sh', 'pnpm --filter ./modules/private-one build'],
   ['scripts/nested/build.mjs', "const path = './external-modules/private-one'"],
   ['scripts/nested/build.cjs', "const path = 'file:../../external-modules/private-one'"],
+  ['.pnpmfile.cjs', "require('./external-modules/private-one/install.cjs')"],
+  ['scripts/local-modules.cjs', "require('../external-modules/private-one/install.cjs')"],
 ]) {
   test(`private folder reference fails in ${file}: ${text}`, () => {
     const files = fixture({});
@@ -102,5 +104,12 @@ test('repository tracked install and runtime wiring contains only public modules
       .filter(Boolean)
       .map((file) => [file, readFileSync(join(root, file))]),
   );
+  assert.deepEqual(checkPublicModules(files), []);
+});
+
+test('generic external directory references remain allowed in tracked install hooks', () => {
+  const files = fixture({});
+  files.set('.pnpmfile.cjs', "const local = require('./scripts/local-modules.cjs')");
+  files.set('scripts/local-modules.cjs', "const directory = join(root, 'external-modules')");
   assert.deepEqual(checkPublicModules(files), []);
 });
