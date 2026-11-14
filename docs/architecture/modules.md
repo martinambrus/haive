@@ -325,7 +325,8 @@ Removing the final selection deletes `.selection.json`; remaining clones keep lo
 To return to public mode, run `pnpm module remove <id>` for each selected module, move or delete all
 clone directories under `external-modules/`, remove `external-modules/.lock`, and run
 `pnpm install --frozen-lockfile`. Delete a legacy empty `.selection.json` too, if present. Local mode
-ends when neither a clone nor a selection remains; `.lock` alone does not activate it.
+ends when neither a clone nor a selection remains; `.lock` alone does not activate it. If selection
+JSON is corrupt, delete `external-modules/.selection.json` and re-add the intended modules.
 
 `.pnpmfile.cjs` shares `scripts/local-modules.cjs` with code generation. Its `readPackage` hook adds
 selected workspace dependencies to the effective api and worker manifests, and to web for web parts,
@@ -346,7 +347,10 @@ selection, copies the resulting public lock back, then refreshes the local lock.
 above re-seeds local resolutions when that tracked lock changes.
 
 Turbo reads on-disk manifests rather than pnpm hooks. Root build/test/typecheck commands therefore
-build the external workspace closure first and bypass host caches while local state exists. The dev
+build the external workspace closure first, then exclude those external packages from the Turbo
+pass so no second build races the host readers. The root `test` and `typecheck` therefore do not
+run an external module's own tests or typecheck; the module's repository runs those. While local state exists, `--force --no-cache` disables
+both cache reads and writes: local outputs must never overwrite a public cache entry. The dev
 library builder and runtime Dockerfiles also build external folders. Docker copies local selection
 and source, seeds its own local lock, and retains external module targets in api/worker runtime images.
 A direct image build from a development checkout includes that checkout's external folders, just as
@@ -361,8 +365,8 @@ The guard rejects every tracked `modules/<id>/` file whose id is absent, so comm
 module manifest cannot make that module public automatically. It also rejects private package
 names in install/runtime wiring, explicit workspace entries and lockfile importers, production source
 and tracked generated registries, and all tracked external-module source/state. Folder paths are
-checked in manifests, locks, workspace configuration, Dockerfiles, `docker-compose*.yml`, workflow
-files and tracked `scripts/**/*.{sh,mjs,cjs}`, including `./`, `link:` and `file:` prefixes.
+checked in manifests, locks, workspace configuration, `.pnpmfile.cjs`, Dockerfiles,
+`docker-compose*.yml`, workflow files and tracked `scripts/**/*.{sh,mjs,cjs}`, including `./`, `link:` and `file:` prefixes.
 Documentation and synthetic tests are excluded from literal checks; install inputs remain checked
 even in test directories, except for the existing three narrow registry-smoke file exemptions.
 
