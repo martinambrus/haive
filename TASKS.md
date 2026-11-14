@@ -650,6 +650,19 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186 (+6)
+
+status: open · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
+
+Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
+
+1. Removing a gate or `07-phase-2-implement` from a derived workflow is allowed whenever `validateComposition` passes (07 removal fails on `missing-loop-target`; gate 1/2 removal is unverified). Admins can already compose static types without gates, so this is no new power, but PR3 should decide and pin it (refuse, or warn in the editor).
+2. A `replace` whose target is stale or off the path is skipped before the replacement refusal (`derived-task-types.ts:156-178`), so it is never diagnosed until the base gains the step. PR3: warn on save when an overlay holds any `replace`.
+3. Stale-target warnings repeat once per candidate (`derived-task-types.ts:206-208`); the editor must dedupe by `operationIndex`.
+4. `createDerivedChangesSchema(maxChanges)` accepts any bound (`:26`), above `MAX_DERIVED_CHANGES` too; PR3 callers must never pass a user value.
+5. `OrderedStepCatalogRow.stepIndex` is `number` but `step_catalog.step_index` is nullable; a NULL throws "Invalid base catalog index" (`run-list.ts:129`). PR3's ordered catalog read must map NULL explicitly.
+6. PR2's fail-closed refusals throw inside the row map of `GET /task-types` and `GET /admin/task-types` (`availabilityOf`, `shared/src/modularity/task-types.ts:106`): with a derived row present on PR2 code (a PR3 revert) the whole list answers 500. PR3 must replace every refusal in one change; a revert past PR3 must delete derived definitions first.
+
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 (+5)
 
 status: open · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
@@ -2094,6 +2107,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Derived task types PR 1 (#1186): `@haive/shared` evaluates a derived type's ordered change list (remove, insertAfter, replace) against every candidate run list of its built-in base (no path plus each execution path, with the environment prelude), with explicit applied/skipped/refused outcomes, stale-target warnings, a protected triage prefix, `replace` refused until output contracts exist, and `validateComposition` on every result; nothing calls it yet. Lows and PR3 decisions filed as T679.
 
 - Step SDK seam, derived task types prerequisite 2 PR 1 (#1184): `@haive/shared/step` carries the step contract (15 interfaces, the seven runtime control classes defined once and re-exported by the worker, `ChatPlanRead`, the form/metadata types), unreachable from every other shared entry; the module loader types `steps` from it; a compiled fixture module proves class identity through the loader. Lows filed as T678. Deploy note: the worker crashed on the pull (new shared entry not built yet) and needed `pnpm docker restart worker`.
 
