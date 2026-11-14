@@ -41,7 +41,11 @@ beforeEach(() => {
   );
   vi.mocked(gitRun).mockImplementation(async (_cwd, args) => ({
     code: args.includes('rev-parse') || args.includes('cat-file') ? 1 : 0,
-    stdout: args.includes('merge-base') ? 'a'.repeat(40) : '',
+    stdout: args.includes('merge-base')
+      ? 'a'.repeat(40)
+      : args.includes('show')
+        ? JSON.stringify({ ownedPaths: [] })
+        : '',
     stderr: '',
   }));
 });
@@ -70,6 +74,14 @@ it('never requests denied dependency metadata from git or the current manifest',
         ),
       ),
   ).toBe(false);
+});
+
+it('uses the held cwd for every collector and dependency git command', async () => {
+  const gitCwd = '/proc/self/fd/42';
+  await collectImplementationFiles(ctx, '/repo', { gitCwd, denyContent: () => false });
+  for (const [, options] of vi.mocked(gitExec).mock.calls) expect(options?.cwd).toBe(gitCwd);
+  await loadDependencyPolicy(ctx, '/repo', { gitCwd });
+  for (const [cwd] of vi.mocked(gitRun).mock.calls) expect(cwd).toBe(gitCwd);
 });
 
 it.each(['EMFILE', 'ENFILE'])(

@@ -167,6 +167,7 @@ export async function loadDependencyPolicy(
     signal?: AbortSignal;
     denyContent?: (path: string) => boolean;
     propagateResourceErrors?: boolean;
+    gitCwd?: string;
   } = {},
 ): Promise<DependencyPolicy> {
   const previous = await loadPreviousStepOutput(
@@ -180,11 +181,12 @@ export async function loadDependencyPolicy(
     sandboxWorktreePath?: string;
   } | null;
   const baseBranch = worktree?.baseBranch;
+  const gitCwd = options.gitCwd ?? workspace;
   const base = baseBranch
-    ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch], undefined, {
+    ? await gitRun(gitCwd, ['merge-base', 'HEAD', baseBranch], undefined, {
         signal: options.signal,
       })
-    : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD'], undefined, {
+    : await gitRun(gitCwd, ['rev-parse', '--verify', 'HEAD'], undefined, {
         signal: options.signal,
       });
   preserveResourceError(base, options.propagateResourceErrors);
@@ -197,7 +199,7 @@ export async function loadDependencyPolicy(
   const ownership = withheldPaths.includes(OWNERSHIP_POLICY_PATH)
     ? null
     : await readBaseline(
-        workspace,
+        gitCwd,
         `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
         false,
         options.signal,
@@ -206,7 +208,7 @@ export async function loadDependencyPolicy(
   const baselineComposer = withheldPaths.includes('composer.json')
     ? null
     : await readBaseline(
-        workspace,
+        gitCwd,
         `${base.stdout.trim()}:composer.json`,
         false,
         options.signal,
@@ -255,7 +257,7 @@ export async function loadDependencyPolicy(
       continue;
     }
     const baselineDrupal7 = await readBaseline(
-      workspace,
+      gitCwd,
       `${base.stdout.trim()}:${marker}`,
       true,
       options.signal,

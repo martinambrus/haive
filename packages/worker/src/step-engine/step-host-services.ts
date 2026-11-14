@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { FileHandle } from 'node:fs/promises';
 import { eq } from 'drizzle-orm';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { schema } from '@haive/database';
@@ -46,7 +47,7 @@ export function createStepHostServices(context: StepContext): StepHostServices {
       throw new StepHostBindingError('Task step or round does not match the context.');
     return task;
   }
-  async function bind(requestedPath?: string): Promise<string> {
+  async function bind(requestedPath?: string): Promise<{ resolved: string; held?: FileHandle }> {
     const task = await verifyIdentity();
     const decision = await loadTaskWorktreeDecision(ctx.db, {
       taskId: ctx.taskId,
@@ -67,10 +68,10 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     } catch {
       throw new StepHostBindingError('Context worktree is outside its repository.');
     }
+    let held: FileHandle | undefined;
     try {
       if (rel) {
-        const held = await openDirNoFollow(ctx.repoPath, rel);
-        await held.close();
+        held = await openDirNoFollow(ctx.repoPath, rel);
       } else if ((await lstatNoFollow(ctx.repoPath, '', { strict: true }))?.kind !== 'directory') {
         throw new StepHostBindingError('Context repository directory is unavailable.');
       }
@@ -78,8 +79,13 @@ export function createStepHostServices(context: StepContext): StepHostServices {
       if (isResourceLimitError(error)) throw error;
       throw new StepHostBindingError('Context worktree directory is unavailable or refused.');
     }
-    checkHostCancellation(ctx);
-    return resolved;
+    try {
+      checkHostCancellation(ctx);
+      return { resolved, held };
+    } catch (error) {
+      await held?.close();
+      throw error;
+    }
   }
   return {
     loadPreviousStepOutput(stepId) {
@@ -90,23 +96,34 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     },
     collectImplementationFiles(worktreePath) {
       return hostCall(ctx, async () => {
-        const resolved = await bind(worktreePath);
-        const scope = await collectImplementationFiles(ctx, resolved, {
-          maxRound: ctx.round,
-          signal: ctx.signal,
-        });
-        return {
-          ...scope,
-          scanError: scope.scanError
-            ? scrubErrorPaths(safeErrorMessage(scope.scanError))
-            : scope.scanError,
-        };
+        const { resolved, held } = await bind(worktreePath);
+        try {
+          const scope = await collectImplementationFiles(ctx, resolved, {
+            maxRound: ctx.round,
+            signal: ctx.signal,
+            gitCwd: held ? `/proc/self/fd/${held.fd}` : resolved,
+          });
+          return {
+            ...scope,
+            scanError: scope.scanError
+              ? scrubErrorPaths(safeErrorMessage(scope.scanError))
+              : scope.scanError,
+          };
+        } finally {
+          await held?.close();
+        }
       });
     },
     readReviewDiff(options) {
       return hostCall(ctx, async () => {
-        const resolved = await bind(options.worktreePath);
-        return readReviewDiff(ctx, resolved, options);
+        const { resolved, held } = await bind(options.worktreePath);
+        try {
+          return await readReviewDiff(ctx, resolved, options, {
+            gitCwd: held ? `/proc/self/fd/${held.fd}` : resolved,
+          });
+        } finally {
+          await held?.close();
+        }
       });
     },
   };

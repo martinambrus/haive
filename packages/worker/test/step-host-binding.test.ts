@@ -1,4 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { gitExec } from '../src/repo/git-exec.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
@@ -20,6 +22,7 @@ beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'sp3-binding-'));
   tree = join(root, '.haive/worktrees/task');
   mkdirSync(tree, { recursive: true });
+  execFileSync('/usr/bin/git', ['init', '-q', tree]);
   symlinkSync(tree, join(root, 'link'));
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -89,3 +92,23 @@ vi.mock('../src/queues/cli-exec/secret-mask.js', () => ({ taskSecretMaskPolicy: 
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: vi.fn(async () => ({ output: latest.output })),
 }));
+
+it('keeps git in the held worktree after its path is replaced, then closes the descriptor', async () => {
+  let gitCwd: string | undefined;
+  vi.mocked(collectImplementationFiles).mockImplementationOnce(async (_ctx, _path, options) => {
+    gitCwd = (options as { gitCwd?: string })?.gitCwd;
+    renameSync(tree, tree + '-moved');
+    mkdirSync(tree);
+    try {
+      const result = await gitExec(['rev-parse', '--show-toplevel'], { cwd: gitCwd ?? tree });
+      expect(result.stdout.trim()).toBe(tree + '-moved');
+      return { files: [], total: 0, truncated: false, scanError: null };
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+      renameSync(tree + '-moved', tree);
+    }
+  });
+  await createStepHostServices(ctx).collectImplementationFiles(tree);
+  expect(gitCwd).toMatch(/^\/proc\/self\/fd\/\d+$/);
+  await expect(gitExec(['rev-parse', '--show-toplevel'], { cwd: gitCwd })).rejects.toBeDefined();
+});

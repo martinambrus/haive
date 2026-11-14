@@ -254,6 +254,18 @@ it('disables optional locks on review git reads and forwards the abort signal', 
     expect(call[3]?.signal).toBe(ctx.signal);
   }
 });
+it('uses the held cwd for capture git calls and both helper chains', async () => {
+  const gitCwd = '/proc/self/fd/42';
+  expect((await readReviewDiff(ctx, '/repo', options, { gitCwd })).status).toBe('ready');
+  for (const [cwd] of vi.mocked(gitRun).mock.calls) expect(cwd).toBe(gitCwd);
+  for (const [, , limits] of vi.mocked(collectImplementationFiles).mock.calls)
+    expect(limits?.gitCwd).toBe(gitCwd);
+  expect(loadDependencyPolicy).toHaveBeenCalledWith(
+    ctx,
+    '/repo',
+    expect.objectContaining({ gitCwd }),
+  );
+});
 it.each([false, true])(
   'caps cumulative retained contents and lists omissions (contents %s)',
   async (includeFileContents) => {

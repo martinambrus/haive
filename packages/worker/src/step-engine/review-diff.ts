@@ -175,6 +175,7 @@ export const REVIEW_GITLINK_PATHSPEC_BYTES = 32 * 1024;
 export const REVIEW_METADATA_BYTES = 16 * 1024 * 1024;
 export const REVIEW_RETAINED_CONTENT_BYTES = 16 * 1024 * 1024;
 interface CaptureLimits {
+  gitCwd?: string;
   retainedContentBytes?: number;
   gitlinkPathspecBytes?: number;
 }
@@ -198,10 +199,15 @@ export async function readReviewDiff(
   const limits = { maxRound: ctx.round, signal: ctx.signal };
   const run = async (args: string[], budget = REVIEW_METADATA_BYTES, change = false) => {
     checkHostCancellation(ctx);
-    const result = await gitRun(worktree, ['--no-optional-locks', ...args], undefined, {
-      signal: ctx.signal,
-      maxBuffer: budget,
-    });
+    const result = await gitRun(
+      captureLimits.gitCwd ?? worktree,
+      ['--no-optional-locks', ...args],
+      undefined,
+      {
+        signal: ctx.signal,
+        maxBuffer: budget,
+      },
+    );
     checkHostCancellation(ctx);
     if (isResourceLimitError({ code: result.noExit }))
       throw Object.assign(new Error('Git could not start due to a resource limit.'), {
@@ -232,7 +238,12 @@ export async function readReviewDiff(
         return true;
       }
     };
-    const readLimits = { ...limits, denyContent, propagateResourceErrors: true };
+    const readLimits = {
+      ...limits,
+      denyContent,
+      propagateResourceErrors: true,
+      gitCwd: captureLimits.gitCwd,
+    };
     scope = await collectImplementationFiles(ctx, worktree, readLimits);
     if (scope.scanError) return unavailable(scope, 'The implementation scan failed.');
     if (!scope.files.length) return unavailable(scope, 'The review scope is empty.');

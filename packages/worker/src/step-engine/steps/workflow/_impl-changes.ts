@@ -82,12 +82,13 @@ async function dirtyWorktreeFiles(
   worktreePath: string,
   signal?: AbortSignal,
   propagateResourceErrors = false,
+  gitCwd = worktreePath,
 ): Promise<DirtyScan> {
   try {
     // -z keeps a name literal; plain porcelain C-quotes one with a space or a non-ASCII byte.
     const { stdout } = await gitExec(
       ['--no-optional-locks', 'status', '--porcelain', '-z', '-uall'],
-      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER, signal },
+      { cwd: gitCwd, maxBuffer: GIT_MAX_BUFFER, signal },
     );
     const files: string[] = [];
     const untracked: string[] = [];
@@ -165,11 +166,12 @@ async function resolveDiffBase(
   forkPointOnly = false,
   signal?: AbortSignal,
   propagateResourceErrors = false,
+  gitCwd = worktreePath,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
       const { stdout } = await gitExec(['merge-base', 'HEAD', baseBranch], {
-        cwd: worktreePath,
+        cwd: gitCwd,
         timeout,
         signal,
       });
@@ -184,7 +186,7 @@ async function resolveDiffBase(
   }
   if (forkPointOnly) return null;
   try {
-    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout, signal });
+    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: gitCwd, timeout, signal });
     return 'HEAD';
   } catch (err) {
     if (propagateResourceErrors && isResourceLimitError(err)) throw err;
@@ -198,6 +200,7 @@ async function readChangeDiff(
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
   propagateResourceErrors = false,
+  gitCwd = worktreePath,
 ): Promise<string | null> {
   const base = await resolveDiffBase(
     worktreePath,
@@ -206,6 +209,7 @@ async function readChangeDiff(
     false,
     signal,
     propagateResourceErrors,
+    gitCwd,
   );
   if (!base) return null;
   const paths = denyContent
@@ -213,6 +217,7 @@ async function readChangeDiff(
         includeDeleted: true,
         signal,
         propagateResourceErrors,
+        gitCwd,
       })
     : undefined;
   if (paths === null) return null;
@@ -234,7 +239,7 @@ async function readChangeDiff(
         '--',
         ...(pathspecs ?? []),
       ],
-      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES, signal },
+      { cwd: gitCwd, maxBuffer: MAX_DIFF_BUFFER_BYTES, signal },
     );
     return stdout.toString();
   } catch (err) {
@@ -256,8 +261,10 @@ export async function readChangedPaths(
     forkPointOnly?: boolean;
     signal?: AbortSignal;
     propagateResourceErrors?: boolean;
+    gitCwd?: string;
   } = {},
 ): Promise<string[] | null> {
+  const gitCwd = options.gitCwd ?? worktreePath;
   const base = await resolveDiffBase(
     worktreePath,
     baseBranch,
@@ -265,11 +272,12 @@ export async function readChangedPaths(
     options.forkPointOnly,
     options.signal,
     options.propagateResourceErrors,
+    options.gitCwd,
   );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
-      cwd: worktreePath,
+      cwd: gitCwd,
       timeout: options.timeoutMs,
       signal: options.signal,
     });
@@ -293,8 +301,10 @@ async function readCommittedDeletions(
     forkPointOnly?: boolean;
     signal?: AbortSignal;
     propagateResourceErrors?: boolean;
+    gitCwd?: string;
   } = {},
 ): Promise<string[] | null> {
+  const gitCwd = options.gitCwd ?? worktreePath;
   const base = await resolveDiffBase(
     worktreePath,
     baseBranch,
@@ -302,12 +312,13 @@ async function readCommittedDeletions(
     options.forkPointOnly,
     options.signal,
     options.propagateResourceErrors,
+    options.gitCwd,
   );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
       ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--'],
-      { cwd: worktreePath, signal: options.signal },
+      { cwd: gitCwd, signal: options.signal },
     );
     const fields = stdout.split('\0');
     const paths: string[] = [];
@@ -331,6 +342,7 @@ async function changedLineNotes(
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
   propagateResourceErrors = false,
+  gitCwd = worktreePath,
 ): Promise<ChangedLineNotes> {
   const diff = await readChangeDiff(
     worktreePath,
@@ -338,6 +350,7 @@ async function changedLineNotes(
     signal,
     denyContent,
     propagateResourceErrors,
+    gitCwd,
   );
   return diff === null ? {} : parseChangedLineRanges(diff);
 }
@@ -359,6 +372,7 @@ export async function collectImplementationFiles(
     signal?: AbortSignal;
     denyContent?: (path: string) => boolean;
     propagateResourceErrors?: boolean;
+    gitCwd?: string;
   } = {},
 ): Promise<ImplementationFileSet> {
   return collectChangeSet(
@@ -368,6 +382,7 @@ export async function collectImplementationFiles(
     options.signal,
     options.denyContent,
     options.propagateResourceErrors,
+    options.gitCwd,
   );
 }
 
@@ -379,8 +394,9 @@ export async function collectChangeSet(
   signal?: AbortSignal,
   denyContent?: (path: string) => boolean,
   propagateResourceErrors = false,
+  gitCwd = worktreePath,
 ): Promise<ImplementationFileSet> {
-  const scan = await dirtyWorktreeFiles(worktreePath, signal, propagateResourceErrors);
+  const scan = await dirtyWorktreeFiles(worktreePath, signal, propagateResourceErrors, gitCwd);
   for (const f of scan.files) files.add(f);
 
   // Which lines of each file the change wrote. Measured against the fork point, so
@@ -392,6 +408,7 @@ export async function collectChangeSet(
     signal,
     denyContent,
     propagateResourceErrors,
+    gitCwd,
   );
   for (const p of scan.untracked) {
     const nested = scan.nestedRepositories[p];
@@ -402,6 +419,7 @@ export async function collectChangeSet(
     forkPointOnly: true,
     signal,
     propagateResourceErrors,
+    gitCwd,
   });
   for (const p of deletions ?? []) {
     files.add(p);
@@ -412,6 +430,7 @@ export async function collectChangeSet(
     forkPointOnly: true,
     signal,
     propagateResourceErrors,
+    gitCwd,
   });
   for (const p of committed ?? []) files.add(p);
   const all = [...files];
