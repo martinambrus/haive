@@ -1065,6 +1065,12 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         };
         testsPassed = null;
         degradedNote = output;
+        await recordCheckRun(
+          ctx,
+          { stepId: '08b-test-management', slot: 'test', iteration: args.iteration },
+          async () => testRun,
+          () => 'not_run',
+        );
       } else {
         // The DDEV web image carries neither the browser binaries nor the libraries they
         // link against, and nothing in the sandbox can add them. Idempotent, so it runs

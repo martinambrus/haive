@@ -306,3 +306,25 @@ it('starts selective timing after browser provisioning, then classifies environm
   } as never);
   expect(s.rows()[0]?.outcome).toBe('not_run');
 });
+
+it('records a selective DDEV runner environment stop, but no command creates no row', async () => {
+  const args = selectiveArgs();
+  const unavailable = fixture();
+  const result = await testManagementStep.apply(unavailable.ctx, {
+    ...args,
+    detected: { ...args.detected, primary: 'phpunit', frameworkRoots: { phpunit: '' }, ddev: true },
+    llmOutput: { ...args.llmOutput, tests_created: ['tests/FooTest.php'] },
+  } as never);
+  expect(result.testRun).toMatchObject({ ran: false, passed: false });
+  expect(result.degradedNote).toContain('DDEV runner unavailable');
+  expect(unavailable.rows()).toHaveLength(1);
+  expect(unavailable.rows()[0]).toMatchObject({ outcome: 'not_run', endedAt: expect.any(Date) });
+  expect(m.exec).not.toHaveBeenCalled();
+
+  const noCommand = fixture();
+  await testManagementStep.apply(noCommand.ctx, {
+    ...args,
+    llmOutput: { ...args.llmOutput, tests_created: ['notes.md'] },
+  } as never);
+  expect(noCommand.rows()).toHaveLength(0);
+});
