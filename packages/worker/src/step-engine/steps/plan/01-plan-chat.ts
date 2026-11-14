@@ -314,31 +314,32 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
 
   async recoverLegacyFormValues(detected, values, ctx) {
     const submitted = values.message;
-    const message =
+    const original = detected.pendingFromLegacySubmission ? detected.pendingQuestion : null;
+    const oversized =
       typeof submitted === 'string' && submitted.trim().length > PLAN_CHAT_MESSAGE_MAX_CHARS
         ? submitted
-        : detected.pendingFromLegacySubmission
-          ? detected.pendingQuestion
-          : null;
+        : null;
+    const message = oversized ?? original;
     if (!message) return null;
     if (!detected.nodeId) throw new Error('The plan for this conversation is no longer available.');
     // Stable per original/task: replay after a crash or duplicate job records it once.
     // The runner commits this insert with its owned edit-form park.
-    const hex = createHash('sha256')
-      .update(JSON.stringify([ctx.taskId, detected.nodeId, message]))
-      .digest('hex');
-    const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-    await ctx.db
-      .insert(schema.planNodeMessages)
-      .values({
-        id,
-        nodeId: detected.nodeId,
-        taskId: ctx.taskId,
-        role: 'user',
-        body: message,
-      })
-      .onConflictDoNothing({ target: schema.planNodeMessages.id });
-    return { ...detected, pendingQuestion: message, pendingFromLegacySubmission: undefined };
+    const preserve = async (body: string) => {
+      const hex = createHash('sha256')
+        .update(JSON.stringify([ctx.taskId, detected.nodeId, body]))
+        .digest('hex');
+      const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+      await ctx.db
+        .insert(schema.planNodeMessages)
+        .values({ id, nodeId: detected.nodeId!, taskId: ctx.taskId, role: 'user', body })
+        .onConflictDoNothing({ target: schema.planNodeMessages.id });
+    };
+    if (original && original !== message) await preserve(original);
+    await preserve(message);
+    return {
+      detected: { ...detected, pendingQuestion: message, pendingFromLegacySubmission: undefined },
+      ...(original && 'message' in values && !oversized ? { formValues: values } : {}),
+    };
   },
 
   reviseLoop: {

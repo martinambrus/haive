@@ -3070,29 +3070,36 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       current.formValues ??
       (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
     const recovery = stepDef.recoverLegacyFormValues;
-    const recoveredPark = recovery
+    const recoveredCheckpoint = recovery
       ? await db.transaction(async (tx) => {
           const recovered = await recovery(detected, (legacyValues ?? {}) as FormValues, {
             ...ctx,
             db: tx as unknown as Database,
           });
           if (!recovered) return null;
-          const formSchema = stepDef.form?.(ctx, recovered);
+          const formSchema = stepDef.form?.(ctx, recovered.detected);
           if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
           const row = await updateOwnedStep(tx, current.id, {
-            detectOutput: recovered,
-            formValues: null,
+            detectOutput: recovered.detected,
+            formValues: recovered.formValues ?? null,
             formSchema,
             status: 'waiting_form',
-            waitingStartedAt: new Date(),
+            waitingStartedAt: recovered.formValues ? null : new Date(),
             pauseFormOnRetry: false,
             statusMessage: null,
           });
-          return { row, formSchema };
+          return { row, formSchema, resumeSubmission: recovered.formValues !== undefined };
         })
       : null;
-    if (recoveredPark) {
-      return { status: 'waiting_form', ...recoveredPark };
+    if (recoveredCheckpoint) {
+      if (!recoveredCheckpoint.resumeSubmission)
+        return {
+          status: 'waiting_form',
+          row: recoveredCheckpoint.row,
+          formSchema: recoveredCheckpoint.formSchema,
+        };
+      current = recoveredCheckpoint.row;
+      detected = current.detectOutput;
     }
 
     // --- Pre-form LLM phase ---

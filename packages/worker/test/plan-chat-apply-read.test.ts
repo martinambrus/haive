@@ -117,7 +117,7 @@ describe('plan chat patches use the dispatch read', () => {
       {},
       f.ctx as never,
     );
-    expect(recovered?.pendingFromLegacySubmission).toBeUndefined();
+    expect(recovered?.detected.pendingFromLegacySubmission).toBeUndefined();
     expect((await planChatStep.detect!(f.ctx as never)).pendingQuestion).toBe(original);
   });
 
@@ -142,11 +142,13 @@ describe('plan chat patches use the dispatch read', () => {
     async (message) => {
       const f = await fixture();
       const original = 'old '.repeat(5001);
-      const detected = (await planChatStep.recoverLegacyFormValues!(
-        f.detected,
-        { message: original },
+      const recovered = (await planChatStep.recoverLegacyFormValues!(
+        { ...f.detected, pendingQuestion: original, pendingFromLegacySubmission: true },
+        { message },
         f.ctx as never,
       ))!;
+      expect(recovered.formValues).toEqual({ message });
+      const detected = recovered.detected;
       expect(planChatStep.llm!.skipIf!({ detected, formValues: {} })).toBe(true);
       await planChatStep.apply(f.ctx as never, {
         detected,

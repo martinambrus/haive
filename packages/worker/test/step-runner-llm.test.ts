@@ -599,6 +599,61 @@ describe('plan writers through the real runner dispatch', () => {
     },
   );
 
+  it.each([
+    ['saved', 'Edited replacement'],
+    ['job', 'Edited replacement'],
+    ['saved', ''],
+    ['job', ''],
+  ])(
+    'accepts a %s edit of a flagged original without asking twice: %s',
+    async (source, message) => {
+      const original = 'x'.repeat(20_001);
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: original,
+        pendingFromLegacySubmission: true as const,
+      };
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: planChatStep.form!({} as never, detected),
+        formValues: source === 'saved' ? { message } : null,
+      });
+      const enqueue = vi.fn();
+      const apply = vi.fn(planChatStep.apply);
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true, apply },
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        ...(source === 'job' ? { formValues: { message } } : {}),
+      });
+      expect(result.status).toBe(message ? 'revise' : 'done');
+      expect(apply).toHaveBeenCalledOnce();
+      expect(apply.mock.calls[0]![1]).toMatchObject({
+        detected: { pendingQuestion: original, pendingFromLegacySubmission: undefined },
+        formValues: { message: source === 'job' && !message ? null : message },
+      });
+      expect(state.inserts.filter((entry) => entry.table === 'plan_node_messages')).toMatchObject([
+        { row: { role: 'user', body: original } },
+      ]);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['saved', 'job'] as const)(
     'reopens an oversized pre-limit %s submission for editing',
     async (source) => {
