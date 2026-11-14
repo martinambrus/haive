@@ -145,6 +145,10 @@ export function newFootprint() {
   };
 }
 
+// Keep public-folder keys stable; external keys carry their tree to avoid collisions.
+const folderKey = (parts) => (parts[1] === 'modules' ? parts[2] : `${parts[1]}/${parts[2]}`);
+const folderPath = (key) => `app/${key.includes('/') ? key : `modules/${key}`}`;
+
 export function scanLayerNames(footprint, layer, names) {
   for (const member of names) {
     const isDir = member.endsWith('/');
@@ -169,22 +173,23 @@ export function scanLayerNames(footprint, layer, names) {
     });
     if (
       parts[0] === 'app' &&
-      parts[1] === 'modules' &&
+      ['modules', 'external-modules'].includes(parts[1]) &&
       (parts.length > 3 || (isDir && parts.length === 3))
     ) {
-      if (!footprint.folders.has(parts[2])) footprint.folders.set(parts[2], []);
+      const folder = folderKey(parts);
+      if (!footprint.folders.has(folder)) footprint.folders.set(folder, []);
       if (!isDir && parts.length === 4 && parts[3] === 'package.json') {
-        footprint.folders.get(parts[2]).push({ layer, member });
+        footprint.folders.get(folder).push({ layer, member });
       }
     }
     if (
       parts[0] === 'app' &&
-      parts[1] === 'modules' &&
+      ['modules', 'external-modules'].includes(parts[1]) &&
       parts.length === 3 &&
       !isDir &&
       parts[2] !== '.gitkeep'
     ) {
-      footprint.notDirs.add(parts[2]);
+      footprint.notDirs.add(folderKey(parts));
     }
     if (!isDir && parts[last] === '.npmrc') {
       footprint.npmrc.push({ layer, member, name: parts.join('/') });
@@ -209,17 +214,17 @@ export function comparePresence(key, footprint, folderNames, expect) {
 
   const folders = new Map();
   for (const [dir, found] of folderNames) {
-    if (found.length === 0) offend(`app/modules/${dir} has no package.json`);
+    if (found.length === 0) offend(`${folderPath(dir)} has no package.json`);
     for (const { layer, name } of found) {
       // The layer is named only where a dir holds several package.json files, to tell them apart.
       const at = found.length > 1 ? ` in layer ${layer}` : '';
       const id = idOf(name);
       if (id === null) {
         offend(
-          `app/modules/${dir} has a package.json named ${JSON.stringify(name)}${at}, not a module package`,
+          `${folderPath(dir)} has a package.json named ${JSON.stringify(name)}${at}, not a module package`,
         );
       } else {
-        folders.set(id, [...(folders.get(id) ?? []), `app/modules/${dir}${at}`]);
+        folders.set(id, [...(folders.get(id) ?? []), `${folderPath(dir)}${at}`]);
       }
     }
   }
@@ -235,7 +240,7 @@ export function comparePresence(key, footprint, folderNames, expect) {
   for (const component of footprint.badComponents) {
     offend(`${component} is not a module package name and version`);
   }
-  for (const name of footprint.notDirs) offend(`app/modules/${name} is not a directory`);
+  for (const name of footprint.notDirs) offend(`${folderPath(name)} is not a directory`);
 
   const compare = (found, source, describe) => {
     const want = new Set(wanted.filter((m) => m.source === source).map((m) => m.id));
