@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { TaskCancelledError, type StepContext } from '@haive/shared/step';
-import { readReviewDiff } from '../src/step-engine/review-diff.js';
+import { readReviewDiff, REVIEW_RETAINED_CONTENT_BYTES } from '../src/step-engine/review-diff.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
@@ -65,14 +65,13 @@ beforeEach(() => {
   vi.mocked(gitRun).mockImplementation(async (_cwd, args) => ({
     code: 0,
     stderr: '',
-    stdout:
-      args[0] === 'merge-base'
-        ? 'a'.repeat(40)
-        : args.includes('--name-status')
-          ? 'M\0a\0'
-          : args[0] === 'ls-files'
-            ? ''
-            : 'diff\n+z\n',
+    stdout: args.includes('merge-base')
+      ? 'a'.repeat(40)
+      : args.includes('--name-status')
+        ? 'M\0a\0'
+        : args.includes('ls-files')
+          ? ''
+          : 'diff\n+z\n',
   }));
   vi.mocked(openFileNoFollow).mockImplementation(
     async () =>
@@ -144,14 +143,13 @@ it('invalidates the hash when a git-changed file outside a capped scope changes'
   vi.mocked(gitRun).mockImplementation(async (_cwd, args) => ({
     code: 0,
     stderr: '',
-    stdout:
-      args[0] === 'merge-base'
-        ? 'a'.repeat(40)
-        : args.includes('--name-status')
-          ? 'M\0a\0M\0b\0'
-          : args[0] === 'ls-files'
-            ? ''
-            : 'diff\n+z\n',
+    stdout: args.includes('merge-base')
+      ? 'a'.repeat(40)
+      : args.includes('--name-status')
+        ? 'M\0a\0M\0b\0'
+        : args.includes('ls-files')
+          ? ''
+          : 'diff\n+z\n',
   }));
   let byte = 65;
   vi.mocked(openFileNoFollow).mockImplementation(
@@ -239,4 +237,54 @@ it.each(['EMFILE', 'ENFILE'])('rethrows %s for the step retry boundary', async (
   const error = Object.assign(new Error(code), { code });
   vi.mocked(openFileNoFollow).mockRejectedValueOnce(error);
   await expect(readReviewDiff(ctx, '/repo', options)).rejects.toBe(error);
+});
+
+it('disables optional locks on review git reads and forwards the abort signal', async () => {
+  expect((await readReviewDiff(ctx, '/repo', options)).status).toBe('ready');
+  for (const call of vi.mocked(gitRun).mock.calls) {
+    expect(call[1][0]).toBe('--no-optional-locks');
+    expect(call[3]?.signal).toBe(ctx.signal);
+  }
+});
+it.each([false, true])(
+  'caps cumulative retained contents and lists omissions (contents %s)',
+  async (includeFileContents) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', 'b'],
+      total: 2,
+    });
+    const run = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) =>
+      args[1].includes('--others') ? { code: 0, stdout: 'b\0', stderr: '' } : run(...args),
+    );
+    const result = await readReviewDiff(
+      ctx,
+      '/repo',
+      { ...options, includeFileContents },
+      { retainedContentBytes: 0 },
+    );
+    expect(result.status, JSON.stringify(result)).toBe('ready');
+    if (result.status !== 'ready') return;
+    const payload = JSON.parse(result.content);
+    expect(payload.untrackedContents).toEqual([]);
+    expect(payload.fileContents).toEqual([]);
+    expect(payload.coverage.partial).toBe(true);
+    expect(payload.omittedContents).toContainEqual({ path: 'b', reason: 'retained-content-limit' });
+  },
+);
+
+it('pins the production retention cap and spends one cumulative budget across files', async () => {
+  expect(REVIEW_RETAINED_CONTENT_BYTES).toBe(16 * 1024 * 1024);
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'b'],
+    total: 2,
+  });
+  const result = await readReviewDiff(ctx, '/repo', options, { retainedContentBytes: 1 });
+  expect(result.status, JSON.stringify(result)).toBe('ready');
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.fileContents).toEqual([{ path: 'a', content: 'z' }]);
+  expect(payload.omittedContents).toContainEqual({ path: 'b', reason: 'retained-content-limit' });
 });

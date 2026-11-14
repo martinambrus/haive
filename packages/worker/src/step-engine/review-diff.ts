@@ -22,7 +22,7 @@ import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
 import { loadDependencyPolicy } from './steps/workflow/_dependency-policy.js';
 import { resolveTaskReviewDimensions } from './review-dimension-context.js';
-import { checkHostCancellation, hostCall } from './step-host-services.js';
+import { checkHostCancellation, hostCall } from './host-call.js';
 
 interface ReviewFile {
   path: string;
@@ -44,6 +44,7 @@ interface ReviewFile {
   hash?: string;
   content?: string;
   untracked?: boolean;
+  contentOmission?: 'retained-content-limit' | 'maxBytes';
 }
 export interface ReviewSnapshot {
   forkPoint: string;
@@ -70,6 +71,12 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 function canonicalScope(scope: ImplementationFileSet): ImplementationFileSet {
   return { ...scope, files: [...scope.files].sort(compare) };
 }
+function fileIdentity({ content: _content, contentOmission: _omission, ...file }: ReviewFile) {
+  return file;
+}
+function snapshotIdentity(snapshot: ReviewSnapshot) {
+  return { ...snapshot, files: snapshot.files.map(fileIdentity) };
+}
 function unavailable(scope: ImplementationFileSet, reason: string): ReviewDiff {
   return { status: 'unavailable', scope, reason };
 }
@@ -85,12 +92,16 @@ export function serializeReviewPayload(
   const files = [...snapshot.files].sort((a, b) => compare(a.path, b.path));
   const includeFileContents = options.includeFileContents === true;
   const fileContents: { path: string; content: string }[] = [];
-  const omittedContents = includeFileContents
-    ? files.map((file) => ({
+  const omittedContents = files.flatMap((file) => {
+    if (file.untracked && file.kind === 'text' && file.content !== undefined) return [];
+    if (!includeFileContents && !(file.untracked && file.kind === 'text')) return [];
+    return [
+      {
         path: file.path,
-        reason: file.kind === 'text' ? 'maxBytes' : file.kind,
-      }))
-    : [];
+        reason: file.kind === 'text' ? (file.contentOmission ?? 'maxBytes') : file.kind,
+      },
+    ];
+  });
   const payload = {
     version: 1,
     includeFileContents,
@@ -99,17 +110,20 @@ export function serializeReviewPayload(
     scope: ordered(scope),
     coverage: {
       partial:
-        scope.truncated || files.some((f) => !['text', 'binary', 'deleted'].includes(f.kind)),
+        scope.truncated ||
+        files.some(
+          (f) => !['text', 'binary', 'deleted'].includes(f.kind) || f.contentOmission !== undefined,
+        ),
       listed: scope.files.length,
       total: scope.total,
     },
     dependencyPolicy: ordered(snapshot.dependencyPolicy),
     reviewDimensions: [...snapshot.reviewDimensions].sort(compare),
-    files: files.map(({ content: _content, ...file }) => file),
+    files: files.map(fileIdentity),
     diff: snapshot.diff,
-    // Untracked files are absent from git diff. Their full text is mandatory evidence.
+    // Untracked text has one home; retained-content omissions are explicit coverage gaps.
     untrackedContents: files
-      .filter((f) => f.untracked && f.kind === 'text')
+      .filter((f) => f.untracked && f.kind === 'text' && f.content !== undefined)
       .map((f) => ({ path: f.path, content: f.content })),
     fileContents,
     omittedContents,
@@ -123,7 +137,7 @@ export function serializeReviewPayload(
     };
   if (includeFileContents) {
     for (const file of files) {
-      if (file.kind !== 'text' || file.content === undefined) continue;
+      if (file.kind !== 'text' || file.untracked || file.content === undefined) continue;
       const index = omittedContents.findIndex((f) => f.path === file.path);
       const [omission] = omittedContents.splice(index, 1);
       fileContents.push({ path: file.path, content: file.content });
@@ -143,6 +157,10 @@ export function serializeReviewPayload(
   };
 }
 
+export const REVIEW_RETAINED_CONTENT_BYTES = 16 * 1024 * 1024;
+interface CaptureLimits {
+  retainedContentBytes?: number;
+}
 class DiffTooLarge extends Error {}
 const EMPTY_SCOPE: ImplementationFileSet = {
   files: [],
@@ -155,6 +173,7 @@ export async function readReviewDiff(
   ctx: StepContext,
   worktree: string,
   options: ReviewDiffOptions,
+  captureLimits: CaptureLimits = {},
 ): Promise<ReviewDiff> {
   let scope = EMPTY_SCOPE;
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0)
@@ -162,7 +181,7 @@ export async function readReviewDiff(
   const limits = { maxRound: ctx.round, signal: ctx.signal };
   const run = async (args: string[], budget = options.maxBytes) => {
     checkHostCancellation(ctx);
-    const result = await gitRun(worktree, args, undefined, {
+    const result = await gitRun(worktree, ['--no-optional-locks', ...args], undefined, {
       signal: ctx.signal,
       maxBuffer: budget,
     });
@@ -193,7 +212,11 @@ export async function readReviewDiff(
     const dependencyPolicy = await hostCall(ctx, () => loadDependencyPolicy(ctx, worktree, limits));
     const dimensions = await hostCall(ctx, () => resolveTaskReviewDimensions(ctx.db, ctx.taskId));
     const prefix = relUnder(ctx.repoPath, worktree);
-    const capture = async (): Promise<ReviewSnapshot> => {
+    const capture = async (retainContents: boolean): Promise<ReviewSnapshot> => {
+      let remainingContentBytes = Math.min(
+        captureLimits.retainedContentBytes ?? REVIEW_RETAINED_CONTENT_BYTES,
+        REVIEW_RETAINED_CONTENT_BYTES,
+      );
       const currentBase = (await run(['merge-base', 'HEAD', baseBranch])).trim();
       if (currentBase !== forkPoint)
         throw new Error('The task fork point changed during collection.');
@@ -269,10 +292,15 @@ export async function readReviewDiff(
         if (!entry || entry.kind !== 'file') {
           files.push({
             path: p,
-            kind:
-              entry?.kind === 'symlink'
+            kind: !entry
+              ? deleted.has(p)
+                ? 'deleted'
+                : 'missing'
+              : entry.kind === 'symlink'
                 ? 'link'
-                : (entry?.kind ?? (deleted.has(p) ? 'deleted' : 'missing')),
+                : entry.kind === 'directory'
+                  ? 'directory'
+                  : 'other',
             ...metadata,
           });
           continue;
@@ -298,6 +326,12 @@ export async function readReviewDiff(
           const hash = createHash('sha256');
           const chunks: Buffer[] = [];
           const delivered = paths.includes(p);
+          const requested = delivered && (options.includeFileContents === true || untracked.has(p));
+          const retain =
+            retainContents &&
+            requested &&
+            before.size <= options.maxBytes &&
+            before.size <= remainingContentBytes;
           const chunk = Buffer.alloc(64 * 1024);
           let size = 0,
             binary = false;
@@ -316,7 +350,8 @@ export async function readReviewDiff(
               }
             }
             size += read.bytesRead;
-            if (delivered && size <= options.maxBytes) chunks.push(Buffer.from(bytes));
+            if (retain && !binary && size <= options.maxBytes && size <= remainingContentBytes)
+              chunks.push(Buffer.from(bytes));
             checkHostCancellation(ctx);
           }
           if (!binary) {
@@ -336,18 +371,25 @@ export async function readReviewDiff(
           )
             throw new Error('A changed file changed during its read.');
           const content =
-            delivered && size <= options.maxBytes
+            retain && size <= options.maxBytes && size <= remainingContentBytes
               ? decodeUtf8Strict(Buffer.concat(chunks))
               : undefined;
           binary ||= content === null;
-          if (delivered && untracked.has(p) && !binary && content === undefined)
-            throw new DiffTooLarge();
+          if (!binary && content !== undefined) remainingContentBytes -= size;
           files.push({
             path: p,
             kind: binary ? 'binary' : 'text',
             mode: before.mode & 0o7777,
             size,
             hash: hash.digest('hex'),
+            ...(!binary && retainContents && requested && content === undefined
+              ? {
+                  contentOmission:
+                    before.size > options.maxBytes
+                      ? ('maxBytes' as const)
+                      : ('retained-content-limit' as const),
+                }
+              : {}),
             ...(untracked.has(p) ? { untracked: true } : {}),
             ...(!binary && content !== undefined && content !== null ? { content } : {}),
           });
@@ -381,7 +423,7 @@ export async function readReviewDiff(
           ])
         : '';
       const changeHash = createHash('sha256')
-        .update(JSON.stringify(ordered(files.map(({ content: _content, ...file }) => file))))
+        .update(JSON.stringify(ordered(files.map(fileIdentity))))
         .digest('hex');
       return {
         forkPoint,
@@ -393,15 +435,18 @@ export async function readReviewDiff(
         files: files.filter((file) => paths.includes(file.path)),
       };
     };
-    const first = await capture();
+    const first = await capture(true);
     const again = await collectImplementationFiles(ctx, worktree, limits);
     if (
       JSON.stringify(ordered(canonicalScope(scope))) !==
       JSON.stringify(ordered(canonicalScope(again)))
     )
       return unavailable(scope, 'The implementation scope changed during collection.');
-    const second = await capture();
-    if (JSON.stringify(ordered(first)) !== JSON.stringify(ordered(second)))
+    const second = await capture(false);
+    if (
+      JSON.stringify(ordered(snapshotIdentity(first))) !==
+      JSON.stringify(ordered(snapshotIdentity(second)))
+    )
       return unavailable(scope, 'The review content changed during collection.');
     return serializeReviewPayload(first, options);
   } catch (error) {

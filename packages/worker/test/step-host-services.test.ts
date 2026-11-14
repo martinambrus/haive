@@ -96,15 +96,14 @@ it('captures context identity and refuses a worktree retarget after the first ca
   mutable.taskId = 'other-task';
   mutable.userId = 'other-user';
   mutable.round = 99;
-  await host.loadPreviousStepOutput('previous');
-  expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
+  await host.collectImplementationFiles('/repo/.haive/worktrees/task');
   task.mockResolvedValue({
     id: 'task',
     userId: 'user',
     currentRound: 2,
     worktreePath: '/repo/other',
   });
-  await expect(host.loadPreviousStepOutput('previous')).rejects.toMatchObject({
+  await expect(host.collectImplementationFiles('/repo/other')).rejects.toMatchObject({
     name: 'StepHostBindingError',
   });
 });
@@ -152,4 +151,12 @@ it('normalizes filesystem errors during binding without exposing host paths', as
     name: 'StepHostBindingError',
     message: 'Context worktree directory is unavailable or refused.',
   });
+});
+
+it('loads previous output with identity checks but without opening a worktree', async () => {
+  await createStepHostServices(ctx).loadPreviousStepOutput('previous');
+  expect(openDirNoFollow).not.toHaveBeenCalled();
+  expect(task).toHaveBeenCalledOnce();
+  expect(step).toHaveBeenCalledOnce();
+  expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
 });

@@ -78,3 +78,19 @@ it('refuses a diff alone over budget and never approves empty scope', () => {
     ).status,
   ).toBe('unavailable');
 });
+
+it('emits untracked text exactly once when full contents are requested', () => {
+  const content = 'unique-untracked-text';
+  const result = serializeReviewPayload(
+    {
+      ...snapshot,
+      files: [{ path: 'a', kind: 'text', untracked: true, content }],
+    },
+    { maxBytes: 10000, includeFileContents: true },
+  );
+  expect(result.status).toBe('ready');
+  if (result.status !== 'ready') return;
+  expect(result.content.split(content)).toHaveLength(2);
+  expect(JSON.parse(result.content).fileContents).toEqual([]);
+  expect(JSON.parse(result.content).omittedContents).toEqual([]);
+});

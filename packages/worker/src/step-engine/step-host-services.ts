@@ -7,10 +7,11 @@ import {
   openDirNoFollow,
   relUnder,
 } from '@haive/shared/fs-safe';
-import { TaskCancelledError, type StepContext, type StepHostServices } from '@haive/shared/step';
+import { type StepContext, type StepHostServices } from '@haive/shared/step';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
 import { loadTaskWorktreeDecision, decidedWorktreePath } from '../repo/task-worktree.js';
+import { checkHostCancellation, hostCall } from './host-call.js';
 import { readReviewDiff } from './review-diff.js';
 
 export class StepHostBindingError extends Error {
@@ -20,43 +21,11 @@ export class StepHostBindingError extends Error {
   }
 }
 
-export function checkHostCancellation(ctx: StepContext): void {
-  ctx.throwIfCancelled();
-  if (ctx.signal.aborted) throw new TaskCancelledError();
-}
-
-/** Normalize aborts to the runner's control class, including during an awaited read.
- * The underlying operation retains its handlers and owns descriptor cleanup. */
-export async function hostCall<T>(ctx: StepContext, operation: () => Promise<T>): Promise<T> {
-  checkHostCancellation(ctx);
-  let abort: () => void = () => {};
-  const cancelled = new Promise<never>((_, reject) => {
-    abort = () => {
-      try {
-        checkHostCancellation(ctx);
-      } catch (error) {
-        reject(error);
-      }
-    };
-    ctx.signal.addEventListener('abort', abort, { once: true });
-  });
-  try {
-    const value = await Promise.race([operation(), cancelled]);
-    checkHostCancellation(ctx);
-    return value;
-  } catch (error) {
-    checkHostCancellation(ctx);
-    throw error;
-  } finally {
-    ctx.signal.removeEventListener('abort', abort);
-  }
-}
-
 export function createStepHostServices(context: StepContext): StepHostServices {
   // Capture identity: mutating a consumer's context cannot retarget these capabilities.
   const ctx = { ...context };
   let boundWorktree: string | undefined;
-  async function bind(requestedPath?: string): Promise<string> {
+  async function verifyIdentity() {
     checkHostCancellation(ctx);
     if (!Number.isSafeInteger(ctx.round) || ctx.round < 0)
       throw new StepHostBindingError('Invalid context round.');
@@ -74,6 +43,10 @@ export function createStepHostServices(context: StepContext): StepHostServices {
       task.currentRound < ctx.round
     )
       throw new StepHostBindingError('Task step or round does not match the context.');
+    return task;
+  }
+  async function bind(requestedPath?: string): Promise<string> {
+    const task = await verifyIdentity();
     const decision = await loadTaskWorktreeDecision(ctx.db, {
       taskId: ctx.taskId,
       columnBranch: task.worktreeBranch,
@@ -110,7 +83,7 @@ export function createStepHostServices(context: StepContext): StepHostServices {
   return {
     loadPreviousStepOutput(stepId) {
       return hostCall(ctx, async () => {
-        await bind();
+        await verifyIdentity();
         return loadPreviousStepOutput(ctx.db, ctx.taskId, stepId, ctx.round);
       });
     },
