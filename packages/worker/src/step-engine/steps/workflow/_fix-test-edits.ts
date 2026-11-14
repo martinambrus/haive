@@ -402,15 +402,18 @@ export function fixTestReviewNotice(records: readonly FixTestRecord[]): string {
     .join('\n');
 }
 
-export function fixTestEditsRow(records: readonly FixTestRecord[]): StatusSummaryItem | null {
+export function fixTestEditsRow(
+  records: readonly FixTestRecord[],
+  limits: { bytes?: number; lines?: number } = {},
+): StatusSummaryItem | null {
   if (!records.length) return null;
-  let bytes = TEST_GATE_BYTES;
-  let lines = TEST_GATE_LINES;
+  let bytes = limits.bytes ?? TEST_GATE_BYTES;
+  let lines = limits.lines ?? TEST_GATE_LINES;
   const body = [
     'Host-captured test edits during repair. These are display evidence, not a verdict on expectation weakening. Final verification and review use the current tree, including these edits. Old tests are not replayed. Renames appear as delete/add. At most the latest 30 repair passes are shown.',
     '',
   ];
-  for (const r of records.slice(0, 30)) {
+  for (const r of records.slice(-30).reverse()) {
     body.push(
       `**${asPlainText(r.stepId)} — round ${r.round}, pass ${r.pass}** (invocation ${asPlainText(r.invocationId)}; before reference ${asPlainText(r.beforeEventId)})`,
     );

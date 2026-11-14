@@ -208,6 +208,16 @@ describe('host fix-pass test evidence', () => {
       expect(isTestEvidencePath(path), path).toBe(false);
   });
 
+  it('spends the gate patch budget on the newest repair passes first and states cuts', () => {
+    const records = [1, 2, 3].map((pass) =>
+      record({ pass, changes: [{ path: 'tests/a', kind: 'modified', patch: '+first\n+last' }] }),
+    );
+    const row = fixTestEditsRow(records, { lines: 2 })!;
+    expect(row.body!.indexOf('pass 3')).toBeLessThan(row.body!.indexOf('pass 1'));
+    expect(row.body!.match(/\+first/g)).toHaveLength(1);
+    expect(row.body).toContain('Display patch cut');
+  });
+
   it('renders the saved record with multiline fenced patches, explicit cuts and safe paths', () => {
     const row = fixTestEditsRow([
       record({
