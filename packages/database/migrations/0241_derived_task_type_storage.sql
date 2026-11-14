@@ -1,7 +1,9 @@
 -- Rollback: revert the application code. The new nullable columns are harmless to old code;
 -- the enum value cannot be dropped and is inert when unused. No executable down migration.
 -- Optional manual cleanup, in a maintenance window. This refuses every task pin or reference,
--- including terminal and dead tasks. Keep the migration journal consistent before roll-forward.
+-- including terminal and dead tasks. It runs once: a second run fails on the dropped column.
+-- After it succeeds, delete the journal row so a later deploy applies this file again:
+-- DELETE FROM "schema_migrations" WHERE "id" = '0241_derived_task_type_storage';
 -- BEGIN MANUAL ROLLBACK
 -- DO $$ BEGIN
 --   LOCK TABLE "tasks", "task_type_definitions" IN ACCESS EXCLUSIVE MODE;
