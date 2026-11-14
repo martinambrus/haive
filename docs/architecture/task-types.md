@@ -70,7 +70,7 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 
 1. register every core step, then the static-list asserts (provider-sensitive, CLI-dispatch,
    skippable, closed path sets);
-2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 35 entries);
+2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 58 entries);
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
@@ -208,11 +208,31 @@ before, a run list without 07 ran 07 off-list and then completed the task.
 `unknown-step`, `unmet-need` (no EARLIER step provides it), `too-late`, `unfulfilled`,
 `missing-loop-target`, `duplicate-step`, `loop-after-closing` and `empty`. `repository` is implicit: no
 step can provide or remove it, so a module step cannot fake a repository. Built-in seeded lists are not
-composition-checked at boot; a guard test (`worker/test/composable-core.test.ts`) asserts that the
-composable steps of the shipped environment and workflow orders raise no ordering issue (`too-late`,
-`loop-after-closing`, `missing-loop-target`, `duplicate-step`), so an ordering rule cannot contradict
-the shipped workflow. Needs and provides are not guarded that way: a need a non-composable step
-provides would read as `unmet-need` once that step is filtered out. There is no `STEP_LOOP_TARGETS`
+composition-checked at boot. A guard test (`worker/test/composable-core.test.ts`) enumerates
+`taskRunListIds`, the same selector `buildRunList` uses, for every `EXECUTION_PATHS` value and the
+unset pre-triage path, including the environment prelude. Every shipped step must have a composable
+entry, and every complete path must validate with **no issues**, including `unmet-need`; no step or
+issue is filtered out. The environment and registered workflow ordering guard stays too. The core
+catalog has 58 entries: all 54 registered workflow steps plus the four environment steps.
+
+Requirements describe inputs a step actually uses; optional report sections and explicit fallbacks
+stay optional. `04a-spec-audit` requires the draft spec and reports to `05a-resolve-spec-warnings`;
+`08c2-code-audit` requires a worktree and reports to gate 2. Neither audit loops. Adversarial QA also
+reports only; its human review and gate 2 restart at `07-phase-2-implement`, while business-requirements
+review revises at `03b-business-requirements`. None of those review gates closes the run.
+`06c-dag-execute` requires the sprint planner that writes its DAG rows; browser verification requires
+a runtime. Pre-sync and final RAG indexing have separate scope tokens. Consumers still read core
+outputs by their literal ids; these entries do not implement replacement roles or derived types.
+
+Optional providers constrain ordering when present. For example, `11b-kb-commit` needs the captured
+learnings, but not skill sync: `plan_tasklist` ships without `11d-skill-sync`. Skill sync precedes the
+knowledge commit when included, using `knowledge-committed`. Run configuration precedes the newly
+catalogued sprint, browser, QA and insight consumers of its presets. Implementation and simplification
+precede the new audit/browser/approval tokens; insight edits run after reviews as shipped, but revoke
+`clean-tree` and precede commit. Built-in step behavior, path membership and boot admission stay as
+before.
+
+There is no `STEP_LOOP_TARGETS`
 table: loop targets live on each entry. `validateTaskTypeDefaults`: every preset or loop-limit key must
 be a step of the type, and a loop limit only on a `loopBudgetEditable` step (1–50).
 

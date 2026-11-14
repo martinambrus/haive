@@ -65,8 +65,8 @@ Re-measure all of this in Phase 0: it is a preview and may have changed.
   triage picks the execution path and `buildRunList` (`worker/src/queues/run-list.ts`) builds a
   path-aware list.
 - The editor has no way to start from a built-in type.
-- `CORE_COMPOSABLE_STEPS` (`worker/src/step-engine/composable-core.ts`) has 35 entries; 04a, 08c2, 08d
-  and 09 are among the workflow steps without one, so a composed type cannot include them.
+- `CORE_COMPOSABLE_STEPS` (`worker/src/step-engine/composable-core.ts`) had 35 entries; 04a, 08c2,
+  08d and 09 were among the 23 workflow steps without one. Prerequisite 1 below added them all.
 - Later steps read earlier ones by id: gate 2 (`09-gate-2-verify-approval.ts`) reads 08c2's output by
   id, so a different step in its place is invisible to it.
 - The fix loop targets only `07-phase-2-implement`, the one step that reads the recorded diagnosis.
@@ -121,6 +121,8 @@ A replacement must keep every reader of the replaced step working:
 
 1. Composable entries for 04a, 08c2, 08d and 09, so a derived workflow can hold every built-in step.
    Extend the guard test that the shipped workflow order raises no ordering issue.
+   **Prerequisite 1 implemented:** 23 entries added (58 total); every shipped workflow path,
+   including its environment prelude, now has complete catalog coverage and validates with no issues.
 2. The step SDK seam: the step types and helpers a module step needs without importing
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
