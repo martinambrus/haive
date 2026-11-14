@@ -252,6 +252,75 @@ upcoming-CLI list, completion release) read the snapshot. Step flags come from `
 Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the run list: always on
 `run_app`, and on a snapshot task when the composition stays as valid without it.
 
+## Derived overlays (PR1 of 4)
+
+The shared foundation exists in `modularity/derived-task-types.ts` and `@haive/shared/run-list`.
+There is no persisted `derived` strategy, derived route or runtime/UI behavior in PR1. The accepted
+delivery plan and the remaining storage/runtime/editor gates are in
+[Derived task types](../plans/deeppattern-module.md#part-a-derived-task-types-core).
+
+`derivedChangesSchema` is a strict union of `{replace, with}`, `{insertAfter, step}` and `{remove}`:
+extra keys are refused, every ID uses the existing core/module/custom grammar and fits 128 characters.
+An empty overlay is legal; `MAX_DERIVED_CHANGES` is 64, and `createDerivedChangesSchema` accepts a
+smaller injected bound for controls. `DerivedRunPlanV1` describes future task pins: version 1,
+base slug/strategy and ordered candidates/fingerprint, overlay revision/changes, repository policy,
+composable declarations, final candidates/outcomes, common prefix and historical warnings.
+It is a shared type, not a database writer or a persisted-data parser.
+
+V1 bases are builtin-only, and workflow is the only eligible base. No admin/module/derived parent
+or derived-of-derived chain is allowed. `derivedBaseEligibility` gives `run_app` the precise
+`run-app-mode-selection-unavailable` reason: its runtime is selected after `01-declare-deps`,
+complete composable lists are unavailable, and its finalization seam differs from triage. Admin-only
+means authoring; later signed-in consumption retains the custom-types switch and module admission.
+
+`workflowBaseCandidates` calls the existing `taskRunListIds` for null/pre-triage and EVERY
+`EXECUTION_PATHS` value. Every candidate includes the environment prelude. The shared
+`OrderedStepCatalogRow` shape carries `stepId`, `workflowType`, `stepIndex`;
+`catalogWorkflowBaseCandidates` reconstructs registry index order, refusing duplicate IDs or
+ambiguous equal indices rather than sorting IDs. `baseCandidateParityIssues` compares paths and
+every ordered ID, detecting missing/extra/duplicate candidates as well as reordering. API catalog
+reads and synced-catalog admission belong to a later PR; the current ID-sorted `readStepCatalog`
+must not be used as derived base order.
+
+`evaluateDerivedTaskType` is pure, with no DB or worker import. Callers supply every base candidate,
+parsed changes, installed IDs and composable declarations (including merged prompt IDs when used).
+It applies changes sequentially against actual IDs per candidate:
+
+- `applied` changes the list; a target absent from that path but known to the base is `path-absent`.
+  A target absent from the whole base and not earlier introduced is `stale-target`, a warning.
+  Neither skipped outcome mutates the list, and no rename is inferred.
+- A removed target is `target-removed-by-change`, a hard issue. There is no alias to a replacement.
+  Earlier inserted steps may anchor later changes; skipped/refused producers propagate their outcome,
+  root operation index and reason through chains. A skipped insertion never renames an existing base ID.
+  Repeated inserts at a surviving anchor put the later insertion nearest that anchor.
+- Hard failures have an explicit `refused` outcome. Missing active installed payloads are hard
+  issues; inactive payloads are not diagnosed. Every active replace is refused with
+  `replacement-contract-unavailable` until output contracts, `replaces` and role readers land in
+  prerequisite 4. Equal provided/required tokens never authorize replacement.
+- The first three workflow steps are untouchable: `00-model-health-workflow`, `00a-sync-base`,
+  `00-triage`. Refuse remove/replace and insertion inside that prefix; insertion after triage is
+  legal. Verify the final prefix too. A protected replace also reports replacement unavailability.
+- Diagnose duplicate final IDs and missing installed final steps. Run `validateComposition` on
+  EVERY final candidate, retaining all issues, including unknown declarations and unmet needs.
+  Optional prompt validation checks quotes per path and orphan entries against the union.
+
+Future task creation must lock/read the base, overlay, module state and ordered catalog coherently,
+validate every candidate and pin v1 at INSERT before executing only the shared prefix. Pin raw used
+prompt definitions across the union in `custom_steps`, with the null/full candidate initially in
+`run_list_snapshot`. At first triage, lock owned step before task, fence ownership/round/epoch,
+validate the selected pinned candidate/declarations and resolvable IDs, then atomically store path,
+chosen snapshot and event. Same-choice replay is idempotent; a different choice returns
+`derived_path_pinned`; unselected triage cannot be skipped. Retry (including full Retry), Resume,
+fix/revise resets and boot recovery retain the pin. This will be the only new snapshot UPDATE
+exception; plans and raw prompts remain INSERT-only. No such exception is enabled in PR1.
+
+Use candidate unions for pre-selection traits, dependencies, integrations and saved CLI previews,
+and chosen snapshots afterward. Default maps belong to the derived row, validated against the union;
+do not inherit live base defaults. Saved editor diagnostics recompute against today's base, while task
+warnings remain pinned history. Invalid candidates block save/preview (400) or creation (409); stale
+warnings alone are permitted only when every final candidate validates. Existing builtin and static
+admin paths keep their current semantics.
+
 ## The admin api and the editor
 
 `GET|POST /admin/task-types`, `GET|PATCH|DELETE /admin/task-types/:slug`, `GET
