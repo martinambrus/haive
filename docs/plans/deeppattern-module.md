@@ -65,7 +65,7 @@ Re-measure all of this in Phase 0: it is a preview and may have changed.
   The built-in `workflow` uses the `workflow_paths` strategy:
   triage picks the execution path and `buildRunList` (`worker/src/queues/run-list.ts`) builds a
   path-aware list.
-- The editor has no way to start from a built-in type.
+- The editor offers “Duplicate and customize” on eligible built-ins, opening an unsaved overlay.
 - `CORE_COMPOSABLE_STEPS` (`worker/src/step-engine/composable-core.ts`) had 35 entries; 04a, 08c2,
   08d and 09 were among the 23 workflow steps without one. Prerequisite 1 below added them all.
 - Later steps read earlier ones by id: gate 2 (`09-gate-2-verify-approval.ts`) reads 08c2's output by
@@ -217,12 +217,13 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
    Status: PR2 of 4 implemented.
-3. Derived types. **PR3 of 4 implemented:** shared schemas/evaluator and ordered catalog adapter,
+3. Derived types. **PR4 of 4 implemented (prerequisite 3 complete):** shared schemas/evaluator and ordered catalog adapter,
    additive storage in 0240/0241, and the atomic API/shared/worker admission, task pinning, triage
    selection and execution/advisory/dependency readers. Tasks pin all candidates before triage;
    selection reuses that plan with step-before-task fencing. Stale operations remain explicit
    diagnostics; active replacements still refuse until prerequisite 4. Built-in/static behavior
-   is retained. No web editor enablement (PR4). The four PRs are:
+   is retained. The existing web editor now authors ordered changes with immediate shared validation,
+   debounced server previews, path/stale warnings and overlay-only saves. The four PRs are:
    1. Shared foundation above; controls cover operations/order, skips/staleness/consumed anchors,
       every path/prelude, duplicate/missing payloads, protected prefix, replacement refusal and real
       registry/catalog parity. Rollback: revert code.
@@ -238,7 +239,7 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
       crash/recovery and Retry/Skip/Stop/Cancel/epoch races, candidate-only module dependencies,
       audit rollback, built-in/static/custom prompt and defaults regressions. Disable new creation
       for rollback; retain runtime support for existing pins.
-   4. Existing editor extension/diagnostics; controls cover unsaved duplicate, local/server parity,
+   4. Existing editor extension/diagnostics implemented; controls cover unsaved duplicate, local/server parity,
       path preview, stale responses, warnings, 403, 409 Reload and static composer/creator defaults.
       Rollback: revert UI; persisted plans/API continue working.
 4. Output contracts and `replaces` for 08c and 08c2, and the role-resolving reader helper.

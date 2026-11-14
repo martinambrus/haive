@@ -284,10 +284,10 @@ upcoming-CLI list, completion release) read the snapshot. Step flags come from `
 Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the run list: always on
 `run_app`, and on a snapshot task when the composition stays as valid without it.
 
-## Derived overlays (PR3 of 4)
+## Derived overlays (PR4 of 4)
 
 Derived types are admin-authored overlays of the built-in workflow. The API and worker support
-admission, task pins and triage; the web editor is PR4. V1 accepts only the builtin `workflow`
+admission, task pins and triage; the existing web editor authors the overlay. V1 accepts only the builtin `workflow`
 with `workflow_paths`. Admin/module/derived parents are refused. `run_app` remains ineligible:
 it chooses a runtime after `01-declare-deps`, lacks complete composable lists and needs a
 finalization seam separate from triage. Derived `requiresRepository` follows the locked base.
@@ -383,7 +383,26 @@ invalidity is 400; authoritative task admission is 409. Detail recomputes the sa
 stored application diagnostics. Task list and detail/poll payloads omit the full pinned plan; detail
 still computes and returns historical warnings before stripping it. A persisted derived row never
 makes either list endpoint return 500.
-The creator protocol remains static-only, and no step-specific or derived editor UI is added here.
+The creator protocol and panel remain static-only; existing static editor/draft behavior is unchanged.
+
+**Editor.** Built-in list/detail actions use catalog eligibility: “Duplicate and customize” opens the
+existing create editor with a blank slug, copied display metadata, the base slug and no changes,
+without writing. An empty base query opens the static editor. Ineligible actions show the catalog's
+precise reason. FormRenderer authors ordered operations live, including incomplete/invalid rows,
+without a separate per-operation submit action; the composer reuses its palette, prompt
+editor, loop limits and integration overview beside a read-only path preview. There is no editable
+flattened base list. Shared evaluation runs on edits; server preview is debounced 350 ms and aborts
+or ignores superseded responses. Neither response replaces unsaved fields or operations.
+Skipped-on-path and stale-target warnings remain separate. Stale warnings merge by operation index
+and warning kind, with server diagnostics taking precedence. Removing a core gate (matched by exact
+step id) or implementation step warns without adding a prohibition beyond server composition validation. Orphan prompt definitions
+stay repairable. Presets/limits belong to the derived row, with obsolete defaults reported rather
+than inherited from the base. Saves send overlay/admin fields only, respect editableFields and
+expectedUpdatedAt and retain Reload on 409. Derived authoring stops retries after 403 and keeps the
+reason visible until a successful reload; static saves retain their existing retry behavior. Create
+preserves the base's repository requirement even though that field is absent from the derived form.
+The admin list shows current
+diagnostics; task detail renders the warnings historically pinned at creation through MarkdownView.
 
 Pins freeze ID order/selection and raw prompts, not historical code or account availability.
 Rollback disables new derived creation and retains a capable worker until existing derived tasks
@@ -605,8 +624,8 @@ tasks are listed in the task list like any other task (a product decision).
   forever); `GET /admin/task-type-drafts/:taskId` answers its owner only, with `awaitingMessage` true
   only while the newest step row is `waiting_form` with `waiting_started_at` set.
 
-- **The panel** (`task-type-creator-panel.tsx`) sits in the editor on the create page and on an
-  admin-made type, never on a built-in or module type. It remembers the conversation per viewer and
+- **The panel** (`task-type-creator-panel.tsx`) sits in the static editor on its create page and on an
+  admin-made static type, never on a derived, built-in or module type. It remembers the conversation per viewer and
   slug in localStorage (`haive:task-type-draft:<slug|new>`; the page works without storage), resumes it
   unless the GET answers 404 or a finished status, and polls every 2 s while the agent works. "Load
   into editor" puts the latest draft into the form as unsaved changes and sends nothing; Save stays
