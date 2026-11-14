@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -81,5 +81,27 @@ it.each(['plain', 'escaped-quote'])(
     await expect(
       ensureEnvKeys(file, [{ key: 'REQUIRED', generate: 'never' }]),
     ).rejects.toMatchObject({ refusal: 'env-key-missing' });
+  },
+);
+
+it.each(['regular', 'symlink'])(
+  'replaces a leftover %s temp without following it',
+  async (kind) => {
+    const original = `KEEP=${randomBytes(20).toString('hex')}\n`;
+    await writeFile(file, original);
+    const temp = `${file}.haive-tmp`;
+    const target = join(dir, 'target.env');
+    const untouched = randomBytes(24).toString('hex');
+    if (kind === 'symlink') {
+      await writeFile(target, untouched);
+      await symlink(target, temp);
+    } else await writeFile(temp, 'incomplete write');
+    expect(await ensureEnvKeys(file, [{ key: 'NEW', generate: 'hex', bytes: 16 }])).toEqual([
+      'NEW',
+    ]);
+    const text = await readFile(file, 'utf8');
+    expect(text).toMatch(new RegExp(`^${original}NEW=[a-f0-9]{32}\\n$`));
+    await expect(stat(temp)).rejects.toMatchObject({ code: 'ENOENT' });
+    if (kind === 'symlink') expect(await readFile(target, 'utf8')).toBe(untouched);
   },
 );

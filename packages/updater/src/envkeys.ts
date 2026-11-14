@@ -74,7 +74,10 @@ export async function ensureEnvKeys(
     return `${entry.key}=${randomBytes(entry.bytes).toString('hex')}\n`;
   });
   const temp = `${file}.haive-tmp`;
-  // Exclusive create: never follow a leftover link or overwrite a concurrent writer's temp file.
+  // Unlink crash leftovers without following links; wx still refuses a raced-in entry.
+  await unlink(temp).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
   const output = await open(temp, 'wx', owner.mode & 0o7777);
   try {
     await output.chown(owner.uid, owner.gid);
