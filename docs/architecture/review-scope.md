@@ -208,6 +208,10 @@ are loaded as metadata before gate detect persists them; patch text is loaded in
 change reads no change to the classified test paths, not a claim of universal coverage. When a
 withheld secret test file kept its size and mode, the pass says so and reads no measurable change
 instead, since a same-size content edit to it cannot be seen.
+When a pass changes a withheld or denied path, under any status, it stores no content for any
+of its files, since a move shows as a delete plus an add and could carry the secret to an
+allowed name; the pass keeps its hashes and line counts only (gate 3's commit excerpts follow
+the same rule).
 
 The row inherits the similar-sites trust boundary. Paths are re-sanitised and escaped.
 Before patch construction and again before display, CRLF/lone CR become LF and U+0085,

@@ -190,6 +190,32 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     ).toEqual(saved!.payload);
   });
 
+  it('keeps no content when a protected fixture moves to an allowed name', async () => {
+    const meta = await seed();
+    const secret = `TOKEN=${randomBytes(24).toString('hex')}`;
+    await writeFile(join(meta.workspace, 'tests/.env.test'), secret);
+    await beginFixTestCapture(db, meta);
+    await rm(join(meta.workspace, 'tests/.env.test'));
+    await writeFile(join(meta.workspace, 'tests/config.json'), secret);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after move');
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    const [record] = await loadFixTestRecords(db, meta.taskId, 30, { patches: true });
+    expect(record!.changes.map((c) => c.path).sort()).toEqual([
+      'tests/.env.test',
+      'tests/a.test.ts',
+      'tests/config.json',
+    ]);
+    expect(JSON.stringify(record)).not.toContain(secret);
+    const blobs = await db
+      .select()
+      .from(schema.fixTestBlobs)
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
+    expect(blobs).toHaveLength(0);
+  });
+
   it('does not publish a complete after-image when cancellation wins during capture', async () => {
     const meta = await seed();
     await beginFixTestCapture(db, meta);

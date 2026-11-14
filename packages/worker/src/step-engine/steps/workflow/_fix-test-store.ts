@@ -386,16 +386,21 @@ export async function finishFixTestCapture(
     const changed = [...new Set([...old.keys(), ...next.keys()])].filter((p) =>
       testFileChanged(old.get(p), next.get(p)),
     );
-    const withheld = new Set(
-      after.files?.filter((f) => f.status === 'content withheld').map((f) => f.path),
-    );
-    if (!interrupted && beforeManifest.state === 'captured' && after.state === 'captured')
+    const withheld = (p: string) =>
+      old.get(p)?.status === 'content withheld' || next.get(p)?.status === 'content withheld';
+    // A protected path in the change under any status may have moved its bytes to an allowed
+    // name (a rename shows as delete + add), so the whole op keeps no content, as gate 3 does.
+    const protectedChanged = changed.some((p) => withheld(p) || finishDeniesPath(p));
+    if (
+      !interrupted &&
+      !protectedChanged &&
+      beforeManifest.state === 'captured' &&
+      after.state === 'captured'
+    )
       await retain(
         tx,
         run.taskId,
-        changed
-          .filter((p) => !withheld.has(p) && !finishDeniesPath(p))
-          .flatMap((p) => [old.get(p), next.get(p)].filter((f): f is TestFile => !!f)),
+        changed.flatMap((p) => [old.get(p), next.get(p)].filter((f): f is TestFile => !!f)),
         options,
       );
     const measured = interrupted
