@@ -119,6 +119,33 @@ describe('host fix-pass test evidence', () => {
     expect(result.changes[0]!.patch.split('\n').length).toBeLessThan(20);
   });
 
+  it('withholds generated secrets under the effective allow and extend policy', async () => {
+    const anchor = await fixture();
+    const value = randomBytes(18).toString('hex');
+    await mkdir(join(anchor, 'tests/.auth'));
+    for (const name of [
+      '.env.test',
+      'id_rsa',
+      '.auth/user.json',
+      'storage-state.json',
+      'custom.json',
+      '.env.example',
+    ])
+      await writeFile(join(anchor, 'tests', name), value);
+    const image = await captureTestImage(anchor, '', {
+      policy: secretMaskPolicy({ allow: ['**/id_rsa'], denyExtend: ['**/custom.json'] }),
+    });
+    for (const name of ['.env.test', '.auth/user.json', 'storage-state.json', 'custom.json']) {
+      const file = image.files!.find((f) => f.path === `tests/${name}`)!;
+      expect(file.status).toBe('content withheld');
+      expect(file.base64).toBeUndefined();
+    }
+    for (const name of ['id_rsa', '.env.example'])
+      expect(image.files!.find((f) => f.path === `tests/${name}`)!.base64).toBe(
+        Buffer.from(value).toString('base64'),
+      );
+  });
+
   it('keeps CR and Unicode line-ending injections inside the web Markdown code block', async () => {
     const req = createRequire(new URL('../../../../../web/package.json', import.meta.url));
     const React = req('react');

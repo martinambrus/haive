@@ -113,7 +113,7 @@ export async function captureTestImage(
             const before = await fh.stat({ bigint: true });
             file.size = Number(before.size);
             file.mode = Number(before.mode & 0o777n);
-            const withheld = false;
+            const withheld = secretMaskDeniesPath(policy, path);
             const keep = !withheld && file.size <= maxBytes && file.size <= contentBytes;
             const hash = createHash('sha256');
             const chunks: Buffer[] = [];

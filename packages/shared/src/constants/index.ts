@@ -1362,6 +1362,11 @@ export const DEFAULT_SECRET_DENY_GLOBS = [
   '**/.pypirc',
   '**/.netrc',
   '**/.git-credentials',
+  // Browser authentication snapshots hold reusable cookies and bearer tokens.
+  '**/.auth/**',
+  '**/storage-state*.json',
+  '**/storageState*.json',
+  '**/storage_state*.json',
   '**/.cargo/credentials*',
   '**/.terraformrc',
   // framework config secrets (Drupal/PHP). settings.local.php holds real DB
