@@ -213,6 +213,18 @@ export function postUserActive(taskId: string, stepRowId: string, deltaMs: numbe
   }).catch(() => {});
 }
 
+/** Additive plan attention uses the same best-effort, no-retry delivery. */
+export function postPlanUserActive(repositoryId: string, deltaMs: number): void {
+  if (deltaMs <= 0) return;
+  void fetch(`${API_BASE}/repositories/${repositoryId}/plan/user-active`, {
+    method: 'POST',
+    credentials: 'include',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deltaMs }),
+  }).catch(() => {});
+}
+
 /** Best-effort: ask the API to release the Global KB embedding model from the GPU
  *  (Ollama keep_alive:0) when the user leaves the Global KB settings page. Uses
  *  `keepalive` so it survives a tab close / navigation, and swallows errors — the

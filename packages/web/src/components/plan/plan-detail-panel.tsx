@@ -35,6 +35,7 @@ import { groupPlanEdges } from './plan-edge-groups';
 import { DEFAULT_IMPACT_DEPTH, IMPACT_DEPTH_CHOICES } from './plan-impact-groups';
 import { PlanImpactList } from './plan-impact-list';
 import { PlanChat } from './plan-chat';
+import { usePlanPending, type PlanActivityReporter } from './plan-activity';
 import { PlanGraph } from './plan-graph';
 import {
   BLOCKED_GLYPH,
@@ -76,6 +77,8 @@ export function PlanDetailPanel({
   onNavigate,
   onClose,
   chatDrafts,
+  reportActivity,
+  onChatAnswer,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -95,9 +98,37 @@ export function PlanDetailPanel({
   onClose: () => void;
   /** Owned by the plan page because this panel unmounts when selection clears. */
   chatDrafts: Map<string, string>;
+  reportActivity?: PlanActivityReporter;
+  onChatAnswer?: () => void;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
+  const openTask =
+    detail?.tasks.some(
+      (task) => !task.deadAt && !['completed', 'failed', 'cancelled'].includes(task.status),
+    ) ?? false;
+  usePlanPending(reportActivity, openTask);
+
+  // Follow the selected node's tasks until they finish; a cached detail must not
+  // leave the attention clock in pending mode after the work ends.
+  useEffect(() => {
+    if (!openTask) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      void getPlanNode(repositoryId, nodeId)
+        .then((next) => {
+          if (!cancelled) {
+            setDetail((previous) => (previous ? { ...previous, tasks: next.tasks } : previous));
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [repositoryId, nodeId, openTask]);
   const [impact, setImpact] = useState<PlanImpact | null>(null);
   // The radius the Impact tab opens at. One hop, because on a real plan two
   // reach a median of 130 nodes — a transitive answer is "the whole plan".
@@ -1020,6 +1051,8 @@ export function PlanDetailPanel({
 
       {tab === 'chat' && (
         <PlanChat
+          reportActivity={reportActivity}
+          onAnswer={onChatAnswer}
           repositoryId={repositoryId}
           nodeId={nodeId}
           onPatched={onChanged}

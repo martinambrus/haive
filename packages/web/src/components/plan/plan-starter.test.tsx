@@ -43,10 +43,12 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
 
 const BUILD = /^(draft a plan from this|retry)/;
 const onNavigate = vi.fn();
+const reportActivity = vi.fn();
 
 async function mount(): Promise<Renderer> {
   const view = createRenderer(() => (
     <PlanStarter
+      reportActivity={reportActivity}
       repositoryId="repo-1"
       onboarded={true}
       onNavigate={onNavigate}
@@ -333,4 +335,20 @@ describe('PlanStarter for a read-only local repository', () => {
     expect(net.buildPlan.mock.calls[0]![1]).not.toHaveProperty('deferStart');
     expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
   });
+});
+
+it('reports an in-flight build and clears pending if the start fails', async () => {
+  let fail!: (reason: Error) => void;
+  net.buildPlan.mockReturnValue(
+    new Promise((_resolve, reject) => {
+      fail = reject;
+    }),
+  );
+  const view = await mount();
+  fire.click(build(view));
+  await view.flush();
+  expect(reportActivity.mock.lastCall?.[1]).toBe(true);
+  fail(new Error('start failed'));
+  await view.flush();
+  expect(reportActivity.mock.lastCall?.[1]).toBe(false);
 });

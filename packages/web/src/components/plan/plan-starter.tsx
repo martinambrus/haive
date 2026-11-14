@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { usePlanPending, type PlanActivityReporter } from './plan-activity';
 import Link from 'next/link';
 import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
 import { FolderUp, Paperclip, X } from 'lucide-react';
@@ -77,6 +78,7 @@ export function PlanStarter({
   onboarded,
   onNavigate,
   onCreateRoot,
+  reportActivity,
 }: {
   repositoryId: string;
   /** null means "not known yet", which is treated as onboarded — the same
@@ -84,11 +86,13 @@ export function PlanStarter({
   onboarded: boolean | null;
   onNavigate: (taskId: string) => void;
   onCreateRoot: (title: string) => Promise<void>;
+  reportActivity?: PlanActivityReporter;
 }) {
   const [brief, setBrief] = useState('');
   const [files, setFiles] = useState<Selected[]>([]);
   const [rootTitle, setRootTitle] = useState('');
   const [busy, setBusy] = useState(false);
+  usePlanPending(reportActivity, busy);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   /** The unstarted draft a failed upload or a refused start left behind. Its presence is what makes
