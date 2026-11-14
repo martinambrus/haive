@@ -480,6 +480,8 @@ export const tasks = pgTable(
     /** Origin used to open this task's PR. Independent of a local_path repo's nullable
      *  remote_url and of later relinks; survives step resets. Migration 0212. */
     prRemoteUrl: text('pr_remote_url'),
+    /** Storage only. Shared's DerivedRunPlanV1 cannot be imported: shared depends on database. */
+    derivedRunPlan: jsonb('derived_run_plan').$type<unknown>(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),

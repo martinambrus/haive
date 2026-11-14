@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { assertRunListStrategyAvailable, type RunListStrategy } from '../step-engine/run-list.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { RESERVED_TASK_TYPE_SLUGS, parseStepId, type ComposableStepEntry } from './contracts.js';
@@ -57,7 +58,7 @@ export interface TaskTypeAvailabilityInput {
     source: string;
     enabled: boolean;
     selectable: boolean;
-    runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
+    runListStrategy: RunListStrategy;
     stepIds: readonly string[] | null;
     requiresRepository: boolean;
   };
@@ -102,6 +103,7 @@ export function resolveTaskTypeAvailability(
   input: TaskTypeAvailabilityInput,
 ): TaskTypeAvailability {
   const { definition, switches, modules, catalog, generic } = input;
+  assertRunListStrategyAvailable(definition.runListStrategy);
   if (!definition.enabled) return { available: false, reason: 'disabled' };
   if (generic && !definition.selectable) return { available: false, reason: 'not-selectable' };
   if (definition.source === 'admin' && !switches.customEnabled) {
