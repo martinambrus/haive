@@ -5,7 +5,9 @@ import {
   replayDatabase,
   replayRequestUsage,
   parseOptions,
+  REPLAY_STREAM_LOG_BYTE_CAP,
 } from '../scripts/replay-request-usage.js';
+import { createStreamLogBuffer } from '../src/queues/cli-exec/stream-log-buffer.js';
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(new URL(`./fixtures/streams/${name}.json`, import.meta.url), 'utf8'));
@@ -70,21 +72,73 @@ describe('read-only request replay', () => {
     });
   });
 
-  it('does not mistake terminal framing for malformed evidence, but refuses elided or broken events', async () => {
+  it('skips pretty-printed stderr and non-event objects while replaying complete events', async () => {
+    const good = row(fixture('request-claude'));
+    const stderr = JSON.stringify({ diagnostic: { details: [{ message: 'retry' }] } }, null, 2);
+    const report = await replayRequestUsage([
+      {
+        ...good,
+        streamLog: `$ command\n${stderr}\n{"diagnostic":"retry"}\n${good.streamLog}\n[haive] exited 0\n`,
+      },
+    ]);
+    expect(report.total).toMatchObject({ complete: 1, incomplete: 0, skippedNonEventLines: 3 });
+    expect(report.byCli).toMatchObject([{ cli: 'claude-code', skippedNonEventLines: 3 }]);
+    expect(report.total.incompleteReasons).not.toHaveProperty('malformed-stream');
+  });
+
+  it('counts explicitly event-prefixed broken lines as malformed without feeding transcript noise', async () => {
     const good = row(fixture('request-claude'));
     const report = await replayRequestUsage([
-      { ...good, streamLog: `$ command\n${good.streamLog}\n[haive] exited 0\n` },
-      { ...good, streamLog: `${good.streamLog}\n{broken` },
-      { ...good, streamLog: `[haive] --- 10 characters elided: test\n${good.streamLog}` },
+      { ...good, streamLog: `${good.streamLog}\n{"type":` },
     ]);
-    expect(report.total).toMatchObject({ complete: 1, incomplete: 2 });
-    expect(report.total.incompleteReasons).toMatchObject({
-      'malformed-stream': 1,
-      'elided-stream': 1,
+    expect(report.total).toMatchObject({ complete: 0, incomplete: 1, malformedEventLines: 1 });
+    expect(report.total.incompleteReasons).toEqual({ 'malformed-event-line': 1 });
+  });
+
+  it('reports elided logs as unknown-truncated, including channels with no request list', async () => {
+    const good = row(fixture('request-claude'));
+    const buffer = createStreamLogBuffer({ headChars: 4, tailChars: 4 });
+    buffer.push('x'.repeat(12));
+    const report = await replayRequestUsage([
+      { ...good, streamLog: `${buffer.toString()}\n${good.streamLog}` },
+      { ...row([], 'gemini'), streamLog: buffer.toString() },
+    ]);
+    expect(report.total).toMatchObject({
+      invocations: 2,
+      complete: 0,
+      incomplete: 0,
+      none: 0,
+      truncatedLogs: 2,
+      'unknown-truncated': 2,
+    });
+    expect(report.byCli).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ cli: 'claude-code', truncatedLogs: 1, 'unknown-truncated': 1 }),
+        expect.objectContaining({ cli: 'gemini', truncatedLogs: 1, 'unknown-truncated': 1 }),
+      ]),
+    );
+    expect(report.counters).toMatchObject({
+      emptyModelUsageAcceptedComplete: 0,
+      noResultFallbackRuns: 0,
+    });
+  });
+
+  it('detects markerless logs at the byte cap with an injectable small limit', async () => {
+    expect(REPLAY_STREAM_LOG_BYTE_CAP).toBe(4 * 1024 * 1024);
+    const good = row(fixture('request-claude'));
+    const report = await replayRequestUsage([good, { ...good, streamLog: `${good.streamLog}é` }], {
+      streamLogByteCap: Buffer.byteLength(good.streamLog) + 2,
+    });
+    expect(report.total).toMatchObject({
+      complete: 1,
+      incomplete: 0,
+      truncatedLogs: 1,
+      'unknown-truncated': 1,
     });
   });
 
   it('validates options before opening a database', () => {
+    expect(parseOptions([])).toEqual({ since: null, limit: null, cli: null });
     expect(
       parseOptions(['--since', '2026-11-01T00:00:00Z', '--limit', '2', '--cli', 'grok']),
     ).toEqual({
@@ -108,6 +162,23 @@ describe('read-only request replay', () => {
     const report = await replayRequestUsage([row(events, 'codex')]);
     expect(report.total).toMatchObject({ complete: 1, none: 0 });
     expect(report.byMainModel).toMatchObject([{ model: 'model-a', complete: 1 }]);
+  });
+
+  it('filters pretty-printed stderr before the Codex app-server parser too', async () => {
+    const good = row(fixture('request-codex-app-server'), 'codex');
+    const report = await replayRequestUsage([
+      { ...good, streamLog: `{\n  "diagnostic": true\n}\n${good.streamLog}` },
+    ]);
+    expect(report.total).toMatchObject({ complete: 1, incomplete: 0, skippedNonEventLines: 1 });
+  });
+
+  it('keeps typed stream events with an id on their original channel', async () => {
+    const claude = fixture('request-claude');
+    claude[1].id = 'event-1';
+    const codex = fixture('request-codex-exec');
+    codex[0].id = 'event-2';
+    const report = await replayRequestUsage([row(claude), row(codex, 'codex')]);
+    expect(report.total).toMatchObject({ complete: 1, none: 1, incomplete: 0 });
   });
 
   it('counts aggregate-only Gemini and antigravity fixtures as having no request channel', async () => {
@@ -170,5 +241,18 @@ describe('read-only request replay', () => {
     expect(params).toEqual([null, null, 'grok', 'grok', 2]);
     expect(cursor).toHaveBeenCalledWith(50);
     expect(report).toMatchObject({ options, total: { invocations: 1 } });
+  });
+  it('defaults to all database rows while consuming bounded cursor batches', async () => {
+    const cursor = vi.fn(async function* () {
+      yield [row(fixture('request-claude'))];
+      yield [row(fixture('request-claude'))];
+    });
+    const select = vi.fn((_parts: TemplateStringsArray, ..._params: unknown[]) => ({ cursor }));
+    const begin = vi.fn(async (_mode, fn) => fn(select));
+    const db = { $client: { begin } } as unknown as Database;
+    const report = await replayDatabase(db, parseOptions([]));
+    expect(select.mock.calls[0]!.slice(1)).toEqual([null, null, null, null, null]);
+    expect(cursor).toHaveBeenCalledWith(50);
+    expect(report.total).toMatchObject({ invocations: 2, complete: 2 });
   });
 });

@@ -2,13 +2,23 @@
  * From packages/worker: pnpm exec tsx scripts/replay-request-usage.ts [--since ISO] [--limit N] [--cli NAME]
  * DATABASE_URL comes only from the operator environment. One aggregate JSON on stdout.
  * Replays the live stream-json and Codex app-server parsers; other channels have no request list.
+ * stream_log is header + interleaved stdout/stderr without channel framing. Replay accepts only
+ * complete single-line event objects; skipped object-like lines are counted separately. General
+ * malformed-stream evidence is therefore unobservable and excluded. A broken line beginning with
+ * an event discriminator is separately reported as malformed-event-line, never fed to a parser.
+ * Elided or byte-cap-sized transcripts have unknown-truncated coverage. Defaults to all rows,
+ * read in bounded cursor batches; --limit optionally narrows the inventory.
  */
 import { pathToFileURL } from 'node:url';
 import { Writable } from 'node:stream';
 import { createDatabase, type Database } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { createStreamJsonCollector } from '../src/queues/cli-exec/stream.js';
-import { isElidedStreamLog } from '../src/queues/cli-exec/stream-log-buffer.js';
+import {
+  isElidedStreamLog,
+  STREAM_LOG_HEAD_CHARS,
+  STREAM_LOG_TAIL_CHARS,
+} from '../src/queues/cli-exec/stream-log-buffer.js';
 import { createCodexAppServerSession } from '../src/cli-executor/codex-app-server.js';
 
 export interface ReplayRow {
@@ -23,6 +33,10 @@ interface Counts {
   complete: number;
   incomplete: number;
   none: number;
+  'unknown-truncated': number;
+  truncatedLogs: number;
+  skippedNonEventLines: number;
+  malformedEventLines: number;
   incompleteReasons: Record<string, number>;
 }
 const counts = (): Counts => ({
@@ -30,13 +44,17 @@ const counts = (): Counts => ({
   complete: 0,
   incomplete: 0,
   none: 0,
+  'unknown-truncated': 0,
+  truncatedLogs: 0,
+  skippedNonEventLines: 0,
+  malformedEventLines: 0,
   incompleteReasons: {},
 });
 
 export function parseOptions(args: string[]) {
-  const options: { since: string | null; limit: number; cli: string | null } = {
+  const options: { since: string | null; limit: number | null; cli: string | null } = {
     since: null,
-    limit: 1000,
+    limit: null,
     cli: null,
   };
   const seen = new Set<string>();
@@ -65,8 +83,15 @@ export function parseOptions(args: string[]) {
   return options;
 }
 
+// The writer caps characters, not bytes. Treat this byte threshold conservatively too,
+// including legacy markerless logs: a retained transcript at the cap cannot prove completeness.
+export const REPLAY_STREAM_LOG_BYTE_CAP = STREAM_LOG_HEAD_CHARS + STREAM_LOG_TAIL_CHARS;
+
 /** Fake row sources use exactly the same collector as database rows. No ids or text in results. */
-export async function replayRequestUsage(source: AsyncIterable<ReplayRow> | Iterable<ReplayRow>) {
+export async function replayRequestUsage(
+  source: AsyncIterable<ReplayRow> | Iterable<ReplayRow>,
+  options: { streamLogByteCap?: number } = {},
+) {
   const total = counts();
   const byCli = new Map<string, Counts>();
   const byMainModel = new Map<string, Counts>();
@@ -93,18 +118,35 @@ export async function replayRequestUsage(source: AsyncIterable<ReplayRow> | Iter
     });
     codex?.attach(sink);
     let appServer = false;
-    // Stored logs include terminal framing and stderr. As in replayContext, only top-level
-    // object lines are events; pass broken object lines too so the real parser refuses them.
+    let skippedNonEventLines = 0;
+    let malformedEventLines = 0;
+    const truncated =
+      isElidedStreamLog(row.streamLog) ||
+      Buffer.byteLength(row.streamLog) >= (options.streamLogByteCap ?? REPLAY_STREAM_LOG_BYTE_CAP);
     for (const line of row.streamLog.split('\n')) {
       if (!line.trimStart().startsWith('{')) continue;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        skippedNonEventLines++;
+        // A compact event discriminator cut off mid-line is different from the bare "{"
+        // of pretty-printed stderr. Report it independently of the live malformed counter.
+        if (/^\s*\{\s*"(?:type|method|id)"\s*:/.test(line)) malformedEventLines++;
+        continue;
+      }
+      const streamEvent = typeof event.type === 'string';
+      const rpcEvent =
+        typeof event.method === 'string' ||
+        typeof event.id === 'string' ||
+        typeof event.id === 'number';
+      if (!streamEvent && !rpcEvent) {
+        skippedNonEventLines++;
+        continue;
+      }
       collector.onChunk(line + '\n');
       codex?.onChunk(line + '\n');
-      try {
-        const event = JSON.parse(line);
-        appServer ||= typeof event.method === 'string';
-      } catch {
-        /* The live parsers count malformed event lines. */
-      }
+      appServer ||= codex !== null && !streamEvent && rpcEvent;
     }
     codex?.close();
     sink.destroy();
@@ -124,13 +166,19 @@ export async function replayRequestUsage(source: AsyncIterable<ReplayRow> | Iter
         identity !== null);
     if (appServer && collector.getRequestUsage().requests?.length)
       reasons.add('mixed-request-channels');
-    if (isElidedStreamLog(row.streamLog)) reasons.add('elided-stream');
-    const coverage = !hasChannel
-      ? 'none'
-      : capture.coverage === 'complete' && reasons.size === 0
-        ? 'complete'
-        : 'incomplete';
-    if (!hasChannel) {
+    // Transcript noise must never manufacture the live parser's malformed-stream reason.
+    reasons.delete('malformed-stream');
+    if (malformedEventLines > 0) reasons.add('malformed-event-line');
+    const coverage = truncated
+      ? 'unknown-truncated'
+      : !hasChannel && malformedEventLines === 0
+        ? 'none'
+        : capture.coverage === 'complete' && reasons.size === 0
+          ? 'complete'
+          : 'incomplete';
+    if (coverage === 'unknown-truncated') {
+      reasons.clear();
+    } else if (coverage === 'none') {
       reasons.clear();
       reasons.add('no-request-channel');
     }
@@ -141,10 +189,14 @@ export async function replayRequestUsage(source: AsyncIterable<ReplayRow> | Iter
     for (const bucket of [total, cliCounts, modelCounts]) {
       bucket.invocations++;
       bucket[coverage]++;
+      bucket.truncatedLogs += Number(truncated);
+      bucket.skippedNonEventLines += skippedNonEventLines;
+      bucket.malformedEventLines += malformedEventLines;
       if (coverage !== 'complete')
         for (const reason of reasons)
           bucket.incompleteReasons[reason] = (bucket.incompleteReasons[reason] ?? 0) + 1;
     }
+    if (truncated) continue;
     counters.sameNameLedgerExcessRuns += Number(diagnostics.sameNameLedgerExcess);
     // VOLATILE: Haiku is the measured Claude titling family. Excess is a candidate,
     // not proof of a side call: raw streams do not identify CLI-owned requests.
@@ -175,7 +227,7 @@ export async function replayRequestUsage(source: AsyncIterable<ReplayRow> | Iter
   }
   return {
     scope:
-      'retained stream-json and Codex app-server; channels without request lists count as none',
+      'retained single-line stream-json and Codex app-server events; malformed-stream unobservable; truncated logs unknown-truncated; channels without request lists count as none',
     total,
     byCli: [...byCli].sort(([a], [b]) => a.localeCompare(b)).map(([cli, c]) => ({ cli, ...c })),
     byMainModel: [...byMainModel]
