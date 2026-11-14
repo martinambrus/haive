@@ -516,6 +516,33 @@ it('check applies install credentials before manifest IO, emits pins, and starts
     HAIVE_WEB_IMAGE: refs.web,
   });
 });
+it.each(['preflight', 'verify', 'commit'] as const)(
+  'recovers a run in %s without a journalled migration head',
+  async (phase) => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
+      id: 'run',
+      fromVersion: '1.0.0',
+      toVersion: '9.9.9',
+      channel: 'acme',
+      startedAt: new Date(),
+      phase,
+      metadata: {},
+    } as never);
+    vi.mocked(run.resume).mockResolvedValue(undefined);
+
+    expect(await main()).toBe(0);
+
+    expect(run.resume).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run',
+        target: expect.objectContaining({ version: '9.9.9' }),
+      }),
+      phase,
+    );
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  },
+);
 it('an interrupted channel run resumes before any new manifest pull', async () => {
   // Recovery still receives valid target argv, but must not pull it.
 

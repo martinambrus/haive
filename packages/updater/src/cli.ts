@@ -346,13 +346,18 @@ export async function main(): Promise<number> {
         envFile,
         snapshotHostDir: snapshotDir,
         fromVersion: live.fromVersion,
-        target: parseReleaseManifest({
+        // Recovery only rolls back or finishes commit; neither repeats the health gate.
+        // This journal-derived context is not a fetched manifest, and older rows may have no head.
+        target: {
           manifestVersion: 1,
           version: live.toVersion,
+          channel: live.channel,
           builtAt: live.startedAt.toISOString(),
           minFrom: '0.0.0',
           migrationHead: String(live.metadata.migrationHead ?? ''),
-        }),
+          contracts: false,
+          images: {},
+        },
         registry:
           typeof live.metadata.imageRegistry === 'string' ? live.metadata.imageRegistry : registry,
         previousImages: journalImages(live.metadata.previousImages),
