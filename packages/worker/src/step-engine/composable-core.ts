@@ -344,7 +344,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [],
     provides: ['spec'],
-    precedes: ['implementation'],
+    precedes: ['sprint-plan', 'implementation'],
   },
   {
     stepId: '04a-spec-audit',
@@ -363,7 +363,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [{ needs: 'spec', reason: 'Reviews the pre-planning spec.' }],
     provides: ['spec', 'spec-reviewed'],
-    precedes: ['spec-warnings-resolved', 'spec-approved', 'implementation'],
+    precedes: ['spec-warnings-resolved', 'spec-approved', 'sprint-plan', 'implementation'],
     loopBudgetEditable: true,
   },
   {
@@ -386,7 +386,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'spec', reason: 'Asks for a decision on the spec.' }],
     provides: ['spec-approved'],
-    precedes: ['implementation'],
+    precedes: ['sprint-plan', 'implementation'],
     loopTargetStepId: '04-phase-0b-pre-planning',
   },
   {
@@ -421,10 +421,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Sprint planning',
     group: 'build',
     dispatchesCli: true,
-    requires: [
-      { needs: 'spec', reason: 'Decomposes the approved spec into implementation issues.' },
-      { needs: 'spec-approved', reason: 'Reads the gate-1 decision and feedback before planning.' },
-    ],
+    // Spec and gate-1 feedback have empty fallbacks; their producers order before planning.
+    requires: [],
     provides: ['sprint-plan'],
     // The planner may choose DAG or single (including override and parse fallback).
     // Keep both routes available so its runtime choice always has an implementation.
@@ -536,7 +534,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: ['verification'],
-    precedes: ['db-saved', 'learnings'],
+    precedes: ['verify-approved', 'db-saved', 'learnings'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -636,14 +634,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Gate 2: Verify approval',
     group: 'check',
     dispatchesCli: false,
-    requires: [
-      needWorktree,
-      {
-        needs: 'verification',
-        reason: 'Presents the verification results for approval before commit.',
-      },
-    ],
-    // Audit/review/QA/browser reports are optional sections, read by their core ids.
+    requires: [needWorktree],
+    // Verification/audit/review/QA/browser reports are optional sections, read by their core ids.
     provides: ['verify-approved'],
     precedes: ['commit'],
     loopTargetStepId: IMPLEMENT,

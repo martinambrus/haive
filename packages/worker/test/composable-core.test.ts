@@ -581,6 +581,81 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
+  it.each([
+    [],
+    ['04-phase-0b-pre-planning'],
+    ['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality'],
+    ['04-phase-0b-pre-planning', '05a-resolve-spec-warnings'],
+    ['04-phase-0b-pre-planning', '06-gate-1-spec-approval'],
+  ])('allows sprint planning with optional earlier inputs: %j', (...inputs) => {
+    expect(
+      validateComposition(
+        [
+          '01-worktree-setup',
+          ...inputs,
+          '06b-sprint-planning',
+          '06c-dag-execute',
+          '07-phase-2-implement',
+        ],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['04-phase-0b-pre-planning', [], 'sprint-plan'],
+    ['05-phase-0b5-spec-quality', ['04-phase-0b-pre-planning'], 'sprint-plan'],
+    ['05a-resolve-spec-warnings', ['04-phase-0b-pre-planning'], 'sprint-plan'],
+    ['06-gate-1-spec-approval', ['04-phase-0b-pre-planning'], 'sprint-plan'],
+  ])('refuses the optional producer %s after sprint planning', (stepId, inputs, token) => {
+    expect(
+      validateComposition(
+        [
+          '01-worktree-setup',
+          ...inputs,
+          '06b-sprint-planning',
+          stepId,
+          '06c-dag-execute',
+          '07-phase-2-implement',
+        ],
+        catalog,
+      ),
+    ).toEqual([expect.objectContaining({ kind: 'too-late', stepId, token })]);
+  });
+
+  it.each(['absent', 'before', 'after'])(
+    'treats verification as optional but ordered at gate 2: %s',
+    (position) => {
+      const order = ['01-worktree-setup', '07-phase-2-implement'];
+      if (position === 'before') order.push('08-phase-5-verify');
+      order.push('09-gate-2-verify-approval');
+      if (position === 'after') order.push('08-phase-5-verify');
+      expect(validateComposition(order, catalog)).toEqual(
+        position === 'after'
+          ? [
+              expect.objectContaining({
+                kind: 'too-late',
+                stepId: '08-phase-5-verify',
+                token: 'verify-approved',
+              }),
+            ]
+          : [],
+      );
+    },
+  );
+
+  it('still requires a worktree for gate 2 without verification', () => {
+    expect(
+      validateComposition(['07-phase-2-implement', '09-gate-2-verify-approval'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '09-gate-2-verify-approval',
+        needs: 'worktree',
+      }),
+    );
+  });
+
   it('requires the DAG planner before execution and run configuration before planning', () => {
     expect(validateComposition(['01-worktree-setup', '06c-dag-execute'], catalog)).toContainEqual(
       expect.objectContaining({
