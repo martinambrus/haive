@@ -584,7 +584,7 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 
 ### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+10)
 
-status: open · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
 1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
 2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
@@ -1023,7 +1023,7 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 ### T648 · upgrades never refresh the compose bundle (design)
 
-status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan drafted in `.claude/tmp/codex-run/T648-plan-draft.md`, awaiting owner approval) · kind: design · found: #1136 review 2026-11-13 · priority: P2
+status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 in progress) · kind: design · found: #1136 review 2026-11-13 · priority: P2
 PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
 Also from #1139: an existing install whose bundle predates MP_UI_AUTH keeps an open Mailpit UI after any upgrade, and a refreshed bundle installed over an `.env` with no `MAILPIT_UI_PASSWORD` fails open (empty value = no auth). Whatever refreshes the bundle must also generate missing keys it needs.
 
