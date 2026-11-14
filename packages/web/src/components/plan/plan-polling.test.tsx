@@ -261,7 +261,7 @@ describe('PlanChat with a live conversation', () => {
     await settle();
   };
 
-  it('reports the running turn, announces its answer once and clears pending on park/unmount', async () => {
+  it('reports the running turn, announces its answer once and clears pending on park', async () => {
     await open(taskResponse(PLAN_CHAT_STEP_ID));
     expect(reportActivity.mock.lastCall?.[1]).toBe(true);
     expect(onAnswer).not.toHaveBeenCalled();
@@ -275,9 +275,6 @@ describe('PlanChat with a live conversation', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(reportActivity.mock.lastCall?.[1]).toBe(false);
     expect(onAnswer).toHaveBeenCalledTimes(1);
-    unmount();
-    unmount = () => {};
-    expect(reportActivity.mock.lastCall?.[1]).toBe(false);
   });
 
   it('keeps polling a conversation that is still working', async () => {

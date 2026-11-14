@@ -103,11 +103,11 @@ export function PlanDetailPanel({
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
-  const openTask =
-    detail?.tasks.some(
-      (task) => !task.deadAt && (task.status === 'queued' || task.status === 'running'),
-    ) ?? false;
-  usePlanPending(reportActivity, openTask);
+  const pendingTask = [...(detail?.tasks ?? []), detail?.advisoryTask].some(
+    (task) =>
+      task != null && !task.deadAt && (task.status === 'queued' || task.status === 'running'),
+  );
+  usePlanPending(reportActivity, pendingTask);
 
   const [impact, setImpact] = useState<PlanImpact | null>(null);
   // The radius the Impact tab opens at. One hop, because on a real plan two
