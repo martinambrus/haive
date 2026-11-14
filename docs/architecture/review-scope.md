@@ -91,8 +91,9 @@ be read) carries no note, and both the prompt legend and the scope fence say so 
 the whole file is in scope. Narrowing on a measurement nobody made is the one direction this
 must never fail in.
 
-`SCOPE_BOUNDARY` (`_scope-fence.ts`, shared with the on-disk agent templates so the inline
-persona and the file that OVERRIDES it cannot drift) is therefore keyed on lines, not files:
+`SCOPE_BOUNDARY` (`packages/shared/src/step/prompts.ts`, re-exported by the worker's
+`_scope-fence.ts` and shared with the on-disk agent templates so the inline persona and
+the file that OVERRIDES it cannot drift) is therefore keyed on lines, not files:
 in scope = the lines the change wrote, the function or block each sits in — an edit's effect is
 not confined to the edited line — plus blast radius (callers of a changed signature, consumers
 of a changed schema, paths the change makes newly reachable). It used to be "the files this
