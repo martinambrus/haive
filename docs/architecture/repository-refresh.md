@@ -160,7 +160,7 @@ Each selected repository is rechecked under the fresh-client lock, taken with
 sweep never acts on a live request's intent the moment that request rolls back;
 the next tick sees it again. A dropped database connection releases that lock
 before the request's Git writes finish, so the lock alone is not enough: a relink
-also holds an in-process writer fence from before its transaction until its Git
+also holds an in-process writer fence from before its relink transaction until its Git
 writes and its own reconcile have settled, and the sweep passes over a fenced
 repository too. The fence is per API process, which matches the single API the
 stack runs; process death ends both the writes and the fence. A repository
@@ -177,10 +177,10 @@ process death, failed undo, an unknown-outcome timeout or signal, or a
 non-connection COMMIT failure with a successful undo can therefore remove a
 pre-existing Git-only origin. This also applies when a clean refusal inherits
 a predecessor's unresolved repair. Two short windows remain where a sweep tick
-can act on a live request's intent on a folder import: between the request's
-rollback and its own intent clear on a fresh connection (a few round trips, or
-indefinitely if that clear fails), and between recording the intent and taking
-the relink lock (the request then answers 409 and a retry restores the origin).
+can act on a live request's intent on a folder import: after the request's
+rollback when its own intent clear fails (the writer fence covers the clear's
+round trips in this process, but not a clear that never lands), and between
+recording the intent and taking the relink lock (the request then answers 409 and a retry restores the origin).
 No durable pre-change origin snapshot is kept;
 preserving one across process death requires a separately designed snapshot
 with credential-handling rules. Each Git call has a 10-second deadline and a

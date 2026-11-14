@@ -2813,7 +2813,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   let callbackSettled: Promise<void> | undefined;
   // Held until this request's Git writes have settled and its own reconcile ran, so the sweep
   // cannot clear the intent while a write that outlived a dropped connection is still running.
-  const endWriter = beginRelinkWriter(id);
+  const endWriter = beginRelinkWriter(repo.id);
   try {
     await db.transaction(async (tx) => {
       let settle!: () => void;
