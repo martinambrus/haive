@@ -660,8 +660,8 @@ Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, revie
 2. A moved secret's full-file sha256 is stored in the manifest and shown as the after identity. Low.
 3. A superseded or stopped repair pass never reaches `finishFixTestCapture` (step-runner.ts ~:760, ~:775), writes no after event and so does not taint the task; a later edit of the moved file would retain the secret. Low-medium.
 4. Withheld same-size `contentUnknown` counting has no negative controls (a withheld file that changed size, a non-withheld same-size edit).
-5. Review-2 F3: the in-memory pending before image (`pending` map) is lost on a worker restart; see P6-S/review-2.md.
-6. Review-2 F9: workspace path resolution for the after capture; see P6-S/review-2.md.
+5. Review-2 F3 (design limit, medium-low): provisional before bytes live per worker process (`pending` map, FIFO), so a restart or eviction degrades the whole pass diff to hashes; see P6-S/review-2.md.
+6. Review-2 F9 (low): begin derives the workspace via `resolveInvocationWorkerTree` (step-runner.ts ~:1227) while finish prefers the issue/task `worktreePath` (`_fix-test-store.ts`); same directory for a worktree task, unverified for read-only local-path repositories.
 7. `/events` is polled every 2 s unpaged. PRE-EXISTING.
 8. The event digest loads all payloads. PRE-EXISTING.
 9. `.auth/` directories are not in the default secret deny globs. PRE-EXISTING.
