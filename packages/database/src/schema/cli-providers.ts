@@ -199,6 +199,25 @@ export const openrouterModelCache = pgTable('openrouter_model_cache', {
         cacheReadPrice: number | null;
         cacheWritePrice: number | null;
         cacheWrite1hPrice: number | null;
+        tiers?:
+          | {
+              aboveTokens: number;
+              inclusive: boolean;
+              inputRate: number | null;
+              outputRate: number | null;
+              cacheReadRate: number | null;
+              cacheWriteRate: number | null;
+              cacheWrite1hRate: number | null;
+            }[]
+          | null;
+        pricingState?: 'unsupported';
+        pricingReason?:
+          | 'unsupported-tier'
+          | 'invalid-tier'
+          | 'unsupported-condition'
+          | 'time-window'
+          | 'variable-price';
+        unsupportedOverrideCount?: number;
         /** From `supported_parameters`. `reasoning` drives whether the effort
          *  selector is worth showing; `tools` decides usability outright, since
          *  Claude Code cannot function without native tool use. */

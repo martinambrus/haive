@@ -1,0 +1,60 @@
+{
+  "claude-haiku-5-5": {
+    "cache_creation_input_token_cost": 1.25e-7,
+    "cache_creation_input_token_cost_above_1hr": 2e-7,
+    "cache_read_input_token_cost": 1e-8,
+    "input_cost_per_token": 1e-7,
+    "litellm_provider": "anthropic",
+    "mode": "chat",
+    "output_cost_per_token": 5e-7,
+    "input_cost_per_token_above_100k_tokens": 5e-7,
+    "output_cost_per_token_above_100k_tokens": 2.5e-6,
+    "cache_creation_input_token_cost_above_100k_tokens": 6.25e-7,
+    "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 1e-6,
+    "cache_read_input_token_cost_above_100k_tokens": 5e-8
+  },
+  "gpt-5.6-sol": {
+    "cache_creation_input_token_cost": 5e-6,
+    "cache_creation_input_token_cost_above_12hr": 1e-5,
+    "cache_creation_input_token_cost_above_12hr_above_272k_tokens": 2e-5,
+    "cache_creation_input_token_cost_above_272k_tokens": 1e-5,
+    "cache_read_input_token_cost": 4e-7,
+    "cache_read_input_token_cost_above_272k_tokens": 8e-7,
+    "input_cost_per_token": 4e-6,
+    "input_cost_per_token_above_272k_tokens": 8e-6,
+    "litellm_provider": "openai",
+    "mode": "chat",
+    "output_cost_per_token": 2e-5,
+    "output_cost_per_token_above_272k_tokens": 3e-5
+  },
+  "gemini-2.5-pro": {
+    "cache_read_input_token_cost": 1.25e-7,
+    "cache_read_input_token_cost_above_200k_tokens": 2.5e-7,
+    "input_cost_per_token": 1.25e-6,
+    "input_cost_per_token_above_200k_tokens": 2.5e-6,
+    "litellm_provider": "vertex_ai-language-models",
+    "mode": "chat",
+    "output_cost_per_token": 1e-5,
+    "output_cost_per_token_above_200k_tokens": 1.5e-5
+  },
+  "xai/grok-4.6": {
+    "cache_read_input_token_cost": 5e-7,
+    "cache_read_input_token_cost_above_200k_tokens": 1e-6,
+    "input_cost_per_token": 2e-6,
+    "input_cost_per_token_above_200k_tokens": 4e-6,
+    "litellm_provider": "xai",
+    "mode": "chat",
+    "output_cost_per_token": 6e-6,
+    "output_cost_per_token_above_200k_tokens": 1.2e-5
+  },
+  "meta/muse-ember-1.0": {
+    "cache_read_input_token_cost": 4e-9,
+    "cache_read_input_token_cost_above_200k_tokens": 1.2e-8,
+    "input_cost_per_token": 1e-7,
+    "input_cost_per_token_above_200k_tokens": 3e-7,
+    "litellm_provider": "meta",
+    "mode": "chat",
+    "output_cost_per_token": 5e-7,
+    "output_cost_per_token_above_200k_tokens": 1.5e-6
+  }
+}

@@ -60,10 +60,12 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
     return {
       ok: true,
       refreshed: [{ name: 'openrouter', count: models.length, latest: null }],
+      // Pricing diagnostics belong to refreshModelPrices, which honors the
+      // per-provider switch. The catalog remains useful for an unpriced model.
       errors: [],
     };
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh openrouter model catalog');
     await db
       .insert(schema.openrouterModelCache)

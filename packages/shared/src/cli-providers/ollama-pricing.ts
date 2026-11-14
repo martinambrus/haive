@@ -22,7 +22,7 @@
  * the whole bug this feed exists to undo.
  */
 
-import type { ModelPriceRates } from './model-pricing.js';
+import type { BasePriceRates, ModelPriceRates } from './model-pricing.js';
 
 /** Model pages live one per BASE model; the tag is not part of the URL.
  *  `kimi-k3:cloud` and `qwen3-coder:480b-cloud` are documented at
@@ -67,7 +67,7 @@ const OLLAMA_PAGE_MARKUP = {
     output: 'outputRate',
     cached: 'cacheReadRate',
     'cached input': 'cacheReadRate',
-  } as Readonly<Record<string, keyof ModelPriceRates>>,
+  } as Readonly<Record<string, keyof BasePriceRates>>,
 } as const;
 
 /** How many visible tokens past the heading the block's own values may lie. Bounded

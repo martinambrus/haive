@@ -8,6 +8,16 @@
  * and the pure trim, so the parsing is testable without a network call.
  */
 
+import {
+  normalizePriceRates,
+  isVariablePriceRate,
+  parseRate,
+  parseTierRate,
+  type ModelPriceRates,
+  type PriceTier,
+  type PricingUnsupportedReason,
+} from './model-pricing.js';
+
 /** One cached model. Mirrors the `$type` on `openrouter_model_cache.models` — the
  *  database package cannot import this (shared imports database, not the reverse),
  *  so the two are kept in sync by hand, exactly like `cli_providers.model_limits`. */
@@ -30,6 +40,11 @@ export interface OpenRouterModelEntry {
   cacheReadPrice: number | null;
   cacheWritePrice: number | null;
   cacheWrite1hPrice: number | null;
+  /** Complete prompt-size overrides after feed-order inheritance, ready for price sync. */
+  tiers?: PriceTier[] | null;
+  pricingState?: 'unsupported';
+  pricingReason?: PricingUnsupportedReason;
+  unsupportedOverrideCount?: number;
   /** Whether `supported_parameters` advertises a reasoning knob. Drives whether the
    *  effort selector is worth offering — NOT a correctness gate: OpenRouter validates
    *  `output_config.effort` globally and models without reasoning accept every level
@@ -51,6 +66,7 @@ interface RawOpenRouterModel {
   name?: unknown;
   context_length?: unknown;
   pricing?: {
+    overrides?: unknown;
     prompt?: unknown;
     completion?: unknown;
     input_cache_read?: unknown;
@@ -61,14 +77,117 @@ interface RawOpenRouterModel {
   architecture?: { input_modalities?: unknown };
 }
 
-/** Upstream sends prices as decimal strings ("0.00001"). Returns null for anything
- *  non-finite so a malformed price shows as "unknown" rather than 0 — a displayed
- *  0 would read as "free", which is the one wrong answer that costs money. */
-function parsePrice(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value !== 'string' || value.trim() === '') return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+const OVERRIDE_RATE_FIELDS = {
+  prompt: 'inputRate',
+  completion: 'outputRate',
+  input_cache_read: 'cacheReadRate',
+  input_cache_write: 'cacheWriteRate',
+  input_cache_write_1h: 'cacheWrite1hRate',
+} as const;
+
+/** VOLATILE: price fields outside Haive's text buckets, observed in the public
+ * OpenRouter catalog on 2026-11-14. Unknown fields remain conditions, regardless
+ * of whether their value looks numeric. */
+const IGNORED_OVERRIDE_PRICE_FIELDS = new Set([
+  'audio',
+  'audio_output',
+  'input_audio_cache',
+  'image',
+  'image_output',
+  'web_search',
+  'internal_reasoning',
+]);
+
+/** Later matching entries win per bucket, including explicit nulls. */
+function parseOverrides(
+  pricing: RawOpenRouterModel['pricing'],
+): Pick<
+  OpenRouterModelEntry,
+  'tiers' | 'pricingState' | 'pricingReason' | 'unsupportedOverrideCount'
+> {
+  // A malformed entry (pricing as a string or number) must not throw at the `in`
+  // check below and stop the whole catalog refresh; it simply has no overrides.
+  if (!pricing || typeof pricing !== 'object') return {};
+  const overrides = pricing.overrides;
+  if (
+    [pricing, ...(Array.isArray(overrides) ? overrides : [])].some(
+      (entry) =>
+        entry &&
+        typeof entry === 'object' &&
+        Object.keys(OVERRIDE_RATE_FIELDS).some((field) =>
+          isVariablePriceRate((entry as Record<string, unknown>)[field]),
+        ),
+    )
+  )
+    return { pricingState: 'unsupported', pricingReason: 'variable-price' };
+  if (!('overrides' in pricing) || overrides === null) return {};
+  if (!Array.isArray(overrides))
+    return {
+      pricingState: 'unsupported',
+      pricingReason: 'invalid-tier',
+      unsupportedOverrideCount: 1,
+    };
+  const supported: Record<string, unknown>[] = [];
+  let unsupportedOverrideCount = 0;
+  let timeWindowCount = 0;
+  for (const entry of overrides) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      unsupportedOverrideCount++;
+      continue;
+    }
+    const conditions = Object.keys(entry).filter(
+      (k) =>
+        k !== 'min_prompt_tokens' &&
+        !Object.hasOwn(OVERRIDE_RATE_FIELDS, k) &&
+        !IGNORED_OVERRIDE_PRICE_FIELDS.has(k),
+    );
+    if (conditions.length || !Object.hasOwn(entry, 'min_prompt_tokens')) {
+      unsupportedOverrideCount++;
+      if (conditions.length && conditions.every((k) => k === 'utc_start' || k === 'utc_end'))
+        timeWindowCount++;
+      continue;
+    }
+    supported.push(entry);
+  }
+  if (unsupportedOverrideCount)
+    return {
+      pricingState: 'unsupported',
+      pricingReason:
+        timeWindowCount === unsupportedOverrideCount ? 'time-window' : 'unsupported-condition',
+      unsupportedOverrideCount,
+    };
+  try {
+    const base: ModelPriceRates = {
+      inputRate: parseRate(pricing.prompt),
+      outputRate: parseRate(pricing.completion),
+      cacheReadRate: parseRate(pricing.input_cache_read),
+      cacheWriteRate: parseRate(pricing.input_cache_write),
+      cacheWrite1hRate: parseRate(pricing.input_cache_write_1h),
+    };
+    const thresholds = [...new Set(supported.map((e) => e.min_prompt_tokens))];
+    const tiers = thresholds.map((aboveTokens) => {
+      // Validate before comparisons: string/NaN thresholds must never participate in inheritance.
+      if (typeof aboveTokens !== 'number' || !Number.isSafeInteger(aboveTokens) || aboveTokens <= 0)
+        throw new Error('Invalid threshold');
+      const tier: PriceTier = { ...base, aboveTokens, inclusive: false };
+      for (const entry of supported) {
+        if (typeof entry.min_prompt_tokens !== 'number' || entry.min_prompt_tokens > aboveTokens)
+          continue;
+        for (const [field, bucket] of Object.entries(OVERRIDE_RATE_FIELDS)) {
+          if (Object.hasOwn(entry, field)) tier[bucket] = parseTierRate(entry[field]);
+        }
+      }
+      return tier;
+    });
+    const normalized = normalizePriceRates({ ...base, tiers });
+    return normalized.tiers?.length ? { tiers: normalized.tiers } : {};
+  } catch {
+    return {
+      pricingState: 'unsupported',
+      pricingReason: 'invalid-tier',
+      unsupportedOverrideCount: overrides.length,
+    };
+  }
 }
 
 function hasStringItem(value: unknown, item: string): boolean {
@@ -91,16 +210,17 @@ export function trimOpenRouterModels(payload: unknown): OpenRouterModelEntry[] {
     const params = raw.supported_parameters;
     out.push({
       id,
+      ...parseOverrides(raw.pricing),
       name: typeof raw.name === 'string' && raw.name.trim() !== '' ? raw.name : id,
       contextLength:
         typeof raw.context_length === 'number' && Number.isFinite(raw.context_length)
           ? raw.context_length
           : null,
-      promptPrice: parsePrice(raw.pricing?.prompt),
-      completionPrice: parsePrice(raw.pricing?.completion),
-      cacheReadPrice: parsePrice(raw.pricing?.input_cache_read),
-      cacheWritePrice: parsePrice(raw.pricing?.input_cache_write),
-      cacheWrite1hPrice: parsePrice(raw.pricing?.input_cache_write_1h),
+      promptPrice: parseRate(raw.pricing?.prompt),
+      completionPrice: parseRate(raw.pricing?.completion),
+      cacheReadPrice: parseRate(raw.pricing?.input_cache_read),
+      cacheWritePrice: parseRate(raw.pricing?.input_cache_write),
+      cacheWrite1hPrice: parseRate(raw.pricing?.input_cache_write_1h),
       supportsReasoning: hasStringItem(params, 'reasoning'),
       supportsTools: hasStringItem(params, 'tools'),
       supportsImages: hasStringItem(raw.architecture?.input_modalities, 'image'),

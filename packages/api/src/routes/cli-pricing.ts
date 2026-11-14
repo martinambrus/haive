@@ -11,6 +11,8 @@ import {
   cliProviderNameSchema,
   logger,
   normalizeModelKey,
+  modelPriceRatesSchema,
+  hasAnyRate,
   type CliProviderName,
   type RefreshCliVersionsJobResult,
 } from '@haive/shared';
@@ -36,13 +38,7 @@ const PROVIDER_NAMES = CLI_PROVIDER_LIST.map((p) => p.name) as [
  *  cache rates — so every field is independently optional. `null` means "no rate",
  *  which is NOT the same as 0: a 0 rate says the tokens are free, and a wrong "free"
  *  is the one error that silently loses money. */
-const ratesSchema = z.object({
-  inputRate: z.number().min(0).nullable(),
-  outputRate: z.number().min(0).nullable(),
-  cacheReadRate: z.number().min(0).nullable(),
-  cacheWriteRate: z.number().min(0).nullable(),
-  cacheWrite1hRate: z.number().min(0).nullable(),
-});
+const ratesSchema = modelPriceRatesSchema;
 
 const manualPriceSchema = z.object({
   // null = a vendor-wide rate, applying to this model id under any provider.
@@ -173,7 +169,7 @@ cliPricingRoutes.post('/prices', async (c) => {
   const modelKey = normalizeModelKey(body.modelKey);
   if (!modelKey) throw new HttpError(400, 'modelKey is required');
   const rates = body.rates;
-  if (Object.values(rates).every((v) => v === null)) {
+  if (!hasAnyRate(rates)) {
     // A row of nulls prices nothing and would only shadow the feed row it outranks.
     throw new HttpError(400, 'at least one rate must be set');
   }

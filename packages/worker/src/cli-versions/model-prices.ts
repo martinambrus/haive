@@ -8,7 +8,10 @@ import {
   configService,
   ECB_DAILY_FX_URL,
   LITELLM_PRICES_URL,
+  PROVIDER_LITELLM_VENDORS,
   hasAnyRate,
+  isVariablePriceRate,
+  parseRate,
   litellmRowsForProviders,
   logger,
   parseEcbDailyRates,
@@ -75,7 +78,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       return {
         ok: false,
         refreshed: [],
-        errors: [{ name: 'price:config', error: safeErrorMessage(err) }],
+        errors: [{ name: 'price:config', error: safeErrorMessage(err).slice(0, 2000) }],
       };
     }
     log.debug({ err }, 'pricing auto-update config unavailable; proceeding');
@@ -97,9 +100,13 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
 
   const desired: DesiredRow[] = [];
   const errors: RefreshCliVersionsJobResult['errors'] = [];
+  const unsupported: NonNullable<RefreshCliVersionsJobResult['unsupported']> = [];
 
   // --- LiteLLM: direct-vendor rates for everything except the gateway ---
-  const litellmProviders = [...enabled];
+  const synced = new Set<CliProviderName>();
+  const litellmProviders = [...enabled].filter(
+    (provider) => PROVIDER_LITELLM_VENDORS[provider]?.length,
+  );
   try {
     const resp = await fetch(LITELLM_PRICES_URL, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!resp.ok) throw new Error(`${LITELLM_PRICES_URL} HTTP ${resp.status}`);
@@ -110,9 +117,15 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
     if (entries.length === 0) throw new Error('litellm feed parsed to 0 chat entries');
     for (const row of litellmRowsForProviders(entries, litellmProviders)) {
       desired.push({ ...row, source: 'litellm' });
+      if (row.rates.pricingState === 'unsupported')
+        errors.push({
+          name: `price:${row.provider}`,
+          error: safeErrorMessage(`${row.modelKey}: ${row.rates.pricingReason}`).slice(0, 2000),
+        });
     }
+    for (const provider of litellmProviders) synced.add(provider);
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh litellm model prices');
     for (const provider of litellmProviders) errors.push({ name: `price:${provider}`, error });
     await recordSyncError(db, litellmProviders, error);
@@ -135,19 +148,59 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       }
       for (const m of models) {
         const rates: ModelPriceRates = {
-          inputRate: m.promptPrice,
-          outputRate: m.completionPrice,
-          cacheReadRate: m.cacheReadPrice,
-          cacheWriteRate: m.cacheWritePrice,
-          cacheWrite1hRate: m.cacheWrite1hPrice,
+          inputRate: parseRate(m.promptPrice),
+          outputRate: parseRate(m.completionPrice),
+          cacheReadRate: parseRate(m.cacheReadPrice),
+          cacheWriteRate: parseRate(m.cacheWritePrice),
+          cacheWrite1hRate: parseRate(m.cacheWrite1hPrice),
+          ...(m.tiers?.length ? { tiers: structuredClone(m.tiers) } : {}),
+          ...(m.pricingState
+            ? { pricingState: m.pricingState, pricingReason: m.pricingReason }
+            : {}),
         };
-        if (!hasAnyRate(rates)) continue;
+        if (
+          [
+            m.promptPrice,
+            m.completionPrice,
+            m.cacheReadPrice,
+            m.cacheWritePrice,
+            m.cacheWrite1hPrice,
+            ...(m.tiers ?? []).flatMap((tier) => [
+              tier.inputRate,
+              tier.outputRate,
+              tier.cacheReadRate,
+              tier.cacheWriteRate,
+              tier.cacheWrite1hRate,
+            ]),
+          ].some(isVariablePriceRate)
+        ) {
+          rates.pricingState = 'unsupported';
+          rates.pricingReason = 'variable-price';
+          delete rates.tiers;
+        }
+        if (!hasAnyRate(rates) && rates.pricingState !== 'unsupported') continue;
         const modelKey = m.id.trim().toLowerCase();
         if (!modelKey) continue;
         desired.push({ provider: 'openrouter', modelKey, source: 'openrouter', rates });
+        if (
+          rates.pricingState === 'unsupported' &&
+          (rates.pricingReason === 'time-window' || rates.pricingReason === 'variable-price')
+        )
+          unsupported.push({
+            model: safeErrorMessage(modelKey).slice(0, 2000),
+            reason: rates.pricingReason,
+          });
+        else if (rates.pricingState === 'unsupported')
+          errors.push({
+            name: 'price:openrouter',
+            error: safeErrorMessage(
+              `${modelKey}: ${rates.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
+            ).slice(0, 2000),
+          });
       }
+      synced.add('openrouter');
     } catch (err) {
-      const error = safeErrorMessage(err);
+      const error = safeErrorMessage(err).slice(0, 2000);
       log.warn({ err, error }, 'failed to read openrouter catalog for pricing');
       errors.push({ name: 'price:openrouter', error });
       await recordSyncError(db, ['openrouter'], error);
@@ -168,33 +221,40 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
         rates: row.rates,
       });
     }
+    if (pageErrors.length === 0 || rows.length > 0) synced.add('ollama');
     if (pageErrors.length > 0) {
-      const error = pageErrors.join('; ');
+      const error = safeErrorMessage(pageErrors.join('; ')).slice(0, 2000);
       errors.push({ name: 'price:ollama', error });
       await recordSyncError(db, ['ollama'], error);
     }
   }
 
-  if (desired.length === 0) {
-    return { ok: errors.length === 0, refreshed: [], errors };
-  }
-
-  const { inserted, closed, unchanged, perProvider } = await applyDesiredRows(db, desired);
+  const { inserted, closed, unchanged, perProvider } = desired.length
+    ? await applyDesiredRows(db, desired)
+    : { inserted: 0, closed: 0, unchanged: 0, perProvider: new Map<CliProviderName, number>() };
+  // A successful empty feed also clears its prior failure. A failed feed preserves
+  // its last-good count and fetchedAt through recordSyncError instead.
+  for (const provider of synced) if (!perProvider.has(provider)) perProvider.set(provider, 0);
 
   const now = new Date();
   for (const [provider, count] of perProvider) {
+    const providerErrors = errors
+      .filter((e) => e.name === `price:${provider}`)
+      .map((e) => e.error)
+      .join('; ');
+    const fetchError = providerErrors ? safeErrorMessage(providerErrors).slice(0, 2000) : null;
     await db
       .insert(schema.cliPricingSync)
       .values({
         name: provider,
         fetchedAt: now,
-        fetchError: null,
+        fetchError,
         priceCount: count,
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: schema.cliPricingSync.name,
-        set: { fetchedAt: now, fetchError: null, priceCount: count, updatedAt: now },
+        set: { fetchedAt: now, fetchError, priceCount: count, updatedAt: now },
       });
   }
 
@@ -207,6 +267,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       latest: null,
     })),
     errors,
+    unsupported,
   };
 }
 
@@ -283,7 +344,10 @@ async function applyDesiredRows(
 
   const perProvider = new Map<CliProviderName, number>();
   for (const row of desired) {
-    perProvider.set(row.provider, (perProvider.get(row.provider) ?? 0) + 1);
+    perProvider.set(
+      row.provider,
+      (perProvider.get(row.provider) ?? 0) + Number(row.rates.pricingState !== 'unsupported'),
+    );
   }
   return { inserted: toInsert.length, closed: toClose.length, unchanged, perProvider };
 }
@@ -337,7 +401,7 @@ export async function refreshFxRates(db: Database): Promise<RefreshCliVersionsJo
     log.info({ date, count: rates.length }, 'refreshed fx rates');
     return { ok: true, refreshed: [{ name: 'fx', count: rates.length, latest: date }], errors: [] };
   } catch (err) {
-    const error = safeErrorMessage(err);
+    const error = safeErrorMessage(err).slice(0, 2000);
     log.warn({ err, error }, 'failed to refresh fx rates');
     return { ok: false, refreshed: [], errors: [{ name: 'fx', error }] };
   }

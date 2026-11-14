@@ -79,6 +79,24 @@ export const cliModelPrices = pgTable(
         cacheReadRate: number | null;
         cacheWriteRate: number | null;
         cacheWrite1hRate: number | null;
+        tiers?:
+          | {
+              aboveTokens: number;
+              inclusive: boolean;
+              inputRate: number | null;
+              outputRate: number | null;
+              cacheReadRate: number | null;
+              cacheWriteRate: number | null;
+              cacheWrite1hRate: number | null;
+            }[]
+          | null;
+        pricingState?: 'unsupported';
+        pricingReason?:
+          | 'unsupported-tier'
+          | 'invalid-tier'
+          | 'unsupported-condition'
+          | 'time-window'
+          | 'variable-price';
       }>()
       .notNull(),
     /** Always 'USD': every vendor bills USD, and a display currency is applied at

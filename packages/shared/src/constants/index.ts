@@ -580,6 +580,8 @@ export interface RefreshCliVersionsJobResult {
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
   errors: { name: string; error: string }[];
+  /** Known conditions that prevent pricing, without a feed failure. */
+  unsupported?: { model: string; reason: 'time-window' | 'variable-price' }[];
 }
 
 export interface LatestRefreshRun {

@@ -166,3 +166,17 @@ it('persists and returns the structural skipped-source list', async () => {
     result: { skipped: ['prices'] },
   });
 });
+
+it('persists known unsupported pricing reasons without failing the refresh', async () => {
+  const fake = fixture();
+  const unsupported = [
+    { model: 'timed', reason: 'time-window' },
+    { model: 'openrouter/auto', reason: 'variable-price' },
+  ];
+  h.prices.mockResolvedValue({ ok: true, refreshed: [], errors: [], unsupported });
+  const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
+  expect(result).toMatchObject({ ok: true, errors: [], unsupported });
+  expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+    result: { ok: true, errors: [], unsupported },
+  });
+});

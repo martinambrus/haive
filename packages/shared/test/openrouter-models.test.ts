@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { trimOpenRouterModels } from '../src/cli-providers/openrouter-models.js';
 
+import google from './fixtures/pricing/openrouter-google.json' with { type: 'json' };
+
 // Shape taken from a real GET https://openrouter.ai/api/v1/models response.
 const REAL_ENTRY = {
   id: 'anthropic/claude-opus-5-fast',
@@ -112,4 +114,76 @@ describe('trimOpenRouterModels', () => {
     expect(trimOpenRouterModels({})).toEqual([]);
     expect(trimOpenRouterModels({ data: 'nope' })).toEqual([]);
   });
+
+  it('keeps the rest of the catalog when one entry has a non-object pricing value', () => {
+    const out = trimOpenRouterModels({
+      data: [
+        { id: 'vendor/broken', pricing: 'free' },
+        { id: 'vendor/numeric', pricing: 7 },
+        { id: 'vendor/ok', pricing: { prompt: '0.000001', completion: '0.000002' } },
+      ],
+    });
+    expect(out.map((m) => m.id)).toEqual(['vendor/broken', 'vendor/numeric', 'vendor/ok']);
+    expect(out[0]!.promptPrice).toBeNull();
+    expect(out[0]!.tiers).toBeUndefined();
+    expect(out[2]!.promptPrice).toBe(0.000001);
+  });
+});
+
+it('materializes the live Gemini override with non-text price keys', () => {
+  const [model] = trimOpenRouterModels(google);
+  expect(model!.pricingState).toBeUndefined();
+  expect(model!.tiers).toEqual([
+    {
+      aboveTokens: 200000,
+      inclusive: false,
+      inputRate: 0.0000025,
+      outputRate: 0.000015,
+      cacheReadRate: 0.00000025,
+      cacheWriteRate: 0.000000375,
+      cacheWrite1hRate: null,
+    },
+  ]);
+});
+it('ignores only known override price fields, never an unknown condition', () => {
+  const parse = (extra: Record<string, unknown>) =>
+    trimOpenRouterModels({
+      data: [
+        {
+          id: 'x',
+          pricing: { prompt: '1', overrides: [{ min_prompt_tokens: 100, prompt: '2', ...extra }] },
+        },
+      ],
+    })[0]!;
+  expect(
+    parse({
+      audio: '3',
+      audio_output: '4',
+      input_audio_cache: '5',
+      image: '6',
+      image_output: '7',
+      web_search: '8',
+      internal_reasoning: '9',
+    }).tiers,
+  ).toHaveLength(1);
+  expect(parse({ region: '1' }).pricingReason).toBe('unsupported-condition');
+  expect(parse({ unknown_price: '1' }).pricingReason).toBe('unsupported-condition');
+});
+
+it('marks negative OpenRouter base and tier rates as variable-price', () => {
+  for (const pricing of [
+    { prompt: '-1', completion: '-1' },
+    { prompt: '1', completion: '2', overrides: [{ min_prompt_tokens: 100, prompt: '-1' }] },
+  ]) {
+    const [model] = trimOpenRouterModels({ data: [{ id: 'openrouter/auto', pricing }] });
+    expect(model).toMatchObject({ pricingState: 'unsupported', pricingReason: 'variable-price' });
+    expect(model!.promptPrice).not.toBe(-1);
+  }
+});
+
+it('treats null overrides as absent while refusing malformed overrides', () => {
+  const parse = (overrides: unknown) =>
+    trimOpenRouterModels({ data: [{ id: 'x', pricing: { prompt: '1', overrides } }] })[0]!;
+  expect(parse(null).pricingState).toBeUndefined();
+  expect(parse({}).pricingReason).toBe('invalid-tier');
 });

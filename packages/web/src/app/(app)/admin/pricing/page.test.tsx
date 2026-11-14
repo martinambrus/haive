@@ -261,3 +261,51 @@ describe('pricing refresh result', () => {
     expect(alerts(view)).toHaveLength(0);
   });
 });
+
+it('lists complete prompt tiers below base rates and preserves them when replacing base rates', async () => {
+  const rates = {
+    inputRate: 1e-6,
+    outputRate: 2e-6,
+    cacheReadRate: null,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const tiers = [
+    { ...rates, aboveTokens: 100000, inclusive: false, inputRate: 5e-6, cacheWrite1hRate: 8e-6 },
+  ];
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [
+            {
+              id: 'x',
+              provider: null,
+              modelKey: 'tiered',
+              source: 'manual',
+              rates: { ...rates, tiers },
+              currency: 'USD',
+              note: null,
+              effectiveFrom: '2026-11-01T00:00:00Z',
+            },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('Prompt > 100,000 tokens');
+  expect(textOf(view.tree())).toContain('$5.00');
+  expect(textOf(view.tree())).toContain('$8.00');
+  fire.type(controls(view.tree(), 'model')[0]!, 'tiered');
+  view.draw();
+  fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+  await settle(view);
+  expect(h.post).toHaveBeenCalledWith(
+    '/cli-pricing/prices',
+    expect.objectContaining({ rates: expect.objectContaining({ tiers }) }),
+  );
+});

@@ -1261,8 +1261,9 @@ const cliPricingSchema = z.object({
 // currency costs are DISPLAYED in. Storage stays USD (what every vendor bills) — the
 // currency only picks the conversion applied at read time, at the ECB rate effective on
 // the task's own date, so an old task keeps reporting the same figure. The per-CLI
-// auto-update toggles live on the pricing page (/cli-pricing); this switch wins over
-// all of them.
+// auto-update toggles live on the pricing page (/cli-pricing). This global switch
+// freezes sync for every provider; existing feed rates stay in use. Only the per-CLI
+// switch also disables feed rates at lookup.
 adminRoutes.get('/config/cli-pricing', async (c) => {
   const autoUpdateEnabled = await configService.getBoolean(
     CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED,
