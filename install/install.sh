@@ -692,6 +692,11 @@ if [ "$CHANNEL" != "public" ]; then
   say "  manifest          verified for $PINNED"
 fi
 
+# Legacy releases need no hash tool. Once a bundle is known, check before downloading its files.
+if [ -s "$CHANNEL_SCRATCH/bundle-files" ] && ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  die "bundle verification requires a hash tool; install sha256sum or shasum and retry the installer"
+fi
+
 step "Writing the install to $INSTALL_DIR"
 # Download and verify in scratch before touching the destination, including --force installs.
 mkdir "$CHANNEL_SCRATCH/bundle"

@@ -471,6 +471,41 @@ for (const lang of ['sh', 'ps1']) {
       }
     });
     if (lang === 'sh') {
+      for (const needsHash of [true, false])
+        check(
+          `missing hash tools are checked before bundle downloads (bundle=${needsHash}, public=${publicInstall})`,
+          () => {
+            const source = readFileSync(join(repo, 'install/install.sh'), 'utf8').replace(
+              'set -eu',
+              `set -eu
+command() (
+  case "$*" in '-v sha256sum'|'-v shasum') return 1 ;; esac
+  unset -f command
+  command "$@"
+)`,
+            );
+            const f = fixture(lang, { publicInstall, data: needsHash ? data : manifest, source });
+            try {
+              const r = f.install();
+              if (needsHash) {
+                assert.notEqual(r.status, 0);
+                assert.match(r.stdout + r.stderr, /sha256sum.*shasum/i);
+                assert.doesNotMatch(
+                  existsSync(join(f.root, 'network-calls'))
+                    ? readFileSync(join(f.root, 'network-calls'), 'utf8')
+                    : '',
+                  /docker-compose/,
+                );
+                assert.ok(!existsSync(f.dir));
+              } else {
+                assert.equal(r.status, 0, r.stdout + r.stderr);
+                assert.ok(existsSync(join(f.dir, '.env')));
+              }
+            } finally {
+              f.clean();
+            }
+          },
+        );
       check(`selected GPU overlay is verified and recorded (public=${publicInstall})`, () => {
         const f = fixture(lang, { publicInstall, data, gpu: true });
         try {
