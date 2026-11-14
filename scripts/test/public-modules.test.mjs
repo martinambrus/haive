@@ -113,3 +113,27 @@ test('generic external directory references remain allowed in tracked install ho
   files.set('scripts/local-modules.cjs', "const directory = join(root, 'external-modules')");
   assert.deepEqual(checkPublicModules(files), []);
 });
+
+test('the private step SDK fixture name is allowed only in its test manifest', () => {
+  const file = 'packages/worker/test/fixtures/step-sdk/package.json';
+  const pkg = {
+    name: '@haive/module-sdk-fixture',
+    private: true,
+    peerDependencies: { '@haive/shared': '0.1.0' },
+  };
+  const files = fixture({});
+  files.set(file, JSON.stringify(pkg));
+  assert.deepEqual(checkPublicModules(files), []);
+  for (const changed of [
+    { ...pkg, private: false },
+    { ...pkg, name: '@haive/module-private-one' },
+    { ...pkg, dependencies: { '@haive/module-private-one': '1.0.0' } },
+  ]) {
+    files.set(file, JSON.stringify(changed));
+    assert.ok(checkPublicModules(files).some((error) => error.includes(file)));
+  }
+  files.delete(file);
+  files.set('packages/worker/test/fixtures/other/package.json', JSON.stringify(pkg));
+  assert.ok(checkPublicModules(files).some((error) => error.includes('other/package.json')));
+  assert.ok(checkPublicModules(fixture({ [pkg.name]: 'workspace:*' })).length > 0);
+});

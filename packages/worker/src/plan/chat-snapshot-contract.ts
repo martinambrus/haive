@@ -1,11 +1,8 @@
-import type { PlanNodeRecord, PlanEdgeRecord } from '@haive/shared/plan';
+import type { ChatPlanRead } from '@haive/shared/step';
+
+export type { ChatPlanRead } from '@haive/shared/step';
 
 export const PLAN_CHAT_SNAPSHOT_PATH = '/haive/plan-chat-snapshot.json';
-
-export interface ChatPlanRead {
-  nodes: PlanNodeRecord[];
-  edges: PlanEdgeRecord[];
-}
 
 export interface PlanChatSnapshot extends ChatPlanRead {
   schemaVersion: 1;

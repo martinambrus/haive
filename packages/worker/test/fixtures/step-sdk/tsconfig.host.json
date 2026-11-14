@@ -1,0 +1,8 @@
+{
+  "extends": "../../../tsconfig.typecheck.json",
+  "compilerOptions": {
+    "rootDir": "../../.."
+  },
+  "include": ["host.typecheck.ts", "../../../src/types/**/*.d.ts"],
+  "exclude": ["dist", "node_modules"]
+}

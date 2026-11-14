@@ -24,7 +24,7 @@ import {
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
-import type { StepDefinition } from '../step-engine/step-definition.js';
+import type { StepDefinition } from '@haive/shared/step';
 import { emitsLoop } from '../step-engine/steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 import {
