@@ -3,7 +3,12 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { beforeAll, beforeEach, afterAll, describe, it, expect, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
-import { handleResult, processTaskJob, resolveFixLoopGate } from '../src/queues/task-queue.js';
+import {
+  handleResult,
+  processTaskJob,
+  providerHoldFor,
+  resolveFixLoopGate,
+} from '../src/queues/task-queue.js';
 import { resolvePreferredCli } from '../src/step-engine/step-runner.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
@@ -13,7 +18,10 @@ import {
   buildFixLoopEscalationSchema,
   recordFixLoopRequest,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
-import { fixRoundCliRole } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
+import {
+  FixRoundCliUnavailable,
+  fixRoundCliRole,
+} from '../src/step-engine/steps/workflow/_fix-round-cli.js';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown, adds: [] as unknown[] }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -529,6 +537,41 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
       }
     },
   );
+
+  it('materialises the fix round row before refusing a choice whose CLI was removed', async () => {
+    const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+    stepRegistry.override({
+      ...target,
+      llm: { requiredCapabilities: ['tool_use'], buildPrompt: () => 'fix' },
+    });
+    const [picked] = await db
+      .insert(schema.cliProviders)
+      .values({ userId, name: 'codex', label: 'gate pick' })
+      .returning();
+    try {
+      const { id, gate } = await parked(REVIEW, LOOP);
+      await resolveFixLoopGate(db, ctxFor(id, LOOP), gate, 'continue', 0, '', picked!.id);
+      await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
+      await expect(
+        providerHoldFor(db, ctxFor(id, LOOP), stepRegistry.require(FIX_LOOP_TARGET_STEP_ID), 1, 0),
+      ).rejects.toBeInstanceOf(FixRoundCliUnavailable);
+      // Retry re-runs the step at this round only when its row exists.
+      const rows = await db
+        .select()
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, id),
+            eq(schema.taskSteps.stepId, FIX_LOOP_TARGET_STEP_ID),
+            eq(schema.taskSteps.round, 1),
+          ),
+        );
+      expect(rows).toHaveLength(1);
+    } finally {
+      stepRegistry.override(target);
+      await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
+    }
+  });
 
   it('rolls the next-round CLI back when Retry wins the task fence', async () => {
     const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);

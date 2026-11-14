@@ -1698,7 +1698,7 @@ async function loadProviders(
 /** The hold message for a fresh step whose resolved CLI is a listed provider that is switched
  *  off, else null. Only a step that dispatches a CLI or reads the default one is asked, and a
  *  step that will only skip is never held. */
-async function providerHoldFor(
+export async function providerHoldFor(
   db: Database,
   ctx: ResolvedTaskContext,
   stepDef: StepDefinition,
@@ -1717,7 +1717,14 @@ async function providerHoldFor(
     ctx.taskId,
     ctx.ignoreSavedStepClis,
     round,
-  );
+  ).catch(async (err: unknown) => {
+    // The round's chosen CLI went away after the gate. The task fails on this refusal, so
+    // its row must exist first: Retry re-runs the step at this round only when it finds one,
+    // and otherwise replays the task from START.
+    if (err instanceof FixRoundCliUnavailable)
+      await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
+    throw err;
+  });
   const message = providerHoldMessage(providers, cliProviderId);
   if (message === null) return null;
   const skips = await willSkipBeforeAdmission(
