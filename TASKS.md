@@ -1136,7 +1136,7 @@ Candidates:
 1. The killed-run fallback dedupes by message.id; check whether grok reuses ids across messages.
 2. grok reports no context window; the 256k table entry is one old measurement.
 
-### T369 · FNF[usage-fallback-verify] · ollama/antigravity live usage fallbacks unverified; zai/muse killed runs store zero usage (+7)
+### T369 · FNF[usage-fallback-verify] · ollama/antigravity live usage fallbacks unverified; zai/muse killed runs store zero usage (+10)
 
 status: open (member 3 DONE #1150; the rest measurement-gated) (VERIFIED 2026-11-13, MSC probe, opt-in `MSC_PROBES=1` `worker/test/msc-usage-probes.test.ts` on branch `verify/misc-probes`: member 3 CONFIRMED, a zai or muse run killed before `result` after zero-valued assistant events stores `{0,0,0}` instead of unknown (`cli-exec/stream.ts` ~:519, persisted at `handlers.ts` ~:422), understating statistics; fix: an all-zero assistant fallback means null, authoritative result usage kept. Member 5 NEEDS LIVE EVIDENCE: the parser replaces both values (`stream.ts` ~:237) and a constructed cumulative two-result stream passes; a captured steered claude run with two results must show whether the second result's usage is per-turn or cumulative before summing. Others stay measurement-gated) · executable: 3 · was modular #237 · priority: P2
 
@@ -1144,12 +1144,15 @@ status: open (member 3 DONE #1150; the rest measurement-gated) (VERIFIED 2026-11
 2. Whether antigravity's running usage is per-step or cumulative is unmeasured.
 3. DONE #1150 (7c13cd38a): an all-zero assistant fallback records null usage, authoritative result usage kept.
 4. amp's multi-turn semantics are unmeasured.
-5. MODERATE, fix first: a steered claude run keeps only the last result's usage next to a cumulative cost (worker cli-exec/stream.ts ~:241). Fix: sum per result.
+5. DONE 2026-11-14 #1160 (a32e86efe): measured on claude-code 2.1.323 (steer mid-turn and after the first result), each result's usage is per turn while cost, duration_api_ms and modelUsage are cumulative; the collector sums result usage. Stored history not backfilled (5 of 6,444 stream logs had more than one result).
 6. gemini and antigravity could prove a single request, but nothing reads it (usage-extract.ts ~:120). sumTokenUsage treats a missing peak as 0.
 7. amp's `usage.max_tokens` (272k) may be its context window. Measure.
 8. ollama's per-message prompt and result prompt disagree (display only).
 
-Execution fence 2026-11-01: Check the current steered-run usage/cost contract first; only a supported incorrect total justifies the fix. Unmeasured provider semantics, table guesses and display-only discrepancies remain measurement-gated.
+9. (#1160 review, PRE-EXISTING, minor) Result usage always wins over the assistant fallback, so a live snapshot between two results, or a steered run killed during its second turn, shows the first turn's tokens beside the cumulative cost (worker queues/cli-exec/stream.ts `getTokenUsage`). Fix direction: add the assistant usage of messages after the last result.
+10. (#1160 review, low) Collector tests lack a cache-bucket case, a result without usage, a live snapshot between results and a replay of the measured capture.
+11. (#1160 review, nit) `maintenance/context-backfill.ts` ~:97 comment calls the result "cumulative" (it means within one turn).
+    Execution fence 2026-11-01: Check the current steered-run usage/cost contract first; only a supported incorrect total justifies the fix. Unmeasured provider semantics, table guesses and display-only discrepancies remain measurement-gated.
 
 ### T371 · FNF[docker-spawn-dedup] · twelve hand-rolled docker spawn helpers re-implement collect, deadline and kill (+1)
 
