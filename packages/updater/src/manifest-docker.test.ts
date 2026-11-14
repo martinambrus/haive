@@ -103,18 +103,19 @@ it.each(['wrong-name', 'symlink', 'oversize', 'hash-mismatch', 'missing'])(
     const body = fault === 'hash-mismatch' ? Buffer.from('different') : bundleBody;
     const block = header(
       fault === 'wrong-name' ? '../docker-compose.yml' : 'docker-compose.yml',
-      fault === 'oversize' ? 9 : body.length,
+      body.length,
       fault === 'symlink' ? '2' : '0',
     );
     archives = [
       [tar(Buffer.from(JSON.stringify(bundledManifest)))],
       [fault === 'missing' ? Buffer.alloc(1024) : tar(body, block)],
+      [tar(bundleBody, header('docker-compose.run.yml', bundleBody.length))],
     ];
     await expect(
       readReleaseManifestImage('private/release:1', undefined, {
         maxBundleBytes: fault === 'oversize' ? 8 : undefined,
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ refusal: 'bundle-invalid' });
     expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
   },
 );

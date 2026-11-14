@@ -97,7 +97,7 @@ describe('bundle preflight', () => {
       text: JSON.stringify(manifest),
       bundle: new Map(Object.keys(files).map((name) => [name, body])),
     });
-    if ('validateCompose' in dk) vi.spyOn(dk, 'validateCompose').mockResolvedValue(undefined);
+    vi.spyOn(dk, 'validateCompose').mockResolvedValue(undefined);
   });
   afterEach(async () => rm(dir, { recursive: true, force: true }));
   it('records bundle-modified with the first file and remedy before any write or hold', async () => {
