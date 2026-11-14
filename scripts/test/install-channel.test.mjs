@@ -441,6 +441,10 @@ for (const lang of ['sh', 'ps1']) {
               const r = f.install([f.flag('force')]);
               assert.notEqual(r.status, 0, r.stdout + r.stderr);
               assert.match(r.stdout + r.stderr, /bundle destination is a directory/);
+              assert.ok(
+                !existsSync(join(f.dir, 'docker-compose.run.yml')),
+                'refuse before placing any bundle file',
+              );
               assert.deepEqual(readdirSync(target), ['operator-file']);
               assert.equal(readFileSync(join(target, 'operator-file'), 'utf8'), 'keep');
               assert.equal(statSync(target).mode, before.mode);
@@ -494,6 +498,10 @@ for (const lang of ['sh', 'ps1']) {
             } else {
               assert.notEqual(r.status, 0);
               assert.match(r.stdout + r.stderr, /cannot set bundle record owner/);
+              assert.ok(
+                !existsSync(join(f.dir, 'docker-compose.yml')),
+                'refuse before placing the compose bundle',
+              );
               assert.ok(!existsSync(join(f.dir, '.env')));
             }
           } finally {
@@ -698,13 +706,17 @@ command() (
         f.clean();
       }
     });
-  check('empty Mailpit password stops before writing env', () => {
+  check('empty Mailpit password stops before writing install files', () => {
     const f = fixture(lang, { publicInstall: true, fail: 'mailpit-secret' });
     try {
       const r = f.install();
       assert.notEqual(r.status, 0, 'empty Mailpit password must refuse installation');
       assert.match(`${r.stdout}${r.stderr}`, /could not generate secrets/i);
       assert.ok(!existsSync(join(f.dir, '.env')), 'no env with an empty Mailpit password');
+      assert.ok(
+        !existsSync(join(f.dir, 'docker-compose.yml')),
+        'no partial bundle after secret refusal',
+      );
     } finally {
       f.clean();
     }

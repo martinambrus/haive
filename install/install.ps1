@@ -605,6 +605,20 @@ if ($hasReleaseBundle) {
   $record = [ordered]@{ version = $pinned; files = $hashes } | ConvertTo-Json -Depth 10 -Compress
   [IO.File]::WriteAllText((Join-Path $bundleDir '.haive-bundle.json'), $record + "`n", (New-Object Text.UTF8Encoding($false)))
 }
+# Refuse known destination conflicts before placing any part of the bundle.
+$placedFiles = @($installedFiles)
+if ($hasReleaseBundle) { $placedFiles += '.haive-bundle.json' }
+foreach ($name in $placedFiles) {
+  if ([IO.Directory]::Exists((Join-Path $Dir $name))) { throw "bundle destination is a directory: $name" }
+}
+# Generate and validate secrets before the first destination write too.
+if (-not (Test-Path (Join-Path $Dir '.env'))) {
+  $key  = New-HexSecret 32
+  $jwt  = New-HexSecret 32
+  $pgpw = New-HexSecret 16
+  $mailpitUiPassword = New-HexSecret 24
+  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
 Push-Location $Dir
 # Stage on the destination filesystem. Rename replaces a link instead of writing through it.
@@ -617,7 +631,6 @@ function Place-BundleFile([string]$name) {
 }
 foreach ($name in $installedFiles) {
   Copy-Item -LiteralPath (Join-Path $bundleDir $name) -Destination (Join-Path $bundleStage $name)
-  Place-BundleFile $name
 }
 if ($hasReleaseBundle) {
   $recordPath = Join-Path $bundleStage '.haive-bundle.json'
@@ -637,8 +650,9 @@ if ($hasReleaseBundle) {
     }
     if ((Invoke-Native chmod @('644', $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record mode' }
   }
-  Place-BundleFile '.haive-bundle.json'
 }
+# Ownership checks can refuse too, so finish them before the first destination file changes.
+foreach ($name in $placedFiles) { Place-BundleFile $name }
 Remove-Item -LiteralPath $bundleStage -Force
 $bundleStage = $null
 
@@ -650,12 +664,6 @@ Write-Note "ports             web $webPort, api $apiPort, mail $mailpitPort"
 $envPath = Join-Path $Dir '.env'
 $channelEnvCreated = $false
 if (-not (Test-Path $envPath)) {
-  $key  = New-HexSecret 32
-  $jwt  = New-HexSecret 32
-  $pgpw = New-HexSecret 16
-  $mailpitUiPassword = New-HexSecret 24
-  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
-
   # HOST_REPO_ROOT is written EXPLICITLY and this is the one Windows-specific hard requirement.
   # docker-compose.yml defaults that mount to ${HOME}, and PowerShell does not set HOME as an
   # ENVIRONMENT variable ($HOME is a shell variable, which Compose cannot see). MEASURED: the

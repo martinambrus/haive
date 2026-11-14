@@ -761,6 +761,24 @@ if [ -s "$CHANNEL_SCRATCH/bundle-files" ]; then
   chmod 644 "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
 fi
 
+# Refuse known destination conflicts before placing any part of the bundle.
+for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"} .haive-bundle.json; do
+  if [ "$name" = .haive-bundle.json ] && [ ! -f "$CHANNEL_SCRATCH/bundle/$name" ]; then continue; fi
+  [ ! -d "$INSTALL_DIR/$name" ] || die "bundle destination is a directory: $name"
+done
+# Generate and validate secrets before the first destination write too.
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+  KEY=$(rand_hex 32)
+  JWT=$(rand_hex 32)
+  PGPW=$(rand_hex 16)
+  MAILPIT_UI_PASSWORD=$(rand_hex 24)
+  # Explicit, not `A && B && C || die`: that reads as if-then-else and is not one — shellcheck
+  # says so as SC2015 — and the answer here has to be unambiguous, since the branch it guards is
+  # the one that would otherwise write an install with an empty encryption key.
+  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ] || [ -z "$MAILPIT_UI_PASSWORD" ]; then
+    die "could not generate secrets. Nothing was installed."
+  fi
+fi
 mkdir -p "$INSTALL_DIR/snapshots"
 cd "$INSTALL_DIR"
 # Stage on the destination filesystem. Rename replaces a link instead of writing through it.
@@ -774,7 +792,6 @@ place_bundle_file() {
 }
 for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"}; do
   cp "$CHANNEL_SCRATCH/bundle/$name" "$BUNDLE_STAGE/$name"
-  place_bundle_file "$name"
 done
 if [ -f "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" ]; then
   record_temp="$BUNDLE_STAGE/.haive-bundle.json"
@@ -793,8 +810,12 @@ if [ -f "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" ]; then
     fi
   fi
   chmod 644 "$record_temp"
-  place_bundle_file .haive-bundle.json
 fi
+# Ownership checks can refuse too, so finish them before the first destination file changes.
+for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"}; do
+  place_bundle_file "$name"
+done
+if [ -f "$BUNDLE_STAGE/.haive-bundle.json" ]; then place_bundle_file .haive-bundle.json; fi
 rmdir "$BUNDLE_STAGE"
 BUNDLE_STAGE=""
 
@@ -806,16 +827,6 @@ say "  ports             web ${WEB_PORT}, api ${API_PORT}, mail ${MAILPIT_PORT}"
 # Secrets. Generated per install and stored only here — a shipped default would mean every install
 # shared one encryption key and any user could decrypt any other's secrets.
 if [ ! -f .env ]; then
-  KEY=$(rand_hex 32)
-  JWT=$(rand_hex 32)
-  PGPW=$(rand_hex 16)
-  MAILPIT_UI_PASSWORD=$(rand_hex 24)
-  # Explicit, not `A && B && C || die`: that reads as if-then-else and is not one — shellcheck
-  # says so as SC2015 — and the answer here has to be unambiguous, since the branch it guards is
-  # the one that would otherwise write an install with an empty encryption key.
-  if [ -z "$KEY" ] || [ -z "$JWT" ] || [ -z "$PGPW" ] || [ -z "$MAILPIT_UI_PASSWORD" ]; then
-    die "could not generate secrets. Nothing was installed."
-  fi
   umask 077
   if [ "$CHANNEL" != "public" ]; then CHANNEL_ENV_CREATED=1; fi
   cat > .env <<EOF
