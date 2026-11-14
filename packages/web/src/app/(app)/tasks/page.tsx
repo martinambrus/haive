@@ -171,7 +171,10 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
             >
               work {formatDuration(task.timing.workMs)}
             </span>
-            <span className="text-amber-400" title="Time the task sat waiting on you">
+            <span
+              className="text-amber-400"
+              title="Time the task sat parked: forms, slots, rate limits, pauses and restarts"
+            >
               idle {formatDuration(task.timing.idleMs)}
             </span>
             <span
