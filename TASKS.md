@@ -650,6 +650,26 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
+
+status: parked (OWNER DECISION 2026-11-14: build paused until a full workflow run gives a fresh 08c baseline to compare DE against) · kind: design · found: owner GO 2026-11-14 · priority: P4
+
+Plan: `docs/plans/deeppattern-module.md` Part B.
+
+Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `bench/grading.md`):
+
+- **Device route.** One device activated (secret file and token location in memory, never re-activate). REST device route: `POST /v1/audits`, then status, result, events and cancel.
+- **Benchmark.** 7 audits on first-build diffs of 6 Haive changes, graded against defects our pipeline confirmed:
+  - precision 24% (9/37 TRUE), with 0 real defects our pipeline missed;
+  - recall 3 of 26 substantive defects;
+  - full file contents cut false claims to 0 but did not add recall;
+  - standard tier (a 3-model panel) beat fast;
+  - 110-263 s per audit; fast costs about $0.23.
+
+**Resume when** the owner has run a full workflow, plus optional artificial step 08 runs on planted-bug diffs. Then compare DE at standard tier with full changed-file contents against that 08c output. Build only as a report-only second opinion, never a gate.
+
+The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
+
 ### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186 (+6)
 
 status: open · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
