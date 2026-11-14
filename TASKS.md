@@ -2118,6 +2118,8 @@ All low unless marked.
 
 ## Done
 
+- Derived task types PR 2 (#1187): migrations 0240 (the `derived` run-list strategy) and 0241 (nullable `base_slug`, `changes` and `tasks.derived_run_plan`, named shape CHECKs, a restrictive self foreign key) with every existing row unchanged; readers refuse a derived type explicitly until PR3; the header's guarded manual cleanup refuses while any task uses a derived type. Applied to the dev database 2026-11-14. Its PR3 hazard is filed in T679 item 6.
+
 - Release bundle swap, T648 PR 5 (#1185): the updater installs the release's compose bundle with a journalled backup, restores only the files a run changed on rollback, refuses linked or non-regular install files before any hold, classifies every installed file a swap replaces (all overlays) for edit detection and retention, keeps backups that hold operator edits, cleans abandoned writer temps, and recovers a crashed run from the journal without a migration head. Lows filed in T674.
 
 - Derived task types PR 1 (#1186): `@haive/shared` evaluates a derived type's ordered change list (remove, insertAfter, replace) against every candidate run list of its built-in base (no path plus each execution path, with the environment prelude), with explicit applied/skipped/refused outcomes, stale-target warnings, a protected triage prefix, `replace` refused until output contracts exist, and `validateComposition` on every result; nothing calls it yet. Lows and PR3 decisions filed as T679.
