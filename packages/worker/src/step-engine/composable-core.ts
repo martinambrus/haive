@@ -16,6 +16,10 @@ const EDITS_PRECEDE = [
   'tests',
   'verification',
   'review',
+  'browser-verification',
+  'code-audit',
+  'adversarial-qa',
+  'verify-approved',
   'commit',
   'reindexed',
   'db-saved',
@@ -74,6 +78,35 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'skills-synced',
       'cleaned',
     ],
+  },
+  {
+    stepId: '00-model-health-workflow',
+    label: 'Model health check',
+    group: 'setup',
+    dispatchesCli: true,
+    requires: [],
+    provides: ['model-health'],
+    precedes: ['execution-path', 'env-deps', 'worktree', 'discovery', 'spec', 'implementation'],
+  },
+  {
+    stepId: '00-triage',
+    label: 'Choose execution path',
+    group: 'setup',
+    dispatchesCli: true,
+    requires: [],
+    provides: ['execution-path'],
+    // Static types keep their snapshot; this still records the path and broad-audit choice.
+    precedes: ['effort-estimated', 'env-deps', 'worktree', 'discovery', 'spec', 'implementation'],
+  },
+  {
+    stepId: '00b-estimate',
+    label: 'Estimate effort',
+    group: 'setup',
+    dispatchesCli: true,
+    // Repository history and the triage path are optional; both have explicit fallbacks.
+    requires: [],
+    provides: ['effort-estimated'],
+    precedes: ['sprint-plan', 'implementation'],
   },
   {
     stepId: '00a-sync-base',
@@ -216,13 +249,89 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     ],
   },
   {
+    stepId: '01e-external-kb-sync',
+    label: 'Sync external knowledge-base changes',
+    group: 'knowledge',
+    dispatchesCli: true,
+    requires: [
+      needRepository('Measures external commits and updates the repository knowledge base.'),
+    ],
+    provides: ['external-kb-synced'],
+    // Commits/reverts its own KB edits, without promising the rest of the tree is clean.
+    precedes: ['pre-indexed', 'discovery', 'spec', 'learnings', 'pushed', 'cleaned'],
+  },
+  {
+    stepId: '01f-external-plan-sync',
+    label: 'Sync external plan changes',
+    group: 'knowledge',
+    dispatchesCli: true,
+    requires: [needRepository('Measures external commits against the repository plan.')],
+    provides: ['external-plan-synced'],
+    precedes: ['discovery', 'spec', 'plan-reconciled', 'cleaned'],
+  },
+  {
+    stepId: '01g-rag-source-selection',
+    label: 'Choose pre-sync RAG scope',
+    group: 'knowledge',
+    dispatchesCli: false,
+    requires: [needRepository('Scans the repository root and saves its indexing scope.')],
+    provides: ['pre-rag-scope'],
+    // Distinct from rag-scope: this indexes the main checkout before implementation.
+    precedes: ['pre-indexed'],
+  },
+  {
+    stepId: '02-pre-rag-sync',
+    label: 'Pre-workflow RAG sync',
+    group: 'knowledge',
+    dispatchesCli: false,
+    requires: [
+      needRepository('Indexes code and knowledge files from the repository root.'),
+      { needs: 'pre-rag-scope', reason: 'Indexes only after the repository scope is reviewed.' },
+    ],
+    provides: ['pre-indexed'],
+    precedes: ['discovery', 'spec', 'implementation'],
+  },
+  {
     stepId: '03-phase-0a-discovery',
     label: 'Phase 0a: Knowledge discovery',
     group: 'spec',
     dispatchesCli: true,
     requires: [],
     provides: ['discovery'],
+    precedes: ['business-requirements', 'spec'],
+  },
+  {
+    stepId: '03b-business-requirements',
+    agentAuthoredOutput: true,
+    label: 'Draft business requirements',
+    group: 'spec',
+    dispatchesCli: true,
+    // Discovery is optional context; the task brief is sufficient to draft requirements.
+    requires: [],
+    provides: ['business-requirements'],
+    precedes: ['requirements-humanized', 'requirements-approved', 'spec'],
+  },
+  {
+    stepId: '03b2-humanize-requirements',
+    agentAuthoredOutput: true,
+    label: 'Humanize business requirements',
+    group: 'spec',
+    dispatchesCli: true,
+    requires: [{ needs: 'business-requirements', reason: 'Rewrites the draft stored by 03b.' }],
+    provides: ['requirements-humanized'],
+    precedes: ['requirements-approved', 'spec'],
+  },
+  {
+    stepId: '03c-business-requirements-review',
+    label: 'Review business requirements',
+    group: 'spec',
+    dispatchesCli: false,
+    requires: [
+      { needs: 'business-requirements', reason: 'Reviews the draft; humanization is optional.' },
+    ],
+    provides: ['requirements-approved'],
     precedes: ['spec'],
+    loopTargetStepId: '03b-business-requirements',
   },
   {
     stepId: '04-phase-0b-pre-planning',
@@ -234,14 +343,36 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     precedes: ['implementation'],
   },
   {
+    stepId: '04a-spec-audit',
+    agentAuthoredOutput: true,
+    label: 'Spec audit (broad)',
+    group: 'spec',
+    dispatchesCli: true,
+    requires: [{ needs: 'spec', reason: 'Audits the pre-planning draft read by step id.' }],
+    provides: ['spec-audit'],
+    precedes: ['spec-reviewed', 'spec-warnings-resolved', 'spec-approved', 'implementation'],
+  },
+  {
     stepId: '05-phase-0b5-spec-quality',
     label: 'Phase 0b.5: Spec quality review',
     group: 'spec',
     dispatchesCli: true,
     requires: [{ needs: 'spec', reason: 'Reviews the pre-planning spec.' }],
-    provides: ['spec'],
-    precedes: ['spec-approved', 'implementation'],
+    provides: ['spec', 'spec-reviewed'],
+    precedes: ['spec-warnings-resolved', 'spec-approved', 'implementation'],
     loopBudgetEditable: true,
+  },
+  {
+    stepId: '05a-resolve-spec-warnings',
+    label: 'Resolve spec warnings',
+    group: 'spec',
+    dispatchesCli: true,
+    // Quality and broad-audit findings are optional; the draft is the fallback body.
+    requires: [
+      { needs: 'spec', reason: 'Resolves findings against the drafted or reviewed spec.' },
+    ],
+    provides: ['spec', 'spec-warnings-resolved'],
+    precedes: ['spec-approved', 'sprint-plan', 'implementation'],
   },
   {
     stepId: '06-gate-1-spec-approval',
@@ -264,8 +395,13 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     provides: [],
     // These steps consume the downstream answers or task-level review/run settings.
     // Worktree, discovery and spec do not consume the answers 06 writes, and run
-    // before 06 in the shipped workflow. Sprint/browser/insights are not catalogued.
+    // before 06 in the shipped workflow.
     precedes: [
+      'sprint-plan',
+      'browser-test-choice',
+      'browser-verification',
+      'adversarial-qa',
+      'insights-triaged',
       'db-migrated',
       'implementation',
       'reconciled',
@@ -274,6 +410,35 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'verification',
       'review',
     ],
+  },
+  {
+    stepId: '06b-sprint-planning',
+    label: 'Sprint planning',
+    group: 'build',
+    dispatchesCli: true,
+    requires: [
+      { needs: 'spec', reason: 'Decomposes the approved spec into implementation issues.' },
+      { needs: 'spec-approved', reason: 'Reads the gate-1 decision and feedback before planning.' },
+    ],
+    provides: ['sprint-plan'],
+    precedes: ['implementation'],
+  },
+  {
+    stepId: '06c-dag-execute',
+    label: 'DAG implementation',
+    group: 'build',
+    dispatchesCli: true,
+    requires: [
+      needWorktree,
+      {
+        needs: 'sprint-plan',
+        reason: 'Reads 06b mode and the task_dag_* rows it creates in DAG mode.',
+      },
+    ],
+    provides: ['implementation'],
+    entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }],
+    removes: ['clean-tree'],
+    precedes: EDITS_PRECEDE,
   },
   {
     stepId: IMPLEMENT,
@@ -310,6 +475,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [needWorktree],
     provides: ['validation'],
     precedes: [
+      'verify-approved',
       'tests',
       'verification',
       'review',
@@ -344,6 +510,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     provides: ['tests'],
     removes: ['clean-tree'],
     precedes: [
+      'verify-approved',
       'verification',
       'review',
       'commit',
@@ -365,6 +532,43 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     loopTargetStepId: IMPLEMENT,
   },
   {
+    stepId: '08a-browser-setup',
+    label: 'Browser test method',
+    group: 'check',
+    dispatchesCli: false,
+    requires: [
+      {
+        needs: 'app-runtime',
+        reason: 'Offers browser methods for the DDEV or app-runner runtime.',
+      },
+    ],
+    provides: ['browser-test-choice'],
+    precedes: ['browser-verification', 'verify-approved', 'commit'],
+  },
+  {
+    stepId: '08a-browser-verify',
+    label: 'Browser verification',
+    group: 'check',
+    dispatchesCli: true,
+    requires: [
+      needWorktree,
+      { needs: 'app-runtime', reason: 'Tests the running DDEV or app-runner application.' },
+    ],
+    // The method has a legacy default when browser setup is absent.
+    provides: ['browser-verification'],
+    removes: ['clean-tree'],
+    precedes: [
+      'review',
+      'code-audit',
+      'adversarial-qa',
+      'verify-approved',
+      'commit',
+      'db-saved',
+      'learnings',
+    ],
+    loopTargetStepId: IMPLEMENT,
+  },
+  {
     stepId: '08c-code-review',
     agentAuthoredOutput: true,
     label: 'Phase 6: Code review',
@@ -372,7 +576,66 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['review'],
-    precedes: ['db-saved', 'learnings'],
+    precedes: ['verify-approved', 'db-saved', 'learnings'],
+    loopTargetStepId: IMPLEMENT,
+  },
+  {
+    stepId: '08c2-code-audit',
+    agentAuthoredOutput: true,
+    label: 'Code audit (broad)',
+    group: 'check',
+    dispatchesCli: true,
+    // Spec and peer review are optional; an absent spec falls back to the task brief.
+    requires: [needWorktree],
+    provides: ['code-audit'],
+    precedes: ['verify-approved', 'commit', 'db-saved', 'learnings'],
+  },
+  {
+    stepId: '08d-adversarial-qa',
+    label: 'Adversarial QA',
+    group: 'check',
+    dispatchesCli: true,
+    // Can attack code without a live app; browser/login/spec/DAG debt are optional context.
+    requires: [needWorktree],
+    provides: ['adversarial-qa'],
+    precedes: ['qa-reviewed', 'verify-approved', 'commit', 'db-saved', 'learnings'],
+  },
+  {
+    stepId: '08d2-adversarial-qa-review',
+    label: 'Review adversarial QA',
+    group: 'check',
+    dispatchesCli: false,
+    requires: [{ needs: 'adversarial-qa', reason: 'Reviews the findings stored by 08d.' }],
+    provides: ['qa-reviewed'],
+    precedes: ['verify-approved', 'commit'],
+    loopTargetStepId: IMPLEMENT,
+  },
+  {
+    stepId: '08e-insights-triage',
+    label: 'Triage insights',
+    group: 'check',
+    dispatchesCli: true,
+    requires: [needWorktree],
+    provides: ['insights-triaged'],
+    removes: ['clean-tree'],
+    // Runs AFTER reviews in the shipped order; selected insights can still edit code.
+    precedes: ['verify-approved', 'commit', 'learnings', 'pushed', 'cleaned'],
+  },
+  {
+    stepId: '09-gate-2-verify-approval',
+    label: 'Gate 2: Verify approval',
+    group: 'check',
+    dispatchesCli: false,
+    requires: [
+      needWorktree,
+      {
+        needs: 'verification',
+        reason: 'Presents the verification results for approval before commit.',
+      },
+    ],
+    // Audit/review/QA/browser reports are optional sections, read by their core ids.
+    provides: ['verify-approved'],
+    precedes: ['commit'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -408,19 +671,16 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     ],
     provides: ['skills-synced'],
     removes: ['clean-tree'],
-    precedes: ['pushed', 'reindexed', 'rag-scope'],
+    precedes: ['knowledge-committed', 'pushed', 'reindexed', 'rag-scope'],
   },
   {
     stepId: '11b-kb-commit',
     label: 'Commit knowledge base',
     group: 'knowledge',
     dispatchesCli: false,
-    requires: [
-      needWorktree,
-      { needs: 'learnings', reason: 'Commits the captured learnings.' },
-      { needs: 'skills-synced', reason: 'Commits the skill files the learning step approved.' },
-    ],
-    provides: ['clean-tree'],
+    requires: [needWorktree, { needs: 'learnings', reason: 'Commits the captured learnings.' }],
+    // Skill sync is optional (absent on plan_tasklist); it must precede this when present.
+    provides: ['clean-tree', 'knowledge-committed'],
     precedes: ['pushed', 'rag-scope', 'reindexed'],
   },
   {
@@ -442,6 +702,25 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'rag-scope', reason: 'Indexes only after the RAG scope is chosen.' },
     ],
     provides: ['reindexed'],
+  },
+  {
+    stepId: '11e-prompt-guidance',
+    label: 'Capture prompt guidance',
+    group: 'knowledge',
+    dispatchesCli: false,
+    // Scans task invocation outputs and writes guidance rows; repo facets are optional.
+    requires: [],
+    provides: ['prompt-guidance'],
+  },
+  {
+    stepId: '11f-plan-reconcile',
+    label: 'Reconcile project plan',
+    group: 'knowledge',
+    dispatchesCli: true,
+    requires: [needRepository('Reconciles the repository plan and writes its mirror.')],
+    // Missing plan/spec/committed changedPaths have explicit empty/worktree fallbacks.
+    provides: ['plan-reconciled'],
+    precedes: ['pushed', 'cleaned'],
   },
   {
     stepId: '11a-gate-4-push',
