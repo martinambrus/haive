@@ -105,25 +105,19 @@ export async function pullImages(ctx: ComposeContext, env: NodeJS.ProcessEnv): P
   await runCompose(ctx, env, ['pull']);
 }
 
-/** Pull, deployment and rollback can also echo the now-populated .env on a config failure. */
+/** Keep process diagnostics for pull, deployment and rollback failures. */
 async function runCompose(
   ctx: ComposeContext,
   env: NodeJS.ProcessEnv,
   args: string[],
   timeout = 1_800_000,
 ): Promise<void> {
-  try {
-    await exec('docker', ['compose', ...composeArgs(ctx, args)], {
-      cwd: ctx.dir,
-      env,
-      timeout,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-  } catch {
-    throw new Error(
-      `Docker Compose ${args[0]} failed; check install configuration and Docker availability`,
-    );
-  }
+  await exec('docker', ['compose', ...composeArgs(ctx, args)], {
+    cwd: ctx.dir,
+    env,
+    timeout,
+    maxBuffer: 32 * 1024 * 1024,
+  });
 }
 
 /** Bring services up. `services` empty means the whole stack. */

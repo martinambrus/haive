@@ -177,23 +177,48 @@ it.each([undefined, 'mirror.test/haive-release:1.2.0'])(
   },
 );
 
-it.each(['pullImages', 'composeUp', 'composeStop', 'validateCompose'] as const)(
-  'discards secret-bearing Compose output from %s',
+it.each(['pullImages', 'composeUp', 'composeStop'] as const)(
+  'preserves Compose failure diagnostics from %s',
   async (operation) => {
     const dk = await import('./docker.js');
-    const value = randomBytes(24).toString('hex');
-    h.exec.mockRejectedValue(new Error(`Compose stderr: ${value}`));
+    const failure = Object.assign(new Error('Docker Compose process failed'), {
+      code: 1,
+      signal: 'SIGTERM',
+      killed: true,
+      stderr: 'dependency failed to start',
+    });
+    h.exec.mockRejectedValue(failure);
     await expect(
-      dk[operation](
-        { dir: '/install', files: ['/install/.haive-upgrade/pending/new/docker-compose.yml'] },
-        {},
-        [],
-      ),
-    ).rejects.not.toThrow(value);
-    expect(h.exec.mock.calls[0]![1]).toContain('--project-directory');
-    expect(h.exec.mock.calls[0]![1]).not.toContain(value);
+      dk[operation]({ dir: '/install', files: ['docker-compose.yml'] }, {}, []),
+    ).rejects.toBe(failure);
   },
 );
+
+it('discards config -q output and errors', async () => {
+  const { validateCompose } = await import('./docker.js');
+  const value = randomBytes(24).toString('hex');
+  const ctx = {
+    dir: '/install',
+    files: ['/install/.haive-upgrade/pending/new/docker-compose.yml'],
+  };
+  h.exec.mockResolvedValue({ stdout: value, stderr: value });
+  expect(await validateCompose(ctx, {})).toBeUndefined();
+  h.exec.mockRejectedValue(new Error(`Compose stderr: ${value}`));
+  const failure = await validateCompose(ctx, {}).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ refusal: 'bundle-config-invalid' });
+  expect(JSON.stringify(failure)).not.toContain(value);
+  expect((failure as Error).message).not.toContain(value);
+  expect(h.exec.mock.calls[0]![1]).toContain('--project-directory');
+  expect(h.exec.mock.calls[0]![1]).toEqual([
+    'compose',
+    '-f',
+    ctx.files[0],
+    '--project-directory',
+    '/install',
+    'config',
+    '-q',
+  ]);
+});
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
