@@ -6,19 +6,12 @@ import {
   removeNoFollow,
   readdirNoFollow,
 } from '@haive/shared/fs-safe';
-import type { ChatPlanRead } from '../step-engine/steps/plan/_plan-chat-context.js';
+import type { PlanChatSnapshot } from './chat-snapshot-contract.js';
+import { wrapperWorkerRoot } from '../sandbox/wrapper-paths.js';
 
-export interface PlanChatSnapshot extends ChatPlanRead {
-  schemaVersion: 1;
-  userId: string;
-  repositoryId: string;
-  taskId: string;
-  invocationId: string;
-}
+export type { PlanChatSnapshot } from './chat-snapshot-contract.js';
 const ROOT = 'plan-chat-snapshots';
 const log = logger.child({ module: 'plan-chat-snapshot' });
-export const snapshotWorkerRoot = () =>
-  process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 
 export function assertSnapshotOwner(
   snapshot: PlanChatSnapshot,
@@ -62,7 +55,7 @@ export async function createPlanChatSnapshot(
 }
 
 /** Called only after boot has reaped the previous worker's CLI containers. */
-export async function reapPlanChatSnapshots(anchor = snapshotWorkerRoot()): Promise<void> {
+export async function reapPlanChatSnapshots(anchor = wrapperWorkerRoot()): Promise<void> {
   const entries = await readdirNoFollow(anchor, ROOT, { strict: true });
   for (const entry of entries ?? []) {
     try {

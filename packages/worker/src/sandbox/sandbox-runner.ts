@@ -1,5 +1,6 @@
 import { createPlanChatSnapshot, type PlanChatSnapshot } from '../plan/chat-snapshot.js';
-import { PLAN_CHAT_SNAPSHOT_PATH } from '../step-engine/steps/plan/_plan-chat-context.js';
+import { PLAN_CHAT_SNAPSHOT_PATH } from '../plan/chat-snapshot-contract.js';
+import { wrapperWorkerRoot } from './wrapper-paths.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, chown, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -32,8 +33,6 @@ const log = logger.child({ module: 'sandbox-runner' });
 const DEFAULT_SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const DEFAULT_WRAPPER_VOLUME =
   process.env.SANDBOX_WRAPPER_HOST_VOLUME ?? volumeName(SHARED_VOLUME.wrappers);
-const DEFAULT_WRAPPER_WORKER_PATH =
-  process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
 export const SANDBOX_WORKDIR = '/haive/workdir';
 export const SANDBOX_USER = 'node';
@@ -224,7 +223,7 @@ export async function runInSandbox(
 ): Promise<SandboxRunResult> {
   const image = options.image ?? DEFAULT_SANDBOX_IMAGE;
   const volumeName = options.wrapperVolumeName ?? DEFAULT_WRAPPER_VOLUME;
-  const wrapperWorkerRoot = options.wrapperWorkerPath ?? DEFAULT_WRAPPER_WORKER_PATH;
+  const workerRoot = options.wrapperWorkerPath ?? wrapperWorkerRoot();
   const wrapperSandboxRoot = options.wrapperSandboxPath ?? DEFAULT_WRAPPER_SANDBOX_PATH;
   const workdir = options.workdir ?? DEFAULT_WORKDIR;
   const runner = options.docker ?? defaultDockerRunner;
@@ -249,7 +248,7 @@ export async function runInSandbox(
 
   try {
     if (spec.planSnapshot) {
-      planSnapshot = await createPlanChatSnapshot(wrapperWorkerRoot, spec.planSnapshot);
+      planSnapshot = await createPlanChatSnapshot(workerRoot, spec.planSnapshot);
       mounts.push({
         source: volumeName,
         subpath: planSnapshot.subpath,
@@ -275,7 +274,7 @@ export async function runInSandbox(
     if (spec.wrapperContent && spec.wrapperContent.trim().length > 0) {
       wrapperId = randomUUID();
       const fileName = 'wrapper.sh';
-      wrapperWorkerPath = join(wrapperWorkerRoot, wrapperId, fileName);
+      wrapperWorkerPath = join(workerRoot, wrapperId, fileName);
       const wrapperSandboxPath = `${wrapperSandboxRoot}/${wrapperId}/${fileName}`;
       await mkdir(dirname(wrapperWorkerPath), { recursive: true });
       await writeFile(wrapperWorkerPath, normalizeWrapperContent(spec.wrapperContent), 'utf8');
@@ -303,7 +302,7 @@ export async function runInSandbox(
       for (let i = 0; i < deduped.length; i++) {
         const ef = deduped[i]!;
         const efId = randomUUID();
-        const efDir = join(wrapperWorkerRoot, efId);
+        const efDir = join(workerRoot, efId);
         const efHostPath = join(efDir, `extra-${i}`);
         await mkdir(efDir, { recursive: true });
         await writeFile(efHostPath, ef.content, 'utf8');
@@ -323,7 +322,7 @@ export async function runInSandbox(
     // runs as node; read back + cleaned up after the run.
     if (spec.captureDir) {
       const captureId = randomUUID();
-      captureHostDir = join(wrapperWorkerRoot, captureId);
+      captureHostDir = join(workerRoot, captureId);
       await mkdir(captureHostDir, { recursive: true });
       await chown(captureHostDir, SANDBOX_UID, SANDBOX_GID).catch((err: unknown) => {
         log.warn({ err, captureHostDir }, 'failed to chown capture dir');

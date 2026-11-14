@@ -1,4 +1,6 @@
-import type { PlanNodeRecord, PlanEdgeRecord } from '@haive/shared/plan';
+import type { ChatPlanRead } from '../../../plan/chat-snapshot-contract.js';
+export { PLAN_CHAT_SNAPSHOT_PATH } from '../../../plan/chat-snapshot-contract.js';
+export type { ChatPlanRead } from '../../../plan/chat-snapshot-contract.js';
 import { PLAN_CHAT_MESSAGE_MAX_CHARS } from '@haive/shared/schemas';
 import { fencedAgentBlock, collapseToLine } from '../_untrusted-repo.js';
 import { renderBoundedPlanIndexParts } from './_plan-index.js';
@@ -9,11 +11,6 @@ export const PLAN_CHAT_HISTORY_MAX_CHARS = 24_000;
 // reserved before any optional context; dispatch measures all actual additions.
 export const PLAN_CHAT_TOTAL_MAX_CHARS = 128_000;
 export const PLAN_CHAT_OUTPUT_RESERVE_CHARS = 32_000;
-export const PLAN_CHAT_SNAPSHOT_PATH = '/haive/plan-chat-snapshot.json';
-export interface ChatPlanRead {
-  nodes: PlanNodeRecord[];
-  edges: PlanEdgeRecord[];
-}
 
 export function chatTranscript(
   transcript: { role: string; body: string }[],

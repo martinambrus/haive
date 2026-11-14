@@ -27,11 +27,26 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'plan-chat-snapshot-'));
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
 });
 const empty = { exitCode: 0, stdout: '', stderr: '', durationMs: 0, timedOut: false };
 
 describe('owned dispatch plan snapshot', () => {
+  it('uses the same configured wrapper root for sandbox files and boot reaping', async () => {
+    vi.stubEnv('SANDBOX_WRAPPER_WORKER_PATH', root);
+    await runInSandbox(
+      { command: 'cli', args: [], planSnapshot: snapshot },
+      {
+        image: 'test-image',
+        docker: { run: vi.fn(async () => empty) } as unknown as DockerRunner,
+      },
+    );
+    expect(await readdir(join(root, 'plan-chat-snapshots'))).toEqual([]);
+    await createPlanChatSnapshot(root, snapshot);
+    await reapPlanChatSnapshots();
+    expect(await readdir(join(root, 'plan-chat-snapshots'))).toEqual([]);
+  });
   it('lays out node ids, versions and bodies on separate lines for file tools', async () => {
     const read = {
       ...snapshot,
