@@ -30,6 +30,10 @@ export const reportDuration = (ms: number | null) => (ms === null ? '—' : form
 export function reportTestPhase(ms: number | null, execution: TestExecution) {
   return `${reportDuration(ms)} · ${execution === 'not_run' ? 'not run' : execution === 'ran' ? 'command ran' : 'execution not recorded'}`;
 }
+export function reportTestExecution(counts: Record<TestExecution, number>) {
+  const total = counts.ran + counts.not_run + counts.unrecorded;
+  return `${counts.ran} of ${total} tasks ran a test command · ${counts.not_run} not run · ${counts.unrecorded} execution not recorded`;
+}
 function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="min-w-0">
@@ -63,13 +67,7 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
         <Tile
           label="Test phase"
           value={reportDuration(t.testsMs)}
-          hint={
-            t.testExecution === 'not_run'
-              ? 'not run'
-              : t.testExecution === 'ran'
-                ? 'Command execution recorded'
-                : 'Execution not recorded'
-          }
+          hint={reportTestExecution(t.testExecutionCounts)}
         />
         <Tile
           label="Workflow work"

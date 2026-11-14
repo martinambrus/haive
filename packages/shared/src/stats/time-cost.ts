@@ -270,11 +270,11 @@ export function buildTimeCostReport(input: {
     pairedWaits: total('pairedWaits'),
     unmeasuredWaits: total('unmeasuredWaits'),
     lowerBound: rows.some((r) => r.lowerBound),
-    testExecution: (rows.some((r) => r.testExecution === 'ran')
-      ? 'ran'
-      : rows.length > 0 && rows.every((r) => r.testExecution === 'not_run')
-        ? 'not_run'
-        : 'unrecorded') as TestExecution,
+    testExecutionCounts: {
+      ran: rows.filter((r) => r.testExecution === 'ran').length,
+      not_run: rows.filter((r) => r.testExecution === 'not_run').length,
+      unrecorded: rows.filter((r) => r.testExecution === 'unrecorded').length,
+    },
   };
   rows.sort((a, b) => (b.workMs ?? 0) - (a.workMs ?? 0) || a.taskId.localeCompare(b.taskId));
   const limit = input.limit !== undefined && input.limit > 0 ? input.limit : TIME_COST_ROW_LIMIT;

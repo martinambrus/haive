@@ -2,10 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   reportDuration,
   reportTestPhase,
+  reportTestExecution,
   REPORT_CATEGORY_COLORS,
 } from '../../src/web/components/time-cost-report.js';
 
 describe('report measurements', () => {
+  it('states command coverage for a mixed population without implying all tasks ran tests', () => {
+    expect(reportTestExecution({ ran: 8, not_run: 120, unrecorded: 13 })).toBe(
+      '8 of 141 tasks ran a test command · 120 not run · 13 execution not recorded',
+    );
+  });
+
   it('distinguishes missing measurements, recorded zero, phase duration and execution', () => {
     expect(reportDuration(null)).toBe('—');
     expect(reportDuration(0)).toBe('0s');

@@ -136,6 +136,29 @@ describe('form lifecycle pairing', () => {
 });
 
 describe('time and cost report', () => {
+  it('counts every execution state across the population before limiting rows', () => {
+    const report = buildTimeCostReport({
+      tasks: ['ran', 'not_run', 'unrecorded'].map((taskId) => ({
+        taskId,
+        completedAt: new Date(1000),
+      })),
+      steps: [
+        step({ taskId: 'ran', output: { test: { ran: true } } }),
+        step({ taskId: 'not_run', output: { test: { ran: false } } }),
+        step({ taskId: 'unrecorded' }),
+      ],
+      events: [],
+      invocations: [],
+      limit: 1,
+    });
+    expect(report.rows).toHaveLength(1);
+    expect(report.totals.testExecutionCounts).toEqual({ ran: 1, not_run: 1, unrecorded: 1 });
+    expect(
+      buildTimeCostReport({ tasks: [], steps: [], events: [], invocations: [] }).totals
+        .testExecutionCounts,
+    ).toEqual({ ran: 0, not_run: 0, unrecorded: 0 });
+  });
+
   it('caps rows after totals, preserves coverage and measures at completion', () => {
     expect(TIME_COST_ROW_LIMIT).toBe(200);
     const report = buildTimeCostReport({

@@ -75,3 +75,42 @@ it('loads only when opened, carries the filters and rejects an old window respon
   finishOld({ marker: 'old window' });
   await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('new window'));
 });
+
+it('renders aggregate command coverage and preserves each mixed-population row label', () => {
+  const report = buildTimeCostReport({
+    tasks: ['ran', 'not_run', 'unrecorded'].map((taskId) => ({
+      taskId,
+      completedAt: new Date(1000),
+    })),
+    steps: [true, false, undefined].map((ran, i) => ({
+      id: String(i),
+      taskId: ['ran', 'not_run', 'unrecorded'][i]!,
+      stepId: '08-phase-5-verify',
+      status: 'done',
+      startedAt: new Date(0),
+      endedAt: new Date(1000),
+      idleMs: 0,
+      userActiveMs: 0,
+      waitingStartedAt: null,
+      output: { test: { ran } },
+    })),
+    events: [],
+    invocations: [],
+  });
+  render(
+    <TimeCostReport
+      report={{
+        ...report,
+        rows: report.rows.map((r) => ({ ...r, title: r.taskId, repository: null })),
+        excludedLegacyInvocations: 0,
+        scope: { providerIgnored: false },
+        costDisplay: { currency: 'USD', usdPerUnit: 1, rateDate: null, approximate: false },
+      }}
+    />,
+  );
+  expect(
+    screen.getByText('1 of 3 tasks ran a test command · 1 not run · 1 execution not recorded'),
+  ).toBeTruthy();
+  for (const label of ['command ran', 'not run', 'execution not recorded'])
+    expect(screen.getByText('1s · ' + label)).toBeTruthy();
+});
