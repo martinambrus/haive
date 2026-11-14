@@ -41,7 +41,10 @@ const plan = vi.hoisted(() => ({
 vi.mock('@haive/shared/plan', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/plan')>()),
   findPlanRoot: vi.fn(async () => plan.root),
-  renderPlanMarkdown: vi.fn(async () => '# Plan'),
+}));
+vi.mock('./_plan-index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_plan-index.js')>()),
+  renderBoundedPlanOutline: vi.fn(async () => '# Plan'),
 }));
 vi.mock('./_plan-prompt.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_plan-prompt.js')>()),

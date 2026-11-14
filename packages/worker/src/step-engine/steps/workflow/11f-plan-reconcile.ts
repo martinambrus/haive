@@ -6,9 +6,17 @@ import { findPlanRoot, PlanPatchError } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
+import {
+  PLAN_CHAT_TOTAL_MAX_CHARS,
+  PLAN_CHAT_OUTPUT_RESERVE_CHARS,
+} from '../plan/_plan-chat-context.js';
 import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
 import {
   MAX_PROPOSED_OPS,
+  boundedPlanWriterPrompt,
+  planFocusTooLarge,
+  assertProposalReadVersions,
+  type WorkflowPlanRead,
   describeDropped,
   describePlanOp,
   describeStrippedLinks,
@@ -38,6 +46,8 @@ import { collectImplementationFiles, isListableName } from './_impl-changes.js';
 export interface PlanReconcileDetect {
   repositoryId: string | null;
   planMarkdown: string;
+  planRead?: WorkflowPlanRead;
+  focusTooLarge?: boolean;
   spec: string;
   changedPaths: string[];
   /** Nodes 04-phase-0b said this task affects, so the agent starts where the
@@ -99,10 +109,12 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     }
   }
 
-  const [[planMarkdown, nodes], spec] = await Promise.all([
+  const [planRead, spec] = await Promise.all([
     readPlanSnapshot(ctx.db, task.repositoryId),
     resolveApprovedSpec(ctx),
   ]);
+
+  const { nodes } = planRead;
 
   // 04-phase-0b resolved this already; it is best-effort because `_step-reset`
   // nulls step output on a Retry cascade.
@@ -119,89 +131,97 @@ async function detectReconcile(ctx: StepContext): Promise<PlanReconcileDetect> {
     })
     .catch(() => []);
 
-  return {
+  const detected: PlanReconcileDetect = {
     repositoryId: task.repositoryId,
-    planMarkdown,
+    planMarkdown: '',
+    planRead,
     spec,
     changedPaths,
     affected,
     nodeTitles: Object.fromEntries(nodes.map((n) => [n.id, n.title])),
     nodeCount: nodes.length,
   };
+  detected.focusTooLarge = planFocusTooLarge(() => buildReconcilePrompt(detected));
+  return detected;
 }
 
-function buildReconcilePrompt(d: PlanReconcileDetect): string {
-  return [
-    // This step reads repository files and emits plan-patch ops, so what it writes becomes
-    // a task description like any other plan node — and its proposals reach a form where
-    // every one is ticked by default, which makes the human gate weak evidence. Joined
-    // into one element so the block's blank lines survive.
-    REPO_IS_DATA_AUTHORING_LINES.join('\n'),
-    '',
-    'A development task has just finished on this repository. Bring the PROJECT PLAN back in',
-    'line with what now exists.',
-    '',
-    'The plan is a durable statement of what the project is MEANT to be. It is not a changelog',
-    'and not a description of the diff — do not add a node for a bug that was fixed or for a',
-    'refactor that changed no capability.',
-    '',
-    '## The plan as it stands',
-    '',
-    d.planMarkdown,
-    '',
-    ...(d.affected.length > 0
-      ? [
-          '## Components this task was expected to affect',
-          '',
-          ...d.affected.map(
-            (a) =>
-              `- ${a.title} (\`node:${a.id}\`` +
-              (a.version === undefined ? ')' : ` · \`version ${a.version}\`)`),
-          ),
-          '',
-        ]
-      : []),
-    '## Paths this task changed',
-    '',
-    ...d.changedPaths
-      .filter(isListableName)
-      .slice(0, 200)
-      .map((p) => `- ${p}`),
-    ...(d.changedPaths.some((p) => !isListableName(p))
-      ? [
-          `(${d.changedPaths.filter((p) => !isListableName(p)).length} changed files have names that cannot be listed safely and are left out.)`,
-        ]
-      : []),
-    'A listed path ending in / is a nested repository, not a file. Do not infer changes',
-    'inside it or propose a file code link for that directory.',
-    '',
-    ...(d.spec ? ['## What the task set out to do', '', d.spec, ''] : []),
-    '## What to propose',
-    '',
-    'Exactly three kinds of change, and nothing else:',
-    '',
-    '1. STATUS. Mark a node `done` when this task actually finished the thing it describes.',
-    '   A node this task merely touched is NOT finished — most affected components are still',
-    '   partly built, and marking one done when it is not is worse than leaving it alone,',
-    '   because the plan is what someone reads to decide what is left.',
-    '2. CODE LINKS. Add `codeLinks` for files above that belong to an existing node. Only for a',
-    '   file you can see in the list, and say in `evidence` why it belongs. A guessed path makes',
-    '   the impact view lie. Set `"role": "covers"` for a TEST file and leave the default',
-    '   `implements` for production code — the test steps of a later task are told which tests',
-    '   cover the components it touches, and they can only be told from these links.',
-    '3. NEW NODES. Add a node only for a real capability this task built that the plan does not',
-    '   describe anywhere. Check the plan above first — a node that duplicates an existing one',
-    '   is worse than a missing one.',
-    '',
-    `Propose at most ${MAX_PROPOSED_OPS} operations. Propose NOTHING (an empty \`ops\` array) if`,
-    'the plan already describes what happened — that is the normal outcome for a task that',
-    'implemented an existing node, and an empty reply is a good answer.',
-    '',
-    'Every change you propose is shown to a developer who ticks the ones they want. Write each',
-    'one so it can be judged on its own.',
-    '',
-    PLAN_PATCH_CONTRACT,
-  ].join('\n');
+function buildReconcilePrompt(d: PlanReconcileDetect, maxChars?: number): string {
+  return boundedPlanWriterPrompt(
+    d,
+    (context) =>
+      [
+        // This step reads repository files and emits plan-patch ops, so what it writes becomes
+        // a task description like any other plan node — and its proposals reach a form where
+        // every one is ticked by default, which makes the human gate weak evidence. Joined
+        // into one element so the block's blank lines survive.
+        REPO_IS_DATA_AUTHORING_LINES.join('\n'),
+        '',
+        'A development task has just finished on this repository. Bring the PROJECT PLAN back in',
+        'line with what now exists.',
+        '',
+        'The plan is a durable statement of what the project is MEANT to be. It is not a changelog',
+        'and not a description of the diff — do not add a node for a bug that was fixed or for a',
+        'refactor that changed no capability.',
+        '',
+        '## The plan as it stands',
+        '',
+        context,
+        '',
+        ...(d.affected.length > 0
+          ? [
+              '## Components this task was expected to affect',
+              '',
+              ...d.affected.map(
+                (a) =>
+                  `- ${a.title} (\`node:${a.id}\`` +
+                  (a.version === undefined ? ')' : ` · \`version ${a.version}\`)`),
+              ),
+              '',
+            ]
+          : []),
+        '## Paths this task changed',
+        '',
+        ...d.changedPaths
+          .filter(isListableName)
+          .slice(0, 200)
+          .map((p) => `- ${p}`),
+        ...(d.changedPaths.some((p) => !isListableName(p))
+          ? [
+              `(${d.changedPaths.filter((p) => !isListableName(p)).length} changed files have names that cannot be listed safely and are left out.)`,
+            ]
+          : []),
+        'A listed path ending in / is a nested repository, not a file. Do not infer changes',
+        'inside it or propose a file code link for that directory.',
+        '',
+        ...(d.spec ? ['## What the task set out to do', '', d.spec, ''] : []),
+        '## What to propose',
+        '',
+        'Exactly three kinds of change, and nothing else:',
+        '',
+        '1. STATUS. Mark a node `done` when this task actually finished the thing it describes.',
+        '   A node this task merely touched is NOT finished — most affected components are still',
+        '   partly built, and marking one done when it is not is worse than leaving it alone,',
+        '   because the plan is what someone reads to decide what is left.',
+        '2. CODE LINKS. Add `codeLinks` for files above that belong to an existing node. Only for a',
+        '   file you can see in the list, and say in `evidence` why it belongs. A guessed path makes',
+        '   the impact view lie. Set `"role": "covers"` for a TEST file and leave the default',
+        '   `implements` for production code — the test steps of a later task are told which tests',
+        '   cover the components it touches, and they can only be told from these links.',
+        '3. NEW NODES. Add a node only for a real capability this task built that the plan does not',
+        '   describe anywhere. Check the plan above first — a node that duplicates an existing one',
+        '   is worse than a missing one.',
+        '',
+        `Propose at most ${MAX_PROPOSED_OPS} operations. Propose NOTHING (an empty \`ops\` array) if`,
+        'the plan already describes what happened — that is the normal outcome for a task that',
+        'implemented an existing node, and an empty reply is a good answer.',
+        '',
+        'Every change you propose is shown to a developer who ticks the ones they want. Write each',
+        'one so it can be judged on its own.',
+        '',
+        PLAN_PATCH_CONTRACT,
+      ].join('\n'),
+    maxChars,
+  );
 }
 
 export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcileApply> = {
@@ -230,6 +250,29 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    prepare: async ({ ctx, detected }) => {
+      const d = detected as PlanReconcileDetect;
+      if (!d.planRead && d.repositoryId) {
+        d.planRead = await readPlanSnapshot(ctx.db, d.repositoryId);
+        d.planMarkdown = '';
+        d.nodeCount = d.planRead.nodes.length;
+        d.nodeTitles = Object.fromEntries(d.planRead.nodes.map((n) => [n.id, n.title]));
+        const byId = new Map(d.planRead.nodes.map((n) => [n.id, n]));
+        d.affected = d.affected.flatMap((a) => {
+          const n = byId.get(a.id);
+          return n ? [{ id: n.id, title: n.title, version: n.version }] : [];
+        });
+      }
+      if (d.planRead) d.focusTooLarge = planFocusTooLarge(() => buildReconcilePrompt(d));
+      return d.focusTooLarge ? false : undefined;
+    },
+    planSnapshot: ({ detected }) => (detected as PlanReconcileDetect).planRead,
+    promptBudget: {
+      maxChars: PLAN_CHAT_TOTAL_MAX_CHARS,
+      outputReserveChars: PLAN_CHAT_OUTPUT_RESERVE_CHARS,
+      buildPrompt: ({ detected }, maxChars) =>
+        buildReconcilePrompt(detected as PlanReconcileDetect, maxChars),
+    },
     // It reads the plan, the spec and a file list, all of which are in the
     // prompt; it has no reason to drive a browser or a container.
     toolProfile: 'rag_only',
@@ -243,7 +286,12 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     optional: true,
     skipIf: (args) => {
       const d = args.detected as PlanReconcileDetect | null;
-      return !d?.repositoryId || d.nodeCount === 0 || d.changedPaths.length === 0;
+      return (
+        !d?.repositoryId ||
+        d.focusTooLarge === true ||
+        d.nodeCount === 0 ||
+        d.changedPaths.length === 0
+      );
     },
     buildPrompt: (args) => buildReconcilePrompt(args.detected as PlanReconcileDetect),
     bypassStub: () => ({ ops: [] }),
@@ -295,6 +343,11 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     };
     if (!d.repositoryId) return result;
 
+    if (d.focusTooLarge || (d.planRead && d.changedPaths.length > 0 && !args.llmOutput)) {
+      result.summary = 'The whole plan focus could not be reviewed; no proposal was requested.';
+      return result;
+    }
+
     const ops = proposedOps(args.llmOutput);
     result.proposed = ops.length;
     if (ops.length === 0) {
@@ -328,6 +381,7 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // and the form never showed one it could not read.
     let applied;
     try {
+      assertProposalReadVersions(chosen, d.planRead);
       applied = await applyPlanPatch(
         ctx.db,
         { ops: chosen, summary: 'plan reconcile after task implementation' },
@@ -338,6 +392,7 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
           onUnresolvableRef: 'drop',
           onInvalidCodeLink: 'strip',
           requireExpectedVersion: true,
+          requireAllUpdateVersions: true,
         },
       );
     } catch (err) {

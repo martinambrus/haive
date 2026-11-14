@@ -57,6 +57,10 @@ export class AdvisedStepError extends Error {
   }
 }
 
+/** Mandatory prompt input cannot be packed whole. Optional LLM phases degrade
+ * to no proposal, just as they do when no provider can dispatch. */
+export class PromptBudgetExceededError extends Error {}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;

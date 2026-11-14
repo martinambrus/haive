@@ -1,3 +1,4 @@
+import { PromptBudgetExceededError } from './step-definition.js';
 import {
   beginFixTestCapture,
   finishFixTestCapture,
@@ -1143,8 +1144,13 @@ async function resolveLlmPhase(
       disallowedTools: miningDisallowedTools(stepDef.metadata.id),
       disableTools: llmSpec.disableTools,
     },
+  }).catch((err: unknown) => {
+    if (!llmSpec.optional || !(err instanceof PromptBudgetExceededError)) throw err;
+    ctx.logger.warn({ err }, 'optional llm prompt cannot fit whole; degrading to null');
+    return null;
   });
 
+  if (!plan) return { resolved: true, llmOutput: null, llmInvocationId: null, current };
   if (plan.mode === 'skip' || !plan.invocation) {
     // The worker supplies providers/deps even when every provider is disabled or
     // incompatible. Optional enrichment must degrade here just as it does when

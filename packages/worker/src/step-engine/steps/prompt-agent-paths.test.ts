@@ -1017,6 +1017,8 @@ const SCANNED_PROMPT_EXPORTS = [
  * waves, then dag-executor's direct dispatches were each found one review at a time.
  */
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
+  'step-engine/steps/workflow/_plan-ops.ts#boundedPlanWriterPrompt':
+    'shared bounded assembly, already scanned through both 11f and 01f registry builders',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUT_CAP_BYTES':
     'a byte limit for an earlier step output, not text',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
@@ -1368,6 +1370,8 @@ const CHANGE_SET = {
  */
 const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   // The chat index consumes an immutable read rather than a live DB-like proxy.
+  '11f-plan-reconcile': { planRead: { nodes: [], edges: [], codeLinks: [] }, changedPaths: [] },
+  '01f-external-plan-sync': { planRead: { nodes: [], edges: [], codeLinks: [] }, changedPaths: [] },
   '01-plan-chat': {
     planRead: { nodes: [], edges: [] },
     transcript: [],

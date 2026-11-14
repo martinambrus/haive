@@ -51,6 +51,8 @@ import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capa
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
+import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-reconcile.js';
+import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
 import { planChatStep } from '../src/step-engine/steps/plan/01-plan-chat.js';
 import * as attachmentsContext from '../src/step-engine/attachments-context.js';
 import * as taskLedger from '../src/step-engine/task-ledger.js';
@@ -296,18 +298,33 @@ function makeProvider(): CliProviderRecord {
   } as CliProviderRecord;
 }
 
-describe('plan chat through the real runner dispatch', () => {
+describe('plan writers through the real runner dispatch', () => {
   afterEach(() => vi.restoreAllMocks());
-  const run = async (broken = false) => {
+  const run = async (
+    broken = false,
+    writer: StepDefinition = planChatStep as StepDefinition,
+    maxChars = writer.metadata.id === '01-plan-chat' ? 18_000 : 32_000,
+  ) => {
     const state = freshState();
-    state.taskStepRow.stepId = '01-plan-chat';
+    state.taskStepRow.stepId = writer.metadata.id;
     const detected = {
       repositoryId: 'repo-1',
       nodeId: 'focus',
       nodeTitle: 'Focus',
       nodeVersion: 7,
       planMarkdown: '',
-      planRead: { nodes: [], edges: [] },
+      planRead: { nodes: [], edges: [], codeLinks: [] },
+      changedPaths: ['src/changed.ts'],
+      branchPoint: 'a'.repeat(40),
+      since: 'b'.repeat(40),
+      firstRun: false,
+      measured: true,
+      affected: [],
+      spec: '',
+      nodeCount: 1,
+      commits: [{ sha: 'a'.repeat(40), subject: 'Changed capability' }],
+      commitsOmitted: 0,
+      pathsOmitted: 0,
       transcript: [{ role: 'user', body: 'Keep this pending turn whole.' }],
       pendingQuestion: 'Keep this pending turn whole.',
     };
@@ -319,14 +336,14 @@ describe('plan chat through the real runner dispatch', () => {
     vi.spyOn(taskLedger, 'augmentPromptWithLedger').mockImplementation(
       async (_db, _task, p) => p + suffix,
     );
-    const buildPrompt = vi.fn(planChatStep.llm!.promptBudget!.buildPrompt);
+    const buildPrompt = vi.fn(writer.llm!.promptBudget!.buildPrompt);
     const stepDef = {
-      ...planChatStep,
+      ...writer,
       shouldRun: async () => true,
       detect: async () => detected,
       llm: {
-        ...planChatStep.llm!,
-        promptBudget: { maxChars: 18_000, outputReserveChars: 2_000, buildPrompt },
+        ...writer.llm!,
+        promptBudget: { maxChars, outputReserveChars: 2_000, buildPrompt },
       },
     };
     const enqueue = vi.fn();
@@ -344,26 +361,44 @@ describe('plan chat through the real runner dispatch', () => {
     return { result, state, detected, enqueue, buildPrompt, prefix, suffix };
   };
 
-  it('repackages the real prompt around additions and attaches the same owned plan read', async () => {
-    const f = await run();
-    expect(f.result.status).toBe('waiting_cli');
-    expect(f.buildPrompt).toHaveBeenCalledOnce();
-    expect(f.buildPrompt.mock.calls[0]![1]).toBeLessThanOrEqual(
-      16_000 - f.prefix.length - f.suffix.length,
-    );
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
-    expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
-    expect(String(f.state.cliInvocationRow!.prompt).length).toBeLessThanOrEqual(16_000);
-    expect(f.enqueue.mock.calls[0]![0].spec.planSnapshot).toEqual({
-      schemaVersion: 1,
-      userId: 'user-1',
-      taskId: 'task-1',
-      invocationId: f.state.cliInvocationRow!.id,
-      repositoryId: 'repo-1',
-      ...f.detected.planRead,
-    });
-  });
+  it.each([planChatStep, planReconcileStep, externalPlanSyncStep])(
+    'repackages $metadata.id and attaches the same owned plan read',
+    async (writer) => {
+      const f = await run(false, writer as StepDefinition);
+      expect(f.result.status, 'error' in f.result ? String(f.result.error) : '').toBe(
+        'waiting_cli',
+      );
+      expect(f.buildPrompt).toHaveBeenCalledOnce();
+      const cap = writer.metadata.id === '01-plan-chat' ? 16_000 : 30_000;
+      expect(f.buildPrompt.mock.calls[0]![1]).toBeLessThanOrEqual(
+        cap - f.prefix.length - f.suffix.length,
+      );
+      expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
+      expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
+      if (writer.metadata.id === '01-plan-chat')
+        expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
+      expect(String(f.state.cliInvocationRow!.prompt).length).toBeLessThanOrEqual(cap);
+      expect(f.enqueue.mock.calls[0]![0].spec.planSnapshot).toEqual({
+        schemaVersion: 1,
+        userId: 'user-1',
+        taskId: 'task-1',
+        invocationId: f.state.cliInvocationRow!.id,
+        repositoryId: 'repo-1',
+        ...f.detected.planRead,
+      });
+    },
+  );
+
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'finishes optional $metadata.id without dispatch when whole mandatory input cannot fit',
+    async (writer) => {
+      const f = await run(false, writer as StepDefinition, 8_000);
+      expect(f.result.status).toBe('done');
+      expect(f.enqueue).not.toHaveBeenCalled();
+      if (writer.metadata.id === '01f-external-plan-sync')
+        expect(f.result.row.output).toMatchObject({ reviewedThrough: null });
+    },
+  );
 
   it('refuses dispatch when an augmenter has replaced the base prompt', async () => {
     const f = await run(true);
