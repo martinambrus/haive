@@ -20,6 +20,7 @@ import {
   getStatsSteps,
   getStatsSummary,
   getStatsTaskTime,
+  getStatsTimeCost,
   getStatsTimeline,
   getStatsToolUsage,
   getUiPrefs,
@@ -35,6 +36,7 @@ import {
   type StatsSummary,
   type StatsTaskClass,
   type StatsTaskTime,
+  type StatsTimeCost,
   type StatsTimeline,
   type StatsToolUsage,
   type UiPrefs,
@@ -71,6 +73,12 @@ const SpendChart = dynamic(() => import('./components/charts.js').then((m) => m.
   ssr: false,
   loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
 });
+const TimeCostReport = dynamic(
+  () => import('./components/time-cost-report.js').then((m) => m.TimeCostReport),
+  {
+    loading: () => <p className="text-sm text-neutral-400">Loading report...</p>,
+  },
+);
 const ActivityChart = dynamic(() => import('./components/charts.js').then((m) => m.ActivityChart), {
   ssr: false,
   loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
@@ -211,6 +219,7 @@ function UnusedReportBody({ report }: { report: Extract<StatsUnusedReport, { ava
 const TABS = [
   'money',
   'time',
+  'report',
   'steps',
   'tools',
   'plan',
@@ -222,6 +231,7 @@ type Tab = (typeof TABS)[number];
 const TAB_LABELS: Record<Tab, string> = {
   money: 'Money',
   time: 'Time & throughput',
+  report: 'Time & cost report',
   steps: 'Steps & models',
   tools: 'Agents & tools',
   plan: 'Plan',
@@ -342,6 +352,14 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
   const [estimates, setEstimates] = useState<StatsEstimates | null>(null);
   const [plan, setPlan] = useState<StatsPlan | null>(null);
   const [taskTime, setTaskTime] = useState<StatsTaskTime | null>(null);
+  const [report, setReport] = useState<{ params: StatsQueryParams; data: StatsTimeCost } | null>(
+    null,
+  );
+  const [reportError, setReportError] = useState<{
+    params: StatsQueryParams;
+    message: string;
+  } | null>(null);
+  const [reportRetry, setReportRetry] = useState(0);
   const [steps, setSteps] = useState<StatsSteps | null>(null);
   const [toolUsage, setToolUsage] = useState<StatsToolUsage | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
@@ -420,6 +438,27 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
           },
     [range, timeZone, repositoryId, taskClass],
   );
+
+  useEffect(() => {
+    if (!params || tab !== 'report') return;
+    let cancelled = false;
+    setReport(null);
+    setReportError(null);
+    getStatsTimeCost(api, params)
+      .then((data) => {
+        if (!cancelled) setReport({ params, data });
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setReportError({
+            params,
+            message: e instanceof Error ? e.message : 'Failed to load report',
+          });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [params, tab, reportRetry]);
 
   // Summary and timeline back the header and two tabs, so they always load. The other three
   // load only when their tab is opened — the point of one endpoint per tab.
@@ -661,6 +700,24 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
       />
 
       {loading && !summary && <div className="text-sm text-neutral-500">Loading...</div>}
+
+      {tab === 'report' &&
+        (report?.params === params ? (
+          <TimeCostReport report={report.data} />
+        ) : reportError?.params === params ? (
+          <div className="text-sm text-neutral-400">
+            <p>{reportError.message}</p>
+            <button
+              type="button"
+              className="mt-2 underline"
+              onClick={() => setReportRetry((n) => n + 1)}
+            >
+              Retry report
+            </button>
+          </div>
+        ) : (
+          <p className="text-sm text-neutral-400">Loading report...</p>
+        ))}
 
       {summary && tab === 'money' && (
         <>

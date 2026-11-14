@@ -1,5 +1,23 @@
 import type { HostApi } from '@haive/web-kit/host';
 import type { CostDisplay } from '@haive/web-kit/format-cost';
+import type { buildTimeCostReport } from '@haive/shared/stats';
+
+export type StatsTimeCost = Omit<ReturnType<typeof buildTimeCostReport>, 'rows'> & {
+  rows: (ReturnType<typeof buildTimeCostReport>['rows'][number] & {
+    title: string;
+    repository: string | null;
+  })[];
+  excludedLegacyInvocations: number;
+  scope: { providerIgnored: boolean };
+  costDisplay: CostDisplay;
+};
+
+export function getStatsTimeCost(
+  api: HostApi,
+  params: StatsQueryParams = {},
+): Promise<StatsTimeCost> {
+  return api.get<StatsTimeCost>(`/m/statistics/time-cost${statsQueryString(params)}`);
+}
 
 export interface Repository {
   id: string;
