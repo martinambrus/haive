@@ -105,6 +105,20 @@ describe('host fix-pass test evidence', () => {
     expect(image.files).toHaveLength(3);
   });
 
+  it('shows a mid-file expectation change in a contextual hunk', async () => {
+    const anchor = await fixture();
+    const lines = Array.from({ length: 200 }, (_, i) => `expect(f(${i})).toBe(${i});`);
+    await writeFile(join(anchor, 'tests/a'), lines.join('\n'));
+    const before = await captureTestImage(anchor, '');
+    lines[150] = 'expect(f(150)).toBe(-1); // weakened';
+    await writeFile(join(anchor, 'tests/a'), lines.join('\n'));
+    const result = compareTestImages(before, await captureTestImage(anchor, ''));
+    expect(result.changes[0]!.patch).toContain('+expect(f(150)).toBe(-1); // weakened');
+    expect(result.changes[0]!.patch).toContain(' expect(f(149)).toBe(149);');
+    expect(result.changes[0]!.cut).toBe(false);
+    expect(result.changes[0]!.patch.split('\n').length).toBeLessThan(20);
+  });
+
   it('renders the saved record with multiline fenced patches, explicit cuts and safe paths', () => {
     const row = fixTestEditsRow([
       record({
@@ -159,5 +173,12 @@ describe('host fix-pass test evidence', () => {
     expect(result.changes[0]!.cut).toBe(true);
     expect(Buffer.byteLength(result.changes[0]!.patch)).toBeLessThanOrEqual(18);
     expect(result.changes[0]!.patch.split('\n').length).toBeLessThanOrEqual(2);
+    const after = await captureTestImage(anchor, '');
+    const guarded = compareTestImages(before, after, { cells: 1 });
+    expect(guarded.changes[0]!.patch).toContain('Too large to diff');
+    expect(guarded.changes[0]!.cut).toBe(true);
+    const hunk = compareTestImages(before, after, { hunkLines: 2 });
+    expect(hunk.changes[0]!.cut).toBe(true);
+    expect(hunk.changes[0]!.patch.split('\n').length).toBeLessThanOrEqual(4);
   });
 });
