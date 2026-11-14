@@ -1517,6 +1517,44 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       ]),
     });
   });
+  it('omits the derived plan from list and detail polls while keeping pinned warnings', async () => {
+    await derivedCatalog();
+    const draft = derivedDraft([{ remove: 'retired-step' }]);
+    expect((await send('POST', '/admin/task-types', draft)).status).toBe(201);
+    const pin = await definitionForCreate(db, 'tt-derived', { generic: true });
+    const [task] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: ACTOR,
+        type: 'tt-derived',
+        title: 'Pinned warnings',
+        runListSnapshot: pin.runListSnapshot,
+        derivedRunPlan: pin.derivedRunPlan,
+      })
+      .returning();
+    const listing = await send('GET', '/tasks?pageSize=100');
+    expect(listing.status).toBe(200);
+    const { tasks } = (await listing.json()) as { tasks: Record<string, unknown>[] };
+    expect(tasks.find((t) => t.id === task!.id)).toBeDefined();
+    expect(tasks.find((t) => t.id === task!.id)).not.toHaveProperty('derivedRunPlan');
+    for (let poll = 0; poll < 2; poll++) {
+      const detail = await send('GET', '/tasks/' + task!.id);
+      expect(detail.status).toBe(200);
+      const body = (await detail.json()) as { task: Record<string, unknown>; warnings: unknown[] };
+      expect(body.task).not.toHaveProperty('derivedRunPlan');
+      expect(body.warnings).toEqual([
+        {
+          kind: 'stale-target',
+          operationIndex: 0,
+          stepId: 'retired-step',
+          candidates: [null, 'quick_bugfix', 'plan_tasklist', 'full_workflow'],
+        },
+      ]);
+    }
+    expect(
+      (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task!.id) }))?.derivedRunPlan,
+    ).toEqual(pin.derivedRunPlan);
+  });
   it('pins candidates and raw prompts, uses union traits/defaults and ignores later definition edits', async () => {
     await derivedCatalog();
     const rawPrompt = {

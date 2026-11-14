@@ -325,7 +325,7 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where,
     // A task's pinned prompt steps can run to many KiB; no list reader needs them.
-    columns: { customSteps: false },
+    columns: { customSteps: false, derivedRunPlan: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -1202,8 +1202,9 @@ taskRoutes.get('/:id', async (c) => {
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
-  // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
-  const { customSteps: _pinned, ...taskFields } = task;
+  // Pins feed flags and warnings, but the page never reads their full bodies.
+  const warnings = task.derivedRunPlan != null ? derivedTaskWarnings(task.derivedRunPlan) : null;
+  const { customSteps: _pinned, derivedRunPlan: _plan, ...taskFields } = task;
   const providerRows =
     task.cliProviderId === null
       ? await db
@@ -1276,7 +1277,7 @@ taskRoutes.get('/:id', async (c) => {
 
   return c.json({
     task: taskWithActive,
-    ...(task.derivedRunPlan != null ? { warnings: derivedTaskWarnings(task.derivedRunPlan) } : {}),
+    ...(warnings !== null ? { warnings } : {}),
     testChecks,
     dead: await loadTaskDead(db, task),
     stop: await loadTaskStop(db, task),
