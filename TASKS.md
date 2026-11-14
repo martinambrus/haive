@@ -650,6 +650,21 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T676 · FNF[external-module-dev] · external module dev install lows, after #1179 (+8)
+
+status: open · kind: fix · found: #1179 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
+
+1. The guard's folder-path pattern needs a boundary before `modules/`, so `/app/modules/<x>`, `${{ github.workspace }}/modules/<x>`, `"$ROOT/modules/<x>"`, `join(root, 'modules', id)` and `.github/actions/*/action.yml` are not scanned for a private path (a package name still trips the name check).
+2. After a selected module gains a `./web` or `./dashboard` export, web depends on it at once but the link appears only after `pnpm install`; gen-modules' advice for a selected external ("run pnpm module add") is wrong in that branch.
+3. `scripts/local-modules.cjs` and `scripts/check-public-modules.mjs` copy the module-id pattern; `packages/shared/test/module-id-pattern.test.ts` does not pin them.
+4. Turbo `--no-cache` (used in local mode) is deprecated in 2.11.7 and goes in 3.0; its replacement `--cache=local:r,remote:r` re-enables reads, so the migration needs a no-read-no-write form.
+5. Literal `node` replaced `process.execPath` in `scripts/module.mjs`; a PATH node differing from the running one runs gen-modules under another Node.
+6. Caller `--force=true`/`--cache=...` mixes with the local-mode policy flags; a caller `--filter=@haive-module/<id>` selects nothing in local mode.
+7. A dev-checkout image build copies local clones, `.selection.json` and the local `.lock` into the own-module builder; release builds from a clean checkout are required (documented).
+8. `.claude/memory-mirror/haive_next_build_on_dev_tree.md` still says to revert `next-env.d.ts`, which is now ignored.
+
 ### T675 · FNF[plan-chat-bound] · bounded plan chat and plan write fence lows, after #1178 (+9)
 
 status: open · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
@@ -738,8 +753,8 @@ status: open · kind: feature · found: owner decision 2026-11-14 (#1174) · pri
 Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-analysis (`docs/plans/kind-riding-dream.md`) modules, which are the first external modules and live in private repositories.
 
 1. DONE 2026-11-14: private repositories `martinambrus/haive-module-translator` and `martinambrus/haive-module-deep-analysis` created (README only, default branch `main`).
-2. Core: a dev install of an external module (cloned into `modules/<id>/`, then `pnpm module add <id>`) leaves nothing in a haive commit. Today `modules/` is tracked and `pnpm module add` edits tracked `package.json` files and `pnpm-lock.yaml`. Design choice: ignore the folder and keep the dependency entries out of tracked files.
-3. Core: a CI check refuses a tracked file that names a module not public in haive.
+2. DONE 2026-11-14 #1179 (bd7217c8a). Core: a dev install of an external module (cloned into `modules/<id>/`, then `pnpm module add <id>`) leaves nothing in a haive commit. Today `modules/` is tracked and `pnpm module add` edits tracked `package.json` files and `pnpm-lock.yaml`. Design choice: ignore the folder and keep the dependency entries out of tracked files.
+3. DONE 2026-11-14 #1179: `scripts/check-public-modules.mjs` against root `public-modules.json` (install/runtime wiring only; prose and test fixtures exempt). Owed: the first Dependabot lockfile PR after #1179 keeps `pnpmfileChecksum` (a lock without it fails frozen installs).
 4. Module CI template: check out haive at a pinned release tag, place the module at `modules/<id>/`, build and test there (core packages are unpublished, `pnpm.overrides` pins them to `workspace:*`).
 5. Release path check: a restricted `@haive-module/<id>` publish to GitHub Packages, the vendor channel build, and a git install source with a token, each exercised once end to end with a stub module.
 
@@ -2032,6 +2047,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- External module dev install, T669 items 2-3 (#1179): private modules cloned into ignored `external-modules/` install through `.pnpmfile.cjs` with a local lockfile, leaving tracked manifests and `pnpm-lock.yaml` unchanged; `pnpm module lock` refreshes the public lock; CI refuses install wiring that names a module missing from `public-modules.json`. Lows filed as T676.
 
 - Bounded plan chat, AIDE² P4 (#1178): plan chat sends the answered turn plus the newest earlier turns that fit, reads the plan from a versioned per-turn snapshot outside the tracked tree (removed after the run, reaped at boot), and a plan write retries a version conflict from a fresh read. Lows filed as T675.
 
