@@ -7,8 +7,13 @@
 //     --api sha256:… --worker sha256:… --web sha256:… > release.json
 //
 // Opt in with --bundle-dir <tree>: read compose files and install/bundle-env.json from that
-// directory, and earlier release bundles from the invoking checkout's git tags (full history).
-// An archived channel tree need not carry its own .git directory.
+// directory, and unique bundle records from v* tags merged into the invoking checkout's HEAD.
+// The target requires base and run compose files; overlays and historical files may be absent.
+// RC tags remain eligible so pristine RC installs can be recognised, and the target is excluded.
+// Shallow checkouts always fail. A tagless first release must explicitly pass --allow-no-history;
+// otherwise missing release tags or a git read failure aborts with stderr and no manifest output.
+// An archived bundle tree need not carry .git; the generator's own tree must carry the shared
+// manifest schema and its dependencies. Without --bundle-dir, only the migrations are needed.
 //
 // Everything else is derived from the tree, so a release cannot forget to update it:
 // `migrationHead` is the highest migration the corpus ships, and `contracts` is computed from
