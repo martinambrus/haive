@@ -284,6 +284,10 @@ export async function repoHoldsCitation(repoPath: string, candidate: string): Pr
     // A proved refusal names something outside the repository's readable tree. A failed
     // verification proves nothing, so it must stop the draft write like any other I/O fault.
     if (isPathContainmentError(err) && err.reason !== 'unverifiable') return false;
+    // Model prose can look like a path while exceeding the filesystem's name limit.
+    // Unlike an unreadable file, that candidate cannot name a repository entry.
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENAMETOOLONG')
+      return false;
     throw err;
   }
 }

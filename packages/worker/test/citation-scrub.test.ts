@@ -177,6 +177,26 @@ describe('path probes stay inside the anchor repo', () => {
     expect(await repoHoldsCitation(repo, 'src/Cache/Backend.php')).toBe(true);
   });
 
+  it.each(['a'.repeat(256), 'é'.repeat(128)])(
+    'treats an overlong filename as a non-citation',
+    async (name) => {
+      const candidate = name + '.ts';
+      expect(await repoHoldsCitation(repo, candidate)).toBe(false);
+      const body = 'Use an invented filename like ' + candidate + ' in this example.';
+      expect(await scrubCitations(body, { repoPath: repo })).toMatchObject({
+        body,
+        removed: [],
+      });
+    },
+  );
+
+  it('treats an overlong parent segment as a non-citation', async () => {
+    const candidate = 'a'.repeat(256) + '/example.ts';
+    expect(await repoHoldsCitation(repo, candidate)).toBe(false);
+    const body = 'Use ' + candidate + ' as an example.';
+    expect(await scrubCitations(body, { repoPath: repo })).toMatchObject({ body, removed: [] });
+  });
+
   it('does not count a path the repo does not hold', async () => {
     expect(await repoHoldsCitation(repo, 'src/Cache/Missing.php')).toBe(false);
   });
