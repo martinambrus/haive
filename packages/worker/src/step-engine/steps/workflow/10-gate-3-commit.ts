@@ -1,3 +1,10 @@
+import { loadFixTestRecords } from './_fix-test-store.js';
+import {
+  fixTestEditsRow,
+  fixTestSummaries,
+  type FixTestSummary,
+  type FixTestRecord,
+} from './_fix-test-edits.js';
 import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
 import type { CommitDiffArtifact } from '@haive/shared/commit-diff-artifact';
@@ -36,6 +43,8 @@ import {
   unregisteredGitlinksMessage,
 } from './_gitlink-registration.js';
 
+const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
+
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
  *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a
  *  pathological diff, and the row should stay small. */
@@ -65,6 +74,7 @@ interface CommitGateDetect {
   commitMessageContext?: string;
   /** Only when no gate 2 decided on this run's similar sites (quick_bugfix has none). Optional
    *  because this payload is persisted. */
+  fixTestRecords?: FixTestSummary[];
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
@@ -243,6 +253,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
     const gate2 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09-gate-2-verify-approval');
+    const priorDecision = (gate2?.output as { decision?: unknown } | null)?.decision;
+    const hadGate2Decision = priorDecision === 'approve' || priorDecision === 'reject';
     const similar = gate2?.output
       ? { sites: [], omitted: 0 }
       : await loadTaskSimilarSites(ctx.db, ctx.taskId);
@@ -265,6 +277,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactPath: null,
         changedFileCount: 0,
         diffArtifactTruncated: false,
+        fixTestRecords: hadGate2Decision
+          ? []
+          : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
         similarSites: similar.sites,
         similarSitesOmitted: similar.omitted,
         outOfScopeInsights: insights.insights,
@@ -337,6 +352,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       changedFileCount,
       diffArtifactTruncated,
       commitMessageContext: messageContext,
+      fixTestRecords: hadGate2Decision
+        ? []
+        : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
@@ -388,6 +406,20 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     bypassStub: () => ({ commitMessage: 'test: describe pending workflow changes' }),
   },
 
+  async prepareForm(ctx, detected): Promise<void> {
+    const records = detected.fixTestRecords?.length
+      ? await loadFixTestRecords(ctx.db, ctx.taskId)
+      : [];
+    // Strip even a legacy detect payload; patches are only for this form construction.
+    detected.fixTestRecords = fixTestSummaries(
+      (detected.fixTestRecords ?? []).map((r) => ({
+        ...r,
+        changes: r.changes.map((c) => ({ ...c, patch: '' })),
+      })),
+    );
+    displayTestRecords.set(detected, records);
+  },
+
   form(_ctx, detected, llmOutput): FormSchema {
     const suggestedMessage = generatedCommitMessage(llmOutput);
     const similarRow = similarSitesRow(
@@ -400,9 +432,12 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       detected.outOfScopeInsightsOmitted ?? 0,
       'Anything listed here needs a follow-up task.',
     );
-    const statusRows = [houseRulesRow(detected.houseRules), similarRow, insightRow].filter(
-      (r) => r !== null,
-    );
+    const statusRows = [
+      houseRulesRow(detected.houseRules),
+      similarRow,
+      fixTestEditsRow(displayTestRecords.get(detected) ?? []),
+      insightRow,
+    ].filter((r) => r !== null);
     return {
       title: 'Gate 3: Commit',
       description: [

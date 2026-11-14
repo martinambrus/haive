@@ -3,7 +3,9 @@ import { mkdtemp, mkdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+vi.mock('./_fix-test-store.js', () => ({ loadFixTestRecords: vi.fn(async () => []) }));
+import { loadFixTestRecords } from './_fix-test-store.js';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
@@ -900,5 +902,48 @@ describe('10-gate-3-commit unreadable file', () => {
     expect(entry?.link).toBe('symlink');
     expect(entry?.before).toBe('distinctive-original-text\n');
     expect(entry?.after).toBe('elsewhere');
+  });
+});
+
+describe('gate 3 repair evidence', () => {
+  it.each([undefined, {}, { decision: 'approve' }])(
+    'loads evidence only without a gate-2 decision: %j',
+    async (output) => {
+      vi.mocked(loadFixTestRecords).mockClear();
+      const workspace = await tmp('gate3-evidence-');
+      await gate3CommitStep.detect!(mkCtx(workspace, [[], output ? [{ output }] : []]));
+      expect(loadFixTestRecords).toHaveBeenCalledTimes(output && 'decision' in output ? 0 : 1);
+    },
+  );
+
+  it('loads patches at display time without persisting them in detect or sending them to the message writer', async () => {
+    const detected = {
+      workspacePath: '/repo',
+      dirtyFiles: 1,
+      isGitRepo: true,
+      implementationSummary: '',
+      commitMessageContext: '',
+      fixTestRecords: [
+        {
+          invocationId: 'run',
+          stepId: '07-phase-2-implement',
+          round: 1,
+          pass: 0,
+          beforeEventId: 'event',
+          state: 'captured',
+          changes: [{ path: 'tests/a', kind: 'modified', patch: '-PRIVATE-PATCH\n+new' }],
+        },
+      ],
+    };
+    vi.mocked(loadFixTestRecords).mockResolvedValueOnce(detected.fixTestRecords as never);
+    await gate3CommitStep.prepareForm!({ taskId: 'task', db: {} } as never, detected as never);
+    expect(JSON.stringify(detected)).not.toContain('PRIVATE-PATCH');
+    const form = gate3CommitStep.form!({} as never, detected as never)!;
+    expect(
+      form.statusSummary?.find((r) => r.label === 'Test edits during fix passes')?.body,
+    ).toContain('-PRIVATE-PATCH\n+new');
+    expect(gate3CommitStep.llm!.buildPrompt({ detected, formValues: {} } as never)).not.toContain(
+      'PRIVATE-PATCH',
+    );
   });
 });

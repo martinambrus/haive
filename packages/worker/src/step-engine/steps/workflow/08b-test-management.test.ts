@@ -1,3 +1,4 @@
+import { BEHAVIOUR_FIX_LINES } from './_fix-loop.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -541,10 +542,7 @@ describe('testManagementStep.fixLoop', () => {
     }
   });
 
-  const DECIDE_PER_FAILURE = [
-    'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
-    'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
-  ];
+  const DECIDE_PER_FAILURE = BEHAVIOUR_FIX_LINES;
   const failing = (over: Record<string, unknown> = {}) =>
     mkApply({
       testsPassed: false,
@@ -570,9 +568,9 @@ describe('testManagementStep.fixLoop', () => {
     expect(v!.diagnosis).toContain('tests/old.spec.ts');
     expect(v!.diagnosis).toContain('5 fix pass');
     // The implementer must not treat the failing assertion as gospel.
-    expect(v!.guidance).toMatch(/TEST is wrong/);
-    expect(v!.guidance).toMatch(/CODE is wrong/);
-    expect(v!.guidance).toMatch(/FLAKY/);
+    expect(v!.guidance).toContain('approved spec proves');
+    expect(v!.guidance).toContain('application behaviour');
+    expect(v!.guidance).toContain('report only the checks that actually ran');
   });
 
   it('hands the three-way framing over as guidance, verbatim, and keeps the fact in the diagnosis', () => {
@@ -801,6 +799,15 @@ describe('test-management fix pass prompt', () => {
     });
   const writerPrompt = () =>
     testManagementStep.llm!.buildPrompt({ detected: detected as never, formValues: {} } as never);
+
+  it('allows an expectation change only against a named approved spec section', () => {
+    const p = fixPrompt(1);
+    expect(p).toContain('Fix the behaviour');
+    expect(p).toContain('approved spec proves');
+    expect(p).toContain('name the spec section');
+    expect(p).toContain('report only the checks that actually ran');
+    expect(p).not.toContain('→ fix the test');
+  });
 
   it('asks for the root cause once, above the command and the failure output', () => {
     const p = fixPrompt(1);

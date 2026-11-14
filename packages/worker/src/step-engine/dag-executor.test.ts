@@ -39,11 +39,16 @@ import {
 } from '../queues/cli-exec/failure-class.js';
 import { TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { StepSupersededError } from './step-ownership.js';
+import { beginFixTestCapture, finishFixTestCapture } from './steps/workflow/_fix-test-store.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
 
 // Wraps the real dispatcher so one test can stub a single call.
+vi.mock('./steps/workflow/_fix-test-store.js', () => ({
+  beginFixTestCapture: vi.fn(),
+  finishFixTestCapture: vi.fn(),
+}));
 vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/secret-mask.js')>()),
   taskSecretMaskPolicy: async () => null,
@@ -2825,6 +2830,10 @@ describe('a review-loop agent whose step a Retry reset before its claim', () => 
 });
 
 describe('ingestReviewRun: a fix coder that never answered', () => {
+  beforeEach(() => {
+    vi.mocked(beginFixTestCapture).mockClear();
+    vi.mocked(finishFixTestCapture).mockReset();
+  });
   it.each([
     [NEVER_STARTED, inv({ rawOutput: null, parsedOutput: null, exitCode: null, startedAt: null })],
     [
@@ -2855,7 +2864,7 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
         },
         stepDef: { metadata: { id: '06c-dag-execute' } } as never,
         providers: [{ id: 'p1', enabled: true }],
-        deps: { enqueueCliInvocation: async () => {} },
+        deps: { enqueueCliInvocation: vi.fn(async () => {}) },
         taskId: 'task1',
         specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
         attachmentsNotice: '',
@@ -2885,9 +2894,13 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
           ],
         },
       } as never;
-      const run = { id: 'run-1' } as never;
+      const run = { id: 'run-1', role: 'coder' } as never;
 
-      await ingestReviewRun(ra, issue, run, neverAnswered);
+      vi.mocked(finishFixTestCapture).mockImplementationOnce(async () => {
+        expect(updates.some((u) => (u.patch as { consumedAt?: unknown }).consumedAt)).toBe(false);
+      });
+
+      await ingestReviewRun(ra, issue, run, { ...neverAnswered, id: 'old-inv' });
 
       // No stuckCount/innerIteration/reviewStatus/reviewerVerdict change: the counters the
       // fix_required branch would have bumped stay untouched.
@@ -2901,6 +2914,25 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
       expect(coderInv?.values.prompt).toContain('Preserve existing permissions');
       expect(runInsert?.values.role).toBe('coder');
       expect(runInsert?.values.iteration).toBe(1);
+      expect(beginFixTestCapture).toHaveBeenLastCalledWith(
+        db,
+        expect.objectContaining({
+          invocationId: coderInv?.values.id ?? expect.any(String),
+          stepId: '06c-dag-execute',
+          pass: 1,
+          workspace: '/does/not/matter',
+        }),
+      );
+      const enqueue = (
+        ra as unknown as { deps: { enqueueCliInvocation: ReturnType<typeof vi.fn> } }
+      ).deps.enqueueCliInvocation;
+      expect(vi.mocked(beginFixTestCapture).mock.invocationCallOrder.at(-1)).toBeLessThan(
+        enqueue.mock.invocationCallOrder[0]!,
+      );
+      expect(finishFixTestCapture).toHaveBeenCalledExactlyOnceWith(db, 'old-inv');
+      expect(vi.mocked(finishFixTestCapture).mock.invocationCallOrder[0]!).toBeLessThan(
+        enqueue.mock.invocationCallOrder[0]!,
+      );
       // Exactly one agent was spawned — a reviewer was never dispatched against unchanged code.
       expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(1);
       // The replacement run must be recorded before the old one is marked consumed, so a
@@ -4434,6 +4466,14 @@ describe('the fix coder prompt asks for the root cause and says when a file was 
     reviewerVerdict: null,
   } as unknown as Parameters<typeof fixCoderPrompt>[0];
   const finding = (file: string) => ({ severity: 'high', file, description: 'stale cache bug' });
+
+  it('keeps the behaviour and approved spec as the fix contract', () => {
+    const p = fixCoderPrompt(issue, [finding('a.ts')], 'SPEC');
+    expect(p).toContain('Fix the behaviour');
+    expect(p).toContain('approved spec proves');
+    expect(p).toContain('name the spec section');
+    expect(p).toContain('report only the checks that actually ran');
+  });
 
   it('asks once, above the findings fence, and says nothing of a repeat by default', () => {
     const p = fixCoderPrompt(issue, [finding('a.ts')], 'SPEC');

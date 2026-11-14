@@ -12,6 +12,14 @@ describe('computeEffectiveSecretGlobs', () => {
     expect(deny).toEqual([...DEFAULT_SECRET_DENY_GLOBS]);
     expect(ignore).toEqual([...DEFAULT_SECRET_CARVEOUTS, ...SECRET_SCAN_IGNORE_DIRS]);
     expect(deny).toContain('**/.env');
+    expect(deny).toEqual(
+      expect.arrayContaining([
+        '**/.auth/**',
+        '**/storage-state*.json',
+        '**/storageState*.json',
+        '**/storage_state*.json',
+      ]),
+    );
     // bare *.sql is intentionally NOT a default (would mask migrations)
     expect(deny).not.toContain('**/*.sql');
   });

@@ -1,3 +1,4 @@
+vi.mock('./_fix-test-store.js', () => ({ loadFixTestRecords: vi.fn(async () => []) }));
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({

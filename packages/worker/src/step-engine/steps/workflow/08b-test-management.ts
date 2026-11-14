@@ -1,3 +1,4 @@
+import { TEST_FILE_RE } from './_test-paths.js';
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -40,7 +41,7 @@ import {
   type TestPreflightBlock,
 } from './_test-preflight.js';
 import { cleanText, contentFingerprint } from '../../task-ledger.js';
-import { ROOT_CAUSE_LINES, cutHead } from './_fix-loop.js';
+import { BEHAVIOUR_FIX_LINES, ROOT_CAUSE_LINES, cutHead } from './_fix-loop.js';
 
 // Phase 5b — Test management (legacy phase5b-test-management.md). Runs straight
 // after the implementation chain and BEFORE 08-phase-5-verify, so the suite verify
@@ -145,9 +146,6 @@ export function parseTesterOutput(raw: unknown): {
     }) ?? { testsCreated: [], testsUpdated: [], testsDeleted: [], notes: '' }
   );
 }
-
-const TEST_FILE_RE =
-  /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
 const CONTROL_CHAR_RE = /\p{Cc}/u;
 
@@ -701,12 +699,8 @@ export function priorPassNotes(previous: StepLoopPassRecord[]): string {
   }
 }
 
-/** The three-way framing the tester agent was given, so the implementer does not treat the
- *  failing assertion as gospel. */
-const DECIDE_PER_FAILURE = [
-  'Decide per failure whether the TEST is wrong (fix the test), the CODE is wrong (fix the',
-  'code), or the test is FLAKY (replace arbitrary waits with proper assertions).',
-].join('\n');
+/** The approved-behaviour contract also governs the implementer after the tester's budget. */
+const DECIDE_PER_FAILURE = BEHAVIOUR_FIX_LINES.join('\n');
 
 /** The fix-loop diagnosis handed to the implementer once the tester's own passes are
  *  spent. */
@@ -969,6 +963,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
         ...ROOT_CAUSE_LINES,
+        ...BEHAVIOUR_FIX_LINES,
         run ? `Command: ${run.command}` : '',
         // Test output is written BY THE REPOSITORY: a test file can print whatever it likes,
         // and this prompt hands it to an agent that edits code. `priorPassNotes` beside it is
@@ -986,10 +981,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         priorPassNotes(previousIterations)
           ? fencedAgentBlock(priorPassNotes(previousIterations))
           : '',
-        'Determine for each failure whether:',
-        '(a) the TEST is wrong (selector/assertion outdated) → fix the test,',
-        '(b) the CODE has a bug → fix the application code,',
-        '(c) the test is FLAKY (timing/race) → replace arbitrary waits with proper assertions.',
+        'For a timing/race failure, replace arbitrary waits with assertions that preserve the approved behaviour.',
         'DO NOT modify tests unrelated to the failures. Do NOT run the tests yourself and do',
         'NOT run git.',
         '',

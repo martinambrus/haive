@@ -144,3 +144,20 @@ planted before the boundary existed survives, though: an alias of a worktree fil
 checkout stays writable.
 
 Step 11 asks its agent to edit the knowledge base on every task, and a blank repository has no `knowledge_base/` by design. So in a task worktree its `prepare` creates the directory, owned like the worktree root, before the agent runs; an empty directory is never committed, so it cannot fake the marker. At the repository root (01 skipped) it creates nothing: it skips the KB-sync half and offers no local investigation (a global promotion still works), and records why in `kbSyncSkipped`.
+
+Browser authentication snapshots are secret-file defaults too: `**/.auth/**` and
+`storage-state*.json`, `storageState*.json`, `storage_state*.json` at any depth hold
+reusable browser sessions. The usual example/sample carve-outs and repository allow/extend
+settings still apply. In every existing repository this expands untracked sandbox masking:
+an untracked `playwright/.auth/user.json` is mounted empty and read-only, so a CLI agent cannot
+read or rewrite it. Tracked paths remain unaffected by sandbox masking. The worktree carry
+set, defined as exactly what masking hides, also grows to include these untracked files.
+Use the repository escape hatch
+`secret_mask_allow: ['**/.auth/**', '**/storage-state*.json']` when those files must be available
+to the agent.
+
+Repair-test evidence uses this same effective policy even when masking is disabled, and
+withholds content for tracked as well as untracked matches because copying either into
+evidence would create a new at-rest secret store. Manifests retain path/size/mode and a
+presence marker for withheld files; their bytes are neither read nor hashed. See
+[Fix loop](fix-loop.md#test-edits-during-a-repair).

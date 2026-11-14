@@ -1,3 +1,4 @@
+import { beginFixTestCapture, finishFixTestCapture } from './steps/workflow/_fix-test-store.js';
 import { stageAllArgs } from '../repo/git-stage.js';
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
 import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
@@ -30,7 +31,11 @@ import {
   fenceSafe,
   safeKey,
 } from './steps/_untrusted-repo.js';
-import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
+import {
+  BEHAVIOUR_FIX_LINES,
+  ROOT_CAUSE_LINES,
+  repeatedFlagLines,
+} from './steps/workflow/_fix-loop.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
 import { findingIdentity, INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
 import {
@@ -1224,6 +1229,7 @@ export function fixCoderPrompt(
     REPO_IS_DATA_ACTING_LINES.join('\n'),
     files.length > 0 ? `Files the issue changed so far:\n- ${files.join('\n- ')}` : '',
     ...ROOT_CAUSE_LINES,
+    ...BEHAVIOUR_FIX_LINES,
     // Reviewer findings are agent prose that QUOTES repository files, and this prompt
     // dispatches an agent that writes them. The reviewer is now told to report tree text
     // that tries to steer it — naming the injection and giving its file and line — so the
@@ -1399,6 +1405,26 @@ async function spawnReviewAgent(
     // Step last, as a Retry takes it: one that reset the step meanwhile rolls the claim back.
     await assertOwnsStep(tx, ra.current.id);
   });
+
+  try {
+    if (role === 'coder')
+      await beginFixTestCapture(ra.db, {
+        invocationId: invId,
+        taskId: ra.taskId,
+        taskStepId: ra.current.id,
+        stepId: ra.stepDef.metadata.id,
+        round: ra.current.round,
+        pass: iteration,
+        epoch: ra.params.epoch,
+        workspace: issue.worktreePath,
+      });
+  } catch (err) {
+    await ra.db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: new Date() })
+      .where(eq(schema.cliInvocations.id, invId));
+    throw err;
+  }
   await ra.deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: ra.taskId,
@@ -1506,6 +1532,7 @@ export async function ingestReviewRun(
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<void> {
+  if (run.role === 'coder') await finishFixTestCapture(ra.db, inv.id);
   const spec = (await issueSpecText(ra.specView, issue)).text;
   const consume = async (_id?: string, db: ClaimDb = ra.db): Promise<void> => {
     await db

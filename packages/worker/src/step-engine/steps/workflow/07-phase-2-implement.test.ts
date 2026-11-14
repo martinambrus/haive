@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { BEHAVIOUR_FIX_LINES } from './_fix-loop.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
@@ -103,6 +104,14 @@ describe('phase2ImplementStep fix-pass browser guidance', () => {
   });
   const prompt = (over: Record<string, unknown>) =>
     phase2ImplementStep.llm!.buildPrompt({ detected: detect(over), formValues: {} } as never);
+
+  it('requires a spec citation for an expectation change and names the real checks', () => {
+    const p = prompt({ fixContext: 'test fails', round: 1 });
+    expect(p).toContain('Fix the behaviour');
+    expect(p).toContain('approved spec proves');
+    expect(p).toContain('name the spec section');
+    expect(p).toContain('report only the checks that actually ran');
+  });
 
   it('adds reproduce-and-verify browser steps on a fix pass when browserTesting is on', () => {
     const p = prompt({ fixContext: 'DB error on the homepage', round: 1, browserTesting: true });
@@ -729,6 +738,14 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
   const form = (over: Record<string, unknown>) =>
     phase2ImplementStep.form!({} as StepContext, detect(over) as never)?.description ?? '';
 
+  it('keeps one behaviour contract across the tester hand-off and lets a human revise the spec', () => {
+    const text = prompt({ fixMarked: true, fixGuidance: BEHAVIOUR_FIX_LINES.join('\n') });
+    expect(text.split(BEHAVIOUR_FIX_LINES[0]!).length - 1).toBe(1);
+    expect(text).toContain(
+      'A human directive revising the spec or an expectation takes precedence',
+    );
+  });
+
   it('drops prior rounds a detect output stored before the mark rendered', () => {
     const prior = 'PRIOR-ROUNDS-MARK';
     expect(prompt({ priorFixContext: prior })).not.toContain(prior);
@@ -771,9 +788,12 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
     expect(p).toContain('AUTHORITATIVE DIRECTIVE');
     expect(p).toContain(`=== Defect to fix (found downstream) ===\n${HOSTILE}\n`);
     expect(p).not.toContain(UNTRUSTED_OPEN);
-    expect(createHash('sha256').update(p).digest('hex')).toEqual(
-      '355b20a9bfe0640870de3ebf1af97c4b66b76a6ccf0bf97de1a960b2cda36a70',
-    );
+    // The added repair contract is asserted above; pin the rest of the person framing.
+    expect(
+      createHash('sha256')
+        .update(p.replace(`${BEHAVIOUR_FIX_LINES.join('\n')}\n`, ''))
+        .digest('hex'),
+    ).toEqual('355b20a9bfe0640870de3ebf1af97c4b66b76a6ccf0bf97de1a960b2cda36a70');
   });
 
   it('shows the form a marked person round as it always did', () => {

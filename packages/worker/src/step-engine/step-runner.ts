@@ -1,3 +1,10 @@
+import {
+  beginFixTestCapture,
+  finishFixTestCapture,
+  loadFixTestRecords,
+} from './steps/workflow/_fix-test-store.js';
+import { fixTestReviewNotice } from './steps/workflow/_fix-test-edits.js';
+import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
@@ -760,6 +767,13 @@ async function resolveLlmPhase(
   const invocation = latest[0];
 
   if (invocation && invocation.endedAt !== null) {
+    if (
+      ['07-phase-2-implement', '08b-test-management', '07b-phase-4-validate'].includes(
+        stepDef.metadata.id,
+      )
+    )
+      await finishFixTestCapture(db, invocation.id);
+
     // An invocation failed if the CLI exited non-zero, exited abnormally
     // (null exit code = killed/timeout), or emitted an explicit errorMessage
     // (e.g. stream-json without a success result — rate-limit / early abort).
@@ -1005,6 +1019,13 @@ async function resolveLlmPhase(
           truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
+
+  if (stepDef.metadata.id === '07b-phase-4-validate') {
+    const notice = fixTestReviewNotice(
+      await loadFixTestRecords(db, params.taskId, 30, { patches: false }),
+    );
+    if (notice) prompt += '\n\n' + notice;
+  }
   // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
   // guidance is quoted text, not a persona the prompt step's author chose.
   const promptStepPersonaIds = isPromptStep(stepDef) ? templatePersonaIds(prompt) : undefined;
@@ -1188,16 +1209,31 @@ async function resolveLlmPhase(
   // `hasLiveInvocation`'s definition and nothing has been enqueued that would ever end it,
   // so leaving it would park the step for good; superseded is the same release the orphan
   // re-dispatch above performs.
-  if (llmSpec.prepareWorkspace) {
-    try {
+  try {
+    if (llmSpec.prepareWorkspace)
       await llmSpec.prepareWorkspace({ ctx, detected, formValues: formValues ?? {} });
-    } catch (err) {
-      await db
-        .update(schema.cliInvocations)
-        .set({ supersededAt: new Date() })
-        .where(eq(schema.cliInvocations.id, invRow.id));
-      throw err;
-    }
+    const repairPass =
+      (stepDef.metadata.id === '07-phase-2-implement' &&
+        !!(detected as { fixContext?: unknown } | null)?.fixContext) ||
+      (stepDef.metadata.id === '08b-test-management' && upcomingIteration > 0) ||
+      (stepDef.metadata.id === '07b-phase-4-validate' && role === 'fixer');
+    if (repairPass)
+      await beginFixTestCapture(db, {
+        invocationId: invRow.id,
+        taskId: params.taskId,
+        taskStepId: current.id,
+        stepId: stepDef.metadata.id,
+        round: current.round,
+        pass: upcomingIteration,
+        epoch: ctx.epoch,
+        workspace: await resolveInvocationWorkerTree(db, params.taskId, worktreeRel),
+      });
+  } catch (err) {
+    await db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: new Date() })
+      .where(eq(schema.cliInvocations.id, invRow.id));
+    throw err;
   }
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,

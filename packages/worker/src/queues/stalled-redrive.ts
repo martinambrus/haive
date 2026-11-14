@@ -1,3 +1,4 @@
+import { expireFixTestImages } from '../step-engine/steps/workflow/_fix-test-store.js';
 import {
   and,
   asc,
@@ -1018,6 +1019,11 @@ export class StalledTaskSweeper {
 
   /** Exposed for deterministic tests. */
   async sweep(): Promise<{ redriven: number }> {
+    try {
+      await expireFixTestImages(this.db);
+    } catch (err) {
+      log.warn({ err }, 'repair evidence expiry failed');
+    }
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
     redriven += await redriveStoppedTasks(this.db, defaultStopDeps, { staleMs: this.staleMs });

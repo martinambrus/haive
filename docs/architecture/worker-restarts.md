@@ -719,3 +719,15 @@ clocks and its list row's timing stop at `dead_at`, it shows no slot wait, and a
 refreshes once when it first sees the task dead, then re-checks every 30 s so a revive is noticed.
 
 The unused task-level `PATCH /tasks/:id/cli-provider` route is retired. Change a task's CLI through the step-level picker, which preserves the recovery and ownership fences above. Task creation and summary-provider settings remain supported.
+
+## Repair-evidence retention in the minute sweep
+
+`StalledTaskSweeper.sweep` runs `expireFixTestImages` before any task re-drive or bundle
+reconcile. Its own catch logs a warning and allows other work to continue; failures in
+later steps cannot starve expiry. Each tick clears bytea from at most 100 live
+`fix_test_blobs` rows older than 30 days, using the partial live-created-at index and
+stamping `expired_at`, while keeping task/hash/size metadata and immutable event refs.
+Admission can expire older content earlier to make room under task/install caps.
+The durable manifest survives worker recovery; provisional before bytes are bounded
+process memory, so restart/eviction can leave old content unavailable. Display states
+that absence and never reconstructs a before file from a later working tree.
