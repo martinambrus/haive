@@ -54,6 +54,9 @@ function buildBundle(dir, version) {
   // Read only fixed names, in allowlist order. A missing overlay is legitimate; other I/O
   // failures must abort rather than publish a hash record that silently omits a file.
   const present = new Set(readdirSync(dir));
+  for (const name of ['docker-compose.yml', 'docker-compose.run.yml']) {
+    if (!present.has(name)) throw new Error(`target bundle is missing required file ${name}`);
+  }
   const files = Object.fromEntries(
     BUNDLE_FILES.filter((name) => present.has(name)).map((name) => [
       name,

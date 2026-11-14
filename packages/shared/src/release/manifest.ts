@@ -60,7 +60,11 @@ export const releaseBundleEnvSchema = z.array(
 );
 
 export const releaseBundleSchema = z.object({
-  files: bundleFilesSchema,
+  files: bundleFilesSchema.refine(
+    (files) =>
+      files['docker-compose.yml'] !== undefined && files['docker-compose.run.yml'] !== undefined,
+    { message: 'target bundle requires docker-compose.yml and docker-compose.run.yml' },
+  ),
   env: releaseBundleEnvSchema,
   known: z.array(bundleFilesSchema),
 });

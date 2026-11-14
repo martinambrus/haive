@@ -83,7 +83,7 @@ describe('release bundle', () => {
     expect(parseReleaseManifest(base)).not.toHaveProperty('bundle');
   });
 
-  it('accepts any subset of the four allowed files, including historical missing overlays', () => {
+  it('accepts optional target overlays and partial historical records', () => {
     const files = Object.fromEntries(
       [
         'docker-compose.yml',
@@ -93,7 +93,17 @@ describe('release bundle', () => {
       ].map((name) => [name, digest]),
     );
     expect(parse({ ...bundle, files }).bundle?.files).toEqual(files);
-    expect(parse({ ...bundle, files: {}, known: [{}] }).bundle?.files).toEqual({});
+    expect(parse({ ...bundle, known: [{}] }).bundle?.known).toEqual([{}]);
+  });
+
+  it('requires base and run files in the target bundle', () => {
+    for (const files of [
+      {},
+      { 'docker-compose.yml': digest },
+      { 'docker-compose.run.yml': digest },
+    ]) {
+      expect(() => parse({ ...bundle, files })).toThrow();
+    }
   });
 
   it.each(['files', 'known'] as const)('rejects any other file name in %s', (field) => {

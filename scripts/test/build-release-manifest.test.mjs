@@ -133,11 +133,12 @@ test('--bundle-dir hashes exact bytes and every earlier release bundle in determ
   assert.equal(build(['--bundle-dir', root]).stdout, result.stdout);
 });
 
-test('--bundle-dir hashes only present allowed files', (t) => {
+test('--bundle-dir hashes mandatory files while omitting absent overlays and unrelated files', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'mfb-partial-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'install'));
   writeFileSync(join(dir, 'install/bundle-env.json'), JSON.stringify(env));
+  writeFileSync(join(dir, 'docker-compose.yml'), second['docker-compose.yml']);
   writeFileSync(join(dir, 'docker-compose.run.yml'), second['docker-compose.run.yml']);
   writeFileSync(join(dir, 'ignored.yml'), 'ignored\n');
   const result = build(['--bundle-dir', dir]);
@@ -145,9 +146,27 @@ test('--bundle-dir hashes only present allowed files', (t) => {
   assert.deepEqual(
     JSON.parse(result.stdout).bundle.files,
     hashes({
+      'docker-compose.yml': second['docker-compose.yml'],
       'docker-compose.run.yml': second['docker-compose.run.yml'],
     }),
   );
+});
+
+test('--bundle-dir refuses a target missing either mandatory compose file', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mfb-missing-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'install'));
+  writeFileSync(join(dir, 'install/bundle-env.json'), JSON.stringify(env));
+  for (const missing of ['docker-compose.yml', 'docker-compose.run.yml']) {
+    for (const name of Object.keys(second)) {
+      if (name === missing) rmSync(join(dir, name), { force: true });
+      else writeFileSync(join(dir, name), second[name]);
+    }
+    const result = build(['--bundle-dir', dir]);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.includes(missing), result.stderr);
+  }
 });
 
 test('--bundle-dir fails rather than publishing incomplete metadata when git cannot be read', () => {
