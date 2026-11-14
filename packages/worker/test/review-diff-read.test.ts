@@ -457,3 +457,44 @@ it.each(['collector', 'serializer'])(
     expect(failedScope.scanError).toContain('/host/private/tree');
   },
 );
+
+it.each(['unreadable-lstat', 'unreadable-open', 'other'])(
+  'preserves ordinary evidence beside an %s entry',
+  async (kind) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', 'odd'],
+      total: 2,
+    });
+    vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) => {
+      if (rel === 'odd' && kind === 'unreadable-lstat')
+        throw Object.assign(new Error('refused'), { code: 'EACCES' });
+      return { kind: rel === 'odd' && kind === 'other' ? 'other' : 'file', stats: stat } as never;
+    });
+    const open = vi.mocked(openFileNoFollow).getMockImplementation()!;
+    vi.mocked(openFileNoFollow).mockImplementation(async (...args) => {
+      if (args[1] === 'odd') throw Object.assign(new Error('refused'), { code: 'EACCES' });
+      return open(...args);
+    });
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result).toMatchObject({ status: 'ready', partial: true });
+    if (result.status !== 'ready') return;
+    const payload = JSON.parse(result.content);
+    expect(payload.files).toContainEqual(
+      expect.objectContaining({ path: 'odd', kind: kind === 'other' ? 'other' : 'unreadable' }),
+    );
+    expect(payload.coverage.partial).toBe(true);
+    expect(payload.diff).toContain('+z');
+    expect(payload.fileContents).toContainEqual({ path: 'a', content: 'z' });
+    expect(payload.files.find((f: { path: string }) => f.path === 'odd').hash).toBeUndefined();
+    expect(
+      vi
+        .mocked(gitRun)
+        .mock.calls.some(
+          (call) => call[1].includes('--full-index') && call[1].includes(':(literal)odd'),
+        ),
+    ).toBe(false);
+    if (kind !== 'unreadable-open')
+      expect(vi.mocked(openFileNoFollow).mock.calls.some((call) => call[1] === 'odd')).toBe(false);
+  },
+);
