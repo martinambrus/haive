@@ -26,6 +26,7 @@ import {
   PLAN_PATCH_CONTRACT,
   applyAgentPatch,
   applyAgentPatchOnce,
+  retryUnversionedPlanConflict,
   parsePlanPatch,
 } from './_plan-prompt.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
@@ -830,38 +831,40 @@ export function createPlanBuildStep(
           // children can be parented with `self` instead of a transcribed uuid —
           // the single commonest thing an agent gets wrong.
           const expanding = EXPAND_AGENT_RE.exec(result.agentId)?.[1];
-          const applied = await applyAgentPatchOnce(
-            ctx,
-            result.agentId,
-            async (tx) => {
-              if (patch.ops.length === 0 && !expanding) {
-                throw new Error('plan outline returned no operations');
-              }
-              const ops = await ensureSemanticExpansionResolution(
-                ctx.db,
-                repositoryId,
-                expanding ?? null,
-                patch.ops,
-              );
-              await assertPlanPatchWithinBreadth(
-                ctx.db,
-                repositoryId,
-                ops,
-                expanding ?? null,
-                breadthCap(args.formValues),
-              );
-              return applyAgentPatch(
-                tx,
-                { ...patch, ops: withMinedStatus(ops, d.mode) },
-                {
+          const applied = await retryUnversionedPlanConflict(patch.ops, () =>
+            applyAgentPatchOnce(
+              ctx,
+              result.agentId,
+              async (tx) => {
+                if (patch.ops.length === 0 && !expanding) {
+                  throw new Error('plan outline returned no operations');
+                }
+                const ops = await ensureSemanticExpansionResolution(
+                  ctx.db,
                   repositoryId,
-                  sourceTaskId: ctx.taskId,
-                  derivedAtCommit,
-                  ...(expanding ? { selfNodeId: expanding } : {}),
-                },
-              );
-            },
-            (outcome) => partialApplyNote(outcome.dropped),
+                  expanding ?? null,
+                  patch.ops,
+                );
+                await assertPlanPatchWithinBreadth(
+                  ctx.db,
+                  repositoryId,
+                  ops,
+                  expanding ?? null,
+                  breadthCap(args.formValues),
+                );
+                return applyAgentPatch(
+                  tx,
+                  { ...patch, ops: withMinedStatus(ops, d.mode) },
+                  {
+                    repositoryId,
+                    sourceTaskId: ctx.taskId,
+                    derivedAtCommit,
+                    ...(expanding ? { selfNodeId: expanding } : {}),
+                  },
+                );
+              },
+              (outcome) => partialApplyNote(outcome.dropped),
+            ),
           );
           // Folded by a pass running beside this one, so its nodes are already in the plan.
           if (!applied) continue;
@@ -881,8 +884,9 @@ export function createPlanBuildStep(
             await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
           }
         } catch (err) {
-          // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
-          if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
+          // Busy or conflict retries are exhausted; preserve the named refusal.
+          if (err instanceof PlanPatchError && (err.kind === 'busy' || err.kind === 'conflict'))
+            throw err;
           notApplied += 1;
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);
