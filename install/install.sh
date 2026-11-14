@@ -764,7 +764,16 @@ if [ -f "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" ]; then
   # Match the root updater writer: install directory owner/group, mode 0644.
   if owner=$(stat -c '%u:%g' . 2>/dev/null); then :
   else owner=$(stat -f '%u:%g' .); fi
-  chown "$owner" .haive-bundle.json
+  if current=$(stat -c '%u:%g' .haive-bundle.json 2>/dev/null); then :
+  else current=$(stat -f '%u:%g' .haive-bundle.json); fi
+  if [ "$current" != "$owner" ]; then
+    if ! chown "$owner" .haive-bundle.json; then
+      # Some shares reject chown even when ownership already matches.
+      if current=$(stat -c '%u:%g' .haive-bundle.json 2>/dev/null); then :
+      else current=$(stat -f '%u:%g' .haive-bundle.json); fi
+      [ "$current" = "$owner" ] || die "cannot set bundle record owner; use an install directory whose ownership you can preserve"
+    fi
+  fi
   chmod 644 .haive-bundle.json
 fi
 

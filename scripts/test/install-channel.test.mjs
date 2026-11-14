@@ -159,6 +159,37 @@ function fixture(
   );
   if (gpu) writeFileSync(join(bin, 'nvidia-smi'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(bin, 'curl'), curl, { mode: 0o755 });
+  writeFileSync(
+    join(bin, 'chown'),
+    `#!/bin/sh
+case "$*" in
+  *.haive-bundle.json)
+    case "$FAIL_AT" in record-chown*)
+      touch "$CASE_ROOT/record-chown-attempted"
+      exit 1 ;;
+    esac ;;
+esac
+exec /bin/chown "$@"
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(bin, 'stat'),
+    `#!/bin/sh
+case "$*" in
+  *.haive-bundle.json)
+    case "$FAIL_AT" in
+      record-chown-wrong) echo '4294967294:4294967294'; exit 0 ;;
+      record-chown-recheck)
+        if [ ! -e "$CASE_ROOT/record-chown-attempted" ]; then
+          echo '4294967294:4294967294'; exit 0
+        fi ;;
+    esac ;;
+esac
+exec /bin/stat "$@"
+`,
+    { mode: 0o755 },
+  );
   for (const command of ['mkdir', 'mv'])
     writeFileSync(
       join(bin, command),
@@ -359,10 +390,11 @@ for (const lang of ['sh', 'ps1']) {
       bundle: { files: hashes, env: [], known: [] },
     };
     check(`bundle record contains only installed verified files (public=${publicInstall})`, () => {
-      const f = fixture(lang, { publicInstall, data });
+      const f = fixture(lang, { publicInstall, data, fail: 'record-chown' });
       try {
         const r = f.install();
         assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.ok(!existsSync(join(f.root, 'record-chown-attempted')), 'skip a no-op chown');
         const record = join(f.dir, '.haive-bundle.json');
         assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), {
           version: '9.9.9',
@@ -385,6 +417,29 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
+    if (publicInstall)
+      for (const matches of [true, false])
+        check(`failed record chown rechecks ownership (matches=${matches})`, () => {
+          const f = fixture(lang, {
+            publicInstall,
+            data,
+            fail: matches ? 'record-chown-recheck' : 'record-chown-wrong',
+          });
+          try {
+            const r = f.install();
+            assert.ok(existsSync(join(f.root, 'record-chown-attempted')));
+            if (matches) {
+              assert.equal(r.status, 0, r.stdout + r.stderr);
+              assert.ok(existsSync(join(f.dir, '.env')));
+            } else {
+              assert.notEqual(r.status, 0);
+              assert.match(r.stdout + r.stderr, /cannot set bundle record owner/);
+              assert.ok(!existsSync(join(f.dir, '.env')));
+            }
+          } finally {
+            f.clean();
+          }
+        });
     check(`bundle hash mismatch refuses before creating install (public=${publicInstall})`, () => {
       const name = 'docker-compose.run.yml';
       const f = fixture(lang, {

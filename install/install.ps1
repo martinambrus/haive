@@ -615,7 +615,15 @@ if ($hasReleaseBundle) {
   if ($env:OS -ne 'Windows_NT') {
     $owner = Invoke-Native stat @('-c', '%u:%g', $Dir) -Capture
     if ($owner.ExitCode -ne 0) { throw 'cannot read install directory owner' }
-    if ((Invoke-Native chown @($owner.Output.Trim(), $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record owner' }
+    $current = Invoke-Native stat @('-c', '%u:%g', $recordPath) -Capture
+    if ($current.ExitCode -ne 0) { throw 'cannot read bundle record owner' }
+    if ($current.Output.Trim() -cne $owner.Output.Trim()) {
+      if ((Invoke-Native chown @($owner.Output.Trim(), $recordPath)).ExitCode -ne 0) {
+        # Some shares reject chown even when ownership already matches.
+        $current = Invoke-Native stat @('-c', '%u:%g', $recordPath) -Capture
+        if ($current.ExitCode -ne 0 -or $current.Output.Trim() -cne $owner.Output.Trim()) { throw 'cannot set bundle record owner; use an install directory whose ownership you can preserve' }
+      }
+    }
     if ((Invoke-Native chmod @('644', $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record mode' }
   }
 }
