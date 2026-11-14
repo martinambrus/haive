@@ -216,62 +216,65 @@ it('refuses an oversized new message without sending or losing the draft', async
   ).toBeGreaterThan(0);
 });
 
-it('offers the whole legacy pending message for an explicit edit in the plan panel', async () => {
-  const original = 'legacy '.repeat(3000);
-  net.chat = {
-    messages: [
-      {
-        id: 'pending',
-        taskId: 'task',
-        nodeId: 'node',
-        role: 'user',
-        body: original,
-        patch: null,
-        cliLabel: null,
-        createdAt: '2026-11-14',
-      },
-    ],
-    conversations: [
-      {
-        taskId: 'task',
-        title: 'Chat',
-        status: 'waiting_user',
-        createdAt: '2026-11-14',
-        cliProviderId: null,
-      },
-    ],
-  };
-  net.chatTask = {
-    task: { id: 'task', status: 'waiting_user', deadAt: null },
-    steps: [
-      {
-        stepId: '01-plan-chat',
-        status: 'waiting_form',
-        waitingStartedAt: '2026-11-14',
-        formSchema: {
-          title: 'Edit message',
-          description: 'The stored message must be edited.',
-          fields: [{ id: 'message', type: 'textarea', default: original }],
+it.each(['initialValue', 'default'] as const)(
+  'offers the whole legacy pending message for an explicit edit in the plan panel (%s)',
+  async (key) => {
+    const original = 'legacy '.repeat(3000);
+    net.chat = {
+      messages: [
+        {
+          id: 'pending',
+          taskId: 'task',
+          nodeId: 'node',
+          role: 'user',
+          body: original,
+          patch: null,
+          cliLabel: null,
+          createdAt: '2026-11-14',
         },
-      },
-    ],
-  };
-  let visible = true;
-  const view = createRenderer(() =>
-    visible ? <PlanChat repositoryId="repo" nodeId="node" onPatched={() => {}} /> : null,
-  );
-  dispose = () => {
-    visible = false;
+      ],
+      conversations: [
+        {
+          taskId: 'task',
+          title: 'Chat',
+          status: 'waiting_user',
+          createdAt: '2026-11-14',
+          cliProviderId: null,
+        },
+      ],
+    };
+    net.chatTask = {
+      task: { id: 'task', status: 'waiting_user', deadAt: null },
+      steps: [
+        {
+          stepId: '01-plan-chat',
+          status: 'waiting_form',
+          waitingStartedAt: '2026-11-14',
+          formSchema: {
+            title: 'Edit message',
+            description: 'The stored message must be edited.',
+            fields: [{ id: 'message', type: 'textarea', [key]: original }],
+          },
+        },
+      ],
+    };
+    let visible = true;
+    const view = createRenderer(() =>
+      visible ? <PlanChat repositoryId="repo" nodeId="node" onPatched={() => {}} /> : null,
+    );
+    dispose = () => {
+      visible = false;
+      view.draw();
+    };
+    await view.flush();
+    await view.flush();
+    const edit = findAll(
+      view.tree(),
+      (e) => e.tag === 'button' && textOf(e) === 'Edit stored message',
+    );
+    expect(edit).toHaveLength(1);
+    fire.click(edit[0]!);
     view.draw();
-  };
-  await view.flush();
-  await view.flush();
-  const edit = findAll(
-    view.tree(),
-    (e) => e.tag === 'button' && textOf(e) === 'Edit stored message',
-  );
-  expect(edit).toHaveLength(1);
-  fire.click(edit[0]!);
-  view.draw();
-  expect(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!.props.value).toBe(original);
-});
+    expect(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!.props.value).toBe(original);
+  },
+);

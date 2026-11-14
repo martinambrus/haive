@@ -228,12 +228,14 @@ export function PlanChat({
 
   const chatForm = liveStep?.formSchema as FormSchema | null | undefined;
   const legacyField = chatForm?.fields.find((f) => f.id === 'message' && f.type === 'textarea');
+  // The worker prefills the edit as `initialValue`; a row parked before that still carries `default`.
+  const storedMessage =
+    legacyField?.type === 'textarea'
+      ? (legacyField.initialValue ?? legacyField.default)
+      : undefined;
   const legacyMessage =
-    legacyField &&
-    'default' in legacyField &&
-    typeof legacyField.default === 'string' &&
-    legacyField.default.length > PLAN_CHAT_MESSAGE_MAX_CHARS
-      ? legacyField.default
+    typeof storedMessage === 'string' && storedMessage.length > PLAN_CHAT_MESSAGE_MAX_CHARS
+      ? storedMessage
       : null;
 
   const firstUnreadId = firstUnreadMessageId(messages, unreadAtOpen);
