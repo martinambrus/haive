@@ -80,7 +80,7 @@ Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(app
 ## Build commands
 
 - `pnpm install` installs all workspace dependencies.
-- `pnpm build` runs `turbo run build` across the workspace; `@haive/shared` and `@haive/database` build first because all other packages depend on them.
+- `pnpm build` wraps `turbo run build`, building external modules first when present; `@haive/shared` and `@haive/database` build before the rest.
 - `pnpm typecheck` runs `tsc --noEmit` everywhere.
 - `pnpm test` runs Vitest across the workspace.
 - `pnpm test:e2e` runs Playwright against the dev compose stack.
