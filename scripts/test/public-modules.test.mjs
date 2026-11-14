@@ -61,6 +61,38 @@ test('unknown lock importers, explicit workspace entries, registries and product
     );
   }
 });
+for (const [file, text] of [
+  ['packages/api/Dockerfile', 'COPY modules/private-one /app/modules/private-one'],
+  ['Dockerfile.dev', 'COPY external-modules/private-one /app/external-modules/private-one'],
+  ['.github/workflows/ci.yml', 'run: pnpm --filter ./modules/private-one build'],
+  ['docker-compose.dev.yml', 'volumes: [./modules/private-one:/app/modules/private-one]'],
+  [
+    'packages/api/package.json',
+    JSON.stringify({ dependencies: { example: 'link:../../external-modules/private-one' } }),
+  ],
+  ['pnpm-lock.yaml', 'resolution: link:../../external-modules/private-one'],
+  ['pnpm-lock.yaml', 'resolution: file:../../external-modules/private-one'],
+  ['scripts/nested/build.sh', 'pnpm --filter ./modules/private-one build'],
+  ['scripts/nested/build.mjs', "const path = './external-modules/private-one'"],
+  ['scripts/nested/build.cjs', "const path = 'file:../../external-modules/private-one'"],
+]) {
+  test(`private folder reference fails in ${file}: ${text}`, () => {
+    const files = fixture({});
+    files.set(file, text);
+    assert.ok(
+      checkPublicModules(files).some((error) =>
+        error.includes(`${file}: non-public workspace/importer`),
+      ),
+    );
+  });
+}
+test('public folder references with relative, link and file prefixes remain allowed', () => {
+  for (const prefix of ['', './', 'link:../../', 'file:../../']) {
+    const files = fixture({});
+    files.set('scripts/nested/build.sh', `pnpm --filter=${prefix}modules/public-one build`);
+    assert.deepEqual(checkPublicModules(files), []);
+  }
+});
 test('repository tracked install and runtime wiring contains only public modules', () => {
   const result = spawnSync('/usr/bin/git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);

@@ -65,9 +65,14 @@ export function checkPublicModules(files) {
     for (const match of text.matchAll(/@haive(?:\/module-|-module\/)([a-z0-9][a-z0-9-]*)/g)) {
       if (!publicIds.has(match[1])) errors.push(`${file}: non-public module ${match[0]}`);
     }
-    if (installInput) {
+    const buildInput =
+      /(?:^|\/)Dockerfile[^/]*$/.test(file) ||
+      /^docker-compose[^/]*\.yml$/.test(file) ||
+      /^\.github\/workflows\/[^/]+$/.test(file) ||
+      /^scripts\/.*\.(?:sh|mjs|cjs)$/.test(file);
+    if (installInput || buildInput) {
       for (const match of text.matchAll(
-        /(?:^|[\s"'])((?:external-modules|modules)\/([a-z0-9][a-z0-9-]*))(?=[/\s"':]|$)/gm,
+        /(?:^|[\s"'`=:\[,(])(?:link:|file:)?(?:\.\.?\/)*((?:external-modules|modules)\/([a-z0-9][a-z0-9-]*))(?=[/\s"':\],)]|$)/gm,
       )) {
         if (match[1].startsWith('external-modules/') || !publicIds.has(match[2]))
           errors.push(`${file}: non-public workspace/importer ${match[1]}`);
