@@ -324,18 +324,32 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
     if (!detected.nodeId) throw new Error('The plan for this conversation is no longer available.');
     // Stable per original/task: replay after a crash or duplicate job records it once.
     // The runner commits this insert with its owned edit-form park.
-    const preserve = async (body: string) => {
+    const preserve = async (body: string, createdAt?: Date) => {
       const hex = createHash('sha256')
         .update(JSON.stringify([ctx.taskId, detected.nodeId, body]))
         .digest('hex');
       const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
       await ctx.db
         .insert(schema.planNodeMessages)
-        .values({ id, nodeId: detected.nodeId!, taskId: ctx.taskId, role: 'user', body })
+        .values({
+          id,
+          nodeId: detected.nodeId!,
+          taskId: ctx.taskId,
+          role: 'user',
+          body,
+          ...(createdAt ? { createdAt } : {}),
+        })
         .onConflictDoNothing({ target: schema.planNodeMessages.id });
     };
-    if (original && original !== message) await preserve(original);
-    await preserve(message);
+    if (original && original !== message) {
+      // One transaction stamps both rows with the same now(), and detect reads
+      // the newest row as the pending turn: order them explicitly.
+      const at = Date.now();
+      await preserve(original, new Date(at - 1));
+      await preserve(message, new Date(at));
+    } else {
+      await preserve(message);
+    }
     return {
       detected: { ...detected, pendingQuestion: message, pendingFromLegacySubmission: undefined },
       ...(original && 'message' in values && !oversized ? { formValues: values } : {}),

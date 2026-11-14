@@ -121,6 +121,32 @@ describe('plan chat patches use the dispatch read', () => {
     expect((await planChatStep.detect!(f.ctx as never)).pendingQuestion).toBe(original);
   });
 
+  it('keeps an oversized replacement newer than its recovered original after a reset', async () => {
+    const f = await fixture();
+    const original = 'old '.repeat(5001);
+    const replacement = 'new '.repeat(5001);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-11-14T00:00:00Z'));
+      await planChatStep.recoverLegacyFormValues!(
+        { ...f.detected, pendingQuestion: original, pendingFromLegacySubmission: true },
+        { message: replacement },
+        f.ctx as never,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    // Postgres stamps both rows with one transaction now() and ties have no
+    // order; the fake ticks per insert, so pin the explicit stamps instead.
+    const rows = await f.db.select().from(schema.planNodeMessages);
+    const at = (body: string) => rows.find((r) => r.body === body)!.createdAt.getTime();
+    const frozen = Date.parse('2026-11-14T00:00:00Z');
+    expect([at(original), at(replacement)]).toEqual([frozen - 1, frozen]);
+    const afterReset = await planChatStep.detect!(f.ctx as never);
+    expect(afterReset.pendingQuestion).toBe(replacement);
+    expect(afterReset.transcript.slice(-2).map((t) => t.body)).toEqual([original, replacement]);
+  });
+
   it('rolls back the durable original if the recovery transaction cannot park', async () => {
     const f = await fixture();
     const original = 'rollback '.repeat(2300);
