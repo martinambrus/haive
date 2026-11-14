@@ -1,6 +1,6 @@
 # T648 plan: the release manifest image carries the compose bundle; `haive upgrade` swaps it
 
-PR1 shipped #1157; PR2 shipped #1172; PR3 shipped #1180; PR4 this change
+PR1 shipped #1157; PR2 shipped #1172; PR3 shipped #1180; PR4 shipped #1181; PR5 implemented: journalled bundle backup, atomic swap, rollback/resume restoration and post-commit pruning (newest and edited/unknown backups retained).
 
 ## Context
 - The installer downloads the compose bundle once, at the install tag: `install/install.sh:662-664`, plus the GPU or Vulkan overlay at `:688-696`. `install/install.ps1:557-558` does the same.
@@ -116,7 +116,12 @@ validates the env declaration with the shared schema before embedding it.
 - `swapBundle` does a temp-file-and-rename per file in the install directory, copying owner and mode from the file it replaces. `.haive-bundle.json` is renamed last.
 - It is idempotent: a file whose hash already matches the target is skipped.
 
-**Commit.** `phaseCommit` keeps the newest `previous/` directory and prunes older backup directories.
+**Commit.** After marking the run done, `phaseCommit` keeps the newest `previous/` and prunes only
+older backups classified `pristine` or `legacy-known`. The saved snapshot's classification is
+persisted in `previous/.haive-backup-kind`. Edited, unknown and unclassified backups survive later
+upgrades until manual deletion; each retained path is emitted as `bundle-backup-retained`.
+Once a run is complete and its saved edits are no longer needed, the operator may delete that
+run's `.haive-upgrade/<runId>/` directory. Never delete the backup of a running upgrade.
 
 **Compose file list.** Replace the literal at `cli.ts:197-200` with base + run + the overlay detected in the install directory: `docker-compose.gpu.yml` or `docker-compose.vulkan.yml`, whichever the installer wrote. This fixes the GPU-overlay bug.
 

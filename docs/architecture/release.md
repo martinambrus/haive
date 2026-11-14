@@ -85,7 +85,21 @@ its separate Dockerfile; the printed, shell-quoted recovery command rebuilds and
 The context is removed after success or a failure before the local manifest write. See
 [Modules](modules.md#publishing-a-channel-scriptspublish-channelmjs) for the channel gates.
 
-The updater now reads and prepares the bundle before `startRun` or any maintenance hold. Channel
+Under the upgrade lock, before reading install settings, pulling images or calling `startRun`,
+normal upgrades and interrupted-run recovery check `.env`, all four allowlisted compose files and
+`.haive-bundle.json` with `lstat`. Every present file must be a regular file. A symlink refuses with
+`install-file-linked`, exit 3, and the filename only; another non-regular entry refuses with
+`install-file-not-regular`. This policy also applies to targets without a bundle. Replace linked
+files with regular files containing the intended bytes before retrying.
+
+At that same start, the updater removes abandoned `.<name>.<uuid>` files left by the install-file
+writer, including `.env` copies. It accepts only the writer's known filenames and exact lowercase
+v4 UUID pattern, in the install root, `pending/new/` and run `previous/` directories. Directories
+are held open; matching temp symlinks are unlinked without following them, and linked directories
+are skipped. Unrelated names are untouched. A standalone `--check` and a dry plan do not clean temps;
+recovery of a live run still cleans them.
+
+The updater reads and prepares the bundle before `startRun` or any maintenance hold. Channel
 manifests and their files come from one release-image container. Public manifests still come from
 the requested HTTPS URL or an operator-controlled local file, which supplies the hash trust anchor;
 files come from `<registry>/haive-release:<version>` or `--release-image <ref>`. An HTTP manifest
@@ -108,8 +122,9 @@ exit 3, and a preflight attempt naming the first differing file and `--replace-m
 For unknown legacy installs, the updater picks the known record with the fewest differing installed
 files and names its first difference; ties retain historical record order. With no known records,
 it compares against the target bundle instead.
-`--replace-modified-bundle` acknowledges replacement intent and is recorded in run metadata; it does not swap
-files in this PR. `--check` validates classification and required keys without generating keys,
+`--replace-modified-bundle` authorizes replacement of local edits and is recorded in run metadata;
+the edited bytes are retained in the run backup before replacement. `--check` validates
+classification and required keys without generating keys,
 staging files, pulling service images, recording an attempt or starting a run.
 
 After classification, `envkeys.ts` checks every `never` declaration before writing anything.
@@ -140,10 +155,60 @@ those errors; that pre-existing third-party behavior remains outside this change
 Staging and key additions can remain after a later preparation failure. Published bundles need
 Docker Compose 2.24 or later for the existing `!reset` tags.
 
-The installed bundle and `.haive-bundle.json` remain unchanged: PR5 adds backup, swap, rollback,
-resume restoration and pruning; PR6 adds the installer's initial record. Verification and rollback
-continue to use the installed compose context until the swap implementation lands. See the
-approved [compose bundle plan](../plans/release-compose-bundle.md).
+Immediately after `startRun`, before draining, the updater copies every installed allowlisted
+compose file and `.haive-bundle.json` into `.haive-upgrade/<runId>/previous/`. It journals
+`metadata.bundle = { from, to, backupDir, overlay }` before changing any installed bundle file:
+`from` and `to` contain per-file hashes, with null recording absence, and `backupDir` is relative
+to the install directory. A crash before this metadata write has changed no installed bundle file.
+The backup contains local edits accepted through `--replace-modified-bundle`, byte for byte.
+No database migration is needed for this JSONB metadata.
+
+Verification writes target image pins, swaps the bundle, writes `HAIVE_VERSION`, then starts the
+stack and checks its reported version and migration head. Each replacement uses an exclusive temp
+file, copies the replaced file's owner/group and mode (or the install directory's owner/group and
+0644 for a new file), fsyncs the file, renames it and fsyncs the directory. The mode-0644 local
+record is written last. Matching hashes skip replacement, so an interrupted swap is repeatable.
+Directories are held open and traversed without following links; linked file targets are refused.
+The same writer protects staging, backup, restore and `.env` pin changes. On shares that reject
+`chown`, an `EPERM` is tolerated only when `fstat` on the held descriptor verifies that both the
+current uid and gid already equal the requested owner. A different owner or another error still
+fails the write; ownership preservation remains required.
+Only installed GPU/Vulkan overlays are deployed. When the target omits an installed overlay, the
+old overlay remains: generated shell helpers bake its filename in at install time. Staged pull
+and config validation include that retained installed overlay, and the local record hashes the
+actual installed files. An unselected target overlay is never silently enabled.
+
+Before commit, a failure restores the backup files first, then the old image pins and
+`HAIVE_VERSION`, restarts on the old compose files, restores the prior maintenance state and marks
+the run rolled back. Installed hashes first identify only the files that differ from `from`,
+including removing a local record absent before the run. All required backup files are hash-checked
+before any restoration starts. Already matching files require no backup; when nothing differs,
+rollback never opens `previous/`, so a deleted or tampered backup cannot prevent lifting the holds.
+If needed old bytes are missing or invalid, rollback leaves the run running and its recovery advice
+names the backup path that must be repaired before retrying.
+Generated `.env` keys stay after rollback intentionally; removing them could reopen missing auth.
+
+After an updater crash, recovery loads `metadata.bundle` from the running journal row without
+fetching a new release. A crash between file renames therefore restores the old bytes and finishes
+rollback. A failed restore leaves the run running for the next invocation to retry. Once the
+journal phase is `commit`, recovery finishes forward and keeps the new files, because destructive
+data migrations may already have run. This pivot is unchanged.
+
+Only after a successful commit marks the run done does pruning remove `pending/new` staging and
+older backups classified `pristine` or `legacy-known`. The classification is computed from the
+saved bytes and durably written as `previous/.haive-backup-kind` before the backup is journalled.
+The newest `previous/` is retained. Backups classified `modified` or `legacy-unknown`, plus older
+backups with no recognised classification, survive later upgrades until the operator deletes them.
+This preserves edits accepted through `--replace-modified-bundle` beyond the next upgrade.
+Each retained backup emits `bundle-backup-retained` with its relative path. Once a run is complete
+and its saved edits are no longer needed, manually delete that run's
+`<install>/.haive-upgrade/<runId>/` directory; never delete the backup of a running upgrade.
+Failed commits and rollbacks retain their backup and staging. A pruning failure emits
+`bundle-prune-failed` with `safeErrorMessage(err)` and keeps the successful commit; remaining
+prunable files may be cleaned by a later successful bundle upgrade.
+No compose call adds `--remove-orphans`; removed services remain a separate follow-up.
+PR6 adds the installer's initial local record. See the approved
+[compose bundle plan](../plans/release-compose-bundle.md).
 
 To run a published release instead of building from source:
 
@@ -161,9 +226,10 @@ The updater preserves the GPU overlay already present in the install directory. 
 compose call uses `docker-compose.yml`, then `docker-compose.run.yml`, then
 `docker-compose.gpu.yml` when present, otherwise `docker-compose.vulkan.yml` when present. NVIDIA
 wins if both files exist, matching the installer's selection order for the generated helper.
-Without either file the updater uses only base and run. It resolves that list once per invocation
-and shares it across image pulls, snapshot stop/restart, verification, rollback and interrupted-run
-recovery; it never probes for a GPU inside the updater container. The separate synthetic Compose
+Without either file the updater uses only base and run. It resolves the installed list at startup
+and refreshes it from the journalled hashes after swap or restore; staged pulls and config validation
+use staged counterparts for changed files, while snapshot stop/restart uses the installed list.
+It never probes for a GPU inside the updater container. The separate synthetic Compose
 model used to parse image settings from `.env` does not load the deployment files.
 
 ## The drain an upgrade runs first
