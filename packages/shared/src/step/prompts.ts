@@ -1,10 +1,17 @@
 import { TASK_SCOPE_RULES } from '../constants/task-scope-rules.js';
 
-const UNTRUSTED_OPEN = '===== BEGIN UNTRUSTED AGENT TEXT =====';
+/** Opening banner; host plumbing, not part of the module contract. */
+export const UNTRUSTED_OPEN = '===== BEGIN UNTRUSTED AGENT TEXT =====';
 
-const UNTRUSTED_CLOSE = '===== END UNTRUSTED AGENT TEXT =====';
+/** Closing banner; host plumbing, not part of the module contract. */
+export const UNTRUSTED_CLOSE = '===== END UNTRUSTED AGENT TEXT =====';
 
-const fenceSafe = (s: string): string => s.replace(/={4,}/g, '===');
+/** Collapse structural fence runs; host plumbing, not part of the module contract. */
+export const fenceSafe = (s: string): string => s.replace(/={4,}/g, '===');
+
+/** Controls that cannot appear on a prompt line (TAB excepted);
+ *  host plumbing, not part of the module contract. */
+export const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /** For agents that read the tree and emit findings: reviewers, lenses, the auditor,
  *  the adversarial roster, the secret sweeper. */
@@ -152,9 +159,8 @@ export const REPO_IS_DATA_ANSWER_LINES = [
  *  is the prompt speaking, and burying it inside the fence would void it.
  *
  *  `UNTRUSTED_FENCE_LEGEND` says once, above the first call, what the banners mean.
- *  dag-executor's three hand-rolled fences are deliberately NOT converted here: each
- *  states its own intro naming who wrote the text, and rewriting three working prompts
- *  to share one wording is its own change. */
+ *  dag-executor's three hand-rolled fences share these banner constants and fenceSafe,
+ *  while each keeps its own intro naming who wrote the text. */
 export function fencedAgentBlock(body: string): string {
   return [UNTRUSTED_OPEN, fenceSafe(body), UNTRUSTED_CLOSE].join('\n');
 }

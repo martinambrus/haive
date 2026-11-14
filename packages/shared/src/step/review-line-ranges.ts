@@ -4,17 +4,20 @@ import type { ChangedLineNotes } from './review-types.js';
  *  A prompt-size cap, and — like MAX_LISTED_FILES — one that states what it cut. */
 export const MAX_RANGES_PER_FILE = 20;
 
-interface DiffHunk {
+/** A raw new-side hunk; host plumbing, not part of the module contract. */
+export interface DiffHunk {
   start: number;
   count: number;
 }
 
-interface DiffFile {
+/** A raw diff file; host plumbing, not part of the module contract. */
+export interface DiffFile {
   deleted: boolean;
   hunks: DiffHunk[];
 }
 
 /**
+ * This is host plumbing, not part of the module contract.
  * Every path of a `git diff --unified=0` output with its hunks, uncapped, in diff order.
  *
  * Line numbers are taken from the `+` side of each hunk header, so they address the file
@@ -26,7 +29,7 @@ interface DiffFile {
  * so the file is simply left unannotated — the same "not recorded" state that resolves to
  * whole-file scope. Failing to the wider scope is the only safe direction.
  */
-function parseDiffHunks(diff: string): Map<string, DiffFile> {
+export function parseDiffHunks(diff: string): Map<string, DiffFile> {
   const files = new Map<string, DiffFile>();
   let path: string | null = null;
   let deleted = false;

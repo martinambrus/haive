@@ -1,11 +1,18 @@
 import { createHash } from 'node:crypto';
+import { LINE_BREAK, fenceSafe } from './prompts.js';
 import { formatChangedLineRanges } from './review-line-ranges.js';
 
 import type { ImplementationFileSet, ChangedLineNotes, FileCoverage } from './review-types.js';
 
-const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
+/** Raw diff parser; host plumbing, not part of the module contract. */
+export { parseDiffHunks } from './review-line-ranges.js';
+/** Raw diff shapes; host plumbing, not part of the module contract. */
+export type { DiffHunk, DiffFile } from './review-line-ranges.js';
 
-const isListableName = (name: string): boolean => !LINE_BREAK.test(name) && !/={4,}/.test(name);
+/** Whether a name survives a prompt line and fence unchanged;
+ *  host plumbing, not part of the module contract. */
+export const isListableName = (name: string): boolean =>
+  !LINE_BREAK.test(name) && fenceSafe(name) === name;
 
 /** What a step's `detected` may actually hold.
  *

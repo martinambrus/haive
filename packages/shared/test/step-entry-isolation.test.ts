@@ -102,7 +102,8 @@ describe('step SDK entry isolation', () => {
       const source = path.join(SRC, target.import.replace('./dist/', '').replace(/\.js$/, '.ts'));
       const closure = closureOf(source);
       for (const [stepName, stepEntry] of ENTRIES) {
-        if (name !== stepName)
+        // Review shares the portable prompt guards; no other entry may reach an SDK entry.
+        if (name !== stepName && !(name === './step/review' && stepName === './step/prompts'))
           expect([...closure], `${name} -> ${stepName}`).not.toContain(stepEntry);
       }
     }

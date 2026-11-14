@@ -31,12 +31,16 @@ describe('step SDK leaf parity', () => {
   it('shares canonical values and functions with the worker compatibility paths', () => {
     expect(Object.keys(prompts).sort()).toEqual([
       'INSIGHTS_INSTRUCTION',
+      'LINE_BREAK',
       'REPO_IS_DATA_ACTING_LINES',
       'REPO_IS_DATA_ANSWER_LINES',
       'REPO_IS_DATA_AUTHORING_LINES',
       'REPO_IS_DATA_LINES',
       'SCOPE_BOUNDARY',
+      'UNTRUSTED_CLOSE',
+      'UNTRUSTED_OPEN',
       'balanceFences',
+      'fenceSafe',
       'fencedAgentBlock',
     ]);
     expect(Object.keys(review).sort()).toEqual([
@@ -44,12 +48,18 @@ describe('step SDK leaf parity', () => {
       'changedFilesBlock',
       'fileCoverage',
       'findingFingerprint',
+      'isListableName',
       'parseChangedLineRanges',
+      'parseDiffHunks',
     ]);
     for (const key of Object.keys(prompts) as (keyof typeof prompts)[]) {
+      // LINE_BREAK was worker-private and needs no compatibility export.
+      if (key === 'LINE_BREAK') continue;
       expect(prompts[key]).toBe(oldPrompts[key]);
     }
     for (const key of Object.keys(review) as (keyof typeof review)[]) {
+      // The raw parser was worker-private and needs no compatibility export.
+      if (key === 'parseDiffHunks') continue;
       expect(review[key]).toBe(oldReview[key]);
     }
   });

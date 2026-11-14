@@ -5,7 +5,11 @@ export {
   REPO_IS_DATA_ANSWER_LINES,
   fencedAgentBlock,
   balanceFences,
+  UNTRUSTED_OPEN,
+  UNTRUSTED_CLOSE,
+  fenceSafe,
 } from '@haive/shared/step/prompts';
+import { UNTRUSTED_OPEN, UNTRUSTED_CLOSE, fenceSafe, LINE_BREAK } from '@haive/shared/step/prompts';
 import { collapseToLine, TASK_SCOPE_RULES } from '@haive/shared';
 
 // Every agent that reads the repository is reading text somebody wrote, and a
@@ -91,14 +95,6 @@ export const REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES = [
 /* reach for instead of re-deriving it.                                */
 /* ------------------------------------------------------------------ */
 
-export const UNTRUSTED_OPEN = '===== BEGIN UNTRUSTED AGENT TEXT =====';
-export const UNTRUSTED_CLOSE = '===== END UNTRUSTED AGENT TEXT =====';
-
-/** Five `=` is the fence's structural element, so this collapses any run of four or
- *  more rather than matching either banner's wording — a reworded banner must not
- *  silently reopen the hole. */
-export const fenceSafe = (s: string): string => s.replace(/={4,}/g, '===');
-
 /** An identifier is a TOKEN, not prose, and it is usually named on a HEADER line
  *  OUTSIDE the fence, where anything it carries lands in the trusted region. Escaping
  *  is not enough there, so a key is REDUCED to what an identifier can legitimately
@@ -167,8 +163,6 @@ export const UNTRUSTED_FENCE_LEGEND = [
 /* with TAB (U+0009) the one carve-out: it is the only control a real   */
 /* value carries and it cannot start a line.                            */
 /* ------------------------------------------------------------------ */
-
-const LINE_BREAK = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/;
 
 export { collapseToLine };
 

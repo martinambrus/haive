@@ -1,17 +1,18 @@
 import type { ImplementationFileSet, ChangedLineNotes } from '@haive/shared/step';
 export type { ImplementationFileSet, ChangedLineNotes, FileCoverage } from '@haive/shared/step';
-import { parseChangedLineRanges } from '@haive/shared/step/review';
+import type { DiffHunk, DiffFile } from '@haive/shared/step/review';
+import { parseChangedLineRanges, parseDiffHunks } from '@haive/shared/step/review';
 export {
   changedFilesBlock,
   fileCoverage,
   parseChangedLineRanges,
   assertReviewableChange,
+  isListableName,
 } from '@haive/shared/step/review';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
@@ -20,9 +21,6 @@ import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
 /** How many changed files a prompt lists. The cap is for prompt size; what matters
  *  is that a list cut down to it says so — see changedFilesBlock. */
 const MAX_LISTED_FILES = 100;
-
-/** Whether a changed file's name can be written onto a prompt line as itself. */
-export const isListableName = (name: string): boolean => isSingleLine(name) && survivesFence(name);
 
 /** What a step's `detected` may actually hold.
  *
@@ -126,79 +124,6 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
  *  reject it and cost the notes entirely. Exceeding this is not fatal — no notes are
  *  recorded and the fence falls back to whole-file scope. */
 const MAX_DIFF_BUFFER_BYTES = 64 * 1024 * 1024;
-
-interface DiffHunk {
-  start: number;
-  count: number;
-}
-
-interface DiffFile {
-  deleted: boolean;
-  hunks: DiffHunk[];
-}
-
-/**
- * Every path of a `git diff --unified=0` output with its hunks, uncapped, in diff order.
- *
- * Line numbers are taken from the `+` side of each hunk header, so they address the file
- * AS THE AGENT WILL READ IT rather than some pre-change numbering.
- *
- * The path is read from the `+++ b/<path>` line rather than the `diff --git a/… b/…` header,
- * which is ambiguous for a path containing a space. A path git chose to QUOTE (control
- * characters, an embedded quote) is not unquoted here: it then matches no file in the set,
- * so the file is simply left unannotated — the same "not recorded" state that resolves to
- * whole-file scope. Failing to the wider scope is the only safe direction.
- */
-// The uncapped host lint collector also needs raw hunks; the SDK parser formats capped notes.
-function parseDiffHunks(diff: string): Map<string, DiffFile> {
-  const files = new Map<string, DiffFile>();
-  let path: string | null = null;
-  let deleted = false;
-  let hunks: DiffHunk[] = [];
-  // A removed `-- x` reads `--- x`, so only the lines before a file's first `@@` are header.
-  let inHeader = false;
-
-  const flush = (): void => {
-    if (path) files.set(path, { deleted, hunks });
-    path = null;
-    deleted = false;
-    hunks = [];
-  };
-
-  const strip = (side: string, prefix: string): string =>
-    side.startsWith(prefix) ? side.slice(prefix.length) : side;
-
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('diff --git ')) {
-      flush();
-      inHeader = true;
-      continue;
-    }
-    // `---` always precedes `+++`, so the old side is recorded first and used only when the
-    // new side turns out to be /dev/null — a deleted file names its path nowhere else.
-    if (inHeader && line.startsWith('--- ')) {
-      const source = line.slice(4).trim();
-      if (source !== '/dev/null') path = strip(source, 'a/');
-      continue;
-    }
-    if (inHeader && line.startsWith('+++ ')) {
-      const target = line.slice(4).trim();
-      if (target === '/dev/null') deleted = true;
-      else path = strip(target, 'b/');
-      continue;
-    }
-    if (!line.startsWith('@@')) continue;
-    inHeader = false;
-    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (!m) continue;
-    const start = Number.parseInt(m[1]!, 10);
-    const count = m[2] === undefined ? 1 : Number.parseInt(m[2], 10);
-    if (!Number.isFinite(start)) continue;
-    hunks.push({ start, count });
-  }
-  flush();
-  return files;
-}
 
 /**
  * The ref this task's change should be measured against.
