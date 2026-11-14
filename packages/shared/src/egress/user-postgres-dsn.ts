@@ -48,3 +48,17 @@ export function assertUserPostgresDsn(dsn: string): void {
   }
   if (host.includes('/')) throw new UserPostgresDsnError('host');
 }
+
+/** Probe responses never carry driver messages: parser, TLS and server errors
+ * can name local files even when no SQL parameters were bound. */
+export function userPostgresErrorMessage(err: unknown): string {
+  if (err instanceof UserPostgresDsnError) {
+    return `PostgreSQL connection parameter "${err.parameter}" is not allowed`;
+  }
+  const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+  if (code === 'ECONNREFUSED') return 'PostgreSQL connection refused';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'PostgreSQL host could not be resolved';
+  if (code === 'CONNECT_TIMEOUT' || code === 'ETIMEDOUT') return 'PostgreSQL connection timed out';
+  if (code === '28P01' || code === '28000') return 'PostgreSQL authentication failed';
+  return 'PostgreSQL connection failed';
+}

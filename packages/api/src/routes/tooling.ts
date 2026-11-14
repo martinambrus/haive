@@ -1,6 +1,6 @@
 import { readForgeErrorExcerpt } from '@haive/shared/forge';
 import { safeErrorMessage } from '@haive/shared/logger';
-import { assertUserPostgresDsn } from '@haive/shared/egress';
+import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
@@ -57,13 +57,13 @@ tooling.post('/test-postgres', async (c) => {
       await sql.end({ timeout: 5 }).catch(() => {});
       return c.json({
         ok: false,
-        error: safeErrorMessage(err),
+        error: userPostgresErrorMessage(err),
       });
     }
   } catch (err) {
     return c.json({
       ok: false,
-      error: safeErrorMessage(err),
+      error: userPostgresErrorMessage(err),
     });
   }
 });
