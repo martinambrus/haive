@@ -12,11 +12,39 @@ export interface RequestUsage {
   cacheCreation1hTokens: number | null;
 }
 
+export type UnobservedSameModelUsage = Omit<RequestUsage, 'requestId' | 'turnId'>;
+
+export type UnobservedSameModelPricingBlocker =
+  'unknown-cache-ttl' | 'unknown-output-usage' | 'unknown-output-request-size';
+
+/** Conservative PR 3 contract, reserved for its tier pricer. A nonempty result means
+ * the excess has NO selected rate: the whole computed invocation must stay unpriced
+ * (source none), never add only its priced buckets. Unknown TTL is not the run's
+ * configured TTL, and excess output has no observed request prompt whose tier it can
+ * inherit. Neither the base rate nor an observed main request's tier is a default.
+ * Unknown usage/TTL also forbids finite cost bounds. Known output with unknown request
+ * size may be bounded only once PR 3 proves all required buckets/rates are known.
+ * An empty result is not tier proof: the pricer must still prove the prompt-side tier
+ * from complete evidence (including aggregate bounds), as for any other usage. */
+export function unobservedSameModelPricingBlockers(
+  excess: UnobservedSameModelUsage,
+): UnobservedSameModelPricingBlocker[] {
+  const blockers: UnobservedSameModelPricingBlocker[] = [];
+  if (
+    excess.cacheCreationTokens > 0 &&
+    (excess.cacheCreation5mTokens === null || excess.cacheCreation1hTokens === null)
+  )
+    blockers.push('unknown-cache-ttl');
+  if (excess.outputTokens === null) blockers.push('unknown-output-usage');
+  else if (excess.outputTokens > 0) blockers.push('unknown-output-request-size');
+  return blockers;
+}
+
 export interface RequestUsageCapture {
   requests: RequestUsage[] | null;
   /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
    * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */
-  unobservedSameModel?: Omit<RequestUsage, 'requestId' | 'turnId'>[];
+  unobservedSameModel?: UnobservedSameModelUsage[];
   coverage: 'complete' | 'incomplete' | 'unknown';
   inputConvention: 'exclusive' | 'inclusive' | 'unknown';
   /** Exact only when the transcript proves it; Gemini reports this independently. */

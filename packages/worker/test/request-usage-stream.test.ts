@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createStreamJsonCollector } from '../src/queues/cli-exec/stream.js';
-import { aggregateRequestUsage } from '../src/cli-executor/request-usage.js';
+import {
+  aggregateRequestUsage,
+  unobservedSameModelPricingBlockers,
+} from '../src/cli-executor/request-usage.js';
 
 const fixture = JSON.parse(
   readFileSync(new URL('./fixtures/streams/request-claude.json', import.meta.url), 'utf8'),
@@ -84,6 +87,10 @@ describe('Claude request coverage', () => {
         cacheCreation5mTokens: null,
         cacheCreation1hTokens: null,
       },
+    ]);
+    expect(unobservedSameModelPricingBlockers(capture.unobservedSameModel![0]!)).toEqual([
+      'unknown-cache-ttl',
+      'unknown-output-request-size',
     ]);
     expect(collector.getRequestUsage()).toEqual(capture);
     expect(collector.getTokenUsage()).toMatchObject({ inputTokens: 300, outputTokens: 5 });
@@ -279,4 +286,34 @@ describe('Claude request coverage', () => {
     events[4].usage = structuredClone(events[3].message.usage);
     expect(read(events).coverage).toBe('incomplete');
   });
+});
+
+it.each([
+  {
+    name: 'unknown cache TTL',
+    cacheCreationTokens: 2,
+    cacheCreation5mTokens: null,
+    cacheCreation1hTokens: null,
+    outputTokens: 0,
+    reasons: ['unknown-cache-ttl'],
+  },
+  {
+    name: 'known excess output without its requests',
+    outputTokens: 7,
+    reasons: ['unknown-output-request-size'],
+  },
+  { name: 'unobservable output', outputTokens: null, reasons: ['unknown-output-usage'] },
+  { name: 'zero excess buckets', outputTokens: 0, reasons: [] },
+])('withholds an assumed rate for same-model $name', ({ name: _name, reasons, ...values }) => {
+  expect(
+    unobservedSameModelPricingBlockers({
+      model: 'claude-haiku-4-5',
+      inputTokens: 11,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 0,
+      cacheCreation5mTokens: 0,
+      cacheCreation1hTokens: 0,
+      ...values,
+    }),
+  ).toEqual(reasons);
 });
