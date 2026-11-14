@@ -142,14 +142,20 @@ async function readManifests(
           ),
         )
     : [];
-  return new Map(
-    rows
-      .filter((r) => r.data)
-      .map((r) => [
-        r.hash.slice('manifest:'.length),
-        JSON.parse(gunzipSync(r.data!).toString()) as TestImage,
-      ]),
-  );
+  const images = new Map<string, TestImage>();
+  for (const row of rows) {
+    if (!row.data) continue;
+    try {
+      images.set(
+        row.hash.slice('manifest:'.length),
+        JSON.parse(gunzipSync(row.data).toString()) as TestImage,
+      );
+    } catch {
+      // A corrupt or undecodable manifest has the same unavailable evidence as a missing row.
+      // Keep other passes readable; callers disclose this endpoint as not captured.
+    }
+  }
+  return images;
 }
 
 /** The partial index finds live metadata; never inspect/detoast content to expire it. */
