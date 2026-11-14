@@ -681,9 +681,9 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190 and #1191 (+19)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190 and #1191 (+20)
 
-status: open (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); queued overnight: items 10 and 11; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
+status: parked (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); items 10 and 11 resolved 2026-11-15 in #1195; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
 Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 
@@ -706,6 +706,7 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 17. (#1191) The web keeps its own copy of `SAFEGUARD_STEP_IDS` for the gate-removal warning; it can drift from the server's list. LOW, parked.
 18. (#1191) Removing a base step when the change list is already at its cap silently does nothing. PRE-EXISTING. LOW, parked.
 19. (#1191) The server preview only runs once the slug is valid, and the editor does not say so; live validation still runs. Browser check 2026-11-14. LOW, parked.
+20. (#1195 review) `web/src/components/cli-provider-form.tsx` ~:715 would render "0 tasks could not be checked" for `incomplete: true` with an empty `invalidTasks`; unreachable today (the api sets `incomplete` only with entries). Cosmetic.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
 
@@ -723,7 +724,7 @@ Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md` and `SD2-S/review-{
 
 ### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
 
-status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 1 queued inside derived types prerequisite 4 (owner 2026-11-14) · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 1 resolved 2026-11-15 in #1195 (06b and gate 2 needs softened to ordering; both read null-safe) · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/DT1-S/review-{1,2}.md`.
 
@@ -1208,9 +1209,9 @@ api `routes/repos.ts` `resetOnboardingArtifacts`. All minor.
 3. Coverage: no case for a FIFO or other special file at a canonical claim name (code is safe: `entry.isFile()` plus `lstat` before open).
 4. PRE-EXISTING: the other reset listings are uncapped, `readdirNoFollow(root, dir, { strict: true })` at ~:2353, ~:2419, ~:2493 on `.claude` and CLI dirs; a planted tree makes the reset allocate an unbounded listing. Fix: the same entry cap the claim sweep uses.
 
-### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+9)
+### T640 · FNF[fs-safe-absence-lows] · reads that still take a failure for absence, after #1125 (+10)
 
-status: open (queued 2026-11-14 overnight, items 1-2; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
+status: parked (items 1-2 resolved 2026-11-15 in #1196; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1125 reviews 2026-11-13 · priority: P3
 PRE-EXISTING unless marked. Worker unless named.
 
 1. Consequential: `queues/cli-exec/ddev-generated-mask.ts` ~:120 skips the `#ddev-generated` protections when a read fails.
@@ -1222,16 +1223,19 @@ PRE-EXISTING unless marked. Worker unless named.
 7. `readTextNoFollow` / `readLinkNoFollow` lenient callers were not in the #1125 audit (it covered lstat, readdir, readFile, openFile).
 8. (from T510 item 2) api bundle file listing bounds files, depth and descriptors but not directory count.
 9. (from T510 item 5) shared `readdirNoFollow` `maxEntries` overflow is a plain `Error` known by wording; give it a code when a caller appears. Coverage: `branch-revert-unknown-reads.test.ts` template copy has no isolation guard.
+10. (#1196 review) `global-kb/01-enrich.ts` ~:517, :520 `.catch(() => new Set())` on `collectRepoBasenames`/`collectRepoSymbols` (`08-knowledge-acquisition.ts` ~:1203-1228, which also swallow every failure): the symbol and basename citation backstops silently turn off on EMFILE/EIO, so the shared-draft guarantee #1196 gave the path detector is partial. Fix direction: propagate resource errors like `repoHoldsCitation` now does.
 
-### T641 · FNF[stored-failure-paths] · raw storage paths persist in stored failure text (+3)
+### T641 · FNF[stored-failure-paths] · raw storage paths persist in stored failure text (+5)
 
-status: open (queued 2026-11-14 overnight, items 1-2) · kind: fix · found: #1126 driver and review 2026-11-13 · priority: P3
+status: parked (items 1-2 resolved 2026-11-15 in #1196; the rest parked: diminishing returns (2026-11-15, owner rule: trivial lows park)) · kind: fix · found: #1126 driver and review 2026-11-13 · priority: P3
 PRE-EXISTING. Worker unless named.
 
 1. Consequential: `queues/cli-exec/handlers.ts` ~:468 stores `safeErrorMessage(err)` in `cli_invocations.error_message` and the mining row; a filesystem failure (now thrown by the sandbox boundaries on EACCES/EIO/EMFILE) carries the worker storage path `/var/lib/haive/repos/<userId>/<repoId>`, shown in the task UI. Route filesystem failures through `scrubErrorPaths` there (error-diagnostics.md rule).
 2. Consequential: `step-engine/step-runner.ts` ~:3813 stores the same raw text in `task_steps.error_message` for step-command and `01b-install-plugins` failures.
 3. Minor: `queues/safe-processor.ts` ~:12 keeps raw filesystem errors in the IDE ensure queue transport (the browser answer is already generic).
 4. Coverage: `step-command`, `01b-install-plugins` and the IDE ensure path have no errno-refusal control at the boundary lookup; the ENOTDIR absent controls inject at the leaf lstat, which real fs-safe never reaches.
+5. (#1196 review) `step-engine/step-runner.ts` ~:3944-3986: a `fixLoopOnError` step's `done` row keeps the raw `safeErrorMessage` as its diagnosis (the scrub runs only on the failed write, by design so the fix-loop predicate reads the original), so a storage path can still show on a `done` row. Fix direction: scrub at the `done` write after the predicate ran.
+6. (#1196 review) shared `logger/errors.ts` ~:88-93: the root filter keeps a whole quoted token whose first path is outside a root (`'/usr/bin/git -C /var/lib/haive/repos/u/r status'` passes unchanged). Latent: no caller found that builds such a message. Fix direction: filter path tokens inside the quoted body.
 
 ### T642 · DDEV recovery cold-boots a live runner when its health exec fails
 
