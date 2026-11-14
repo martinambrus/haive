@@ -161,7 +161,9 @@ export interface LlmInvocationSpec {
    *  form, with ctx). Use for environment setup the invocation depends on —
    *  e.g. 08a starts the runner's headed-browser desktop so the chrome-devtools
    *  MCP can connect to it. Idempotent; awaited each dispatch (incl. loop
-   *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. */
+   *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. The runner persists `detected`
+   *  right after it, so anything the hook writes onto it lands in detect_output:
+   *  never put a secret there. */
   // Return false when refreshed input makes this invocation unnecessary; apply
   // still runs with null llmOutput. Other preparation hooks return void.
   prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void | false>;
