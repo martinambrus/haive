@@ -337,6 +337,9 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Web UI
 
+- [Human active time](docs/architecture/human-time.md): presence epochs, reading estimates, the
+  fail-open tab lease and task-page delivery. `ActivityClock`, `useActiveTime`, `visibleWords`.
+
 - [Sessions](docs/architecture/session-recovery.md): browser recovery.
 
 - [Diff viewer](docs/architecture/diff-viewer.md): text highlights, change maps and pane scrolling.
