@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { canUpgradeFrom, parseReleaseManifest, type ReleaseManifest } from './manifest.js';
+import {
+  canUpgradeFrom,
+  parseReleaseManifest,
+  releaseManifestSchema,
+  type ReleaseManifest,
+} from './manifest.js';
 
 const base = {
   manifestVersion: 1 as const,
@@ -55,6 +60,101 @@ describe('parseReleaseManifest', () => {
     expect(() => parseReleaseManifest({ ...base, manifestVersion: 2 })).toThrow();
     expect(() => parseReleaseManifest({ ...base, minFrom: '' })).toThrow();
     expect(() => parseReleaseManifest({})).toThrow();
+  });
+});
+
+describe('release bundle', () => {
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const bundle = {
+    files: { 'docker-compose.yml': digest, 'docker-compose.run.yml': digest },
+    env: [
+      { key: 'MAILPIT_UI_PASSWORD', generate: 'hex', bytes: 24 },
+      { key: 'POSTGRES_PASSWORD', generate: 'never' },
+    ],
+    known: [{ 'docker-compose.yml': digest }],
+  };
+  const parse = (value: unknown) => parseReleaseManifest({ ...base, bundle: value });
+
+  it('round-trips the optional bundle without changing manifestVersion', () => {
+    const manifest = parse(bundle);
+    expect(manifest.manifestVersion).toBe(1);
+    expect(manifest.bundle).toEqual(bundle);
+    expect(parseReleaseManifest(JSON.parse(JSON.stringify(manifest)))).toEqual(manifest);
+    expect(parseReleaseManifest(base)).not.toHaveProperty('bundle');
+  });
+
+  it('accepts any subset of the four allowed files, including historical missing overlays', () => {
+    const files = Object.fromEntries(
+      [
+        'docker-compose.yml',
+        'docker-compose.run.yml',
+        'docker-compose.gpu.yml',
+        'docker-compose.vulkan.yml',
+      ].map((name) => [name, digest]),
+    );
+    expect(parse({ ...bundle, files }).bundle?.files).toEqual(files);
+    expect(parse({ ...bundle, files: {}, known: [{}] }).bundle?.files).toEqual({});
+  });
+
+  it.each(['files', 'known'] as const)('rejects any other file name in %s', (field) => {
+    for (const name of [
+      'extra.yml',
+      '../docker-compose.yml',
+      '/docker-compose.yml',
+      'bundle/docker-compose.yml',
+    ]) {
+      const files = { [name]: digest };
+      expect(() => parse({ ...bundle, [field]: field === 'known' ? [files] : files })).toThrow();
+    }
+  });
+
+  it.each(['files', 'known'] as const)('rejects malformed hashes in %s', (field) => {
+    for (const hash of [
+      'a'.repeat(64),
+      `sha256:${'A'.repeat(64)}`,
+      `sha256:${'a'.repeat(63)}`,
+      `sha256:${'a'.repeat(65)}`,
+      digest + '\n',
+    ]) {
+      const files = { 'docker-compose.yml': hash };
+      expect(() => parse({ ...bundle, [field]: field === 'known' ? [files] : files })).toThrow();
+    }
+  });
+
+  it.each([16, 64])('accepts hex generation at the %i-byte boundary', (bytes) => {
+    const env = [{ key: '_VALID_1', generate: 'hex', bytes }];
+    expect(parse({ ...bundle, env }).bundle?.env).toEqual(env);
+  });
+
+  it.each([undefined, 15, 65, 16.5, '24'])('rejects invalid hex byte count %s', (bytes) => {
+    expect(() => parse({ ...bundle, env: [{ key: 'KEY', generate: 'hex', bytes }] })).toThrow();
+  });
+
+  it('forbids bytes on never keys, including an explicitly undefined property', () => {
+    for (const bytes of [24, undefined]) {
+      expect(() => parse({ ...bundle, env: [{ key: 'KEY', generate: 'never', bytes }] })).toThrow();
+    }
+  });
+
+  it('rejects invalid env names and generation modes', () => {
+    for (const key of ['', '1KEY', 'WITH-DASH', 'WITH SPACE', 'KEY=VALUE', 'KEY\n']) {
+      expect(() => parse({ ...bundle, env: [{ key, generate: 'never' }] })).toThrow();
+    }
+    expect(() => parse({ ...bundle, env: [{ key: 'KEY', generate: 'random' }] })).toThrow();
+  });
+
+  it('requires files, env and known whenever a bundle is present', () => {
+    for (const field of ['files', 'env', 'known'] as const) {
+      const { [field]: omitted, ...partial } = bundle;
+      void omitted;
+      expect(() => parse(partial)).toThrow();
+    }
+  });
+
+  it('keeps the old z.object reader compatible by stripping the unknown bundle', () => {
+    // omit recreates the previous reader: a plain z.object, whose default policy is strip.
+    const oldReader = releaseManifestSchema.omit({ bundle: true });
+    expect(oldReader.parse({ ...base, bundle })).toEqual(parseReleaseManifest(base));
   });
 });
 
