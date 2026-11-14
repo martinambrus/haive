@@ -105,7 +105,7 @@ export function PlanDetailPanel({
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
   const openTask =
     detail?.tasks.some(
-      (task) => !task.deadAt && !['completed', 'failed', 'cancelled'].includes(task.status),
+      (task) => !task.deadAt && (task.status === 'queued' || task.status === 'running'),
     ) ?? false;
   usePlanPending(reportActivity, openTask);
 

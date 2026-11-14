@@ -15,6 +15,47 @@ vi.mock('next/link', async () => {
       createElement('a', { href }, children as never),
   };
 });
+
+it.each([
+  ['waiting_user', false],
+  ['paused', false],
+  ['created', false],
+  ['waiting_pr', false],
+  ['queued', true],
+  ['running', true],
+  ['completed', false],
+  ['failed', false],
+  ['cancelled', false],
+])('reports pending %s node work as %s', async (status, pending) => {
+  net.tasks = [{ taskId: 'task-1', title: 'Implement', status, type: 'workflow', createdAt: '' }];
+  const reportActivity = vi.fn();
+  let visible = true;
+  const view = createRenderer(() =>
+    visible ? (
+      <PlanDetailPanel
+        repositoryId="repo-1"
+        nodeId="node-A"
+        tree={[]}
+        tab="details"
+        chatDrafts={new Map()}
+        unreadCount={0}
+        onRead={() => {}}
+        onTabChange={() => {}}
+        onChanged={() => {}}
+        onNavigate={() => {}}
+        onClose={() => {}}
+        reportActivity={reportActivity}
+      />
+    ) : null,
+  );
+  dispose = () => {
+    visible = false;
+    view.draw();
+    net.tasks = [];
+  };
+  await view.flush();
+  expect(reportActivity.mock.lastCall?.[1]).toBe(pending);
+});
 vi.mock('lucide-react', async (original) =>
   Object.fromEntries(Object.keys(await original<object>()).map((name) => [name, () => null])),
 );

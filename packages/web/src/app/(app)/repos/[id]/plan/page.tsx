@@ -135,7 +135,8 @@ export default function PlanPage() {
   const [startingNext, setStartingNext] = useState(false);
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
-  usePlanPending(activity.report, sequencing || ordering?.activeTaskId != null);
+  // The overview has no task status. Report only the start request this page owns.
+  usePlanPending(activity.report, sequencing);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
   const [questionsKey, setQuestionsKey] = useState(0);
   const [removingEdge, setRemovingEdge] = useState(false);
@@ -904,6 +905,7 @@ export default function PlanPage() {
                       router.push(`/tasks/${taskId}`);
                     } catch (e) {
                       setError(e instanceof Error ? e.message : 'Could not start the ordering run');
+                    } finally {
                       setSequencing(false);
                     }
                   })();

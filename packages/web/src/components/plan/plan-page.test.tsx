@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PlanPage from '../../app/(app)/repos/[id]/plan/page';
-import { buttons, createRenderer, findAll, isDisabled, textOf } from '../../../test/render-tree';
+import {
+  buttons,
+  createRenderer,
+  findAll,
+  fire,
+  isDisabled,
+  textOf,
+} from '../../../test/render-tree';
 
 vi.mock('react', async (original) => ({
   ...(await original<typeof import('react')>()),
@@ -55,6 +62,7 @@ vi.mock('@/components/project-state-conflicts-banner', () => ({
 }));
 
 const net = vi.hoisted(() => ({
+  sequence: vi.fn(),
   merge: vi.fn(),
   nodeCount: 1,
   ordering: null as { activeTaskId: string } | null,
@@ -74,6 +82,7 @@ vi.mock('@/lib/api-client', async (original) => ({
         : { task: { id: 'live', status: 'running' }, steps: [], providers: [] },
   },
   postPlanUserActive: net.postPlan,
+  startPlanSequence: net.sequence,
   getUiPrefs: async () => ({}),
   getPlanOverview: async () => {
     net.overview();
@@ -233,11 +242,11 @@ describe('plan page attention wiring', () => {
     await flush(view);
     expect(net.active.mock.lastCall?.[0].pending).toBe(false);
   });
-  it('reports an in-flight ordering pass', async () => {
+  it('does not infer pending from a loaded ordering task id without a status', async () => {
     net.ordering = { activeTaskId: 'ordering-task' };
     const view = createRenderer(() => <PlanPage />);
     await flush(view);
-    expect(net.active.mock.lastCall?.[0].pending).toBe(true);
+    expect(net.active.mock.lastCall?.[0].pending).toBe(false);
   });
 });
 
@@ -255,4 +264,22 @@ it('renews the content key when the selected node chat reports an answer, not on
   await vi.advanceTimersByTimeAsync(10_000);
   await flush(view);
   expect(net.active.mock.lastCall?.[0].contentKey).toBe(after);
+});
+
+it('reports ordering only while the page’s start request is in flight', async () => {
+  let resolve!: (result: { taskId: string }) => void;
+  net.sequence.mockReturnValue(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const view = createRenderer(() => <PlanPage />);
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(false);
+  fire.click(buttons(view.tree(), /^order the plan$/i)[0]!);
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(true);
+  resolve({ taskId: 'ordering-task' });
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(false);
 });
