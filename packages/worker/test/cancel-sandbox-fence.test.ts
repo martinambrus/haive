@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { createUnlessSuperseded, supersedeTaskRuns } from '../src/sandbox/cli-sandbox-fence.js';
 import {
@@ -91,6 +91,29 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       .set({ endedAt: new Date(), exitCode: 0 })
       .where(eq(schema.cliInvocations.id, id));
   };
+
+  it('indexes only live contents and serves expiry and admission scans', async () => {
+    const [index] = await db.$client<{ predicate: string }[]>`
+      select pg_get_expr(indpred, indrelid) as predicate from pg_index
+      where indexrelid = 'fix_test_blobs_expiry_idx'::regclass
+    `;
+    expect(index!.predicate).toContain('(expired_at IS NULL)');
+    expect(index!.predicate).toContain('(content IS NOT NULL)');
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local enable_seqscan = off`);
+      for (const query of [
+        sql`explain select task_id, content_hash from fix_test_blobs
+          where expired_at is null and content is not null
+          and created_at < now() - interval '30 days'
+          order by created_at, task_id, content_hash limit 100`,
+        sql`explain select task_id, content_hash, size_bytes from fix_test_blobs
+          where expired_at is null and content is not null and size_bytes > 0
+          order by created_at, task_id, content_hash`,
+      ]) {
+        expect(JSON.stringify(await tx.execute(query))).toContain('fix_test_blobs_expiry_idx');
+      }
+    });
+  });
 
   it('replays both boundaries once, keeps the first reference through resets and a later pass', async () => {
     const meta = await seed();

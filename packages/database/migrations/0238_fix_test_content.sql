@@ -15,7 +15,9 @@ DO $$ BEGIN
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
-CREATE INDEX IF NOT EXISTS fix_test_blobs_expiry_idx ON fix_test_blobs(created_at) WHERE expired_at IS NULL;
+-- Replacing the experimental definition also handles an already-present broader index.
+DROP INDEX IF EXISTS fix_test_blobs_expiry_idx;
+CREATE INDEX IF NOT EXISTS fix_test_blobs_expiry_idx ON fix_test_blobs(created_at) WHERE expired_at IS NULL AND content IS NOT NULL;
 
 -- Prior experimental event payloads must not keep serving file content or host paths.
 -- Their references survive, with unavailable legacy content disclosed rather than copied

@@ -31,6 +31,6 @@ export const fixTestBlobs = pgTable(
     primaryKey({ columns: [t.taskId, t.contentHash] }),
     index('fix_test_blobs_expiry_idx')
       .on(t.createdAt)
-      .where(sql`${t.expiredAt} is null`),
+      .where(sql`${t.expiredAt} is null and ${t.content} is not null`),
   ],
 );

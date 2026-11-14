@@ -238,7 +238,9 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
       size: schema.fixTestBlobs.sizeBytes,
     })
     .from(schema.fixTestBlobs)
-    .where(sql`${schema.fixTestBlobs.expiredAt} is null and ${schema.fixTestBlobs.sizeBytes} > 0`)
+    .where(
+      sql`${schema.fixTestBlobs.expiredAt} is null and ${schema.fixTestBlobs.content} is not null and ${schema.fixTestBlobs.sizeBytes} > 0`,
+    )
     .orderBy(
       asc(schema.fixTestBlobs.createdAt),
       asc(schema.fixTestBlobs.taskId),
