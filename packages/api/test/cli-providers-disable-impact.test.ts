@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { AppEnv } from '../src/context.js';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { providerDisableImpact } from '../src/lib/provider-disable-impact.js';
+import * as stepFlags from '../src/lib/step-flags.js';
 import { resetStepFlagsCache } from '../src/lib/step-flags.js';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown, userId: '' }));
@@ -73,6 +75,54 @@ function task(over: Record<string, unknown> = {}) {
 }
 const read = () => app.request(`/${providerId}/disable-impact`);
 describe('provider disable impact', () => {
+  it.each([false, true])(
+    'reports malformed plans per task, including custom flags: %s',
+    async (custom) => {
+      task();
+      const id = task({
+        type: 'derived-test',
+        derivedRunPlan: { version: 999 },
+        customSteps: custom ? { 'custom.derived-test.step': {} } : null,
+      });
+      task(); // valid rows on either side still contribute
+      const response = await read();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        taskCount: 2,
+        stepCount: 4,
+        incomplete: true,
+        invalidTasks: [{ id, code: 'invalid-derived-run-plan' }],
+      });
+      expect(fake.rows(schema.cliProviders)[0]?.enabled).toBe(true);
+      expect(fake.rows(schema.tasks).every((t) => t.deadAt === null)).toBe(true);
+    },
+  );
+
+  it('reports all invalid tasks even when there are no valid counts', async () => {
+    const ids = [task({ derivedRunPlan: {} }), task({ derivedRunPlan: [] })];
+    expect(await (await read()).json()).toEqual({
+      taskCount: 0,
+      stepCount: 0,
+      incomplete: true,
+      invalidTasks: ids.map((id) => ({ id, code: 'invalid-derived-run-plan' })),
+    });
+  });
+
+  it.each([
+    new TypeError('broken code'),
+    Object.assign(new Error('database unavailable'), { code: 'CONNECTION_CLOSED' }),
+  ])('propagates non-plan errors from a task scan: %s', async (error) => {
+    task();
+    const spy = vi.spyOn(stepFlags, 'loadTaskStepFlags').mockRejectedValueOnce(error);
+    try {
+      await expect(
+        providerDisableImpact(fake.db as unknown as Database, h.userId, providerId),
+      ).rejects.toBe(error);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('counts fresh CLI and provider-sensitive bindings, excluding continuations and other owners', async () => {
     task();
     const continued = task();

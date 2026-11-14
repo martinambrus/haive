@@ -1,4 +1,4 @@
-import { pinnedTaskStepIds } from '@haive/shared/modularity';
+import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
@@ -1289,14 +1289,15 @@ export function resolveMergedTasks(
 /**
  * Live tasks OTHER than `onboarding` that write Haive-managed files into the repository root.
  *
- * Exported for `onboarding-reset-provenance-smoke`: this is a query, so the unit suite cannot
- * reach it — dropping `workflow` from the type list fails nothing there.
+ * An unreadable plan cannot prove the task will leave the root alone: keep it as a
+ * named blocker. Database and programming failures still propagate.
+ * Exported for the reset unit controls and `onboarding-reset-provenance-smoke`.
  */
 export async function loadLiveRootWriters(
   db: ReturnType<typeof getDb>,
   userId: string,
   repositoryId: string,
-): Promise<Array<{ id: string }>> {
+): Promise<Array<{ id: string; code?: DerivedRunPlanError['code'] }>> {
   const live = await db
     .select({
       id: schema.tasks.id,
@@ -1313,14 +1314,20 @@ export async function loadLiveRootWriters(
         inArray(schema.tasks.status, LIVE_TASK_STATUSES),
       ),
     );
-  return live
-    .filter(
-      (t) =>
-        OTHER_ROOT_WRITER_TASK_TYPES.includes(t.type) ||
-        ROOT_WRITING_STEP_IDS.some((id) => pinnedTaskStepIds(t)?.includes(id) === true),
-    )
-    .slice(0, 1)
-    .map((t) => ({ id: t.id }));
+  for (const task of live) {
+    try {
+      const stepIds = pinnedTaskStepIds(task);
+      if (
+        OTHER_ROOT_WRITER_TASK_TYPES.includes(task.type) ||
+        ROOT_WRITING_STEP_IDS.some((id) => stepIds?.includes(id) === true)
+      )
+        return [{ id: task.id }];
+    } catch (error) {
+      if (!(error instanceof DerivedRunPlanError)) throw error;
+      return [{ id: task.id, code: error.code }];
+    }
+  }
+  return [];
 }
 
 /**
@@ -3268,6 +3275,14 @@ async function runOnboardingArtifactReset(
   // `onboarding_artifacts` rows, so racing it deletes files it just wrote or strips rows it is
   // still working from.
   const liveWriters = await loadLiveRootWriters(db, userId, id);
+  const invalidWriter = liveWriters.find((task) => task.code !== undefined);
+  if (invalidWriter) {
+    throw new HttpError(
+      409,
+      `Task ${invalidWriter.id} has an invalid saved workflow plan. Finish or cancel it before resetting this repository.`,
+      invalidWriter.code,
+    );
+  }
   if (facts.liveTaskId !== null || liveWriters.length > 0) {
     throw new HttpError(
       409,

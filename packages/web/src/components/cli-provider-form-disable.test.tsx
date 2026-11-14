@@ -60,6 +60,36 @@ it('shows server impact before disabling, and writes only after confirmation', a
     expect.objectContaining({ enabled: false }),
   );
 });
+it.each([0, 2])(
+  'discloses incomplete counts and confirms even with %s known tasks',
+  async (taskCount) => {
+    h.get.mockImplementation(async (path: string) => {
+      if (path.endsWith('/disable-impact'))
+        return {
+          taskCount,
+          stepCount: taskCount,
+          incomplete: true,
+          invalidTasks: [{ id: 'invalid-task', code: 'invalid-derived-run-plan' }],
+        };
+      if (path.endsWith('/secrets')) return { secrets: [] };
+      throw new Error('Unexpected GET');
+    });
+    await saveDisabled();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('Counts are incomplete');
+    expect(dialog.textContent).toContain('1 task could not be checked');
+    expect(dialog.querySelector('.haive-md')?.textContent).toContain('Counts are incomplete');
+    expect(h.patch).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Disable provider' }));
+    });
+    expect(h.patch).toHaveBeenCalledWith(
+      '/cli-providers/provider',
+      expect.objectContaining({ enabled: false }),
+    );
+  },
+);
+
 it('cancels a disable without writing', async () => {
   await saveDisabled();
   const dialog = screen.getByRole('dialog');

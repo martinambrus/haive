@@ -36,7 +36,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { bundleFileName, claimFileName } from '@haive/shared/project-state';
-import { repoRoutes, resetOnboardingArtifacts } from '../src/routes/repos.js';
+import { repoRoutes, resetOnboardingArtifacts, loadLiveRootWriters } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -419,6 +419,66 @@ app.onError(errorHandler);
 const reset = () => app.request(`/${REPO}/onboarding-artifacts`, { method: 'DELETE' });
 
 describe('resetting a repository through the route', () => {
+  it('names a malformed live task as a reset blocker before any deletion or worker request', async () => {
+    const root = await repoRoot();
+    const fake = await setup(root);
+    const id = '00000000-0000-4000-8000-0000000000c1';
+    fake.insert(schema.tasks, {
+      id,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'derived-test',
+      status: 'running',
+      derivedRunPlan: { version: 999 },
+      runListSnapshot: ['01-worktree-setup'],
+      executionPath: null,
+    });
+    const before = {
+      repositories: structuredClone(fake.rows(schema.repositories)),
+      sync: structuredClone(fake.rows(schema.projectStateSync)),
+      outbox: structuredClone(fake.rows(schema.projectStateOutbox)),
+    };
+    const formatBefore = await readFile(path.join(root, FORMAT), 'utf8');
+    const response = await reset();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: expect.stringContaining(id),
+      code: 'invalid-derived-run-plan',
+    });
+    expect(await loadLiveRootWriters(h.db as never, USER, REPO)).toEqual([
+      { id, code: 'invalid-derived-run-plan' },
+    ]);
+    expect(await readFile(path.join(root, FORMAT), 'utf8')).toBe(formatBefore);
+    expect(await exists(root, RENDER)).toBe(true);
+    expect(fake.rows(schema.repositories)).toEqual(before.repositories);
+    expect(fake.rows(schema.projectStateSync)).toEqual(before.sync);
+    expect(fake.rows(schema.projectStateOutbox)).toEqual(before.outbox);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new TypeError('broken query'),
+    Object.assign(new Error('database unavailable'), { code: 'CONNECTION_CLOSED' }),
+  ])('propagates query failures in the live-writer scan: %s', async (error) => {
+    const db = {
+      select: () => ({ from: () => ({ where: () => Promise.reject(error) }) }),
+    };
+    await expect(loadLiveRootWriters(db as never, USER, REPO)).rejects.toBe(error);
+  });
+
+  it('does not absorb non-plan errors while inspecting a row', async () => {
+    const fake = await setup('/unused');
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-0000000000c3',
+      userId: USER,
+      repositoryId: REPO,
+      type: 'static-test',
+      status: 'running',
+      runListSnapshot: {},
+    });
+    await expect(loadLiveRootWriters(h.db as never, USER, REPO)).rejects.toBeInstanceOf(TypeError);
+  });
+
   const skill = '.claude/skills/personal/SKILL.md';
   async function mergedSkill(storedBranch: string, kind: 'event' | 'legacy') {
     const root = await repoRoot({ [skill]: 'my untouched skill' });
