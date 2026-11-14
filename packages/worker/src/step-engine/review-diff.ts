@@ -375,7 +375,10 @@ export async function readReviewDiff(
       if (batch.length) await readGitlinks(batch);
       for (const p of allPaths) {
         checkHostCancellation(ctx);
-        if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
+        if (
+          (scope.nestedRepositories && Object.hasOwn(scope.nestedRepositories, p)) ||
+          (untracked.has(p) && p.endsWith('/'))
+        ) {
           files.push({ path: p, kind: 'nested-repository' });
           continue;
         }

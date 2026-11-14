@@ -98,6 +98,34 @@ beforeEach(() => {
   );
 });
 afterEach(() => vi.useRealTimers());
+it.each(['constructor', 'toString'])(
+  'reads a changed file named %s without mistaking an inherited key for a nested repository',
+  async (name) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: [name],
+      nestedRepositories: {},
+    });
+    vi.mocked(gitRun).mockImplementation(async (_cwd, args) => ({
+      code: 0,
+      stderr: '',
+      stdout: args.includes('merge-base')
+        ? 'a'.repeat(40)
+        : args.includes('--name-status')
+          ? `M\0${name}\0`
+          : args.includes('ls-files')
+            ? ''
+            : 'diff\n+z\n',
+    }));
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result.status, JSON.stringify(result)).toBe('ready');
+    if (result.status !== 'ready') throw new Error(JSON.stringify(result));
+    const payload = JSON.parse(result.content);
+    expect(payload.files).toContainEqual(expect.objectContaining({ path: name, kind: 'text' }));
+    expect(payload.fileContents).toEqual([{ path: name, content: 'z' }]);
+    expect(openFileNoFollow).toHaveBeenCalledWith('/repo', name, 'read', { strict: true });
+  },
+);
 it('refuses an unreadable fork point', async () => {
   vi.mocked(gitRun).mockResolvedValue({ code: 1, stdout: '', stderr: '' });
   expect((await readReviewDiff(ctx, '/repo', options)).status).toBe('unavailable');
