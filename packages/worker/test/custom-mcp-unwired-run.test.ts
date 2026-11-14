@@ -183,7 +183,16 @@ describe('a run that names custom tools it cannot wire, through the job handler'
       expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(payload, false, message);
 
       const written = writes.length;
-      await expect(handleCliExecJob(db, payload)).resolves.toBeUndefined();
+      await expect(handleCliExecJob(db, payload)).resolves.toMatchObject({
+        requestUsage: {
+          requests: null,
+          coverage: 'unknown',
+          inputConvention: 'unknown',
+          requestCount: null,
+          modelCoverage: 'unknown',
+          reasons: ['recovered-completion'],
+        },
+      });
       expect(writes).toHaveLength(written);
       expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
     },
@@ -207,7 +216,16 @@ describe('a run queued before its pinned tools tightened, through the job handle
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(queued, false, message);
 
     const written = writes.length;
-    await expect(handleCliExecJob(db, queued)).resolves.toBeUndefined();
+    await expect(handleCliExecJob(db, queued)).resolves.toMatchObject({
+      requestUsage: {
+        requests: null,
+        coverage: 'unknown',
+        inputConvention: 'unknown',
+        requestCount: null,
+        modelCoverage: 'unknown',
+        reasons: ['recovered-completion'],
+      },
+    });
     expect(writes).toHaveLength(written);
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
   });

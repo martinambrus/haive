@@ -264,7 +264,16 @@ describe('a stamped run of a CLI that is given no MCP configuration, through the
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(payload, false, message);
 
     const written = writes.length;
-    await expect(handleCliExecJob(db, payload)).resolves.toBeUndefined();
+    await expect(handleCliExecJob(db, payload)).resolves.toMatchObject({
+      requestUsage: {
+        requests: null,
+        coverage: 'unknown',
+        inputConvention: 'unknown',
+        requestCount: null,
+        modelCoverage: 'unknown',
+        reasons: ['recovered-completion'],
+      },
+    });
     expect(writes).toHaveLength(written);
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
   });
