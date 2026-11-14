@@ -71,6 +71,18 @@ export function notionalCostUsdSql() {
   return sql<number>`coalesce(sum(${notionalCostRowSql()}), 0)::double precision`;
 }
 
+/** Coverage uses the same two eras as the money helpers. A recorded zero is priced;
+ * a missing snapshot can still have a usable legacy reported price. */
+export function pricedCostRowSql() {
+  const cost = schema.cliInvocations.cost;
+  return sql<boolean>`coalesce(case when ${cost} is not null then
+    ${cost} ->> 'source' <> 'none' and ${cost} ->> 'costUsd' is not null
+    else ${schema.cliProviders.name}::text in ${COST_METERED_PROVIDERS}
+      and ${schema.cliProviders.authMode} in ('api_key', 'subscription')
+      and ${schema.cliInvocations.tokenUsage} ->> 'costUsd' is not null
+    end, false)`;
+}
+
 /** Per-ROW notional cost. Same reason as realCostRowSql. */
 export function notionalCostRowSql() {
   const cost = schema.cliInvocations.cost;
