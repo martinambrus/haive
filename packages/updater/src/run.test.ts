@@ -574,6 +574,16 @@ describe('maintenance state while the config store is unavailable', () => {
     } as Partial<UpgradeContext>);
   const unlocks = () => events.filter((e) => e === 'unlock').length;
 
+  it('requests removal of services absent from the restored release on rollback', async () => {
+    const ctx = rollbackContext();
+    await rollback(ctx, 'verify failed');
+    const call = vi.mocked(dk.composeUp).mock.calls[0]!;
+    expect(call[0]).toEqual(ctx.compose);
+    expect(call[1].HAIVE_VERSION).toBe(ctx.fromVersion);
+    expect(call[2]).toEqual([]);
+    expect(call[3]).toEqual({ removeOrphans: true });
+  });
+
   it('fails the drain, writing no state and releasing the fence, when the first state read cannot be answered', async () => {
     vi.mocked(configService.getFresh).mockRejectedValueOnce(new ConfigUnavailableError('get'));
 

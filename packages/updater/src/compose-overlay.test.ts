@@ -155,8 +155,8 @@ it.each([
         ['stop', 'postgres'],
         ['up', '-d', 'postgres'],
         ['up', '-d'],
-        ['up', '-d'],
-        ['up', '-d'],
+        ['up', '-d', '--remove-orphans'],
+        ['up', '-d', '--remove-orphans'],
       ].map((operation) => ['docker', ['compose', ...files, ...operation]]),
     );
     expect(h.exec.mock.calls.map(([, , options]) => options.cwd)).toEqual(Array(6).fill(dir));

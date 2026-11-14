@@ -438,7 +438,15 @@ export async function rollback(ctx: UpgradeContext, reason: string): Promise<voi
   if (ctx.bundle) await restoreBundle(ctx.compose, ctx.bundle);
   await writeImages(ctx, ctx.previousImages);
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
-  await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry));
+  // The target bundle may have started services absent from the restored release.
+  await dk.composeUp(
+    ctx.compose,
+    composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry),
+    [],
+    {
+      removeOrphans: true,
+    },
+  );
   await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
