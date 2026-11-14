@@ -1,4 +1,5 @@
 import { normalizeStepFormValues } from '@haive/shared/schemas';
+import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
@@ -922,6 +923,13 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const normalized = normalizeStepFormValues(stepId, body.values);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
+  if (
+    stepId === '04-tooling-infrastructure' &&
+    typeof values.ragConnectionString === 'string' &&
+    values.ragConnectionString
+  ) {
+    assertUserPostgresDsn(values.ragConnectionString);
+  }
 
   const now = new Date();
   const writeAnswer = async (tx: DbHandle) => {

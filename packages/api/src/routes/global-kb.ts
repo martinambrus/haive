@@ -1,5 +1,5 @@
 import { safeErrorMessage } from '@haive/shared/logger';
-import { userPostgresErrorMessage } from '@haive/shared/egress';
+import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
@@ -521,6 +521,7 @@ async function putConfig(c: Context<AppEnv>) {
     );
   }
   const storesString = isAdmin && given !== '' && given !== saved.connectionString;
+  if (given !== '') assertUserPostgresDsn(given);
   const fields: [name: string, key: string, value: string | undefined][] = [
     ['enabled', CONFIG_KEYS.GLOBAL_KB_ENABLED, isAdmin ? d.enabled?.toString() : undefined],
     ['digestEnabled', CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, d.digestEnabled?.toString()],

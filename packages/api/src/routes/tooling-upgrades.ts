@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { UserPostgresDsnError } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
@@ -387,8 +388,9 @@ async function ragStoreAwaitsReembedBounded(
   };
   try {
     return await Promise.race([probe(), deadline]);
-  } catch {
+  } catch (err) {
     void held.conn?.pg.end({ timeout: 0 }).catch(() => {});
+    if (err instanceof UserPostgresDsnError) throw err;
     return true;
   } finally {
     clearTimeout(timer);

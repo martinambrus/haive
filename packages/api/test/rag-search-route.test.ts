@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 
 const DIMS = 8;
 const LOCAL_OLLAMA = 'http://local-ollama.test';
 const GLOBAL_OLLAMA = 'http://global-ollama.test';
-const SECRET = 'rag-search-route-test-secret';
+const SECRET = randomBytes(32).toString('hex');
 
 type Embed = { vector?: number[]; fail?: boolean; delayMs?: number };
 type Hit = { sourcePath: string; rrf: number; sourceType: string };
@@ -129,6 +130,25 @@ import type { AppEnv } from '../src/context.js';
 const app = new Hono<AppEnv>();
 app.route('/rag', ragRoutes);
 app.onError(errorHandler);
+
+it('reports a refused stored RAG parameter with actionable, secret-free copy', async () => {
+  h.realLocalStore = true;
+  h.localConnectionString = `postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslcert=`;
+  await expect(executeRagSearch('task-1', 'query', 8, 'local')).rejects.toMatchObject({
+    code: 'user_postgres_dsn_refused',
+    message:
+      'PostgreSQL connection parameter "sslcert" is not allowed. Remove it from the saved connection string and save again.',
+  });
+});
+
+it('reports a refused stored global KB parameter instead of silently returning local hits', async () => {
+  h.realStore = true;
+  h.connectionString = `postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslkey=`;
+  await expect(executeRagSearch('task-1', 'query')).rejects.toMatchObject({
+    code: 'user_postgres_dsn_refused',
+    parameter: 'sslkey',
+  });
+});
 
 const hit = (sourcePath: string, sourceType: string, rrf: number): Hit => ({
   sourcePath,

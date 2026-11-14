@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 
 const h = vi.hoisted(() => ({ db: undefined as unknown, add: vi.fn() }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -31,6 +32,44 @@ beforeEach(() => {
   );
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it('refuses a PostgreSQL file parameter before persisting a tooling form', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  const stepId = '04-tooling-infrastructure';
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'running' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId,
+    status: 'waiting_form',
+    round: 0,
+    idleMs: 0,
+    waitingStartedAt: fake.now(),
+  });
+  h.db = fake.db;
+  h.add.mockResolvedValueOnce(undefined);
+  const before = structuredClone(fake.rows(schema.taskSteps));
+  const res = await app.request(`/${TASK}/steps/${stepId}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      values: {
+        ragMode: 'external',
+        ragConnectionString: `postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslkey=`,
+      },
+    }),
+  });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({
+    code: 'user_postgres_dsn_refused',
+    error: expect.stringContaining('"sslkey"'),
+  });
+  expect(fake.rows(schema.taskSteps)).toEqual(before);
+  expect(h.add).not.toHaveBeenCalled();
+});
 
 it.each(['running', 'done', 'failed'])(
   'returns a stable code when the step is %s rather than awaiting a form',

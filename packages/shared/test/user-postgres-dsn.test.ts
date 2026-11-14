@@ -58,7 +58,8 @@ it.each(['sslrootcert', 'sslcert', 'sslkey'])(
           (err: unknown) => err,
         );
         expect(outcome).toMatchObject({
-          message: `PostgreSQL connection parameter "${parameter}" is not allowed`,
+          code: 'user_postgres_dsn_refused',
+          message: `PostgreSQL connection parameter "${parameter}" is not allowed. Remove it from the saved connection string and save again.`,
         });
         expect(postgres).not.toHaveBeenCalled();
       }

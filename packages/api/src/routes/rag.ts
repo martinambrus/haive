@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { isUndefinedTable, schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { UserPostgresDsnError } from '@haive/shared/egress';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
   RUNBOOK_BOOST_BUGFIX,
@@ -395,6 +396,7 @@ export async function executeRagSearch(
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
     } catch (err) {
+      if (err instanceof UserPostgresDsnError) throw err;
       // The per-project RAG database is created lazily by resolveRagConnection, but
       // ai_rag_embeddings is only created by the onboarding step 10-rag-populate.
       // Agents run LLM steps well before that (06_5-agent-discovery), so a missing
@@ -472,6 +474,7 @@ export async function executeRagSearch(
       globalHits = result.scoped;
       globalBodies = result.bodies;
     } catch (err) {
+      if (err instanceof UserPostgresDsnError) throw err;
       log.warn({ err, taskId }, 'global KB search failed; returning local-only');
       globalHits = [];
       globalBodies = new Map();

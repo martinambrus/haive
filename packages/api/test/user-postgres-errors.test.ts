@@ -66,7 +66,7 @@ it.each(
     );
     expect(result.ok).toBe(false);
     expect(result.error ?? result.message).toBe(
-      'PostgreSQL connection parameter "sslrootcert" is not allowed',
+      'PostgreSQL connection parameter "sslrootcert" is not allowed. Remove it from the saved connection string and save again.',
     );
     expect(postgres).not.toHaveBeenCalled();
   },

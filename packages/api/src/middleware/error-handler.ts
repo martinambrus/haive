@@ -8,12 +8,15 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 import { hasPgCode, isUniqueViolationOf, ONE_LIVE_UPGRADE_INDEX } from '@haive/database';
 import { ConfigUnavailableError, logger } from '@haive/shared';
+import { UserPostgresDsnError } from '@haive/shared/egress';
 import { HttpError, type AppEnv } from '../context.js';
 import { isUuid } from '../lib/uuid.js';
 
 const INVALID_TEXT_REPRESENTATION = '22P02';
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+  if (err instanceof UserPostgresDsnError)
+    return c.json({ error: err.message, code: err.code }, 400);
   if (err instanceof ModuleAdmissionError)
     return c.json(
       { error: err.message, code: err.code, moduleId: err.moduleId },

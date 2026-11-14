@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   realStore: false,
+  guardedStore: false,
   openOptions: [] as unknown[],
   statements: [] as Array<{ statement: string; params: unknown[] | undefined }>,
   batches: [0] as Array<number | { code: string }>,
@@ -62,6 +64,7 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
     },
     resolveRagConnection: async (...args: Parameters<typeof actual.resolveRagConnection>) => {
       h.openOptions.push(args[3]);
+      if (h.guardedStore) return actual.resolveRagConnection(...args);
       if (h.realStore) {
         return {
           mode: 'external',
@@ -167,6 +170,7 @@ function setup(
   });
   h.db = fake.db;
   h.realStore = false;
+  h.guardedStore = false;
   h.openOptions = [];
   h.statements = [];
   h.batches = [0];
@@ -193,6 +197,30 @@ const retry = () =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ragEmbedAction: 'retry' }),
   });
+
+it('reports a refused stored re-embed DSN instead of a generic failure', async () => {
+  setup(`postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslrootcert=`);
+  h.guardedStore = true;
+  const res = await rebuild();
+  expect(res.status).toBe(400);
+  expect(await res.json()).toEqual({
+    code: 'user_postgres_dsn_refused',
+    error:
+      'PostgreSQL connection parameter "sslrootcert" is not allowed. Remove it from the saved connection string and save again.',
+  });
+  expect(h.statements).toEqual([]);
+});
+
+it('reports a refused stored DSN on retry instead of hiding it as degraded', async () => {
+  setup(`postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslcert=`, true, true);
+  h.guardedStore = true;
+  const res = await retry();
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({
+    code: 'user_postgres_dsn_refused',
+    error: expect.stringContaining('"sslcert"'),
+  });
+});
 
 afterEach(() => {
   fakeLock.reset();

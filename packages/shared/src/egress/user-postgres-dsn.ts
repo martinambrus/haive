@@ -1,8 +1,11 @@
 type RefusedParameter = 'sslrootcert' | 'sslcert' | 'sslkey' | 'host';
 
 export class UserPostgresDsnError extends Error {
+  readonly code = 'user_postgres_dsn_refused';
   constructor(readonly parameter: RefusedParameter) {
-    super(`PostgreSQL connection parameter "${parameter}" is not allowed`);
+    super(
+      `PostgreSQL connection parameter "${parameter}" is not allowed. Remove it from the saved connection string and save again.`,
+    );
     this.name = 'UserPostgresDsnError';
   }
 }
@@ -53,7 +56,7 @@ export function assertUserPostgresDsn(dsn: string): void {
  * can name local files even when no SQL parameters were bound. */
 export function userPostgresErrorMessage(err: unknown): string {
   if (err instanceof UserPostgresDsnError) {
-    return `PostgreSQL connection parameter "${err.parameter}" is not allowed`;
+    return err.message;
   }
   const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
   if (code === 'ECONNREFUSED') return 'PostgreSQL connection refused';
