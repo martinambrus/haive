@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -24,6 +25,7 @@ import {
   startRemoteReconcileSweep,
   REMOTE_SWEEP_BATCH,
   REMOTE_SWEEP_INTERVAL_MS,
+  REMOTE_SKIP_LOG_INTERVAL_MS,
 } from '../src/lib/remote-reconcile.js';
 const id = '00000000-0000-4000-8000-000000000001';
 const userId = '00000000-0000-4000-8000-000000000002';
@@ -211,4 +213,67 @@ it('leaves a repository to a relink in this process whose Git writes may still r
   });
   await reconcileRemote(id, userId, { skipLocked: true });
   expect(h.git).toHaveBeenCalled();
+});
+
+it.each(['fenced', 'locked'] as const)(
+  'logs a %s sweep skip with a bounded per-repository rate',
+  async (reason) => {
+    vi.useFakeTimers();
+    vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+    const end = reason === 'fenced' ? beginRelinkWriter(id) : () => {};
+    if (reason === 'locked') {
+      // A SKIP LOCKED read returns no row, while an ordinary MVCC read still sees intent.
+      const read = Object.assign(Promise.resolve([]), {
+        from() {
+          return this;
+        },
+        where() {
+          return this;
+        },
+        for() {
+          return this;
+        },
+      });
+      const tx = {
+        execute: async () => [],
+        select: () => read,
+        query: { repositories: { findFirst: async () => ({ id }) } },
+      };
+      h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) =>
+        run({ transaction: (work: (value: unknown) => Promise<unknown>) => work(tx) }),
+      );
+    }
+    const stop = startRemoteReconcileSweep({ intervalMs: 10, skipLogIntervalMs: 25 });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        { repositoryId: id, reason },
+        'remote reconciliation skipped',
+      );
+      expect(REMOTE_SKIP_LOG_INTERVAL_MS).toBe(300_000);
+      expect(h.git).not.toHaveBeenCalled();
+      expect(pending()).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(info).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(info).toHaveBeenCalledTimes(2);
+    } finally {
+      stop();
+      end();
+    }
+  },
+);
+
+it('does not report a deleted repository as locked in a sweep', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+  await fake.db.delete(schema.repositories).where(eq(schema.repositories.id, id));
+  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(info).not.toHaveBeenCalled();
+    expect(h.git).not.toHaveBeenCalled();
+  } finally {
+    stop();
+  }
 });

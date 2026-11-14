@@ -11,6 +11,7 @@ import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js
 // Only trusted database intent authorizes reconciliation; repository files are untrusted.
 export const REMOTE_SWEEP_BATCH = 25;
 export const REMOTE_SWEEP_INTERVAL_MS = 30_000;
+export const REMOTE_SKIP_LOG_INTERVAL_MS = 300_000;
 
 // Relinks in this process whose Git writes may still be running. A dropped database
 // connection releases the row lock before such a write finishes, so the lock alone cannot
@@ -111,9 +112,9 @@ export async function reconcileRemote(
   id: string,
   userId: string,
   { skipLocked = false }: { skipLocked?: boolean } = {},
-): Promise<void> {
-  await withFreshDatabase(async (db) => {
-    await db.transaction(async (tx) => {
+): Promise<'locked' | 'fenced' | undefined> {
+  return withFreshDatabase(async (db) => {
+    return db.transaction(async (tx) => {
       const [repo] = await boundedLockWait(tx, () =>
         tx
           .select()
@@ -121,10 +122,25 @@ export async function reconcileRemote(
           .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
           .for('no key update', skipLocked ? { skipLocked: true } : undefined),
       );
-      // A delete won the lock (do not touch its former checkout), or a relink holds the row.
-      if (!repo?.remoteRelinkIntent) return;
+      // SKIP LOCKED cannot distinguish a held row from a delete. An ordinary MVCC
+      // read does not wait for its writer, and avoids calling a vanished row locked.
+      if (!repo) {
+        if (skipLocked) {
+          const pending = await tx.query.repositories.findFirst({
+            where: and(
+              eq(schema.repositories.id, id),
+              eq(schema.repositories.userId, userId),
+              isNotNull(schema.repositories.remoteRelinkIntent),
+            ),
+            columns: { id: true },
+          });
+          if (pending) return 'locked' as const;
+        }
+        return;
+      }
+      if (!repo.remoteRelinkIntent) return;
       // A relink whose connection dropped may still be writing Git; it reconciles itself.
-      if (skipLocked && relinkWriters.has(id)) return;
+      if (skipLocked && relinkWriters.has(id)) return 'fenced' as const;
       const root = repo.storagePath ?? repo.localPath;
       if (!root) throw new Error('Repository has no path for remote reconciliation');
       await verifyRelinkCheckout(root);
@@ -171,12 +187,19 @@ export async function reconcileRemote(
 export function startRemoteReconcileSweep({
   batchSize = REMOTE_SWEEP_BATCH,
   intervalMs = REMOTE_SWEEP_INTERVAL_MS,
+  skipLogIntervalMs = REMOTE_SKIP_LOG_INTERVAL_MS,
   schedule = setTimeout,
 } = {}): () => void {
   let cursor: string | undefined;
   let stopped = false;
   let timer: NodeJS.Timeout;
+  const skipLoggedAt = new Map<string, number>();
   const tick = async () => {
+    // Retain only this log interval's skips, bounded by the sweep's page size/rate.
+    const expired = Date.now() - skipLogIntervalMs;
+    for (const [id, at] of skipLoggedAt) {
+      if (at <= expired) skipLoggedAt.delete(id);
+    }
     try {
       const repos = await getDb().query.repositories.findMany({
         where: and(
@@ -191,7 +214,11 @@ export function startRemoteReconcileSweep({
       for (const repo of repos) {
         if (stopped) break;
         try {
-          await reconcileRemote(repo.id, repo.userId, { skipLocked: true });
+          const reason = await reconcileRemote(repo.id, repo.userId, { skipLocked: true });
+          if (reason && !skipLoggedAt.has(repo.id)) {
+            skipLoggedAt.set(repo.id, Date.now());
+            logger.info({ repositoryId: repo.id, reason }, 'remote reconciliation skipped');
+          }
         } catch (err) {
           logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
         }
