@@ -582,6 +582,29 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
+### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+5)
+
+status: open · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+
+1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
+2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
+3. `refresh_runs.result` `$type` omits the new `unsupported` field (database schema); the stored JSON carries it.
+4. The `unsupported` list (time-window, variable-price models) is persisted in the refresh result but shown nowhere on `/admin/pricing`.
+5. A future LiteLLM text-rate key whose base name contains a modality word (audio, image, ...) would be ignored by `LITELLM_NON_TEXT_RATE_FAMILIES` instead of failing loud. Hypothetical.
+
+### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+8)
+
+status: open · kind: fix · found: human time PR 1-2 · priority: P3
+
+1. The real-browser check of the task-page timer is owed (no live non-plan-chat task was parked at a form on 2026-11-14): allowance ~2 min inline spec, ~5 min maximized, ~1 min short form; stops with the mouse still; poll/auto-scroll does not restart; `visibleWords` cost and null rate on a real gate page.
+2. A paused task still counts as plan-page pending work: pausing sets `pausedAt` and leaves the status, and the node payload (`GET /plan/nodes/:id` tasks) does not carry `pausedAt` (web plan-detail-panel.tsx ~:106). Bounded by the 15-minute pending window. Add `pausedAt` to the payload and exclude it.
+3. The ordering reporter counts only the page's own start request; an ordering pass already running when the page opens does not extend attention, since the overview carries no task status (repos/[id]/plan/page.tsx).
+4. The plan page Order button is re-enabled in `finally` before navigation and the route has no duplicate guard.
+5. Fail-open lease counting relies on the `foreground` flag that only events update; no test pairs fail-open storage with an unfocused tab (web lib/active-time/use-active-time.ts).
+6. `visibleWords` skips (does not prune) offscreen subtrees whose clip is not empty, so only the 50,000-node work bound limits them; its real cost is unmeasured.
+7. `onFocus` can drop up to one tick of retained time.
+8. Approximations documented in `docs/architecture/human-time.md`: positioned descendants escaping an overflow ancestor are misclipped, `pointer-events: none` text is excluded, range chunks can split a word.
+
 ### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+13)
 
 status: open · kind: fix · found: T655 run · priority: P3
@@ -1887,6 +1910,8 @@ All low unless marked.
 
 ## Done
 
+- human time PR 1 (`docs/plans/human-time-idle-detection.md`) — idle-aware task-page timer: presence epochs on a monotonic clock, reading allowance from visible words (150 wpm, 60 s to 5 min), trusted-input rules, fail-open attention lease, waiting step picked by `isAwaitingFormInput`; topic docs/architecture/human-time.md — PR #1163 (4888d3e15), 2026-11-14; browser check owed, lows T666.
+- context-tiered pricing PR 1 (`docs/plans/context-tiered-pricing.md`) — prompt-size tiers stored in the rate jsonb from LiteLLM and OpenRouter, unpriced markers (`time-window`, `variable-price`, unreadable tiers) refused at lookup, negative router rates retired, per-feed `fetch_error`; model-pricing.md corrected (the global switch freezes rates, only the per-CLI switch is enforced at lookup) — PR #1164 (2ee2f6a5c), 2026-11-14; live refresh: 141 tiered rows, 11 markers, 0 negative rows. Lows T665.
 - T553 items 1, 2, 3, 5, 6 — impact preview and confirm before a provider disable, provider-hold badge via `task_steps.provider_wait_provider_id` (migration 0236), hold copy names both ways out, recap skip logged, run-list and execution-path selection shared by api and worker — PR #1162 (d7a6a43ad), 2026-11-14; bots clean (Codex none, Greptile 5, P1 fixed and resolved), CI 17 pass; 0236 applied, libs rebuilt, api/worker ready, 0 error logs. Confirm dialog not browser-checked (a 0/0 disable saves at once and would change an owner provider row). Items 4, 8, 9 and lows 10-14 stay open.
 - T655 — upgrade postgres.js to unpatched v4.1.1, drop the local patch, guard file-reading DSN parameters — PR #1159 (d82c683fb), 2026-11-14; bots clean (Codex none, Greptile 5), CI 17 pass; deployed via pnpm docker rebuild, postgres@4.1.1 loaded, api/worker ready, 0 error logs. Lows T664, T555 item 6 done.
 - T659 — plan-canvas smoke race checks wait on PostgreSQL lock waits or peer settlement instead of sleeps (the CI failure was smoke timing; the merge it saw is correct); lows in T663 — PR #1161 (034003dea), 2026-11-14
