@@ -1,5 +1,10 @@
 import path from 'node:path';
-import { readTextNoFollow, lstatNoFollow, isResourceLimitError } from '@haive/shared/fs-safe';
+import {
+  readTextNoFollow,
+  lstatNoFollow,
+  isResourceLimitError,
+  RESOURCE_LIMITS,
+} from '@haive/shared/fs-safe';
 import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
@@ -220,7 +225,7 @@ export async function loadDependencyPolicy(
     : await readTextNoFollow(
         anchor,
         `${prefix}composer.json`,
-        options.propagateResourceErrors ? { strict: true } : undefined,
+        options.propagateResourceErrors ? { rethrow: RESOURCE_LIMITS } : undefined,
       );
   let drupal = false;
   const roots = [...DEFAULT_ROOTS];
@@ -268,7 +273,7 @@ export async function loadDependencyPolicy(
       (await lstatNoFollow(
         anchor,
         `${prefix}${marker}`,
-        options.propagateResourceErrors ? { strict: true } : undefined,
+        options.propagateResourceErrors ? { rethrow: RESOURCE_LIMITS } : undefined,
       )) !== null
     ) {
       drupal7Roots.push(root);
