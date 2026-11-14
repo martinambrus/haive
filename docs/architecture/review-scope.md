@@ -210,8 +210,9 @@ withheld secret test file kept its size and mode, the pass says so and reads no 
 instead, since a same-size content edit to it cannot be seen.
 When a pass changes a withheld or denied path, under any status, it stores no content for any
 of its files, since a move shows as a delete plus an add and could carry the secret to an
-allowed name; the pass keeps its hashes and line counts only (gate 3's commit excerpts follow
-the same rule).
+allowed name; the pass keeps its hashes only, and so does every later pass of the task, where
+the moved bytes would be an ordinary file's before-image (gate 3's commit excerpts follow the
+same rule).
 
 The row inherits the similar-sites trust boundary. Paths are re-sanitised and escaped.
 Before patch construction and again before display, CRLF/lone CR become LF and U+0085,

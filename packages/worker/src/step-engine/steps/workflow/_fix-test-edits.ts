@@ -377,7 +377,7 @@ export function compareTestImages(
         ? 'content withheld by secret policy.'
         : unavailable.status === 'refused'
           ? 'Test path refused; content not captured.'
-          : 'content not retained (size, storage budget, restart or expiry); hashes and manifest retained.'
+          : 'content not retained (size, storage budget, restart, expiry or a protected test path change in this task); hashes and manifest retained.'
       : binary
         ? 'Binary content changed (bytes retained by content hash).'
         : [

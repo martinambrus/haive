@@ -391,9 +391,23 @@ export async function finishFixTestCapture(
     // A protected path in the change under any status may have moved its bytes to an allowed
     // name (a rename shows as delete + add), so the whole op keeps no content, as gate 3 does.
     const protectedChanged = changed.some((p) => withheld(p) || finishDeniesPath(p));
+    // The moved bytes are an ordinary file's before-image in every later pass, so the task
+    // stays without content once any pass has changed a protected path.
+    const [tainted] = await tx
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, run.taskId),
+          eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+          sql`${schema.taskEvents.payload}->>'protectedChanged' = 'true'`,
+        ),
+      )
+      .limit(1);
     if (
       !interrupted &&
       !protectedChanged &&
+      !tainted &&
       beforeManifest.state === 'captured' &&
       after.state === 'captured'
     )
@@ -412,7 +426,11 @@ export async function finishFixTestCapture(
       taskId: run.taskId,
       taskStepId: meta.taskStepId,
       eventType: FIX_TEST_AFTER,
-      payload: { ...reference, beforeEventId: before.id },
+      payload: {
+        ...reference,
+        beforeEventId: before.id,
+        ...(protectedChanged ? { protectedChanged: true } : {}),
+      },
     });
   });
   forget(invocationId);

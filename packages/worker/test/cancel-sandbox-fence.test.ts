@@ -216,6 +216,36 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     expect(blobs).toHaveLength(0);
   });
 
+  it('keeps no content in a later pass that edits a file a protected fixture moved to', async () => {
+    const meta = await seed();
+    const secret = `TOKEN=${randomBytes(24).toString('hex')}`;
+    await writeFile(join(meta.workspace, 'tests/.env.test'), secret);
+    await beginFixTestCapture(db, meta);
+    await rm(join(meta.workspace, 'tests/.env.test'));
+    await writeFile(join(meta.workspace, 'tests/config.json'), secret);
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    const [next] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: meta.taskId, taskStepId: meta.taskStepId, mode: 'cli', prompt: 'next' })
+      .returning();
+    await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2 });
+    await writeFile(join(meta.workspace, 'tests/config.json'), `${secret}\nEDITED=1`);
+    await end(next!.id);
+    await finishFixTestCapture(db, next!.id);
+    const records = await loadFixTestRecords(db, meta.taskId, 30, { patches: true });
+    expect(records).toHaveLength(2);
+    expect(records[1]!.changes.map((c) => c.path)).toEqual(['tests/config.json']);
+    expect(JSON.stringify(records)).not.toContain(secret);
+    const blobs = await db
+      .select()
+      .from(schema.fixTestBlobs)
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
+    expect(blobs).toHaveLength(0);
+  });
+
   it('does not publish a complete after-image when cancellation wins during capture', async () => {
     const meta = await seed();
     await beginFixTestCapture(db, meta);
