@@ -3,20 +3,34 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Derive the public set once, from the tracked public module tree. Local clones
-// and ignored generated outputs cannot expand this set.
+// Adding a public module requires an explicit entry in this reviewed list.
 export function checkPublicModules(files) {
-  const publicIds = new Set();
   const errors = [];
+  const publicIds = new Set();
+  const listFile = 'public-modules.json';
+  try {
+    const ids = JSON.parse(String(files.get(listFile)));
+    if (
+      !Array.isArray(ids) ||
+      ids.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,22}$/.test(id)) ||
+      new Set(ids).size !== ids.length
+    )
+      throw new Error('invalid public module list');
+    for (const id of ids) publicIds.add(id);
+  } catch {
+    errors.push(`${listFile}: missing or invalid public module list`);
+  }
   const moduleName = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
   for (const [file, bytes] of files) {
+    const folder = /^modules\/([^/]+)\//.exec(file);
+    if (folder && !publicIds.has(folder[1]))
+      errors.push(`${file}: non-public module folder ${folder[1]} must not be tracked`);
     const path = /^modules\/([^/]+)\/package\.json$/.exec(file);
     if (!path) continue;
     try {
       const pkg = JSON.parse(String(bytes));
       const id = moduleName.exec(pkg.name)?.[1];
       if (id !== path[1]) errors.push(`${file}: public module package must match its folder`);
-      else publicIds.add(id);
     } catch {
       errors.push(`${file}: unreadable public module manifest`);
     }
@@ -78,6 +92,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (errors.length) process.exitCode = 1;
   else
     console.log(
-      'public-modules: PASS (tracked install/runtime references match the public module tree)',
+      'public-modules: PASS (tracked install/runtime references match the declared public modules)',
     );
 }
