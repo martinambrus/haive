@@ -36,7 +36,7 @@ type Requirement = { stepId: string; title: string; requirement: IntegrationRequ
 async function requirementsForCreate(db: Handle, definition: TaskTypeDefinitionForCreate) {
   const requirements: Requirement[] = [];
   const issues: TaskIntegrationPreview['issues'] = [];
-  const ids = definition.runListSnapshot;
+  const ids = definition.candidateStepIds ?? definition.runListSnapshot;
   if (ids === null || ids === undefined) return { requirements, issues };
   const rows =
     ids.length === 0
@@ -87,7 +87,11 @@ export async function taskIntegrationPreview(
   const { requirements, issues } = await requirementsForCreate(db, input.definition);
   const result: TaskIntegrationPreview = {
     admitted: issues.length === 0,
-    scope: input.definition.runListSnapshot == null ? 'dispatch-time' : 'static',
+    scope: input.definition.derivedRunPlan
+      ? 'may run after path selection'
+      : input.definition.runListSnapshot == null
+        ? 'dispatch-time'
+        : 'static',
     categories: [],
     issues,
   };
@@ -251,6 +255,15 @@ export async function admitTaskIntegrations(
     });
   return {
     picks,
+    categoryModules: preview.categories
+      .filter(
+        (category) => category.required && category.status === 'resolved' && category.selected,
+      )
+      .flatMap((category) =>
+        integrationModuleIds([
+          { categoryId: category.categoryId, providerId: category.selected!.providerId },
+        ]).map((moduleId) => ({ categoryId: category.categoryId, moduleId })),
+      ),
     moduleIds: integrationModuleIds(
       preview.categories
         .filter(

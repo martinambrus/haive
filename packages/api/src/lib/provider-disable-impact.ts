@@ -1,3 +1,4 @@
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import type { ExecutionPath } from '@haive/shared';
 import { builtinRunListStrategy, taskRunListIds } from '@haive/shared/run-list';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -54,20 +55,25 @@ export async function providerDisableImpact(db: Database, userId: string, provid
             .from(schema.envTemplates)
             .where(eq(schema.envTemplates.id, task.envTemplateId))
         : [];
-    const runList = taskRunListIds(
-      {
-        workflowType: task.type,
-        runListStrategy: strategy,
-        runListSnapshot: task.runListSnapshot,
-        executionPath: (task.executionPath as ExecutionPath | null) ?? null,
-      },
-      (type) =>
-        [...flags.values()]
-          .filter((f) => f.workflowType === type)
-          .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
-          .map((f) => f.stepId),
-      (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)?.containerTool,
-    );
+    const runList =
+      task.derivedRunPlan != null
+        ? [...pinnedTaskStepIds(task)!]
+        : taskRunListIds(
+            {
+              derivedRunPlan: task.derivedRunPlan,
+              workflowType: task.type,
+              runListStrategy: strategy,
+              runListSnapshot: task.runListSnapshot,
+              executionPath: (task.executionPath as ExecutionPath | null) ?? null,
+            },
+            (type) =>
+              [...flags.values()]
+                .filter((f) => f.workflowType === type)
+                .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
+                .map((f) => f.stepId),
+            (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
+              ?.containerTool,
+          );
     const currentIndex = task.currentStepId ? runList.indexOf(task.currentStepId) : -1;
     const candidates = [...new Set(runList)]
       .filter((stepId) => {

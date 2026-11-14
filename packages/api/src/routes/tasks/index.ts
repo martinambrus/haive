@@ -1,3 +1,4 @@
+import { derivedTaskWarnings } from '@haive/shared/modularity';
 import { assertTaskRootMergeIdle } from '../../lib/root-merge-busy.js';
 import { recordTaskModuleAdmissions } from '@haive/shared/modularity-server';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
@@ -706,7 +707,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
       }
     }
-    const locked = await definitionForCreate(handle, body.type, { generic: true });
+    const locked = await definitionForCreate(handle, body.type, { generic: true, locked: true });
     // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
     if (
       locked.takesRootLock !== definition.takesRootLock ||
@@ -772,6 +773,12 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        derivedRunPlan: locked.derivedRunPlan
+          ? {
+              ...locked.derivedRunPlan,
+              integrationAdmissions: integrationAdmission.categoryModules,
+            }
+          : null,
         customSteps,
         status: 'created',
         expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
@@ -895,7 +902,15 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (queued) await enqueueStart(task.id, userId);
 
-  return c.json({ task: queued ?? task }, 201);
+  return c.json(
+    {
+      task: queued ?? task,
+      ...(task.derivedRunPlan != null
+        ? { warnings: derivedTaskWarnings(task.derivedRunPlan) }
+        : {}),
+    },
+    201,
+  );
 });
 
 // Read-only draft account resolution, registered before /:id.
@@ -1261,6 +1276,7 @@ taskRoutes.get('/:id', async (c) => {
 
   return c.json({
     task: taskWithActive,
+    ...(task.derivedRunPlan != null ? { warnings: derivedTaskWarnings(task.derivedRunPlan) } : {}),
     testChecks,
     dead: await loadTaskDead(db, task),
     stop: await loadTaskStop(db, task),

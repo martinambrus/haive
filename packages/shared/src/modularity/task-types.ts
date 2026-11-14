@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import { assertRunListStrategyAvailable, type RunListStrategy } from '../step-engine/run-list.js';
+import { type RunListStrategy } from '../step-engine/run-list.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { RESERVED_TASK_TYPE_SLUGS, parseStepId, type ComposableStepEntry } from './contracts.js';
+import { derivedChangesSchema } from './derived-changes.js';
 import { promptStepEntrySchema } from './prompt-steps.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -70,6 +71,7 @@ export interface TaskTypeAvailabilityInput {
     composable: ReadonlyMap<string, ComposableStepEntry>;
   } | null;
   generic: boolean;
+  derived?: { stepIds: readonly string[]; valid: boolean };
 }
 
 export type TaskTypeAvailability =
@@ -90,7 +92,7 @@ export function moduleIdsOfTaskType(
 ): string[] {
   const ids = new Set<string>();
   if (definition.source.startsWith('module:')) ids.add(definition.source.slice('module:'.length));
-  if (definition.runListStrategy === 'static') {
+  if (definition.runListStrategy === 'static' || definition.runListStrategy === 'derived') {
     for (const stepId of definition.stepIds ?? []) {
       const parsed = parseStepId(stepId);
       if (parsed?.kind === 'module') ids.add(parsed.moduleId);
@@ -103,7 +105,6 @@ export function resolveTaskTypeAvailability(
   input: TaskTypeAvailabilityInput,
 ): TaskTypeAvailability {
   const { definition, switches, modules, catalog, generic } = input;
-  assertRunListStrategyAvailable(definition.runListStrategy);
   if (!definition.enabled) return { available: false, reason: 'disabled' };
   if (generic && !definition.selectable) return { available: false, reason: 'not-selectable' };
   if (definition.source === 'admin' && !switches.customEnabled) {
@@ -111,6 +112,14 @@ export function resolveTaskTypeAvailability(
   }
   if (definition.source.startsWith('module:') && !switches.moduleEnabled) {
     return { available: false, reason: 'module-types-off' };
+  }
+  if (definition.runListStrategy === 'derived') {
+    if (!input.derived?.valid) return { available: false, reason: 'invalid-composition' };
+    return resolveTaskTypeAvailability({
+      ...input,
+      definition: { ...definition, runListStrategy: 'static', stepIds: [...input.derived.stepIds] },
+      catalog: null,
+    });
   }
   if (modules !== null) {
     const used = moduleIdsOfTaskType(definition);
@@ -179,11 +188,25 @@ export const customTaskTypeCreateSchema = z
     sortOrder: z.number().int().optional(),
   })
   .strict();
+export const derivedTaskTypeCreateSchema = customTaskTypeCreateSchema
+  .omit({ stepIds: true, requiresRepository: true })
+  .extend({
+    runListStrategy: z.literal('derived'),
+    baseSlug: z.string().min(1).max(128),
+    changes: derivedChangesSchema,
+    requiresRepository: z.boolean().optional(),
+  })
+  .strict();
+export const adminTaskTypeCreateSchema = z.union([
+  customTaskTypeCreateSchema,
+  derivedTaskTypeCreateSchema,
+]);
 export type CustomTaskTypeCreate = z.infer<typeof customTaskTypeCreateSchema>;
 
 export const taskTypeUpdateSchema = customTaskTypeCreateSchema
   .omit({ slug: true })
   .partial()
+  .extend({ changes: derivedChangesSchema.optional() })
   .strict();
 export type TaskTypeUpdate = z.infer<typeof taskTypeUpdateSchema>;
 
@@ -196,6 +219,16 @@ export const publicTaskTypeSchema = z.object({
   restoresDatabase: z.boolean(),
   dispatchesCli: z.boolean(),
   available: z.boolean(),
+  warnings: z
+    .array(
+      z.object({
+        kind: z.enum(['stale-target', 'path-absent-replacement']),
+        operationIndex: z.number().int(),
+        stepId: z.string(),
+        candidates: z.array(z.string().nullable()),
+      }),
+    )
+    .optional(),
   reason: z.enum(PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS).optional(),
   missingStepIds: z.array(z.string()).optional(),
   modules: z.array(taskTypeModuleRefSchema).optional(),

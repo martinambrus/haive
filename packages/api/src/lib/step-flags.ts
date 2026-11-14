@@ -1,3 +1,4 @@
+import { parseDerivedRunPlan, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -114,13 +115,15 @@ export function withTaskCustomSteps(
     requiresRepository: boolean;
     runListSnapshot: readonly string[] | null;
     customSteps: Record<string, unknown> | null;
+    derivedRunPlan?: unknown;
+    executionPath?: string | null;
   },
 ): StepFlagMap {
   const entries = Object.entries(task.customSteps ?? {});
   if (entries.length === 0) return flags;
   const merged = new Map(flags);
   for (const [stepId, raw] of entries) {
-    const index = task.runListSnapshot?.indexOf(stepId) ?? -1;
+    const index = pinnedTaskStepIds(task)?.indexOf(stepId) ?? -1;
     const entry = parsePromptStepEntry(raw);
     if (index < 0 || entry === null) continue;
     merged.set(stepId, {
@@ -145,10 +148,17 @@ export async function loadTaskStepFlags(
     type: string;
     runListSnapshot: readonly string[] | null;
     customSteps: Record<string, unknown> | null;
+    derivedRunPlan?: unknown;
+    executionPath?: string | null;
   },
 ): Promise<StepFlagMap> {
   const flags = await loadStepFlags(db);
   if (Object.keys(task.customSteps ?? {}).length === 0) return flags;
+  if (task.derivedRunPlan != null)
+    return withTaskCustomSteps(flags, {
+      ...task,
+      requiresRepository: parseDerivedRunPlan(task.derivedRunPlan).requiresRepository,
+    });
   const [definition] = await db
     .select({ requiresRepository: schema.taskTypeDefinitions.requiresRepository })
     .from(schema.taskTypeDefinitions)

@@ -90,6 +90,17 @@ describe('/admin/task-types for a regular user', () => {
     ['GET', '/admin/task-types/catalog'],
     ['GET', '/admin/task-types/my-type'],
     ['POST', '/admin/task-types', create],
+    [
+      'POST',
+      '/admin/task-types/preview',
+      {
+        slug: 'my-derived',
+        displayName: 'Derived',
+        runListStrategy: 'derived',
+        baseSlug: 'workflow',
+        changes: [],
+      },
+    ],
     ['PATCH', '/admin/task-types/my-type', { displayName: 'Renamed' }],
     ['DELETE', '/admin/task-types/my-type'],
   ];
@@ -208,4 +219,35 @@ describe('GET /admin/task-types/catalog overview metadata', () => {
     });
     expect(h.write).not.toHaveBeenCalled();
   });
+});
+
+describe('DT3 derived list admission boundary', () => {
+  it.each(['/task-types', '/admin/task-types'])(
+    'serializes a persisted derived row at %s without a server error',
+    async (path) => {
+      h.role = 'admin';
+      h.defs = [
+        {
+          slug: 'derived-example',
+          displayName: 'Derived example',
+          description: null,
+          source: 'admin',
+          enabled: true,
+          selectable: true,
+          runListStrategy: 'derived',
+          stepIds: null,
+          baseSlug: 'workflow',
+          changes: [],
+          requiresRepository: true,
+          sortOrder: 0,
+          promptSteps: {},
+          preAnswerDefaults: {},
+          stepLoopLimitDefaults: {},
+        },
+      ];
+      const response = await send('GET', path);
+      expect(response.status).toBe(200);
+      expect(h.write).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -1,32 +1,29 @@
 import { z } from 'zod';
-import type { ExecutionPath } from '../schemas/tasks.js';
+import { EXECUTION_PATHS, executionPathSchema, type ExecutionPath } from '../schemas/tasks.js';
 import type { DerivedBaseCandidate } from '../step-engine/run-list.js';
 import {
   MODEL_HEALTH_STEP_ID,
   SYNC_BASE_STEP_ID,
   TRIAGE_STEP_ID,
 } from '../step-engine/execution-paths.js';
-import { parseStepId, type ComposableStepEntry } from './contracts.js';
+import { composableStepEntrySchema, type ComposableStepEntry } from './contracts.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { checkPromptSteps, type PromptStepIssue } from './task-type-draft.js';
 import type { ParsedPromptStepEntry } from './prompt-steps.js';
 
-export const MAX_DERIVED_CHANGES = 64;
-const derivedStepIdSchema = z
-  .string()
-  .max(128)
-  .refine((id) => parseStepId(id) !== null, 'invalid step id');
-export const derivedChangeSchema = z.union([
-  z.object({ replace: derivedStepIdSchema, with: derivedStepIdSchema }).strict(),
-  z.object({ insertAfter: derivedStepIdSchema, step: derivedStepIdSchema }).strict(),
-  z.object({ remove: derivedStepIdSchema }).strict(),
-]);
-export type DerivedChange = z.infer<typeof derivedChangeSchema>;
-
-export function createDerivedChangesSchema(maxChanges = MAX_DERIVED_CHANGES) {
-  return z.array(derivedChangeSchema).max(maxChanges);
-}
-export const derivedChangesSchema = createDerivedChangesSchema();
+export {
+  MAX_DERIVED_CHANGES,
+  derivedChangeSchema,
+  createDerivedChangesSchema,
+  derivedChangesSchema,
+  type DerivedChange,
+} from './derived-changes.js';
+import {
+  derivedChangeSchema,
+  derivedChangesSchema,
+  derivedStepIdSchema,
+  type DerivedChange,
+} from './derived-changes.js';
 
 export const DERIVED_WORKFLOW_PREFIX: readonly string[] = [
   MODEL_HEALTH_STEP_ID,
@@ -51,7 +48,7 @@ export interface DerivedChangeOutcome {
 }
 
 export interface DerivedOverlayWarning {
-  kind: 'stale-target';
+  kind: 'stale-target' | 'path-absent-replacement';
   executionPath: Path;
   operationIndex: number;
   stepId: string;
@@ -79,7 +76,7 @@ export interface DerivedOverlayEvaluation {
   issues: DerivedOverlayIssue[];
 }
 
-/** Future persisted execution state. This PR adds no strategy, row, writer or reader.
+/** Persisted execution state.
  * The fingerprint covers actual ordered base IDs/catalog declarations, not workflow's
  * existing content_hash (which hashes null step IDs). Selected path lives on the task;
  * PR3 must pin it at first triage and retain it through Retry and recovery. */
@@ -97,6 +94,8 @@ export interface DerivedRunPlanV1 {
   candidates: DerivedEvaluatedCandidate[];
   commonPrefix: string[];
   warnings: DerivedOverlayWarning[];
+  integrationAdmissions?: { categoryId: string; moduleId: string }[];
+  defaultWarnings?: { kind: string; stepId: string; field?: string }[];
 }
 export type DerivedRunPlan = DerivedRunPlanV1;
 
@@ -203,8 +202,16 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
         outcome = { operationIndex, change, outcome: 'applied', reason: 'change-applied' };
       }
       state.outcomes.push(outcome);
-      if (outcome.outcome === 'stale-target') {
-        warnings.push({ kind: 'stale-target', executionPath, operationIndex, stepId: target });
+      if (
+        outcome.outcome === 'stale-target' ||
+        ('replace' in change && outcome.outcome === 'path-absent')
+      ) {
+        warnings.push({
+          kind: outcome.outcome === 'stale-target' ? 'stale-target' : 'path-absent-replacement',
+          executionPath,
+          operationIndex,
+          stepId: target,
+        });
       }
       if (
         payload !== undefined &&
@@ -271,4 +278,171 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
     }
   }
   return { candidates, warnings, issues };
+}
+
+export class DerivedRunPlanError extends Error {
+  readonly code = 'invalid-derived-run-plan';
+  constructor() {
+    super('The derived task run plan is missing or malformed');
+    this.name = 'DerivedRunPlanError';
+  }
+}
+const candidateSchema = z
+  .object({
+    executionPath: executionPathSchema.nullable(),
+    stepIds: z.array(derivedStepIdSchema).min(3),
+  })
+  .strict();
+const outcomeSchema = z
+  .object({
+    operationIndex: z.number().int().nonnegative(),
+    change: derivedChangeSchema,
+    outcome: z.enum(['applied', 'path-absent', 'stale-target', 'refused']),
+    reason: z.enum([
+      'change-applied',
+      'target-not-on-path',
+      'target-not-in-base',
+      'target-removed-by-change',
+      'missing-installed-step',
+      'replacement-contract-unavailable',
+      'protected-prefix-edit',
+    ]),
+    causedByOperation: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+const warningSchema = z
+  .object({
+    kind: z.enum(['stale-target', 'path-absent-replacement']),
+    executionPath: executionPathSchema.nullable(),
+    operationIndex: z.number().int().nonnegative(),
+    stepId: derivedStepIdSchema,
+  })
+  .strict();
+const planSchema = z
+  .object({
+    version: z.literal(1),
+    base: z
+      .object({
+        slug: z.literal('workflow'),
+        runListStrategy: z.literal('workflow_paths'),
+        candidates: z.array(candidateSchema).length(4),
+        catalogFingerprint: z.string().min(1),
+      })
+      .strict(),
+    overlay: z.object({ revision: z.string().min(1), changes: derivedChangesSchema }).strict(),
+    requiresRepository: z.boolean(),
+    composableEntries: z.array(composableStepEntrySchema),
+    candidates: z
+      .array(
+        candidateSchema.extend({
+          outcomes: z.array(outcomeSchema),
+          compositionIssues: z.array(z.never()),
+        }),
+      )
+      .length(4),
+    commonPrefix: z.array(derivedStepIdSchema),
+    warnings: z.array(warningSchema),
+    integrationAdmissions: z
+      .array(z.object({ categoryId: z.string(), moduleId: z.string() }).strict())
+      .optional(),
+    defaultWarnings: z
+      .array(
+        z.object({ kind: z.string(), stepId: z.string(), field: z.string().optional() }).strict(),
+      )
+      .optional(),
+  })
+  .strict();
+
+/** Never rebuild an existing task from today's definition or catalog. */
+export function parseDerivedRunPlan(raw: unknown): DerivedRunPlan {
+  const parsed = planSchema.safeParse(raw);
+  if (!parsed.success) throw new DerivedRunPlanError();
+  const plan = parsed.data;
+  const paths = [null, ...EXECUTION_PATHS];
+  const catalog = new Map(plan.composableEntries.map((entry) => [entry.stepId, entry]));
+  if (
+    JSON.stringify(plan.commonPrefix) !== JSON.stringify(DERIVED_WORKFLOW_PREFIX) ||
+    [plan.base.candidates, plan.candidates].some(
+      (candidates) =>
+        paths.some((path) => candidates.filter((c) => c.executionPath === path).length !== 1) ||
+        candidates.some(
+          (c) =>
+            !DERIVED_WORKFLOW_PREFIX.every((id, i) => c.stepIds[i] === id) ||
+            new Set(c.stepIds).size !== c.stepIds.length,
+        ),
+    ) ||
+    plan.candidates.some(
+      (c) =>
+        c.outcomes.length !== plan.overlay.changes.length ||
+        c.outcomes.some(
+          (outcome, i) =>
+            outcome.operationIndex !== i ||
+            outcome.outcome === 'refused' ||
+            JSON.stringify(outcome.change) !== JSON.stringify(plan.overlay.changes[i]),
+        ) ||
+        validateComposition(c.stepIds, catalog, { requiresRepository: plan.requiresRepository })
+          .length > 0,
+    )
+  ) {
+    throw new DerivedRunPlanError();
+  }
+  return plan;
+}
+
+export function derivedCandidateIds(
+  raw: unknown,
+  path: ExecutionPath | null,
+  union = false,
+): string[] {
+  const plan = parseDerivedRunPlan(raw);
+  if (path === null && union)
+    return [...new Set(plan.candidates.flatMap((candidate) => candidate.stepIds))];
+  const candidate = plan.candidates.find((c) => c.executionPath === path);
+  if (!candidate) throw new DerivedRunPlanError();
+  return [...candidate.stepIds];
+}
+
+/** Traits and dependencies inspect every possible path until triage commits its choice. */
+export function pinnedTaskStepIds(task: {
+  runListSnapshot?: readonly string[] | null;
+  derivedRunPlan?: unknown;
+  executionPath?: ExecutionPath | string | null;
+}): readonly string[] | null {
+  if (task.derivedRunPlan != null) {
+    const parsed =
+      task.executionPath == null ? null : executionPathSchema.safeParse(task.executionPath);
+    if (parsed !== null && !parsed.success) throw new DerivedRunPlanError();
+    const path = parsed?.success ? parsed.data : null;
+    return derivedCandidateIds(task.derivedRunPlan, path, true);
+  }
+  return task.runListSnapshot ?? null;
+}
+
+export function summarizeDerivedWarnings(warnings: readonly DerivedOverlayWarning[]) {
+  const summary = new Map<
+    number,
+    {
+      kind: 'stale-target' | 'path-absent-replacement';
+      operationIndex: number;
+      stepId: string;
+      candidates: (ExecutionPath | null)[];
+    }
+  >();
+  for (const warning of warnings) {
+    const item = summary.get(warning.operationIndex) ?? {
+      kind: warning.kind,
+      operationIndex: warning.operationIndex,
+      stepId: warning.stepId,
+      candidates: [],
+    };
+    if (!item.candidates.includes(warning.executionPath))
+      item.candidates.push(warning.executionPath);
+    summary.set(warning.operationIndex, item);
+  }
+  return [...summary.values()];
+}
+
+export function derivedTaskWarnings(raw: unknown) {
+  const plan = parseDerivedRunPlan(raw);
+  return [...summarizeDerivedWarnings(plan.warnings), ...(plan.defaultWarnings ?? [])];
 }

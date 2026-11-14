@@ -1,3 +1,4 @@
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { randomUUID } from 'node:crypto';
 import { Duplex } from 'node:stream';
 import Docker from 'dockerode';
@@ -359,7 +360,7 @@ export class TerminalSessionManager {
       if (
         task.type === 'workflow' ||
         task.type === 'run_app' ||
-        task.runListSnapshot?.includes('01-worktree-setup') === true
+        pinnedTaskStepIds(task)?.includes('01-worktree-setup') === true
       ) {
         const wt = await this.db.query.taskSteps.findFirst({
           where: and(

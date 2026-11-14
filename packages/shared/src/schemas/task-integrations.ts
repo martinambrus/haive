@@ -57,7 +57,7 @@ export interface TaskIntegrationCategoryPreview {
 }
 export interface TaskIntegrationPreview {
   admitted: boolean;
-  scope: 'static' | 'dispatch-time';
+  scope: 'static' | 'dispatch-time' | 'may run after path selection';
   categories: TaskIntegrationCategoryPreview[];
   issues: {
     stepId: string;

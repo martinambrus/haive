@@ -1,3 +1,4 @@
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
@@ -1301,6 +1302,8 @@ export async function loadLiveRootWriters(
       id: schema.tasks.id,
       type: schema.tasks.type,
       runListSnapshot: schema.tasks.runListSnapshot,
+      derivedRunPlan: schema.tasks.derivedRunPlan,
+      executionPath: schema.tasks.executionPath,
     })
     .from(schema.tasks)
     .where(
@@ -1314,7 +1317,7 @@ export async function loadLiveRootWriters(
     .filter(
       (t) =>
         OTHER_ROOT_WRITER_TASK_TYPES.includes(t.type) ||
-        ROOT_WRITING_STEP_IDS.some((id) => t.runListSnapshot?.includes(id) === true),
+        ROOT_WRITING_STEP_IDS.some((id) => pinnedTaskStepIds(t)?.includes(id) === true),
     )
     .slice(0, 1)
     .map((t) => ({ id: t.id }));
