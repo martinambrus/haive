@@ -256,16 +256,3 @@ it('renews the content key when the selected node chat reports an answer, not on
   await flush(view);
   expect(net.active.mock.lastCall?.[0].contentKey).toBe(after);
 });
-
-it('clears completed ordering work using a status read without another checkout sync hint', async () => {
-  net.ordering = { activeTaskId: 'ordering-task' };
-  const view = createRenderer(() => <PlanPage />);
-  await flush(view);
-  const hinted = net.overview.mock.calls.length;
-  expect(net.active.mock.lastCall?.[0].pending).toBe(true);
-  net.ordering = null;
-  await vi.advanceTimersByTimeAsync(5000);
-  await flush(view);
-  expect(net.active.mock.lastCall?.[0].pending).toBe(false);
-  expect(net.overview).toHaveBeenCalledTimes(hinted);
-});

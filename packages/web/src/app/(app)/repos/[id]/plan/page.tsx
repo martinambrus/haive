@@ -39,7 +39,6 @@ import {
   type PlanDefects,
   type PlanNextUp,
   type PlanOrderingProgress,
-  type PlanOverview,
   type PlanPullOutcome,
   type PlanMergeConflict,
   type PlanMergeState,
@@ -137,24 +136,6 @@ export default function PlanPage() {
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   usePlanPending(activity.report, sequencing || ordering?.activeTaskId != null);
-  useEffect(() => {
-    if (!ordering?.activeTaskId) return;
-    let cancelled = false;
-    const timer = setInterval(() => {
-      if (document.hidden) return;
-      // The navigation helper also requests checkout sync; this poll only reads status.
-      void api
-        .get<PlanOverview>(`/repositories/${encodeURIComponent(repositoryId)}/plan`)
-        .then((overview) => {
-          if (!cancelled) setOrdering(overview.ordering ?? null);
-        })
-        .catch(() => {});
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [repositoryId, ordering?.activeTaskId]);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
   const [questionsKey, setQuestionsKey] = useState(0);
   const [removingEdge, setRemovingEdge] = useState(false);

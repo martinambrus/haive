@@ -109,26 +109,6 @@ export function PlanDetailPanel({
     ) ?? false;
   usePlanPending(reportActivity, openTask);
 
-  // Follow the selected node's tasks until they finish; a cached detail must not
-  // leave the attention clock in pending mode after the work ends.
-  useEffect(() => {
-    if (!openTask) return;
-    let cancelled = false;
-    const timer = setInterval(() => {
-      if (document.hidden) return;
-      void getPlanNode(repositoryId, nodeId)
-        .then((next) => {
-          if (!cancelled) {
-            setDetail((previous) => (previous ? { ...previous, tasks: next.tasks } : previous));
-          }
-        })
-        .catch(() => {});
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [repositoryId, nodeId, openTask]);
   const [impact, setImpact] = useState<PlanImpact | null>(null);
   // The radius the Impact tab opens at. One hop, because on a real plan two
   // reach a median of 130 nodes — a transitive answer is "the whole plan".
