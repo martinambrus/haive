@@ -6,7 +6,7 @@ import { EXECUTION_PATHS } from '@haive/shared';
 import { parseDerivedRunPlan, type DerivedRunPlan } from '@haive/shared/modularity';
 import { pinDerivedWorkflowPath } from '../src/step-engine/derived-path.js';
 import { stepRegistry, StepRegistry } from '../src/step-engine/registry.js';
-import { handleResult } from '../src/queues/task-queue.js';
+import { handleResult, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { deadTaskResolution, reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
 
 const h = vi.hoisted(() => ({
@@ -34,6 +34,19 @@ vi.mock('../src/sandbox/sandbox-kill.js', async (original) => ({
 vi.mock('../src/project-state/set-aside.js', async (original) => ({
   ...(await original<object>()),
   resyncAfterTaskEnd: async () => undefined,
+}));
+vi.mock('../src/sandbox/task-auth-volume.js', async (original) => ({
+  ...(await original<object>()),
+  cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
+  syncRefreshedAuthToUserVolumes: async () => undefined,
+}));
+vi.mock('../src/sandbox/ollama-provision.js', async (original) => ({
+  ...(await original<object>()),
+  unloadTaskOllamaCliModels: async () => undefined,
+}));
+vi.mock('@haive/shared/rag', async (original) => ({
+  ...(await original<object>()),
+  resolveTaskEmbedTarget: async () => null,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<object>()),
@@ -110,6 +123,7 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
   beforeAll(async () => {
     db = createDatabase(url!);
     h.db = db;
+    setContainerCleanupRunner(async () => 0);
     registry()
       .all()
       .forEach((step) => stepRegistry.override(step));
@@ -138,6 +152,7 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
     repositoryId = repo!.id;
   });
   afterAll(async () => {
+    setContainerCleanupRunner(null);
     await db.execute(sql`DROP TRIGGER IF EXISTS derived_event_failure ON task_events`);
     await db.execute(sql`DROP FUNCTION IF EXISTS derived_event_failure()`);
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
@@ -388,6 +403,59 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
     );
     expect(pickup.executionPath).toBe('quick_bugfix');
   });
+  it.each(['done', 'skipped'] as const)(
+    'fails an unselected derived task when its prefix ends %s',
+    async (status) => {
+      const [row] = await db
+        .update(schema.taskSteps)
+        .set({ status, output: {}, endedAt: new Date() })
+        .where(eq(schema.taskSteps.id, stepId))
+        .returning();
+      const pickup = {
+        taskId,
+        userId,
+        workflowType: 'derived-test',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        executionPath: null,
+        metadata: null,
+        orchestrationEpoch: 3,
+        currentStepId: '00-triage',
+        currentRound: 0,
+        status: 'running',
+        completedAt: null,
+        runListStrategy: 'derived',
+        derivedRunPlan: pin(),
+        runListSnapshot: [...prefix, 'full'],
+      } as Parameters<typeof handleResult>[1];
+      await handleResult(
+        db,
+        pickup,
+        '00-triage',
+        status === 'done' ? { status, row: row!, output: {} } : { status, row: row! },
+      );
+      expect(await task()).toMatchObject({
+        status: 'failed',
+        executionPath: null,
+        errorMessage: expect.stringContaining('derived_path_unselected'),
+      });
+      expect(
+        await db
+          .select()
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, taskId),
+              eq(schema.taskEvents.eventType, 'task.completed'),
+            ),
+          ),
+      ).toEqual([]);
+      expect(h.adds).toEqual([]);
+    },
+  );
+
   it('marks and revives an unselected derived task at boot using every pinned candidate', async () => {
     const sent: string[] = [];
     const deps = {

@@ -2395,6 +2395,15 @@ export async function handleResult(
           nextRound,
           ctx.orchestrationEpoch,
         );
+      } else if (ctx.derivedRunPlan != null && ctx.executionPath === null) {
+        await finishFailedStep(
+          db,
+          ctx,
+          stepId,
+          result.row,
+          'derived_path_unselected: The derived workflow reached the end of its prefix without selecting a path.',
+          OPEN_TASK_STATUSES,
+        );
       } else {
         await markTaskCompleted(db, ctx.taskId, { epoch: ctx.orchestrationEpoch });
       }
