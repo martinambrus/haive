@@ -650,6 +650,21 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
+
+status: open · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/TC2-S/` (review-2.md, review-3.md).
+
+1. The aggregate tile hint prints "0 passed · 0 failed · 0 not run · 0 incomplete" when the window holds only tasks from before recording began (statistics `time-cost-report.tsx` ~:85); show only the "Recording began" clause.
+2. Row JSON for an unrecorded task carries `testSuiteRuns: 0` and all-zero `testCheckCounts`, so "no rows" and "recorded zero" look the same in the data. No other consumer today.
+3. The failed-write warning path (L5) has no test asserting `logger.warn` was called.
+4. No committed concurrency test for two replays taking over the same row (a scratch test passed 7/7); step ownership makes it unsupported today.
+5. `statement_timeout` is per statement: the start block runs three statements, so the worst case is about 15 s, not the 5 s the comment implies (`_check-runs.ts` ~:9-17). Reword, or add `SET LOCAL lock_timeout`.
+6. No test for a 57014 cancel on the finalization write, and the SET-before-write order is not asserted.
+7. Residual unbounded waits: pool acquisition (`max: 10`, no client-side timeout), and BEGIN/SET before the timeout applies. Each recording write now holds a pooled connection across its round trips. Unmeasured.
+8. Owed live check: a real workflow task records rows for 08 and 08b and the "Time & cost report" tab shows them.
+
 ### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+9)
 
 status: open · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
@@ -1967,6 +1982,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Time and cost report PR 2 (#1170): every 08/08b check run is recorded in `task_check_runs` (migration 0239) as observation only, with bounded writes; the report counts passed, failed, not run and incomplete runs. Lows filed as T671.
 
 - Fix-pass test edits, AIDE² P6 (#1171): repair passes record before/after images of test files (`fix_test_blobs`, migration 0238) and gates 2 and 3 show the edits; protected paths stay withheld, and a protected move keeps the task contentless. Lows filed as T670.
 
