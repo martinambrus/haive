@@ -664,6 +664,8 @@ export const taskSteps = pgTable(
     }>(),
     /** Logical rerun generation: recovery epoch bumps leave it unchanged. */
     rerunGeneration: integer('rerun_generation').notNull().default(0),
+    /** Disabled explicit CLI responsible for the current pending park; display copy is not state. */
+    providerWaitProviderId: uuid('provider_wait_provider_id'),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),

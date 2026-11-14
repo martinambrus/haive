@@ -9,6 +9,7 @@ const KIND_LABEL: Record<SlotWait['kind'], string> = {
   agent: 'agent slot',
   module: 'module setup',
   integration: 'integration',
+  provider: 'disabled provider',
 };
 
 const KIND_TITLE: Record<SlotWait['kind'], string> = {
@@ -16,6 +17,7 @@ const KIND_TITLE: Record<SlotWait['kind'], string> = {
   agent: 'Queued for a free agent slot',
   module: "Waiting for its module's setup to finish",
   integration: 'Waiting for a required integration to become available',
+  provider: 'Waiting for a disabled CLI provider to be enabled or the step CLI to be switched',
 };
 
 const STALE_HINT =

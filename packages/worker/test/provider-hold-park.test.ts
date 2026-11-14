@@ -150,7 +150,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
       .values({
         emailEncrypted: 'provider-hold-park-test@test.local',
         emailBlindIndex: EMAIL_INDEX,
-        passwordHash: 'not-real',
+        passwordHash: randomBytes(12).toString('hex'),
         role: 'user',
         status: 'active',
         tokenVersion: 0,
@@ -260,13 +260,18 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     await runningTask();
     await tick();
     const [first] = await rows();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const oldHeartbeat = new Date('2026-01-01T00:00:00Z');
+    await db
+      .update(schema.taskSteps)
+      .set({ updatedAt: oldHeartbeat })
+      .where(eq(schema.taskSteps.id, first!.id));
     await runNext();
     const [second] = await rows();
     expect(second!.status).toBe('pending');
     expect(second!.waitingStartedAt).toEqual(first!.waitingStartedAt);
     expect(second!.statusMessage).toBe(first!.statusMessage);
-    expect(second!.updatedAt.getTime()).toBeGreaterThan(first!.updatedAt.getTime());
+    expect(second!.updatedAt).not.toEqual(oldHeartbeat);
+    expect(second!.providerWaitProviderId).toBe(ownId);
     expect(advances()).toHaveLength(2);
     expect(advances()[1]!.opts.delay).toBe(30_000);
     noDetectOrApply();
@@ -282,6 +287,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     const [row] = await rows();
     expect(row!.startedAt).toBeInstanceOf(Date);
     expect(row!.waitingStartedAt).toBeNull();
+    expect(row!.providerWaitProviderId).toBeNull();
   });
 
   it('H4: an enabled CLI picked for the step in this task releases the park', async () => {
@@ -296,11 +302,14 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
   });
 
   it('H5: a global pause wins over the provider hold and shows the pause words', async () => {
-    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     await runningTask();
     await tick();
+    expect((await rows())[0]!.providerWaitProviderId).toBe(ownId);
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    await runNext();
     const [row] = await rows();
     expect(row).toMatchObject({ status: 'pending' });
+    expect(row!.providerWaitProviderId).toBeNull();
     expect(row!.statusMessage).toMatch(/^Paused/);
     expect(row!.statusMessage).not.toContain('Own CLI');
     expect(advances()[0]!.opts.delay).toBe(30_000);

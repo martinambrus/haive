@@ -2906,6 +2906,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,
         integrationWait: null,
+        providerWaitProviderId: null,
       });
       if (!claimed) return supersededPass(current);
       current = claimed;
