@@ -15,7 +15,7 @@ import {
   MAX_PROPOSED_OPS,
   boundedPlanWriterPrompt,
   planFocusTooLarge,
-  assertProposalReadVersions,
+  filterProposalReadVersions,
   type WorkflowPlanRead,
   describeDropped,
   describePlanOp,
@@ -381,10 +381,10 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
     // and the form never showed one it could not read.
     let applied;
     try {
-      assertProposalReadVersions(chosen, d.planRead);
+      const proposal = filterProposalReadVersions(chosen, d.planRead);
       applied = await applyPlanPatch(
         ctx.db,
-        { ops: chosen, summary: 'plan reconcile after task implementation' },
+        { ops: proposal.ops, summary: 'plan reconcile after task implementation' },
         {
           repositoryId: d.repositoryId,
           origin: 'user',
@@ -392,9 +392,9 @@ export const planReconcileStep: StepDefinition<PlanReconcileDetect, PlanReconcil
           onUnresolvableRef: 'drop',
           onInvalidCodeLink: 'strip',
           requireExpectedVersion: true,
-          requireAllUpdateVersions: true,
         },
       );
+      applied.dropped.unshift(...proposal.dropped);
     } catch (err) {
       if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
       result.decision = 'conflict';

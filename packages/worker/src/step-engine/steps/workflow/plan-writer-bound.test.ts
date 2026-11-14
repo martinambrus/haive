@@ -2,6 +2,8 @@ import { expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import {
   applyPlanPatch,
   PlanPatchError,
@@ -293,7 +295,7 @@ it.each([planReconcileStep, externalPlanSyncStep])(
       );
       expect(result.applied).toBe(1);
       expect(vi.mocked(applyPlanPatch).mock.lastCall?.[2]).toMatchObject({
-        requireAllUpdateVersions: true,
+        requireExpectedVersion: true,
       });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -302,38 +304,97 @@ it.each([planReconcileStep, externalPlanSyncStep])(
 );
 
 it.each([planReconcileStep, externalPlanSyncStep])(
-  'refuses missing, guessed-newer and live-raced versions ($metadata.id)',
+  'drops invalid read-version ops individually and preserves code-link-only upserts ($metadata.id)',
   async (step) => {
     const read = fixture();
     const target = read.nodes[1]!;
-    const d = detected(read);
     const context = { taskId: 'task', logger: { warn: vi.fn() } };
-    for (const change of [
-      { ordinal: 2 },
-      { codeLinks: [] },
-      { status: 'done', expectedVersion: target.version + 1 },
+    const valid = {
+      op: 'upsert',
+      nodeRef: read.nodes[2]!.id,
+      status: 'done',
+      expectedVersion: read.nodes[2]!.version,
+    };
+    for (const bad of [
+      { op: 'upsert', nodeRef: target.id, ordinal: 2 },
+      { op: 'upsert', nodeRef: target.id, status: 'done' },
+      { op: 'delete', nodeRef: target.id },
+      { op: 'upsert', nodeRef: target.id, status: 'done', expectedVersion: target.version + 1 },
+      { op: 'upsert', nodeRef: node(99).id, expectedVersion: 1, codeLinks: [] },
     ]) {
-      vi.mocked(applyPlanPatch).mockClear();
-      vi.mocked(stampExternalWatermark).mockClear();
+      vi.mocked(applyPlanPatch).mockReset();
+      vi.mocked(applyPlanPatch).mockResolvedValueOnce({
+        created: [],
+        updated: [read.nodes[2]!.id],
+        deleted: [],
+        linked: 0,
+        unlinked: 0,
+        codeLinked: 0,
+        refs: {},
+        dropped: [],
+        strippedCodeLinks: [],
+      });
       const result = await step.apply(
         context as never,
         {
-          detected: d,
-          llmOutput: { ops: [{ op: 'upsert', nodeRef: target.id, ...change }] },
-          formValues: { applyOps: ['0'] },
+          detected: detected(read),
+          llmOutput: { ops: [bad, valid] },
+          formValues: { applyOps: ['0', '1'] },
         } as never,
       );
-      expect(result.decision).toBe('conflict');
-      expect(applyPlanPatch).not.toHaveBeenCalled();
-      expect(stampExternalWatermark).not.toHaveBeenCalled();
+      expect(result.decision).toBe('applied');
+      expect(result.applied).toBe(1);
+      expect(result.dropped).toHaveLength(1);
+      expect(result.summary).toContain('1 approved change(s) could not be applied');
+      expect(vi.mocked(applyPlanPatch).mock.lastCall?.[1]).toMatchObject({ ops: [valid] });
     }
+    // The shared applier allowed this shape before bounded workflow prompts.
+    vi.mocked(applyPlanPatch).mockReset();
+    vi.mocked(applyPlanPatch).mockResolvedValueOnce({
+      created: [],
+      updated: [target.id],
+      deleted: [],
+      linked: 0,
+      unlinked: 0,
+      codeLinked: 1,
+      refs: {},
+      dropped: [],
+      strippedCodeLinks: [],
+    });
+    const linksOnly = {
+      op: 'upsert',
+      nodeRef: target.id,
+      codeLinks: [{ repoPath: 'src/changed.ts', evidence: 'Implements this component' }],
+    };
+    const result = await step.apply(
+      context as never,
+      {
+        detected: detected(read),
+        llmOutput: { ops: [linksOnly] },
+        formValues: { applyOps: ['0'] },
+      } as never,
+    );
+    expect(result.applied).toBe(1);
+    expect(result.codeLinked).toBe(1);
+    expect(vi.mocked(applyPlanPatch).mock.lastCall?.[1]).toMatchObject({ ops: [linksOnly] });
+    expect(vi.mocked(applyPlanPatch).mock.lastCall?.[2].requireAllUpdateVersions).not.toBe(true);
+  },
+);
+
+it.each([planReconcileStep, externalPlanSyncStep])(
+  'reports a real stale CAS once without retrying against a newer read ($metadata.id)',
+  async (step) => {
+    const read = fixture();
+    const target = read.nodes[1]!;
+    vi.mocked(applyPlanPatch).mockReset();
+    vi.mocked(stampExternalWatermark).mockClear();
     vi.mocked(applyPlanPatch).mockRejectedValueOnce(
       new PlanPatchError('conflict', 'concurrent canvas edit'),
     );
     const result = await step.apply(
-      context as never,
+      { taskId: 'task', logger: { warn: vi.fn() } } as never,
       {
-        detected: d,
+        detected: detected(read),
         llmOutput: {
           ops: [
             { op: 'upsert', nodeRef: target.id, status: 'done', expectedVersion: target.version },
@@ -369,5 +430,67 @@ it.each(['commitsOmitted', 'pathsOmitted'] as const)(
     expect(result.commitsReviewed).toBe(1);
     expect(result.reviewedThrough).toBe(d.branchPoint);
     expect(stampExternalWatermark).toHaveBeenCalledWith(undefined, 'repo', 'plan', d.branchPoint);
+  },
+);
+
+it.each([planReconcileStep, externalPlanSyncStep])(
+  'applies unversioned code links through the real applier while reporting a dropped field op ($metadata.id)',
+  async (step) => {
+    const read = fixture(2);
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      planNodes: schema.planNodes,
+      planNodeEdges: schema.planNodeEdges,
+      planNodeCodeLinks: schema.planNodeCodeLinks,
+      planMirrorState: schema.planMirrorState,
+    });
+    const repositoryId = node(90).id;
+    fake.insert(schema.repositories, { id: repositoryId, userId: node(91).id, name: 'repo' });
+    for (const n of read.nodes) fake.insert(schema.planNodes, { ...n, repositoryId });
+    fake.insert(schema.planMirrorState, { repositoryId, revision: 1 });
+    const actual = await vi.importActual<typeof import('@haive/shared/plan')>('@haive/shared/plan');
+    vi.mocked(applyPlanPatch).mockReset();
+    vi.mocked(applyPlanPatch).mockImplementation(actual.applyPlanPatch);
+    try {
+      const context = {
+        db: fake.db as unknown as Database,
+        taskId: node(92).id,
+        logger: { warn: vi.fn() },
+      };
+      const linksOnly = {
+        op: 'upsert',
+        nodeRef: read.nodes[1]!.id,
+        codeLinks: [{ repoPath: 'src/changed.ts', evidence: 'Implements this component' }],
+      };
+      const bad = { op: 'upsert', nodeRef: read.nodes[0]!.id, status: 'done' };
+      const result = await step.apply(
+        context as never,
+        {
+          detected: { ...detected(read), repositoryId },
+          llmOutput: { ops: [bad, linksOnly] },
+          formValues: { applyOps: ['0', '1'] },
+        } as never,
+      );
+      expect(result.applied).toBe(1);
+      expect(result.dropped).toHaveLength(1);
+      expect(result.codeLinked).toBe(1);
+      expect(await context.db.select().from(schema.planNodeCodeLinks)).toMatchObject([
+        { nodeId: read.nodes[1]!.id, repoPath: 'src/changed.ts' },
+      ]);
+      // An entirely invalid set is reported as dropped, including an empty applier patch.
+      const empty = await step.apply(
+        context as never,
+        {
+          detected: { ...detected(read), repositoryId },
+          llmOutput: { ops: [bad] },
+          formValues: { applyOps: ['0'] },
+        } as never,
+      );
+      expect(empty.decision).toBe('applied');
+      expect(empty.applied).toBe(0);
+      expect(empty.dropped).toHaveLength(1);
+    } finally {
+      vi.mocked(applyPlanPatch).mockReset();
+    }
   },
 );

@@ -15,7 +15,7 @@ import {
   MAX_PROPOSED_OPS,
   boundedPlanWriterPrompt,
   planFocusTooLarge,
-  assertProposalReadVersions,
+  filterProposalReadVersions,
   type WorkflowPlanRead,
   describeDropped,
   describePlanOp,
@@ -416,10 +416,10 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     // its own op rather than the developer's whole approved set.
     let applied;
     try {
-      assertProposalReadVersions(chosen, d.planRead);
+      const proposal = filterProposalReadVersions(chosen, d.planRead);
       applied = await applyPlanPatch(
         ctx.db,
-        { ops: chosen, summary: 'plan catch-up for commits made outside the workflow' },
+        { ops: proposal.ops, summary: 'plan catch-up for commits made outside the workflow' },
         {
           repositoryId: d.repositoryId,
           origin: 'user',
@@ -429,9 +429,9 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
           // The agent wrote the links, and the form never showed one it could not read.
           onInvalidCodeLink: 'strip',
           requireExpectedVersion: true,
-          requireAllUpdateVersions: true,
         },
       );
+      applied.dropped.unshift(...proposal.dropped);
     } catch (err) {
       if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
       // Not stamped: the range stays unreviewed, so the next run proposes against the new plan.
