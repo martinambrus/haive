@@ -591,6 +591,11 @@ status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the
 3. `refresh_runs.result` `$type` omits the new `unsupported` field (database schema); the stored JSON carries it.
 4. The `unsupported` list (time-window, variable-price models) is persisted in the refresh result but shown nowhere on `/admin/pricing`.
 5. A future LiteLLM text-rate key whose base name contains a modality word (audio, image, ...) would be ignored by `LITELLM_NON_TEXT_RATE_FAMILIES` instead of failing loud. Hypothetical.
+6. #1167 PR 3 prerequisite: real complete rate per CLI and per main model is unmeasured; replay retained stream logs read-only (`worker/src/queues/cli-exec/stream.ts` getRequestUsage) before pricing from coverage. CONNECTED.
+7. #1167 Same-name ledger rule may keep runs whose main model is the titling model (haiku) permanently incomplete (stream.ts billedMatches); if measured, relax to entry >= priced sum per bucket. Safe direction. CONNECTED.
+8. #1167 An empty `result.modelUsage` ledger is still accepted as complete when prompt sums match (stream.ts reconcile loop break on size 0). NIT, PRE-EXISTING in design.
+9. #1167 `contradictory-request` compares output tokens too (stream.ts ~354); if a binary updates output between content blocks of one message, runs go incomplete. Compare prompt buckets + model only if it shows. LOW.
+10. Killed Claude/Ollama fallback under-counts output (stream.ts ~646: fallback output 0 vs completed 141 on the retained fixture). PRE-EXISTING, consequential for token stats.
 
 ### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
@@ -604,6 +609,8 @@ status: open · kind: fix · found: human time PR 1-2 · priority: P3
 6. `visibleWords` skips (does not prune) offscreen subtrees whose clip is not empty, so only the 50,000-node work bound limits them; its real cost is unmeasured.
 7. `onFocus` can drop up to one tick of retained time.
 8. Approximations documented in `docs/architecture/human-time.md`: positioned descendants escaping an overflow ancestor are misclipped, `pointer-events: none` text is excluded, range chunks can split a word.
+9. #1166 Time tab grid went lg:grid-cols-6 -> 4, so 7 tiles lay out 4+3 (reflows existing tiles); pick a layout. LOW cosmetic.
+10. #1166 Plan page tile hint does not say a dash can also mean the selected class excludes plan work (card description does). LOW.
 
 ### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+13)
 
@@ -1173,13 +1180,6 @@ status: parked · was modular #231 · reason: diminishing returns (2026-11-01 sc
 In 9 grok runs, tool-result chars/4 come to 1.14-2.25x the recorded prompt tokens; e.g. run e3d08fb4… (09-qa).
 Candidates:
 
-- #1167 PR 3 prerequisite: real complete rate per CLI and per main model is unmeasured; replay retained stream logs read-only (`worker/src/queues/cli-exec/stream.ts` getRequestUsage) before pricing from coverage. CONNECTED.
-- #1167 Same-name ledger rule may keep runs whose main model is the titling model (haiku) permanently incomplete (stream.ts billedMatches); if measured, relax to entry >= priced sum per bucket. Safe direction. CONNECTED.
-- #1167 An empty `result.modelUsage` ledger is still accepted as complete when prompt sums match (stream.ts reconcile loop break on size 0). NIT, PRE-EXISTING in design.
-- #1167 `contradictory-request` compares output tokens too (stream.ts ~354); if a binary updates output between content blocks of one message, runs go incomplete. Compare prompt buckets + model only if it shows. LOW.
-- Killed Claude/Ollama fallback under-counts output (stream.ts ~646: fallback output 0 vs completed 141 on the retained fixture). PRE-EXISTING, consequential for token stats.
-- #1166 Time tab grid went lg:grid-cols-6 -> 4, so 7 tiles lay out 4+3 (reflows existing tiles); pick a layout. LOW cosmetic.
-- #1166 Plan page tile hint does not say a dash can also mean the selected class excludes plan work (card description does). LOW.
 - usage under-reports;
 - chars/4 overstates;
 - grok drops old tool results.
