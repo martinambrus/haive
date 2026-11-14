@@ -32,4 +32,7 @@ const turboOptions = separator === -1 ? extra : extra.slice(0, separator);
 const cacheOptions = local.localMode()
   ? ['--force', '--no-cache'].filter((flag) => !turboOptions.includes(flag))
   : [];
-run(['exec', 'turbo', 'run', task, ...cacheOptions, ...extra]);
+// Their dist is already complete, and the on-disk host manifests do not carry
+// edges that would order another Turbo build of these packages before the hosts.
+const moduleOptions = local.folders().length ? ['--filter=!./external-modules/*'] : [];
+run(['exec', 'turbo', 'run', task, ...moduleOptions, ...cacheOptions, ...extra]);

@@ -89,7 +89,10 @@ test('workspace tasks preserve ordinary Turbo behavior, and build local modules 
   assert.equal(tree.run('workspace-task.mjs', ['typecheck']).status, 0);
   const calls = tree.pnpmCalls();
   assert.match(calls[1], /--filter @haive\/database.*--filter \.\/external-modules\/\* -r build$/);
-  assert.match(calls[2], /exec turbo run typecheck --force --no-cache$/);
+  assert.match(
+    calls[2],
+    /exec turbo run typecheck --filter=!\.\/external-modules\/\* --force --no-cache$/,
+  );
 });
 
 test('root tasks forward every extra argument to Turbo in public and local mode', (t) => {
@@ -101,7 +104,7 @@ test('root tasks forward every extra argument to Turbo in public and local mode'
       assert.equal(tree.run('workspace-task.mjs', [task, ...args]).status, 0);
       assert.equal(
         tree.pnpmCalls().at(-1),
-        `${tree.root} exec turbo run ${task}${mode === 'local' ? ' --no-cache' : ''} ${args.join(' ')}`,
+        `${tree.root} exec turbo run ${task}${mode === 'local' ? ' --filter=!./external-modules/* --no-cache' : ''} ${args.join(' ')}`,
       );
     }
   }
@@ -161,8 +164,20 @@ test('local cache policy stays before task arguments and avoids duplicate caller
   assert.equal(tree.run('workspace-task.mjs', ['test', '--', '--no-cache']).status, 0);
   assert.equal(
     tree.pnpmCalls().at(-1),
-    `${tree.root} exec turbo run test --force --no-cache -- --no-cache`,
+    `${tree.root} exec turbo run test --filter=!./external-modules/* --force --no-cache -- --no-cache`,
   );
   assert.equal(tree.run('workspace-task.mjs', ['build', '--force', '--no-cache']).status, 0);
-  assert.equal(tree.pnpmCalls().at(-1), `${tree.root} exec turbo run build --force --no-cache`);
+  assert.equal(
+    tree.pnpmCalls().at(-1),
+    `${tree.root} exec turbo run build --filter=!./external-modules/* --force --no-cache`,
+  );
+});
+
+test('a failed external prebuild stops before any Turbo task starts', (t) => {
+  const tree = makeTree(t);
+  mkdirSync(join(tree.root, 'external-modules/privateone'));
+  const result = tree.run('workspace-task.mjs', ['build'], { STUB_PNPM_EXIT: '1' });
+  assert.notEqual(result.status, 0);
+  assert.equal(tree.pnpmCalls().length, 1);
+  assert.doesNotMatch(tree.pnpmCalls()[0], /turbo/);
 });
