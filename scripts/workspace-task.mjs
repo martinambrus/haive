@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import local from './local-modules.cjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const [task] = process.argv.slice(2);
+const [task, ...extra] = process.argv.slice(2);
 if (!['build', 'test', 'typecheck'].includes(task)) throw new Error('invalid workspace task');
 function run(args) {
   const result = spawnSync('pnpm', args, { cwd: root, stdio: 'inherit' });
@@ -25,4 +25,4 @@ if (local.folders().length) {
     'build',
   ]);
 }
-run(['exec', 'turbo', 'run', task, ...(local.localMode() ? ['--force'] : [])]);
+run(['exec', 'turbo', 'run', task, ...(local.localMode() ? ['--force'] : []), ...extra]);

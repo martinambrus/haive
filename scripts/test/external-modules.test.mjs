@@ -58,6 +58,21 @@ test('workspace tasks preserve ordinary Turbo behavior, and build local modules 
   assert.match(calls[2], /exec turbo run typecheck --force$/);
 });
 
+test('root tasks forward every extra argument to Turbo in public and local mode', (t) => {
+  const tree = makeTree(t);
+  const args = ['--filter=@haive/api', '--force', '--continue', '--', '--reporter=x'];
+  for (const mode of ['public', 'local']) {
+    if (mode === 'local') mkdirSync(join(tree.root, 'external-modules/privateone'));
+    for (const task of ['build', 'test', 'typecheck']) {
+      assert.equal(tree.run('workspace-task.mjs', [task, ...args]).status, 0);
+      assert.equal(
+        tree.pnpmCalls().at(-1),
+        `${tree.root} exec turbo run ${task}${mode === 'local' ? ' --force' : ''} ${args.join(' ')}`,
+      );
+    }
+  }
+});
+
 test('failed external install restores selection, and a missing selected clone cannot silently disappear', (t) => {
   const tree = makeTree(t, { modules: { privateone: { exports: ['./manifest'] } } });
   renameSync(join(tree.root, 'modules/privateone'), join(tree.root, 'external-modules/privateone'));
