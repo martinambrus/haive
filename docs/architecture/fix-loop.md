@@ -274,7 +274,8 @@ no longer matched, not deleted. Recovery or Retry within the target round keeps 
 a later card pick supersedes it. Dispatch refreshes ownership and enabled state and runs
 capability checks with the round provider as the sole candidate. An unusable active
 override refuses dispatch visibly, with the implementation card named as a recovery action;
-there is no fallback. A reoffered gate can replace the slot, or clear it with The same CLI.
+there is no fallback. The refusal first writes the round's bare `pending` row, so Retry
+re-runs the step at that round rather than replaying the task from START. A reoffered gate can replace the slot, or clear it with The same CLI.
 
 A choice that becomes unusable before the gate answer is applied refuses that answer
 instead of failing the task. The same transaction restores the gate's `waiting_form` status,
