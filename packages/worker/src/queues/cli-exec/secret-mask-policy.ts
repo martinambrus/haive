@@ -59,16 +59,20 @@ export function secretMaskPolicy(opts: {
  */
 export function secretMaskDeniesPath(policy: SecretMaskPolicy, rel: string): boolean {
   const normalised = normaliseRel(rel);
-  if (!normalised) return false;
+  if (!normalised || policy.tracked?.has(normalised)) return false;
+  return compileSecretMaskPolicy(policy)(normalised);
+}
 
-  // Tracked (committed) files are out of scope for masking, so they are readable.
-  if (policy.tracked?.has(normalised)) return false;
-
+/** Compile once when applying one effective policy to multiple repository paths. */
+export function compileSecretMaskPolicy(policy: SecretMaskPolicy): (rel: string) => boolean {
   const { match, ignore } = partitionLikeTinyglobby(policy.globs.deny, policy.globs.ignore);
   const denied = picomatch(match, { dot: true });
-  if (!denied(normalised)) return false;
   const ignored = picomatch(ignore, { dot: true });
-  return !ignored(normalised);
+  return (rel) => {
+    const normalised = normaliseRel(rel);
+    if (!normalised || policy.tracked?.has(normalised)) return false;
+    return denied(normalised) && !ignored(normalised);
+  };
 }
 
 /**

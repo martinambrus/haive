@@ -7,7 +7,7 @@ import { fencedAgentBlock } from '../_untrusted-repo.js';
 import { asPlainText, sanitizeSimilarSites } from './_similar-sites.js';
 import { isTestEvidencePath } from './_test-paths.js';
 import {
-  secretMaskDeniesPath,
+  compileSecretMaskPolicy,
   secretMaskPolicy,
   type SecretMaskPolicy,
 } from '../../../queues/cli-exec/secret-mask-policy.js';
@@ -99,7 +99,7 @@ export async function captureTestImage(
   } = {},
 ): Promise<TestImage> {
   const maxBytes = limits.bytes ?? TEST_IMAGE_BYTES;
-  const policy = limits.policy ?? secretMaskPolicy({});
+  const deniesPath = compileSecretMaskPolicy(limits.policy ?? secretMaskPolicy({}));
   let remaining = limits.entries ?? TEST_IMAGE_ENTRIES;
   let contentBytes = limits.contentBytes ?? TEST_IMAGE_CONTENT_BYTES;
   const files: NonNullable<TestImage['files']> = [];
@@ -123,7 +123,7 @@ export async function captureTestImage(
             const before = await fh.stat({ bigint: true });
             file.size = Number(before.size);
             file.mode = Number(before.mode & 0o777n);
-            const withheld = secretMaskDeniesPath(policy, path);
+            const withheld = deniesPath(path);
             const keep = !withheld && file.size <= maxBytes && file.size <= contentBytes;
             const hash = createHash('sha256');
             const chunks: Buffer[] = [];

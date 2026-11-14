@@ -5,7 +5,7 @@ import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { resolveInvocationWorkerTree } from '../../../repo/worktree-git-boundary.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import {
-  secretMaskDeniesPath,
+  compileSecretMaskPolicy,
   secretMaskPolicy,
 } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { lockOwnedStep } from '../../step-ownership.js';
@@ -373,7 +373,9 @@ export async function finishFixTestCapture(
   const after = await capture(db, meta, options);
   // Deleted/refused after paths cannot carry a withheld status. Recheck their before
   // contents against the effective policy as well, before any bytes enter the store.
-  const finishPolicy = (await taskSecretMaskPolicy(db, meta.taskId)) ?? secretMaskPolicy({});
+  const finishDeniesPath = compileSecretMaskPolicy(
+    (await taskSecretMaskPolicy(db, meta.taskId)) ?? secretMaskPolicy({}),
+  );
   await db.transaction(async (tx) => {
     if (!(await owned(tx, meta, true))) return;
     if (await stored(tx, run.taskId, invocationId, FIX_TEST_AFTER)) return;
@@ -392,7 +394,7 @@ export async function finishFixTestCapture(
         tx,
         run.taskId,
         changed
-          .filter((p) => !withheld.has(p) && !secretMaskDeniesPath(finishPolicy, p))
+          .filter((p) => !withheld.has(p) && !finishDeniesPath(p))
           .flatMap((p) => [old.get(p), next.get(p)].filter((f): f is TestFile => !!f)),
         options,
       );
@@ -445,7 +447,10 @@ export async function loadFixTestRecords(
     [...starts, ...ends].map((e) => e.payload as unknown as Reference),
   );
   const imageFor = (ref?: Reference) => manifests.get(ref?.manifestHash ?? '');
-  const policy = await taskSecretMaskPolicy(db, taskId);
+  const deniesPath = compileSecretMaskPolicy(
+    (await taskSecretMaskPolicy(db, taskId)) ?? secretMaskPolicy({}),
+  );
+  const changedPaths = new Map<string, Set<string>>();
   const hashes = new Set<string>();
   for (const start of starts) {
     const a = imageFor(start.payload as unknown as Reference);
@@ -454,11 +459,14 @@ export async function loadFixTestRecords(
     );
     const next = new Map(b?.files?.map((f) => [f.path, f]));
     const old = new Map(a?.files?.map((f) => [f.path, f]));
+    const changed = new Set<string>();
+    changedPaths.set(start.id, changed);
     for (const p of new Set([...old.keys(), ...next.keys()])) {
       const x = old.get(p),
         y = next.get(p);
       if (!testFileChanged(x, y)) continue;
-      if (secretMaskDeniesPath(policy ?? secretMaskPolicy({}), p)) continue;
+      changed.add(p);
+      if (deniesPath(p)) continue;
       if (x?.hash) hashes.add(x.hash);
       if (y?.hash) hashes.add(y.hash);
     }
@@ -484,17 +492,21 @@ export async function loadFixTestRecords(
       .filter((b) => b.content && !b.expiredAt)
       .map((b) => [b.contentHash, b.content!.toString('base64')]),
   );
-  const hydrate = (image?: TestImage): TestImage =>
+  const hydrate = (image: TestImage | undefined, changed: Set<string>): TestImage =>
     image
       ? {
           ...image,
+          // Unchanged endpoints never contribute identities or bytes to the result.
+          // Only changed paths need policy evaluation, including metadata-only loads.
           files: image.files?.map((f) =>
-            secretMaskDeniesPath(policy ?? secretMaskPolicy({}), f.path)
-              ? { ...f, hash: 'withheld:present', status: 'content withheld', base64: undefined }
-              : {
-                  ...f,
-                  base64: f.status === 'available' && f.hash ? bytes.get(f.hash) : undefined,
-                },
+            !changed.has(f.path)
+              ? f
+              : deniesPath(f.path)
+                ? { ...f, hash: 'withheld:present', status: 'content withheld', base64: undefined }
+                : {
+                    ...f,
+                    base64: f.status === 'available' && f.hash ? bytes.get(f.hash) : undefined,
+                  },
           ),
         }
       : { state: 'not captured', reason: 'Missing manifest.' };
@@ -505,8 +517,11 @@ export async function loadFixTestRecords(
       const p = e.payload as unknown as Reference;
       const end = settled.get(p.invocationId);
       const compared = compareTestImages(
-        hydrate(imageFor(p)),
-        hydrate(imageFor(end?.payload as unknown as Reference | undefined)),
+        hydrate(imageFor(p), changedPaths.get(e.id)!),
+        hydrate(
+          imageFor(end?.payload as unknown as Reference | undefined),
+          changedPaths.get(e.id)!,
+        ),
         {
           bytes: Math.min(TEST_PATCH_BYTES, remainingBytes),
           lines: Math.min(TEST_PATCH_LINES, remainingLines),

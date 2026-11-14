@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { glob } from 'tinyglobby';
-import { secretMaskDeniesPath, secretMaskPolicy } from './secret-mask-policy.js';
+import {
+  compileSecretMaskPolicy,
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+} from './secret-mask-policy.js';
 
 /**
  * Paths chosen for the SHAPES they exercise, not for coverage: leading-dot basenames, a dotted
@@ -51,6 +55,26 @@ async function buildFixture(): Promise<string> {
 }
 
 describe('secretMaskDeniesPath', () => {
+  it('keeps compiled and per-call decisions equivalent across effective policies', () => {
+    const paths = [
+      ...FIXTURE_FILES,
+      'tests/.auth/user.json',
+      'tests/storage-state.json',
+      './sub/.env',
+      'sub\\.env',
+      '',
+      '/.env',
+    ];
+    for (const policy of [
+      secretMaskPolicy({}),
+      secretMaskPolicy({ allow: ['**/id_rsa'], denyExtend: ['**/*.md', '!**/safe.md'] }),
+      secretMaskPolicy({ tracked: new Set(['.env']), allow: ['!**/*.pem'] }),
+    ]) {
+      const deniesPath = compileSecretMaskPolicy(policy);
+      expect(paths.map(deniesPath)).toEqual(paths.map((p) => secretMaskDeniesPath(policy, p)));
+    }
+  });
+
   it('returns the same verdict as the tinyglobby scan computeSecretMasks runs', async () => {
     const root = await buildFixture();
     try {
