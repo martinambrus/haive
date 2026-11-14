@@ -1,4 +1,5 @@
 import { Queue } from 'bullmq';
+import type { RequestUsageCapture } from '../../cli-executor/request-usage.js';
 import {
   logger,
   type CleanTranscript,
@@ -52,6 +53,8 @@ export interface ExecutionOutcome {
    *  CliTokenUsage in @haive/shared). Undefined/null when the CLI reported
    *  nothing (plain-text output, legacy payloads, antigravity). */
   tokenUsage?: CliTokenUsage | null;
+  /** In-memory evidence only; never persisted in token_usage or used for pricing in PR 2. */
+  requestUsage?: RequestUsageCapture;
   /** Which model actually answered, parsed from the same output as tokenUsage.
    *  Persisted to cli_invocations.model_identity. Null when this execution path
    *  captures no stream, and for CLIs that name no model at all (codex, amp). */

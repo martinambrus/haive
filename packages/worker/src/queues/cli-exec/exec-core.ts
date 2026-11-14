@@ -1243,6 +1243,7 @@ export async function executeCliSpec(
             `${failedMcp.length === 1 ? 'that server' : 'those servers'}, so its result cannot be trusted.`
           : null),
       tokenUsage: collector.getTokenUsage(),
+      requestUsage: collector.getRequestUsage(),
       modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       compaction: compactionFrom(collector.getCompactions()),
       apiDurationMs: collector.getApiDurationMs(),
@@ -1279,6 +1280,7 @@ export async function executeCliSpec(
         reason,
       // Tokens were burned even without a result event (e.g. error_max_turns).
       tokenUsage: collector.getTokenUsage(),
+      requestUsage: collector.getRequestUsage(),
       // Worth keeping on a failed run: the init event still names what was asked
       // for, which is how a task that died on "unrecognized model" shows which
       // model it tried. served stays null unless a turn came back before the fault.
@@ -1359,6 +1361,7 @@ export async function executeCliSpec(
       result.error,
     ),
     tokenUsage: collector.getTokenUsage(),
+    requestUsage: collector.getRequestUsage(),
     // antigravity lands here. Its captured --log-file is the only place it names a
     // model, and then only as a human label ("Gemini 3.7 Flash (High)").
     modelIdentity: modelIdentityFrom({

@@ -3,6 +3,13 @@
 /* ------------------------------------------------------------------ */
 
 import type { CliTokenUsage, CompactionEvent, InvocationToolUsage } from '@haive/shared';
+import {
+  claudeRequestUsage,
+  record,
+  requestModelCoverage,
+  type RequestUsage,
+  type RequestUsageCapture,
+} from '../../cli-executor/request-usage.js';
 import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
 import { buildOutputTruncationMessage, classifyStreamFailure } from './failure-class.js';
@@ -44,6 +51,7 @@ interface StreamJsonCollector {
    *  entry for the init/served model reports. Null when no usage is reported or the
    *  assistant fallback is all zero (unknown on zai/muse, not a measured zero). */
   getTokenUsage: () => CliTokenUsage | null;
+  getRequestUsage: () => RequestUsageCapture;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its cost; its usage is per turn). Null when no result event carried one. */
   getApiDurationMs: () => number | null;
@@ -112,6 +120,12 @@ export function createStreamJsonCollector(
   let resultErrorText: string | null = null;
   let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
+  let resultCount = 0;
+  let resultOutputKnown = false;
+  let initialized = false;
+  const requestIssues = new Set<string>();
+  // Same message ids as assistantUsageByMessage; this strict view never changes legacy totals.
+  const requestsByMessage = new Map<string, RequestUsage>();
   let reportedWindow: number | null = null;
   let resultApiDurationMs: number | null = null;
   // Live fallback before the `result` event: one usage per assistant message.id, summed like the
@@ -154,6 +168,7 @@ export function createStreamJsonCollector(
     eventCount++;
 
     const type = event.type as string;
+    if (type === 'system' && event.subtype === 'init') initialized = true;
     const subtype = event.subtype as string | undefined;
 
     // Retry state. Consecutive api_retry lines (measured: attempts 1..10 arrive back to back
@@ -232,6 +247,10 @@ export function createStreamJsonCollector(
 
     // Extract final result
     if (type === 'result') {
+      resultCount++;
+      const strictResult = claudeRequestUsage(event.usage, 'result', null);
+      if (!strictResult) requestIssues.add('invalid-result-usage');
+      resultOutputKnown = strictResult?.outputTokens != null;
       if (!resultFired) {
         resultFired = true;
         onResult?.();
@@ -318,6 +337,25 @@ export function createStreamJsonCollector(
     // Always collect assistant text deltas — used as a cross-check against the
     // result event when downstream parsing fails.
     if (type === 'assistant') {
+      const message = record(event.message);
+      const id = typeof message?.id === 'string' && message.id.trim() ? message.id : null;
+      const model =
+        typeof message?.model === 'string' &&
+        message.model.trim() &&
+        !isPlaceholderModel(message.model)
+          ? message.model.trim()
+          : null;
+      const request = claudeRequestUsage(message?.usage ?? event.usage, id ?? '', model);
+      if (!id) requestIssues.add('missing-request-id');
+      if (!model) requestIssues.add('missing-request-model');
+      if (!request) requestIssues.add('invalid-request-usage');
+      if (resultCount > 0) requestIssues.add('request-after-result');
+      if (id && request) {
+        const previous = requestsByMessage.get(id);
+        if (previous && JSON.stringify(previous) !== JSON.stringify(request))
+          requestIssues.add('contradictory-request');
+        requestsByMessage.set(id, request);
+      }
       const msg = event.message as Record<string, unknown> | undefined;
       // What actually answered. Placeholders are skipped: claude-code emits
       // model:"<synthetic>" with zero usage for messages IT authored (e.g. an API
@@ -495,6 +533,50 @@ export function createStreamJsonCollector(
         buffer = '';
       }
       return resultApiDurationMs;
+    },
+    getRequestUsage(): RequestUsageCapture {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      const requests = [...requestsByMessage.values()].map((r) => ({ ...r }));
+      const reasons = new Set(requestIssues);
+      if (!initialized) reasons.add('missing-init');
+      // #1160 fixes whole-run totals by summing per-turn results. This does not prove
+      // each turn's request inventory independently, so keep the one-result rule.
+      if (resultCount !== 1) reasons.add('result-count');
+      if (malformedLineCount > 0) reasons.add('malformed-stream');
+      if (!requests.length) reasons.add('missing-requests');
+      const sum = (key: 'inputTokens' | 'cacheReadTokens' | 'cacheCreationTokens') =>
+        requests.reduce((n, r) => n + r[key], 0);
+      const promptMatches =
+        resultUsage !== null &&
+        sum('inputTokens') === resultUsage.inputTokens &&
+        sum('cacheReadTokens') === (resultUsage.cacheReadTokens ?? 0) &&
+        sum('cacheCreationTokens') === (resultUsage.cacheCreationTokens ?? 0);
+      if (!promptMatches) reasons.add('prompt-mismatch');
+      const outputKnown =
+        promptMatches &&
+        resultOutputKnown &&
+        malformedLineCount === 0 &&
+        requests.every((r) => r.outputTokens !== null) &&
+        requests.reduce((n, r) => n + (r.outputTokens ?? 0), 0) === resultUsage?.outputTokens;
+      if (!outputKnown) for (const r of requests) r.outputTokens = null;
+      if (requests.some((r) => r.cacheCreationTokens > 0 && r.cacheCreation5mTokens === null))
+        reasons.add('unknown-cache-ttl');
+      const modelCoverage = requestModelCoverage(requests);
+      if (modelCoverage !== 'single') reasons.add('model-coverage');
+      if ([...billedModels].some((m) => !requests.some((r) => r.model === m)))
+        reasons.add('unobserved-model');
+      const complete = reasons.size === 0;
+      return {
+        requests,
+        coverage: complete ? 'complete' : 'incomplete',
+        inputConvention: 'exclusive',
+        requestCount: complete ? requests.length : null,
+        modelCoverage,
+        reasons: [...reasons],
+      };
     },
     getTokenUsage(): CliTokenUsage | null {
       if (buffer.trim()) {

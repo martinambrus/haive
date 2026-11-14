@@ -1,0 +1,52 @@
+[
+  {
+    "type": "system",
+    "subtype": "init",
+    "model": "model-a"
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "id": "a",
+      "model": "model-a",
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 2,
+        "cache_read_input_tokens": 30,
+        "cache_creation_input_tokens": 10,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 10,
+          "ephemeral_1h_input_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "id": "b",
+      "model": "model-a",
+      "usage": {
+        "input_tokens": 200,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 40,
+        "cache_creation_input_tokens": 20,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 20,
+          "ephemeral_1h_input_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "type": "result",
+    "subtype": "success",
+    "result": "done",
+    "usage": {
+      "input_tokens": 300,
+      "output_tokens": 5,
+      "cache_read_input_tokens": 70,
+      "cache_creation_input_tokens": 30
+    }
+  }
+]
