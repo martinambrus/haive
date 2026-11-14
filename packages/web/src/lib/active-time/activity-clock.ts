@@ -78,8 +78,8 @@ export class ActivityClock {
     return true;
   }
 
-  setReadingWords(epoch: number, words: number): void {
-    if (epoch !== this.epoch || this.measured) return;
+  setReadingWords(epoch: number, words: number, now: number): void {
+    if (epoch !== this.epoch || this.measured || !this.isPresent(now)) return;
     this.measured = true;
     this.reading = readingAllowanceMs(words);
     this.deadline = this.epochAt + this.allowance();

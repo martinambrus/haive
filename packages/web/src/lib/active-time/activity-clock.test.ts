@@ -37,11 +37,11 @@ describe('activity clock', () => {
   it('freezes deferred measurement to an epoch and accepts it only once', () => {
     const c = new ActivityClock(0);
     const epoch = c.epoch;
-    c.setReadingWords(epoch, 300);
-    c.setReadingWords(epoch, 750);
+    c.setReadingWords(epoch, 300, 2000);
+    c.setReadingWords(epoch, 750, 3000);
     expect(c.isPresent(120000)).toBe(false);
     c.input(130000);
-    c.setReadingWords(epoch, 750);
+    c.setReadingWords(epoch, 750, 130001);
     expect(c.isPresent(190000)).toBe(false);
   });
   it('restarts content only with recent real input, not chained content', () => {
@@ -77,7 +77,7 @@ describe('activity clock', () => {
   it('a delayed measurement cannot smuggle in an extension that was refused while idle', () => {
     const c = new ActivityClock(0);
     c.setModes(61000, true, false);
-    c.setReadingWords(c.epoch, 150);
+    c.setReadingWords(c.epoch, 750, 61000);
     expect(c.isPresent(62000)).toBe(false);
     c.input(63000);
     expect(c.isPresent(900000)).toBe(true);

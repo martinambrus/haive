@@ -70,13 +70,13 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     };
     touchLease();
     held = lease?.acquired ?? true;
-    const flush = () => {
+    const flush = (publish = true) => {
       let delta = Math.round(unflushed);
       if (delta <= 0) return;
       unflushed = 0;
       committed += delta;
       lastFlush = now();
-      show();
+      if (publish) show();
       // Discard before dispatch: an ambiguous additive request must never be retried.
       while (delta > 0) {
         const chunk = Math.min(delta, ACTIVE_TIME_FLUSH_MS);
@@ -100,7 +100,7 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
       const epoch = clock.epoch;
       measureTimer = setTimeout(() => {
         // Deadline stays anchored to the input, even if this callback ran late.
-        clock.setReadingWords(epoch, visibleWords() ?? 0);
+        clock.setReadingWords(epoch, visibleWords() ?? 0, now());
       }, READING_MEASURE_DELAY_MS);
     };
     const update = () => {
@@ -194,13 +194,17 @@ export function useActiveTime({ enabled, pending, contentKey, sink, baseMs = 0 }
     const interval = setInterval(() => {
       held = foreground ? touchLease() : false;
       sample();
+      // A fresh takeover excluded the preceding interval. Its acquired baseline
+      // permits a later final flush to count only the partial interval after it.
+      held = foreground && (lease?.acquired ?? true);
       // Leaving an iframe restores this epoch's reading deadline; staying never renews it.
       clock.setModes(now(), latest.current.pending, iframeFocused());
       if (now() - lastFlush >= ACTIVE_TIME_FLUSH_MS) flush();
     }, ACTIVE_TIME_SAMPLE_MS);
     return () => {
-      sample();
-      flush(); // closes over the OLD sink
+      // Collect the final partial tick for the OLD sink, without a state update.
+      unflushed += clock.sample(now(), foreground && held);
+      flush(false);
       lease?.release();
       clearInterval(interval);
       clearTimeout(measureTimer);

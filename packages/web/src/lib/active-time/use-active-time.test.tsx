@@ -188,6 +188,22 @@ describe('useActiveTime', () => {
     expect(h.result.current).toBe(121100);
     expect(visibleWords).toHaveBeenCalledTimes(1);
   });
+  it('a measurement delayed past presence cannot revive counting', () => {
+    vi.mocked(visibleWords).mockReturnValue(750);
+    const h = setup();
+    const monotonic = vi.spyOn(performance, 'now').mockReturnValue(61000);
+    advance(2000);
+    expect(visibleWords).toHaveBeenCalledOnce();
+    monotonic.mockReturnValue(62000);
+    advance(1000);
+    expect(h.result.current).toBe(60100);
+  });
+  it('flushes the final partial tick without publishing another display', () => {
+    const h = setup();
+    advance(500);
+    h.unmount();
+    expect(h.sink).toHaveBeenCalledExactlyOnceWith(500);
+  });
   it('uses the base allowance on measurement overflow or failure', () => {
     vi.mocked(visibleWords).mockReturnValue(null);
     const h = setup();
@@ -316,6 +332,15 @@ describe('useActiveTime', () => {
     expect(second.result.current).toBe(100);
     advance(1000);
     expect(second.result.current).toBe(1100);
+  });
+  it('flushes the partial interval after a takeover baseline without backfilling', () => {
+    const first = setup();
+    const second = setup();
+    advance(2000);
+    first.unmount();
+    advance(1500);
+    second.unmount();
+    expect(second.sink).toHaveBeenCalledExactlyOnceWith(500);
   });
   it('an expired foreign lease can be claimed, with a fresh baseline', () => {
     localStorage.setItem(
