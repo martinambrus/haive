@@ -18,7 +18,8 @@ The insert uses `ON CONFLICT (id) DO NOTHING`. Concurrent inserts and a replay c
 create a second event. A deliberate Retry with the same retained invocation/form gets a
 new event through its generation. The first recorded observation wins: replay must not
 replace an earlier failure's counts with a reconciliation against files it already wrote.
-This does not make the existing filesystem apply idempotent. A hard process kill before
+Filesystem replay is separate: learning provenance carries a stable operation id (below),
+so an earlier successful write is reused even if telemetry was never recorded. A hard process kill before
 `finally` cannot record its unfinished observation; replay records its observation under
 the same key. Counts describe completed operations observed by the recorded apply, not
 an atomic filesystem/database commit or a reconstruction of writes before a hard kill.
@@ -90,10 +91,10 @@ replay, two after an explicit Retry) and has no committed test.
 ## Reading the events
 
 A step can carry several events: one per round and per `rerun_generation`. For counts of
-what a run finally did, read the latest generation per (step row, round). A Retry replays
-the agent's ops against files the first pass already wrote, and an insert whose target
-exists gets a suffixed id (a pre-existing behaviour of the insert path), so a retried run's
-events over-state real inserts if summed across generations. Drafts rejected in full are
+what a run finally did, read the latest generation per (step row, round). A recovery or re-drive of the same invocation reuses its learning files (a Retry supersedes the
+invocation, so it is a fresh one); already completed operations do not increment filesystem-write
+counters again. A fresh invocation or changed proposal is
+distinct and still suffixes a colliding insert. Do not sum generations as unique learning counts. Drafts rejected in full are
 re-rolled before the form (`shouldRetryPreForm`); only the final invocation's reply is
 counted, so machine rejections on earlier re-rolls leave no trace.
 
@@ -104,7 +105,15 @@ Each learning written by `applyLearningOps` carries a trailing HTML comment in t
 insert's origin records the writer's task id, UTC ISO timestamp and `bodyHash`; an update
 retains that origin and appends its own task id, UTC timestamp, `beforeHash` and `afterHash`.
 `LEARNING_UPDATE_HISTORY_MAX` is **5**: origin is retained indefinitely, the last five updates
-are retained, and older update records are dropped. Within one apply, repeated updates to one
+are retained, and older update records are dropped. Stamps optionally carry an `operationId`:
+SHA-256 over the task/step row, round, invocation and the proposal's original ordinal and entry.
+Recovery epochs and Retry generations are excluded, as are reviewer edits. An insert reuses the
+file whose origin records that operation, including its collision suffix and staged-draft id.
+A recorded update proves that target's preceding operations in the same proposal completed;
+replay skips that prefix, preserving bytes and history. The default atomic filesystem write
+publishes content and identity together, independently of the best-effort reconcile event.
+Legacy records without an operation id remain readable but cannot prove an earlier write's identity.
+Within one apply, repeated updates to one
 target chain from the bytes the preceding operation successfully wrote. An update whose
 after-hash equals its before-hash returns the prior file byte-for-byte, without a new date or
 history slot, including for legacy files.
