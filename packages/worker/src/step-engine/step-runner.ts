@@ -5407,9 +5407,22 @@ function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>):
 }
 
 /** A schema default is a source of answers, including a legacy default restored by validation.
- *  Scope Git semantics to the known gate before any schema copy or Retry/reopen return. */
+ *  Normalize stored forms before validation, keeping editor text separate from answer defaults. */
 function normalizeStepSchemaDefaults(stepId: string, schema: FormSchema | null): FormSchema | null {
-  if (!schema || stepId !== '11a-gate-4-push') return schema;
+  if (!schema) return schema;
+  if (stepId === '01-plan-chat') {
+    let changed = false;
+    const fields = schema.fields.map((field) => {
+      if (field.type !== 'textarea' || field.id !== 'message' || field.default === undefined)
+        return field;
+      changed = true;
+      const { default: original, ...rest } = field;
+      return { ...rest, initialValue: field.initialValue ?? original };
+    });
+    return changed ? { ...schema, fields } : schema;
+  }
+  // Scope Git semantics to the known gate before any schema copy or Retry/reopen return.
+  if (stepId !== '11a-gate-4-push') return schema;
   const defaults = extractFormDefaults(schema);
   const normalized = normalizeStepFormValues(stepId, defaults);
   if (!normalized.success) throw new Error(normalized.issues.join('; '));

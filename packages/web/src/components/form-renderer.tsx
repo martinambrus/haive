@@ -201,8 +201,9 @@ export function StatusSummary({
 
 function defaultValueFor(field: FormField): unknown {
   switch (field.type) {
-    case 'text':
     case 'textarea':
+      return field.initialValue ?? field.default ?? '';
+    case 'text':
     case 'select-with-text':
     case 'radio-with-textarea':
       return field.default ?? '';

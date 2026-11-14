@@ -305,7 +305,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
           id: 'message',
           label: 'Next message',
           description: `Leave empty to finish. Maximum ${PLAN_CHAT_MESSAGE_MAX_CHARS.toLocaleString('en-US')} characters.`,
-          ...(needsEdit(detected) ? { default: detected.pendingQuestion! } : {}),
+          ...(needsEdit(detected) ? { initialValue: detected.pendingQuestion! } : {}),
           required: false,
         },
       ],

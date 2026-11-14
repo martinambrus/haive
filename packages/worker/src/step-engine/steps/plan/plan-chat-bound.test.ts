@@ -105,7 +105,7 @@ describe('plan chat whole context', () => {
     const form = planChatStep.form!({} as never, detected);
     expect(form).not.toBeNull();
     expect(form?.description).toMatch(/20,000|20000/);
-    expect(form?.fields[0]).toMatchObject({ id: 'message', default: 'x'.repeat(20_001) });
+    expect(form?.fields[0]).toMatchObject({ id: 'message', initialValue: 'x'.repeat(20_001) });
     expect(planChatStep.llm!.skipIf!({ detected, formValues: {} })).toBe(true);
   });
 });

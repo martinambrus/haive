@@ -374,6 +374,52 @@ describe('plan chat through the real runner dispatch', () => {
     expect(f.enqueue).not.toHaveBeenCalled();
   });
 
+  it.each(['normal', 'persisted edit'] as const)(
+    'ends a blank %s form through the runner without dispatching',
+    async (kind) => {
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: kind === 'normal' ? null : 'x'.repeat(20_001),
+      };
+      const form = planChatStep.form!({} as never, detected)!;
+      if (kind === 'persisted edit') {
+        // A form already parked by the previous branch revision still has a fallback default.
+        form.fields = [
+          { type: 'textarea', id: 'message', label: 'Message', default: detected.pendingQuestion! },
+        ];
+      }
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: form,
+      });
+      const enqueue = vi.fn();
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true },
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        formValues: { message: '' },
+      });
+      expect(result.status).toBe('done');
+      expect(state.taskStepRow.output).toMatchObject({ continueRequested: false, error: null });
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['saved', 'job'] as const)(
     'reopens an oversized pre-limit %s submission for editing',
     async (source) => {
@@ -413,7 +459,7 @@ describe('plan chat through the real runner dispatch', () => {
       expect(state.taskStepRow.formValues).toBeNull();
       expect(state.taskStepRow.detectOutput).toMatchObject({ pendingQuestion: message });
       expect(state.taskStepRow.formSchema).toMatchObject({
-        fields: [{ id: 'message', default: message }],
+        fields: [{ id: 'message', initialValue: message }],
       });
       expect(state.taskStepRow.waitingStartedAt).toBeInstanceOf(Date);
       expect(enqueue).not.toHaveBeenCalled();
