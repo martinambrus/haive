@@ -68,6 +68,10 @@ vi.mock('./_gate-insights.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_gate-insights.js')>()),
   loadUnactedInsights: m.loadUnactedInsights,
 }));
+vi.mock('./_fix-test-store.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_fix-test-store.js')>()),
+  loadFixTestRecords: vi.fn(async () => []),
+}));
 
 import { TaskCancelledError } from '../../step-definition.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
