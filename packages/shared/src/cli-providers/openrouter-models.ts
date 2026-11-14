@@ -84,6 +84,19 @@ const OVERRIDE_RATE_FIELDS = {
   input_cache_write_1h: 'cacheWrite1hRate',
 } as const;
 
+/** VOLATILE: price fields outside Haive's text buckets, observed in the public
+ * OpenRouter catalog on 2026-11-14. Unknown fields remain conditions, regardless
+ * of whether their value looks numeric. */
+const IGNORED_OVERRIDE_PRICE_FIELDS = new Set([
+  'audio',
+  'audio_output',
+  'input_audio_cache',
+  'image',
+  'image_output',
+  'web_search',
+  'internal_reasoning',
+]);
+
 /** Later matching entries win per bucket, including explicit nulls. */
 function parseOverrides(
   pricing: RawOpenRouterModel['pricing'],
@@ -109,7 +122,12 @@ function parseOverrides(
     const keys = Object.keys(entry);
     if (
       !keys.includes('min_prompt_tokens') ||
-      keys.some((k) => k !== 'min_prompt_tokens' && !(k in OVERRIDE_RATE_FIELDS))
+      keys.some(
+        (k) =>
+          k !== 'min_prompt_tokens' &&
+          !Object.hasOwn(OVERRIDE_RATE_FIELDS, k) &&
+          !IGNORED_OVERRIDE_PRICE_FIELDS.has(k),
+      )
     ) {
       unsupportedOverrideCount++;
       continue;

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { trimOpenRouterModels } from '../src/cli-providers/openrouter-models.js';
 
+import google from './fixtures/pricing/openrouter-google.json' with { type: 'json' };
+
 // Shape taken from a real GET https://openrouter.ai/api/v1/models response.
 const REAL_ENTRY = {
   id: 'anthropic/claude-opus-5-fast',
@@ -112,4 +114,44 @@ describe('trimOpenRouterModels', () => {
     expect(trimOpenRouterModels({})).toEqual([]);
     expect(trimOpenRouterModels({ data: 'nope' })).toEqual([]);
   });
+});
+
+it('materializes the live Gemini override with non-text price keys', () => {
+  const [model] = trimOpenRouterModels(google);
+  expect(model!.pricingState).toBeUndefined();
+  expect(model!.tiers).toEqual([
+    {
+      aboveTokens: 200000,
+      inclusive: false,
+      inputRate: 0.0000025,
+      outputRate: 0.000015,
+      cacheReadRate: 0.00000025,
+      cacheWriteRate: 0.000000375,
+      cacheWrite1hRate: null,
+    },
+  ]);
+});
+it('ignores only known override price fields, never an unknown condition', () => {
+  const parse = (extra: Record<string, unknown>) =>
+    trimOpenRouterModels({
+      data: [
+        {
+          id: 'x',
+          pricing: { prompt: '1', overrides: [{ min_prompt_tokens: 100, prompt: '2', ...extra }] },
+        },
+      ],
+    })[0]!;
+  expect(
+    parse({
+      audio: '3',
+      audio_output: '4',
+      input_audio_cache: '5',
+      image: '6',
+      image_output: '7',
+      web_search: '8',
+      internal_reasoning: '9',
+    }).tiers,
+  ).toHaveLength(1);
+  expect(parse({ region: '1' }).pricingReason).toBe('unsupported-condition');
+  expect(parse({ unknown_price: '1' }).pricingReason).toBe('unsupported-condition');
 });

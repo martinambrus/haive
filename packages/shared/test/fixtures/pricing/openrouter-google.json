@@ -1,0 +1,130 @@
+{
+  "data": [
+    {
+      "id": "google/gemini-2.5-pro",
+      "canonical_slug": "google/gemini-2.5-pro",
+      "hugging_face_id": "",
+      "name": "Google: Gemini 2.5 Pro",
+      "created": 1750169544,
+      "description": "Gemini 2.5 Pro is Google\u2019s state-of-the-art AI model designed for advanced reasoning, coding, mathematics, and scientific tasks. It employs \u201cthinking\u201d capabilities, enabling it to reason through responses with enhanced accuracy...",
+      "context_length": 1048576,
+      "architecture": {
+        "modality": "text+image+file+audio+video->text",
+        "input_modalities": ["text", "image", "file", "audio", "video"],
+        "output_modalities": ["text"],
+        "tokenizer": "Gemini",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000125",
+        "completion": "0.00001",
+        "image": "0.00000125",
+        "audio": "0.00000125",
+        "input_audio_cache": "0.000000125",
+        "web_search": "0.014",
+        "internal_reasoning": "0.00001",
+        "input_cache_read": "0.000000125",
+        "input_cache_write": "0.000000375",
+        "overrides": [
+          {
+            "min_prompt_tokens": 200000,
+            "prompt": "0.0000025",
+            "completion": "0.000015",
+            "audio": "0.0000025",
+            "input_audio_cache": "0.00000025",
+            "input_cache_read": "0.00000025"
+          }
+        ]
+      },
+      "top_provider": {
+        "context_length": 1048576,
+        "max_completion_tokens": 65536,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "seed",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p"
+      ],
+      "default_parameters": {
+        "temperature": null,
+        "top_p": null,
+        "frequency_penalty": null
+      },
+      "supported_voices": null,
+      "knowledge_cutoff": "2025-01-31",
+      "expiration_date": null,
+      "links": {
+        "details": "/api/v1/models/google/gemini-2.5-pro/endpoints"
+      },
+      "endpoints": [
+        "/api/v1/chat/completions",
+        "/api/v1/completions",
+        "/api/v1/messages",
+        "/api/v1/responses"
+      ],
+      "benchmarks": {
+        "design_arena": [
+          {
+            "arena": "models",
+            "category": "3d",
+            "elo": 1060,
+            "win_rate": 50.6,
+            "rank": 106
+          },
+          {
+            "arena": "models",
+            "category": "codecategories",
+            "elo": 1142,
+            "win_rate": 57.5,
+            "rank": 90
+          },
+          {
+            "arena": "models",
+            "category": "dataviz",
+            "elo": 1219,
+            "win_rate": 68.2,
+            "rank": 51
+          },
+          {
+            "arena": "models",
+            "category": "gamedev",
+            "elo": 1101,
+            "win_rate": 54.2,
+            "rank": 97
+          },
+          {
+            "arena": "models",
+            "category": "uicomponent",
+            "elo": 1130,
+            "win_rate": 57.5,
+            "rank": 89
+          },
+          {
+            "arena": "models",
+            "category": "website",
+            "elo": 1159,
+            "win_rate": 58.4,
+            "rank": 89
+          }
+        ],
+        "artificial_analysis": {
+          "intelligence_index": null,
+          "coding_index": 33.3,
+          "agentic_index": 1.6
+        }
+      },
+      "reasoning": {
+        "mandatory": true
+      }
+    }
+  ]
+}
