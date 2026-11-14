@@ -10,7 +10,9 @@ import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
 import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
 import { ensureEnvKeys } from './envkeys.js';
+import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
+import { cleanupInstallTemps, requireRegularInstallFiles } from './install-files.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
@@ -31,6 +33,7 @@ import {
   phaseVerify,
   readEnvVar,
   recordSnapshot,
+  recordBundleBackup,
   resume,
   rollback,
   type UpgradeContext,
@@ -181,11 +184,14 @@ async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
 }
 
 async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = scrubErrorPaths(safeErrorMessage(err));
   await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
   emit('rollback-failed', {
     message,
-    next: 'run `haive upgrade` again to finish the rollback',
+    next:
+      err instanceof BundleBackupError
+        ? `restore the missing or invalid bundle backup at ${err.backupDir}, then run \`haive upgrade\` again to finish the rollback`
+        : 'run `haive upgrade` again to finish the rollback',
   });
   return EXIT.rollbackFailed;
 }
@@ -325,6 +331,8 @@ export async function main(): Promise<number> {
     locked = true;
     const live = await findLiveRun(sql);
     hasRun = live !== null;
+    await requireRegularInstallFiles(installDir);
+    if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
 
@@ -338,17 +346,24 @@ export async function main(): Promise<number> {
         envFile,
         snapshotHostDir: snapshotDir,
         fromVersion: live.fromVersion,
-        target: parseReleaseManifest({
+        // Recovery only rolls back or finishes commit; neither repeats the health gate.
+        // This journal-derived context is not a fetched manifest: recovery never reads its head,
+        // so a missing one must not block a rollback.
+        target: {
           manifestVersion: 1,
           version: live.toVersion,
+          channel: live.channel,
           builtAt: live.startedAt.toISOString(),
           minFrom: '0.0.0',
           migrationHead: String(live.metadata.migrationHead ?? ''),
-        }),
+          contracts: false,
+          images: {},
+        },
         registry:
           typeof live.metadata.imageRegistry === 'string' ? live.metadata.imageRegistry : registry,
         previousImages: journalImages(live.metadata.previousImages),
         targetImages: journalImages(live.metadata.targetImages),
+        bundle: readBundleState(live.metadata.bundle),
         apiUrl,
         postgresVolume: pgVolume,
         network,
@@ -516,6 +531,7 @@ export async function main(): Promise<number> {
 
     let verifyFailed = false;
     try {
+      await recordBundleBackup(ctx);
       await phaseDraining(ctx);
       await phaseMaintenance(ctx);
       if (pgVolume) {

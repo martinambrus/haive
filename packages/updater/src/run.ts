@@ -1,5 +1,5 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import type { ISql, Sql } from 'postgres';
 import {
   CONFIG_KEYS,
@@ -11,7 +11,9 @@ import {
   type MaintenanceState,
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
+import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
+import { inInstall } from './install-files.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
   enterPhase,
@@ -22,6 +24,13 @@ import {
   type RunMetadata,
 } from './journal.js';
 import { decideResume, type UpgradePhase } from './phases.js';
+import {
+  backupBundle,
+  swapBundle,
+  restoreBundle,
+  pruneBundles,
+  type BundleState,
+} from './bundle-swap.js';
 
 export interface UpgradeContext {
   sql: Sql;
@@ -42,6 +51,8 @@ export interface UpgradeContext {
   registry: string;
   previousImages?: ImageOverrides;
   targetImages?: ImageOverrides;
+  /** Durable backup state, journalled before any installed bundle file is replaced. */
+  bundle?: BundleState;
   /** Base URL of the api, for the health gate. */
   apiUrl: string;
   /** Postgres data volume to snapshot. */
@@ -76,11 +87,18 @@ export interface UpgradeContext {
  *  by replacing the line rather than appending, or a rollback would leave two and compose would
  *  take the last. */
 export async function setEnvVar(envFile: string, key: string, value: string): Promise<void> {
-  const text = await readFile(envFile, 'utf8');
-  const line = `${key}=${value}`;
-  const pattern = new RegExp(`^${key}=.*$`, 'm');
-  const next = pattern.test(text) ? text.replace(pattern, line) : `${text.trimEnd()}\n${line}\n`;
-  await writeFile(envFile, next, 'utf8');
+  await inInstall(dirname(envFile), async (dir) => {
+    const name = basename(envFile);
+    const current = await dir.read(name);
+    if (!current) throw new Error('install env file is missing');
+    const text = current.bytes.toString('utf8');
+    const line = `${key}=${value}`;
+    const pattern = new RegExp(`^${key}=.*$`, 'm');
+    const next = pattern.test(text)
+      ? text.replace(pattern, () => line)
+      : `${text.trimEnd()}\n${line}\n`;
+    await dir.atomic(name, Buffer.from(next), current.owner);
+  });
 }
 
 export async function readEnvVar(envFile: string, key: string): Promise<string | null> {
@@ -378,9 +396,19 @@ export async function phaseMigrate(ctx: UpgradeContext): Promise<void> {
   ctx.log('migrated', { tail: out.split('\n').slice(-1)[0] ?? '' });
 }
 
+/** Immediately after startRun, before draining or changing any installed bundle file. */
+export async function recordBundleBackup(ctx: UpgradeContext): Promise<void> {
+  if (!ctx.target.bundle) return;
+  const bundle = await backupBundle(ctx.compose, ctx.runId, ctx.target);
+  await mergeMetadata(ctx.sql, ctx.runId, { bundle });
+  ctx.bundle = bundle;
+}
+
 export async function phaseVerify(ctx: UpgradeContext): Promise<boolean> {
   await enterPhase(ctx.sql, ctx.runId, 'verify');
   await writeImages(ctx, ctx.targetImages);
+  if (ctx.target.bundle && !ctx.bundle) throw new Error('bundle backup was not journalled');
+  if (ctx.bundle) await swapBundle(ctx.compose, ctx.bundle, ctx.target.version);
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.target.version);
   await dk.composeUp(ctx.compose, composeEnv(ctx.target.version, ctx.targetImages, ctx.registry));
   ctx.log('verify-start', { expect: ctx.target.version });
@@ -400,6 +428,7 @@ export async function phaseVerify(ctx: UpgradeContext): Promise<boolean> {
  *  against them perfectly well, and undoing them is neither possible nor necessary. */
 export async function rollback(ctx: UpgradeContext, reason: string): Promise<void> {
   ctx.log('rollback', { to: ctx.fromVersion, reason });
+  if (ctx.bundle) await restoreBundle(ctx.compose, ctx.bundle);
   await writeImages(ctx, ctx.previousImages);
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
   await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry));
@@ -428,6 +457,16 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
 
   await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'done');
+  if (ctx.bundle) {
+    try {
+      await pruneBundles(ctx.compose, ctx.bundle, ctx.log);
+    } catch (err) {
+      ctx.log('bundle-prune-failed', {
+        reason: 'commit succeeded; keeping remaining backup and staging files',
+        message: safeErrorMessage(err),
+      });
+    }
+  }
   ctx.log('done', { version: ctx.target.version });
 }
 

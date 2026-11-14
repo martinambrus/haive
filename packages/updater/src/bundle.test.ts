@@ -71,7 +71,9 @@ it('does not substitute a different target overlay when the installed overlay is
     { ...bundle, files },
     new Map(Object.keys(files).map((name) => [name, body])),
   );
-  expect(staged.files).toHaveLength(2);
+  expect(staged.files).toHaveLength(3);
+  expect(staged.files[2]).toBe(join(dir, 'docker-compose.gpu.yml'));
+  expect(await readFile(staged.files[2]!)).toEqual(body);
 });
 
 it('rejects a malformed installed record as modified', async () => {
@@ -94,4 +96,20 @@ it('names the first differing file in the closest known legacy record', async ()
     kind: 'legacy-unknown',
     differingFile: 'docker-compose.run.yml',
   });
+});
+
+it('detects an installed inactive overlay absent from the local record', async () => {
+  const files = { ...baseFiles, 'docker-compose.gpu.yml': hash };
+  for (const name of ['docker-compose.gpu.yml', 'docker-compose.vulkan.yml'])
+    await writeFile(join(dir, name), body);
+  await writeFile(join(dir, '.haive-bundle.json'), JSON.stringify({ version: '1.0.0', files }));
+  const classification = await classifyBundle(await readComposeContext(dir), {
+    ...bundle,
+    files: { ...files, 'docker-compose.vulkan.yml': hash },
+  });
+  expect(classification).toEqual({
+    kind: 'modified',
+    differingFile: 'docker-compose.vulkan.yml',
+  });
+  expect(() => requireUnmodifiedBundle(classification, false)).toThrow('--replace-modified-bundle');
 });

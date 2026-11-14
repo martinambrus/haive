@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,10 @@ vi.mock('../src/run.js', async (importOriginal) => {
   };
 });
 
-import { ensureJournal, startRun } from '../src/journal.js';
+import { backupBundle } from '../src/bundle-swap.js';
+import { bundleHash } from '../src/bundle.js';
+import { parseReleaseManifest } from '@haive/shared/release';
+import { ensureJournal, startRun, mergeMetadata, enterPhase } from '../src/journal.js';
 
 const url = process.env.UPDATER_ROLLBACK_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/updater_rollback_test'))
@@ -182,6 +185,48 @@ describe.skipIf(!url)(
       expect(await runUpdater()).toBe(0);
 
       expect(control.stored).toBe('normal');
+    });
+
+    it('restores a running run from metadata.bundle before restarting the old files', async () => {
+      const names = ['docker-compose.yml', 'docker-compose.run.yml'];
+      const old = Buffer.from('old compose # local change\n');
+      const next = Buffer.from('new compose\n');
+      for (const name of names) await writeFile(join(dir, name), old);
+      await rm(join(dir, '.haive-bundle.json'), { force: true });
+      await ensureJournal(sql);
+      const id = await startRun(sql, {
+        fromVersion: '1.0.0',
+        toVersion: '1.1.0',
+        channel: 'public',
+      });
+      const target = parseReleaseManifest({
+        manifestVersion: 1,
+        version: '1.1.0',
+        builtAt: '2026-01-01',
+        migrationHead: '0221',
+        bundle: {
+          files: Object.fromEntries(names.map((name) => [name, bundleHash(next)])),
+          known: [],
+          env: [],
+        },
+      });
+      const bundle = await backupBundle({ dir, files: names }, id, target);
+      await mergeMetadata(sql, id, { bundle, foundState: 'normal' });
+      await enterPhase(sql, id, 'verify');
+      await writeFile(join(dir, names[0]!), next);
+      await writeFile(join(dir, '.haive-bundle.json'), '{}');
+      await writeFile(join(dir, '.env'), 'HAIVE_VERSION=1.1.0\n');
+      control.stored = 'maintenance';
+      control.composeUp = async () => {
+        for (const name of names) expect(await readFile(join(dir, name))).toEqual(old);
+        expect(await readFile(join(dir, '.env'), 'utf8')).toContain('HAIVE_VERSION=1.0.0');
+      };
+      expect(await runUpdater()).toBe(0);
+      expect((await run()).status).toBe('rolled_back');
+      expect(control.stored).toBe('normal');
+      await expect(readFile(join(dir, '.haive-bundle.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
 
     it('keeps the run running with the error recorded, exits 6, and leaves the hold in place', async () => {
