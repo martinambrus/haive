@@ -110,6 +110,11 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
     if (entries.length === 0) throw new Error('litellm feed parsed to 0 chat entries');
     for (const row of litellmRowsForProviders(entries, litellmProviders)) {
       desired.push({ ...row, source: 'litellm' });
+      if (row.rates.pricingState === 'unsupported')
+        errors.push({
+          name: `price:${row.provider}`,
+          error: `${row.modelKey}: ${row.rates.pricingReason}`,
+        });
     }
   } catch (err) {
     const error = safeErrorMessage(err);
@@ -140,11 +145,20 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
           cacheReadRate: m.cacheReadPrice,
           cacheWriteRate: m.cacheWritePrice,
           cacheWrite1hRate: m.cacheWrite1hPrice,
+          ...(m.tiers?.length ? { tiers: structuredClone(m.tiers) } : {}),
+          ...(m.pricingState
+            ? { pricingState: m.pricingState, pricingReason: m.pricingReason }
+            : {}),
         };
-        if (!hasAnyRate(rates)) continue;
+        if (!hasAnyRate(rates) && rates.pricingState !== 'unsupported') continue;
         const modelKey = m.id.trim().toLowerCase();
         if (!modelKey) continue;
         desired.push({ provider: 'openrouter', modelKey, source: 'openrouter', rates });
+        if (rates.pricingState === 'unsupported')
+          errors.push({
+            name: 'price:openrouter',
+            error: `${modelKey}: ${rates.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
+          });
       }
     } catch (err) {
       const error = safeErrorMessage(err);
@@ -183,18 +197,23 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
 
   const now = new Date();
   for (const [provider, count] of perProvider) {
+    const fetchError =
+      errors
+        .filter((e) => e.name === `price:${provider}`)
+        .map((e) => e.error)
+        .join('; ') || null;
     await db
       .insert(schema.cliPricingSync)
       .values({
         name: provider,
         fetchedAt: now,
-        fetchError: null,
+        fetchError,
         priceCount: count,
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: schema.cliPricingSync.name,
-        set: { fetchedAt: now, fetchError: null, priceCount: count, updatedAt: now },
+        set: { fetchedAt: now, fetchError, priceCount: count, updatedAt: now },
       });
   }
 

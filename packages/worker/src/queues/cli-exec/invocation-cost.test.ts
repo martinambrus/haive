@@ -83,3 +83,67 @@ describe('cache TTL resolution when the config store is unreadable', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('unsupported feed rates', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it('refuses computed pricing but preserves manual precedence and snapshots by value', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const rates = {
+      inputRate: 1,
+      outputRate: 2,
+      cacheReadRate: null,
+      cacheWriteRate: null,
+      cacheWrite1hRate: null,
+      tiers: [
+        {
+          aboveTokens: 100,
+          inclusive: false,
+          inputRate: 5,
+          outputRate: 10,
+          cacheReadRate: null,
+          cacheWriteRate: null,
+          cacheWrite1hRate: null,
+        },
+      ],
+    };
+    const rows = [
+      {
+        id: 'feed',
+        provider: 'codex',
+        modelKey: 'x',
+        source: 'litellm',
+        rates: { ...rates, pricingState: 'unsupported', pricingReason: 'unsupported-tier' },
+        effectiveFrom: new Date(),
+      },
+    ];
+    const db = {
+      query: {
+        cliProviders: { findFirst: async () => ({ authMode: 'api_key', model: 'x' }) },
+        cliPricingSync: { findFirst: async () => undefined },
+      },
+      select: () => ({ from: () => ({ where: async () => rows }) }),
+    } as unknown as Database;
+    const input = {
+      cliProviderId: 'prov-1',
+      providerName: 'codex',
+      tokenUsage: { inputTokens: 1, outputTokens: 1 } as never,
+      modelIdentity: null,
+    };
+    expect(await resolveInvocationCost(db, input)).toMatchObject({
+      source: 'none',
+      billable: false,
+    });
+    rows.push({
+      id: 'manual',
+      provider: 'codex',
+      modelKey: 'x',
+      source: 'manual',
+      rates: structuredClone(rates),
+      effectiveFrom: new Date(),
+    } as (typeof rows)[number]);
+    const cost = await resolveInvocationCost(db, input);
+    expect(cost).toMatchObject({ source: 'manual', costUsd: 3 });
+    rows[1]!.rates.tiers[0]!.inputRate = 999;
+    expect(cost!.rates!.tiers![0]!.inputRate).toBe(5);
+  });
+});

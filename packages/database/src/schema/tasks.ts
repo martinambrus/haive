@@ -1031,6 +1031,19 @@ export const cliInvocations = pgTable(
         cacheReadRate: number | null;
         cacheWriteRate: number | null;
         cacheWrite1hRate: number | null;
+        tiers?:
+          | {
+              aboveTokens: number;
+              inclusive: boolean;
+              inputRate: number | null;
+              outputRate: number | null;
+              cacheReadRate: number | null;
+              cacheWriteRate: number | null;
+              cacheWrite1hRate: number | null;
+            }[]
+          | null;
+        pricingState?: 'unsupported';
+        pricingReason?: 'unsupported-tier' | 'invalid-tier' | 'unsupported-condition';
       } | null;
       cacheTtl: '5m' | '1h';
       /** Buckets that had tokens but no rate. Non-empty means the total is partial,

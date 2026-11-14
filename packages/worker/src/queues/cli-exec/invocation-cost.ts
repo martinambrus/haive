@@ -125,7 +125,7 @@ export async function resolveInvocationCost(
         billable: false,
         modelKey,
         priceRowId: chosen.id,
-        rates: chosen.rates,
+        rates: structuredClone(chosen.rates),
         cacheTtl,
         unpricedBuckets: computed.unpricedBuckets,
       };
@@ -137,7 +137,7 @@ export async function resolveInvocationCost(
       billable: decision.billable,
       modelKey,
       priceRowId: chosen.id,
-      rates: chosen.rates,
+      rates: structuredClone(chosen.rates),
       cacheTtl,
       unpricedBuckets: [],
     };

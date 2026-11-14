@@ -57,10 +57,16 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
         },
       });
     log.info({ count: models.length }, 'refreshed openrouter model catalog');
+    const errors = models
+      .filter((m) => m.pricingState === 'unsupported')
+      .map((m) => ({
+        name: 'price:openrouter',
+        error: `${m.id}: ${m.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
+      }));
     return {
-      ok: true,
+      ok: errors.length === 0,
       refreshed: [{ name: 'openrouter', count: models.length, latest: null }],
-      errors: [],
+      errors,
     };
   } catch (err) {
     const error = safeErrorMessage(err);

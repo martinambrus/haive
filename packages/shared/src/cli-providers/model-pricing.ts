@@ -13,6 +13,7 @@
  * providers ever show real money.
  */
 
+import { z } from 'zod';
 import type { AuthMode, CliProviderName } from '../types/index.js';
 import { getCliProviderMetadata, resolveCostBasis } from './catalog.js';
 
@@ -30,6 +31,89 @@ export interface ModelPriceRates {
    *  charges 2x base for 1h vs 1.25x for 5m, and both feeds publish it as its own
    *  field. Used only when CONFIG_KEYS.PROMPT_CACHING_1H was on for the run. */
   cacheWrite1hRate: number | null;
+  tiers?: PriceTier[] | null;
+  pricingState?: 'unsupported';
+  pricingReason?: PricingUnsupportedReason;
+}
+
+export type PricingUnsupportedReason =
+  'unsupported-tier' | 'invalid-tier' | 'unsupported-condition';
+export type BasePriceRates = Pick<
+  ModelPriceRates,
+  'inputRate' | 'outputRate' | 'cacheReadRate' | 'cacheWriteRate' | 'cacheWrite1hRate'
+>;
+export interface PriceTier extends BasePriceRates {
+  aboveTokens: number;
+  inclusive: boolean;
+}
+
+export const PRICE_RATE_KEYS = [
+  'inputRate',
+  'outputRate',
+  'cacheReadRate',
+  'cacheWriteRate',
+  'cacheWrite1hRate',
+] as const;
+export const MAX_PRICE_TIERS = 4;
+const rateSchema = z.number().finite().nonnegative().nullable();
+const baseRatesShape = {
+  inputRate: rateSchema,
+  outputRate: rateSchema,
+  cacheReadRate: rateSchema,
+  cacheWriteRate: rateSchema,
+  cacheWrite1hRate: rateSchema,
+};
+const priceTierSchema = z.object({
+  ...baseRatesShape,
+  aboveTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  inclusive: z.boolean(),
+});
+/** Shared ingress contract. Complete tiers never inherit during pricing. */
+export const modelPriceRatesSchema = z
+  .object({
+    ...baseRatesShape,
+    tiers: z.array(priceTierSchema).max(MAX_PRICE_TIERS).nullable().optional(),
+  })
+  .superRefine((rates, ctx) => {
+    const seen = new Set<number>();
+    for (const tier of rates.tiers ?? []) {
+      if (seen.has(tier.aboveTokens))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['tiers'],
+          message: 'Tier thresholds must be unique',
+        });
+      seen.add(tier.aboveTokens);
+    }
+  })
+  .transform(({ tiers, ...base }) => ({
+    ...base,
+    ...(tiers?.length ? { tiers: [...tiers].sort((a, b) => a.aboveTokens - b.aboveTokens) } : {}),
+  }));
+
+export function normalizePriceRates(value: unknown): ModelPriceRates {
+  return modelPriceRatesSchema.parse(value);
+}
+
+/** Strict tier ingress: a present null is unknown; malformed values invalidate the model. */
+export function parseTierRate(value: unknown): number | null {
+  const rate = parseRate(value);
+  if (value !== null && rate === null) throw new Error('Invalid tier rate');
+  return rate;
+}
+
+function basePriceRates(rates: ModelPriceRates): BasePriceRates {
+  return Object.fromEntries(PRICE_RATE_KEYS.map((key) => [key, rates[key]])) as BasePriceRates;
+}
+
+/** Pure boundary helper reserved for per-request pricing in PR 3. Returns a copy. */
+export function tierRatesFor(rates: ModelPriceRates, promptTokens: number): BasePriceRates {
+  let selected: BasePriceRates = rates;
+  for (const tier of rates.tiers ?? []) {
+    if (tier.inclusive ? promptTokens >= tier.aboveTokens : promptTokens > tier.aboveTokens)
+      selected = tier;
+  }
+  return basePriceRates(selected);
 }
 
 /** Where a stored rate came from. `manual` is admin-entered (a negotiated or
@@ -75,7 +159,19 @@ export function ratesEqual(a: ModelPriceRates, b: ModelPriceRates): boolean {
     a.outputRate === b.outputRate &&
     a.cacheReadRate === b.cacheReadRate &&
     a.cacheWriteRate === b.cacheWriteRate &&
-    a.cacheWrite1hRate === b.cacheWrite1hRate
+    a.cacheWrite1hRate === b.cacheWrite1hRate &&
+    a.pricingState === b.pricingState &&
+    a.pricingReason === b.pricingReason &&
+    JSON.stringify(
+      (a.tiers ?? []).map((t) => [t.aboveTokens, t.inclusive, ...PRICE_RATE_KEYS.map((k) => t[k])]),
+    ) ===
+      JSON.stringify(
+        (b.tiers ?? []).map((t) => [
+          t.aboveTokens,
+          t.inclusive,
+          ...PRICE_RATE_KEYS.map((k) => t[k]),
+        ]),
+      )
   );
 }
 
@@ -134,7 +230,16 @@ export interface LitellmPriceEntry {
   rates: ModelPriceRates;
 }
 
+const LITELLM_RATE_FIELDS: Record<string, (typeof PRICE_RATE_KEYS)[number]> = {
+  input_cost_per_token: 'inputRate',
+  output_cost_per_token: 'outputRate',
+  cache_read_input_token_cost: 'cacheReadRate',
+  cache_creation_input_token_cost: 'cacheWriteRate',
+  cache_creation_input_token_cost_above_1hr: 'cacheWrite1hRate',
+};
+
 interface RawLitellmEntry {
+  [key: string]: unknown;
   input_cost_per_token?: unknown;
   output_cost_per_token?: unknown;
   cache_read_input_token_cost?: unknown;
@@ -168,7 +273,47 @@ export function parseLitellmPrices(payload: unknown): LitellmPriceEntry[] {
       cacheWriteRate: parseRate(raw.cache_creation_input_token_cost),
       cacheWrite1hRate: parseRate(raw.cache_creation_input_token_cost_above_1hr),
     };
-    if (!hasAnyRate(rates)) continue;
+    try {
+      if ('tiered_pricing' in raw) {
+        rates.pricingState = 'unsupported';
+        rates.pricingReason = 'unsupported-tier';
+      } else {
+        const tiers = new Map<number, PriceTier>();
+        for (const [field, value] of Object.entries(raw)) {
+          if (!field.includes('_above_')) continue;
+          if (
+            /(?:^|_)(?:batches|flex|priority|ultrafast|decisions)(?:_|$)/.test(field) ||
+            field.startsWith('cache_creation_input_token_cost_above_12hr')
+          )
+            continue;
+          if (field === 'cache_creation_input_token_cost_above_1hr') continue;
+          const match =
+            /^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost|cache_creation_input_token_cost_above_1hr)_above_(\d+)k_tokens$/.exec(
+              field,
+            );
+          if (!match) {
+            rates.pricingState = 'unsupported';
+            rates.pricingReason = 'unsupported-tier';
+            break;
+          }
+          const aboveTokens = Number(match[2]) * 1000;
+          const tier = tiers.get(aboveTokens) ?? {
+            ...basePriceRates(rates),
+            aboveTokens,
+            inclusive: false,
+          };
+          const bucket = LITELLM_RATE_FIELDS[match[1]!]!;
+          tier[bucket] = parseTierRate(value);
+          tiers.set(aboveTokens, tier);
+        }
+        if (!rates.pricingState)
+          Object.assign(rates, normalizePriceRates({ ...rates, tiers: [...tiers.values()] }));
+      }
+    } catch {
+      rates.pricingState = 'unsupported';
+      rates.pricingReason = 'invalid-tier';
+    }
+    if (!hasAnyRate(rates) && rates.pricingState !== 'unsupported') continue;
     out.push({
       key,
       vendor: typeof raw.litellm_provider === 'string' ? raw.litellm_provider : null,
@@ -271,7 +416,10 @@ export function litellmRowsForProviders(
       const mapKey = JSON.stringify([provider, modelKey]);
       const existing = out.get(mapKey);
       if (existing && existing.sourceKey.length <= entry.key.length) continue;
-      out.set(mapKey, { provider, modelKey, rates: entry.rates, sourceKey: entry.key });
+      const rates = structuredClone(entry.rates);
+      if (rates.tiers)
+        rates.tiers = rates.tiers.map((tier) => ({ ...tier, inclusive: entry.vendor === 'xai' }));
+      out.set(mapKey, { provider, modelKey, rates, sourceKey: entry.key });
     }
   }
   return [...out.values()].sort(
@@ -496,7 +644,9 @@ export function pickLivePrice(
     if (byScope !== 0) return byScope;
     return b.effectiveFrom.getTime() - a.effectiveFrom.getTime();
   });
-  return sorted[0] ?? null;
+  const selected = sorted[0] ?? null;
+  // Refuse the selected feed's marker rather than falling back to a lower-ranked stale feed.
+  return selected?.rates.pricingState === 'unsupported' ? null : selected;
 }
 
 // --- Currency -----------------------------------------------------------

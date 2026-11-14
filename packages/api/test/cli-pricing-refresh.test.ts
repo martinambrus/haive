@@ -41,7 +41,12 @@ async function refresh(path = '/pricing/refresh', role: 'admin' | 'user' | null 
 }
 
 beforeEach(() => {
-  const fake = createFakeDb({ users: schema.users, refreshRuns: schema.refreshRuns });
+  const fake = createFakeDb({
+    users: schema.users,
+    refreshRuns: schema.refreshRuns,
+    cliModelPrices: schema.cliModelPrices,
+    cliPricingSync: schema.cliPricingSync,
+  });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
   h.db = fake.db;
@@ -252,5 +257,64 @@ describe('pricing refresh polling', () => {
   it.each([null, 'user'] as const)('requires an admin session (%s)', async (role) => {
     expect((await poll('123', role)).status).toBe(role === null ? 401 : 403);
     expect(h.getJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('manual context tiers', () => {
+  const rates = {
+    inputRate: 1,
+    outputRate: 2,
+    cacheReadRate: null,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const tier = { ...rates, aboveTokens: 100, inclusive: false, inputRate: null };
+  async function request(method: string, body?: unknown, path = '/pricing/prices') {
+    const token = await signAccessToken({ sub: ADMIN, role: 'admin', tv: 0 });
+    return app.request(path, {
+      method,
+      headers: { cookie: `${ACCESS_COOKIE}=${token}`, 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  }
+  it('round trips complete tiers through manual writes, reads and replacement history', async () => {
+    const body = { provider: 'codex', modelKey: 'Tiered', rates: { ...rates, tiers: [tier] } };
+    const saved = await request('POST', body);
+    expect(saved.status).toBe(201);
+    expect(await saved.json()).toMatchObject({ rates: { tiers: [tier] } });
+    expect(await (await request('GET', undefined, '/pricing')).json()).toMatchObject({
+      prices: [{ rates: { tiers: [tier] } }],
+    });
+    expect(
+      (await request('POST', { ...body, rates: { ...body.rates, outputRate: 3 } })).status,
+    ).toBe(201);
+    const history = (await (
+      await request('GET', undefined, '/pricing/history?modelKey=tiered&provider=codex')
+    ).json()) as { history: { rates: { tiers: unknown[] } }[] };
+    expect(history.history).toHaveLength(2);
+    expect(
+      history.history.every((r: { rates: { tiers: unknown[] } }) => r.rates.tiers.length === 1),
+    ).toBe(true);
+  });
+  it.each(
+    [
+      [{ ...tier, aboveTokens: 0 }],
+      [{ ...tier, aboveTokens: 1.5 }],
+      [{ ...tier, aboveTokens: Number.MAX_SAFE_INTEGER + 1 }],
+      [tier, tier],
+      [1, 2, 3, 4, 5].map((aboveTokens) => ({ ...tier, aboveTokens })),
+      [{ ...tier, inputRate: -1 }],
+      [{ ...tier, inputRate: '0' }],
+    ].map((tiers) => ({ tiers })),
+  )('refuses malformed manual tiers (%j)', async ({ tiers }) => {
+    const res = await request('POST', {
+      provider: 'codex',
+      modelKey: 'x',
+      rates: { ...rates, tiers },
+    });
+    expect(res.status).toBe(400);
+    expect(
+      await (h.db as ReturnType<typeof createFakeDb>['db']).select().from(schema.cliModelPrices),
+    ).toHaveLength(0);
   });
 });

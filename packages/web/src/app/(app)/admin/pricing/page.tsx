@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
@@ -24,7 +24,10 @@ interface PriceRow {
   provider: string | null;
   modelKey: string;
   source: 'openrouter' | 'litellm' | 'manual' | 'ollama';
-  rates: ModelRates;
+  rates: ModelRates & {
+    tiers?: (ModelRates & { aboveTokens: number; inclusive: boolean })[] | null;
+    pricingState?: 'unsupported';
+  };
   currency: string;
   note: string | null;
   effectiveFrom: string;
@@ -168,10 +171,19 @@ export default function PricingPage() {
       for (const key of Object.keys(rates) as (keyof ModelRates)[]) {
         rates[key] = parsePerMillion(draft.rates[key]);
       }
+      const previous = data?.prices.find(
+        (p) =>
+          p.source === 'manual' &&
+          p.provider === (draft.provider || null) &&
+          p.modelKey === draft.modelKey.trim().toLowerCase(),
+      );
       await api.post('/cli-pricing/prices', {
         provider: draft.provider === '' ? null : draft.provider,
         modelKey: draft.modelKey,
-        rates,
+        rates: {
+          ...rates,
+          ...(previous?.rates.tiers?.length ? { tiers: previous.rates.tiers } : {}),
+        },
         note: draft.note === '' ? null : draft.note,
       });
       setDraft({
@@ -409,42 +421,76 @@ export default function PricingPage() {
             </thead>
             <tbody>
               {prices.map((p) => (
-                <tr key={p.id} className="border-t border-neutral-800">
-                  <td className="px-3 py-2 font-mono text-neutral-300">{p.provider ?? 'any'}</td>
-                  <td className="px-3 py-2 font-mono text-neutral-200" title={p.note ?? undefined}>
-                    {p.modelKey}
-                  </td>
-                  <td className="px-3 py-2">
-                    <Badge variant={p.source === 'manual' ? 'warning' : 'default'}>
-                      {p.source}
-                    </Badge>
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-neutral-300">
-                    {perMillion(p.rates.inputRate)}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-neutral-300">
-                    {perMillion(p.rates.outputRate)}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
-                    {perMillion(p.rates.cacheReadRate)}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
-                    {perMillion(p.rates.cacheWriteRate)}
-                  </td>
-                  <td className="px-3 py-2 text-neutral-500">{ago(p.effectiveFrom)}</td>
-                  <td className="px-3 py-2 text-right">
-                    {p.source === 'manual' && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => void retire(p.id)}
-                      >
-                        Retire
-                      </Button>
-                    )}
-                  </td>
-                </tr>
+                <Fragment key={p.id}>
+                  <tr className="border-t border-neutral-800">
+                    <td className="px-3 py-2 font-mono text-neutral-300">{p.provider ?? 'any'}</td>
+                    <td
+                      className="px-3 py-2 font-mono text-neutral-200"
+                      title={p.note ?? undefined}
+                    >
+                      {p.modelKey}
+                      {p.rates.pricingState === 'unsupported' && (
+                        <Badge variant="error">unpriced</Badge>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <Badge variant={p.source === 'manual' ? 'warning' : 'default'}>
+                        {p.source}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-neutral-300">
+                      {perMillion(p.rates.inputRate)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-neutral-300">
+                      {perMillion(p.rates.outputRate)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
+                      {perMillion(p.rates.cacheReadRate)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
+                      {perMillion(p.rates.cacheWriteRate)}
+                    </td>
+                    <td className="px-3 py-2 text-neutral-500">{ago(p.effectiveFrom)}</td>
+                    <td className="px-3 py-2 text-right">
+                      {p.source === 'manual' && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => void retire(p.id)}
+                        >
+                          Retire
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                  {(p.rates.tiers ?? []).map((tier) => (
+                    <tr
+                      key={tier.aboveTokens}
+                      className="border-t border-neutral-800 bg-neutral-900/40 text-xs"
+                    >
+                      <td colSpan={3} className="px-3 py-2 text-neutral-400">
+                        Prompt {tier.inclusive ? '≥' : '>'}{' '}
+                        {tier.aboveTokens.toLocaleString('en-US')} tokens
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-neutral-300">
+                        {perMillion(tier.inputRate)}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-neutral-300">
+                        {perMillion(tier.outputRate)}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
+                        {perMillion(tier.cacheReadRate)}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-cyan-400/80">
+                        {perMillion(tier.cacheWriteRate)} (5m)
+                        <br />
+                        {perMillion(tier.cacheWrite1hRate)} (1h)
+                      </td>
+                      <td colSpan={2} />
+                    </tr>
+                  ))}
+                </Fragment>
               ))}
             </tbody>
           </table>
