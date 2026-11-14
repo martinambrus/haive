@@ -347,7 +347,8 @@ export async function main(): Promise<number> {
         snapshotHostDir: snapshotDir,
         fromVersion: live.fromVersion,
         // Recovery only rolls back or finishes commit; neither repeats the health gate.
-        // This journal-derived context is not a fetched manifest, and older rows may have no head.
+        // This journal-derived context is not a fetched manifest: recovery never reads its head,
+        // so a missing one must not block a rollback.
         target: {
           manifestVersion: 1,
           version: live.toVersion,
