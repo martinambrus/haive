@@ -81,3 +81,17 @@ it('rejects a malformed installed record as modified', async () => {
     differingFile: '.haive-bundle.json',
   });
 });
+
+it('names the first differing file in the closest known legacy record', async () => {
+  const older = {
+    'docker-compose.yml': bundleHash(Buffer.from('older base')),
+    'docker-compose.run.yml': bundleHash(Buffer.from('older run')),
+  };
+  await writeFile(join(dir, 'docker-compose.run.yml'), 'local edit');
+  expect(
+    await classifyBundle(await readComposeContext(dir), { ...bundle, known: [older, baseFiles] }),
+  ).toEqual({
+    kind: 'legacy-unknown',
+    differingFile: 'docker-compose.run.yml',
+  });
+});

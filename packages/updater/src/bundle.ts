@@ -35,8 +35,8 @@ export async function classifyBundle(
       throw error;
     },
   );
-  const differs = (files: Partial<Record<Name, string>>, names: readonly string[]) =>
-    names.find((name) => !files[name as Name] || files[name as Name] !== installed.get(name));
+  const differingFiles = (files: Partial<Record<Name, string>>, names: readonly string[]) =>
+    names.filter((name) => !files[name as Name] || files[name as Name] !== installed.get(name));
   if (record !== undefined) {
     let files: Bundle['files'];
     try {
@@ -56,19 +56,23 @@ export async function classifyBundle(
     } catch {
       return { kind: 'modified', differingFile: '.haive-bundle.json' };
     }
-    const differingFile = differs(
+    const differingFile = differingFiles(
       files,
       RELEASE_BUNDLE_FILES.filter(
         (name) => compose.files.includes(name) || Object.hasOwn(files, name),
       ),
-    );
+    )[0];
     return differingFile ? { kind: 'modified', differingFile } : { kind: 'pristine' };
   }
-  for (const files of bundle.known)
-    if (!differs(files, compose.files)) return { kind: 'legacy-known' };
+  let closest: string[] | undefined;
+  for (const files of bundle.known) {
+    const differences = differingFiles(files, compose.files);
+    if (differences.length === 0) return { kind: 'legacy-known' };
+    if (!closest || differences.length < closest.length) closest = differences;
+  }
   return {
     kind: 'legacy-unknown',
-    differingFile: differs(bundle.known[0] ?? bundle.files, compose.files) ?? compose.files[0],
+    differingFile: (closest ?? differingFiles(bundle.files, compose.files))[0] ?? compose.files[0],
   };
 }
 
