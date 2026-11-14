@@ -339,34 +339,31 @@ it.each([
     }
   },
 );
-it.each(['deleted', 'missing'])(
-  'withholds the whole capture for a denied %s path',
-  async (kind) => {
-    vi.mocked(collectImplementationFiles).mockResolvedValue({
-      ...scope,
-      files: ['a', 'x.bak'],
-      total: 2,
-    });
-    vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) =>
-      rel === 'x.bak' ? null : ({ kind: 'file', stats: stat } as never),
-    );
-    const run = vi.mocked(gitRun).getMockImplementation()!;
-    vi.mocked(gitRun).mockImplementation(async (...args) =>
-      args[1].includes('--name-status')
-        ? { code: 0, stdout: (kind === 'deleted' ? 'D\0x.bak\0' : '') + 'A\0a\0', stderr: '' }
-        : run(...args),
-    );
-    const result = await readReviewDiff(ctx, '/repo', options);
-    expect(result).toMatchObject({ status: 'ready', partial: true });
-    if (result.status !== 'ready') return;
-    const payload = JSON.parse(result.content);
-    expect(payload.diff).toBe('');
-    expect(
-      payload.files.every((f: { kind: string; hash?: string }) => f.kind === 'withheld' && !f.hash),
-    ).toBe(true);
-    expect(openFileNoFollow).not.toHaveBeenCalled();
-  },
-);
+it.each(['deleted'])('withholds the whole capture for a denied %s path', async (kind) => {
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'x.bak'],
+    total: 2,
+  });
+  vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) =>
+    rel === 'x.bak' ? null : ({ kind: 'file', stats: stat } as never),
+  );
+  const run = vi.mocked(gitRun).getMockImplementation()!;
+  vi.mocked(gitRun).mockImplementation(async (...args) =>
+    args[1].includes('--name-status')
+      ? { code: 0, stdout: (kind === 'deleted' ? 'D\0x.bak\0' : '') + 'A\0a\0', stderr: '' }
+      : run(...args),
+  );
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.diff).toBe('');
+  expect(
+    payload.files.every((f: { kind: string; hash?: string }) => f.kind === 'withheld' && !f.hash),
+  ).toBe(true);
+  expect(openFileNoFollow).not.toHaveBeenCalled();
+});
 
 it('returns a small change ready when the index exceeds maxBytes', async () => {
   const maxBytes = 1024;
@@ -585,4 +582,33 @@ it('keeps a deny when case-folding would turn a different allow spelling into a 
     expect(JSON.parse(result.content).files).toContainEqual(
       expect.objectContaining({ path: 'x.bak', kind: 'withheld' }),
     );
+});
+
+it('keeps ordinary evidence beside a phantom denied reported path', async () => {
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'phantom.bak'],
+    total: 2,
+  });
+  vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) =>
+    rel === 'phantom.bak' ? null : ({ kind: 'file', stats: stat } as never),
+  );
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.diff).toContain('+z');
+  expect(payload.fileContents).toContainEqual({ path: 'a', content: 'z' });
+  expect(payload.files).toContainEqual({ path: 'phantom.bak', kind: 'withheld' });
+  expect(payload.files).toContainEqual(
+    expect.objectContaining({
+      path: 'a',
+      kind: 'text',
+      hash: createHash('sha256').update('z').digest('hex'),
+    }),
+  );
+  expect(vi.mocked(openFileNoFollow).mock.calls.every((call) => call[1] === 'a')).toBe(true);
+  expect(
+    vi.mocked(gitRun).mock.calls.some((call) => call[1].includes(':(literal)phantom.bak')),
+  ).toBe(false);
 });

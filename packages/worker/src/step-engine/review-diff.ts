@@ -284,17 +284,16 @@ export async function readReviewDiff(
         }
       }
       const deniedPaths = new Set([...safePaths.values()].filter(denied));
-      // A denied deletion/missing source could have moved to any allowed destination.
+      // A git-reported denied deletion could have moved to any allowed destination.
       // Existing denied paths withhold only their own bytes, hashes and hunks.
-      let withholdAll = [...deniedPaths].some((p) => deleted.has(p));
+      const withholdAll = [...deniedPaths].some((p) => deleted.has(p));
       const withheld = new Map<string, ReviewFile>();
       for (const p of deniedPaths) {
         let metadata = {};
         try {
           const rel = (prefix ? prefix + '/' : '') + p;
           const entry = await lstatNoFollow(ctx.repoPath, rel, { strict: true });
-          if (!entry) withholdAll = true;
-          else metadata = { size: entry.stats.size, mode: entry.stats.mode & 0o7777 };
+          if (entry) metadata = { size: entry.stats.size, mode: entry.stats.mode & 0o7777 };
         } catch (error) {
           if (isResourceLimitError(error)) throw error;
         }
