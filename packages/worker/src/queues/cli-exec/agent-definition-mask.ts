@@ -7,9 +7,9 @@
  * invocation's listing carried every repo agent's name and description, and the claude binary's own
  * 8,000-char skill budget left 1 of 18 repo skills described.
  *
- * Rides the same shape as {@link resolveDdevGeneratedMasks}: an outer resolver that does the DB
- * lookup inside one fail-open try/catch, and a pure core exposed for fixture-tree tests. Two
- * differences, both deliberate:
+ * Like {@link resolveDdevGeneratedMasks}, it has an outer resolver for the DB lookup and a pure
+ * core exposed for fixture-tree tests. This context control keeps its own fail-open catch;
+ * the DDEV-generated config mask fails closed. Two other differences, both deliberate:
  *
  * - it returns MOUNTS, not `SandboxExtraFile`s. A file mask needs content; an empty directory is a
  *   `tmpfs`, which is the form `DockerVolumeMount.tmpfs` added for exactly this.

@@ -3954,6 +3954,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       };
     }
     const cancelled = err instanceof TaskCancelledError;
+    // A done fix-loop row stores the diagnosis for reclassification on recovery. Preserve
+    // it through routing and that write; scrub only failure display copy below.
     const errorMessage = cancelled ? 'task cancelled by user' : safeErrorMessage(err);
     if (cancelled) {
       log.info({ stepId: meta.id, taskId }, 'step aborted by task cancel');

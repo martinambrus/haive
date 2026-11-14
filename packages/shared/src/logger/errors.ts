@@ -68,7 +68,8 @@ export function safeErrorMessage(err: unknown): string {
  *  POSIX, drive and UNC paths. Quoted paths may contain spaces; unquoted tokens end at
  *  whitespace or diagnostic punctuation. The placeholder contains no path, so repairs converge.
  *  Optional roots restrict removal to those directories and their descendants, preserving
- *  container paths needed for repair diagnoses. Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. The URL
+ *  container paths needed for repair diagnoses. Keep safeErrorMessage's ordinary-error contract
+ *  unchanged for other diagnostic sinks. The URL
  *  scheme is bounded to 32 characters: an unbounded one restarts at every letter of a long token,
  *  which is quadratic (a 200,000-character token took about 40 s). Each quote kind has its own
  *  alternative whose body excludes that quote, rather than a lazy body closed by a backreference:
