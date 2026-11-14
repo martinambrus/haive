@@ -145,3 +145,32 @@ it.each([
   await saveDisabled();
   expect(screen.getByRole('dialog').textContent).toContain(copy);
 });
+
+it('gates the rebuild immediately, defers polling until accepted, and restores a cancelled build', async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      render(<CliProviderForm mode="edit" metadata={metadata} provider={provider} />);
+    });
+    fireEvent.click(screen.getByLabelText('Enabled'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Rebuild image' }));
+    });
+    expect(screen.getByRole('button', { name: 'Building...' }).hasAttribute('disabled')).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(h.get).not.toHaveBeenCalledWith('/cli-providers/provider');
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    });
+    expect(screen.getByRole('button', { name: 'Rebuild image' }).hasAttribute('disabled')).toBe(
+      false,
+    );
+    expect(screen.getByText('idle')).toBeTruthy();
+    expect(h.patch).not.toHaveBeenCalled();
+    expect(h.post).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});

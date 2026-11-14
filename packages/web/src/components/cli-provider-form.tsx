@@ -419,7 +419,9 @@ export function CliProviderForm({
 
   useEffect(() => {
     if (mode !== 'edit' || !provider?.id) return;
-    if (buildState.status !== 'building') return;
+    // An optimistic build may still be awaiting disable confirmation or persistence.
+    // Do not let the stored, pre-request status clear its Test connection gate.
+    if (buildState.status !== 'building' || buildRequesting) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -442,7 +444,7 @@ export function CliProviderForm({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [mode, provider?.id, buildState.status]);
+  }, [mode, provider?.id, buildState.status, buildRequesting]);
 
   // Poll model provisioning (pull/build on the in-stack daemon) to completion so
   // re-opening a provider reflects whether its model finished or failed — without
@@ -604,11 +606,17 @@ export function CliProviderForm({
     if (mode !== 'edit' || !provider?.id) return;
     setBuildRequesting(true);
     clearError();
+    const previousBuildState = buildState;
+    // Flip build gating on synchronously with the click so Test connection stays
+    // disabled through the dirty -> building handoff when persistEdit clears dirty.
+    setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
     try {
       if (formDirty) {
-        if (!(await persistEdit())) return;
+        if (!(await persistEdit())) {
+          setBuildState(previousBuildState);
+          return;
+        }
       }
-      setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
       await api.post(`/cli-providers/${provider.id}/sandbox-image/build`);
     } catch (err) {
       captureError(err, 'Failed to start build');
