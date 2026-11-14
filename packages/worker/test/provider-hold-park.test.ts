@@ -7,6 +7,7 @@ import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared'
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -42,6 +43,8 @@ const SENSITIVE = `provider-hold-${SUFFIX}.sensitive`;
 const LLM = `provider-hold-${SUFFIX}.llm`;
 const PLAIN = `provider-hold-${SUFFIX}.plain`;
 const SKIPPED = `provider-hold-${SUFFIX}.skipped`;
+const MODULE = `provider-hold-${SUFFIX}`;
+const MODULE_STEP = `module.${MODULE}.sensitive`;
 const EMAIL_INDEX = 'provider-hold-park-test-user';
 const START_TYPE = 'provider-hold-park';
 
@@ -78,6 +81,7 @@ define(SENSITIVE, 0, { providerSensitive: true }, phases);
 define(LLM, 1, { llm: { requiredCapabilities: [], buildPrompt: () => 'a prompt' } }, phases);
 define(PLAIN, 2, {}, phases);
 define(SKIPPED, 3, { providerSensitive: true }, skippedPhases);
+define(MODULE_STEP, 4, { providerSensitive: true }, phases);
 
 const advances = () => h.adds.filter((add) => add.name === TASK_JOB_NAMES.ADVANCE_STEP);
 
@@ -223,6 +227,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
   });
 
   afterEach(() => {
+    markModuleSchemaReady(MODULE);
     vi.restoreAllMocks();
   });
 
@@ -238,6 +243,7 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
       .delete(schema.taskTypeDefinitions)
       .where(eq(schema.taskTypeDefinitions.slug, START_TYPE));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, MODULE));
     await db.$client.end({ timeout: 5 });
   });
 
@@ -313,6 +319,37 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     expect(row!.statusMessage).toMatch(/^Paused/);
     expect(row!.statusMessage).not.toContain('Own CLI');
     expect(advances()[0]!.opts.delay).toBe(30_000);
+    noDetectOrApply();
+  });
+
+  it('module schema wins over a disabled provider until setup is ready', async () => {
+    await db.insert(schema.modules).values({
+      moduleId: MODULE,
+      packageName: `@haive/module-${MODULE}`,
+      name: MODULE,
+      installedVersion: '1.0.0',
+    });
+    await db
+      .update(schema.tasks)
+      .set({ runListSnapshot: [MODULE_STEP] })
+      .where(eq(schema.tasks.id, taskId));
+    markModuleSchemaUnready(MODULE);
+    await runningTask(MODULE_STEP);
+    await tick(MODULE_STEP);
+    const [schemaPark] = await rows();
+    expect(schemaPark).toMatchObject({ status: 'pending', providerWaitProviderId: null });
+    expect(schemaPark!.waitingStartedAt).toBeInstanceOf(Date);
+    expect(advances()[0]!.opts.delay).toBe(5_000);
+    expect(phases.shouldRun).not.toHaveBeenCalled();
+    noDetectOrApply();
+
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    const [providerPark] = await rows();
+    expect(providerPark).toMatchObject({ status: 'pending', providerWaitProviderId: ownId });
+    expect(providerPark!.waitingStartedAt).toEqual(schemaPark!.waitingStartedAt);
+    expect(advances()[1]!.opts.delay).toBe(30_000);
+    expect(phases.shouldRun).toHaveBeenCalledTimes(1);
     noDetectOrApply();
   });
 
