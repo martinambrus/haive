@@ -1238,6 +1238,7 @@ taskRoutes.get('/:id', async (c) => {
     stepRows.map((s) => s.stepId),
     task.ignoreSavedStepClis,
     task.runListSnapshot,
+    task.currentRound,
   );
   const callCounts = await loadLoggedCallCount(db, id);
   let testChecks = summarizeTestChecks([]);

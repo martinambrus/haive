@@ -40,15 +40,15 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1610 s at 149 rows. MEASURED 2026-11-12 on
+- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1650 s at 153 rows. MEASURED 2026-11-12 on
   ubuntu-latest: the gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the
-  older 7.5 s figure undercounted. Its 40-minute limit (2400 s) leaves 790 s over modelled green and covers the
-  38-minute gated step limit plus setup (2400 s). The 120 s allowance rounds up the historical 62 s setup maximum to
+  older 7.5 s figure undercounted. Its 41-minute limit (2460 s) leaves 810 s over modelled green and covers the
+  39-minute gated step limit plus setup (2460 s). The 120 s allowance rounds up the historical 62 s setup maximum to
   include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
   whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
-  its 38 minutes holds 152 rows and fails the pin at 153 (raised from 37 at 149 rows); the job's 600 s margin lasts
-  through 168 rows.
+  its 39 minutes holds 156 rows and fails the pin at 157 (raised from 38 when the list reached 153 rows); the job's 600 s margin lasts
+  through 174 rows.
   Measure again before raising a limit when those pins fail.
 
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger

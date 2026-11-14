@@ -58,6 +58,7 @@ import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
+import { resolveFixRoundCli } from './steps/workflow/_fix-round-cli.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import type { IntegrationBinding } from '@haive/shared/integrations';
 import {
@@ -252,7 +253,14 @@ export async function resolvePreferredCli(
   role: string = 'default',
   taskId?: string,
   ignoreSaved = false,
-): Promise<{ cliProviderId: string | null; effortLevel: string | null }> {
+  round?: number,
+): Promise<{
+  cliProviderId: string | null;
+  effortLevel: string | null;
+  roundProvider?: CliProviderRecord;
+}> {
+  const roundProvider = await resolveFixRoundCli(db, userId, taskId, stepId, role, round);
+  if (roundProvider) return { cliProviderId: roundProvider.id, effortLevel: null, roundProvider };
   const listed = (id: string | null): id is string => !!id && providers.some((p) => p.id === id);
   // A NULL provider is this task clearing the slot, so the saved preference stays out of it.
   const taskChoice = (r: string) =>
@@ -1067,21 +1075,25 @@ async function resolveLlmPhase(
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.
   const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';
-  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
-    await resolvePreferredCli(
-      db,
-      params.userId,
-      stepDef.metadata.id,
-      params.cliProviderId ?? null,
-      params.providers,
-      role,
-      params.taskId,
-      params.ignoreSavedStepClis ?? false,
-    );
+  const {
+    cliProviderId: preferredProviderId,
+    effortLevel: preferredEffort,
+    roundProvider,
+  } = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    params.providers,
+    role,
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
+    current.round,
+  );
   const steeringRequested = await resolveSteeringEnabled();
   const worktreeRel = llmSpec.worktreeRel?.({ detected, formValues: formValues ?? {} });
   const plan = await resolveTaskDispatch(db, params.taskId, {
-    providers: params.providers,
+    providers: roundProvider ? [roundProvider] : params.providers,
     preferredProviderId,
     steeringRequested,
     worktreeRel,
@@ -1115,7 +1127,7 @@ async function resolveLlmPhase(
     // The worker supplies providers/deps even when every provider is disabled or
     // incompatible. Optional enrichment must degrade here just as it does when
     // dependencies are absent or an invocation fails.
-    if (llmSpec.optional && plan.personaFailure === undefined) {
+    if (llmSpec.optional && !roundProvider && plan.personaFailure === undefined) {
       ctx.logger.warn(
         { reason: plan.reason },
         'optional llm dispatch unavailable; degrading to null',
@@ -1124,7 +1136,11 @@ async function resolveLlmPhase(
     }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
-      errorMessage: plan.personaFailure ?? `no cli provider available: ${plan.reason}`,
+      errorMessage:
+        plan.personaFailure ??
+        (roundProvider
+          ? `Next fix round CLI "${roundProvider.label}" cannot run this step: ${plan.reason}`
+          : `no cli provider available: ${plan.reason}`),
       endedAt: new Date(),
     });
     return {
@@ -1344,19 +1360,23 @@ async function resolveAiFixPhase(
     ),
   );
 
-  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
-    await resolvePreferredCli(
-      db,
-      params.userId,
-      stepDef.metadata.id,
-      params.cliProviderId ?? null,
-      params.providers,
-      'default',
-      params.taskId,
-      params.ignoreSavedStepClis ?? false,
-    );
+  const {
+    cliProviderId: preferredProviderId,
+    effortLevel: preferredEffort,
+    roundProvider,
+  } = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    params.providers,
+    'default',
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
+    current.round,
+  );
   const plan = await resolveTaskDispatch(db, params.taskId, {
-    providers: params.providers,
+    providers: roundProvider ? [roundProvider] : params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
     // Same step, so the same declared surface: a fix agent for a report-only step

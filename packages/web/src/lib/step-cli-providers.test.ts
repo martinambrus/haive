@@ -14,6 +14,16 @@ const seats = [
 ];
 
 describe('stepCliProviderIds', () => {
+  it('names no provider for an unavailable round choice instead of the task fallback', () => {
+    expect(
+      stepCliProviderIds({
+        step: { preferredCliProviderId: null, roundCliUnavailable: true } as StepCliProviderSource,
+        taskCliProviderId: 'codex',
+        listedProviderIds: LISTED,
+      }),
+    ).toEqual([]);
+  });
+
   it('names just the task provider for a step with nothing configured', () => {
     expect(
       stepCliProviderIds({ step: step(), taskCliProviderId: 'codex', listedProviderIds: LISTED }),

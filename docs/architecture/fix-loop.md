@@ -250,6 +250,41 @@ defect block, the repeat quote, the honored block, the prior-rounds block, the l
 does so only for a marked row, and treats an unmarked one as machine text. Keyed on the field, never
 on the wording.
 
+**A person can change the next fix round's CLI at either escalation gate.** The round-limit
+gate (`buildFixLoopEscalationSchema`) and oscillation gate
+(`buildOscillationEscalationSchema`) offer The same CLI or an enabled, owned provider
+that passes the implementation step's dispatch checks. This is manual only; a repeat
+never switches providers automatically. The preview describes the implementation step in
+the next fix round of this task, without step ids, role slots or internal round numbers.
+The existing worktree stays. When no enabled provider is eligible, the selector says so
+and explains that the existing CLI choice will be used.
+
+Continue stores the choice in `task_step_cli_choices` under the task, implementation
+step and `fix:<round>:default` role, inside the existing fenced transaction that closes
+the gate and moves the task pointer. Accept and Abort ignore the selector. Both user
+preference tables stay unchanged. With The same CLI or a legacy answer lacking the field,
+dispatch follows the existing chain. Only that implementation round's default role reads
+the round slot. The newest of that slot and the task's ordinary default slot wins, ordered
+by PostgreSQL's full timestamp precision (the ordinary slot wins an exact tie). Thus a
+step-card pick made after the gate replaces its override, including a disabled or deleted
+provider; an earlier card choice stays below it. A later card clear replaces it too.
+
+The slot expires from resolution at the next round; the row is retained, so consumed means
+no longer matched, not deleted. Recovery or Retry within the target round keeps it unless
+a later card pick supersedes it. Dispatch refreshes ownership and enabled state and runs
+capability checks with the round provider as the sole candidate. An unusable active
+override refuses dispatch visibly, with the implementation card named as a recovery action;
+there is no fallback. The refusal first writes the round's bare `pending` row, so Retry
+re-runs the step at that round rather than replaying the task from START. A reoffered gate can replace the slot, or clear it with The same CLI.
+
+A choice that becomes unusable before the gate answer is applied refuses that answer
+instead of failing the task. The same transaction restores the gate's `waiting_form` status,
+clears its submitted values, stamps `waiting_started_at`, refreshes the eligible options and
+adds a fixed explanation to the form. It leaves the task waiting for the person, writes no
+round choice or continuation event and queues no next step. The original row-ownership and
+task-epoch fences still apply: an overtaken answer rolls every write back. Unrelated database
+or dispatch errors still propagate.
+
 ## Test edits during a repair
 
 The implementation fix prompt, 08b's fix passes and the DAG fix coder share

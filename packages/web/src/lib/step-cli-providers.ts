@@ -23,6 +23,7 @@
  *  build one without the fifty unrelated columns. */
 export interface StepCliProviderSource {
   preferredCliProviderId: string | null;
+  roundCliUnavailable?: true;
   miningSeats?: { id: string; label: string }[];
   miningSeatProviders?: Record<string, string | null>;
   cliRoles?: { id: string; label: string }[];
@@ -35,6 +36,8 @@ export function stepCliProviderIds(args: {
   listedProviderIds: ReadonlySet<string>;
 }): string[] {
   const { step, taskCliProviderId, listedProviderIds } = args;
+  // A round override is the only candidate; an unavailable one refuses dispatch.
+  if (step?.roundCliUnavailable) return [];
   // A pref pointing at a deleted provider is ignored, exactly as the worker ignores it — the
   // seat runs on the fallback, so the fallback is what the header must name. A disabled one
   // still has its row, so it is kept: the worker holds the step on it.

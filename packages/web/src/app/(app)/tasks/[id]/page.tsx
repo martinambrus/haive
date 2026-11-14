@@ -58,7 +58,12 @@ import {
 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { useActiveTime } from '@/lib/active-time/use-active-time';
-import { isAwaitingFormInput, shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
+import {
+  isAwaitingFormInput,
+  nextFormPark,
+  shouldClearSubmitting,
+  submitErrorFor,
+} from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import {
@@ -638,6 +643,7 @@ interface TaskDetailResponse {
 type CliPreferenceFields = Pick<
   TaskStep,
   | 'preferredCliProviderId'
+  | 'roundCliUnavailable'
   | 'preferredEffortLevel'
   | 'cliRoles'
   | 'cliRoleProviders'
@@ -654,7 +660,12 @@ function applyCliPreference<T extends CliPreferenceFields>(
 ): T {
   const effort = effortLevel ?? null;
   if (!role) {
-    return { ...step, preferredCliProviderId: cliProviderId, preferredEffortLevel: effort };
+    return {
+      ...step,
+      preferredCliProviderId: cliProviderId,
+      preferredEffortLevel: effort,
+      roundCliUnavailable: undefined,
+    };
   }
   if (step.cliRoles?.some((r) => r.id === role)) {
     return {
@@ -774,6 +785,8 @@ export default function TaskDetailPage() {
   const [summaryCliError, setSummaryCliError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
+  // The step's park stamp when its answer was sent (see shouldClearSubmitting).
+  const submittedPark = useRef<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -1320,6 +1333,7 @@ export default function TaskDetailPage() {
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setActionNotice(null);
+    submittedPark.current = step.waitingStartedAt;
     setSubmitting(step.stepId);
     setSubmitError(null);
     try {
@@ -1336,7 +1350,8 @@ export default function TaskDetailPage() {
       await reload();
       // Keep button disabled here. The effect below clears `submitting` once the
       // step's status leaves `waiting_form`, which is when the form unmounts
-      // (success) or is replaced by a retry button (failure). Clearing in a
+      // (success) or is replaced by a retry button (failure), or once the worker
+      // reoffers the form under a new park stamp (a refused answer). Clearing in a
       // `finally` re-enabled the button between reload and backend transition.
     } catch (err) {
       setSubmitError({
@@ -1348,7 +1363,7 @@ export default function TaskDetailPage() {
   }
 
   useEffect(() => {
-    if (shouldClearSubmitting(submitting, steps)) {
+    if (shouldClearSubmitting(submitting, steps, submittedPark.current)) {
       setSubmitting(null);
     }
   }, [steps, submitting]);
@@ -1715,7 +1730,11 @@ export default function TaskDetailPage() {
   // prompt covered only that one, so a dead token on a seat CLI failed the step in silence.
   const taskEffectiveCliProviderId = task.effectiveCliProviderId ?? task.cliProviderId ?? null;
   const usageProviderIds = stepCliProviderIds({
-    step: currentStep ?? null,
+    step:
+      currentStep ??
+      steps.find((s) => s.stepId === task.currentStepId && s.round === task.currentRound) ??
+      upcomingCliSteps.find((s) => s.stepId === task.currentStepId) ??
+      null,
     taskCliProviderId: taskEffectiveCliProviderId,
     listedProviderIds: new Set(providers.map((p) => p.id)),
   });
@@ -2665,7 +2684,12 @@ function UpcomingCliPanel({
             idPrefix={`upcoming-cli-${s.stepId}`}
             roles={s.cliRoles}
             seats={s.miningSeats}
-            defaultProviderId={s.preferredCliProviderId ?? taskCliProviderId ?? ''}
+            defaultProviderId={
+              s.roundCliUnavailable
+                ? (s.preferredCliProviderId ?? '')
+                : (s.preferredCliProviderId ?? taskCliProviderId ?? '')
+            }
+            roundCliUnavailable={s.roundCliUnavailable}
             defaultEffortLevel={s.preferredEffortLevel}
             roleProviders={s.cliRoleProviders}
             roleEfforts={s.cliRoleEfforts}
@@ -3658,6 +3682,10 @@ function StepCardImpl({
   // spam). Failed tasks keep theirs — the runtime may still be up for debugging.
   const runtimeTornDown = taskCancelled || taskStatus === 'completed';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
+  // Remount the form on each new park (see nextFormPark), adjusting state during render.
+  const [formPark, setFormPark] = useState(step.waitingStartedAt);
+  const nextPark = nextFormPark(formPark, step.waitingStartedAt);
+  if (nextPark !== formPark) setFormPark(nextPark);
   const panelCtx: PanelContext = {
     formOpen: !!showForm,
     runtimeTornDown,
@@ -3703,7 +3731,9 @@ function StepCardImpl({
   const cliPickerId = `cli-${step.stepId}`;
   // Per-step preference wins; otherwise fall back to the task default. Empty
   // string for "no preference" so the dropdown shows the (none) option.
-  const effectiveCliProviderId = step.preferredCliProviderId ?? taskCliProviderId ?? '';
+  const effectiveCliProviderId = step.roundCliUnavailable
+    ? (step.preferredCliProviderId ?? '')
+    : (step.preferredCliProviderId ?? taskCliProviderId ?? '');
   // Per-step lock: only locked while THIS step is running/waiting on CLI.
   const cliLocked = step.status === 'running' || step.status === 'waiting_cli';
   // Multi-CLI alternating steps (cliRoles) count one user-facing round per N
@@ -3858,6 +3888,7 @@ function StepCardImpl({
               roles={step.cliRoles}
               seats={step.miningSeats}
               defaultProviderId={effectiveCliProviderId}
+              roundCliUnavailable={step.roundCliUnavailable}
               defaultEffortLevel={step.preferredEffortLevel}
               roleProviders={step.cliRoleProviders}
               roleEfforts={step.cliRoleEfforts}
@@ -4212,7 +4243,7 @@ function StepCardImpl({
               </div>
             )}
             <FormRenderer
-              key={supportsPresets ? `${step.stepId}-${formKey}` : undefined}
+              key={`${step.stepId}-${formPark ?? ''}${supportsPresets ? `-${formKey}` : ''}`}
               schema={schema}
               initialValues={supportsPresets ? (appliedValues ?? initialValues) : initialValues}
               disabled={taskDead}

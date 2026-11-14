@@ -325,6 +325,10 @@ and tail; a line above an agent's quote calls it data; a blank previous report i
 
 ### P3. Run the next fix round on another CLI, for this task only
 
+**Built (2026-11-14).** Manual choice at the round-limit and oscillation gates;
+task- and round-scoped dispatch, fenced persistence and regression controls implemented.
+No automatic switch; D3 stays open.
+
 A task-scoped choice that never writes a user preference; with nothing chosen, dispatch resolves
 exactly as today. Offered where a person decides: both escalation gates, as "run the next round on:
 the same CLI, or one of the enabled providers". The worktree stays, so the best state so far is kept:
@@ -482,18 +486,23 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 ## Open decisions
 
 - **D1.** P1: keep parity (96k) or adopt the role-sized arm, decided by P1's measurement.
-- **D2.** Plan chat's transcript: one conversation per node across tasks, as today, or one per task.
 - **D3.** P3's automatic half, once a stable defect identity exists (08b's failing test ids are one
   candidate, unmeasured): whether to add an opt-in that switches the CLI on a repeat of the SAME
   defect.
 - **D4.** A cheaper provider for narrow seats as a product default, or user configuration only.
 - **D5.** F11: collapse repeated lines in test output before the tail cut (structural, with no banner
   matching), parked until more 08b runs exist.
-- **D11.** P4 and P5: how a bounded plan writer reaches a node its index omits. A versioned snapshot
-  written for each dispatch and kept out of the repository's tracked tree, or a lookup the agent calls
-  that answers from the dispatch's read. One choice serves plan chat, 11f and 01f.
 
 ## Decided
+
+- **D2 (the owner, 2026-11-14).** One plan-chat conversation per node across tasks, as today.
+  The cap keeps the answered turn plus the newest earlier turns that fit and states how many
+  were dropped.
+- **D11 (the owner, 2026-11-14).** A versioned snapshot is written for each dispatch, kept out
+  of the repository's tracked tree and removed after the run. One choice serves plan chat, 11f
+  and 01f.
+- **P3 manual only, no automatic switch (D3 stays open) (the owner, 2026-11-14).**
+- **P7 parked (owner, 2026-11-14).**
 
 - **D9.** Versions where a writer may patch (2026-10-08, #452). The refusal of an unversioned agent
   update shipped in #374; the committed `.haive-data/plan.md` mirror stays version-free; 11f and 01f

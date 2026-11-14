@@ -999,6 +999,8 @@ export interface UpcomingCliStep {
    *  read a title from yet). */
   title: string;
   preferredCliProviderId: string | null;
+  /** The active round choice cannot dispatch; it must not fall through to the task CLI. */
+  roundCliUnavailable?: true;
   preferredEffortLevel: string | null;
   cliRoles?: { id: string; label: string }[];
   cliRoleProviders?: Record<string, string | null>;
@@ -1075,6 +1077,8 @@ export interface TaskStep {
    *  used provider after dispatch. The dropdown defaults to this when
    *  present; falls back to the task-level cliProviderId otherwise. */
   preferredCliProviderId: string | null;
+  /** The active round choice cannot dispatch; it must not fall through to the task CLI. */
+  roundCliUnavailable?: true;
   /** Per-(user, step) effort override (null = use the provider's configured
    *  effort); drives the per-step effort dropdown's selected value. */
   preferredEffortLevel: string | null;

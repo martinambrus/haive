@@ -130,7 +130,13 @@ describe('loadStepFlags', () => {
 
   it('lists the static upcoming steps for an empty catalog', async () => {
     const flags = await loadStepFlags(fakeDb(() => []).db);
-    const db = { select: () => ({ from: () => ({ where: async () => [] }) }) } as never;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => Object.assign(Promise.resolve([]), { orderBy: async () => [] }),
+        }),
+      }),
+    } as never;
     const upcoming = await buildUpcomingCliSteps(db, flags, 'u', 't', 'workflow', []);
     expect(upcoming.length).toBeGreaterThan(0);
   });
@@ -226,7 +232,13 @@ describe('withTaskCustomSteps', () => {
     const base = await loadStepFlags(fakeDb(() => [row('a'), row('b')]).db);
     const task = { ...owner, runListSnapshot: snapshot, customSteps };
     const flags = withTaskCustomSteps(base, task);
-    const db = { select: () => ({ from: () => ({ where: async () => [] }) }) } as never;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => Object.assign(Promise.resolve([]), { orderBy: async () => [] }),
+        }),
+      }),
+    } as never;
     const upcoming = await buildUpcomingCliSteps(db, flags, 'u', 't', 'tt-x', [], false, snapshot);
     expect(upcoming.map((s) => s.stepId)).toEqual(['custom.t.second', 'custom.t.first']);
     expect(enrichStepsWithCliUsage(flags, [{ stepId: 'custom.t.first' }])[0]!.usesCli).toBe(true);

@@ -1,5 +1,6 @@
 'use client';
 
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { useState, type ReactNode } from 'react';
 import type { CliProvider } from '@/lib/api-client';
 
@@ -21,6 +22,7 @@ export function CliPickerGrid({
   seats,
   defaultProviderId,
   defaultEffortLevel,
+  roundCliUnavailable = false,
   roleProviders,
   roleEfforts,
   seatProviders,
@@ -39,6 +41,7 @@ export function CliPickerGrid({
   /** Effective provider for the single-CLI dropdown (per-step pref, else task default). */
   defaultProviderId: string;
   defaultEffortLevel?: string | null;
+  roundCliUnavailable?: boolean;
   roleProviders?: Record<string, string | null>;
   roleEfforts?: Record<string, string | null>;
   seatProviders?: Record<string, string | null>;
@@ -81,9 +84,11 @@ export function CliPickerGrid({
   const cliOptions = (
     <>
       <option value="">
-        {fallbackProvider
-          ? `(none — use the default: ${fallbackProvider.label})`
-          : '(none — use the default)'}
+        {roundCliUnavailable
+          ? 'Choose another CLI'
+          : fallbackProvider
+            ? `(none — use the default: ${fallbackProvider.label})`
+            : '(none — use the default)'}
       </option>
       {providerOptions}
     </>
@@ -151,6 +156,16 @@ export function CliPickerGrid({
        drops cells per row as the window narrows; the cell width never changes,
        so nothing re-flows on a CLI switch. */
     <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(min(22rem,100%),1fr))]">
+      {roundCliUnavailable && (
+        <InlineMarkdown
+          className="col-span-full text-xs text-amber-300"
+          body={
+            providers.some((p) => p.id === defaultProviderId)
+              ? 'The chosen CLI is disabled. Enable it or pick another on the step card or at the gate.'
+              : 'The chosen CLI was removed. Pick another on the step card or at the gate.'
+          }
+        />
+      )}
       {roles && roles.length > 0 ? (
         // Multi-CLI step (e.g. spec-quality): one dropdown per role.
         roles.map((roleDesc) => (

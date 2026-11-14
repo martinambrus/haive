@@ -186,9 +186,17 @@ import {
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
   FIX_LOOP_GATE_SOURCE,
+  FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
+import {
+  eligibleFixRoundProviders,
+  FIX_ROUND_CLI_FIELD,
+  FixRoundCliUnavailable,
+  fixRoundCliField,
+  recordFixRoundCliChoice,
+} from '../step-engine/steps/workflow/_fix-round-cli.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
@@ -1676,7 +1684,10 @@ export async function enqueueRepoCleanup(
   );
 }
 
-async function loadProviders(db: Database, userId: string): Promise<CliProviderRecord[]> {
+async function loadProviders(
+  db: Database | DbHandle,
+  userId: string,
+): Promise<CliProviderRecord[]> {
   const rows = await db
     .select()
     .from(schema.cliProviders)
@@ -1687,7 +1698,7 @@ async function loadProviders(db: Database, userId: string): Promise<CliProviderR
 /** The hold message for a fresh step whose resolved CLI is a listed provider that is switched
  *  off, else null. Only a step that dispatches a CLI or reads the default one is asked, and a
  *  step that will only skip is never held. */
-async function providerHoldFor(
+export async function providerHoldFor(
   db: Database,
   ctx: ResolvedTaskContext,
   stepDef: StepDefinition,
@@ -1705,7 +1716,15 @@ async function providerHoldFor(
     'default',
     ctx.taskId,
     ctx.ignoreSavedStepClis,
-  );
+    round,
+  ).catch(async (err: unknown) => {
+    // The round's chosen CLI went away after the gate. The task fails on this refusal, so
+    // its row must exist first: Retry re-runs the step at this round only when it finds one,
+    // and otherwise replays the task from START.
+    if (err instanceof FixRoundCliUnavailable)
+      await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
+    throw err;
+  });
   const message = providerHoldMessage(providers, cliProviderId);
   if (message === null) return null;
   const skips = await willSkipBeforeAdmission(
@@ -2452,6 +2471,14 @@ export async function handleResult(
           nextRound,
         );
         if (osc.tripped && osc.conflictingDiagnoses) {
+          const cliOptions = {
+            round: nextRound,
+            providers: eligibleFixRoundProviders(
+              ctx.userId,
+              await loadProviders(db, ctx.userId),
+              stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
+            ),
+          };
           const parked = await writeOwnedRow(db, result.row.id, {
             status: 'waiting_form',
             formSchema: buildOscillationEscalationSchema(
@@ -2465,6 +2492,7 @@ export async function handleResult(
                 a: HUMAN_REJECT_SOURCES.has(result.sourceStepId) && !result.unfencedLegacy,
                 b: osc.conflictingPerson === true,
               },
+              cliOptions,
             ),
             formValues: null,
             endedAt: null,
@@ -2523,6 +2551,14 @@ export async function handleResult(
         // next round once the gate is parked (an answer to it waits behind this job) so
         // "Continue" can re-enter implementation immediately; it is simply never read if
         // the user accepts or aborts.
+        const cliOptions = {
+          round: nextRound,
+          providers: eligibleFixRoundProviders(
+            ctx.userId,
+            await loadProviders(db, ctx.userId),
+            stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
+          ),
+        };
         const parked = await writeOwnedRow(db, result.row.id, {
           status: 'waiting_form',
           formSchema: buildFixLoopEscalationSchema(
@@ -2531,6 +2567,7 @@ export async function handleResult(
             cap,
             result.guidance,
             HUMAN_REJECT_SOURCES.has(result.sourceStepId) && !result.unfencedLegacy,
+            cliOptions,
           ),
           formValues: null,
           endedAt: null,
@@ -2739,6 +2776,7 @@ export async function resolveFixLoopGate(
   /** Free text the user typed on the gate. Applies to 'continue' only — 'accept' skips the
    *  implementation step and 'abort' fails the task, so there is nothing for it to reach. */
   instruction: string,
+  cliProviderId?: string,
 ): Promise<void> {
   // A Retry that reset the gate took it over, and its own pass decides what runs next.
   const closeGate = () => writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() });
@@ -2773,6 +2811,7 @@ export async function resolveFixLoopGate(
     targetRound: number,
     record: (tx: DbHandle) => Promise<void>,
   ): Promise<boolean> => {
+    let applied = false;
     try {
       await db.transaction(async (tx) => {
         if (fence.reviveFailed) {
@@ -2781,7 +2820,50 @@ export async function resolveFixLoopGate(
           if (refusal) throw new GateAnswerOvertaken('revive_refused', refusal.reason);
         }
         await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
-        await record(tx);
+        try {
+          await record(tx);
+        } catch (err) {
+          if (!(err instanceof FixRoundCliUnavailable)) throw err;
+          const form = gateRow.formSchema as FormSchema;
+          const title = 'CLI choice could not be applied';
+          const field = fixRoundCliField({
+            round: targetRound,
+            providers: eligibleFixRoundProviders(
+              ctx.userId,
+              await loadProviders(tx, ctx.userId),
+              target,
+            ),
+          });
+          await updateOwnedStep(tx, gateRow.id, {
+            status: 'waiting_form',
+            endedAt: null,
+            formValues: null,
+            waitingStartedAt: new Date(),
+            formSchema: {
+              ...form,
+              fields: form.fields.map((f) => (f.id === FIX_ROUND_CLI_FIELD ? field : f)),
+              infoSections: [
+                {
+                  title,
+                  body: 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+                  defaultOpen: true,
+                },
+                ...(form.infoSections ?? []).filter((s) => s.title !== title),
+              ],
+            },
+          });
+          const [parked] = await tx
+            .update(schema.tasks)
+            .set({
+              status: 'waiting_user',
+              updatedAt: new Date(),
+            })
+            .where(taskWriteTarget(ctx.taskId, fence))
+            .returning({ id: schema.tasks.id });
+          if (!parked) throw new GateAnswerOvertaken('task_moved');
+          notApplied('cli_unavailable');
+          return;
+        }
         const pointed = await markTaskRunningWithStep(
           tx,
           ctx.taskId,
@@ -2791,8 +2873,9 @@ export async function resolveFixLoopGate(
           fence,
         );
         if (!pointed) throw new GateAnswerOvertaken('task_moved');
+        applied = true;
       });
-      return true;
+      return applied;
     } catch (err) {
       if (err instanceof GateAnswerOvertaken) {
         notApplied(err.code, err.refusal ? { refusal: err.refusal } : {});
@@ -2857,6 +2940,7 @@ export async function resolveFixLoopGate(
   const prior =
     directive.length > 0 ? await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound) : null;
   const landed = await reopen(target, nextRound, async (tx) => {
+    await recordFixRoundCliChoice(tx, ctx.userId, ctx.taskId, target, nextRound, cliProviderId);
     if (prior) {
       await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
         diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
@@ -2884,13 +2968,18 @@ export async function resolveFixLoopGate(
 function readFixLoopGateAction(
   payload: TaskJobPayload,
   existing: { formValues: unknown } | undefined,
-): { action: string; instruction: string } | null {
+): { action: string; instruction: string; cliProviderId?: string } | null {
   const gateValues =
     payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
   const action = gateValues?.[FIX_LOOP_ACTION_FIELD];
   if (typeof action !== 'string') return null;
   const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
-  return { action, instruction: typeof raw === 'string' ? raw : '' };
+  const provider = gateValues?.[FIX_ROUND_CLI_FIELD];
+  return {
+    action,
+    instruction: typeof raw === 'string' ? raw : '',
+    cliProviderId: typeof provider === 'string' ? provider : undefined,
+  };
 }
 
 async function handleStartTask(
@@ -3317,7 +3406,15 @@ async function handleAdvanceStep(
       'advance-step skipped: step already done (duplicate delivery)',
     );
     if (gate) {
-      await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
+      await resolveFixLoopGate(
+        db,
+        ctx,
+        existing,
+        gate.action,
+        round,
+        gate.instruction,
+        gate.cliProviderId,
+      );
     } else if (redriven) {
       await handleResult(db, ctx, payload.stepId, redriven, { redrive: true });
     }
@@ -3359,7 +3456,15 @@ async function handleAdvanceStep(
   // the action (continue / accept / abort) here instead of re-running the parked step.
   const gate = readFixLoopGateAction(payload, existing);
   if (existing && gate) {
-    await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
+    await resolveFixLoopGate(
+      db,
+      ctx,
+      existing,
+      gate.action,
+      round,
+      gate.instruction,
+      gate.cliProviderId,
+    );
     return;
   }
 

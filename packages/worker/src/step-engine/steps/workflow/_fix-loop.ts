@@ -4,6 +4,11 @@ import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
 import {
+  FIX_LOOP_TARGET_STEP_ID,
+  fixRoundCliField,
+  type FixRoundCliOptions,
+} from './_fix-round-cli-field.js';
+import {
   cleanText,
   contentFingerprint,
   legacyContentFingerprint,
@@ -26,7 +31,7 @@ import {
 
 /** The step every fix round re-enters at: the implementation phase re-runs in fix
  *  mode, then the whole post-implementation chain re-runs as new round-N rows. */
-export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
+export { FIX_LOOP_TARGET_STEP_ID };
 /** Fallback cap when a task predates tasks.max_fix_rounds (set on the Gate-1 form). */
 export const DEFAULT_MAX_FIX_ROUNDS = 5;
 const FIX_LOOP_REQUESTED = 'fix_loop.requested';
@@ -80,6 +85,7 @@ export function buildFixLoopEscalationSchema(
   cap: number,
   guidance?: string,
   person?: boolean,
+  cliOptions?: FixRoundCliOptions,
 ): FormSchema {
   return {
     title: `Fix loop reached the ${cap}-round limit`,
@@ -109,6 +115,7 @@ export function buildFixLoopEscalationSchema(
         default: 'continue',
       },
       instructionField(),
+      fixRoundCliField(cliOptions),
     ],
     submitLabel: 'Apply decision',
   };
@@ -126,6 +133,7 @@ export function buildOscillationEscalationSchema(
   guidanceA?: string,
   guidanceB?: string,
   persons?: { a: boolean; b: boolean },
+  cliOptions?: FixRoundCliOptions,
 ): FormSchema {
   const excerpt = (step: string, diagnosis: string, person?: boolean): string =>
     excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(step));
@@ -162,6 +170,7 @@ export function buildOscillationEscalationSchema(
         default: 'continue',
       },
       instructionField(),
+      fixRoundCliField(cliOptions),
     ],
     submitLabel: 'Apply decision',
   };
