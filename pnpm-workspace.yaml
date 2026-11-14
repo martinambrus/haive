@@ -1,4 +1,4 @@
 packages:
-  - 'packages/*'
-  - 'modules/*'
-  - 'external-modules/*'
+  - "packages/*"
+  - "modules/*"
+  - "external-modules/*"

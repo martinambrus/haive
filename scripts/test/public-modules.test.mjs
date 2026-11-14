@@ -94,7 +94,7 @@ test('public folder references with relative, link and file prefixes remain allo
   }
 });
 test('repository tracked install and runtime wiring contains only public modules', () => {
-  const result = spawnSync('/usr/bin/git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' });
+  const result = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   const files = new Map(
     result.stdout

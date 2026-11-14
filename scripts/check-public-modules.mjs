@@ -84,7 +84,7 @@ export function checkPublicModules(files) {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = spawnSync('/usr/bin/git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' });
+  const result = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' });
   if (result.status !== 0) throw new Error('could not enumerate tracked files');
   const files = new Map(
     result.stdout
