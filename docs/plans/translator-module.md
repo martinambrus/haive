@@ -20,6 +20,14 @@ passes happened. Holding all three in one turn is hard; weaker models collapse i
 Splitting them into genuinely separate invocations, each seeing the previous output, is the single
 highest-value change here and may bring cheaper models into range.
 
+**Source lives in its own private repository (DECIDED 2026-11-14).** The module is developed in
+`martinambrus/haive-module-translator`, a private GitHub repository created before any module code is
+written; the public haive repository holds none of it. It follows the same external-module rules as
+the deep-analysis module (`kind-riding-dream.md`, "Source lives in its own private repository"): the
+core changes land in haive as generic capabilities, the core prerequisite that keeps a dev install
+out of haive commits lands first, module CI builds against a pinned haive release tag, and each gap
+found is fixed in core. The two are the first external modules.
+
 Ships as `@haive-module/translator`, distributed exactly like the deep-analysis module (private
 registry, BuildKit-secret token, `entitlementId`) per the distribution and module-step rules in
 `serialized-chasing-thacker.md` and `rippling-wibbling-puffin.md`. **Both foundations have landed.**
