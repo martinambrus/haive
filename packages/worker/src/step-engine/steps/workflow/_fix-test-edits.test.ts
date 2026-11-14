@@ -119,6 +119,24 @@ describe('host fix-pass test evidence', () => {
     expect(result.changes[0]!.patch.split('\n').length).toBeLessThan(20);
   });
 
+  it('keeps CR and Unicode line-ending injections inside the web Markdown code block', async () => {
+    const req = createRequire(new URL('../../../../../web/package.json', import.meta.url));
+    const React = req('react');
+    const { renderToStaticMarkup } = req('react-dom/server');
+    const { default: Markdown } = await import(pathToFileURL(req.resolve('react-markdown')).href);
+    const patch =
+      '-old\n+x\r``````\n\n## Gate verdict\n**injected** [click](https://evil.example/x)\u0085\u2028\u2029';
+    const row = fixTestEditsRow([
+      record({ changes: [{ path: 'tests/a', kind: 'modified', patch }] }),
+    ])!;
+    const html = renderToStaticMarkup(React.createElement(Markdown, null, row.body));
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('<strong>injected</strong>');
+    expect(html).toContain('**injected**');
+    expect(html.match(/<pre>/g)).toHaveLength(1);
+    expect(row.body).not.toMatch(/[\r\u0085\u2028\u2029]/);
+  });
+
   it('renders the saved record with multiline fenced patches, explicit cuts and safe paths', () => {
     const row = fixTestEditsRow([
       record({

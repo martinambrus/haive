@@ -3,7 +3,7 @@ import { isUtf8 } from 'node:buffer';
 import { readdirSizesNoFollow, openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 import { fenceOpener } from '@haive/shared/markdown-fences';
 import type { StatusSummaryItem } from '@haive/shared';
-import { balanceFences, fencedAgentBlock } from '../_untrusted-repo.js';
+import { fencedAgentBlock } from '../_untrusted-repo.js';
 import { asPlainText, sanitizeSimilarSites } from './_similar-sites.js';
 import { isTestEvidencePath } from './_test-paths.js';
 import {
@@ -401,7 +401,7 @@ export function fixTestEditsRow(records: readonly FixTestRecord[]): StatusSummar
   let bytes = TEST_GATE_BYTES;
   let lines = TEST_GATE_LINES;
   const body = [
-    'Host-captured test edits during repair. These are display evidence, not a verdict on expectation weakening. Current-tree checks include these edits; no private grader or old-test replay ran. Renames appear as delete/add.',
+    'Host-captured test edits during repair. These are display evidence, not a verdict on expectation weakening. Final verification and review use the current tree, including these edits. Old tests are not replayed. Renames appear as delete/add. At most the latest 30 repair passes are shown.',
     '',
   ];
   for (const r of records.slice(0, 30)) {
@@ -415,13 +415,13 @@ export function fixTestEditsRow(records: readonly FixTestRecord[]): StatusSummar
       );
       continue;
     }
-    if (!r.changes.length) body.push('No test edit measured between the two complete images.');
+    if (!r.changes.length) body.push('No change to the classified test paths.');
     for (const c of r.changes) {
       if (!safePath(c.path)) continue;
       body.push(
         `- ${asPlainText(c.path)} (${c.kind}); before SHA-256: ${asPlainText(c.beforeHash ?? 'absent')}; after SHA-256: ${asPlainText(c.afterHash ?? 'absent')}`,
       );
-      const bounded = cutPatch(balanceFences(c.patch), Math.max(0, bytes), Math.max(0, lines));
+      const bounded = cutPatch(displayLines(c.patch), Math.max(0, bytes), Math.max(0, lines));
       bytes -= Buffer.byteLength(bounded.patch);
       lines -= bounded.patch ? bounded.patch.split('\n').length : 0;
       // The shared CommonMark helper includes closing runs too. No payload can close this fence.
@@ -432,7 +432,7 @@ export function fixTestEditsRow(records: readonly FixTestRecord[]): StatusSummar
       body.push(`${fence}diff\n${bounded.patch}\n${fence}`);
       if (c.cut || bounded.cut)
         body.push(
-          'Display patch cut at the line/byte cap; immutable image references retain the whole captured content.',
+          'Display patch cut: at most 40 lines / 6 KiB per hunk and 80 lines / 12 KiB per pass (gate: 240 lines / 32 KiB), or comparison safety limit. Manifest hashes remain; content availability is subject to retention.',
         );
     }
     body.push('');
