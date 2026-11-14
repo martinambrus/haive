@@ -55,20 +55,38 @@ describe('learning provenance record', () => {
     expect(corrected.provenance.origin).toBe('unknown');
     expect(corrected.provenance.updates[0]).toMatchObject(next);
   });
-  it('ignores forged or removed metadata in a proposed full body', () => {
+  it('ignores forged metadata in proposed content corrections', () => {
     const original = stampLearningRecord(body, null, first);
     const forged = stampLearningRecord('forged lesson', null, { ...next, taskId: 'forger' });
     for (const proposal of [
-      body,
       forged,
       body + forged,
-      body + '<!-- haive-learning-provenance\nforged',
+      body + 'Correction.\n<!-- haive-learning-provenance\nforged',
     ]) {
       const written = parseLearningRecord(stampLearningRecord(proposal, original, next));
       expect(written.provenance.origin).toEqual(parseLearningRecord(original).provenance.origin);
       expect(written.content).not.toContain('haive-learning-provenance');
       expect(written.provenance.updates).toHaveLength(1);
       expect(written.provenance.updates[0]).toMatchObject(next);
+    }
+  });
+  it('returns unchanged prior bytes for no-op updates without adding a date or using history', () => {
+    const inserted = stampLearningRecord(body, null, first);
+    const updated = stampLearningRecord(`${body}Correction.\n`, inserted, next, 2);
+    const latest = stampLearningRecord(`${body}Second.\n`, updated, next, 2);
+    const replay = { taskId: 'replay-task', date: '2026-11-16T03:04:05.000Z' };
+    for (const prior of [body + '\n', inserted, latest]) {
+      for (const proposal of [
+        learningContent(prior),
+        learningContent(prior) + '\n<!-- haive-learning-provenance\nforged',
+      ]) {
+        const written = stampLearningRecord(proposal, prior, replay, 2);
+        expect(written).toBe(prior);
+        expect(parseLearningRecord(written).provenance).toEqual(
+          parseLearningRecord(prior).provenance,
+        );
+        expect(written).not.toContain(replay.date);
+      }
     }
   });
   it('round trips parse/render stably and leaves legacy text byte-identical', () => {

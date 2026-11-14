@@ -90,11 +90,13 @@ export function stampLearningRecord(
       ? { version: 1, origin: { ...checkedStamp, bodyHash: afterHash }, updates: [] }
       : parseLearningRecord(priorFile).provenance;
   if (priorFile !== null) {
+    const beforeHash = bodyHash(priorFile);
+    if (beforeHash === afterHash) return priorFile;
     provenance.updates = [
       ...provenance.updates,
       {
         ...checkedStamp,
-        beforeHash: bodyHash(priorFile),
+        beforeHash,
         afterHash,
       },
     ].slice(-historyMax);
