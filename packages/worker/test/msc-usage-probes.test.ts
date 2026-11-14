@@ -23,25 +23,30 @@ const result = (input: number, output: number, cost: number) => ({
 });
 
 describe('stream usage fallback', () => {
-  it('keeps cumulative totals from the second result of a constructed steered run', () => {
-    // This controls parser behaviour, not the unrecorded provider contract:
-    // summing these result snapshots would double-count the first turn.
+  it('sums the per-turn usage of each result in a steered run', () => {
+    // Measured 2026-11-14, claude-code 2.1.323 with a second stream-json user message sent
+    // after the first result: each result's `usage` covers its own turn (1472/48, then
+    // 1501/150), while `total_cost_usd`, `duration_api_ms` and `modelUsage` are cumulative
+    // (the second result's modelUsage was 2973/198). Keeping only the last usage stored the
+    // final turn's tokens next to the whole run's cost.
+    // A steer written mid-turn, as the forwarder sends it, measured the same way (1472/934
+    // then 1493/1544; modelUsage 2965/2478).
     const collector = createStreamJsonCollector();
     const events = [
       { type: 'system', subtype: 'init', model: 'claude-sonnet-5' },
-      assistant('first', 'claude-sonnet-5', 10, 2),
-      result(10, 2, 0.01),
-      { type: 'user', message: { role: 'user', content: 'follow up' } },
-      assistant('second', 'claude-sonnet-5', 20, 3),
-      result(30, 5, 0.03),
+      assistant('first', 'claude-sonnet-5', 1583, 0),
+      result(1472, 48, 0.006848),
+      { type: 'system', subtype: 'init', model: 'claude-sonnet-5' },
+      assistant('second', 'claude-sonnet-5', 1650, 0),
+      result(1501, 150, 0.015852),
     ];
     for (const event of events) collector.onChunk(JSON.stringify(event) + '\n');
     expect(collector.getTokenUsage()).toEqual({
-      inputTokens: 30,
-      outputTokens: 5,
-      totalTokens: 35,
-      costUsd: 0.03,
-      peakPromptTokens: 20,
+      inputTokens: 2973,
+      outputTokens: 198,
+      totalTokens: 3171,
+      costUsd: 0.015852,
+      peakPromptTokens: 1650,
     });
   });
 

@@ -202,7 +202,8 @@ MEASURED on the dev install over 30 days, claude-opus-5-5 reads 93 tok/s per mod
 31 per wall-clock second, since model time was 33% of its runs. Wall time alone misstates model
 speed by 3x.
 
-**The value is cumulative, so the LAST result event wins**, like the result usage beside it: a
+**The value is cumulative, so the LAST result event wins**, like the cost beside it; the result
+usage is per turn and is summed across a steered run's result events: a
 steered run carried 27,366 then 35,255 ms against 39,571 ms of wall clock. Migration `0182`
 backfilled 2,719 rows from `stream_log` by parsing each line as JSON and keeping the last `type:
 "result"` line, never by key position; the binary writes `duration_api_ms` BEFORE `type`. gemini
