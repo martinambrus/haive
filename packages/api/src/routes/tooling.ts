@@ -1,5 +1,6 @@
 import { readForgeErrorExcerpt } from '@haive/shared/forge';
 import { safeErrorMessage } from '@haive/shared/logger';
+import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
@@ -39,6 +40,7 @@ tooling.post('/test-postgres', async (c) => {
 
   const { pgSocket } = await probeEgressFor(c);
   try {
+    assertUserPostgresDsn(connStr);
     const postgres = (await import('postgres')).default;
     const sql = postgres(connStr, {
       ...(pgSocket ? { socket: pgSocket } : {}),

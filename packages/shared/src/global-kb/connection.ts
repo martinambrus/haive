@@ -6,6 +6,7 @@ import { logger } from '../logger/index.js';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { configService, CONFIG_KEYS, type ConfigService } from '../config/config.service.js';
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
+import { assertUserPostgresDsn } from '../egress/user-postgres-dsn.js';
 
 const log = logger.child({ module: 'global-kb-connection' });
 const CONNECTION_CHECK_MS = 500;
@@ -174,6 +175,7 @@ function resolveExternal(
   connectionString: string,
   opts: GlobalKbConnectOptions,
 ): GlobalKbConnection {
+  assertUserPostgresDsn(connectionString);
   const pg = postgres(connectionString, poolOptions(opts));
   return buildConnection('external', pg, settings);
 }

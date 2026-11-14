@@ -5,7 +5,7 @@ import { sql } from 'drizzle-orm';
 import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
-import { guardedPgSocket, validateAllowlist } from '../egress/index.js';
+import { assertUserPostgresDsn, guardedPgSocket, validateAllowlist } from '../egress/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
 const CONNECTION_CHECK_MS = 500;
@@ -121,6 +121,7 @@ export async function ragRowsAwaitReembed(
 export function dsnDialHost(dsn: string): string | null {
   let client: postgres.Sql | undefined;
   try {
+    assertUserPostgresDsn(dsn);
     client = postgres(dsn, { max: 1 });
     const hosts = client.options.host as string[] | undefined;
     if (client.options.path || hosts?.length !== 1) return null;
@@ -265,6 +266,7 @@ function resolveExternal(
   embeddingDimensions: number,
   opts: RagConnectOptions,
 ): RagConnection {
+  assertUserPostgresDsn(connectionString);
   const pg = postgres(connectionString, {
     ...poolOptions(opts),
     ...(opts.trustedTarget ? {} : { socket: guardedPgSocket }),
