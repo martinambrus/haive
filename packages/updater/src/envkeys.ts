@@ -54,7 +54,7 @@ export class EnvKeyInterpolated extends UpgradeRefusal {
   constructor(public readonly key: string) {
     super(
       'env-key-interpolated',
-      `required .env key ${key} refers to another variable; set a literal value (single-quote it to keep a $)`,
+      `required .env key ${key} refers to another variable; replace it with the literal value docker compose config resolves for it today`,
     );
   }
 }

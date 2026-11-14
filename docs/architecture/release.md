@@ -117,7 +117,9 @@ A missing, empty or commented-out `never` key refuses with `env-key-missing` and
 A declared key (`never` or `hex`) whose unquoted or double-quoted value holds a `$` reference
 refuses with `env-key-interpolated`: Compose substitutes it when it reads `.env`, so
 `${MAIL_PASSWORD:-}` would pass as non-empty text and reach Mailpit empty. A single-quoted value
-and `$$` are literal and pass.
+and `$$` are literal and pass. Replace a refused value with what `docker compose config` resolves
+for it today, not the written text: Compose has been passing the substituted value, and a changed
+`CONFIG_ENCRYPTION_KEY`, `JWT_SECRET` or `POSTGRES_PASSWORD` no longer matches the data it protects.
 Missing or empty `hex` keys get `crypto.randomBytes(bytes).toString('hex')`; existing non-empty
 values are retained. The updater appends the additions through an exclusively created
 `.env.haive-tmp`, applies the original uid/gid with `fchown` and the original mode, fsyncs it and
