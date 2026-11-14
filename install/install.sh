@@ -1000,7 +1000,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
   *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v> [--replace-modified-bundle]${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>] [--force]" >&2; exit 2 ;;
 esac
 EOF
-chmod 755 "$BUNDLE_STAGE/haive"
+chmod 700 "$BUNDLE_STAGE/haive"
 place_bundle_file haive
 
 # Uninstall deliberately does NOT use `down -v`. Five volumes in docker-compose.yml carry an
@@ -1231,7 +1231,7 @@ rm -rf .docker
 ' "$BUNDLE_STAGE/uninstall.sh" > "$CHANNEL_SCRATCH/uninstall.sh"
   mv "$CHANNEL_SCRATCH/uninstall.sh" "$BUNDLE_STAGE/uninstall.sh"
 fi
-chmod 755 "$BUNDLE_STAGE/uninstall.sh"
+chmod 700 "$BUNDLE_STAGE/uninstall.sh"
 place_bundle_file uninstall.sh
 rmdir "$BUNDLE_STAGE"
 BUNDLE_STAGE=""

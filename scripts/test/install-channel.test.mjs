@@ -442,7 +442,7 @@ for (const lang of ['sh', 'ps1']) {
           assert.deepEqual(readFileSync(outside[index]), before[index].bytes, name);
           assert.equal(statSync(outside[index]).mode, before[index].mode, name);
           assert.ok(lstatSync(join(f.dir, name)).isFile(), name);
-          if (lang === 'sh') assert.equal(statSync(join(f.dir, name)).mode & 0o777, 0o755);
+          if (lang === 'sh') assert.equal(statSync(join(f.dir, name)).mode & 0o777, 0o700);
         }
         assert.ok(!readdirSync(f.dir).some((name) => name.startsWith('.haive-install.')));
       } finally {
