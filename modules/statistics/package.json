@@ -32,7 +32,7 @@
     "@haive/shared": "workspace:*",
     "@haive/web-kit": "workspace:*",
     "drizzle-orm": "0.45.2",
-    "hono": "^4.13.12",
+    "hono": "^4.13.16",
     "recharts": "^3.10.1",
     "zod": "^4.6.6"
   },
