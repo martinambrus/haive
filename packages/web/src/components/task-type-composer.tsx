@@ -312,7 +312,7 @@ export function TaskTypeComposer({
       kind: 'remove',
     });
     const slug = prompt ? promptStepSlugOf(id, prompt.typeSlug) : null;
-    if (prompt && slug !== null && !next.includes(id)) {
+    if (!overlay && prompt && slug !== null && !next.includes(id)) {
       const { [slug]: _gone, ...kept } = promptSteps;
       prompt.set(kept);
     }

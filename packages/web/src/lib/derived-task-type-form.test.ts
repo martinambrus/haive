@@ -4,6 +4,7 @@ import {
   evaluateDerivedEditor,
   buildDerivedCreateBody,
   buildDerivedUpdateBody,
+  removeDerivedStep,
 } from './derived-task-type-form';
 import { derivedFixture } from './derived-test-fixture';
 import { readPromptSteps } from './prompt-step-editing';
@@ -67,6 +68,67 @@ describe('derived editor contract', () => {
       issueKinds: [...new Set(result.issues.map((i) => i.kind))].sort(),
       warningKinds: [...new Set(result.warnings.map((w) => w.kind))].sort(),
     }).toEqual(testCase.expected);
+  });
+
+  it('appends a base-step removal and keeps existing prompt definitions and inserts', () => {
+    const promptSteps = readPromptSteps({
+      keep: {
+        slug: 'keep',
+        title: 'Keep',
+        template: 'Retained',
+        capabilities: [],
+        timeoutMs: 60_000,
+      },
+    });
+    const changes = [{ insertAfter: 'a', step: 'custom.mine.keep' }];
+    const next = removeDerivedStep({ changes, stepId: 'b', typeSlug: 'mine', promptSteps });
+    expect(next.changes).toEqual([...changes, { remove: 'b' }]);
+    expect(next.promptSteps).toBe(promptSteps);
+    expect(changes).toHaveLength(1);
+    expect(
+      evaluateDerivedEditor({
+        catalog: fixture.catalog,
+        baseSlug: 'workflow',
+        typeSlug: 'mine',
+        requiresRepository: true,
+        changes: next.changes,
+        promptSteps: next.promptSteps,
+        loopLimits: {},
+        preAnswerDefaults: {},
+      }).issues,
+    ).toEqual([]);
+  });
+
+  it('prunes transitive insert, replace and remove dependencies while retaining independent edits', () => {
+    const promptSteps = readPromptSteps(
+      Object.fromEntries(
+        ['root', 'child', 'keep'].map((slug) => [
+          slug,
+          { slug, title: slug, template: slug, capabilities: [], timeoutMs: 60_000 },
+        ]),
+      ),
+    );
+    const next = removeDerivedStep({
+      typeSlug: 'mine',
+      stepId: 'custom.mine.root',
+      promptSteps,
+      changes: [
+        { insertAfter: 'a', step: 'custom.mine.root' },
+        { insertAfter: 'custom.mine.root', step: 'custom.mine.child' },
+        { replace: 'custom.mine.child', with: 'x' },
+        { insertAfter: 'x', step: 'y' },
+        { remove: 'y' },
+        { remove: 'custom.mine.root' },
+        { insertAfter: 'a', step: 'custom.mine.keep' },
+        { remove: 'old-name' },
+      ],
+    });
+    expect(next.changes).toEqual([
+      { insertAfter: 'a', step: 'custom.mine.keep' },
+      { remove: 'old-name' },
+    ]);
+    expect(next.promptSteps).toEqual({ keep: promptSteps.keep });
+    expect(Object.keys(promptSteps)).toEqual(['root', 'child', 'keep']);
   });
 
   it('keeps incomplete operations invalid rather than dropping rows', () => {

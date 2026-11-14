@@ -162,3 +162,40 @@ export function renameDerivedPromptIds(
         : { insertAfter: rename(change.insertAfter), step: rename(change.step) },
   );
 }
+
+/** Remove an overlay-owned insertion and the operations that consume its outputs. */
+export function removeDerivedStep(input: {
+  changes: DerivedChange[];
+  stepId: string;
+  typeSlug: string;
+  promptSteps: PromptSteps;
+}): { changes: DerivedChange[]; promptSteps: PromptSteps } {
+  const producer = input.changes.findIndex(
+    (change) => 'insertAfter' in change && change.step === input.stepId,
+  );
+  if (producer < 0)
+    return {
+      changes: [...input.changes, { remove: input.stepId }],
+      promptSteps: input.promptSteps,
+    };
+
+  const removed = new Set<string>();
+  const changes = input.changes.filter((change, index) => {
+    const target =
+      'remove' in change
+        ? change.remove
+        : 'replace' in change
+          ? change.replace
+          : change.insertAfter;
+    if (index !== producer && !removed.has(target)) return true;
+    if ('insertAfter' in change) removed.add(change.step);
+    if ('replace' in change) removed.add(change.with);
+    return false;
+  });
+  const promptSteps = Object.fromEntries(
+    Object.entries(input.promptSteps).filter(
+      ([, entry]) => !removed.has(promptStepId(input.typeSlug, entry.slug)),
+    ),
+  );
+  return { changes, promptSteps };
+}

@@ -48,6 +48,7 @@ import {
   buildDerivedUpdateBody,
   evaluateDerivedEditor,
   renameDerivedPromptIds,
+  removeDerivedStep,
 } from '@/lib/derived-task-type-form';
 import { useDerivedPreview } from '@/lib/use-derived-preview';
 import { TaskTypeDuplicateAction } from './task-type-duplicate-action';
@@ -148,6 +149,7 @@ export function TaskTypeEditor({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [formRevision, setFormRevision] = useState(0);
+  const [changesRevision, setChangesRevision] = useState(0);
   const [loadedValues, setLoadedValues] = useState<FormValues | null>(null);
   const [changedRow, setChangedRow] = useState<AdminTaskType | null>(null);
   const [leaving, setLeaving] = useState(false);
@@ -550,13 +552,16 @@ export function TaskTypeEditor({
                         setChanges((prev) => [...prev, { insertAfter: target, step }]);
                       }
                     : undefined,
-                onRemove:
-                  editableFields.includes('changes') && changes.length < MAX_DERIVED_CHANGES
-                    ? (step: string) => {
-                        touch();
-                        setChanges((prev) => [...prev, { remove: step }]);
-                      }
-                    : undefined,
+                onRemove: editableFields.includes('changes')
+                  ? (stepId: string) => {
+                      const next = removeDerivedStep({ changes, stepId, typeSlug, promptSteps });
+                      if (next.changes.length > MAX_DERIVED_CHANGES) return;
+                      touch();
+                      setChanges(next.changes);
+                      setPromptSteps(next.promptSteps);
+                      setChangesRevision((n) => n + 1);
+                    }
+                  : undefined,
                 limitsEditable: editableFields.includes('stepLoopLimitDefaults'),
               },
             }
@@ -647,7 +652,7 @@ export function TaskTypeEditor({
             error={preview.error}
             disabled={saving || authoringForbidden}
             editable={editableFields.includes('changes')}
-            revision={`${formRevision}:${typeSlug}`}
+            revision={`${formRevision}:${typeSlug}:${changesRevision}`}
             entries={withPrompts!}
             requiresRepository={requiresRepository}
             onChange={(next) => {

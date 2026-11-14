@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { derivedFixture } from '@/lib/derived-test-fixture';
 import { TaskTypeEditor } from './task-type-editor';
+import { TaskTypeComposer } from './task-type-composer';
+import { newPromptStep } from '@/lib/prompt-step-editing';
 import TaskTypesPage from '@/app/(app)/admin/task-types/page';
 import { DerivedTaskTypeChanges } from './derived-task-type-changes';
 import { MAX_DERIVED_CHANGES } from '@haive/shared/modularity';
@@ -587,6 +589,98 @@ describe('derived editor', () => {
     await act(async () => {});
     expect(screen.getByText(/x: This step is not installed/)).toBeTruthy();
     expect((screen.getByLabelText(/^New step/) as HTMLInputElement).value).toBe('x');
+  });
+
+  it.each([false, true])(
+    'removes overlay prompt inserts and their dependents (saved: %s)',
+    async (saved) => {
+      const actualApi =
+        await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
+      mocks.createTaskType.mockImplementation(actualApi.createTaskType);
+      mocks.updateTaskType.mockImplementation(actualApi.updateTaskType);
+      const fetch = wireResponse({ taskType: row });
+      const first = { ...newPromptStep([]), template: 'First prompt' };
+      const second = { ...newPromptStep([first.slug]), template: 'Second prompt' };
+      if (saved) {
+        mocks.getAdminTaskType.mockResolvedValue({
+          taskType: {
+            ...row,
+            changes: [
+              { insertAfter: 'b', step: 'custom.mine.prompt-step' },
+              { insertAfter: 'custom.mine.prompt-step', step: 'custom.mine.prompt-step-2' },
+              { insertAfter: 'custom.mine.prompt-step-2', step: 'x' },
+              { remove: 'old-name' },
+            ],
+            promptSteps: { [first.slug]: first, [second.slug]: second },
+          },
+          availability: { available: true },
+        });
+        await mount({ slug: 'mine', duplicateBaseSlug: '' });
+      } else {
+        await mount();
+        fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: 'mine' } });
+        for (const entry of [first, second]) {
+          fireEvent.click(screen.getByRole('button', { name: 'Add prompt step' }));
+          fireEvent.change(screen.getByLabelText('Prompt template'), {
+            target: { value: entry.template },
+          });
+        }
+        fireEvent.click(screen.getByRole('button', { name: 'Add x' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
+        fireEvent.change(screen.getAllByLabelText(/^Target step/)[3]!, {
+          target: { value: 'old-name' },
+        });
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Edit prompt step Prompt step' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Remove prompt step' }));
+      const save = screen.getByRole('button', {
+        name: saved ? 'Save changes' : 'Create task type',
+      }) as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+      fireEvent.click(save);
+      await act(async () => {});
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetch.mock.calls[0]![1].body);
+      expect(body.changes).toEqual([{ remove: 'old-name' }]);
+      expect(body.promptSteps).toEqual({});
+      expect(screen.queryByLabelText('Prompt template')).toBeNull();
+      const evaluation = evaluateDerivedEditor({
+        catalog: fixture.catalog,
+        baseSlug: 'workflow',
+        typeSlug: 'mine',
+        requiresRepository: true,
+        changes: body.changes,
+        promptSteps: body.promptSteps,
+        loopLimits: {},
+        preAnswerDefaults: {},
+      });
+      expect(evaluation.issues).toEqual([]);
+    },
+  );
+
+  it('delegates base prompt removal to the overlay without deleting base definitions', () => {
+    const entry = { ...newPromptStep([]), template: 'Base prompt' };
+    const onRemove = vi.fn();
+    const onPromptStepsChange = vi.fn();
+    render(
+      <TaskTypeComposer
+        catalog={fixture.catalog}
+        typeSlug="mine"
+        stepIds={['custom.mine.prompt-step']}
+        promptSteps={{ [entry.slug]: entry }}
+        loopLimits={{}}
+        requiresRepository
+        readOnly
+        overlay={{ onRemove, limitsEditable: false }}
+        onPromptStepsChange={onPromptStepsChange}
+        onStepIdsChange={vi.fn()}
+        onLoopLimitsChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Edit prompt step Prompt step' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove prompt step' }));
+    expect(onRemove).toHaveBeenCalledExactlyOnceWith('custom.mine.prompt-step');
+    expect(onPromptStepsChange).not.toHaveBeenCalled();
   });
 
   it('keeps orphan prompt work repairable after its insertion is deleted', async () => {
