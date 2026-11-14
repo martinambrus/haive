@@ -1620,18 +1620,25 @@ describe('house rules injection', () => {
   describe('a prompt too large for an argv-only CLI', () => {
     // No shipped adapter is argv-only since gemini reads stdin; this keeps the guard under test.
     class ArgvOnlyGemini extends GeminiAdapter {
+      constructor(private readonly limit = PROMPT_ARGV_LIMIT_BYTES) {
+        super();
+      }
       override buildCliInvocation(
         _provider: CliProviderRecord,
         prompt: string,
         opts: InvokeOpts,
       ): CliCommandSpec {
+        if (bytes(prompt) > this.limit) throw new PromptTooLargeError('argv-only', bytes(prompt));
         const { argv } = deliverPrompt(prompt, { adapter: 'argv-only', stdin: false });
         return { command: 'argv-only', args: ['-p', ...argv], env: {}, cwd: opts.cwd };
       }
     }
     class ArgvOnlyRegistry extends CliAdapterRegistry {
+      constructor(private readonly limit = PROMPT_ARGV_LIMIT_BYTES) {
+        super();
+      }
       override get(): GeminiAdapter {
-        return new ArgvOnlyGemini();
+        return new ArgvOnlyGemini(this.limit);
       }
     }
     const argvOnly = { registry: new ArgvOnlyRegistry() };
@@ -1648,6 +1655,46 @@ describe('house rules injection', () => {
     it('has a block worth dropping', () => {
       expect(houseBytes).toBeGreaterThan(400);
       expect(agentBytes).toBeGreaterThan(houseBytes);
+    });
+
+    it('keeps the repacked budgeted prompt when falling back without rules', () => {
+      const packed = 'packed';
+      const repack = vi.fn(() => packed);
+      const { prompt, spec } = dispatch(
+        {
+          registry: new ArgvOnlyRegistry(overhead + bytes(packed) + 16),
+          agentRulesInjection: true,
+          ...house,
+          promptBudget: { maxChars: 24000, outputReserveChars: 1000, repack },
+        },
+        'unpacked '.repeat(100),
+        gemini,
+      );
+      expect(repack).toHaveBeenCalledTimes(1);
+      expect(prompt).toContain(packed);
+      expect(prompt).not.toContain('unpacked');
+      expect(spec.agentRules).toMatchObject({ injected: false, reason: 'prompt-too-large' });
+      expect(spec.houseRules?.reason).toBe('too_large');
+      expect(prompt.length).toBeLessThanOrEqual(23000);
+    });
+
+    it('still throws when a budgeted argv prompt cannot fit without rules', () => {
+      expect(() =>
+        dispatch(
+          {
+            registry: new ArgvOnlyRegistry(overhead + 8),
+            agentRulesInjection: true,
+            ...house,
+            promptBudget: {
+              maxChars: 24000,
+              outputReserveChars: 1000,
+              repack: () => 'x'.repeat(32),
+            },
+          },
+          'original',
+          gemini,
+        ),
+      ).toThrow(PromptTooLargeError);
     });
 
     it('drops the house rules first and keeps the agent rules', () => {

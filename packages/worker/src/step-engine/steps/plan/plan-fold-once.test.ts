@@ -6,6 +6,7 @@ import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { applyAgentPatch, applyAgentPatchOnce } from './_plan-prompt.js';
 import { partialApplyNote } from './01-plan-build.js';
 import { foldCoverageResults } from './02-plan-coverage.js';
+import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 
 vi.mock('./_plan-prompt.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./_plan-prompt.js')>();
@@ -196,6 +197,48 @@ describe('foldCoverageResults', () => {
   beforeEach(() => {
     vi.mocked(applyAgentPatch).mockReset();
     vi.mocked(applyAgentPatch).mockResolvedValue(applied);
+  });
+
+  it('retries a conflict with fresh semantic input and the whole claim', async () => {
+    vi.mocked(ensureSemanticExpansionResolution).mockClear();
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(new PlanPatchError('conflict', 'raced'));
+    const { db, claims, stamps } = fakeDb();
+    const ordinalReply = {
+      ...reply,
+      output: { ops: [{ op: 'upsert', nodeRef: 'n1', ordinal: 2 }] },
+    };
+    expect((await foldCoverageResults(ctx(db), detected, [ordinalReply])).hadFailure).toBe(false);
+    expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+    expect(ensureSemanticExpansionResolution).toHaveBeenCalledTimes(2);
+    expect(claims).toHaveLength(2);
+    expect(stamps).toEqual([]);
+  });
+
+  it('fails persistent conflicts by name after the bound without discarding the reply', async () => {
+    const conflict = new PlanPatchError('conflict', 'raced');
+    vi.mocked(applyAgentPatch).mockRejectedValue(conflict);
+    const { db, claims, stamps } = fakeDb();
+    await expect(foldCoverageResults(ctx(db), detected, [reply])).rejects.toBe(conflict);
+    expect(claims).toHaveLength(3);
+    expect(stamps).toEqual([]);
+  });
+
+  it('stamps stale caller versions for a later wave without retrying against a fresh read', async () => {
+    const conflict = new PlanPatchError('conflict', 'stale caller version');
+    vi.mocked(applyAgentPatch).mockRejectedValue(conflict);
+    const versioned = {
+      ...reply,
+      output: { ops: [{ op: 'upsert', nodeRef: 'n1', ordinal: 2, expectedVersion: 1 }] },
+    };
+    const { db, claims, stamps } = fakeDb();
+    expect((await foldCoverageResults(ctx(db), detected, [versioned])).hadFailure).toBe(true);
+    expect(claims).toHaveLength(1);
+    expect(stamps).toEqual([
+      expect.objectContaining({
+        values: { errorMessage: 'plan patch not applied: stale caller version' },
+        inTransaction: false,
+      }),
+    ]);
   });
 
   it('retries a busy coverage fold without discarding its reply', async () => {

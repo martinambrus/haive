@@ -51,6 +51,7 @@ import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capa
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { PromptTooLargeError } from '../src/cli-adapters/prompt-delivery.js';
+import { AGENT_RULES_MARKER } from '../src/orchestrator/agent-rules.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
 import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-reconcile.js';
 import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
@@ -80,7 +81,16 @@ interface MockState {
   inserts: { table: string; row: Record<string, unknown> }[];
 }
 
-function makeMockDb(state: MockState): Database {
+interface MockDbOptions {
+  refuseUpdate?: (
+    table: string,
+    values: Record<string, unknown>,
+    draft: MockState,
+    inTransaction: boolean,
+  ) => boolean;
+}
+
+function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = false): Database {
   let nextId = 1;
   const db = {
     select: () => ({
@@ -133,7 +143,20 @@ function makeMockDb(state: MockState): Database {
         };
       },
     }),
-    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    transaction: async (fn: (tx: unknown) => unknown) => {
+      // Isolate transaction writes: a hook accidentally using the outer db must
+      // leave its insert behind when the owned checkpoint refuses the draft.
+      const draft = {
+        ...state,
+        taskStepRow: { ...state.taskStepRow },
+        cliInvocationRow: state.cliInvocationRow && { ...state.cliInvocationRow },
+        updates: [...state.updates],
+        inserts: [...state.inserts],
+      };
+      const result = await fn(makeMockDb(draft, opts, true));
+      Object.assign(state, draft);
+      return result;
+    },
     insert: (table: unknown) => {
       const tableName = tableNameOf(table);
       return {
@@ -148,6 +171,10 @@ function makeMockDb(state: MockState): Database {
               state.cliInvocationRow = { ...row, endedAt: null };
             }
             return [row];
+          },
+          onConflictDoNothing: async () => {
+            if (!state.inserts.some((entry) => entry.table === tableName && entry.row.id === v.id))
+              state.inserts.push({ table: tableName, row: v });
           },
           // recordStepCliPreference uses .values().onConflictDoUpdate()
           // (no .returning()). The chain still needs to be awaitable to
@@ -176,7 +203,7 @@ function makeMockDb(state: MockState): Database {
       };
       return {
         set: (v: Record<string, unknown>) => {
-          const rows = apply(v);
+          const rows = opts.refuseUpdate?.(tableName, v, state, inTransaction) ? [] : apply(v);
           return { where: (_: unknown) => ({ returning: async () => rows }) };
         },
       };
@@ -540,6 +567,48 @@ describe('plan writers through the real runner dispatch', () => {
     },
   );
 
+  it('keeps the pre-budget rule fallback for required plan chat and records the omission', async () => {
+    vi.spyOn(configService, 'getBoolean').mockImplementation(
+      async (key) => key === CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED,
+    );
+    const adapter = cliAdapterRegistry.get('claude-code');
+    const originalBuild = adapter.buildCliInvocation.bind(adapter);
+    const build = vi
+      .spyOn(adapter, 'buildCliInvocation')
+      .mockImplementation((provider, prompt, opts) => {
+        if (prompt.includes(AGENT_RULES_MARKER)) throw new PromptTooLargeError('argv-only', 123456);
+        return originalBuild(provider, prompt, opts);
+      });
+    const f = await run(false, planChatStep as StepDefinition, 64_000);
+    expect(f.result.status).toBe('waiting_cli');
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(f.buildPrompt).toHaveBeenCalledOnce();
+    expect(f.enqueue).toHaveBeenCalledOnce();
+    expect(f.enqueue.mock.calls[0]![0].spec.agentRules).toMatchObject({
+      injected: false,
+      reason: 'prompt-too-large',
+    });
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
+    expect(f.state.cliInvocationRow!.prompt).not.toContain(AGENT_RULES_MARKER);
+  });
+
+  it('fails required plan chat if its argv prompt still cannot fit after dropping rules', async () => {
+    vi.spyOn(configService, 'getBoolean').mockImplementation(
+      async (key) => key === CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED,
+    );
+    const build = vi
+      .spyOn(cliAdapterRegistry.get('claude-code'), 'buildCliInvocation')
+      .mockImplementation(() => {
+        throw new PromptTooLargeError('argv-only', 123456);
+      });
+    const f = await run(false, planChatStep as StepDefinition, 64_000);
+    expect(f.result.status).toBe('failed');
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(f.enqueue).not.toHaveBeenCalled();
+  });
+
   it('refuses dispatch when an augmenter has replaced the base prompt', async () => {
     const f = await run(true);
     expect(f.result.status).toBe('failed');
@@ -595,6 +664,115 @@ describe('plan writers through the real runner dispatch', () => {
     },
   );
 
+  it.each([
+    ['saved', 'Edited replacement'],
+    ['job', 'Edited replacement'],
+    ['saved', ''],
+    ['job', ''],
+  ])(
+    'accepts a %s edit of a flagged original without asking twice: %s',
+    async (source, message) => {
+      const original = 'x'.repeat(20_001);
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: original,
+        pendingFromLegacySubmission: true as const,
+      };
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: planChatStep.form!({} as never, detected),
+        formValues: source === 'saved' ? { message } : null,
+      });
+      const enqueue = vi.fn();
+      const apply = vi.fn(planChatStep.apply);
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true, apply },
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        ...(source === 'job' ? { formValues: { message } } : {}),
+      });
+      expect(result.status).toBe(message ? 'revise' : 'done');
+      expect(apply).toHaveBeenCalledOnce();
+      expect(apply.mock.calls[0]![1]).toMatchObject({
+        detected: { pendingQuestion: original, pendingFromLegacySubmission: undefined },
+        formValues: { message: source === 'job' && !message ? null : message },
+      });
+      expect(state.inserts.filter((entry) => entry.table === 'plan_node_messages')).toMatchObject([
+        { row: { role: 'user', body: original } },
+      ]);
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['park', 'resume'] as const)(
+    'rolls back the original when the runner loses ownership of its recovery %s checkpoint',
+    async (mode) => {
+      const original = 'x'.repeat(20_001);
+      const detected = {
+        repositoryId: 'repo-1',
+        nodeId: 'focus',
+        nodeTitle: 'Focus',
+        nodeVersion: 1,
+        planMarkdown: '',
+        planRead: { nodes: [], edges: [] },
+        transcript: [],
+        pendingQuestion: mode === 'resume' ? original : null,
+        ...(mode === 'resume' ? { pendingFromLegacySubmission: true as const } : {}),
+      };
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        stepId: '01-plan-chat',
+        status: 'waiting_form',
+        detectOutput: detected,
+        formSchema: planChatStep.form!({} as never, detected),
+      });
+      const refuseUpdate = vi.fn((table, values, draft, inTransaction) => {
+        if (table !== 'task_steps' || values.status !== 'waiting_form' || !values.detectOutput)
+          return false;
+        expect(inTransaction).toBe(true);
+        expect(
+          draft.inserts.filter((entry: { table: string }) => entry.table === 'plan_node_messages'),
+        ).toMatchObject([{ row: { role: 'user', body: original } }]);
+        expect(state.inserts).toEqual([]);
+        return true; // No returned row makes the real updateOwnedStep throw StepSupersededError.
+      });
+      const enqueue = vi.fn();
+      const result = await advanceStep({
+        db: makeMockDb(state, { refuseUpdate }),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: { ...planChatStep, shouldRun: async () => true },
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+        formValues: { message: mode === 'resume' ? 'Edited replacement' : original },
+      });
+      expect(result.status).toBe('superseded');
+      expect(refuseUpdate).toHaveBeenCalled();
+      expect(state.inserts).toEqual([]);
+      expect(state.taskStepRow.detectOutput).toEqual(detected);
+      expect(state.taskStepRow.formValues).toBeNull();
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['saved', 'job'] as const)(
     'reopens an oversized pre-limit %s submission for editing',
     async (source) => {
@@ -637,6 +815,9 @@ describe('plan writers through the real runner dispatch', () => {
         fields: [{ id: 'message', initialValue: message }],
       });
       expect(state.taskStepRow.waitingStartedAt).toBeInstanceOf(Date);
+      expect(state.inserts.filter((entry) => entry.table === 'plan_node_messages')).toMatchObject([
+        { row: { role: 'user', body: message } },
+      ]);
       expect(enqueue).not.toHaveBeenCalled();
     },
   );

@@ -837,9 +837,10 @@ function buildCliSidePlan(
           steeringMode,
         });
       } catch (err) {
-        // gemini takes its prompt only as an argument, and rules must never be what pushes a prompt
+        // An argv-only adapter must never fail just because rules push a prompt
         // that fits past that limit: drop the house rules, then the agent rules, and say so.
-        if (!(err instanceof PromptTooLargeError) || req.promptBudget) throw err;
+        // This pre-budget contract applies to required steps too; input that still cannot fit fails.
+        if (!(err instanceof PromptTooLargeError)) throw err;
         if (houseBlock !== null) {
           houseBlock = null;
           houseRules = house.droppedStamp;
@@ -849,7 +850,7 @@ function buildCliSidePlan(
         } else {
           throw err;
         }
-        effectivePrompt = adaptPrompt(req.input.prompt, rulesText, houseBlock);
+        effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
       }
     }
     spec.agentRules = agentRules;

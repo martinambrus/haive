@@ -2,6 +2,7 @@ import { PLAN_PATCH_MAX_OPS, planTaskProposalSchema, type PlanTaskProposal } fro
 import { retryPlanPatch } from '../../../plan/patch-retry.js';
 import {
   applyPlanPatch,
+  retryPlanConflict,
   stripNodeRefPrefix,
   type ApplyPlanPatchResult,
   type DbOrTx,
@@ -320,6 +321,29 @@ export async function applyAgentPatch(
     ...(opts.requireAllUpdateVersions ? { requireAllUpdateVersions: true } : {}),
     ...(opts.selfNodeId ? { selfNodeId: opts.selfNodeId } : {}),
   });
+}
+
+/** Retry only replies with no caller-supplied versions. The applier drops
+ * unversioned content edits; the remaining existing-node writes are derived
+ * ordinals/code links. Re-run the whole claim and every derived read, never
+ * replace an explicit expectedVersion with a fresh one. */
+export function retryUnversionedPlanConflict<T>(
+  ops: unknown[],
+  foldFresh: () => Promise<T>,
+): Promise<T> {
+  return hasCallerPlanVersion(ops) ? foldFresh() : retryPlanConflict(foldFresh);
+}
+
+/** A caller version describes the agent's read and must never be refreshed by a fold retry. */
+export function hasCallerPlanVersion(ops: unknown[]): boolean {
+  return ops.some(
+    (op) =>
+      op !== null &&
+      typeof op === 'object' &&
+      'expectedVersion' in op &&
+      op.expectedVersion !== undefined &&
+      op.expectedVersion !== null,
+  );
 }
 
 /**
