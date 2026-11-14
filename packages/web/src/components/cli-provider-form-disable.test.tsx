@@ -85,3 +85,28 @@ it('also confirms before a rebuild persists an unsaved disable', async () => {
   expect(h.patch).not.toHaveBeenCalled();
   expect(h.post).not.toHaveBeenCalled();
 });
+
+it.each(['Save', 'Rebuild image'])(
+  'still persists through %s when the impact read rejects',
+  async (action) => {
+    h.get.mockImplementation(async (path: string) => {
+      if (path.endsWith('/disable-impact')) throw new Error('Preview unavailable');
+      if (path.endsWith('/secrets')) return { secrets: [] };
+      throw new Error(`Unexpected GET ${path}`);
+    });
+    await act(async () => {
+      render(<CliProviderForm mode="edit" metadata={metadata} provider={provider} />);
+    });
+    fireEvent.click(screen.getByLabelText('Enabled'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: action }));
+    });
+    expect(h.patch).toHaveBeenCalledWith(
+      '/cli-providers/provider',
+      expect.objectContaining({ enabled: false }),
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
+    if (action === 'Rebuild image')
+      expect(h.post).toHaveBeenCalledWith('/cli-providers/provider/sandbox-image/build');
+  },
+);

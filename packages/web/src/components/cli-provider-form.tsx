@@ -521,14 +521,19 @@ export function CliProviderForm({
     if (mode !== 'edit' || !provider?.id) return false;
     const snapshot = state;
     if (savedState.enabled && !snapshot.enabled) {
-      const impact = await api.get<{ taskCount: number; stepCount: number }>(
-        `/cli-providers/${provider.id}/disable-impact`,
-      );
-      const confirmed = await new Promise<boolean>((resolve) => {
-        disableAnswer.current = resolve;
-        setDisableImpact(impact);
-      });
-      if (!confirmed) return false;
+      // The preview is advisory: an unavailable or older API must not prevent saving.
+      const impact = await api
+        .get<{ taskCount: number; stepCount: number }>(
+          `/cli-providers/${provider.id}/disable-impact`,
+        )
+        .catch(() => null);
+      if (impact) {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          disableAnswer.current = resolve;
+          setDisableImpact(impact);
+        });
+        if (!confirmed) return false;
+      }
     }
 
     const networkPolicy: CliNetworkPolicy = {
