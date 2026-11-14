@@ -527,7 +527,7 @@ export function CliProviderForm({
           `/cli-providers/${provider.id}/disable-impact`,
         )
         .catch(() => null);
-      if (impact) {
+      if (impact && (impact.taskCount > 0 || impact.stepCount > 0)) {
         const confirmed = await new Promise<boolean>((resolve) => {
           disableAnswer.current = resolve;
           setDisableImpact(impact);
@@ -706,7 +706,7 @@ export function CliProviderForm({
         <div className="flex flex-col gap-4 p-6">
           <h2 className="text-lg font-semibold">Disable CLI provider</h2>
           <MarkdownView
-            body={`${disableImpact?.taskCount ?? 0} tasks have ${disableImpact?.stepCount ?? 0} remaining steps pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
+            body={`${disableImpact?.taskCount ?? 0} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
           />
           <div className="flex gap-2">
             <Button type="button" onClick={() => answerDisable(true)}>
