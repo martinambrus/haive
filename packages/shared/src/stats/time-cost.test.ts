@@ -108,6 +108,13 @@ describe('form lifecycle pairing', () => {
       ]),
     ).toMatchObject({ waitMs: null, pairedWaits: 0 });
   });
+  it('closes a merge clarification wait answered through /clarify', () => {
+    expect(sumFormWaits([event(1, 'step.waiting_form'), event(2, 'step.clarified')])).toEqual({
+      waitMs: 100,
+      pairedWaits: 1,
+      unmeasuredWaits: 0,
+    });
+  });
   it('replaces a park, ignores orphan submits and leaves open waits unmeasured', () => {
     expect(
       sumFormWaits([

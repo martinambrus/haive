@@ -46,6 +46,8 @@ const STEP_END_EVENTS = new Set([
 export const FORM_WAIT_EVENT_TYPES: readonly string[] = Object.freeze([
   'step.waiting_form',
   'step.form_submitted',
+  // A merge clarification answer closes its wait through /clarify, not the submit route.
+  'step.clarified',
   ...RESET_EVENTS,
   ...TASK_END_EVENTS,
   ...STEP_END_EVENTS,
@@ -93,7 +95,11 @@ export function sumFormWaits(events: FormWaitEvent[]) {
       waits.clear();
     } else if (STEP_END_EVENTS.has(e.eventType)) {
       if (waits.delete(e.taskStepId!)) unmeasuredWaits++;
-    } else if (e.eventType === 'step.waiting_form' || e.eventType === 'step.form_submitted') {
+    } else if (
+      e.eventType === 'step.waiting_form' ||
+      e.eventType === 'step.form_submitted' ||
+      e.eventType === 'step.clarified'
+    ) {
       if (!e.taskStepId || at === null) {
         unmeasuredWaits++;
         continue;

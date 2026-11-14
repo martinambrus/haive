@@ -349,7 +349,7 @@ only when its steps include a test phase. A recorded zero-duration test phase re
 Human active is task-form attention, including carried time. Plan-page attention remains
 separately reported on the Time tab and is never added here. Steering, testing another tab
 and forge review are outside this measurement. Waiting for a person pairs each park with
-its submit over the full lifecycle stream, per task and step-row id, ordered by timestamp
+its submit (or, for a merge clarification, its `step.clarified` answer) over the full lifecycle stream, per task and step-row id, ordered by timestamp
 and event id. The event projection preserves PostgreSQL microseconds: converting to `Date`
 first could reverse an auto-submit within one millisecond when ids break the tie. Retry,
 automatic retry, revise/reset, loop-back, skip, abort, failure, stop, cancellation and
