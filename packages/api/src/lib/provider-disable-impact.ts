@@ -1,4 +1,4 @@
-import { pinnedTaskStepIds } from '@haive/shared/modularity';
+import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
 import type { ExecutionPath } from '@haive/shared';
 import { builtinRunListStrategy, taskRunListIds } from '@haive/shared/run-list';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -41,65 +41,75 @@ export async function providerDisableImpact(db: Database, userId: string, provid
     );
   let taskCount = 0;
   let stepCount = 0;
+  const invalidTasks: Array<{ id: string; code: DerivedRunPlanError['code'] }> = [];
   for (const task of tasks) {
-    const flags = await loadTaskStepFlags(db, task);
-    const [definition] = await db
-      .select({ runListStrategy: schema.taskTypeDefinitions.runListStrategy })
-      .from(schema.taskTypeDefinitions)
-      .where(eq(schema.taskTypeDefinitions.slug, task.type));
-    const strategy = definition?.runListStrategy ?? builtinRunListStrategy(task.type);
-    const [envTemplate] =
-      strategy === 'run_app_modes' && task.envTemplateId
-        ? await db
-            .select({ declaredDeps: schema.envTemplates.declaredDeps })
-            .from(schema.envTemplates)
-            .where(eq(schema.envTemplates.id, task.envTemplateId))
-        : [];
-    const runList =
-      task.derivedRunPlan != null
-        ? [...pinnedTaskStepIds(task)!]
-        : taskRunListIds(
-            {
-              derivedRunPlan: task.derivedRunPlan,
-              workflowType: task.type,
-              runListStrategy: strategy,
-              runListSnapshot: task.runListSnapshot,
-              executionPath: (task.executionPath as ExecutionPath | null) ?? null,
-            },
-            (type) =>
-              [...flags.values()]
-                .filter((f) => f.workflowType === type)
-                .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
-                .map((f) => f.stepId),
-            (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
-              ?.containerTool,
+    try {
+      const flags = await loadTaskStepFlags(db, task);
+      const [definition] = await db
+        .select({ runListStrategy: schema.taskTypeDefinitions.runListStrategy })
+        .from(schema.taskTypeDefinitions)
+        .where(eq(schema.taskTypeDefinitions.slug, task.type));
+      const strategy = definition?.runListStrategy ?? builtinRunListStrategy(task.type);
+      const [envTemplate] =
+        strategy === 'run_app_modes' && task.envTemplateId
+          ? await db
+              .select({ declaredDeps: schema.envTemplates.declaredDeps })
+              .from(schema.envTemplates)
+              .where(eq(schema.envTemplates.id, task.envTemplateId))
+          : [];
+      const runList =
+        task.derivedRunPlan != null
+          ? [...pinnedTaskStepIds(task)!]
+          : taskRunListIds(
+              {
+                derivedRunPlan: task.derivedRunPlan,
+                workflowType: task.type,
+                runListStrategy: strategy,
+                runListSnapshot: task.runListSnapshot,
+                executionPath: (task.executionPath as ExecutionPath | null) ?? null,
+              },
+              (type) =>
+                [...flags.values()]
+                  .filter((f) => f.workflowType === type)
+                  .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
+                  .map((f) => f.stepId),
+              (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
+                ?.containerTool,
+            );
+      const currentIndex = task.currentStepId ? runList.indexOf(task.currentStepId) : -1;
+      const candidates = [...new Set(runList)]
+        .filter((stepId) => {
+          const f = flags.get(stepId);
+          if (!f?.dispatchesStepCli && !f?.providerSensitive) return false;
+          if (currentIndex >= 0 && runList.indexOf(stepId) < currentIndex) return false;
+          const row = rows.find(
+            (r) => r.taskId === task.id && r.stepId === stepId && r.round === task.currentRound,
           );
-    const currentIndex = task.currentStepId ? runList.indexOf(task.currentStepId) : -1;
-    const candidates = [...new Set(runList)]
-      .filter((stepId) => {
-        const f = flags.get(stepId);
-        if (!f?.dispatchesStepCli && !f?.providerSensitive) return false;
-        if (currentIndex >= 0 && runList.indexOf(stepId) < currentIndex) return false;
-        const row = rows.find(
-          (r) => r.taskId === task.id && r.stepId === stepId && r.round === task.currentRound,
-        );
-        return !row || row.status === 'pending';
-      })
-      .map((stepId) => ({ stepId, round: task.currentRound }));
-    const steps = await enrichStepsWithCliPreferences(
-      db,
-      flags,
-      userId,
-      candidates,
-      task.id,
-      task.ignoreSavedStepClis,
-    );
-    const count = steps.filter(
-      (s) =>
-        !s.roundCliUnavailable && (s.preferredCliProviderId ?? task.cliProviderId) === providerId,
-    ).length;
-    if (count > 0) taskCount++;
-    stepCount += count;
+          return !row || row.status === 'pending';
+        })
+        .map((stepId) => ({ stepId, round: task.currentRound }));
+      const steps = await enrichStepsWithCliPreferences(
+        db,
+        flags,
+        userId,
+        candidates,
+        task.id,
+        task.ignoreSavedStepClis,
+      );
+      const count = steps.filter(
+        (s) =>
+          !s.roundCliUnavailable && (s.preferredCliProviderId ?? task.cliProviderId) === providerId,
+      ).length;
+      if (count > 0) taskCount++;
+      stepCount += count;
+    } catch (error) {
+      if (!(error instanceof DerivedRunPlanError)) throw error;
+      invalidTasks.push({ id: task.id, code: error.code });
+    }
   }
-  return { taskCount, stepCount };
+  return {
+    taskCount,
+    stepCount,
+    ...(invalidTasks.length > 0 ? { incomplete: true, invalidTasks } : {}),
+  };
 }

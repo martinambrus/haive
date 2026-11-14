@@ -220,7 +220,11 @@ snapshot (`resolveRunList`), and `derived` resolves the task's pinned prefix/sel
 `@haive/shared/run-list`; path ordering lives in `@haive/shared/execution-paths`. The worker
 resolves those IDs through its registry and retains the run-app database-compatibility check.
 The provider-disable preview uses the same selector with catalog steps, the stored execution
-path and the linked environment template, including before a task has a run-list snapshot.
+path and the linked environment template, including before a task has a run-list snapshot. It
+isolates `DerivedRunPlanError` per task, returning valid counts plus `incomplete: true` and
+`invalidTasks: [{id, code}]`; its dialog labels incomplete counts even at zero. The reset guard
+`loadLiveRootWriters` instead retains an invalid live task as a named 409 blocker before deletion.
+Neither scan marks tasks dead, and other failures propagate.
 
 **A missing step is never filtered out.** `resolveRunList` returns the steps and the unresolved ids, and
 an unresolved step marks the task dead (`markTaskDead`). Filtering made both forward walks read "no next
@@ -248,7 +252,10 @@ issue is filtered out. The environment and registered workflow ordering guard st
 catalog has 58 entries: all 54 registered workflow steps plus the four environment steps.
 
 Requirements describe inputs a step actually uses; optional report sections and explicit fallbacks
-stay optional. `04a-spec-audit` requires the draft spec and reports to `05a-resolve-spec-warnings`;
+stay optional. Sprint planning accepts missing spec and gate-1 feedback; every spec producer and
+gate 1 precedes `sprint-plan` when present. Gate 2 accepts missing verification but still requires a
+worktree; verification precedes `verify-approved` when present. `04a-spec-audit` requires the draft
+spec and reports to `05a-resolve-spec-warnings`;
 `08c2-code-audit` requires a worktree and reports to gate 2. Neither audit loops. Adversarial QA also
 reports only; its human review and gate 2 restart at `07-phase-2-implement`, while business-requirements
 review revises at `03b-business-requirements`. None of those review gates closes the run.

@@ -36,6 +36,13 @@ import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
 import { Dialog } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 
+interface ProviderDisableImpact {
+  taskCount: number;
+  stepCount: number;
+  incomplete?: boolean;
+  invalidTasks?: Array<{ id: string; code: string }>;
+}
+
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
   provider?: CliProvider;
@@ -188,10 +195,7 @@ export function CliProviderForm({
   const [submitting, setSubmitting] = useState(false);
   // A ref takes the gate before either action awaits or React renders disabled controls.
   const persistenceInFlight = useRef(false);
-  const [disableImpact, setDisableImpact] = useState<{
-    taskCount: number;
-    stepCount: number;
-  } | null>(null);
+  const [disableImpact, setDisableImpact] = useState<ProviderDisableImpact | null>(null);
   const disableAnswer = useRef<((confirmed: boolean) => void) | null>(null);
   useEffect(
     () => () => {
@@ -527,11 +531,9 @@ export function CliProviderForm({
     if (savedState.enabled && !snapshot.enabled) {
       // The preview is advisory: an unavailable or older API must not prevent saving.
       const impact = await api
-        .get<{ taskCount: number; stepCount: number }>(
-          `/cli-providers/${provider.id}/disable-impact`,
-        )
+        .get<ProviderDisableImpact>(`/cli-providers/${provider.id}/disable-impact`)
         .catch(() => null);
-      if (impact && (impact.taskCount > 0 || impact.stepCount > 0)) {
+      if (impact && (impact.incomplete || impact.taskCount > 0 || impact.stepCount > 0)) {
         const confirmed = await new Promise<boolean>((resolve) => {
           disableAnswer.current = resolve;
           setDisableImpact(impact);
@@ -709,6 +711,10 @@ export function CliProviderForm({
     }
   }
 
+  const incompleteImpactNotice = disableImpact?.incomplete
+    ? `**Counts are incomplete.** ${disableImpact.invalidTasks?.length ?? 'Some'} ${disableImpact.invalidTasks?.length === 1 ? 'task could' : 'tasks could'} not be checked. The counts below cover only tasks that could be checked.\n\n`
+    : '';
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <Dialog
@@ -721,7 +727,7 @@ export function CliProviderForm({
         <div className="flex flex-col gap-4 p-6">
           <h2 className="text-lg font-semibold">Disable CLI provider</h2>
           <MarkdownView
-            body={`${disableImpact?.taskCount ?? 0} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
+            body={`${incompleteImpactNotice}${disableImpact?.taskCount ?? 0} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
           />
           <div className="flex gap-2">
             <Button type="button" onClick={() => answerDisable(true)}>
