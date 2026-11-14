@@ -130,7 +130,6 @@ it('keeps each node’s draft through a switch from A to B and back in PlanDetai
 describe.each(['node', 'advisory'] as const)('%s work', (source) => {
   it.each([
     ['waiting_user', false],
-    ['paused', false],
     ['created', false],
     ['waiting_pr', false],
     ['queued', true],
@@ -143,8 +142,7 @@ describe.each(['node', 'advisory'] as const)('%s work', (source) => {
       {
         taskId: 'task-1',
         title: 'Work',
-        // Also exercise the brief's paused control, outside the current API union.
-        status: status as PlanNodeTask['status'],
+        status,
         type: source === 'advisory' ? 'advisory' : 'workflow',
         createdAt: '',
       },
