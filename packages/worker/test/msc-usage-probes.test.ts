@@ -29,6 +29,8 @@ describe('stream usage fallback', () => {
     // 1501/150), while `total_cost_usd`, `duration_api_ms` and `modelUsage` are cumulative
     // (the second result's modelUsage was 2973/198). Keeping only the last usage stored the
     // final turn's tokens next to the whole run's cost.
+    // A steer written mid-turn, as the forwarder sends it, measured the same way (1472/934
+    // then 1493/1544; modelUsage 2965/2478).
     const collector = createStreamJsonCollector();
     const events = [
       { type: 'system', subtype: 'init', model: 'claude-sonnet-5' },
