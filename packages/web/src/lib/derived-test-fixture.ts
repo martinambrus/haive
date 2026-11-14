@@ -1,28 +1,17 @@
+import { derivedOverlayInputs } from '../../../shared/test/derived-overlay-fixtures';
 import type { TaskTypeCatalog } from './api-client';
 export function derivedFixture() {
-  const prefix = ['00-model-health-workflow', '00a-sync-base', '00-triage'];
-  const candidates = [
-    { executionPath: null, stepIds: [...prefix, 'a', 'b'] },
-    { executionPath: 'quick_bugfix' as const, stepIds: [...prefix, 'a'] },
-  ];
+  const { entries, baseCandidates: candidates } = derivedOverlayInputs();
   const catalog: TaskTypeCatalog = {
     synced: true,
     modules: [],
     groups: [{ id: 'test', label: 'Test' }],
-    registeredStepIds: [...prefix, 'a', 'b', 'x', 'y'],
-    steps: [...prefix, 'a', 'b', 'x', 'y'].map((stepId) => ({
-      stepId,
+    registeredStepIds: entries.map((entry) => entry.stepId),
+    steps: entries.map((entry) => ({
+      stepId: entry.stepId,
       source: 'builtin',
-      title: stepId,
-      entry: {
-        stepId,
-        label: stepId,
-        group: 'test',
-        dispatchesCli: false,
-        requires: [],
-        provides: [],
-        ...(stepId === 'a' ? { loopBudgetEditable: true } : {}),
-      },
+      title: entry.label,
+      entry,
     })),
     bases: [
       { slug: 'workflow', eligibility: { eligible: true }, orderedBaseLists: candidates },

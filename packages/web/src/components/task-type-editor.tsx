@@ -424,12 +424,15 @@ export function TaskTypeEditor({
           return;
         }
         const body = derived
-          ? buildDerivedCreateBody(submitted, {
-              baseSlug: baseSlug!,
-              changes,
-              loopLimits,
-              promptSteps,
-            })
+          ? buildDerivedCreateBody(
+              { ...submitted, requiresRepository },
+              {
+                baseSlug: baseSlug!,
+                changes,
+                loopLimits,
+                promptSteps,
+              },
+            )
           : buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
         await createTaskType(body);
         forgetDraftConversation(null);

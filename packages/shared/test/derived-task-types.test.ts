@@ -18,7 +18,9 @@ import {
 } from '../src/step-engine/run-list.js';
 import { EXECUTION_PATHS } from '../src/schemas/tasks.js';
 
-const prefix = ['00-model-health-workflow', '00a-sync-base', '00-triage'];
+import { derivedOverlayInputs, derivedOverlayCases } from './derived-overlay-fixtures.js';
+
+const { prefix, entries, baseCandidates } = derivedOverlayInputs();
 const entry = (stepId: string, extra: Partial<ComposableStepEntry> = {}): ComposableStepEntry => ({
   stepId,
   label: stepId,
@@ -28,13 +30,8 @@ const entry = (stepId: string, extra: Partial<ComposableStepEntry> = {}): Compos
   provides: [],
   ...extra,
 });
-const entries = [...prefix, 'a', 'b', 'c', 'x', 'y', 'module.example.check'].map((id) => entry(id));
 const catalog = new Map(entries.map((e) => [e.stepId, e]));
 const installedStepIds = new Set(catalog.keys());
-const baseCandidates = [
-  { executionPath: null, stepIds: [...prefix, 'a', 'b'] },
-  { executionPath: 'quick_bugfix' as const, stepIds: [...prefix, 'a'] },
-];
 const evaluate = (changes: DerivedChange[]) =>
   evaluateDerivedTaskType({
     baseCandidates,
@@ -88,6 +85,28 @@ describe('derived overlay contracts', () => {
 });
 
 describe('derived overlay evaluation', () => {
+  it.each(derivedOverlayCases)('shared contract fixture: $name', (fixture) => {
+    const result = evaluateDerivedTaskType({
+      baseCandidates,
+      changes: fixture.changes,
+      catalog: new Map(
+        entries
+          .filter((e) => !fixture.omitDeclarations?.includes(e.stepId))
+          .map((e) => [e.stepId, e]),
+      ),
+      installedStepIds: new Set(
+        entries.map((e) => e.stepId).filter((id) => !fixture.omitInstalled?.includes(id)),
+      ),
+    });
+    expect(result.candidates.map((c) => c.executionPath)).toEqual([null, 'quick_bugfix']);
+    expect({
+      steps: result.candidates.map((c) => c.stepIds),
+      outcomes: result.candidates.map((c) => c.outcomes.map((o) => o.outcome)),
+      issueKinds: [...new Set(result.issues.map((i) => i.kind))].sort(),
+      warningKinds: [...new Set(result.warnings.map((w) => w.kind))].sort(),
+    }).toEqual(fixture.expected);
+  });
+
   it('inserts and removes in order, allowing an inserted step to anchor a later operation', () => {
     const result = evaluate([
       { insertAfter: 'a', step: 'x' },

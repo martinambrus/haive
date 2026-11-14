@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateDerivedTaskType, type DerivedChange } from '@haive/shared/modularity';
+import { derivedOverlayCases } from '../../../shared/test/derived-overlay-fixtures';
 import {
   evaluateDerivedEditor,
   buildDerivedCreateBody,
@@ -43,48 +43,30 @@ describe('derived editor contract', () => {
       ),
     ).toEqual({});
   });
-  it.each<{ changes: DerivedChange[] }>([
-    { changes: [] },
-    {
-      changes: [{ insertAfter: 'a', step: 'x' }, { insertAfter: 'x', step: 'y' }, { remove: 'b' }],
-    },
-    {
-      changes: [
-        { insertAfter: 'a', step: 'x' },
-        { insertAfter: 'a', step: 'y' },
-      ],
-    },
-    { changes: [{ remove: 'b' }, { insertAfter: 'b', step: 'x' }, { remove: 'old-name' }] },
-    {
-      changes: [
-        { insertAfter: 'old-name', step: 'x' },
-        { insertAfter: 'x', step: 'y' },
-      ],
-    },
-    { changes: [{ replace: 'a', with: 'x' }] },
-    { changes: [{ remove: '00-triage' }] },
-    { changes: [{ insertAfter: 'a', step: 'missing' }] },
-    { changes: [{ insertAfter: 'a', step: 'b' }] },
-  ])('uses the PR1 evaluator fixtures %#', ({ changes }) => {
-    const actual = evaluateDerivedEditor({
-      catalog: fixture.catalog,
+  it.each(derivedOverlayCases)('shared contract fixture: $name', (testCase) => {
+    const result = evaluateDerivedEditor({
+      catalog: {
+        ...fixture.catalog,
+        steps: fixture.catalog.steps.filter((s) => !testCase.omitDeclarations?.includes(s.stepId)),
+        registeredStepIds: fixture.catalog.registeredStepIds.filter(
+          (id) => !testCase.omitInstalled?.includes(id),
+        ),
+      },
       baseSlug: 'workflow',
-      changes,
+      changes: testCase.changes,
       typeSlug: 'mine',
       requiresRepository: true,
       promptSteps: {},
       loopLimits: {},
       preAnswerDefaults: {},
     });
-    const expected = evaluateDerivedTaskType({
-      baseCandidates: fixture.candidates,
-      changes,
-      catalog: new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry])),
-      installedStepIds: new Set(fixture.catalog.registeredStepIds),
-      requiresRepository: true,
-    });
-    expect(actual.candidates).toEqual(expected.candidates);
-    expect(actual.issues).toEqual(expected.issues);
+    expect(result.candidates.map((c) => c.executionPath)).toEqual([null, 'quick_bugfix']);
+    expect({
+      steps: result.candidates.map((c) => c.stepIds),
+      outcomes: result.candidates.map((c) => c.outcomes.map((o) => o.outcome)),
+      issueKinds: [...new Set(result.issues.map((i) => i.kind))].sort(),
+      warningKinds: [...new Set(result.warnings.map((w) => w.kind))].sort(),
+    }).toEqual(testCase.expected);
   });
 
   it('keeps incomplete operations invalid rather than dropping rows', () => {

@@ -88,9 +88,15 @@ async function advance() {
     await vi.advanceTimersByTimeAsync(350);
   });
 }
+function wireResponse(body: unknown) {
+  const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify(body)));
+  vi.stubGlobal('fetch', fetch);
+  return fetch;
+}
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  mocks.updateTaskType.mockReset();
   mocks.getTaskTypeCatalog.mockResolvedValue(fixture.catalog);
   mocks.getAdminTaskType.mockImplementation((slug: string) =>
     Promise.resolve({
@@ -105,6 +111,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('derived editor', () => {
@@ -224,6 +231,11 @@ describe('derived editor', () => {
   });
 
   it('separates path skips from stale targets and sends only the overlay', async () => {
+    const actualApi = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
+    mocks.updateTaskType.mockImplementation(actualApi.updateTaskType);
+    const fetch = wireResponse({
+      taskType: { ...row, changes: [{ remove: 'b' }, { remove: 'old-name' }] },
+    });
     await mount({ slug: 'mine', duplicateBaseSlug: '' });
     fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
     fireEvent.change(screen.getByLabelText(/^Target step/), { target: { value: 'b' } });
@@ -239,13 +251,18 @@ describe('derived editor', () => {
         /Base no longer includes this step/,
       ).length,
     ).toBeGreaterThan(0);
-    mocks.updateTaskType.mockResolvedValue({
-      taskType: { ...row, changes: [{ remove: 'b' }, { remove: 'old-name' }] },
-    });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Overlay revision' } });
+    fireEvent.change(screen.getByLabelText('Loop limit'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await act(async () => {});
-    expect(mocks.updateTaskType).toHaveBeenCalledWith('mine', {
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe(`${actualApi.API_BASE_URL}/admin/task-types/mine`);
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({
+      displayName: 'Overlay revision',
       changes: [{ remove: 'b' }, { remove: 'old-name' }],
+      stepLoopLimitDefaults: { a: 3 },
       expectedUpdatedAt: row.updatedAt,
     });
   });
@@ -370,6 +387,9 @@ describe('derived editor', () => {
   );
 
   it('creates an overlay with its own limits and no inherited base presets', async () => {
+    const actualApi = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
+    mocks.createTaskType.mockImplementation(actualApi.createTaskType);
+    const fetch = wireResponse({ taskType: row });
     mocks.getAdminTaskType.mockResolvedValue({
       taskType: {
         ...base,
@@ -383,10 +403,19 @@ describe('derived editor', () => {
     fireEvent.change(screen.getByLabelText('Loop limit'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create task type' }));
     await act(async () => {});
-    const body = mocks.createTaskType.mock.calls[0]![0];
-    expect(body).toMatchObject({
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe(`${actualApi.API_BASE_URL}/admin/task-types`);
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body).toEqual({
       slug: 'mine',
       displayName: 'Workflow',
+      description: 'Base description',
+      requiresRepository: true,
+      enabled: true,
+      selectable: true,
+      sortOrder: 0,
       runListStrategy: 'derived',
       baseSlug: 'workflow',
       changes: [],
@@ -397,6 +426,39 @@ describe('derived editor', () => {
     for (const key of ['stepIds', 'candidates', 'source', 'orderedBaseLists'])
       expect(body).not.toHaveProperty(key);
     expect(mocks.push).toHaveBeenCalledWith('/admin/task-types/mine');
+  });
+
+  it('posts only the unsaved overlay and metadata to preview after the debounce', async () => {
+    const actualApi = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
+    mocks.previewDerivedTaskType.mockImplementation(actualApi.previewDerivedTaskType);
+    const fetch = wireResponse(preview);
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add x' }));
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Unsaved preview' } });
+    fireEvent.change(screen.getByLabelText('Loop limit'), { target: { value: '3' } });
+    expect(fetch).not.toHaveBeenCalled();
+    await advance();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe(`${actualApi.API_BASE_URL}/admin/task-types/preview`);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({
+      slug: 'mine',
+      displayName: 'Unsaved preview',
+      description: 'Base description',
+      requiresRepository: true,
+      enabled: true,
+      selectable: true,
+      sortOrder: 0,
+      runListStrategy: 'derived',
+      baseSlug: 'workflow',
+      changes: [{ insertAfter: 'b', step: 'x' }],
+      stepLoopLimitDefaults: { a: 3 },
+      promptSteps: {},
+      preAnswerDefaults: {},
+    });
+    expect(mocks.createTaskType).not.toHaveBeenCalled();
+    expect(mocks.updateTaskType).not.toHaveBeenCalled();
   });
 
   it('keeps path ordering read-only while palette actions author ordered changes', async () => {
