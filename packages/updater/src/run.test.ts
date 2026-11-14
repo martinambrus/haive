@@ -767,6 +767,16 @@ describe('bundle recovery across the commit pivot', () => {
     expect(logs).toContain('rolled-back');
   });
 
+  it('finishes rollback and lifts holds with a deleted backup when the install is untouched', async () => {
+    await rm(join(dir, ctx.bundle!.backupDir), { recursive: true });
+    const recovered = { ...ctx, bundle: JSON.parse(JSON.stringify(ctx.bundle)) };
+    await resume(recovered, 'migrate');
+    await assertOld();
+    expect(stored).toBe('normal');
+    expect(statements.some((s) => s.values.includes('rolled_back'))).toBe(true);
+    expect(logs).toContain('rolled-back');
+  });
+
   it('retains the backup and staging when commit has not succeeded', async () => {
     expect(await phaseVerify(ctx)).toBe(true);
     vi.mocked(dk.runOneShot).mockRejectedValueOnce(new Error('commit failed'));

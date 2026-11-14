@@ -97,6 +97,22 @@ it('keeps all current files when a later backup hash is wrong', async () => {
   expect(await readFile(join(dir, names[0]!))).toEqual(next);
 });
 
+it.each(['missing', 'corrupt'])('ignores an unneeded %s backup during restore', async (kind) => {
+  const state = await prepare();
+  if (kind === 'missing') await rm(join(dir, state.backupDir), { recursive: true });
+  else await writeFile(join(dir, state.backupDir, names[0]!), 'corrupt');
+  await restoreBundle(compose(), state);
+  expect(await readFile(join(dir, names[0]!))).toEqual(body);
+});
+
+it('validates only backups of files that need restoring', async () => {
+  const state = await prepare();
+  await writeFile(join(dir, names[0]!), next);
+  await rm(join(dir, state.backupDir, names[1]!));
+  await restoreBundle(compose(), state);
+  for (const name of names) expect(await readFile(join(dir, name))).toEqual(body);
+});
+
 it('skips an already swapped file without replacing its inode', async () => {
   const state = await prepare();
   await swapBundle(compose(), state, target.version);

@@ -10,7 +10,7 @@ import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
 import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
 import { ensureEnvKeys } from './envkeys.js';
-import { readBundleState } from './bundle-swap.js';
+import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
@@ -183,11 +183,14 @@ async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
 }
 
 async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = scrubErrorPaths(safeErrorMessage(err));
   await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
   emit('rollback-failed', {
     message,
-    next: 'run `haive upgrade` again to finish the rollback',
+    next:
+      err instanceof BundleBackupError
+        ? `restore the missing or invalid bundle backup at ${err.backupDir}, then run \`haive upgrade\` again to finish the rollback`
+        : 'run `haive upgrade` again to finish the rollback',
   });
   return EXIT.rollbackFailed;
 }

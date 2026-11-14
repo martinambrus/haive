@@ -1,4 +1,5 @@
 import { RELEASE_BUNDLE_FILES, type ReleaseManifest } from '@haive/shared/release';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { bundleHash } from './bundle.js';
 import type { ComposeContext } from './docker.js';
 import { inDirectories, inInstall } from './install-files.js';
@@ -132,26 +133,44 @@ export async function swapBundle(
   compose.files = selectedFiles(state.to);
 }
 
+export class BundleBackupError extends Error {
+  constructor(
+    public readonly backupDir: string,
+    cause: unknown,
+  ) {
+    super(`bundle backup unavailable at ${backupDir}: ${safeErrorMessage(cause)}`, { cause });
+  }
+}
+
 export async function restoreBundle(compose: ComposeContext, state: BundleState): Promise<void> {
   await inInstall(compose.dir, async (root) => {
-    await inDirectories(root, state.backupDir.split('/'), false, async (backup) => {
-      // Validate the WHOLE backup first: a corrupt later file must not cause a partial restore.
-      const saved = new Map<string, NonNullable<Awaited<ReturnType<typeof backup.read>>>>();
-      for (const name of NAMES) {
-        if (!state.from[name]) continue;
-        const file = await backup.read(name);
-        if (!file || bundleHash(file.bytes) !== state.from[name])
-          throw new Error(`backup bundle hash mismatch: ${name}`);
-        saved.set(name, file);
+    const needed: string[] = [];
+    for (const name of NAMES) {
+      const current = await root.read(name);
+      if ((current ? bundleHash(current.bytes) : null) !== state.from[name]) needed.push(name);
+    }
+    const saved = new Map<string, NonNullable<Awaited<ReturnType<typeof root.read>>>>();
+    // Only open the backup when old bytes are needed. Validate all of those before any write.
+    if (needed.some((name) => state.from[name])) {
+      try {
+        await inDirectories(root, state.backupDir.split('/'), false, async (backup) => {
+          for (const name of needed) {
+            if (!state.from[name]) continue;
+            const file = await backup.read(name);
+            if (!file || bundleHash(file.bytes) !== state.from[name])
+              throw new Error(`backup bundle hash mismatch: ${name}`);
+            saved.set(name, file);
+          }
+        });
+      } catch (error) {
+        throw new BundleBackupError(state.backupDir, error);
       }
-      for (const name of NAMES) {
-        const current = await root.read(name);
-        if ((current ? bundleHash(current.bytes) : null) === state.from[name]) continue;
-        const file = saved.get(name);
-        if (file) await root.atomic(name, file.bytes, file.owner);
-        else await root.remove(name);
-      }
-    });
+    }
+    for (const name of needed) {
+      const file = saved.get(name);
+      if (file) await root.atomic(name, file.bytes, file.owner);
+      else await root.remove(name);
+    }
   });
   compose.files = selectedFiles(state.from);
 }

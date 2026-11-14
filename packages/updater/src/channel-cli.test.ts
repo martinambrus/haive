@@ -135,6 +135,35 @@ describe('bundle preflight', () => {
     expect(await readdir(dir)).toHaveLength(3);
     expect(journal.startRun).not.toHaveBeenCalled();
   });
+  it('names a needed missing backup in rollback recovery advice', async () => {
+    const { backupBundle, restoreBundle } = await import('./bundle-swap.js');
+    const { parseReleaseManifest } = await import('@haive/shared/release');
+    const compose = { dir, files: Object.keys(files) };
+    const bundle = await backupBundle(compose, 'new-run', parseReleaseManifest(manifest));
+    await writeFile(join(dir, 'docker-compose.yml'), 'changed');
+    await rm(join(dir, bundle.backupDir), { recursive: true });
+    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+      id: 'new-run',
+      fromVersion: '1.0.0',
+      toVersion: manifest.version,
+      startedAt: new Date(),
+      phase: 'migrate',
+      metadata: { bundle, migrationHead: manifest.migrationHead },
+    } as never);
+    vi.mocked(run.resume).mockImplementationOnce(async (ctx) =>
+      restoreBundle(ctx.compose, ctx.bundle!),
+    );
+    vi.mocked(journal.recordRunError).mockResolvedValueOnce(undefined);
+    expect(await main()).toBe(6);
+    const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(output).toContainEqual(
+      expect.objectContaining({
+        event: 'rollback-failed',
+        next: expect.stringContaining(bundle.backupDir),
+      }),
+    );
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
   it('check validates but writes no env, staging, journal or hold', async () => {
     process.argv.push('--check');
     expect(await main()).toBe(0);
