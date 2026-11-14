@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { RELEASE_BUNDLE_FILES, type ReleaseManifest } from '@haive/shared/release';
 import type { ComposeContext } from './docker.js';
 import { UpgradeRefusal } from './refusal.js';
+import { inDirectories, inInstall } from './install-files.js';
 
 type Bundle = NonNullable<ReleaseManifest['bundle']>;
 type Name = (typeof RELEASE_BUNDLE_FILES)[number];
@@ -35,6 +36,16 @@ export async function classifyBundle(
       throw error;
     },
   );
+  return classifyBundleHashes(compose.files, bundle, installed, record);
+}
+
+/** Also classify the copied backup snapshot, so retention follows the bytes actually saved. */
+export function classifyBundleHashes(
+  activeFiles: readonly string[],
+  bundle: Bundle,
+  installed: ReadonlyMap<string, string | undefined>,
+  record: string | undefined,
+): BundleClassification {
   const differingFiles = (files: Partial<Record<Name, string>>, names: readonly string[]) =>
     names.filter((name) => !files[name as Name] || files[name as Name] !== installed.get(name));
   if (record !== undefined) {
@@ -59,20 +70,20 @@ export async function classifyBundle(
     const differingFile = differingFiles(
       files,
       RELEASE_BUNDLE_FILES.filter(
-        (name) => compose.files.includes(name) || Object.hasOwn(files, name),
+        (name) => activeFiles.includes(name) || Object.hasOwn(files, name),
       ),
     )[0];
     return differingFile ? { kind: 'modified', differingFile } : { kind: 'pristine' };
   }
   let closest: string[] | undefined;
   for (const files of bundle.known) {
-    const differences = differingFiles(files, compose.files);
+    const differences = differingFiles(files, activeFiles);
     if (differences.length === 0) return { kind: 'legacy-known' };
     if (!closest || differences.length < closest.length) closest = differences;
   }
   return {
     kind: 'legacy-unknown',
-    differingFile: (closest ?? differingFiles(bundle.files, compose.files))[0] ?? compose.files[0],
+    differingFile: (closest ?? differingFiles(bundle.files, activeFiles))[0] ?? activeFiles[0],
   };
 }
 
@@ -103,44 +114,18 @@ export async function stageBundle(
         `release bundle hash mismatch or missing file: ${name}`,
       );
   }
-  const owner = await stat(compose.dir);
   const installDir = resolve(compose.dir);
-  let dir = installDir;
-  for (const part of ['.haive-upgrade', 'pending', 'new']) {
-    dir = join(dir, part);
-    try {
-      await mkdir(dir, { mode: owner.mode & 0o777 });
-      const handle = await open(dir, 'r');
-      try {
-        await handle.chown(owner.uid, owner.gid);
-        await handle.chmod(owner.mode & 0o777);
-      } finally {
-        await handle.close();
+  const dir = join(installDir, '.haive-upgrade', 'pending', 'new');
+  await inInstall(installDir, (root) =>
+    inDirectories(root, ['.haive-upgrade', 'pending', 'new'], true, async (staged) => {
+      for (const name of RELEASE_BUNDLE_FILES) {
+        if (bundle.files[name])
+          await staged.atomic(name, payload.get(name)!, { ...root.owner, mode: 0o644 });
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    }
-  }
-  for (const name of RELEASE_BUNDLE_FILES) {
-    if (!bundle.files[name]) continue;
-    const temp = join(dir, `.${name}.${randomUUID()}`);
-    const file = await open(temp, 'wx', 0o644);
-    try {
-      await file.chown(owner.uid, owner.gid);
-      await file.chmod(0o644);
-      await file.writeFile(payload.get(name)!);
-      await file.sync();
-      await file.close();
-      await rename(temp, join(dir, name));
-    } finally {
-      await file.close().catch(() => {});
-      await unlink(temp).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error;
-      });
-    }
-  }
-  const files = compose.files
-    .filter((name) => bundle.files[name as Name])
-    .map((name) => join(dir, name));
+    }),
+  );
+  const files = compose.files.map((name) =>
+    bundle.files[name as Name] ? join(dir, name) : join(installDir, name),
+  );
   return { dir: installDir, files };
 }

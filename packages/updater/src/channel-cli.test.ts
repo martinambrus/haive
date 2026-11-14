@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const h = vi.hoisted(() => ({
@@ -18,6 +18,7 @@ vi.mock('./journal.js', () => ({
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
+  mergeMetadata: vi.fn(),
   recordAttempt: vi.fn(),
   startRun: vi.fn(),
   tryLock: vi.fn(),
@@ -134,6 +135,65 @@ describe('bundle preflight', () => {
     expect(await readdir(dir)).toHaveLength(3);
     expect(journal.startRun).not.toHaveBeenCalled();
   });
+  it.each([
+    '.env',
+    'docker-compose.yml',
+    'docker-compose.run.yml',
+    'docker-compose.gpu.yml',
+    'docker-compose.vulkan.yml',
+    '.haive-bundle.json',
+  ])('refuses linked %s before reading settings, pulling or starting a run', async (name) => {
+    const source = join(dir, 'link-source');
+    await writeFile(source, env);
+    await rm(join(dir, name), { force: true });
+    await symlink(source, join(dir, name));
+    process.argv.push('--replace-modified-bundle');
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'install-file-linked' },
+        error: expect.stringContaining(name),
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+    expect(await readFile(source, 'utf8')).toBe(env);
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(env.trim());
+  });
+  it('names a needed missing backup in rollback recovery advice', async () => {
+    const { backupBundle, restoreBundle } = await import('./bundle-swap.js');
+    const { parseReleaseManifest } = await import('@haive/shared/release');
+    const compose = { dir, files: Object.keys(files) };
+    const bundle = await backupBundle(compose, 'new-run', parseReleaseManifest(manifest));
+    await writeFile(join(dir, 'docker-compose.yml'), 'changed');
+    await rm(join(dir, bundle.backupDir), { recursive: true });
+    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+      id: 'new-run',
+      fromVersion: '1.0.0',
+      toVersion: manifest.version,
+      startedAt: new Date(),
+      phase: 'migrate',
+      metadata: { bundle, migrationHead: manifest.migrationHead },
+    } as never);
+    vi.mocked(run.resume).mockImplementationOnce(async (ctx) =>
+      restoreBundle(ctx.compose, ctx.bundle!),
+    );
+    vi.mocked(journal.recordRunError).mockResolvedValueOnce(undefined);
+    expect(await main()).toBe(6);
+    const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(output).toContainEqual(
+      expect.objectContaining({
+        event: 'rollback-failed',
+        next: expect.stringContaining(bundle.backupDir),
+      }),
+    );
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
   it('check validates but writes no env, staging, journal or hold', async () => {
     process.argv.push('--check');
     expect(await main()).toBe(0);
@@ -143,6 +203,65 @@ describe('bundle preflight', () => {
     expect(journal.startRun).not.toHaveBeenCalled();
     expect(images.prepareImages).not.toHaveBeenCalled();
     expect(dk.validateCompose).not.toHaveBeenCalled();
+  });
+  it('cleans only writer UUID temps before starting, without following file or directory links', async () => {
+    const stale = [
+      `..env.${randomUUID()}`,
+      `.docker-compose.yml.${randomUUID()}`,
+      `..haive-bundle.json.${randomUUID()}`,
+      `.haive-upgrade/pending/new/.docker-compose.run.yml.${randomUUID()}`,
+      `.haive-upgrade/older/previous/..haive-backup-kind.${randomUUID()}`,
+    ];
+    await mkdir(join(dir, '.haive-upgrade/pending/new'), { recursive: true });
+    await mkdir(join(dir, '.haive-upgrade/older/previous'), { recursive: true });
+    for (const name of stale) await writeFile(join(dir, name), env, { mode: 0o600 });
+    const outside = join(dir, 'outside');
+    await mkdir(join(outside, 'previous'), { recursive: true });
+    const untouched = [
+      '..env.not-a-uuid',
+      `..env.${randomUUID()}.bak`,
+      `.unrelated.${randomUUID()}`,
+      `outside/previous/..env.${randomUUID()}`,
+    ];
+    for (const name of untouched) await writeFile(join(dir, name), env);
+    await symlink(outside, join(dir, '.haive-upgrade/linked'));
+    const source = join(dir, 'link-source');
+    await writeFile(source, env);
+    const linkedTemp = `..env.${randomUUID()}`;
+    await symlink(source, join(dir, linkedTemp));
+    vi.mocked(journal.startRun).mockImplementationOnce(async () => {
+      for (const name of [...stale, linkedTemp])
+        await expect(readFile(join(dir, name))).rejects.toMatchObject({ code: 'ENOENT' });
+      return 'new-run';
+    });
+    expect(await main()).toBe(0);
+    for (const name of untouched) expect(await readFile(join(dir, name), 'utf8')).toBe(env);
+    expect(await readFile(source, 'utf8')).toBe(env);
+  });
+  it('check leaves stale writer temps untouched', async () => {
+    const name = `..env.${randomUUID()}`;
+    await writeFile(join(dir, name), env);
+    process.argv.push('--check');
+    expect(await main()).toBe(0);
+    expect(await readFile(join(dir, name), 'utf8')).toBe(env);
+  });
+  it('cleans stale temps before interrupted-run recovery without fetching a target', async () => {
+    const name = `..env.${randomUUID()}`;
+    await writeFile(join(dir, name), env);
+    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+      id: 'live',
+      fromVersion: '1.0.0',
+      toVersion: manifest.version,
+      startedAt: new Date(),
+      phase: 'migrate',
+      metadata: { migrationHead: manifest.migrationHead },
+    } as never);
+    vi.mocked(run.resume).mockImplementationOnce(async () => {
+      await expect(readFile(join(dir, name))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+    expect(await main()).toBe(0);
+    expect(run.resume).toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
   });
   it('bundle-absent keeps the old path, without a release-image pull or new refusal', async () => {
     const { bundle: _bundle, ...older } = manifest;
@@ -192,6 +311,22 @@ describe('bundle preflight', () => {
           replaceModifiedBundle: true,
         }),
       }),
+    );
+    expect(
+      await readFile(join(dir, '.haive-upgrade/new-run/previous/docker-compose.run.yml'), 'utf8'),
+    ).toBe('edited');
+    expect(journal.mergeMetadata).toHaveBeenCalledWith(
+      h.sql,
+      'new-run',
+      expect.objectContaining({
+        bundle: expect.objectContaining({ backupDir: '.haive-upgrade/new-run/previous' }),
+      }),
+    );
+    expect(vi.mocked(journal.startRun).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(journal.mergeMetadata).mock.invocationCallOrder[0]!,
+    );
+    expect(vi.mocked(journal.mergeMetadata).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(run.phaseDraining).mock.invocationCallOrder[0]!,
     );
     expect(await readFile(join(dir, 'docker-compose.run.yml'), 'utf8')).toBe('edited');
     const value = (await readFile(join(dir, '.env'), 'utf8')).match(
