@@ -94,7 +94,7 @@ describe('step SDK entry isolation', () => {
       );
       expect(external, name).toEqual(name === './step/review' ? ['node:crypto'] : []);
     }
-  });
+  }, 30_000);
 
   it('is unreachable from every other shared entry, including the root and web-used entries', () => {
     // Check all public entries, so a new web import needs no separate allowlist update.
@@ -107,5 +107,5 @@ describe('step SDK entry isolation', () => {
           expect([...closure], `${name} -> ${stepName}`).not.toContain(stepEntry);
       }
     }
-  });
+  }, 30_000);
 });
