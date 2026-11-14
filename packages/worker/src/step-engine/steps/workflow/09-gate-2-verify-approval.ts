@@ -1,3 +1,5 @@
+import { loadFixTestRecords } from './_fix-test-store.js';
+import { fixTestEditsRow, type FixTestRecord } from './_fix-test-edits.js';
 import { findingUpstream, type UpstreamKind } from './_dependency-policy.js';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -248,6 +250,7 @@ interface VerifyGateDetect {
   } | null;
   /** Same code or defect elsewhere that the implementation left alone. Optional because this
    *  payload is persisted: a gate parked before the field existed replays without it. */
+  fixTestRecords?: FixTestRecord[];
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   /** Optional improvements agents noted outside the task that nobody picked at 08e. Optional for
@@ -944,6 +947,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       dbAccess,
       screenshotsArtifactPath,
       runtimeSmoke,
+      fixTestRecords: await loadFixTestRecords(ctx.db, ctx.taskId),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
@@ -1439,6 +1443,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       'To have this task fix one, reject with feedback that names it; otherwise consider a follow-up task.',
     );
     if (similarRow) rows.push(similarRow);
+    const testRow = fixTestEditsRow(detected.fixTestRecords ?? []);
+    if (testRow) rows.push(testRow);
     const insightRow = insightsRow(
       detected.outOfScopeInsights ?? [],
       detected.outOfScopeInsightsOmitted ?? 0,

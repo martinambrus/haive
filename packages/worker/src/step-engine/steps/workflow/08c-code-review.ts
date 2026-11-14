@@ -1,3 +1,5 @@
+import { loadFixTestRecords } from './_fix-test-store.js';
+import { fixTestReviewNotice } from './_fix-test-edits.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
 import {
@@ -1259,25 +1261,26 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // reaches the prompt builders directly. Still before any dispatch, so nothing is spent.
       assertReviewableChange('08c-code-review', d.implementationFiles);
       await hydrateTaskBrief(ctx, d);
+      const testNotice = fixTestReviewNotice(await loadFixTestRecords(ctx.db, ctx.taskId));
       // roleKey === agentId here: every reviewer in this wave is a fixed persona, so its
       // id is already the stable seat STEP_MINING_SEATS enumerates.
       return [
         {
           agentId: 'peer-reviewer',
           agentTitle: 'Peer Reviewer',
-          prompt: buildPeerPrompt(d),
+          prompt: [buildPeerPrompt(d), testNotice].filter(Boolean).join('\n\n'),
           roleKey: 'peer-reviewer',
         },
         {
           agentId: 'security-code-reviewer',
           agentTitle: 'Security Code Reviewer',
-          prompt: buildSecurityPrompt(d),
+          prompt: [buildSecurityPrompt(d), testNotice].filter(Boolean).join('\n\n'),
           roleKey: 'security-code-reviewer',
         },
         ...lensesForLevel(d.level).map((lens) => ({
           agentId: lens.id,
           agentTitle: lens.title,
-          prompt: buildLensPrompt(lens, d),
+          prompt: [buildLensPrompt(lens, d), testNotice].filter(Boolean).join('\n\n'),
           roleKey: lens.id,
         })),
       ];
@@ -1506,6 +1509,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         );
         // A second-wave dispatch may resume detect output from before taskBrief existed.
         await hydrateTaskBrief(ctx, d);
+        const testNotice = fixTestReviewNotice(await loadFixTestRecords(ctx.db, ctx.taskId));
         throw new MiningWaveError(
           // The agent id here is per FINDING and unbounded, so it cannot be a seat. The
           // LENS is what repeats across the wave and is what a per-seat model choice is
@@ -1515,7 +1519,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
             refuteLenses.map((lens) => ({
               agentId: lensAgentId(f.agentId, lens),
               agentTitle: refuterTitle(f, i, wave.length, lens),
-              prompt: buildRefutePrompt(args.detected, f, lens),
+              prompt: [buildRefutePrompt(args.detected, f, lens), testNotice]
+                .filter(Boolean)
+                .join('\n\n'),
               roleKey: lens ? `refuter:${lens.id}` : 'refuter',
             })),
           ),

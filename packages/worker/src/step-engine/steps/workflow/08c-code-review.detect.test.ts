@@ -195,3 +195,4 @@ describe('08c apply with a detect stored before the settings were carried', () =
     await expect(firstPass()).rejects.toBe(unavailable);
   });
 });
+vi.mock('./_fix-test-store.js', () => ({ loadFixTestRecords: vi.fn(async () => []) }));

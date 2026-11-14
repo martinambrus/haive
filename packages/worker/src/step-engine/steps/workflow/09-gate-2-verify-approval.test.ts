@@ -7,6 +7,7 @@ const m = vi.hoisted(() => ({
   resolveTaskDirectAccess: vi.fn(),
   resolveScreenshotRoot: vi.fn(),
   loadTaskSimilarSites: vi.fn(),
+  loadFixTestRecords: vi.fn(async () => []),
   loadUnactedInsights: vi.fn(),
   loadGateHouseRules: vi.fn(),
   changeFingerprint: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock('./_screenshots.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_screenshots.js')>()),
   resolveScreenshotRoot: m.resolveScreenshotRoot,
 }));
+vi.mock('./_fix-test-store.js', () => ({ loadFixTestRecords: m.loadFixTestRecords }));
 vi.mock('./_similar-sites.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_similar-sites.js')>()),
   loadTaskSimilarSites: m.loadTaskSimilarSites,
@@ -782,6 +784,27 @@ describe('gate-2 similar sites', () => {
   };
   const form = (detected: unknown) =>
     gate2VerifyApprovalStep.form!({} as never, detected as never)!;
+
+  it('renders a durable repair record as a separate multiline evidence row', () => {
+    const rows =
+      form({
+        ...base,
+        fixTestRecords: [
+          {
+            invocationId: 'run',
+            stepId: '08b-test-management',
+            round: 2,
+            pass: 1,
+            beforeEventId: 'event',
+            state: 'captured',
+            changes: [{ path: 'tests/a.test.ts', kind: 'modified', patch: '-old\n+new' }],
+          },
+        ],
+      }).statusSummary ?? [];
+    expect(rows.find((r) => r.label === 'Test edits during fix passes')?.body).toContain(
+      '-old\n+new',
+    );
+  });
 
   it('lists them in the last row, with the way to act on them', () => {
     const rows =

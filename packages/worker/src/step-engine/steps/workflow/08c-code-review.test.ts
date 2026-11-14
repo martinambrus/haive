@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('./_fix-test-store.js', () => ({ loadFixTestRecords: vi.fn(async () => []) }));
+import { loadFixTestRecords } from './_fix-test-store.js';
 vi.mock('./_dependency-policy.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_dependency-policy.js')>()),
   loadReviewDependencyPolicy: vi.fn(
@@ -65,6 +67,38 @@ function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
     errorMessage: null,
   };
 }
+
+it('tells every review seat the host-derived test paths, without relaying the evidence patch', async () => {
+  vi.mocked(loadFixTestRecords).mockResolvedValueOnce([
+    {
+      invocationId: 'run',
+      stepId: '08b-test-management',
+      round: 1,
+      pass: 1,
+      beforeEventId: 'event',
+      state: 'captured',
+      changes: [
+        { path: 'tests/changed.test.ts', kind: 'modified', patch: 'NEVER-RELAY-PATCH' },
+        { path: '../escape', kind: 'added', patch: 'NEVER-RELAY-PATCH' },
+      ],
+    },
+  ]);
+  const agents = await codeReviewStep.agentMining!.selectAgents({
+    ctx: fakeCtx,
+    detected: {
+      spec: 's',
+      implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false },
+      debtBlock: '',
+      level: 'enterprise',
+    },
+  } as never);
+  expect(agents).toHaveLength(5);
+  for (const agent of agents) {
+    expect(agent.prompt).toContain('tests/changed.test.ts');
+    expect(agent.prompt).not.toContain('../escape');
+    expect(agent.prompt).not.toContain('NEVER-RELAY-PATCH');
+  }
+});
 /** A terminal that was DISPATCHED and died — killed at its budget, orphaned, preempted.
  *  Distinct from `mining(id, null)`, which is an agent that finished and said nothing, and
  *  from omitting the agent entirely, which means it was never dispatched at all. */
