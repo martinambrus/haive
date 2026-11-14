@@ -449,7 +449,7 @@ start, naming the package.
 A module's `./steps` entry imports `StepDefinition`, its phase contracts, form and metadata
 types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
 `satisfies StepDefinition<Detect, Apply>` and default-export a readonly array; the worker
-namespaces their ids and workflow type when it loads them. Import the six control-error
+namespaces their ids and workflow type when it loads them. Import the seven control-error
 constructors from this same entry so the runner receives the canonical class objects.
 A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
 The worker's old contract paths re-export them for compatibility. Other shared entries,
