@@ -25,6 +25,7 @@ export * from './step-catalog.js';
 export * from './task-types.js';
 export * from './integrations.js';
 export * from './custom-tools.js';
+export * from './task-check-runs.js';
 export * from './modules.js';
 export * from './module-sources.js';
 export * from './fix-test-blobs.js';
