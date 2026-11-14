@@ -27,6 +27,23 @@ test('external add/remove keeps host manifests and canonical lock unchanged, inc
   assert.equal(removed.status, 0, removed.stderr);
   assert.deepEqual(paths.map(tree.read), before);
   assert.doesNotMatch(tree.read('packages/api/src/modules.generated.ts'), /privateone/);
+  assert.equal(tree.has('external-modules/.selection.json'), false);
+  const local = createRequire(import.meta.url)(join(tree.root, 'scripts/local-modules.cjs'));
+  assert.equal(local.localMode(), false);
+  const config = { frozenLockfile: true };
+  assert.equal(local.updateConfig(config), config);
+});
+
+test('remove drops an empty selection while the clone alone keeps local mode active', (t) => {
+  const tree = makeTree(t, { modules: { privateone: { exports: ['./manifest'] } } });
+  renameSync(join(tree.root, 'modules/privateone'), join(tree.root, 'external-modules/privateone'));
+  assert.equal(tree.run('module.mjs', ['add', 'privateone']).status, 0);
+  assert.equal(tree.run('module.mjs', ['remove', 'privateone']).status, 0);
+  assert.equal(tree.has('external-modules/.selection.json'), false);
+  const local = createRequire(import.meta.url)(join(tree.root, 'scripts/local-modules.cjs'));
+  assert.equal(local.localMode(), true);
+  rmSync(join(tree.root, 'external-modules/privateone'), { recursive: true });
+  assert.equal(local.localMode(), false);
 });
 
 test('local lock seeding rebases importers, keeps the normal store, and does not affect public installs', (t) => {
@@ -77,7 +94,7 @@ test('failed external install restores selection, and a missing selected clone c
   const tree = makeTree(t, { modules: { privateone: { exports: ['./manifest'] } } });
   renameSync(join(tree.root, 'modules/privateone'), join(tree.root, 'external-modules/privateone'));
   assert.notEqual(tree.run('module.mjs', ['add', 'privateone'], { STUB_PNPM_EXIT: '1' }).status, 0);
-  assert.deepEqual(JSON.parse(tree.read('external-modules/.selection.json')), {});
+  assert.equal(tree.has('external-modules/.selection.json'), false);
   assert.equal(tree.run('module.mjs', ['add', 'privateone']).status, 0);
   rmSync(join(tree.root, 'external-modules/privateone'), { recursive: true });
   const result = tree.run('gen-modules.mjs');

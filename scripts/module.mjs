@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import local from './local-modules.cjs';
@@ -56,11 +56,13 @@ if (registry === null && (existsSync(externalFile) || selected[id] !== undefined
     };
   } else delete selected[id];
   mkdirSync(local.directory, { recursive: true });
-  writeFileSync(local.selectionFile, `${JSON.stringify(selected, null, 2)}\n`);
+  if (Object.keys(selected).length)
+    writeFileSync(local.selectionFile, `${JSON.stringify(selected, null, 2)}\n`);
+  else rmSync(local.selectionFile, { force: true });
   const lock = spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' });
   if (lock.status !== 0) {
-    // Keep an empty selection if this was the first add: the clone still needs a local lock.
-    writeFileSync(local.selectionFile, before ?? '{}\n');
+    if (before === null) rmSync(local.selectionFile, { force: true });
+    else writeFileSync(local.selectionFile, before);
     fail('pnpm install --lockfile-only failed; local selection was reverted');
   }
   const gen = spawnSync(process.execPath, [join(root, 'scripts/gen-modules.mjs')], {
