@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   LEARNING_UPDATE_HISTORY_MAX,
@@ -95,6 +96,26 @@ describe('learning provenance record', () => {
     expect(renderLearningRecord(parsed.content, parsed.provenance)).toBe(text);
     expect(learningContent(body)).toBe(body);
     expect(learningContent(text)).toBe(body);
+  });
+  it('normalises CRLF symmetrically so origin and successive update hashes form one chain', () => {
+    const crlf = (text: string) => text.replace(/\n/g, '\r\n');
+    const inserted = stampLearningRecord(crlf(body), null, first);
+    const origin = parseLearningRecord(inserted).provenance.origin;
+    expect(origin).toEqual({
+      ...first,
+      bodyHash: createHash('sha256').update(body).digest('hex'),
+    });
+    expect(learningContent(inserted)).toBe(body);
+    const corrected = `${body}Correction.\n`;
+    const updated = stampLearningRecord(crlf(corrected), crlf(inserted), next);
+    const firstUpdate = parseLearningRecord(updated).provenance.updates[0]!;
+    expect(firstUpdate.beforeHash).toBe((origin as { bodyHash: string }).bodyHash);
+    expect(firstUpdate.afterHash).toBe(createHash('sha256').update(corrected).digest('hex'));
+    const twice = stampLearningRecord(crlf(`${body}Second.\n`), crlf(updated), next);
+    expect(parseLearningRecord(twice).provenance.updates[1]!.beforeHash).toBe(
+      firstUpdate.afterHash,
+    );
+    expect(stampLearningRecord(corrected, crlf(updated), first)).toBe(crlf(updated));
   });
   it.each([3, 6])('strips nested markers to a fixpoint at depth %i', (depth) => {
     let nested = '<!-- haive-learning-provenance x -->';

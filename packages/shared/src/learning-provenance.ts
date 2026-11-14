@@ -61,7 +61,7 @@ export function parseLearningRecord(text: string): {
 }
 
 function canonicalContent(text: string): string {
-  return `${learningContent(text).replace(/\n+$/, '')}\n`;
+  return `${learningContent(text).replace(/\r\n/g, '\n').replace(/\n+$/, '')}\n`;
 }
 
 export function renderLearningRecord(content: string, provenance: LearningProvenance): string {
