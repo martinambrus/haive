@@ -1,0 +1,311 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`behavior fixture > compares prompt, form, output and exact written bytes against unchanged code 1`] = `
+{
+  "files": [
+    [
+      ".haive-data/knowledge_base/investigations/private-investigation.md",
+      "---
+title: private investigation
+type: bug-investigation
+date: <now>
+task: private task
+---
+
+# private investigation
+
+## Root cause
+private cause
+
+## Lesson
+private lesson",
+    ],
+    [
+      ".haive-data/learnings/edited.md",
+      "# private human edit
+private edited body
+",
+    ],
+    [
+      ".haive-data/learnings/fresh.md",
+      "# private-title-fresh
+
+private-body-fresh src/a.ts:7
+",
+    ],
+    [
+      ".haive-data/learnings/old.md",
+      "# private-title-old
+
+private-body-old src/a.ts:7
+",
+    ],
+    [
+      ".haive-data/learnings/unknown.md",
+      "# private-title-unknown
+
+private-body-unknown src/a.ts:7
+",
+    ],
+    [
+      ".haive/learning-drafts/learnings/edited.md",
+      "# private human edit
+private edited body",
+    ],
+    [
+      ".haive/learning-drafts/learnings/removed.md",
+      "  ",
+    ],
+  ],
+  "form": {
+    "description": "Task: private task
+Verification: passed
+Bug fix — a knowledge-base investigation was drafted below.
+Review the drafts below. Edit any file inline in the changes view — what you leave there is what gets written, and emptying a file drops it. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again, which replaces your edits with its new draft.",
+    "fields": [
+      {
+        "default": true,
+        "id": "writeFiles",
+        "label": "Apply learning changes (3 new, 2 updated, 2 removed) to .haive-data/learnings/",
+        "type": "checkbox",
+      },
+      {
+        "default": true,
+        "id": "writeInvestigation",
+        "label": "Write the bug investigation to .haive-data/knowledge_base/investigations/",
+        "type": "checkbox",
+      },
+      {
+        "default": false,
+        "id": "promoteInvestigationGlobal",
+        "label": "Promote it to the GLOBAL KB (cross-repo house standard) instead of this repo",
+        "type": "checkbox",
+      },
+      {
+        "defaults": [],
+        "id": "acceptGlobalCandidates",
+        "label": "Promote these as GLOBAL KB drafts (cross-repo house standards)",
+        "options": [
+          {
+            "description": "tech_pattern · node",
+            "label": "private global",
+            "value": "private-global",
+          },
+        ],
+        "type": "multi-select",
+      },
+      {
+        "id": "instruction",
+        "label": "Instructions to the agent (optional) — refine or correct the drafts (e.g. 'limit the DDEV article to v1.25.2', 'rewrite the X learning to …'). Leave blank to accept the drafts as drafted.",
+        "rows": 3,
+        "type": "textarea",
+      },
+    ],
+    "infoSections": [
+      {
+        "body": "### [NEW] private-title-fresh
+
+private-body-fresh src/a.ts:7
+
+---
+
+### [UPDATE → old] private-title-old
+
+private-body-old src/a.ts:7
+
+---
+
+### [REMOVE → gone] gone
+
+---
+
+### [UPDATE → missing] private-title-unknown
+
+private-body-unknown src/a.ts:7
+
+---
+
+### [REMOVE → missing] missing
+
+---
+
+### [NEW] private-title-removed
+
+private-body-removed src/a.ts:7
+
+---
+
+### [NEW] private-title-edited
+
+private-body-edited src/a.ts:7",
+        "defaultOpen": true,
+        "preview": "[NEW] private-title-fresh; [UPDATE → old] private-title-old; [REMOVE → gone] gon",
+        "title": "Drafted learnings (3 new, 2 updated, 2 removed)",
+      },
+      {
+        "body": "**private investigation**
+
+## Root cause
+private cause
+
+## Lesson
+private lesson",
+        "defaultOpen": true,
+        "preview": "private investigation",
+        "title": "Drafted bug investigation",
+      },
+      {
+        "body": "### [tech_pattern · node] private global
+
+private portable body",
+        "defaultOpen": false,
+        "preview": "private global",
+        "title": "Global KB candidates (1)",
+      },
+    ],
+    "submitLabel": "Capture learnings",
+    "title": "Phase 8: Learning capture",
+  },
+  "output": {
+    "deleted": [
+      ".haive-data/learnings/gone.md",
+    ],
+    "entries": [
+      {
+        "body": "private-body-fresh src/a.ts:7",
+        "id": "fresh",
+        "op": "insert",
+        "title": "private-title-fresh",
+      },
+      {
+        "body": "private-body-old src/a.ts:7",
+        "id": "old",
+        "op": "update",
+        "targetId": "old",
+        "title": "private-title-old",
+      },
+      {
+        "body": "",
+        "id": "gone",
+        "op": "delete",
+        "targetId": "gone",
+        "title": "gone",
+      },
+      {
+        "body": "private-body-unknown src/a.ts:7",
+        "id": "unknown",
+        "op": "update",
+        "targetId": "missing",
+        "title": "private-title-unknown",
+      },
+      {
+        "body": "",
+        "id": "missing",
+        "op": "delete",
+        "targetId": "missing",
+        "title": "missing",
+      },
+      {
+        "body": "private-body-removed src/a.ts:7",
+        "id": "removed",
+        "op": "insert",
+        "title": "private-title-removed",
+      },
+      {
+        "body": "private-body-edited src/a.ts:7",
+        "id": "edited",
+        "op": "insert",
+        "title": "private-title-edited",
+      },
+    ],
+    "investigationWritten": ".haive-data/knowledge_base/investigations/private-investigation.md",
+    "kbReverted": false,
+    "kbSync": null,
+    "kbSyncSkipped": null,
+    "promotedCandidates": [
+      "global-kb:draft-id",
+    ],
+    "refineRequested": false,
+    "skillSync": null,
+    "source": "llm",
+    "written": [
+      ".haive-data/learnings/fresh.md",
+      ".haive-data/learnings/old.md",
+      ".haive-data/learnings/unknown.md",
+      ".haive-data/learnings/edited.md",
+    ],
+  },
+  "promotions": [
+    [
+      {},
+      {
+        "body": "private portable body",
+        "category": "tech_pattern",
+        "facets": {},
+        "taskId": "task-id",
+        "title": "private global",
+        "topicKey": "tech_pattern:node",
+        "userId": "user-id",
+      },
+      {},
+    ],
+  ],
+  "prompt": "[[HAIVE_AGENT_DEFINITION:learning-recorder]]
+If a \`.claude/agents/learning-recorder.md\` agent definition exists in the repo, follow it;
+otherwise follow the protocol below.
+[[HAIVE_AGENT_DEFINITION_END]]
+You are the learning capture phase of an engineering workflow.
+Emit ONE JSON object inside a \`\`\`json fenced code block with the shape:
+{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown; MUST cite a path/to/file.ext:LINE from this run>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }
+Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.
+ADMISSION BAR — the knowledge base is read by every future run, so a weak entry costs
+every one of them. Before you write ANY learning, investigation, or global candidate,
+drop it if ANY of these is true:
+1. A linter, type checker, test, or CI job would have caught it. Tooling already
+   enforces it; a KB article about it is never read.
+2. You knew it before this run, from general training. If the lesson would be true of
+   a project you have never seen, it is not a lesson from THIS run.
+3. You cannot cite a concrete \`path/to/file.ext:LINE\` from this run as the evidence
+   for it. No citation means no evidence, and an uncited lesson is an opinion.
+Cite that \`file.ext:LINE\` inside each learning \`body\`. Entries without one are DROPPED
+before a human ever sees them — writing fewer, cited lessons is the goal, not more.
+Emitting zero entries is a valid, correct answer when the run taught nothing durable.
+LEARNINGS RECONCILIATION — you are shown the EXISTING learnings below. For each lesson decide an \`op\`:
+- "insert" (default) for a NEW lesson no existing learning covers.
+- "update" with \`targetId\` = an existing learning id when refining/replacing it; put the FULL new content in \`body\`.
+- "delete" with \`targetId\` = an existing learning id when this run proved that lesson WRONG or obsolete.
+Only use a \`targetId\` that EXACTLY matches an id in the existing list (an unknown target is treated as an insert, or dropped for delete). Do not duplicate a lesson that already exists — update it instead.
+An existing learning listed by title alone carries no excerpt: read \`.haive-data/learnings/<id>.md\` before an "update" or "delete" names it, because an "update" replaces the whole body.
+KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:
+1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.
+2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)
+3. new_feature / feature_update / feature_removal → LOCATE where the feature belongs (search \`rag_search\` FIRST, then \`.haive-data/knowledge_base/INDEX.md\`), then READ the target file from disk before you change it. \`rag_search\` returns a SNIPPET of that file as it was indexed at the START of this run — the index is not rewritten until after the commit gate — so editing from what it returned drops whatever the snippet left out, the same way a TRUNCATED global article does below. Then EDIT the structured \`.haive-data/knowledge_base/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.
+4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.
+5. Report EVERY knowledge_base file you changed in \`kbSync.changes\`. Do NOT edit \`.haive-data/knowledge_base/investigations/\` — that is recorded separately below.
+SKILL SYNC — after classifying the task above, keep the project SKILLS (capability guides under \`.claude/skills/\`) in sync with what this task changed. DECIDE ONLY here: do NOT create, edit, or write any skill file and do NOT emit skill bodies — a later step regenerates the affected skill from your decision. Add a \`"skillSync": { "ops": [ ... ] }\` field to the JSON:
+- new_feature (the task ADDED a capability that no existing skill covers) → { "op": "new_feature", "capability": "<the capability name>", "rationale": "<one line: what it does>" }.
+- feature_update (the task CHANGED a capability an existing skill covers) → { "op": "feature_update", "skillId": "<an id from the Existing skills list below>", "rationale": "<one line: what changed>" }.
+- feature_removal (the task REMOVED a capability an existing skill covers) → { "op": "feature_removal", "skillId": "<an id from the Existing skills list below>", "rationale": "<one line: why it is gone>" }.
+- bug_fix / refactor → the capability set is unchanged; emit "ops": [].
+Use a \`skillId\` ONLY from the Existing skills list below (an unknown id is dropped). Emit one op per affected capability — usually zero or one. Keep this consistent with the KB sync classification above.
+This task was a BUG FIX: ALSO produce an \`investigation\`. In \`symptoms\`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation, citing the \`path/to/file.ext:LINE\` the bug lived on) and the durable lesson for future work. Set its \`scope\` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo) AND it clears the ADMISSION BAR above — a lesson CI would catch, or one you already knew, stays "local" at most; otherwise "local".
+GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo's own code, names, or paths), add a \`globalCandidates\` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "description": "<optional: ONE line, at most 300 characters, saying what the rule states and when it applies>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. \`evidence\` is checked and then discarded: it stays OUT of \`body\`, which must remain portable, and a candidate without it is dropped. \`description\` is shown beside the title to every repo the article applies to, so it carries the same portability rule as \`body\`: no repo-specific names/paths. If a candidate covers the SAME topic as one of the existing global articles shown below, author \`body\` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn. An article shown below marked TRUNCATED is an EXCERPT: call \`rag_search\` with its exact title to read it in full before you merge, or you will delete the part you never saw.
+Task title: private task
+Task description: private description
+Feature/area: (unspecified)
+Implementation summary: (none)
+Verification passed: true
+Commit sha: unavailable (commit outcome not recorded)
+Files touched: (none)
+=== Existing learnings (reconcile against these; use their id as targetId) ===
+- old — private listed: private excerpt
+- title-only — private title only
+- (+3 further learning(s) not listed; they are files under \`.haive-data/learnings/\`)
+=== Existing skills (pick a skillId from here for a feature_update / feature_removal) ===
+(none yet)
+=== Existing global house-standard articles for this stack (to UPDATE one, re-use its tech and author the full merged body) ===
+(none)
+=== What happened during this task (mine this — it is the real, persisted run history) ===
+Ground EVERY learning, the investigation, and the KB sync in the SPECIFIC diagnoses, findings, human reactions, and any user steering (mid-run course-corrections) above: quote the real errors/symptoms, name what was planned or implemented wrong and how it was resolved, and fold the human reviewer reactions and steering directives in. A mid-run steer marks a spot where the agent drifted — capture the durable lesson (or runbook step) that would have avoided the need to steer. Do NOT write generic advice. For a bug, the investigation symptoms + root cause must cite the actual diagnosis; the KB sync should reflect what the reviewers and the human actually flagged. Grounding is what the ADMISSION BAR checks: every learning body and every global candidate must carry the \`path/to/file.ext:LINE\` it came from, and one that cannot is dropped rather than written.",
+}
+`;
