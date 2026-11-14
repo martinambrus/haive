@@ -1,6 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
@@ -44,6 +54,7 @@ beforeAll(() => {
   mkdirSync(join(template, '.auth'));
   mkdirSync(join(template, 'config'));
   writeFileSync(join(template, 'config/settings.php'), before);
+  writeFileSync(join(template, 'allowed.txt'), 'original\n');
   for (const p of tracked) writeFileSync(join(template, p), before);
   git(template, 'init', '-b', 'base');
   git(template, 'config', 'user.name', 'Fixture');
@@ -144,5 +155,93 @@ it('rejects a reported noncanonical secret name through real git and descriptor 
       path,
       kind: 'invalid',
     });
+  expect(openFileNoFollow).not.toHaveBeenCalled();
+});
+
+it('retains allowed changed evidence alongside a denied changed file through real git', async () => {
+  const content = 'ordinary change\n';
+  writeFileSync(join(root, 'allowed.txt'), content);
+  paths.push('allowed.txt');
+  const result = await readReviewDiff(ctx, root, {
+    worktreePath: root,
+    maxBytes: 20000,
+    includeFileContents: true,
+  });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  expect(JSON.stringify(result)).not.toContain(before);
+  expect(JSON.stringify(result)).not.toContain(after);
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.diff).toContain('-original\n+ordinary change');
+  expect(payload.diff).not.toContain('.auth/user.json');
+  expect(payload.fileContents).toEqual([{ path: 'allowed.txt', content }]);
+  expect(payload.files).toContainEqual(
+    expect.objectContaining({
+      path: 'allowed.txt',
+      kind: 'text',
+      hash: createHash('sha256').update(content).digest('hex'),
+    }),
+  );
+  for (const path of [...tracked, ...untracked]) {
+    const file = payload.files.find((f: { path: string }) => f.path === path);
+    expect(file).toMatchObject({ kind: 'withheld', size: after.length, mode: 0o644 });
+    expect(file.hash).toBeUndefined();
+  }
+  expect(vi.mocked(openFileNoFollow).mock.calls.every((call) => call[1] === 'allowed.txt')).toBe(
+    true,
+  );
+});
+
+it('withholds a denied mode-only change reported by real git', async () => {
+  const path = tracked[0]!;
+  writeFileSync(join(root, path), before);
+  chmodSync(join(root, path), 0o755);
+  expect(git(root, 'diff', '--numstat', '--', path).toString()).toBe('0\t0\t' + path + '\n');
+  expect(git(root, 'diff', '--summary', '--', path).toString()).toContain(
+    'mode change 100644 => 100755',
+  );
+  const result = await readReviewDiff(ctx, root, {
+    worktreePath: root,
+    maxBytes: 20000,
+    includeFileContents: true,
+  });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  expect(JSON.stringify(result)).not.toContain(before);
+  expect(JSON.stringify(result)).not.toContain(after);
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.files).toContainEqual({
+    path,
+    kind: 'withheld',
+    size: before.length,
+    mode: 0o755,
+  });
+  expect(payload.diff).toBe('');
+  expect(openFileNoFollow).not.toHaveBeenCalled();
+});
+
+it('withholds a denied file-to-link type change reported by real git', async () => {
+  const path = tracked[0]!;
+  const target = 'link-' + after;
+  unlinkSync(join(root, path));
+  symlinkSync(target, join(root, path));
+  expect(git(root, 'diff', '--name-status', '--', path).toString()).toBe('T\t' + path + '\n');
+  const result = await readReviewDiff(ctx, root, {
+    worktreePath: root,
+    maxBytes: 20000,
+    includeFileContents: true,
+  });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  expect(JSON.stringify(result)).not.toContain(before);
+  expect(JSON.stringify(result)).not.toContain(after);
+  if (result.status !== 'ready') return;
+  const payload = JSON.parse(result.content);
+  expect(payload.files).toContainEqual({
+    path,
+    kind: 'withheld',
+    size: target.length,
+    mode: 0o777,
+  });
+  expect(payload.diff).toBe('');
   expect(openFileNoFollow).not.toHaveBeenCalled();
 });
