@@ -10,6 +10,7 @@ import { parseReleaseManifest } from '../../packages/shared/src/release/manifest
 
 const env = [{ key: 'LATER_KEY', generate: 'hex', bytes: 16 }];
 const first = { 'docker-compose.yml': 'first\r\n', 'docker-compose.gpu.yml': 'gpu\n' };
+const rc = { 'docker-compose.yml': 'rc\n', 'docker-compose.gpu.yml': 'rc gpu\n' };
 const second = { 'docker-compose.yml': 'second\n', 'docker-compose.run.yml': 'run\n' };
 const current = {
   'docker-compose.yml': 'current\r\n',
@@ -72,7 +73,11 @@ before(() => {
   write(first);
   commit();
   git('tag', 'v0.1.0');
+  git('tag', 'v0.1.1'); // Same bundle: retain only its first occurrence.
   git('tag', 'not-a-release');
+  write(rc);
+  commit();
+  git('tag', 'v0.1.5-rc.1'); // RC installs need recognition too.
   rmSync(join(root, 'docker-compose.gpu.yml'));
   write(second);
   commit();
@@ -81,6 +86,15 @@ before(() => {
   writeFileSync(join(root, 'extra.yml'), 'not in the bundle\n');
   commit();
   git('tag', 'v0.3.0'); // The target itself is not an earlier release.
+  git('checkout', '-b', 'future');
+  write({ 'docker-compose.yml': 'future\n' });
+  commit();
+  git('tag', 'v9.0.0'); // A descendant of HEAD is not merged into the generating commit.
+  git('checkout', '-b', 'side', 'v0.1.0');
+  write({ 'docker-compose.yml': 'unmerged side branch\n' });
+  commit();
+  git('tag', 'v0.0.1'); // Nor is a side branch, even with an earlier version label.
+  git('checkout', 'main');
 });
 after(() => {
   if (root) rmSync(root, { recursive: true, force: true });
@@ -121,14 +135,14 @@ test('without --bundle-dir the original manifest bytes are unchanged and need no
   );
 });
 
-test('--bundle-dir hashes exact bytes and every earlier release bundle in deterministic order', () => {
+test('--bundle-dir hashes unique merged release bundles, including RCs, in stable refname order', () => {
   const result = build(['--bundle-dir', root]);
   assert.equal(result.status, 0, result.stderr);
   const manifest = parseReleaseManifest(JSON.parse(result.stdout));
   assert.deepEqual(manifest.bundle, {
     files: hashes(current),
     env,
-    known: [hashes(first), hashes(second)],
+    known: [hashes(first), hashes(rc), hashes(second)],
   });
   assert.equal(build(['--bundle-dir', root]).stdout, result.stdout);
 });

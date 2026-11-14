@@ -67,7 +67,7 @@ function buildBundle(dir, version) {
   if (git('rev-parse', '--is-shallow-repository').toString('utf8').trim() !== 'false') {
     throw new Error('shallow checkout: fetch the full release history before building a bundle');
   }
-  const tags = git('tag', '--list', 'v*', '--sort=refname')
+  const tags = git('tag', '--merged', 'HEAD', '--list', 'v*', '--sort=refname')
     .toString('utf8')
     .trim()
     .split('\n')
@@ -76,6 +76,7 @@ function buildBundle(dir, version) {
     throw new Error('no v* release tags found; use --allow-no-history only for a first release');
   }
   const known = [];
+  const seen = new Set();
   for (const tag of tags) {
     if (normalizeVersion(tag) === version) continue;
     const ref = `refs/tags/${tag}`;
@@ -93,7 +94,11 @@ function buildBundle(dir, version) {
         sha256(git('show', `${ref}:${name}`)),
       ]),
     );
-    if (Object.keys(record).length > 0) known.push(record);
+    const identity = JSON.stringify(record);
+    if (Object.keys(record).length > 0 && !seen.has(identity)) {
+      seen.add(identity);
+      known.push(record);
+    }
   }
   return { files, env, known };
 }
