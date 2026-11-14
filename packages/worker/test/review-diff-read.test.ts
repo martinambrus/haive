@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { loadDependencyPolicy } from '../src/step-engine/steps/workflow/_dependency-policy.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
@@ -215,3 +217,26 @@ it.each(['link', 'directory', 'missing', 'gitlink', 'absolute', 'parent'])(
     );
   },
 );
+
+it('sanitizes a bound-value database error before returning a reason', async () => {
+  const value = randomBytes(24).toString('hex');
+  const error = Object.assign(new Error('Failed query with ' + value), { params: [value] });
+  vi.mocked(loadDependencyPolicy).mockRejectedValueOnce(error);
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'unavailable', reason: 'Database operation failed' });
+  expect(JSON.stringify(result)).not.toContain(value);
+});
+it('scrubs a host path from a returned failure reason', async () => {
+  vi.mocked(loadDependencyPolicy).mockRejectedValueOnce(
+    new Error('Cannot read /host/private/tree/file'),
+  );
+  expect(await readReviewDiff(ctx, '/repo', options)).toMatchObject({
+    status: 'unavailable',
+    reason: 'Cannot read [path]',
+  });
+});
+it.each(['EMFILE', 'ENFILE'])('rethrows %s for the step retry boundary', async (code) => {
+  const error = Object.assign(new Error(code), { code });
+  vi.mocked(openFileNoFollow).mockRejectedValueOnce(error);
+  await expect(readReviewDiff(ctx, '/repo', options)).rejects.toBe(error);
+});

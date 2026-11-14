@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
+import { openDirNoFollow } from '@haive/shared/fs-safe';
 import { TaskCancelledError, type StepContext } from '@haive/shared/step';
 import { createStepHostServices } from '../src/step-engine/step-host-services.js';
 import { loadPreviousStepOutput } from '../src/step-engine/steps/onboarding/_helpers.js';
@@ -135,3 +136,20 @@ it('normalizes cancellation during an awaited read, using fake time', async () =
 });
 
 vi.mock('../src/queues/cli-exec/secret-mask.js', () => ({ taskSecretMaskPolicy: vi.fn() }));
+
+it.each(['EMFILE', 'ENFILE'])('preserves %s during worktree binding', async (code) => {
+  const error = Object.assign(new Error(code), { code });
+  vi.mocked(openDirNoFollow).mockRejectedValueOnce(error);
+  await expect(
+    createStepHostServices(ctx).collectImplementationFiles('/repo/.haive/worktrees/task'),
+  ).rejects.toBe(error);
+});
+it('normalizes filesystem errors during binding without exposing host paths', async () => {
+  vi.mocked(openDirNoFollow).mockRejectedValueOnce(new Error('Cannot open /host/private/tree'));
+  await expect(
+    createStepHostServices(ctx).collectImplementationFiles('/repo/.haive/worktrees/task'),
+  ).rejects.toMatchObject({
+    name: 'StepHostBindingError',
+    message: 'Context worktree directory is unavailable or refused.',
+  });
+});

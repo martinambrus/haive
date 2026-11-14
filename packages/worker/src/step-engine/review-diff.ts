@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import {
   decodeUtf8Strict,
   lstatNoFollow,
@@ -405,11 +406,9 @@ export async function readReviewDiff(
     return serializeReviewPayload(first, options);
   } catch (error) {
     checkHostCancellation(ctx);
+    if (isResourceLimitError(error)) throw error;
     if (error instanceof DiffTooLarge)
       return { status: 'too-large', scope, reason: 'The complete diff exceeds maxBytes.' };
-    return unavailable(
-      scope,
-      error instanceof Error ? error.message : 'Review content is unavailable.',
-    );
+    return unavailable(scope, scrubErrorPaths(safeErrorMessage(error)));
   }
 }
