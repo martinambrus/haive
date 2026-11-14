@@ -14,6 +14,10 @@ import {
   compareTestImages,
   testFileChanged,
   sha256,
+  TEST_GATE_BYTES,
+  TEST_GATE_LINES,
+  TEST_PATCH_BYTES,
+  TEST_PATCH_LINES,
   type FixTestRecord,
   type TestImage,
   type TestFile,
@@ -150,15 +154,18 @@ async function readManifests(
 
 /** The partial index finds live metadata; never inspect/detoast content to expire it. */
 export async function expireFixTestImages(db: Database): Promise<void> {
-  await db.execute(sql`
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('haive.fix-test-image-budget'))`);
+    await tx.execute(sql`
     with expired as (
       select task_id, content_hash from fix_test_blobs
       where expired_at is null and content is not null and created_at < now() - (${FIX_TEST_RETENTION_DAYS} * interval '1 day')
-      order by created_at limit 100
+      order by created_at, task_id, content_hash limit 100
     )
     update fix_test_blobs b set content = null, expired_at = now()
     from expired e where b.task_id = e.task_id and b.content_hash = e.content_hash
-  `);
+    `);
+  });
 }
 
 async function stored(db: Database | Tx, taskId: string, invocationId: string, eventType: string) {
@@ -180,7 +187,10 @@ async function stored(db: Database | Tx, taskId: string, invocationId: string, e
 /** Run -> step -> task is the Retry/Stop order. No repository I/O under these locks. */
 async function owned(tx: Tx, meta: CaptureMeta, ended: boolean): Promise<boolean> {
   const [run] = await tx
-    .select()
+    .select({
+      endedAt: schema.cliInvocations.endedAt,
+      supersededAt: schema.cliInvocations.supersededAt,
+    })
     .from(schema.cliInvocations)
     .where(eq(schema.cliInvocations.id, meta.invocationId))
     .for('no key update');
@@ -229,7 +239,11 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
     })
     .from(schema.fixTestBlobs)
     .where(sql`${schema.fixTestBlobs.expiredAt} is null and ${schema.fixTestBlobs.sizeBytes} > 0`)
-    .orderBy(asc(schema.fixTestBlobs.createdAt));
+    .orderBy(
+      asc(schema.fixTestBlobs.createdAt),
+      asc(schema.fixTestBlobs.taskId),
+      asc(schema.fixTestBlobs.contentHash),
+    );
   let total = usage.reduce((n, b) => n + b.size, 0);
   let task = usage.filter((b) => b.taskId === taskId).reduce((n, b) => n + b.size, 0);
   const evicted = new Set<object>();
@@ -317,6 +331,7 @@ export async function finishFixTestCapture(
 ): Promise<void> {
   // Primary-key lookup first; non-repair completions never scan other tasks' events.
   const run = await db.query.cliInvocations.findFirst({
+    columns: { taskId: true, mode: true, exitCode: true, endedAt: true },
     where: eq(schema.cliInvocations.id, invocationId),
   });
   if (!run) return;
@@ -443,7 +458,11 @@ export async function loadFixTestRecords(
   const blobs =
     options.patches !== false && hashes.size
       ? await db
-          .select()
+          .select({
+            contentHash: schema.fixTestBlobs.contentHash,
+            content: schema.fixTestBlobs.content,
+            expiredAt: schema.fixTestBlobs.expiredAt,
+          })
           .from(schema.fixTestBlobs)
           .where(
             and(
@@ -471,20 +490,32 @@ export async function loadFixTestRecords(
           ),
         }
       : { state: 'not captured', reason: 'Missing manifest.' };
-  return starts.reverse().map((e) => {
-    const p = e.payload as unknown as Reference;
-    const end = settled.get(p.invocationId);
-    return {
-      invocationId: p.invocationId,
-      stepId: p.stepId,
-      round: p.round,
-      pass: p.pass,
-      beforeEventId: e.id,
-      ...compareTestImages(
+  let remainingBytes = options.patches === false ? 0 : TEST_GATE_BYTES;
+  let remainingLines = options.patches === false ? 0 : TEST_GATE_LINES;
+  return starts
+    .map((e) => {
+      const p = e.payload as unknown as Reference;
+      const end = settled.get(p.invocationId);
+      const compared = compareTestImages(
         hydrate(imageFor(p)),
         hydrate(imageFor(end?.payload as unknown as Reference | undefined)),
-        options.patches === false ? { bytes: 0, lines: 0 } : undefined,
-      ),
-    };
-  });
+        {
+          bytes: Math.min(TEST_PATCH_BYTES, remainingBytes),
+          lines: Math.min(TEST_PATCH_LINES, remainingLines),
+        },
+      );
+      for (const c of compared.changes) {
+        remainingBytes -= Buffer.byteLength(c.patch);
+        remainingLines -= c.patch ? c.patch.split('\n').length : 0;
+      }
+      return {
+        invocationId: p.invocationId,
+        stepId: p.stepId,
+        round: p.round,
+        pass: p.pass,
+        beforeEventId: e.id,
+        ...compared,
+      };
+    })
+    .reverse();
 }

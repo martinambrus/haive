@@ -336,6 +336,17 @@ export function compareTestImages(
     const b = next.get(path);
     if (a?.status === 'refused' && b?.status === 'refused') couldNotMeasure++;
     if (!testFileChanged(a, b)) continue;
+    if (bytes <= 0 || lines <= 0) {
+      changes.push({
+        path,
+        kind: a ? (b ? 'modified' : 'deleted') : 'added',
+        beforeHash: a?.hash,
+        afterHash: b?.hash,
+        patch: '',
+        cut: true,
+      });
+      continue;
+    }
     const left = Buffer.from(a?.base64 ?? '', 'base64');
     const right = Buffer.from(b?.base64 ?? '', 'base64');
     const binary = !isUtf8(left) || !isUtf8(right) || left.includes(0) || right.includes(0);

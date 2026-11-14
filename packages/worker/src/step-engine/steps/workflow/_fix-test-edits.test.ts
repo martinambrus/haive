@@ -209,6 +209,34 @@ describe('host fix-pass test evidence', () => {
       expect(isTestEvidencePath(path), path).toBe(false);
   });
 
+  it('does not read content or compute diffs after the display budget is spent', () => {
+    const file = {
+      path: 'tests/a',
+      hash: 'old',
+      mode: 420,
+      status: 'available' as const,
+      base64: Buffer.from('old').toString('base64'),
+    };
+    const later = {
+      ...file,
+      path: 'tests/z',
+      get base64(): string {
+        throw new Error('content beyond budget');
+      },
+    };
+    const before = { state: 'captured' as const, files: [file, later] };
+    const after = {
+      state: 'captured' as const,
+      files: [
+        { ...file, hash: 'new', base64: Buffer.from('new').toString('base64') },
+        { path: later.path, hash: 'new', mode: 420, status: 'available' as const },
+      ],
+    };
+    const result = compareTestImages(before, after, { lines: 1 });
+    expect(result.changes).toHaveLength(2);
+    expect(result.changes[1]).toMatchObject({ path: 'tests/z', patch: '', cut: true });
+  });
+
   it('spends the gate patch budget on the newest repair passes first and states cuts', () => {
     const records = [1, 2, 3].map((pass) =>
       record({ pass, changes: [{ path: 'tests/a', kind: 'modified', patch: '+first\n+last' }] }),
