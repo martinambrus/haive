@@ -15,14 +15,18 @@ const folders = () =>
 const localMode = () => existsSync(selectionFile) || folders().length > 0;
 function selection() {
   if (!existsSync(selectionFile)) return {};
-  const value = JSON.parse(readFileSync(selectionFile, 'utf8'));
-  if (!value || Array.isArray(value) || typeof value !== 'object')
-    throw new Error('invalid external module selection');
-  for (const [id, entry] of Object.entries(value)) {
-    if (moduleId.exec(entry?.name)?.[1] !== id)
-      throw new Error('invalid external module selection');
+  try {
+    const value = JSON.parse(readFileSync(selectionFile, 'utf8'));
+    if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error();
+    for (const [id, entry] of Object.entries(value)) {
+      if (moduleId.exec(entry?.name)?.[1] !== id) throw new Error();
+    }
+    return value;
+  } catch {
+    throw new Error(
+      'invalid external module selection; delete external-modules/.selection.json and re-add your modules',
+    );
   }
-  return value;
 }
 function effectivePackage(pkg) {
   if (!['@haive/api', '@haive/worker', '@haive/web'].includes(pkg.name)) return pkg;

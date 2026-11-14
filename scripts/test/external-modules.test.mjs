@@ -181,3 +181,14 @@ test('a failed external prebuild stops before any Turbo task starts', (t) => {
   assert.equal(tree.pnpmCalls().length, 1);
   assert.doesNotMatch(tree.pnpmCalls()[0], /turbo/);
 });
+
+test('corrupt local selections explain recovery even when module remove cannot run', (t) => {
+  const tree = makeTree(t);
+  const local = createRequire(import.meta.url)(join(tree.root, 'scripts/local-modules.cjs'));
+  for (const text of ['{', 'null', '[]', '{"privateone": {"name": "invalid"}}']) {
+    writeFileSync(local.selectionFile, text);
+    assert.throws(() => local.selection(), /delete external-modules\/\.selection\.json/);
+  }
+  rmSync(local.selectionFile);
+  assert.deepEqual(local.selection(), {});
+});
