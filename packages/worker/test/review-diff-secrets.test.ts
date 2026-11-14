@@ -42,6 +42,8 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd,
 beforeAll(() => {
   template = mkdtempSync(join(tmpdir(), 'sp3-secret-template-'));
   mkdirSync(join(template, '.auth'));
+  mkdirSync(join(template, 'config'));
+  writeFileSync(join(template, 'config/settings.php'), before);
   for (const p of tracked) writeFileSync(join(template, p), before);
   git(template, 'init', '-b', 'base');
   git(template, 'config', 'user.name', 'Fixture');
@@ -123,5 +125,24 @@ it.each(['missing', 'error'])('refuses a %s policy before any file read', async 
   expect((await readReviewDiff(ctx, root, { worktreePath: root, maxBytes: 20000 })).status).toBe(
     'unavailable',
   );
+  expect(openFileNoFollow).not.toHaveBeenCalled();
+});
+
+it('rejects a reported noncanonical secret name through real git and descriptor reads', async () => {
+  const path = 'config/settings.php/';
+  paths.push(path);
+  const result = await readReviewDiff(ctx, root, {
+    worktreePath: root,
+    maxBytes: 20000,
+    includeFileContents: true,
+  });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  expect(JSON.stringify(result)).not.toContain(before);
+  expect(JSON.stringify(result)).not.toContain(after);
+  if (result.status === 'ready')
+    expect(JSON.parse(result.content).files).toContainEqual({
+      path,
+      kind: 'invalid',
+    });
   expect(openFileNoFollow).not.toHaveBeenCalled();
 });

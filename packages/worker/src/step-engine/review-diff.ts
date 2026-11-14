@@ -216,7 +216,12 @@ export async function readReviewDiff(
     const policy = await hostCall(ctx, () => taskSecretMaskPolicy(ctx.db, ctx.taskId));
     if (!policy) return unavailable(scope, 'The task secret policy is unavailable.');
     // At-rest capture covers tracked files too, unlike the sandbox mount policy.
-    const denied = compileSecretMaskPolicy({ ...policy, tracked: null });
+    const atRestPolicy = { ...policy, tracked: null };
+    const exactDeny = compileSecretMaskPolicy(atRestPolicy);
+    const foldedDeny = compileSecretMaskPolicy(atRestPolicy, { nocase: true });
+    // A case-insensitive mount can resolve another spelling of a denied name. Either
+    // policy verdict withholds it; folding must never override an exact deny with an allow.
+    const denied = (canonical: string) => exactDeny(canonical) || foldedDeny(canonical);
     scope = await collectImplementationFiles(ctx, worktree, limits);
     if (scope.scanError) return unavailable(scope, 'The implementation scan failed.');
     if (!scope.files.length) return unavailable(scope, 'The review scope is empty.');
@@ -267,14 +272,26 @@ export async function readReviewDiff(
       // The cap limits delivered review evidence, not retry identity. Hash omitted changes
       // too, so a partial payload cannot reuse an earlier identity after those files change.
       const allPaths = [...new Set([...paths, ...changed, ...untracked])].sort(compare);
+      // Validate once before policy, filesystem access or pathspec construction. Reported
+      // names are evidence, not instructions to repair a path into another file's name.
+      const safePaths = new Map<string, string>();
+      for (const p of allPaths) {
+        try {
+          const safe = toSafeRel(p);
+          if (safe && safe === p) safePaths.set(p, safe);
+        } catch (error) {
+          if (!isPathContainmentError(error, 'invalid-path')) throw error;
+        }
+      }
+      const deniedPaths = new Set([...safePaths.values()].filter(denied));
       // A denied deletion/missing source could have moved to any allowed destination.
       // Existing denied paths withhold only their own bytes, hashes and hunks.
-      let withholdAll = allPaths.some((p) => denied(p) && deleted.has(p));
+      let withholdAll = [...deniedPaths].some((p) => deleted.has(p));
       const withheld = new Map<string, ReviewFile>();
-      for (const p of allPaths.filter(denied)) {
+      for (const p of deniedPaths) {
         let metadata = {};
         try {
-          const rel = (prefix ? prefix + '/' : '') + toSafeRel(p);
+          const rel = (prefix ? prefix + '/' : '') + p;
           const entry = await lstatNoFollow(ctx.repoPath, rel, { strict: true });
           if (!entry) withholdAll = true;
           else metadata = { size: entry.stats.size, mode: entry.stats.mode & 0o7777 };
@@ -285,16 +302,7 @@ export async function readReviewDiff(
       }
       const indexPaths = withholdAll
         ? []
-        : allPaths
-            .filter((p) => !denied(p))
-            .flatMap((p) => {
-              try {
-                return [':(literal)' + toSafeRel(p)];
-              } catch (error) {
-                if (!isPathContainmentError(error, 'invalid-path')) throw error;
-                return [];
-              }
-            });
+        : [...safePaths.values()].filter((p) => !deniedPaths.has(p)).map((p) => ':(literal)' + p);
       const gitlinks = new Set(
         (indexPaths.length ? await run(['ls-files', '--stage', '-z', '--', ...indexPaths]) : '')
           .split('\0')
@@ -305,21 +313,18 @@ export async function readReviewDiff(
       );
       for (const p of allPaths) {
         checkHostCancellation(ctx);
-        const deniedFile = withheld.get(p);
+        const safe = safePaths.get(p);
+        if (safe === undefined) {
+          files.push({ path: p, kind: 'invalid' });
+          continue;
+        }
+        const deniedFile = withheld.get(safe);
         if (deniedFile) {
           files.push(deniedFile);
           continue;
         }
         if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
           files.push({ path: p, kind: 'nested-repository' });
-          continue;
-        }
-        let safe: string;
-        try {
-          safe = toSafeRel(p);
-        } catch (error) {
-          if (!isPathContainmentError(error, 'invalid-path')) throw error;
-          files.push({ path: p, kind: 'invalid' });
           continue;
         }
         const rel = (prefix ? prefix + '/' : '') + safe;
@@ -455,7 +460,7 @@ export async function readReviewDiff(
         .filter(
           (file) => paths.includes(file.path) && ['text', 'binary', 'deleted'].includes(file.kind),
         )
-        .map((file) => ':(literal)' + toSafeRel(file.path));
+        .map((file) => ':(literal)' + safePaths.get(file.path)!);
       const diff = pathspecs.length
         ? await run(
             [

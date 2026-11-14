@@ -498,3 +498,91 @@ it.each(['unreadable-lstat', 'unreadable-open', 'other'])(
       expect(vi.mocked(openFileNoFollow).mock.calls.some((call) => call[1] === 'odd')).toBe(false);
   },
 );
+
+it.each([
+  'config/settings.php/',
+  'config/./settings.php',
+  './/settings.php',
+  'config//settings.php',
+  'config/a/../settings.php',
+  'config/settings.php/.',
+  '.ssh/./id_rsa',
+  'id_rsa/',
+  '.env/',
+])('discloses noncanonical reported name %s without reading its target', async (path) => {
+  const secret = randomBytes(24).toString('hex');
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', path],
+    total: 2,
+  });
+  const open = vi.mocked(openFileNoFollow).getMockImplementation()!;
+  vi.mocked(lstatNoFollow).mockImplementation(
+    async (_anchor, rel) =>
+      ({
+        kind: 'file',
+        stats: rel === 'a' ? stat : { ...stat, size: secret.length },
+      }) as never,
+  );
+  vi.mocked(openFileNoFollow).mockImplementation(async (...args) => {
+    if (args[1] === 'a') return open(...args);
+    return {
+      stat: async () => ({ ...stat, size: secret.length }),
+      close,
+      read: async (buffer: Buffer, _o: number, _l: number, position: number) => {
+        if (!position) buffer.write(secret);
+        return { bytesRead: position ? 0 : secret.length, buffer };
+      },
+    } as unknown as Awaited<ReturnType<typeof openFileNoFollow>>;
+  });
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  expect(JSON.stringify(result)).not.toContain(secret);
+  expect(JSON.stringify(result)).not.toContain(createHash('sha256').update(secret).digest('hex'));
+  if (result.status !== 'ready') return;
+  expect(JSON.parse(result.content).files).toContainEqual({ path, kind: 'invalid' });
+  expect(vi.mocked(openFileNoFollow).mock.calls.every((call) => call[1] === 'a')).toBe(true);
+  expect(vi.mocked(lstatNoFollow).mock.calls.every((call) => call[1] === 'a')).toBe(true);
+  expect(
+    vi
+      .mocked(gitRun)
+      .mock.calls.every((call) =>
+        call[1].filter((arg) => arg.startsWith(':(literal)')).every((arg) => arg === ':(literal)a'),
+      ),
+  ).toBe(true);
+});
+
+it.each(['.ENV', 'Config/Settings.php', '.SSH/ID_RSA'])(
+  'denies case alias %s even when the filesystem would resolve it',
+  async (path) => {
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', path],
+      total: 2,
+    });
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result).toMatchObject({ status: 'ready', partial: true });
+    if (result.status !== 'ready') return;
+    expect(JSON.parse(result.content).files).toContainEqual(
+      expect.objectContaining({ path, kind: 'withheld' }),
+    );
+    expect(vi.mocked(openFileNoFollow).mock.calls.every((call) => call[1] === 'a')).toBe(true);
+    expect(vi.mocked(gitRun).mock.calls.some((call) => call[1].includes(':(literal)' + path))).toBe(
+      false,
+    );
+  },
+);
+it('keeps a deny when case-folding would turn a different allow spelling into a match', async () => {
+  vi.mocked(taskSecretMaskPolicy).mockResolvedValue(secretMaskPolicy({ allow: ['**/*.BAK'] }));
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'x.bak'],
+    total: 2,
+  });
+  const result = await readReviewDiff(ctx, '/repo', options);
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status === 'ready')
+    expect(JSON.parse(result.content).files).toContainEqual(
+      expect.objectContaining({ path: 'x.bak', kind: 'withheld' }),
+    );
+});
