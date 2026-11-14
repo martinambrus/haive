@@ -7,6 +7,8 @@ import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
 import type { StepDefinition } from '../../step-definition.js';
 import { FIX_LOOP_ACTION_FIELD, FIX_LOOP_TARGET_STEP_ID } from './_fix-loop.js';
 
+export class FixRoundCliUnavailable extends Error {}
+
 export const FIX_ROUND_CLI_FIELD = 'fixRoundCliProviderId';
 
 /** A separate slot leaves the task's ordinary step/seat choices intact. The exact round
@@ -73,18 +75,18 @@ async function loadRoundProvider(
   providerId: string | null,
 ): Promise<CliProviderRecord> {
   if (!providerId)
-    throw new Error(
+    throw new FixRoundCliUnavailable(
       'Next fix round CLI was deleted; choose another CLI on the implementation step card or at the escalation gate.',
     );
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
   });
   if (!provider || provider.userId !== userId)
-    throw new Error(
+    throw new FixRoundCliUnavailable(
       'Next fix round CLI is not available or owned by you; choose another CLI on the implementation step card or at the escalation gate.',
     );
   if (!provider.enabled)
-    throw new Error(
+    throw new FixRoundCliUnavailable(
       `Next fix round CLI "${provider.label}" is disabled; enable it or choose another CLI on the implementation step card.`,
     );
   return provider;
@@ -138,7 +140,7 @@ export async function recordFixRoundCliChoice(
   }
   const provider = await loadRoundProvider(db, userId, providerId);
   if (eligibleFixRoundProviders(userId, [provider], target).length === 0)
-    throw new Error(
+    throw new FixRoundCliUnavailable(
       `Next fix round CLI "${provider.label}" cannot run ${target.metadata.id}; choose another CLI.`,
     );
   await db

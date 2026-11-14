@@ -10,6 +10,7 @@ import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import {
   FIX_LOOP_TARGET_STEP_ID,
+  buildFixLoopEscalationSchema,
   recordFixLoopRequest,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
 import { fixRoundCliRole } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
@@ -445,6 +446,86 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
             providers.map((p) => p.id),
           ),
         );
+      }
+    },
+  );
+
+  it.each(['disabled', 'incompatible'])(
+    'refuses a gate answer whose CLI became %s without failing the task',
+    async (state) => {
+      const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+      stepRegistry.override({
+        ...target,
+        llm: { requiredCapabilities: ['tool_use'], buildPrompt: () => 'fix' },
+      });
+      const [picked] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId,
+          name: state === 'disabled' ? 'codex' : 'ollama',
+          label: 'was offered',
+          enabled: state !== 'disabled',
+        })
+        .returning();
+      try {
+        const { id, gate } = await parked(REVIEW, LOOP, { status: 'waiting_user' });
+        const values = { fixLoopAction: 'continue', fixRoundCliProviderId: picked!.id };
+        await db
+          .update(schema.taskSteps)
+          .set({
+            formSchema: buildFixLoopEscalationSchema(REVIEW, 'defect', 0, undefined, false, {
+              round: 1,
+              providers: [picked!],
+            }),
+            formValues: values,
+            waitingStartedAt: null,
+          })
+          .where(eq(schema.taskSteps.id, gate.id));
+        await processTaskJob(
+          job(TASK_JOB_NAMES.ADVANCE_STEP, {
+            taskId: id,
+            userId,
+            stepId: REVIEW,
+            round: 0,
+            formValues: values,
+          }),
+        );
+        await expectParked(id, gate);
+        const row = await stepRow(gate.id);
+        expect(row).toMatchObject({ formValues: null, waitingStartedAt: expect.any(Date) });
+        expect(row.formSchema).toMatchObject({
+          infoSections: expect.arrayContaining([
+            {
+              title: 'CLI choice could not be applied',
+              body: 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+              defaultOpen: true,
+            },
+          ]),
+        });
+        expect(await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) })).toMatchObject({
+          status: 'waiting_user',
+          currentStepId: REVIEW,
+          currentRound: 0,
+          errorMessage: null,
+        });
+        expect(
+          await db.query.taskStepCliChoices.findMany({
+            where: eq(schema.taskStepCliChoices.taskId, id),
+          }),
+        ).toEqual([]);
+        await resolveFixLoopGate(
+          db,
+          ctxFor(id, LOOP, { status: 'waiting_user' }),
+          row,
+          'continue',
+          0,
+          '',
+          'same',
+        );
+        expect(h.adds).toHaveLength(1);
+      } finally {
+        stepRegistry.override(target);
+        await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
       }
     },
   );

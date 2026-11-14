@@ -193,6 +193,8 @@ import {
 import {
   eligibleFixRoundProviders,
   FIX_ROUND_CLI_FIELD,
+  FixRoundCliUnavailable,
+  fixRoundCliField,
   recordFixRoundCliChoice,
 } from '../step-engine/steps/workflow/_fix-round-cli.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
@@ -1682,7 +1684,10 @@ export async function enqueueRepoCleanup(
   );
 }
 
-async function loadProviders(db: Database, userId: string): Promise<CliProviderRecord[]> {
+async function loadProviders(
+  db: Database | DbHandle,
+  userId: string,
+): Promise<CliProviderRecord[]> {
   const rows = await db
     .select()
     .from(schema.cliProviders)
@@ -2799,6 +2804,7 @@ export async function resolveFixLoopGate(
     targetRound: number,
     record: (tx: DbHandle) => Promise<void>,
   ): Promise<boolean> => {
+    let applied = false;
     try {
       await db.transaction(async (tx) => {
         if (fence.reviveFailed) {
@@ -2807,7 +2813,50 @@ export async function resolveFixLoopGate(
           if (refusal) throw new GateAnswerOvertaken('revive_refused', refusal.reason);
         }
         await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
-        await record(tx);
+        try {
+          await record(tx);
+        } catch (err) {
+          if (!(err instanceof FixRoundCliUnavailable)) throw err;
+          const form = gateRow.formSchema as FormSchema;
+          const title = 'CLI choice could not be applied';
+          const field = fixRoundCliField({
+            round: targetRound,
+            providers: eligibleFixRoundProviders(
+              ctx.userId,
+              await loadProviders(tx, ctx.userId),
+              target,
+            ),
+          });
+          await updateOwnedStep(tx, gateRow.id, {
+            status: 'waiting_form',
+            endedAt: null,
+            formValues: null,
+            waitingStartedAt: new Date(),
+            formSchema: {
+              ...form,
+              fields: form.fields.map((f) => (f.id === FIX_ROUND_CLI_FIELD ? field : f)),
+              infoSections: [
+                {
+                  title,
+                  body: 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+                  defaultOpen: true,
+                },
+                ...(form.infoSections ?? []).filter((s) => s.title !== title),
+              ],
+            },
+          });
+          const [parked] = await tx
+            .update(schema.tasks)
+            .set({
+              status: 'waiting_user',
+              updatedAt: new Date(),
+            })
+            .where(taskWriteTarget(ctx.taskId, fence))
+            .returning({ id: schema.tasks.id });
+          if (!parked) throw new GateAnswerOvertaken('task_moved');
+          notApplied('cli_unavailable');
+          return;
+        }
         const pointed = await markTaskRunningWithStep(
           tx,
           ctx.taskId,
@@ -2817,8 +2866,9 @@ export async function resolveFixLoopGate(
           fence,
         );
         if (!pointed) throw new GateAnswerOvertaken('task_moved');
+        applied = true;
       });
-      return true;
+      return applied;
     } catch (err) {
       if (err instanceof GateAnswerOvertaken) {
         notApplied(err.code, err.refusal ? { refusal: err.refusal } : {});
