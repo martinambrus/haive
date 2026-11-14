@@ -20,6 +20,7 @@ const query = '?from=2026-11-01T00:00:00Z&to=2026-11-12T00:00:00Z';
 function fixture(role = 'user') {
   const predicates: string[] = [];
   const tables: unknown[] = [];
+  const parameters: unknown[][] = [];
   const db = {
     select: (fields: Record<string, unknown>) => {
       const keys = Object.keys(fields);
@@ -67,8 +68,11 @@ function fixture(role = 'user') {
               ? (resolve: (rows: unknown[]) => void) => resolve(rows)
               : (...args: unknown[]) => {
                   if (prop === 'from') tables.push(args[0]);
-                  if (prop === 'where' && args[0])
-                    predicates.push(new PgDialect().sqlToQuery(args[0] as never).sql);
+                  if (prop === 'where' && args[0]) {
+                    const query = new PgDialect().sqlToQuery(args[0] as never);
+                    predicates.push(query.sql);
+                    parameters.push(query.params);
+                  }
                   return chain;
                 },
         },
@@ -88,7 +92,7 @@ function fixture(role = 'user') {
       : c.json({ error: String(err) }, 500),
   );
   app.route('/', createStatsRoutes({ db } as never));
-  return { app, predicates, tables, db };
+  return { app, predicates, parameters, tables, db };
 }
 
 describe('completed-task report endpoint', () => {
@@ -134,6 +138,14 @@ describe('completed-task report endpoint', () => {
     expect(f.predicates.join('\n')).toContain('"tasks"."user_id"');
     expect(f.predicates.slice(1).join('\n')).not.toContain('"started_at" >=');
     expect(f.predicates.join('\n')).not.toContain('"cli_provider_id" =');
+  });
+  it('keeps the caller predicate ANDed with a non-admin repository facet', async () => {
+    const f = fixture();
+    const repositoryId = '00000000-0000-4000-8000-000000000003';
+    const res = await f.app.request('/time-cost' + query + '&repositoryId=' + repositoryId);
+    expect(res.status).toBe(200);
+    expect(f.predicates[0]).toContain('"tasks"."user_id" = $1 and "tasks"."repository_id" = $2');
+    expect(f.parameters[0]?.slice(0, 2)).toEqual([USER, repositoryId]);
   });
   it('rechecks install-wide access before any query', async () => {
     const f = fixture();
