@@ -132,7 +132,6 @@ export function DerivedTaskTypeChanges({
                   },
                 ]),
           ],
-          submitLabel: 'Apply change',
         };
         return (
           <div
@@ -149,7 +148,6 @@ export function DerivedTaskTypeChanges({
                   [`payload-${index}`]: payload,
                 }}
                 submitting={disabled}
-                onSubmit={async () => {}}
                 onValuesChange={(v) => {
                   const target = String(v[`target-${index}`] ?? '');
                   const payload = String(v[`payload-${index}`] ?? '');

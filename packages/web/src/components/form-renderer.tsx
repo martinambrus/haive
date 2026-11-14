@@ -21,7 +21,8 @@ export type { FormValues };
 
 interface FormRendererProps {
   schema: FormSchema;
-  onSubmit: (values: FormValues) => void | Promise<void>;
+  /** Omit for fields that update their parent live through onValuesChange. */
+  onSubmit?: (values: FormValues) => void | Promise<void>;
   disabled?: boolean;
   submitting?: boolean;
   initialValues?: FormValues;
@@ -296,7 +297,7 @@ export function FormRenderer({
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (isSubmitBlocked({ disabled, submitting, submitDisabled })) return;
+    if (!onSubmit || isSubmitBlocked({ disabled, submitting, submitDisabled })) return;
     const required = validateRequired(schema, values);
     if (required) {
       setLocalError(required);
@@ -345,9 +346,14 @@ export function FormRenderer({
       </div>
       <FormError message={localError ?? errorMessage ?? null} />
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={isSubmitBlocked({ disabled, submitting, submitDisabled })}>
-          {submitting ? 'Submitting...' : (schema.submitLabel ?? 'Submit')}
-        </Button>
+        {onSubmit && (
+          <Button
+            type="submit"
+            disabled={isSubmitBlocked({ disabled, submitting, submitDisabled })}
+          >
+            {submitting ? 'Submitting...' : (schema.submitLabel ?? 'Submit')}
+          </Button>
+        )}
         {onSkip && (
           <Button
             type="button"

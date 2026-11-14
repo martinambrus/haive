@@ -140,6 +140,18 @@ describe('derived editor', () => {
       true,
     );
   });
+  it('edits change rows live without an Apply change submit control', async () => {
+    await mount({ slug: 'mine', duplicateBaseSlug: '' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
+    expect(screen.queryByRole('button', { name: 'Apply change' })).toBeNull();
+    fireEvent.change(screen.getByLabelText(/^Target step/), { target: { value: 'old-name' } });
+    expect(
+      within(screen.getByRole('region', { name: 'Stale targets' })).getByText(
+        /old-name: Base no longer includes this step/,
+      ),
+    ).toBeTruthy();
+  });
+
   it('reads admin-list warnings from the API diagnostics envelope', async () => {
     mocks.listAdminTaskTypes.mockResolvedValue({
       taskTypes: [
