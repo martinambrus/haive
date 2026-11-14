@@ -155,3 +155,33 @@ test('--bundle-dir fails rather than publishing incomplete metadata when git can
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, '');
 });
+
+function cloneFixture(t, options = []) {
+  const dir = mkdtempSync(join(tmpdir(), 'mfb-clone-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  execFileSync('/usr/bin/git', ['clone', ...options, '--no-tags', `file://${root}`, dir], {
+    stdio: 'pipe',
+  });
+  return dir;
+}
+
+test('--bundle-dir refuses a shallow checkout even with the first-release opt-out', (t) => {
+  const dir = cloneFixture(t, ['--depth', '1']);
+  for (const extra of [[], ['--allow-no-history']]) {
+    const result = build(['--bundle-dir', dir, ...extra], dir);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /shallow/i);
+  }
+});
+
+test('--bundle-dir requires release tags unless explicitly building a first release', (t) => {
+  const dir = cloneFixture(t);
+  const refused = build(['--bundle-dir', dir], dir);
+  assert.notEqual(refused.status, 0);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /no v\* release tags.*--allow-no-history/i);
+  const allowed = build(['--bundle-dir', dir, '--allow-no-history'], dir);
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.deepEqual(parseReleaseManifest(JSON.parse(allowed.stdout)).bundle.known, []);
+});

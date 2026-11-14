@@ -61,13 +61,20 @@ function buildBundle(dir, version) {
     ]),
   );
   const env = JSON.parse(readFileSync(join(dir, 'install/bundle-env.json'), 'utf8'));
+  if (git('rev-parse', '--is-shallow-repository').toString('utf8').trim() !== 'false') {
+    throw new Error('shallow checkout: fetch the full release history before building a bundle');
+  }
   const tags = git('tag', '--list', 'v*', '--sort=refname')
     .toString('utf8')
     .trim()
     .split('\n')
-    .filter((tag) => tag && normalizeVersion(tag) !== version);
+    .filter(Boolean);
+  if (tags.length === 0 && !process.argv.includes('--allow-no-history')) {
+    throw new Error('no v* release tags found; use --allow-no-history only for a first release');
+  }
   const known = [];
   for (const tag of tags) {
+    if (normalizeVersion(tag) === version) continue;
     const ref = `refs/tags/${tag}`;
     // Listing the tree distinguishes absent historical files from a failed git read. Do not
     // turn every failed `git show` (including corruption) into an apparently missing file.
