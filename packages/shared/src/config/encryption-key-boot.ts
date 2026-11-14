@@ -30,6 +30,7 @@ async function encryptedRowCounts(db: Pick<Database, 'execute'>): Promise<Record
     select to_regclass('integration_provider_configs') is not null as providers,
            to_regclass('integration_connections') is not null as connections
   `);
+  // Only an explicit absence skips a table; an empty capability result keeps the old inventory.
   const rows = await db.execute<{ source: string; count: string }>(sql`
     select 'system_secrets' as source, count(*) as count from ${schema.systemSecrets}
     union all select 'users', count(*) from ${schema.users}
@@ -37,14 +38,14 @@ async function encryptedRowCounts(db: Pick<Database, 'execute'>): Promise<Record
     union all select 'cli_provider_secrets', count(*) from ${schema.cliProviderSecrets}
     union all select 'repo_credentials', count(*) from ${schema.repoCredentials}
     ${
-      tables!.providers
+      tables?.providers !== false
         ? sql`union all select 'integration_provider_configs', count(*) from ${schema.integrationProviderConfigs}
       where ${schema.integrationProviderConfigs.oauthClientSecretEncrypted} is not null
          or ${schema.integrationProviderConfigs.encryptedDek} is not null`
         : sql``
     }
     ${
-      tables!.connections
+      tables?.connections !== false
         ? sql`union all select 'integration_connections', count(*) from ${schema.integrationConnections}
       where ${schema.integrationConnections.accessTokenEncrypted} is not null
          or ${schema.integrationConnections.refreshTokenEncrypted} is not null

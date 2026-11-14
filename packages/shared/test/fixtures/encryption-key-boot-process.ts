@@ -1,3 +1,5 @@
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { ConfigService } from '../../src/config/config.service.js';
 import { ConfigUnavailableError } from '../../src/config/config-unavailable.js';
 import type { Database } from '@haive/database';
@@ -7,7 +9,11 @@ let reserve: (() => void) | undefined;
 let commit: (() => void) | undefined;
 let discarded = false;
 const db = {
-  execute: async () => {
+  execute: async (query: SQL) => {
+    // Capability discovery must not consume the inventory barrier used by the parent.
+    if (new PgDialect().sqlToQuery(query).sql.includes('to_regclass')) {
+      return [{ providers: true, connections: true }];
+    }
     await new Promise<void>((resolve) => {
       reserve = resolve;
       process.send!({ event: 'inventory' });

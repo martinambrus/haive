@@ -158,6 +158,16 @@ afterEach(async () => {
 });
 
 describe('boot encryption key safety', () => {
+  it('still inventories ciphertext when the catalog returns no capability row', async () => {
+    const { db, execute } = database({ system_secrets: 1 });
+    execute.mockResolvedValueOnce([]);
+    await expect(boot(service(), db)).rejects.toThrow('1 encrypted rows exist');
+    const inventory = new PgDialect().sqlToQuery(execute.mock.calls[1]![0]).sql;
+    expect(inventory).toContain('integration_provider_configs');
+    expect(inventory).toContain('integration_connections');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it.each(SOURCES)('refuses a missing key with ciphertext in %s', async (source) => {
     const fixture = database({ [source]: 1 });
     await expect(boot(service(), fixture.db)).rejects.toThrow(
