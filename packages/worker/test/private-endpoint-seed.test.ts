@@ -326,13 +326,49 @@ describe('seedHostOfUrl', () => {
 });
 
 describe('a stored DSN host reaches the planner as the dial reads it', () => {
-  it('hands an encoded socket path on as a name the planner refuses as invalid', async () => {
-    const host = dsnDialHost('postgres://u@%2Fvar%2Frun%2Fpostgresql/rag');
-    expect((await plan([host!])).skipped.map((skip) => skip.reason)).toEqual(['invalid']);
+  // The production candidate collector drops nulls before passing hosts to the planner.
+  const planDsn = (dsn: string, dnsTable: Answers = {}, systemTable: Answers = {}) => {
+    const host = dsnDialHost(dsn);
+    return plan(host ? [host] : [], dnsTable, systemTable);
+  };
+
+  it.each([
+    'postgres://u@%2Fvar%2Frun%2Fpostgresql/rag',
+    'postgres://u@ignored/rag?host=%2Fvar%2Frun%2Fpostgresql',
+    'postgres://u@h:abc/rag',
+    'postgres://u@a.lan,b.lan/rag',
+  ])('excludes a refused socket, invalid name or multiple hosts: %s', async (dsn) => {
+    expect(dsnDialHost(dsn)).toBeNull();
+    expect(await planDsn(dsn)).toEqual({ entries: [], skipped: [], dropped: 0 });
   });
 
-  it('skips the bracketed form as an invalid name', async () => {
-    const result = await plan([dsnDialHost('postgres://u:p@[fd00::5]:5432/rag')!]);
-    expect(result.skipped.map((skip) => skip.reason)).toEqual(['invalid']);
+  it('seeds the bracketed private literal v4 actually dials', async () => {
+    expect(dsnDialHost('postgres://u@[fd00::5]:5432/rag')).toBe('fd00::5');
+    expect(await planDsn('postgres://u@[fd00::5]:5432/rag')).toEqual({
+      entries: ['fd00::5'],
+      skipped: [],
+      dropped: 0,
+    });
   });
+
+  it('never seeds bracketed loopback now that v4 parses it as an IP', async () => {
+    expect(await planDsn('postgres://u@[::1]:5432/rag')).toEqual({
+      entries: [],
+      skipped: [{ host: '::1', reason: 'not-seedable' }],
+      dropped: 0,
+    });
+  });
+
+  it.each(['postgres://u@/h:5432', 'postgres:///rag'])(
+    'never seeds the default localhost dial through either resolver: %s',
+    async (dsn) => {
+      const expected = {
+        entries: [],
+        skipped: [{ host: 'localhost', reason: 'not-seedable' }],
+        dropped: 0,
+      };
+      expect(await planDsn(dsn, { localhost: ['127.0.0.1', '::1'] })).toEqual(expected);
+      expect(await planDsn(dsn, {}, { localhost: ['127.0.0.1', '::1'] })).toEqual(expected);
+    },
+  );
 });
