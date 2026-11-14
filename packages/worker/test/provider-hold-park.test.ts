@@ -307,7 +307,22 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     expect((await rows())[0]!.waitingStartedAt).toBeNull();
   });
 
-  it('H5: a global pause wins over the provider hold and shows the pause words', async () => {
+  it('H5 first park: a global pause wins before evaluating a provider hold', async () => {
+    await runningTask();
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    await tick();
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: 'pending', providerWaitProviderId: null });
+    expect(row!.waitingStartedAt).toBeInstanceOf(Date);
+    expect(row!.statusMessage).toMatch(/^Paused/);
+    expect(row!.statusMessage).not.toContain('Own CLI');
+    expect(advances()).toHaveLength(1);
+    expect(advances()[0]!.opts.delay).toBe(30_000);
+    expect(phases.shouldRun).not.toHaveBeenCalled();
+    noDetectOrApply();
+  });
+
+  it('H5 re-park: a global pause overtakes an existing provider hold', async () => {
     await runningTask();
     await tick();
     expect((await rows())[0]!.providerWaitProviderId).toBe(ownId);
@@ -318,7 +333,8 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     expect(row!.providerWaitProviderId).toBeNull();
     expect(row!.statusMessage).toMatch(/^Paused/);
     expect(row!.statusMessage).not.toContain('Own CLI');
-    expect(advances()[0]!.opts.delay).toBe(30_000);
+    expect(advances()).toHaveLength(2);
+    expect(advances()[1]!.opts.delay).toBe(30_000);
     noDetectOrApply();
   });
 
