@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { retryPlanPatch } from '../../../plan/patch-retry.js';
 import { asc, eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -66,8 +67,7 @@ interface PlanChatDetect {
   /** The turn this pass is answering — the newest user message with no reply
    *  after it. Null when the conversation is up to date, which is what ends it. */
   pendingQuestion: string | null;
-  /** A pre-limit submitted answer checkpointed for editing before apply could
-   * append it to the conversation. Preserve it in history when the edit lands. */
+  /** Legacy detect-only originals are moved to durable history during recovery. */
   pendingFromLegacySubmission?: true;
 }
 
@@ -312,11 +312,33 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
     };
   },
 
-  recoverLegacyFormValues(detected, values) {
-    const message = values.message;
-    if (typeof message !== 'string' || message.trim().length <= PLAN_CHAT_MESSAGE_MAX_CHARS)
-      return null;
-    return { ...detected, pendingQuestion: message, pendingFromLegacySubmission: true };
+  async recoverLegacyFormValues(detected, values, ctx) {
+    const submitted = values.message;
+    const message =
+      typeof submitted === 'string' && submitted.trim().length > PLAN_CHAT_MESSAGE_MAX_CHARS
+        ? submitted
+        : detected.pendingFromLegacySubmission
+          ? detected.pendingQuestion
+          : null;
+    if (!message) return null;
+    if (!detected.nodeId) throw new Error('The plan for this conversation is no longer available.');
+    // Stable per original/task: replay after a crash or duplicate job records it once.
+    // The runner commits this insert with its owned edit-form park.
+    const hex = createHash('sha256')
+      .update(JSON.stringify([ctx.taskId, detected.nodeId, message]))
+      .digest('hex');
+    const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+    await ctx.db
+      .insert(schema.planNodeMessages)
+      .values({
+        id,
+        nodeId: detected.nodeId,
+        taskId: ctx.taskId,
+        role: 'user',
+        body: message,
+      })
+      .onConflictDoNothing({ target: schema.planNodeMessages.id });
+    return { ...detected, pendingQuestion: message, pendingFromLegacySubmission: undefined };
   },
 
   reviseLoop: {

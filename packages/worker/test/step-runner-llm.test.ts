@@ -149,6 +149,10 @@ function makeMockDb(state: MockState): Database {
             }
             return [row];
           },
+          onConflictDoNothing: async () => {
+            if (!state.inserts.some((entry) => entry.table === tableName && entry.row.id === v.id))
+              state.inserts.push({ table: tableName, row: v });
+          },
           // recordStepCliPreference uses .values().onConflictDoUpdate()
           // (no .returning()). The chain still needs to be awaitable to
           // not throw when the runner records the actually-used provider.
@@ -637,6 +641,9 @@ describe('plan writers through the real runner dispatch', () => {
         fields: [{ id: 'message', initialValue: message }],
       });
       expect(state.taskStepRow.waitingStartedAt).toBeInstanceOf(Date);
+      expect(state.inserts.filter((entry) => entry.table === 'plan_node_messages')).toMatchObject([
+        { row: { role: 'user', body: message } },
+      ]);
       expect(enqueue).not.toHaveBeenCalled();
     },
   );

@@ -3064,27 +3064,35 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
-    // Recover a pre-limit saved answer before worker validation can fail it.
-    // Keep the whole value and its edit form in one owned row write; a restart
-    // can then offer the same edit without copying the rejected answer again.
+    // Durable originals and the owned edit-form park commit together, so a reset
+    // cannot discard a recovered submission or let a superseded pass append it.
     const legacyValues =
       current.formValues ??
       (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
-    const recovered =
-      legacyValues && stepDef.recoverLegacyFormValues?.(detected, legacyValues as FormValues);
-    if (recovered) {
-      const formSchema = stepDef.form?.(ctx, recovered);
-      if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
-      current = await updateRow(db, current.id, {
-        detectOutput: recovered,
-        formValues: null,
-        formSchema,
-        status: 'waiting_form',
-        waitingStartedAt: new Date(),
-        pauseFormOnRetry: false,
-        statusMessage: null,
-      });
-      return { status: 'waiting_form', row: current, formSchema };
+    const recovery = stepDef.recoverLegacyFormValues;
+    const recoveredPark = recovery
+      ? await db.transaction(async (tx) => {
+          const recovered = await recovery(detected, (legacyValues ?? {}) as FormValues, {
+            ...ctx,
+            db: tx as unknown as Database,
+          });
+          if (!recovered) return null;
+          const formSchema = stepDef.form?.(ctx, recovered);
+          if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
+          const row = await updateOwnedStep(tx, current.id, {
+            detectOutput: recovered,
+            formValues: null,
+            formSchema,
+            status: 'waiting_form',
+            waitingStartedAt: new Date(),
+            pauseFormOnRetry: false,
+            statusMessage: null,
+          });
+          return { row, formSchema };
+        })
+      : null;
+    if (recoveredPark) {
+      return { status: 'waiting_form', ...recoveredPark };
     }
 
     // --- Pre-form LLM phase ---

@@ -87,12 +87,66 @@ async function fixture() {
 }
 
 describe('plan chat patches use the dispatch read', () => {
+  it('recovers the whole original from durable history after clearing all step output', async () => {
+    const f = await fixture();
+    const original = 'original '.repeat(2300);
+    const recovered = await planChatStep.recoverLegacyFormValues!(
+      f.detected,
+      { message: original },
+      f.ctx as never,
+    );
+    expect(recovered).not.toBeNull();
+    // Reset discards detection, form and output; detect has only durable rows to read.
+    const afterReset = await planChatStep.detect!(f.ctx as never);
+    expect(afterReset.pendingQuestion).toBe(original);
+    expect(afterReset.transcript.at(-1)).toMatchObject({ role: 'user', body: original });
+    expect(planChatStep.form!(f.ctx as never, afterReset)?.fields[0]).toMatchObject({
+      initialValue: original,
+    });
+    // A saved/job answer delivered twice must not duplicate the original.
+    await planChatStep.recoverLegacyFormValues!(f.detected, { message: original }, f.ctx as never);
+    const messages = await f.db.select().from(schema.planNodeMessages);
+    expect(messages.filter((m) => m.body === original)).toHaveLength(1);
+  });
+
+  it('recovers a legacy detect-only original before accepting an edit', async () => {
+    const f = await fixture();
+    const original = 'legacy '.repeat(3000);
+    const recovered = await planChatStep.recoverLegacyFormValues!(
+      { ...f.detected, pendingQuestion: original, pendingFromLegacySubmission: true },
+      {},
+      f.ctx as never,
+    );
+    expect(recovered?.pendingFromLegacySubmission).toBeUndefined();
+    expect((await planChatStep.detect!(f.ctx as never)).pendingQuestion).toBe(original);
+  });
+
+  it('rolls back the durable original if the recovery transaction cannot park', async () => {
+    const f = await fixture();
+    const original = 'rollback '.repeat(2300);
+    await expect(
+      f.db.transaction(async (tx) => {
+        await planChatStep.recoverLegacyFormValues!(f.detected, { message: original }, {
+          ...f.ctx,
+          db: tx,
+        } as never);
+        throw new Error('park refused');
+      }),
+    ).rejects.toThrow('park refused');
+    const messages = await f.db.select().from(schema.planNodeMessages);
+    expect(messages.some((m) => m.body === original)).toBe(false);
+  });
+
   it.each(['Edited replacement', ''])(
     'preserves a recovered submitted original in history when edited or ended: %s',
     async (message) => {
       const f = await fixture();
       const original = 'old '.repeat(5001);
-      const detected = planChatStep.recoverLegacyFormValues!(f.detected, { message: original })!;
+      const detected = (await planChatStep.recoverLegacyFormValues!(
+        f.detected,
+        { message: original },
+        f.ctx as never,
+      ))!;
       expect(planChatStep.llm!.skipIf!({ detected, formValues: {} })).toBe(true);
       await planChatStep.apply(f.ctx as never, {
         detected,
