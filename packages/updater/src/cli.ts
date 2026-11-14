@@ -12,6 +12,7 @@ import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.j
 import { ensureEnvKeys } from './envkeys.js';
 import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
+import { requireRegularInstallFiles } from './install-files.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
@@ -330,6 +331,7 @@ export async function main(): Promise<number> {
     locked = true;
     const live = await findLiveRun(sql);
     hasRun = live !== null;
+    await requireRegularInstallFiles(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
 

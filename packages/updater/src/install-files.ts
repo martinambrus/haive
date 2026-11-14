@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
+import { join } from 'node:path';
+import { RELEASE_BUNDLE_FILES } from '@haive/shared/release';
+import { UpgradeRefusal } from './refusal.js';
 import {
   lstat,
   mkdir,
@@ -13,6 +16,39 @@ import {
 
 type Owner = Pick<Stats, 'uid' | 'gid' | 'mode'>;
 const absent = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
+
+export const INSTALL_FILE_NAMES = ['.env', ...RELEASE_BUNDLE_FILES, '.haive-bundle.json'] as const;
+
+/** Refuse links before readers or writers can disagree about which install file they use. */
+export async function requireRegularInstallFiles(dir: string): Promise<void> {
+  for (const name of INSTALL_FILE_NAMES) {
+    const info = await lstat(join(dir, name)).catch((error: unknown) => {
+      if (absent(error)) return undefined;
+      throw error;
+    });
+    if (info?.isSymbolicLink())
+      throw new UpgradeRefusal(
+        'install-file-linked',
+        `install file must be a regular file: ${name}`,
+      );
+    if (info && !info.isFile())
+      throw new UpgradeRefusal(
+        'install-file-not-regular',
+        `install file must be a regular file: ${name}`,
+      );
+  }
+}
+
+async function preserveOwner(file: FileHandle, owner: Owner): Promise<void> {
+  try {
+    await file.chown(owner.uid, owner.gid);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    // Some shares refuse even a no-op chown. Accept only ownership verified on the held fd.
+    const current = await file.stat();
+    if (current.uid !== owner.uid || current.gid !== owner.gid) throw error;
+  }
+}
 
 /** The install is operator-owned, not a sandbox repository. Hold each directory while using it:
  * no intermediate component or final file inside it may redirect a root updater through a link. */
@@ -49,7 +85,7 @@ export class InstallDirectory {
     const dir = await InstallDirectory.open(this.path(name));
     if (created) {
       try {
-        await dir.handle.chown(this.owner.uid, this.owner.gid);
+        await preserveOwner(dir.handle, this.owner);
         await dir.handle.chmod(this.owner.mode & 0o777);
         dir.owner = await dir.handle.stat();
         await dir.sync();
@@ -95,7 +131,7 @@ export class InstallDirectory {
     const temp = `.${name}.${randomUUID()}`;
     const file = await open(this.path(temp), 'wx', mode.mode & 0o7777);
     try {
-      await file.chown(mode.uid, mode.gid);
+      await preserveOwner(file, mode);
       await file.chmod(mode.mode & 0o7777);
       await file.writeFile(bytes);
       await file.sync();

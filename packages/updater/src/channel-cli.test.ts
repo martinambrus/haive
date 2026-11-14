@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const h = vi.hoisted(() => ({
@@ -134,6 +134,36 @@ describe('bundle preflight', () => {
     expect(await readFile(join(dir, '.env'), 'utf8')).toBe('');
     expect(await readdir(dir)).toHaveLength(3);
     expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it.each([
+    '.env',
+    'docker-compose.yml',
+    'docker-compose.run.yml',
+    'docker-compose.gpu.yml',
+    'docker-compose.vulkan.yml',
+    '.haive-bundle.json',
+  ])('refuses linked %s before reading settings, pulling or starting a run', async (name) => {
+    const source = join(dir, 'link-source');
+    await writeFile(source, env);
+    await rm(join(dir, name), { force: true });
+    await symlink(source, join(dir, name));
+    process.argv.push('--replace-modified-bundle');
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'install-file-linked' },
+        error: expect.stringContaining(name),
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+    expect(await readFile(source, 'utf8')).toBe(env);
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(env.trim());
   });
   it('names a needed missing backup in rollback recovery advice', async () => {
     const { backupBundle, restoreBundle } = await import('./bundle-swap.js');
