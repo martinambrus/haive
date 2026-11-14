@@ -9,6 +9,7 @@ import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
+import { scrubWorkerErrorPaths } from '../../repo/stored-error.js';
 import {
   CLI_EXEC_JOB_NAMES,
   VERSION_REFRESH_KIND,
@@ -482,7 +483,7 @@ async function runCliExecJob(
     };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
-    const message = safeErrorMessage(err);
+    const message = scrubWorkerErrorPaths(err);
     log.error({ err, invocationId: payload.invocationId }, 'cli exec failed');
     await publishCliExit(payload.invocationId, -1);
     await db.transaction(async (tx) => {

@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bareFilenameCandidates } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 import { bodyUsesRepoSymbol } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 import { STACK_INDICATORS } from '../src/step-engine/steps/onboarding/01-env-detect.js';
@@ -13,6 +13,18 @@ import {
   splitIntoBlocks,
 } from '../src/step-engine/steps/kb-author/_citation-scrub.js';
 
+const fault = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: (...args: Parameters<typeof real.open>) => {
+      if (fault.error && String(args[0]) === repo) throw fault.error;
+      return real.open(...args);
+    },
+  };
+});
+
 // A global KB article is retrieved by OTHER projects, so a path from the codebase that happened
 // to be open is noise there and rots here. MEASURED on entry b15eebfb, which led with
 // `sites/all/themes/activit/img/` and cited `internal_menu_block.tpl.php:83-88`.
@@ -21,6 +33,7 @@ beforeEach(async () => {
   repo = await mkdtemp(path.join(os.tmpdir(), 'haive-scrub-'));
 });
 afterEach(async () => {
+  fault.error = null;
   await rm(repo, { recursive: true, force: true }).catch(() => {});
 });
 
@@ -162,6 +175,26 @@ describe('path probes stay inside the anchor repo', () => {
   it('accepts an ordinary repo-relative path that is really there', async () => {
     await mk('src/Cache/Backend.php');
     expect(await repoHoldsCitation(repo, 'src/Cache/Backend.php')).toBe(true);
+  });
+
+  it.each(['a'.repeat(256), 'é'.repeat(128)])(
+    'treats an overlong filename as a non-citation',
+    async (name) => {
+      const candidate = name + '.ts';
+      expect(await repoHoldsCitation(repo, candidate)).toBe(false);
+      const body = 'Use an invented filename like ' + candidate + ' in this example.';
+      expect(await scrubCitations(body, { repoPath: repo })).toMatchObject({
+        body,
+        removed: [],
+      });
+    },
+  );
+
+  it('treats an overlong parent segment as a non-citation', async () => {
+    const candidate = 'a'.repeat(256) + '/example.ts';
+    expect(await repoHoldsCitation(repo, candidate)).toBe(false);
+    const body = 'Use ' + candidate + ' as an example.';
+    expect(await scrubCitations(body, { repoPath: repo })).toMatchObject({ body, removed: [] });
   });
 
   it('does not count a path the repo does not hold', async () => {
@@ -432,4 +465,28 @@ describe('bareFilenameCandidates one-letter extensions', () => {
       expect(bareFilenameCandidates(text)).toEqual([]);
     }
   });
+});
+
+describe('citation lookup failures', () => {
+  it.each(['EACCES', 'EIO', 'EMFILE'])(
+    'stops before a repository citation can enter a shared draft on %s',
+    async (code) => {
+      await mk('src/private-helper.ts');
+      fault.error = Object.assign(new Error('ENOENT wording is not an absence verdict'), { code });
+      await expect(
+        scrubCitations('See src/private-helper.ts for the rule.', {
+          repoPath: repo,
+        }),
+      ).rejects.toBe(fault.error);
+    },
+  );
+
+  it.each(['ENOENT', 'ENOTDIR'])(
+    'keeps the example on true boundary absence (%s)',
+    async (code) => {
+      fault.error = Object.assign(new Error('injected boundary absence'), { code });
+      const body = 'See src/example-helper.ts for the rule.';
+      expect(await scrubCitations(body, { repoPath: repo })).toEqual({ body, removed: [] });
+    },
+  );
 });

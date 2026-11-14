@@ -8,7 +8,22 @@ const SAME_NAMESPACE = '00000000-0000-4000-8000-0000000000b1';
 const OTHER_NAMESPACE = '00000000-0000-4000-8000-0000000000c1';
 const TASK = '00000000-0000-4000-8000-0000000000d1';
 
-const h = vi.hoisted(() => ({ gdb: undefined as unknown, confirm: vi.fn() }));
+const h = vi.hoisted(() => ({
+  gdb: undefined as unknown,
+  confirm: vi.fn(),
+  boundaryError: null as Error | null,
+}));
+
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: (...args: Parameters<typeof real.open>) => {
+      if (h.boundaryError && String(args[0]) === '/nonexistent') throw h.boundaryError;
+      return real.open(...args);
+    },
+  };
+});
 
 vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/global-kb')>();
@@ -92,6 +107,7 @@ const skeleton = () =>
 
 describe('kb enrich apply and the description', () => {
   beforeEach(() => {
+    h.boundaryError = null;
     h.confirm.mockReset();
     h.confirm.mockResolvedValue(null);
   });
@@ -163,6 +179,7 @@ describe('kb enrich apply and the description of the entry it replaces', () => {
   const update = { mode: 'update', targetId: SAME_NAMESPACE };
 
   beforeEach(() => {
+    h.boundaryError = null;
     h.confirm.mockReset();
     h.confirm.mockResolvedValue(SAME_NAMESPACE);
   });
@@ -235,6 +252,7 @@ describe('kb enrich apply and the description of the entry it replaces', () => {
 // then archives that entry by id.
 describe('kb enrich and namespaces', () => {
   beforeEach(() => {
+    h.boundaryError = null;
     h.confirm.mockReset();
   });
 
@@ -306,5 +324,29 @@ describe('kb enrich and namespaces', () => {
     });
 
     expect((await kbAuthorEnrichStep.detect!(ctx)).authorDescription).toBeNull();
+  });
+});
+
+describe('unreadable repository citations cannot be persisted', () => {
+  it.each(
+    ['body', 'description'].flatMap((field) =>
+      ['EACCES', 'EIO', 'EMFILE'].map((code) => [field, code] as const),
+    ),
+  )('keeps the skeleton unchanged when a %s citation lookup fails (%s)', async (field, code) => {
+    const { ctx, stored } = setup([skeleton()]);
+    const before = { ...stored(SKELETON) };
+    h.boundaryError = Object.assign(new Error(code + ': open /nonexistent'), { code });
+    try {
+      await expect(
+        kbAuthorEnrichStep.apply!(ctx, {
+          detected: detected({ hasRepo: true }),
+          llmOutput: llm({ [field]: 'See src/private-helper.ts for the rule.' }),
+          isFinalLlmAttempt: true,
+        } as never),
+      ).rejects.toBe(h.boundaryError);
+      expect(stored(SKELETON)).toEqual(before);
+    } finally {
+      h.boundaryError = null;
+    }
   });
 });

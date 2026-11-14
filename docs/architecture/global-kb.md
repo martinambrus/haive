@@ -389,6 +389,14 @@ ms per fingerprint on a 90-file change. A capped file list is attributed to the 
 
 ## Author task failure and cancellation
 
+The kb-author citation scrub aborts on unknown repository lookup failures before saving
+a draft body or description. Confirmed absence, invalid candidate names (including
+ENAMETOOLONG) and candidates proved to be outside the readable repository remain
+non-citations; a failed containment verification aborts too. This prevents repository-specific
+citations from entering the shared draft while avoiding deletion of possibly generic prose
+on a guessed presence verdict. Symbol and basename collection remain separate backstops
+whose unknown-read behaviour is not strengthened by this path-probe rule.
+
 `reconcileKbAuthorEntryOnTaskEnd` is shared by ordinary worker failure, Stop settlement and
 Cancel teardown. Failure (including Stop alone) marks a skeleton or enriching entry failed and
 keeps it for retry. Cancel removes skeleton, enriching and failed entries, so a later Cancel also

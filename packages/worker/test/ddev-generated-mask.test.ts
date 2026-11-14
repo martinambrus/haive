@@ -1,8 +1,40 @@
 import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { computeDdevGeneratedMasks } from '../src/queues/cli-exec/ddev-generated-mask.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  computeDdevGeneratedMasks,
+  resolveDdevGeneratedMasks,
+} from '../src/queues/cli-exec/ddev-generated-mask.js';
+
+const fault = vi.hoisted(() => ({
+  point: '',
+  anchor: null as string | null,
+  error: null as Error | null,
+}));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: (...args: Parameters<typeof real.open>) => {
+      const name = String(args[0]);
+      if (
+        fault.error &&
+        ((fault.point === 'anchor' && name === (fault.anchor ?? root)) ||
+          (fault.point === 'parent' && name.endsWith('/apache')) ||
+          (fault.point === 'file' && name.endsWith('/apache-site.conf')))
+      )
+        throw fault.error;
+      return real.open(...args);
+    },
+    readdir: (...args: Parameters<typeof real.readdir>) => {
+      if (fault.error && fault.point === 'listing') throw fault.error;
+      return real.readdir(...args);
+    },
+  };
+});
+
+import { resolveInvocationWorkerRoot } from '../src/repo/worktree-git-boundary.js';
 
 const MARKED = '#ddev-generated\nsome config\n';
 const WORKDIR = '/haive/workdir';
@@ -24,6 +56,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  fault.error = null;
+  fault.point = '';
+  fault.anchor = null;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -119,5 +154,47 @@ describe('computeDdevGeneratedMasks', () => {
 
     const masks = await computeDdevGeneratedMasks(root, '/other/mount');
     expect(masks[0]!.containerPath).toBe('/other/mount/.ddev/apache/apache-site.conf');
+  });
+});
+
+describe('unreadable generated-config boundaries', () => {
+  it.each(
+    ['anchor', 'parent', 'listing', 'file'].flatMap((point) =>
+      ['EACCES', 'EIO', 'EMFILE'].map((code) => [point, code] as const),
+    ),
+  )('refuses the invocation on an unknown %s read (%s)', async (point, code) => {
+    await write('.ddev/apache/apache-site.conf', MARKED);
+
+    fault.point = point;
+    fault.error = Object.assign(new Error('ENOENT wording is not an absence verdict'), { code });
+    await expect(computeDdevGeneratedMasks(root, WORKDIR)).rejects.toBe(fault.error);
+  });
+
+  it.each(['ENOENT', 'ENOTDIR'])('keeps true absence at the anchor (%s)', async (code) => {
+    fault.point = 'anchor';
+    fault.error = Object.assign(new Error('injected boundary absence'), { code });
+    expect(await computeDdevGeneratedMasks(root, WORKDIR)).toEqual([]);
+  });
+
+  it('does not swallow the filesystem refusal at the DB wrapper', async () => {
+    await write('.ddev/apache/apache-site.conf', MARKED);
+    const db = {
+      query: {
+        tasks: { findFirst: async () => ({ userId: 'user', repositoryId: 'repo' }) },
+        repositories: { findFirst: async () => ({ storagePath: root, localPath: null }) },
+      },
+    } as never;
+    fault.point = 'anchor';
+    fault.anchor = resolveInvocationWorkerRoot({
+      storagePath: root,
+      userId: 'user',
+      repositoryId: 'repo',
+    });
+    fault.error = Object.assign(new Error('injected boundary failure'), { code: 'EIO' });
+    await expect(resolveDdevGeneratedMasks(db, 'task')).rejects.toMatchObject({
+      code: 'DDEV_GENERATED_MASK_FAILED',
+      message:
+        'DDEV-generated config could not be protected; retry when the repository is readable',
+    });
   });
 });

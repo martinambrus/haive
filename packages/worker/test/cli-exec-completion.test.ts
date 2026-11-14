@@ -7,9 +7,24 @@ import type { CliExecJobPayload } from '@haive/shared';
 const stubs = vi.hoisted(() => ({
   scoreHouseRules: vi.fn((..._args: unknown[]): Promise<void> | undefined => undefined),
   executeByKind: vi.fn(),
+  boundaryError: null as Error | null,
   resumeStepIfLinked: vi.fn(async () => {}),
   recordLedgerEntry: vi.fn(async (..._args: unknown[]) => {}),
 }));
+
+// Inject at the anchor open: fs-safe reaches this before any leaf lstat.
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: (...args: Parameters<typeof real.open>) => {
+      if (stubs.boundaryError && String(args[0]) === BOUNDARY_ANCHOR) {
+        throw stubs.boundaryError;
+      }
+      return real.open(...args);
+    },
+  };
+});
 
 vi.mock('../src/orchestrator/house-rules-similarity.js', () => ({
   scoreHouseRulesInBackground: stubs.scoreHouseRules,
@@ -41,6 +56,8 @@ vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => ({
 }));
 
 import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
+import { repoGitDataBoundary } from '../src/queues/cli-exec/gitfile-mask.js';
+import { WORKER_REPO_STORAGE_ROOT } from '../src/repo/worktree-git-boundary.js';
 import { CliLoginRequiredError } from '../src/queues/cli-exec/_shared.js';
 
 function tableNameOf(table: unknown): string {
@@ -127,6 +144,8 @@ function fakeDb(opts: {
   return { db: handle(null) as Database, writes };
 }
 
+const BOUNDARY_ANCHOR = WORKER_REPO_STORAGE_ROOT + '/user/repo';
+
 const RUN = '11111111-1111-4111-8111-111111111111';
 const MINING = '22222222-2222-4222-8222-222222222222';
 const STEP = '33333333-3333-4333-8333-333333333333';
@@ -158,6 +177,7 @@ const miningWrites = (writes: Write[]) =>
   writes.filter((w) => w.table === 'task_step_agent_minings');
 
 beforeEach(() => {
+  stubs.boundaryError = null;
   stubs.executeByKind.mockReset();
   stubs.resumeStepIfLinked.mockReset();
   stubs.recordLedgerEntry.mockReset();
@@ -542,5 +562,33 @@ it.each([true, false])(
     expect(
       stubs.resumeStepIfLinked.mock.calls.some((args: unknown[]) => args[2] === expected),
     ).toBe(true);
+  },
+);
+
+it.each(['EACCES', 'EIO', 'EMFILE'])(
+  'scrubs the storage path from persisted boundary failures (%s)',
+  async (code) => {
+    const err = Object.assign(new Error(code + ': open ' + BOUNDARY_ANCHOR), { code });
+    stubs.boundaryError = err;
+    stubs.executeByKind.mockImplementation(() =>
+      repoGitDataBoundary(
+        { source: 'haive_repos', target: '/haive/workdir', subpath: 'user/repo' },
+        { hasWorktree: false, hasRepo: true },
+      ),
+    );
+    const { db, writes } = fakeDb({});
+    await expect(handleCliExecJob(db, base)).rejects.toBe(err);
+    const expected = code + ': open [path]';
+    expect(
+      runWrites(writes)
+        .filter((w) => w.set.exitCode === -1)
+        .map((w) => w.set.errorMessage),
+    ).toEqual([expected]);
+    expect(
+      miningWrites(writes)
+        .filter((w) => w.set.status === 'failed')
+        .map((w) => w.set.errorMessage),
+    ).toEqual([expected]);
+    expect(stubs.resumeStepIfLinked).toHaveBeenCalledWith(base, false, expected);
   },
 );

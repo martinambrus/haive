@@ -8,6 +8,7 @@ import { fixTestReviewNotice } from './steps/workflow/_fix-test-edits.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubWorkerErrorPaths } from '../repo/stored-error.js';
 import {
   and,
   asc,
@@ -2444,9 +2445,8 @@ async function releaseUnsentAgents(
   err: unknown,
   ctx: StepContext,
 ): Promise<void> {
-  const errorMessage = `dispatch failed before the agent was queued: ${safeErrorMessage(
-    err,
-  )}`.slice(0, 2000);
+  const errorMessage =
+    `dispatch failed before the agent was queued: ${scrubWorkerErrorPaths(err)}`.slice(0, 2000);
   const now = new Date();
   try {
     if (linking) {
@@ -3954,6 +3954,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       };
     }
     const cancelled = err instanceof TaskCancelledError;
+    // A done fix-loop row stores the diagnosis for reclassification on recovery. Preserve
+    // it through routing and that write; scrub only failure display copy below.
     const errorMessage = cancelled ? 'task cancelled by user' : safeErrorMessage(err);
     if (cancelled) {
       log.info({ stepId: meta.id, taskId }, 'step aborted by task cancel');
@@ -3984,7 +3986,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // After the step's own write, so a Resume never finds the agents ended on a step still running;
       // not when that write errored (the catch hands back the stale row) and the step is not terminal.
       if (stepDef.agentMining && finished !== row)
-        await releaseStepAgents(db, row.id, errorMessage);
+        await releaseStepAgents(db, row.id, scrubWorkerErrorPaths(errorMessage));
       if (!finished) return supersededPass(row);
       // writeEnd returns the original row on a failed write; it owns no new completion.
       if (finished !== row) await recordFinishedUsage(db, finished, meta.id);
@@ -4001,15 +4003,16 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ...(advised?.advice ? { guidance: advised.advice } : {}),
       };
     }
+    const storedError = scrubWorkerErrorPaths(errorMessage);
     const failed = await writeEnd({
       status: 'failed',
       statusMessage: null,
-      errorMessage,
+      errorMessage: storedError,
       endedAt: new Date(),
     });
-    if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, errorMessage);
+    if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, storedError);
     if (!failed) return supersededPass(row);
-    return { status: 'failed', row: failed, error: errorMessage };
+    return { status: 'failed', row: failed, error: storedError };
   } finally {
     clearInterval(pollTimer);
     if (!controller.signal.aborted) controller.abort();
@@ -4306,7 +4309,7 @@ async function recordSummaryEnqueueFailure(
         .update(schema.cliInvocations)
         .set({
           exitCode: -1,
-          errorMessage: safeErrorMessage(err),
+          errorMessage: scrubWorkerErrorPaths(err),
           endedAt: now,
         })
         .where(eq(schema.cliInvocations.id, invocationId));
@@ -4321,7 +4324,7 @@ async function recordSummaryEnqueueFailure(
       prompt: '',
       agentTitle: 'Step summary',
       exitCode: -1,
-      errorMessage: safeErrorMessage(err),
+      errorMessage: scrubWorkerErrorPaths(err),
       endedAt: now,
       haiveBuild: currentBuildStamp(),
     });

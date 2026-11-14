@@ -1912,6 +1912,26 @@ describe('fix-loop guidance', () => {
       expect(state.taskStepRow).toMatchObject({ errorMessage: MESSAGE });
     });
 
+    it.each([
+      'nginx: [emerg] unknown directive "foo" in /etc/nginx/sites-enabled/nginx-site.conf:5',
+      'container exited\n+ source /mnt/ddev_config/web-entrypoint.d/post-start.sh\ntouch: Permission denied',
+    ])('classifies and stores the original path-bearing diagnosis: %s', async (message) => {
+      const state = fresh();
+      const result = await advanceStep(
+        params(makeMockDb(state), throwing(new Error(message), isDdevAgentFixableFailure), 2),
+      );
+      expect(result.status).toBe('loop_back');
+      if (result.status === 'loop_back') expect(result.diagnosis).toBe(message);
+      expect(state.taskStepRow).toMatchObject({ status: 'done', errorMessage: message });
+      const recovered = await finishedStepResult(
+        makeMockDb(state),
+        'task-1',
+        throwing(new Error(message), isDdevAgentFixableFailure),
+        state.taskStepRow as unknown as TaskStepRow,
+      );
+      expect(recovered).toMatchObject({ status: 'loop_back', diagnosis: message });
+    });
+
     it('still fails a step that does not route the error, with the whole message', async () => {
       const result = await advanceStep(
         params(
