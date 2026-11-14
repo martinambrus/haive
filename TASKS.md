@@ -687,7 +687,7 @@ status: open · kind: feature · found: owner decision 2026-11-14 (#1174) · pri
 
 Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-analysis (`docs/plans/kind-riding-dream.md`) modules, which are the first external modules and live in private repositories.
 
-1. Create the private GitHub repositories `martinambrus/haive-module-translator` and `martinambrus/haive-module-deep-analysis` (owner go-ahead needed: outward-facing).
+1. DONE 2026-11-14: private repositories `martinambrus/haive-module-translator` and `martinambrus/haive-module-deep-analysis` created (README only, default branch `main`).
 2. Core: a dev install of an external module (cloned into `modules/<id>/`, then `pnpm module add <id>`) leaves nothing in a haive commit. Today `modules/` is tracked and `pnpm module add` edits tracked `package.json` files and `pnpm-lock.yaml`. Design choice: ignore the folder and keep the dependency entries out of tracked files.
 3. Core: a CI check refuses a tracked file that names a module not public in haive.
 4. Module CI template: check out haive at a pinned release tag, place the module at `modules/<id>/`, build and test there (core packages are unpublished, `pnpm.overrides` pins them to `workspace:*`).
