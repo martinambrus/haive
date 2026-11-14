@@ -124,6 +124,14 @@ function approvedPublicSecrets(lang, text) {
     assert.ok(text.includes(before), `baseline contains ${before}`);
     text = text.replace(before, after);
   }
+  // Recovery still needs a deliberately selected updater image, including on an old install.
+  const before = lang === 'sh' ? ' >&2; exit 2; }' : '"; exit 2 }';
+  const after =
+    lang === 'sh'
+      ? ' >&2; echo "For recovery, use --version with the interrupted upgrade target; it selects the updater image." >&2; exit 2; }'
+      : '"; Write-Host "For recovery, use -Version with the interrupted upgrade target; it selects the updater image."; exit 2 }';
+  assert.ok(text.includes(before), 'baseline contains the upgrade version refusal');
+  text = text.replace(before, after);
   return text;
 }
 function fixture(
@@ -389,6 +397,27 @@ for (const lang of ['sh', 'ps1']) {
       channel: publicInstall ? 'public' : 'customer',
       bundle: { files: hashes, env: [], known: [] },
     };
+    check(
+      `generated upgrade explains the version needed for recovery (public=${publicInstall})`,
+      () => {
+        const f = fixture(lang, { publicInstall, data });
+        try {
+          const installed = f.install();
+          assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+          const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), ['upgrade']);
+          assert.equal(r.status, 2, r.stdout + r.stderr);
+          assert.match(r.stdout + r.stderr, /recovery.*interrupted upgrade target.*updater image/i);
+          assert.ok(
+            !f
+              .calls()
+              .split('\n')
+              .some((line) => line.includes('\trun\t')),
+          );
+        } finally {
+          f.clean();
+        }
+      },
+    );
     check(`force install replaces linked helpers safely (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data });
       try {
