@@ -600,6 +600,15 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T663 · FNF[plan-canvas-smoke-lows] · plan-canvas smoke check lows, after #1161 (+4)
+
+status: open · kind: fix · found: #1161 review 2026-11-14 · priority: P4
+
+1. (connected, PRE-EXISTING, by reading) The check "child added under a node being deleted" most likely never reaches the stray-child guard: the editor's patch holds the plan-patch lock and the reconcile waits on that first (`packages/worker/test/plan-canvas-smoke.ts`, `plan/mirror.ts`). Confirm at runtime; if so, reorder the check so the guard is exercised.
+2. The `settling` helper discards the peer's outcome, so an early unrelated peer failure still passes the check (same as the old sleep).
+3. The `blocked()` poll loop issues `pg_stat_activity` queries back to back with no pause.
+4. The 5 s watchdog's failure message names no fixture or check label.
+
 ### T661 · FNF[provider-shell-close-lows] · provider shell revocation lows, after #1156 (+6)
 
 status: open · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
@@ -893,11 +902,6 @@ Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless name
 
 status: done 2026-11-13 #1126 (6f1e2223e): the shared boundary lookup uses fs-safe strict mode; only ENOENT/ENOTDIR read as absent, every other failure (EACCES, EIO, a link in the path) refuses the run before a container starts; an IDE boot refuses a worktree subpath with a link or non-directory parent; lows in T641 · kind: fix · found: #1125 review 2026-11-13 · priority: P2
 PRE-EXISTING, security. worker `queues/cli-exec/gitfile-mask.ts` ~:58 `lookupInRepoMount` and ~:96-97 `repoGitDataBoundary`: since #1125 only EMFILE/ENFILE rethrow; EACCES, EIO, ENOMEM, ESTALE and a link in the repository path still answer `null`, so the sandbox starts with `.git` unmounted and read-write. Same lookup feeds `.haive-data` and worktrees boundaries. Fix direction: `strict: true` plus a deliberate absence check (ENOENT/ENOTDIR only means no `.git`), every other failure refuses the run; the five consumers already fail closed on a throw (traced in #1125 review 2). Controls per errno.
-
-### T659 · FNF[ci-flakes-2] · plan-canvas smoke three-way reconcile check flakes in CI
-
-status: open · kind: fix · found: PR #1157 CI 2026-11-13 (run 43519214885) · priority: P3
-PRE-EXISTING. `smoke:plan-canvas` failed once with check "three-way: an edge a canvas patch inserted during the reconcile keeps its note and holds the reconcile" (detail `{"edging":"merged","depends":[{"note":"from the canvas"}]}`); unrelated PR (updater-only diff), rerun of the failed job passed. The check races a canvas patch against the reconcile; find what orders them (`plan/mirror.ts` reconcile, the smoke's hold point) and make the smoke wait on a structural signal, not timing. No CI change, no retry.
 
 ### T657 · FNF[reset-claim-sweep-lows] · onboarding reset claim sweep lows, after #1151 (+4)
 
@@ -1865,6 +1869,7 @@ All low unless marked.
 
 ## Done
 
+- T659 — plan-canvas smoke race checks wait on PostgreSQL lock waits or peer settlement instead of sleeps (the CI failure was smoke timing; the merge it saw is correct); lows in T663 — PR #1161 (034003dea), 2026-11-14
 - T508 — a remote relink records a durable intent on the row; a fresh locked read reconciles Git's origin after a lost connection, failed COMMIT or process death, on the request path and through a sweep that skips locked and in-process-fenced repositories; lows in T662 — PR #1158 (8305c3d2d), 2026-11-14
 - T658 — relink SIGTERM lock-file flake: the test now waits on a FIFO open handshake instead of wall time — PR #1158 (8305c3d2d), 2026-11-14
 - T654 — close live provider shells when the provider is disabled — PR #1156 (846c1ee9a), 2026-11-14
