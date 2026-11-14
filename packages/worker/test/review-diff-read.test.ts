@@ -5,7 +5,7 @@ import { TaskCancelledError, type StepContext } from '@haive/shared/step';
 import { readReviewDiff } from '../src/step-engine/review-diff.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { gitRun } from '../src/repo/git-exec.js';
-import { openFileNoFollow } from '@haive/shared/fs-safe';
+import { openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: vi.fn(async () => ({ output: { baseBranch: 'base' } })),
@@ -23,6 +23,7 @@ vi.mock('../src/repo/git-exec.js', () => ({ gitRun: vi.fn() }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   openFileNoFollow: vi.fn(),
+  lstatNoFollow: vi.fn(),
 }));
 vi.mock('../src/queues/cli-exec/secret-mask.js', async () => {
   const { secretMaskPolicy } = await import('../src/queues/cli-exec/secret-mask-policy.js');
@@ -54,6 +55,10 @@ beforeEach(() => {
     },
     async emitProgress() {},
   };
+  vi.mocked(lstatNoFollow).mockResolvedValue({
+    kind: 'file',
+    stats: stat,
+  } as unknown as NonNullable<Awaited<ReturnType<typeof lstatNoFollow>>>);
   vi.mocked(collectImplementationFiles).mockResolvedValue(scope);
   vi.mocked(gitRun).mockImplementation(async (_cwd, args) => ({
     code: 0,
@@ -166,3 +171,47 @@ it('invalidates the hash when a git-changed file outside a capped scope changes'
   if (first.status === 'ready' && second.status === 'ready')
     expect(first.diffHash).not.toBe(second.diffHash);
 });
+
+it.each(['link', 'directory', 'missing', 'gitlink', 'absolute', 'parent'])(
+  'keeps review ready and discloses a %s entry as partial coverage',
+  async (kind) => {
+    const p = kind === 'absolute' ? '/outside' : kind === 'parent' ? '../outside' : 'odd';
+    vi.mocked(collectImplementationFiles).mockResolvedValue({
+      ...scope,
+      files: ['a', p],
+      total: 2,
+    });
+    vi.mocked(lstatNoFollow).mockImplementation(async (_anchor, rel) => {
+      if (rel === 'a') return { kind: 'file', stats: stat } as never;
+      if (kind === 'missing') return null;
+      return {
+        kind: kind === 'gitlink' ? 'directory' : kind === 'link' ? 'symlink' : kind,
+        stats: stat,
+      } as never;
+    });
+    const run = vi.mocked(gitRun).getMockImplementation()!;
+    vi.mocked(gitRun).mockImplementation(async (...args) =>
+      kind === 'gitlink' && args[1].includes('--stage')
+        ? { code: 0, stdout: '160000 ' + 'a'.repeat(40) + ' 0\todd\0', stderr: '' }
+        : run(...args),
+    );
+    const result = await readReviewDiff(ctx, '/repo', options);
+    expect(result.status, JSON.stringify(result)).toBe('ready');
+    if (result.status !== 'ready') return;
+    const payload = JSON.parse(result.content);
+    expect(payload.coverage.partial).toBe(true);
+    expect(payload.files).toContainEqual(
+      expect.objectContaining({
+        path: p,
+        kind: kind === 'absolute' || kind === 'parent' ? 'invalid' : kind,
+      }),
+    );
+    expect(payload.diff).toContain('+z');
+    expect(openFileNoFollow).not.toHaveBeenCalledWith(
+      '/repo',
+      p,
+      expect.anything(),
+      expect.anything(),
+    );
+  },
+);

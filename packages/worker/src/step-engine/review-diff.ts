@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
   decodeUtf8Strict,
-  errno,
   lstatNoFollow,
+  isPathContainmentError,
+  isResourceLimitError,
   openFileNoFollow,
   relUnder,
   toSafeRel,
@@ -24,7 +25,19 @@ import { checkHostCancellation, hostCall } from './step-host-services.js';
 
 interface ReviewFile {
   path: string;
-  kind: 'text' | 'binary' | 'deleted' | 'nested-repository' | 'withheld';
+  kind:
+    | 'text'
+    | 'binary'
+    | 'deleted'
+    | 'nested-repository'
+    | 'withheld'
+    | 'link'
+    | 'gitlink'
+    | 'directory'
+    | 'missing'
+    | 'invalid'
+    | 'unreadable'
+    | 'other';
   mode?: number;
   size?: number;
   hash?: string;
@@ -84,7 +97,8 @@ export function serializeReviewPayload(
     changeHash: snapshot.changeHash,
     scope: ordered(scope),
     coverage: {
-      partial: scope.truncated || files.some((f) => f.kind === 'nested-repository'),
+      partial:
+        scope.truncated || files.some((f) => !['text', 'binary', 'deleted'].includes(f.kind)),
       listed: scope.files.length,
       total: scope.total,
     },
@@ -203,6 +217,12 @@ export async function readReviewDiff(
         )
       )
         throw new Error('The implementation scope is inconsistent with git.');
+      const gitlinks = new Set(
+        (await run(['ls-files', '--stage', '-z'])).split('\0').flatMap((record) => {
+          const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
+          return match ? [match[1]!] : [];
+        }),
+      );
       const files: ReviewFile[] = [];
       // The cap limits delivered review evidence, not retry identity. Hash omitted changes
       // too, so a partial payload cannot reuse an earlier identity after those files change.
@@ -210,43 +230,49 @@ export async function readReviewDiff(
       // A move is delete + add. Once a denied endpoint participates, the allowed
       // endpoint cannot be identified safely, so withhold the whole capture's contents.
       const withhold = allPaths.some(denied);
-      const pathspecs = paths
-        .filter((p) => !scope.nestedRepositories?.[p])
-        .map((p) => ':(literal)' + toSafeRel(p));
-      const diff =
-        !withhold && pathspecs.length
-          ? await run([
-              '-c',
-              'core.quotePath=false',
-              'diff',
-              '--no-color',
-              '--no-renames',
-              '--no-relative',
-              '--src-prefix=a/',
-              '--dst-prefix=b/',
-              '--full-index',
-              '--diff-algorithm=myers',
-              '--no-indent-heuristic',
-              '--unified=3',
-              '--submodule=short',
-              forkPoint,
-              '--',
-              ...pathspecs,
-            ])
-          : '';
       for (const p of allPaths) {
         checkHostCancellation(ctx);
         if (scope.nestedRepositories?.[p] || (untracked.has(p) && p.endsWith('/'))) {
           files.push({ path: p, kind: 'nested-repository' });
           continue;
         }
-        const rel = (prefix ? prefix + '/' : '') + toSafeRel(p);
-        if (withhold) {
-          const entry = await lstatNoFollow(ctx.repoPath, rel, { strict: true });
+        let safe: string;
+        try {
+          safe = toSafeRel(p);
+        } catch (error) {
+          if (!isPathContainmentError(error, 'invalid-path')) throw error;
+          files.push({ path: p, kind: 'invalid' });
+          continue;
+        }
+        const rel = (prefix ? prefix + '/' : '') + safe;
+        let entry;
+        try {
+          entry = await lstatNoFollow(ctx.repoPath, rel, { strict: true });
+        } catch (error) {
+          if (isResourceLimitError(error)) throw error;
           files.push({
             path: p,
-            kind: 'withheld',
-            ...(entry ? { size: entry.stats.size, mode: entry.stats.mode & 0o7777 } : {}),
+            kind: isPathContainmentError(error, 'link') ? 'link' : 'unreadable',
+          });
+          continue;
+        }
+        const metadata = entry ? { size: entry.stats.size, mode: entry.stats.mode & 0o7777 } : {};
+        if (withhold) {
+          files.push({ path: p, kind: 'withheld', ...metadata });
+          continue;
+        }
+        if (gitlinks.has(safe)) {
+          files.push({ path: p, kind: 'gitlink', ...metadata });
+          continue;
+        }
+        if (!entry || entry.kind !== 'file') {
+          files.push({
+            path: p,
+            kind:
+              entry?.kind === 'symlink'
+                ? 'link'
+                : (entry?.kind ?? (deleted.has(p) ? 'deleted' : 'missing')),
+            ...metadata,
           });
           continue;
         }
@@ -254,18 +280,16 @@ export async function readReviewDiff(
         try {
           fh = await openFileNoFollow(ctx.repoPath, rel, 'read', { strict: true });
         } catch (error) {
-          if (errno(error) === 'ENOENT' && deleted.has(p)) {
-            files.push({ path: p, kind: 'deleted' });
-            continue;
-          }
-          throw error;
+          if (isResourceLimitError(error)) throw error;
+          files.push({
+            path: p,
+            kind: isPathContainmentError(error, 'link') ? 'link' : 'unreadable',
+          });
+          continue;
         }
         if (!fh) {
-          if (deleted.has(p)) {
-            files.push({ path: p, kind: 'deleted' });
-            continue;
-          }
-          throw new Error('A changed file is unavailable.');
+          files.push({ path: p, kind: deleted.has(p) ? 'deleted' : 'missing' });
+          continue;
         }
         try {
           checkHostCancellation(ctx);
@@ -330,6 +354,31 @@ export async function readReviewDiff(
           await fh.close();
         }
       }
+      const pathspecs = files
+        .filter(
+          (file) => paths.includes(file.path) && ['text', 'binary', 'deleted'].includes(file.kind),
+        )
+        .map((file) => ':(literal)' + toSafeRel(file.path));
+      const diff = pathspecs.length
+        ? await run([
+            '-c',
+            'core.quotePath=false',
+            'diff',
+            '--no-color',
+            '--no-renames',
+            '--no-relative',
+            '--src-prefix=a/',
+            '--dst-prefix=b/',
+            '--full-index',
+            '--diff-algorithm=myers',
+            '--no-indent-heuristic',
+            '--unified=3',
+            '--submodule=short',
+            forkPoint,
+            '--',
+            ...pathspecs,
+          ])
+        : '';
       const changeHash = createHash('sha256')
         .update(JSON.stringify(ordered(files.map(({ content: _content, ...file }) => file))))
         .digest('hex');

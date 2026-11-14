@@ -88,5 +88,12 @@ it('reads committed and dirty changes, untracked text, deletion, mode and binary
   git('branch', 'base', git('rev-parse', 'HEAD~1').trim());
   unlinkSync(join(root, 'new.txt'));
   symlinkSync('/etc/hostname', join(root, 'new.txt'));
-  expect((await readReviewDiff(ctx, root, options)).status).toBe('unavailable');
+  const linked = await readReviewDiff(ctx, root, options);
+  expect(linked.status, JSON.stringify(linked)).toBe('ready');
+  if (linked.status === 'ready') {
+    expect(JSON.parse(linked.content).coverage.partial).toBe(true);
+    expect(JSON.parse(linked.content).files).toContainEqual(
+      expect.objectContaining({ path: 'new.txt', kind: 'link' }),
+    );
+  }
 });
