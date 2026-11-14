@@ -3,10 +3,29 @@ import {
   reportDuration,
   reportTestPhase,
   reportTestExecution,
+  reportTestSuite,
+  reportCheckCoverage,
   REPORT_CATEGORY_COLORS,
 } from '../../src/web/components/time-cost-report.js';
+import { summarizeTestChecks } from '@haive/shared/stats';
 
 describe('report measurements', () => {
+  it('shows missing suite measurements as a dash and unfinished checks as incomplete', () => {
+    const summary = summarizeTestChecks([
+      { taskId: 't', slot: 'test', outcome: 'running', startedAt: new Date(0), endedAt: null },
+      {
+        taskId: 't',
+        slot: 'test',
+        outcome: 'interrupted',
+        startedAt: new Date(0),
+        endedAt: new Date(1000),
+      },
+    ]);
+    expect(reportTestSuite(summarizeTestChecks([]))).toBe('—');
+    expect(reportTestSuite(summary)).toContain('incomplete');
+    expect(reportCheckCoverage(summary)).toContain('2 incomplete');
+    expect(reportCheckCoverage(summary)).not.toContain('100%');
+  });
   it('states command coverage for a mixed population without implying all tasks ran tests', () => {
     expect(reportTestExecution({ ran: 8, not_run: 120, unrecorded: 13 })).toBe(
       '8 of 141 tasks ran a test command · 120 not run · 13 execution not recorded',

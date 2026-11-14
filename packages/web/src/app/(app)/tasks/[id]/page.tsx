@@ -594,6 +594,7 @@ interface LinkedTask {
 }
 
 interface TaskDetailResponse {
+  testChecks?: ReturnType<typeof import('@haive/shared/stats').summarizeTestChecks>;
   task: Task;
   /** The steps the worker could not resolve; null while the task is alive. */
   dead?: { at: string; steps: DeadStepRow[] } | null;
@@ -726,6 +727,7 @@ export default function TaskDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
+  const [testChecks, setTestChecks] = useState<TaskDetailResponse['testChecks']>();
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
   const [rebuildDdevOpen, setRebuildDdevOpen] = useState(false);
@@ -866,6 +868,7 @@ export default function TaskDetailPage() {
       if (!current()) return;
       scope.applied = request;
       setTask(data.task);
+      setTestChecks(data.testChecks);
       setSteps(data.steps);
       setDeadSteps(data.dead?.steps ?? []);
       setStop(data.stop ?? null);
@@ -2315,6 +2318,7 @@ export default function TaskDetailPage() {
           })}
           <TaskTotalTime
             task={task}
+            testChecks={testChecks}
             steps={steps}
             userActive={userActive}
             providerBreakdown={providerBreakdown}
@@ -3312,12 +3316,14 @@ function HeaderUsageChip({
 
 function TaskTotalTime({
   task,
+  testChecks,
   steps,
   userActive,
   providerBreakdown,
   costDisplay,
 }: {
   task: Task;
+  testChecks?: TaskDetailResponse['testChecks'];
   steps: TaskStep[];
   userActive: { activeStepId: string | null; displayMs: number };
   providerBreakdown: TaskProviderUsage[];
@@ -3408,7 +3414,7 @@ function TaskTotalTime({
             <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
             <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
           </div>
-          <TaskTestsTimeCell steps={liveSteps} nowMs={endMs} format={fmt} />
+          <TaskTestsTimeCell steps={liveSteps} nowMs={endMs} format={fmt} testChecks={testChecks} />
           <div className="flex flex-col items-end">
             <span className="font-mono text-lg text-amber-300">{fmt(idleMs)}</span>
             <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>

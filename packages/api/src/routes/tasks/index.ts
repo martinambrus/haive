@@ -31,7 +31,12 @@ import {
   lockRepositoryTasksKey,
   isLockNotAvailable,
 } from '@haive/database';
-import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
+import {
+  isTaskClass,
+  knownTaskTypes,
+  typesForClass,
+  summarizeTestChecks,
+} from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
   ESTIMATE_RECORDED_EVENT,
@@ -1235,8 +1240,27 @@ taskRoutes.get('/:id', async (c) => {
     task.runListSnapshot,
   );
   const callCounts = await loadLoggedCallCount(db, id);
+  let testChecks = summarizeTestChecks([]);
+  try {
+    testChecks = summarizeTestChecks(
+      await db
+        .select({
+          taskId: schema.taskCheckRuns.taskId,
+          slot: schema.taskCheckRuns.slot,
+          outcome: schema.taskCheckRuns.outcome,
+          startedAt: schema.taskCheckRuns.startedAt,
+          endedAt: schema.taskCheckRuns.endedAt,
+        })
+        .from(schema.taskCheckRuns)
+        .where(and(eq(schema.taskCheckRuns.taskId, id), eq(schema.taskCheckRuns.slot, 'test'))),
+    );
+  } catch (err) {
+    logger.warn({ err, taskId: id }, 'task check summary unavailable (non-fatal)');
+  }
+
   return c.json({
     task: taskWithActive,
+    testChecks,
     dead: await loadTaskDead(db, task),
     stop: await loadTaskStop(db, task),
     steps,

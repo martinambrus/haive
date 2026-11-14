@@ -338,13 +338,44 @@ its completion instant. Work is elapsed step work, including deterministic setup
 agent-hours separately sum concurrent invocation spans.
 
 Test phase covers the six test-category steps, including setup and skipped commands. It
-never proves test execution. Before check-run recording, surviving `08-phase-5-verify`
-`output.test.ran` outcomes provide execution coverage: true is recorded execution, false
-is **not run**, and missing evidence is **execution not recorded**. Reset outputs cannot
-recover earlier attempts. The aggregate reports per-task ran, not-run and unrecorded counts
-over the full population before the display cap. Commands agents run during implementation stay in Implementation.
-The task page's Total time card shows **tests** after work, with the tooltip **part of work**,
-only when its steps include a test phase. A recorded zero-duration test phase remains visible.
+never proves test execution. `task_check_runs` (0239) retains each selected verification
+slot and selective test-management run independently of reset step output. No command text or
+output is stored. Text slot and outcome columns have database CHECK constraints; task and task-step foreign
+keys are indexed. Attempts use
+the step-row id, round, `rerun_generation` and loop iteration, unique within task/step/slot.
+Skipped slots create no record. Recording errors warn without failing a check.
+
+Test suite runs and `testSuiteMs` cover only finished passed/failed `test` slots, including
+selective runs and retries, with duration from their stored timestamps. Lint, PHP lint and
+typecheck are excluded. Browser provisioning precedes the timed selective check; the
+post-failure enumerate probe remains inside its classification boundary. Suite time can also
+include agent-slot wait while the sandbox command obtains a lease; the tile discloses both. A measured zero
+remains zero; no measurement is a dash. Running and interrupted checks are incomplete with
+no duration. Environment stops are `not_run`, including 08b's missing DDEV runner;
+a selective pass without a runnable command creates no row. Pass share uses `sampledRatio(passed,
+passed + failed)`; not-run, running and interrupted counts appear beside it, outside its
+denominator. Low samples show n rather than a percentage. Totals cover the whole population
+before the display cap. The Test suite runs tile and column show count and suite time; the
+task page tests tooltip also receives the suite summary from its authenticated task detail.
+A failed check-summary read warns and returns an empty, unmeasured summary without failing
+the task detail request.
+Historical task rows with no checks show only a dash, without zero coverage counts; the tile
+retains its aggregate coverage hint even before the first recorded run.
+
+Execution coverage prefers a task's recorded `test` checks when any exist: any passed/failed
+check means ran; only not-run checks means not run; otherwise execution is unrecorded, with
+incomplete counts alongside. If no test check row exists, the PR-1 heuristic remains:
+surviving `08-phase-5-verify` output.test.ran true means ran, all explicitly false means not
+run, and missing evidence is unrecorded. Lint-only rows do not replace this fallback. Counts
+are per task across the full population. Commands agents run during implementation remain
+in Implementation.
+
+The recording date comes from the singleton `task_check_recording`, seeded once with the
+migration-time timestamp by 0239 (`ON CONFLICT DO NOTHING`). It survives deletion of every
+task or repository and migration replay; it is never the earliest surviving check row.
+An absent marker is disclosed as unavailable. Rollback reverts code and leaves the unused
+tables; remove them only in a later migration. `/summary` and Money retain their existing
+calculations and population.
 
 Human active is task-form attention, including carried time. Plan-page attention remains
 separately reported on the Time tab and is never added here. Steering, testing another tab

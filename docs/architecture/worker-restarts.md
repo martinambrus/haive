@@ -70,6 +70,18 @@ recorded migration, so a dropped column stays missing; if one was dropped, also 
 `schema_migrations` row (`0233_deterministic_apply_receipts`,
 `0234_snapshot_decision_generation`) so the guarded file re-runs.
 
+**Check-run measurements preserve recovery identity.** `_check-runs.ts` uses the step-row id,
+round, `rerun_generation` and loop iteration, following step 11's learning outcome identity
+(#1168); an epoch bump alone does not declare another attempt. Recording is observation
+only: every apply replay executes checks as it did before recording existed. A compare-and-swap
+takes over the same attempt row from any prior outcome, resets its start/end timestamps and
+finalizes the latest observation, without retaining command text or output. An abrupt death
+leaves `running`; a thrown/cancelled command finalizes `interrupted` in `finally`. Both display
+as incomplete with no suite duration until recovery runs again. Explicit Retry advances the
+generation and keeps earlier rows. Recording failures only warn and never block execution;
+a failed finalization may leave a running record. No recovery sweep invents a successful
+check or zero duration.
+
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
 missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no
 run left to wait for, or finished (`done`/`skipped`) with nothing after it, while the task queue holds

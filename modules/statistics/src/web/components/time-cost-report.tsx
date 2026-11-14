@@ -2,10 +2,10 @@ import Link from 'next/link';
 import { formatCost } from '@haive/web-kit/format-cost';
 import { formatDuration } from '@haive/web-kit/format-duration';
 import { TIME_CATEGORIES, type TimeCategory } from '@haive/shared/timing';
-import type { TestExecution } from '@haive/shared/stats';
+import type { TestExecution, summarizeTestChecks } from '@haive/shared/stats';
 import type { StatsTimeCost } from '../api.js';
 import { StackedShareBar } from './stacked-share-bar.js';
-import { formatAgentHours } from '../lib/format-stats.js';
+import { formatAgentHours, formatSampledRatio } from '../lib/format-stats.js';
 
 // Fixed to category, contrast-checked against #0a0a0a; named legend also identifies every segment.
 export const REPORT_CATEGORY_COLORS: Record<TimeCategory, string> = {
@@ -33,6 +33,16 @@ export function reportTestPhase(ms: number | null, execution: TestExecution) {
 export function reportTestExecution(counts: Record<TestExecution, number>) {
   const total = counts.ran + counts.not_run + counts.unrecorded;
   return `${counts.ran} of ${total} tasks ran a test command · ${counts.not_run} not run · ${counts.unrecorded} execution not recorded`;
+}
+type TestChecks = ReturnType<typeof summarizeTestChecks>;
+export function reportTestSuite(r: TestChecks) {
+  const incomplete = r.testCheckCounts.running + r.testCheckCounts.interrupted;
+  if (!r.testSuiteRuns) return incomplete ? '— · incomplete' : '—';
+  return `${r.testSuiteRuns} ${r.testSuiteRuns === 1 ? 'run' : 'runs'} · ${reportDuration(r.testSuiteMs)}${incomplete ? ' · incomplete' : ''}`;
+}
+export function reportCheckCoverage(r: TestChecks) {
+  const c = r.testCheckCounts;
+  return `Pass share: ${formatSampledRatio(r.testPassShare)} · ${c.passed} passed · ${c.failed} failed · ${c.not_run} not run · ${c.running + c.interrupted} incomplete (${c.running} running, ${c.interrupted} interrupted)`;
 }
 function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -68,6 +78,11 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
           label="Test phase"
           value={reportDuration(t.testsMs)}
           hint={reportTestExecution(t.testExecutionCounts)}
+        />
+        <Tile
+          label="Test suite runs"
+          value={reportTestSuite(t)}
+          hint={`${reportCheckCoverage(t)}. Suite time can include agent-slot wait and the 08b post-failure enumerate probe. ${report.recordingStartedAt ? `Recording began ${report.recordingStartedAt.slice(0, 10)} (UTC)` : 'Recording start unavailable'}`}
         />
         <Tile
           label="Workflow work"
@@ -115,10 +130,10 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
         <div className="min-w-0 rounded-lg border border-neutral-800 p-3">
           <table className="w-full table-fixed text-xs" aria-label="Completed tasks time and cost">
             <colgroup>
-              <col style={{ width: '22%' }} />
+              <col style={{ width: '18%' }} />
               <col style={{ width: '12%' }} />
-              {Array.from({ length: 6 }, (_, i) => (
-                <col key={i} style={{ width: '11%' }} />
+              {Array.from({ length: 7 }, (_, i) => (
+                <col key={i} style={{ width: '10%' }} />
               ))}
             </colgroup>
             <thead>
@@ -127,6 +142,7 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
                   'Task',
                   'Repository',
                   'Test phase',
+                  'Test suite runs',
                   'Workflow work',
                   'Human active',
                   'Waiting',
@@ -140,31 +156,40 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
               </tr>
             </thead>
             <tbody>
-              {report.rows.map((r) => (
-                <tr key={r.taskId} className="border-t border-neutral-800 align-top">
-                  <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
-                    <Link
-                      className="text-neutral-200 underline hover:text-white"
-                      href={`/tasks/${r.taskId}`}
-                    >
-                      {r.title}
-                    </Link>
-                  </td>
-                  <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
-                    {r.repository ?? '—'}
-                  </td>
-                  <td className="break-words px-1 py-3">
-                    {reportTestPhase(r.testsMs, r.testExecution)}
-                  </td>
-                  <td className="break-words px-1 py-3 font-mono">{reportDuration(r.workMs)}</td>
-                  <td className="break-words px-1 py-3 font-mono">
-                    {reportDuration(r.userActiveMs)}
-                  </td>
-                  <td className="break-words px-1 py-3 font-mono">{reportDuration(r.waitMs)}</td>
-                  <td className="break-words px-1 py-3 font-mono">{money(r.realUsd)}</td>
-                  <td className="break-words px-1 py-3 font-mono">{apiRates(r)}</td>
-                </tr>
-              ))}
+              {report.rows.map((r) => {
+                const coverage = Object.values(r.testCheckCounts).some((n) => n > 0)
+                  ? reportCheckCoverage(r)
+                  : undefined;
+                return (
+                  <tr key={r.taskId} className="border-t border-neutral-800 align-top">
+                    <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
+                      <Link
+                        className="text-neutral-200 underline hover:text-white"
+                        href={`/tasks/${r.taskId}`}
+                      >
+                        {r.title}
+                      </Link>
+                    </td>
+                    <td className="break-words px-1 py-3 [overflow-wrap:anywhere]">
+                      {r.repository ?? '—'}
+                    </td>
+                    <td className="break-words px-1 py-3">
+                      {reportTestPhase(r.testsMs, r.testExecution)}
+                    </td>
+                    <td className="break-words px-1 py-3" title={coverage}>
+                      {reportTestSuite(r)}
+                      {coverage && <div className="mt-1 text-neutral-400">{coverage}</div>}
+                    </td>
+                    <td className="break-words px-1 py-3 font-mono">{reportDuration(r.workMs)}</td>
+                    <td className="break-words px-1 py-3 font-mono">
+                      {reportDuration(r.userActiveMs)}
+                    </td>
+                    <td className="break-words px-1 py-3 font-mono">{reportDuration(r.waitMs)}</td>
+                    <td className="break-words px-1 py-3 font-mono">{money(r.realUsd)}</td>
+                    <td className="break-words px-1 py-3 font-mono">{apiRates(r)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {report.truncated && (
@@ -190,9 +215,14 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
         <p>
           Workflow work is elapsed step work, including deterministic setup and the test phase;
           agent-hours sum concurrent invocations. Test phase includes setup and skipped commands and
-          does not prove that tests executed. Execution coverage comes from surviving verification
-          outcomes; earlier attempts may be unrecorded. Test commands run by agents during
-          implementation remain in Implementation.
+          does not prove that tests executed. Suite time sums finished test checks, including
+          selective runs and retries; lint and typecheck are excluded. Suite time can include
+          agent-slot wait and the 08b post-failure enumerate probe. Not-run and incomplete checks
+          are excluded from pass share. A task with test check records uses those for execution
+          coverage: passed or failed means ran, only not-run records means not run, otherwise
+          execution is unrecorded. Tasks without test check records fall back to surviving
+          verification output; earlier attempts may be unrecorded. Test commands run by agents
+          during implementation remain in Implementation.
         </p>
         <p>
           Human active counts attention only on a waiting task form. Plan page time is reported

@@ -6,6 +6,7 @@ import {
   type TaskTimingStep,
   type TimeCategory,
 } from '../step-engine/timing.js';
+import { summarizeTestChecks, type TimeCostCheckRun } from './check-runs.js';
 
 export interface FormWaitEvent {
   id: string;
@@ -144,7 +145,7 @@ export interface TimeCostInvocation {
   unsnapshottedInvocations: number;
 }
 export type TestExecution = 'ran' | 'not_run' | 'unrecorded';
-export interface TimeCostRow {
+export interface TimeCostRow extends ReturnType<typeof summarizeTestChecks> {
   taskId: string;
   workMs: number | null;
   testsMs: number | null;
@@ -177,7 +178,13 @@ function groupByTask<T extends { taskId: string }>(rows: T[]) {
 
 /** Before check-run recording, only the deterministic verify output proves command execution.
  * Other test-phase agents' elapsed spans say nothing about whether a command ran. */
-function testExecution(steps: TimeCostStep[]): TestExecution {
+function testExecution(steps: TimeCostStep[], checks: TimeCostCheckRun[]): TestExecution {
+  const tests = checks.filter((r) => r.slot === 'test');
+  if (tests.length > 0) {
+    if (tests.some((r) => r.outcome === 'passed' || r.outcome === 'failed')) return 'ran';
+    if (tests.every((r) => r.outcome === 'not_run')) return 'not_run';
+    return 'unrecorded';
+  }
   const results = steps
     .filter((s) => s.stepId === '08-phase-5-verify')
     .map((s) => {
@@ -194,11 +201,14 @@ export function buildTimeCostReport(input: {
   steps: TimeCostStep[];
   events: FormWaitEvent[];
   invocations: TimeCostInvocation[];
+  checkRuns?: TimeCostCheckRun[];
+  recordingStartedAt?: string | null;
   limit?: number;
 }) {
   const stepsByTask = groupByTask(input.steps);
   const eventsByTask = groupByTask(input.events);
   const runsByTask = groupByTask(input.invocations);
+  const checksByTask = groupByTask(input.checkRuns ?? []);
   const byCategory = Object.fromEntries(
     TIME_CATEGORIES.map((c) => [c, { workMs: 0, agentMs: 0, realUsd: 0, notionalUsd: 0 }]),
   ) as Record<
@@ -207,6 +217,7 @@ export function buildTimeCostReport(input: {
   >;
   const rows: TimeCostRow[] = input.tasks.map((t) => {
     const steps = stepsByTask.get(t.taskId) ?? [];
+    const checks = checksByTask.get(t.taskId) ?? [];
     const at = new Date(t.completedAt).getTime();
     const timing = computeTaskTiming(steps, at);
     const work = computeWorkByCategory(steps, at);
@@ -234,7 +245,8 @@ export function buildTimeCostReport(input: {
       unsnapshottedInvocations: 0,
       unattributedInvocations: 0,
       lowerBound: false,
-      testExecution: testExecution(steps),
+      testExecution: testExecution(steps, checks),
+      ...summarizeTestChecks(checks),
     };
     for (const run of runsByTask.get(t.taskId) ?? []) {
       const c = byCategory[timeCategoryOf(run.stepId ?? '')];
@@ -271,6 +283,7 @@ export function buildTimeCostReport(input: {
   const measured = (key: 'testsMs' | 'waitMs' | 'realUsd' | 'notionalUsd') =>
     rows.some((r) => r[key] !== null) ? rows.reduce((n, r) => n + (r[key] ?? 0), 0) : null;
   const totals = {
+    ...summarizeTestChecks(input.tasks.flatMap((t) => checksByTask.get(t.taskId) ?? [])),
     timedTaskCount: rows.filter((r) => r.workMs !== null).length,
     workMs: total('workMs'),
     userActiveMs: total('userActiveMs'),
@@ -295,6 +308,7 @@ export function buildTimeCostReport(input: {
   rows.sort((a, b) => (b.workMs ?? 0) - (a.workMs ?? 0) || a.taskId.localeCompare(b.taskId));
   const limit = input.limit !== undefined && input.limit > 0 ? input.limit : TIME_COST_ROW_LIMIT;
   return {
+    recordingStartedAt: input.recordingStartedAt ?? null,
     totals,
     byCategory,
     rows: rows.slice(0, limit),

@@ -6,3 +6,4 @@ export * from './time-cost.js';
 export * from './throughput.js';
 export * from './tokens.js';
 export * from './tool-usage.js';
+export * from './check-runs.js';

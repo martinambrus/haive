@@ -87,6 +87,7 @@ function setup(cliProviderId: string | null, providers: Rows[] | null) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
+    taskCheckRuns: schema.taskCheckRuns,
     taskEvents: schema.taskEvents,
     modules: schema.modules,
     stepCatalog: schema.stepCatalog,
