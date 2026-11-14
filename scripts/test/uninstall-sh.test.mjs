@@ -104,7 +104,10 @@ for a in "$@"; do
   if [ "$prev" = -o ]; then out=$a; fi
   prev=$a
 done
-case "$out" in docker-compose*) echo 'services: {}' > "$out" ;; esac
+case "\${out##*/}" in
+  release.json) echo '{}' > "$out" ;;
+  docker-compose*) echo 'services: {}' > "$out" ;;
+esac
 exit 0
 `;
 

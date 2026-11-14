@@ -322,10 +322,15 @@ remains internal and unauthenticated. A failed database password sync stops depe
 is retried on the next start. See README's source-build setup for host database client
 settings and the credential-only rollback (the reverted script has no automatic sync).
 
-Only installs whose compose bundle carries the gate have it. `haive upgrade` swaps
-images and keeps the compose bundle it was installed with, so an install upgraded from
-an earlier release keeps the daemon on `haive-models` with no gate until its compose bundle is
-replaced by one from this release or later.
+Only installs whose compose bundle carries the gate have it. A release manifest with `bundle`
+now makes `haive upgrade` verify and replace the compose files as well as the images, preserving
+the installed GPU or Vulkan overlay. Fresh installers verify the fetched files and write
+`.haive-bundle.json`; older installs without a record are recognised through the target's known
+hashes. A modified or unknown bundle refuses until the operator accepts
+`--replace-modified-bundle`, which backs up the old files before replacement. A target without
+`bundle` still upgrades images only, so it cannot add the gate. The host helper and updater need
+Docker Compose 2.24 or later. Required keys generated in `.env` stay after rollback so it cannot
+reopen missing auth. See [Cutting a release](release.md) for verification, backups and recovery.
 
 KNOWN SECURITY GAP, accepted for local single-user use (owner decision 2026-11-13): per-task ports
 the worker publishes are reachable from other tasks' sandboxes. They bind 127.0.0.1, which

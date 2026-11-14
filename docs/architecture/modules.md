@@ -644,9 +644,13 @@ nothing unless it exits 0.
 `install.ps1 -Channel <c> -RegistryUser <u> -Version <v> [-ChannelRegistry <prefix>]`, which also takes the GNU spellings and
 the base's bare positional order Version, Dir, InstallId, Channel)
 installs a channel from its private registry. `<c>` and `<prefix>` follow the build-channel CHANNEL and PREFIX rules;
-the prefix defaults to `ghcr.io/martinambrus`. Without `--channel`, or with `public`, nothing below happens and the
-public output (`.env`, `./haive`, the uninstall script) is unchanged. A channel has no `latest`: the version is
-required and its absence refuses.
+the prefix defaults to `ghcr.io/martinambrus`. Public and channel installs both verify every fetched
+compose file against `bundle.files` when present and write the initial `.haive-bundle.json` record
+with the version and hashes of installed files only. A release without `bundle` writes no record.
+Hash mismatches refuse before the destination is written, including with `--force`.
+Both the host helper and updater require Docker Compose 2.24 or later for `!reset`.
+Without `--channel`, or with `public`, none of the channel behavior below happens.
+A channel has no `latest`: the version is required and its absence refuses.
 
 - Token: from `HAIVE_REGISTRY_TOKEN` (removed from the environment at once) or a no-echo prompt that restores the
   terminal on every exit. It reaches `docker login --password-stdin` only, never argv, a file the installer
@@ -673,6 +677,10 @@ required and its absence refuses.
   compares (`./x`, `/./` and a trailing slash collapse), and a channel install refuses `..` and characters outside
   letters, digits, spaces, `_`, `-` and `.`. The PowerShell installer re-applies the owner-only DACL (or POSIX
   0700/0600) after the move.
+- Bundle verification uses the already-read channel manifest; it never fetches a second manifest
+  from the public release. Compose downloads are staged in private scratch and checked before
+  credential placement or destination writes. The POSIX record has the install directory's
+  owner/group and mode 0644; PowerShell uses the install directory's inherited Windows ACL.
 - `--check`: login and manifest read under the scratch config, then removed; writes nothing.
 - Generated `./haive`: reads `.env` as data (it never sources it) and exports `DOCKER_CONFIG` for compose, so
   `up` and `pull` use the install credential. `upgrade` runs the updater with `--channel`,
@@ -723,6 +731,9 @@ per-customer.
   of the three, refuses (`rollback-images-missing`). Rollback inventory lists digest forms (`repo@digest` and
   `repo:tag@digest`) for a channel install and for a public install whose overrides carry a digest, so digest
   pins pass preflight.
+- `--replace-modified-bundle` explicitly accepts replacing local compose edits or an unknown
+  legacy bundle. The updater backs up accepted edits before replacement; see [Cutting a release](release.md).
+  Generated required keys stay in `.env` after rollback so rollback cannot reopen missing auth.
 - `--dry-plan` (channel installs only) prints the computed image plan from the manifest and touches no database.
 - Revocation: the vendor revokes the token; the next pull fails closed and the running stack keeps running.
 

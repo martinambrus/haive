@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
@@ -22,10 +23,20 @@ const images = Object.fromEntries(
 );
 const manifest = { channel: 'customer', version: '9.9.9', images };
 const pins = ['api', 'worker', 'web'].map((host) => images[host]).join('\n') + '\n';
-function read(data) {
+function read(data, bundleFile = '') {
   return spawnSync(
     'awk',
-    ['-v', 'channel=customer', '-v', 'version=9.9.9', '-v', `registry=${registry}`, reader],
+    [
+      '-v',
+      `bundleFile=${bundleFile}`,
+      '-v',
+      'channel=customer',
+      '-v',
+      'version=9.9.9',
+      '-v',
+      `registry=${registry}`,
+      reader,
+    ],
     { input: data, encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, timeout: 3000 },
   );
 }
@@ -98,3 +109,47 @@ test('manifest reader rejects garbage after otherwise complete records', () => {
   assert.equal(r.status, 1, r.stderr);
   assert.equal(r.stdout, '');
 });
+
+const bundleFiles = {
+  'docker-compose.yml': 'sha256:' + 'a'.repeat(64),
+  'docker-compose.run.yml': 'sha256:' + 'b'.repeat(64),
+  'docker-compose.gpu.yml': 'sha256:' + 'c'.repeat(64),
+};
+test('manifest reader emits bundle hashes separately from image pins', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'install-manifest-'));
+  try {
+    const path = join(dir, 'bundle-files');
+    const r = read(JSON.stringify({ ...manifest, bundle: { files: bundleFiles } }), path);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, pins);
+    assert.ok(existsSync(path), 'bundle metadata emitted');
+    assert.equal(
+      readFileSync(path, 'utf8'),
+      Object.entries(bundleFiles)
+        .map(([n, h]) => n + ' ' + h + '\n')
+        .join(''),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+for (const [name, bundle] of [
+  ['null bundle', null],
+  ['array bundle', []],
+  ['missing files', {}],
+  ['array files', { files: [] }],
+  ['missing run', { files: { 'docker-compose.yml': bundleFiles['docker-compose.yml'] } }],
+  [
+    'unknown filename',
+    { files: { ...bundleFiles, '../escape': bundleFiles['docker-compose.yml'] } },
+  ],
+  ['non-compose filename', { files: { ...bundleFiles, other: bundleFiles['docker-compose.yml'] } }],
+  ['non-string hash', { files: { ...bundleFiles, 'docker-compose.run.yml': 1 } }],
+  ['bad hash', { files: { ...bundleFiles, 'docker-compose.run.yml': 'sha256:no' } }],
+]) {
+  test(`manifest reader refuses ${name}`, () => {
+    const r = read(JSON.stringify({ ...manifest, bundle }));
+    assert.equal(r.status, 1, r.stderr);
+    assert.equal(r.stdout, '');
+  });
+}

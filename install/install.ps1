@@ -326,6 +326,27 @@ function Assert-ManifestKeys([string]$json) {
   if ($reader.pos -ne $json.Length) { throw 'trailing JSON content' }
 }
 
+# The same strict reader serves public downloads and authenticated channel images.
+function Read-ReleaseManifest([string]$file) {
+  $entry = Get-Item -LiteralPath $file -Force
+  if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'release manifest must be a regular file of at most 1 MiB' }
+  $json = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file))
+  Assert-ManifestKeys $json
+  $manifest = $json | ConvertFrom-Json
+  if (@($manifest.PSObject.Properties.Name) -ccontains 'bundle') {
+    $allowed = @('docker-compose.yml', 'docker-compose.run.yml', 'docker-compose.gpu.yml', 'docker-compose.vulkan.yml')
+    if ($manifest.bundle -isnot [pscustomobject] -or @($manifest.bundle.PSObject.Properties.Name) -cnotcontains 'files' -or $manifest.bundle.files -isnot [pscustomobject]) { throw 'invalid release bundle files' }
+    foreach ($name in @('docker-compose.yml', 'docker-compose.run.yml')) {
+      if (@($manifest.bundle.files.PSObject.Properties.Name) -cnotcontains $name) { throw "release bundle is missing $name" }
+    }
+    foreach ($property in $manifest.bundle.files.PSObject.Properties) {
+      if ($allowed -cnotcontains $property.Name -or $property.Value -isnot [string] -or $property.Value -cnotmatch '\Asha256:[0-9a-f]{64}\z') { throw "invalid release bundle hash: $($property.Name)" }
+    }
+    if (@($manifest.PSObject.Properties.Name) -cnotcontains 'channel' -or @($manifest.PSObject.Properties.Name) -cnotcontains 'version' -or $manifest.channel -isnot [string] -or $manifest.version -isnot [string] -or $manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'release bundle channel or version differs' }
+  }
+  return $manifest
+}
+
 # Stage credentials until verification succeeds; no failed manifest creates an install.
 function Read-ChannelManifest {
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
@@ -399,13 +420,8 @@ function Read-ChannelManifest {
     if ((Invoke-Native docker @('cp', "${container}:/release.json", $file)).ExitCode -ne 0) { throw 'could not read /release.json from the channel release image' }
     if ((Invoke-Native docker @('rm', '-f', $container)).ExitCode -ne 0) { throw "could not remove manifest container $container" }
     $container = $null
-    $entry = Get-Item -LiteralPath $file -Force
-    if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'channel manifest must be a regular file of at most 1 MiB' }
     try {
-      # GetString retains a BOM so the grammar rejects it, like the shell reader.
-      $json = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file))
-      Assert-ManifestKeys $json
-      $manifest = $json | ConvertFrom-Json
+      $manifest = Read-ReleaseManifest $file
       foreach ($name in @('channel','version','images')) {
         if (@($manifest.PSObject.Properties.Name) -cnotcontains $name) { throw 'missing manifest key' }
       }
@@ -504,7 +520,10 @@ Write-Note "resolved          $pinned  (tag $tag)"
 # Verify the release EXISTS before generating a secret or pulling an image, so a typo costs
 # nothing. Its manifest is the artefact an upgrade reads too.
 if ($Channel -ceq 'public') {
-  try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
+  $script:ChannelScratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
+  $null = New-Item -ItemType Directory -Path $ChannelScratch
+  $manifestFile = Join-Path $ChannelScratch 'release.json'
+  try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -OutFile $manifestFile -UseBasicParsing }
   catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
 }
 if ($Check) {
@@ -516,7 +535,10 @@ if ($Check) {
   Write-Host "-Check: nothing was installed."
   exit 0
 }
-if ($Channel -ceq 'public') { Write-Note "manifest          found" }
+if ($Channel -ceq 'public') {
+  $releaseManifest = Read-ReleaseManifest $manifestFile
+  Write-Note "manifest          found"
+}
 
 if (-not $Dir) { $Dir = Join-Path $env:USERPROFILE $InstallId }
 # Collapse relative and /./ segments before deriving the updater credential path.
@@ -545,20 +567,21 @@ if ($Channel -cne 'public') {
   $channelHostDir = $Dir.Replace('\', '/').TrimEnd('/')
   if ($channelHostDir -match '^([A-Za-z]):/(.*)$') { $channelHostDir = '/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2] }
   if ($channelHostDir -cnotmatch '^/[a-zA-Z0-9_./ -]+$' -or $channelHostDir.Contains('..') -or $channelHostDir.Contains('//') -or $channelHostDir.EndsWith('/.')) { Die 'channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and .' }
-  try { $channelManifest = Read-ChannelManifest }
+  try { $channelManifest = Read-ChannelManifest; $releaseManifest = $channelManifest }
   catch { Die $_.Exception.Message }
   Write-Note "manifest          verified for $pinned"
 }
 
 Write-Step "Writing the install to $Dir"
-New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
-Push-Location $Dir
+# Keep every download in scratch until all installed files have passed verification.
+$bundleDir = Join-Path $ChannelScratch 'bundle'
+$null = New-Item -ItemType Directory -Path $bundleDir
 
-Get-Bundle "$Raw/$tag/docker-compose.yml"     (Join-Path $Dir 'docker-compose.yml')
-Get-Bundle "$Raw/$tag/docker-compose.run.yml" (Join-Path $Dir 'docker-compose.run.yml')
+Get-Bundle "$Raw/$tag/docker-compose.yml"     (Join-Path $bundleDir 'docker-compose.yml')
+Get-Bundle "$Raw/$tag/docker-compose.run.yml" (Join-Path $bundleDir 'docker-compose.run.yml')
 # A release older than its installer may not pass the generated password to Mailpit; the
 # summary then says the inbox is open rather than promise a login it does not have.
-$mailLogin = if (Select-String -LiteralPath (Join-Path $Dir 'docker-compose.run.yml') -Pattern '^\s*MP_UI_AUTH:' -Quiet) {
+$mailLogin = if (Select-String -LiteralPath (Join-Path $bundleDir 'docker-compose.run.yml') -Pattern '^\s*MP_UI_AUTH:' -Quiet) {
   '(user haive, MAILPIT_UI_PASSWORD from .env)'
 } else {
   '(no login in this release: anyone who can reach this port can read its mail)'
@@ -569,6 +592,55 @@ Write-Note "compose bundle    docker-compose.yml + docker-compose.run.yml"
 # stack boots correctly on CPU either way and probing it here would be a claim this script has not
 # measured. Ollama runs on CPU; that is a supported configuration, not a degraded one.
 Write-Note "ollama            CPU"
+
+$installedFiles = @('docker-compose.yml', 'docker-compose.run.yml')
+$hasReleaseBundle = @($releaseManifest.PSObject.Properties.Name) -ccontains 'bundle'
+if ($hasReleaseBundle) {
+  $hashes = [ordered]@{}
+  foreach ($name in $installedFiles) {
+    $actual = 'sha256:' + (Get-FileHash -LiteralPath (Join-Path $bundleDir $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -cne $releaseManifest.bundle.files.$name) { Die "release bundle hash mismatch: $name; retry the installer; if it persists, report this release to its publisher" }
+    $hashes[$name] = $actual
+  }
+  $record = [ordered]@{ version = $pinned; files = $hashes } | ConvertTo-Json -Depth 10 -Compress
+  [IO.File]::WriteAllText((Join-Path $bundleDir '.haive-bundle.json'), $record + "`n", (New-Object Text.UTF8Encoding($false)))
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
+Push-Location $Dir
+# Stage on the destination filesystem. Rename replaces a link instead of writing through it.
+$bundleStage = Join-Path $Dir ('.haive-install.' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $bundleStage
+function Place-BundleFile([string]$name) {
+  $destination = Join-Path $Dir $name
+  if ([IO.Directory]::Exists($destination)) { throw "bundle destination is a directory: $name" }
+  Move-Item -LiteralPath (Join-Path $bundleStage $name) -Destination $destination -Force
+}
+foreach ($name in $installedFiles) {
+  Copy-Item -LiteralPath (Join-Path $bundleDir $name) -Destination (Join-Path $bundleStage $name)
+  Place-BundleFile $name
+}
+if ($hasReleaseBundle) {
+  $recordPath = Join-Path $bundleStage '.haive-bundle.json'
+  Copy-Item -LiteralPath (Join-Path $bundleDir '.haive-bundle.json') -Destination $recordPath
+  # Windows inherits the install directory's ACL; POSIX installs match the updater's owner and mode.
+  if ($env:OS -ne 'Windows_NT') {
+    $owner = Invoke-Native stat @('-c', '%u:%g', $Dir) -Capture
+    if ($owner.ExitCode -ne 0) { throw 'cannot read install directory owner' }
+    $current = Invoke-Native stat @('-c', '%u:%g', $recordPath) -Capture
+    if ($current.ExitCode -ne 0) { throw 'cannot read bundle record owner' }
+    if ($current.Output.Trim() -cne $owner.Output.Trim()) {
+      if ((Invoke-Native chown @($owner.Output.Trim(), $recordPath)).ExitCode -ne 0) {
+        # Some shares reject chown even when ownership already matches.
+        $current = Invoke-Native stat @('-c', '%u:%g', $recordPath) -Capture
+        if ($current.ExitCode -ne 0 -or $current.Output.Trim() -cne $owner.Output.Trim()) { throw 'cannot set bundle record owner; use an install directory whose ownership you can preserve' }
+      }
+    }
+    if ((Invoke-Native chmod @('644', $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record mode' }
+  }
+  Place-BundleFile '.haive-bundle.json'
+}
+Remove-Item -LiteralPath $bundleStage -Force
+$bundleStage = $null
 
 $webPort     = Get-FreePort 3000
 $apiPort     = Get-FreePort ($webPort + 1)
@@ -660,7 +732,9 @@ if ($Channel -cne 'public') {
 
 $haivePs1 = @'
 # Haive control script for this install. Generated by the installer.
-param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain)
+[CmdletBinding(PositionalBinding=$false)]
+param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain,
+  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $files = @('-f','docker-compose.yml','-f','docker-compose.run.yml')
@@ -680,7 +754,7 @@ switch ($Command) {
   'ps'      { docker compose @files ps }
   'version' { $e = Get-DotEnv; Invoke-RestMethod "http://localhost:$($e['HAIVE_API_PORT'])/version" | ConvertTo-Json }
   'upgrade' {
-    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v>"; exit 2 }
+    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v> [--replace-modified-bundle]"; exit 2 }
     $e = Get-DotEnv
     $v = $Version -replace '^v',''
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
@@ -703,6 +777,7 @@ switch ($Command) {
       '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots"
     )
     if ($ForceDrain) { $dargs += '--force' }
+    if ($RemainingArgs.Count -gt 0) { $dargs += $RemainingArgs }
     $previousDatabaseUrl = $env:DATABASE_URL
     $previousEncryptionKey = $env:CONFIG_ENCRYPTION_KEY
     try {
@@ -714,18 +789,11 @@ switch ($Command) {
       $env:CONFIG_ENCRYPTION_KEY = $previousEncryptionKey
     }
   }
-  default { Write-Host "usage: .\haive.ps1 up|down|logs|ps|version|upgrade -Version <v>" }
+  default { Write-Host "usage: .\haive.ps1 up|down|logs|ps|version|upgrade -Version <v> [--replace-modified-bundle]" }
 }
 '@
 if ($Channel -cne 'public') {
-  $haivePs1 = $haivePs1.Replace("param([Parameter(Position=0)][string]`$Command = 'help', [string]`$Version, [switch]`$ForceDrain)", @'
-[CmdletBinding(PositionalBinding=$false)]
-param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain,
-  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)
-'@)
-  # Append only after the image and updater options, never to docker run options.
-  $haivePs1 = $haivePs1.Replace("    if (`$ForceDrain) { `$dargs += '--force' }", "    if (`$ForceDrain) { `$dargs += '--force' }`n    if (`$RemainingArgs.Count -gt 0) { `$dargs += `$RemainingArgs }")
-  $haivePs1 = $haivePs1.Replace('upgrade -Version <v>', 'upgrade -Version <v> [--change-channel <channel>]')
+  $haivePs1 = $haivePs1.Replace('upgrade -Version <v> [--replace-modified-bundle]', 'upgrade -Version <v> [--replace-modified-bundle] [--change-channel <channel>]')
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
 Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
 $installEnv = Get-DotEnv
@@ -1059,5 +1127,8 @@ Write-Host ""
   }
   if ($ChannelScratch) {
     Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if ($bundleStage) {
+    Remove-Item -LiteralPath $bundleStage -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
