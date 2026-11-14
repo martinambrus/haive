@@ -1,5 +1,5 @@
 import { safeErrorMessage } from '@haive/shared/logger';
-import { and, eq, isNull, inArray } from 'drizzle-orm';
+import { and, eq, isNull, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_PROVIDER_LIST,
@@ -287,38 +287,47 @@ async function applyDesiredRows(
   unchanged: number;
   perProvider: Map<CliProviderName, number>;
 }> {
-  const sources = [...new Set(desired.map((d) => d.source))];
-  const live = await db
-    .select()
-    .from(schema.cliModelPrices)
-    .where(
-      and(
-        isNull(schema.cliModelPrices.effectiveTo),
-        inArray(schema.cliModelPrices.source, sources),
-      ),
+  return db.transaction(async (tx) => {
+    // A row lock cannot serialize the first insertion of a missing price. One shared
+    // advisory key covers every feed batch, including missing rows. Fetches happen before
+    // this short section; the bounded wait holds no request-scoped connection.
+    await tx.execute(sql`SET LOCAL lock_timeout = '30000ms'`);
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${'model-price-refresh'}, 0))`,
     );
-  const liveByKey = new Map(live.map((r) => [`${r.provider ?? ''} ${r.modelKey} ${r.source}`, r]));
+    const sources = [...new Set(desired.map((d) => d.source))];
+    const live = await tx
+      .select()
+      .from(schema.cliModelPrices)
+      .where(
+        and(
+          isNull(schema.cliModelPrices.effectiveTo),
+          inArray(schema.cliModelPrices.source, sources),
+        ),
+      );
+    const liveByKey = new Map(
+      live.map((r) => [`${r.provider ?? ''} ${r.modelKey} ${r.source}`, r]),
+    );
 
-  const toClose: string[] = [];
-  const toInsert: DesiredRow[] = [];
-  let unchanged = 0;
-  for (const row of desired) {
-    const existing = liveByKey.get(`${row.provider} ${row.modelKey} ${row.source}`);
-    if (!existing) {
+    const toClose: string[] = [];
+    const toInsert: DesiredRow[] = [];
+    let unchanged = 0;
+    for (const row of desired) {
+      const existing = liveByKey.get(`${row.provider} ${row.modelKey} ${row.source}`);
+      if (!existing) {
+        toInsert.push(row);
+        continue;
+      }
+      if (ratesEqual(existing.rates, row.rates)) {
+        unchanged++;
+        continue;
+      }
+      toClose.push(existing.id);
       toInsert.push(row);
-      continue;
     }
-    if (ratesEqual(existing.rates, row.rates)) {
-      unchanged++;
-      continue;
-    }
-    toClose.push(existing.id);
-    toInsert.push(row);
-  }
 
-  if (toClose.length > 0 || toInsert.length > 0) {
-    const now = new Date();
-    await db.transaction(async (tx) => {
+    if (toClose.length > 0 || toInsert.length > 0) {
+      const now = new Date();
       // Close first: the partial unique index allows exactly one live row per
       // (provider, model, source), so the replacement cannot be inserted while the
       // superseded row is still open.
@@ -326,7 +335,12 @@ async function applyDesiredRows(
         await tx
           .update(schema.cliModelPrices)
           .set({ effectiveTo: now })
-          .where(inArray(schema.cliModelPrices.id, toClose.slice(i, i + 500)));
+          .where(
+            and(
+              inArray(schema.cliModelPrices.id, toClose.slice(i, i + 500)),
+              isNull(schema.cliModelPrices.effectiveTo),
+            ),
+          );
       }
       for (let i = 0; i < toInsert.length; i += 500) {
         await tx.insert(schema.cliModelPrices).values(
@@ -339,17 +353,17 @@ async function applyDesiredRows(
           })),
         );
       }
-    });
-  }
+    }
 
-  const perProvider = new Map<CliProviderName, number>();
-  for (const row of desired) {
-    perProvider.set(
-      row.provider,
-      (perProvider.get(row.provider) ?? 0) + Number(row.rates.pricingState !== 'unsupported'),
-    );
-  }
-  return { inserted: toInsert.length, closed: toClose.length, unchanged, perProvider };
+    const perProvider = new Map<CliProviderName, number>();
+    for (const row of desired) {
+      perProvider.set(
+        row.provider,
+        (perProvider.get(row.provider) ?? 0) + Number(row.rates.pricingState !== 'unsupported'),
+      );
+    }
+    return { inserted: toInsert.length, closed: toClose.length, unchanged, perProvider };
+  });
 }
 
 /** Record a fetch failure without touching stored rates or price counts. */
