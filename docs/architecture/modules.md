@@ -473,7 +473,66 @@ is published.
 
 The worker's old paths re-export the contracts, DTOs and helpers for compatibility. Other shared
 entries, including the root and browser entries, do not re-export any of the three step SDK
-entries. Task-bound host services are later SDK work; these entries grant no new dispatch service.
+entries. These entries grant no new dispatch service.
+
+Every production context supplies `ctx.host`, typed as optional `StepHostServices` so existing
+test doubles remain valid. A module requiring it checks once and fails clearly when it is absent.
+The three services capture the context's task, user and round, verify task-step ownership, and
+accept only its resolved worktree, using the canonical latest setup decision (a skipped 01
+selects the repository root even with an old worktree column); a mismatch throws `StepHostBindingError`.
+`loadPreviousStepOutput(stepId)` adapts the core helper with a ceiling of `ctx.round`;
+`collectImplementationFiles(worktreePath)` adapts the same collector used by built-in reviews,
+including its cap, changed-line notes, nested checkout boundaries and scan errors. Previous-output
+lookups still verify task, step and round, but do not require a surviving worktree directory.
+
+`readReviewDiff({worktreePath, maxBytes, includeFileContents?})` returns the explicit `ReviewDiff`
+DTO: `ready` carries canonical JSON `content`, UTF-8 `bytes`, SHA-256 `diffHash`, `scope` and a top-level `partial` marker;
+`too-large` and `unavailable` carry a reason, scope and `partial: true`. The payload includes the verified fork
+point, scope and partial-coverage disclosure, dependency ownership and review dimensions, the
+tracked diff, retained untracked text, and per-file content hashes, modes and binary/deletion notices.
+Its versioned bytes include the contents flag and a digest of omitted git changes; they are hashed exactly.
+With `includeFileContents: true`, full post-change text follows the diff within the same byte
+budget. Untracked text appears only in untrackedContents, including when the flag is true.
+Files are tried in path order; omissions identify each path and its reason. Mandatory
+evidence over budget is `too-large`; empty scopes, unreadable fork points and inconsistent
+captures are `unavailable`. Secret-policy failure is also unavailable. A link, gitlink, directory,
+missing or invalid (absolute or parent-traversing) entry is disclosed by kind and leaves the
+payload ready with `coverage.partial` and top-level `partial`; it cannot veto unrelated evidence. Nonregular entries
+never enter content hunks. A partial result never establishes complete review coverage.
+
+Each call resolves `taskSecretMaskPolicy` once, compiles the effective allow/extend/carve-out
+globs and refuses a missing or failed policy lookup, even when sandbox masking is disabled.
+Tracked matches are withheld too: their bytes are never read or hashed, their hunks leave the
+diff, and only path/size/mode and a withheld kind remain. Withholding is per denied path: no content open, read, hash or pathspec for that path;
+ordinary files retain their contents, hashes and hunks. Only a git-reported deletion of a denied
+path withholds the whole capture, since its bytes could have moved to an allowed destination; a
+denied name that is merely missing from a reported list is withheld on its own. Every path is
+canonicalized once before the policy check, and a reported name that is not already canonical
+(a trailing slash, `./`, `..` or a doubled slash) is disclosed as `invalid` and never opened. When
+the exact and case-insensitive verdicts disagree, deny wins. A nested repository is disclosed by
+kind before any of these checks, and a name longer than the git argument budget is `invalid`.
+Both name-status and hunk queries disable rename detection (`--no-renames`). Same-size edits to withheld files cannot
+be detected. This follows [Fix loop](fix-loop.md#test-edits-during-a-repair).
+
+Retained file content has a fixed 16 MiB cumulative raw-byte cap (injectable at smaller values
+in tests), independent of the caller's maxBytes. Excess content is listed as
+`retained-content-limit` and makes coverage partial. The consistency capture hashes and compares
+file identities without retaining another full-content copy; omitted git changes still
+participate in the fingerprint. This bounds retained content, not total hashing I/O.
+
+Failure reasons and returned scope.scanError pass through safeErrorMessage and scrubErrorPaths; EMFILE/ENFILE propagate
+to fail and retry the step, never become unavailable or a missing entry. Missing and refused
+bound directories raise StepHostBindingError rather than raw filesystem errors.
+
+Repository reads use held descriptors through `fs-safe`; git uses hardened host helpers
+with optional locks disabled for review diff, ls-files and merge-base reads.
+Metadata queries have a fixed 16 MiB internal ceiling independent of maxBytes; overflow
+is unavailable, not too-large. Gitlink metadata queries use literal changed paths only,
+excluding denied paths. maxBytes bounds the change payload and hunk output.
+Services honor the context signal and normalize cancellation through `throwIfCancelled`;
+no database transaction spans git or file reads. `PreviousStepOutput`, `ReviewDiffOptions`
+and `StepHostServices` are declared in the public contract entry, with no worker type imports.
+Fix-loop diagnosis and unacted-insight services remain deferred to the deep-analysis consumer.
 
 ## Published-image installs
 

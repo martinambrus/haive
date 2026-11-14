@@ -216,7 +216,7 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
 2. The step SDK seam: the step types and helpers a module step needs without importing
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
-   Status: PR2 of 4 implemented.
+   Status: PR3 of 4 implemented (host services: previous output, implementation files, review diff).
 3. Derived types. **PR4 of 4 implemented (prerequisite 3 complete):** shared schemas/evaluator and ordered catalog adapter,
    additive storage in 0240/0241, and the atomic API/shared/worker admission, task pinning, triage
    selection and execution/advisory/dependency readers. Tasks pin all candidates before triage;
@@ -249,6 +249,10 @@ bounds, use fake timers and keep each new/changed test file under 5 s. Register 
 within its budget. Built-in and static-admin semantics remain unchanged throughout.
 
 ## Part B: DeepPattern as a steps-only public module (only after a go)
+
+Status: paused by owner decision on 2026-11-14 until a full workflow run gives a fresh 08c
+baseline to compare against. The Phase 0 benchmark (precision 24%, recall 3 of 26, no new real
+findings) puts it at best a report-only second opinion, never a gate. Part A continues.
 ### Module shape
 
 - A public GitHub repository, `martinambrus/haive-module-deeppattern`, package
