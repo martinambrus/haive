@@ -670,9 +670,9 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186 (+6)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186 and #1190 (+13)
 
-status: open · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
+status: open (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); queued overnight: items 10 and 11; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
 Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 
@@ -682,6 +682,13 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 4. `createDerivedChangesSchema(maxChanges)` accepts any bound (`:26`), above `MAX_DERIVED_CHANGES` too; PR3 callers must never pass a user value.
 5. `OrderedStepCatalogRow.stepIndex` is `number` but `step_catalog.step_index` is nullable; a NULL throws "Invalid base catalog index" (`run-list.ts:129`). PR3's ordered catalog read must map NULL explicitly.
 6. PR2's fail-closed refusals throw inside the row map of `GET /task-types` and `GET /admin/task-types` (`availabilityOf`, `shared/src/modularity/task-types.ts:106`): with a derived row present on PR2 code (a PR3 revert) the whole list answers 500. PR3 must replace every refusal in one change; a revert past PR3 must delete derived definitions first.
+7. (#1190) `POST /tasks` and `PATCH /tasks/:id` still return the full derived run plan; list and poll strip it. LOW.
+8. (#1190) An `UnresolvedStepError` is rethrown raw on one read path instead of failing by name. LOW.
+9. (#1190) Read-only endpoints take the catalog lock they do not need. LOW.
+10. (#1190) Scan readers throw on a malformed derived row instead of skipping it by name (`api/routes/repos.ts` ~:1305, `api/lib/provider-disable-impact.ts` ~:60), so one bad row fails the whole listing. Consequential.
+11. (#1190) CI's gated test list is at 155 of its 156 budget; the next gated test fails CI. Raise or rebalance the budget with a measurement.
+12. (#1190) The catalog fingerprint orders with `localeCompare`, which depends on the runtime locale. LOW.
+13. (#1190) The admission preflight reads the same rows twice. LOW.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
 
