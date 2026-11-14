@@ -58,7 +58,7 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
       });
     log.info({ count: models.length }, 'refreshed openrouter model catalog');
     const errors = models
-      .filter((m) => m.pricingState === 'unsupported')
+      .filter((m) => m.pricingState === 'unsupported' && m.pricingReason !== 'time-window')
       .map((m) => ({
         name: 'price:openrouter',
         error: `${m.id}: ${m.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,

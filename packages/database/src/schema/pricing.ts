@@ -91,7 +91,8 @@ export const cliModelPrices = pgTable(
             }[]
           | null;
         pricingState?: 'unsupported';
-        pricingReason?: 'unsupported-tier' | 'invalid-tier' | 'unsupported-condition';
+        pricingReason?:
+          'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window';
       }>()
       .notNull(),
     /** Always 'USD': every vendor bills USD, and a display currency is applied at

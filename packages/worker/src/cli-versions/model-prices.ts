@@ -97,6 +97,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
 
   const desired: DesiredRow[] = [];
   const errors: RefreshCliVersionsJobResult['errors'] = [];
+  const unsupported: NonNullable<RefreshCliVersionsJobResult['unsupported']> = [];
 
   // --- LiteLLM: direct-vendor rates for everything except the gateway ---
   const litellmProviders = [...enabled];
@@ -154,7 +155,9 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
         const modelKey = m.id.trim().toLowerCase();
         if (!modelKey) continue;
         desired.push({ provider: 'openrouter', modelKey, source: 'openrouter', rates });
-        if (rates.pricingState === 'unsupported')
+        if (rates.pricingState === 'unsupported' && rates.pricingReason === 'time-window')
+          unsupported.push({ model: modelKey, reason: rates.pricingReason });
+        else if (rates.pricingState === 'unsupported')
           errors.push({
             name: 'price:openrouter',
             error: `${modelKey}: ${rates.pricingReason} (${m.unsupportedOverrideCount ?? 0} overrides)`,
@@ -190,7 +193,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
   }
 
   if (desired.length === 0) {
-    return { ok: errors.length === 0, refreshed: [], errors };
+    return { ok: errors.length === 0, refreshed: [], errors, unsupported };
   }
 
   const { inserted, closed, unchanged, perProvider } = await applyDesiredRows(db, desired);
@@ -226,6 +229,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       latest: null,
     })),
     errors,
+    unsupported,
   };
 }
 

@@ -1090,6 +1090,7 @@ export async function handleRefreshCliVersionsJob(
     runId,
     startedAt: started.startedAt.toISOString(),
     ...(prices.skipped?.length ? { skipped: prices.skipped } : {}),
+    ...(prices.unsupported?.length ? { unsupported: prices.unsupported } : {}),
     ok: cli.ok && tools.ok && openrouter.ok && browsers.ok && ruby.ok && prices.ok && fx.ok,
     refreshed: [
       ...cli.refreshed,

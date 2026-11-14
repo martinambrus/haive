@@ -157,6 +157,7 @@ describe('context tier storage', () => {
     expect(models.find((m) => m.id.startsWith('qwen/'))!.tiers).toHaveLength(2);
     const timed = models.find((m) => m.id.startsWith('minimax/'))!;
     expect(timed.pricingState).toBe('unsupported');
+    expect(timed.pricingReason).toBe('time-window');
     expect(timed.unsupportedOverrideCount).toBe(2);
   });
   it('applies OpenRouter overrides in feed order per key at each threshold', () => {

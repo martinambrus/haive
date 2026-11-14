@@ -128,7 +128,7 @@ describe('tier refresh lifecycle', () => {
     expect(await cost()).toMatchObject({ source: 'computed' });
     expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(1);
   });
-  it('invalidates OpenRouter unknown conditions and restores supported tiers', async () => {
+  it('counts known OpenRouter time windows without errors and restores supported tiers', async () => {
     await fake.db
       .update(schema.cliPricingSync)
       .set({ autoUpdateEnabled: true })
@@ -147,9 +147,10 @@ describe('tier refresh lifecycle', () => {
     expect(await cost('openrouter')).toMatchObject({ source: 'computed' });
     await cache([{ utc_start: 1, utc_end: 2, prompt: '3' }]);
     const result = await refreshModelPrices(db);
-    expect(result.errors).toContainEqual({
-      name: 'price:openrouter',
-      error: expect.stringContaining('x'),
+    expect(result).toMatchObject({
+      ok: true,
+      errors: [],
+      unsupported: [{ model: 'x', reason: 'time-window' }],
     });
     expect((await live()).find((r) => r.provider === 'openrouter')!.rates).toMatchObject({
       pricingState: 'unsupported',
@@ -208,4 +209,20 @@ it('syncs live Gemini modality shapes without a price error', async () => {
   expect(result.errors).toEqual([]);
   expect((await live()).filter((r) => r.provider === 'gemini')).toHaveLength(2);
   expect((await live()).every((r) => !r.rates.pricingState)).toBe(true);
+});
+
+it('counts known time windows as successful catalog refreshes', async () => {
+  feed = {
+    data: [
+      {
+        id: 'timed',
+        pricing: { prompt: '1', overrides: [{ utc_start: 1, utc_end: 2, prompt: '2' }] },
+      },
+    ],
+  };
+  const result = await refreshOpenRouterModels(db);
+  expect(result).toMatchObject({ ok: true, errors: [] });
+  expect((await fake.db.query.openrouterModelCache!.findFirst())!.models).toMatchObject([
+    { id: 'timed', pricingState: 'unsupported', pricingReason: 'time-window' },
+  ]);
 });

@@ -1043,7 +1043,8 @@ export const cliInvocations = pgTable(
             }[]
           | null;
         pricingState?: 'unsupported';
-        pricingReason?: 'unsupported-tier' | 'invalid-tier' | 'unsupported-condition';
+        pricingReason?:
+          'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window';
       } | null;
       cacheTtl: '5m' | '1h';
       /** Buckets that had tokens but no rate. Non-empty means the total is partial,

@@ -37,7 +37,7 @@ export interface ModelPriceRates {
 }
 
 export type PricingUnsupportedReason =
-  'unsupported-tier' | 'invalid-tier' | 'unsupported-condition';
+  'unsupported-tier' | 'invalid-tier' | 'unsupported-condition' | 'time-window';
 export type BasePriceRates = Pick<
   ModelPriceRates,
   'inputRate' | 'outputRate' | 'cacheReadRate' | 'cacheWriteRate' | 'cacheWrite1hRate'

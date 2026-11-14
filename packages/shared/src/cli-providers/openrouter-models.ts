@@ -114,22 +114,22 @@ function parseOverrides(
     };
   const supported: Record<string, unknown>[] = [];
   let unsupportedOverrideCount = 0;
+  let timeWindowCount = 0;
   for (const entry of overrides) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       unsupportedOverrideCount++;
       continue;
     }
-    const keys = Object.keys(entry);
-    if (
-      !keys.includes('min_prompt_tokens') ||
-      keys.some(
-        (k) =>
-          k !== 'min_prompt_tokens' &&
-          !Object.hasOwn(OVERRIDE_RATE_FIELDS, k) &&
-          !IGNORED_OVERRIDE_PRICE_FIELDS.has(k),
-      )
-    ) {
+    const conditions = Object.keys(entry).filter(
+      (k) =>
+        k !== 'min_prompt_tokens' &&
+        !Object.hasOwn(OVERRIDE_RATE_FIELDS, k) &&
+        !IGNORED_OVERRIDE_PRICE_FIELDS.has(k),
+    );
+    if (conditions.length || !Object.hasOwn(entry, 'min_prompt_tokens')) {
       unsupportedOverrideCount++;
+      if (conditions.length && conditions.every((k) => k === 'utc_start' || k === 'utc_end'))
+        timeWindowCount++;
       continue;
     }
     supported.push(entry);
@@ -137,7 +137,8 @@ function parseOverrides(
   if (unsupportedOverrideCount)
     return {
       pricingState: 'unsupported',
-      pricingReason: 'unsupported-condition',
+      pricingReason:
+        timeWindowCount === unsupportedOverrideCount ? 'time-window' : 'unsupported-condition',
       unsupportedOverrideCount,
     };
   try {
