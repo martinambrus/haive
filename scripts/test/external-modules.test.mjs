@@ -81,7 +81,7 @@ test('local lock keeps local resolutions until the tracked public lock changes',
   assert.equal(tree.read('external-modules/.lock/pnpm-lock.yaml'), tree.read('pnpm-lock.yaml'));
 });
 
-test('workspace tasks preserve ordinary Turbo behavior, and build local modules before forcing host caches', (t) => {
+test('workspace tasks preserve ordinary Turbo behavior, and build local modules before disabling host caches', (t) => {
   const tree = makeTree(t);
   assert.equal(tree.run('workspace-task.mjs', ['build']).status, 0);
   assert.match(tree.pnpmCalls()[0], /exec turbo run build$/);
@@ -89,7 +89,7 @@ test('workspace tasks preserve ordinary Turbo behavior, and build local modules 
   assert.equal(tree.run('workspace-task.mjs', ['typecheck']).status, 0);
   const calls = tree.pnpmCalls();
   assert.match(calls[1], /--filter @haive\/database.*--filter \.\/external-modules\/\* -r build$/);
-  assert.match(calls[2], /exec turbo run typecheck --force$/);
+  assert.match(calls[2], /exec turbo run typecheck --force --no-cache$/);
 });
 
 test('root tasks forward every extra argument to Turbo in public and local mode', (t) => {
@@ -101,7 +101,7 @@ test('root tasks forward every extra argument to Turbo in public and local mode'
       assert.equal(tree.run('workspace-task.mjs', [task, ...args]).status, 0);
       assert.equal(
         tree.pnpmCalls().at(-1),
-        `${tree.root} exec turbo run ${task}${mode === 'local' ? ' --force' : ''} ${args.join(' ')}`,
+        `${tree.root} exec turbo run ${task}${mode === 'local' ? ' --no-cache' : ''} ${args.join(' ')}`,
       );
     }
   }
@@ -153,4 +153,16 @@ test('selected external web mismatch advice names module add rather than a track
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /run pnpm module add privateone/);
   assert.doesNotMatch(result.stderr, /from packages\/web\/package.json/);
+});
+
+test('local cache policy stays before task arguments and avoids duplicate caller flags', (t) => {
+  const tree = makeTree(t);
+  mkdirSync(join(tree.root, 'external-modules/privateone'));
+  assert.equal(tree.run('workspace-task.mjs', ['test', '--', '--no-cache']).status, 0);
+  assert.equal(
+    tree.pnpmCalls().at(-1),
+    `${tree.root} exec turbo run test --force --no-cache -- --no-cache`,
+  );
+  assert.equal(tree.run('workspace-task.mjs', ['build', '--force', '--no-cache']).status, 0);
+  assert.equal(tree.pnpmCalls().at(-1), `${tree.root} exec turbo run build --force --no-cache`);
 });

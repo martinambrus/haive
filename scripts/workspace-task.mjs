@@ -25,4 +25,11 @@ if (local.folders().length) {
     'build',
   ]);
 }
-run(['exec', 'turbo', 'run', task, ...(local.localMode() ? ['--force'] : []), ...extra]);
+// --force skips reads but still writes; --no-cache also disables writes. Keep
+// policy flags before task arguments, and do not repeat flags the caller supplied.
+const separator = extra.indexOf('--');
+const turboOptions = separator === -1 ? extra : extra.slice(0, separator);
+const cacheOptions = local.localMode()
+  ? ['--force', '--no-cache'].filter((flag) => !turboOptions.includes(flag))
+  : [];
+run(['exec', 'turbo', 'run', task, ...cacheOptions, ...extra]);
