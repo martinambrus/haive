@@ -1019,6 +1019,11 @@ export class StalledTaskSweeper {
 
   /** Exposed for deterministic tests. */
   async sweep(): Promise<{ redriven: number }> {
+    try {
+      await expireFixTestImages(this.db);
+    } catch (err) {
+      log.warn({ err }, 'repair evidence expiry failed');
+    }
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
     redriven += await redriveStoppedTasks(this.db, defaultStopDeps, { staleMs: this.staleMs });
@@ -1027,7 +1032,6 @@ export class StalledTaskSweeper {
     await reconcileStrandedCloningRepos(this.db);
     await reconcileStrandedSyncingBundles(this.db);
     await this.bundleOrphans.sweep(this.db);
-    await expireFixTestImages(this.db);
     return { redriven };
   }
 }

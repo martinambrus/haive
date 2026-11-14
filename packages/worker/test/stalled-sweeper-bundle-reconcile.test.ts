@@ -4,6 +4,10 @@ import type { Database } from '@haive/database';
 
 const reconcile = vi.fn<(db: Database) => Promise<void>>(async () => undefined);
 const reconcileRepos = vi.fn<(db: Database) => Promise<void>>(async () => undefined);
+const expire = vi.fn<(db: Database) => Promise<void>>(async () => undefined);
+vi.mock('../src/step-engine/steps/workflow/_fix-test-store.js', () => ({
+  expireFixTestImages: expire,
+}));
 
 vi.mock('../src/data-migrations.js', () => ({
   reconcileStrandedSyncingBundles: reconcile,
@@ -22,13 +26,32 @@ function emptyDb(): Database {
 }
 
 describe('StalledTaskSweeper', () => {
+  it('expires evidence before unrelated work can fail and isolates expiry failures', async () => {
+    expire.mockClear();
+    const broken = new Proxy(emptyDb(), {
+      get: (_target, key) =>
+        key === 'select'
+          ? () => {
+              throw new Error('unrelated sweep failed');
+            }
+          : Reflect.get(_target, key),
+    });
+    await expect(new StalledTaskSweeper({ db: broken }).sweep()).rejects.toThrow(
+      'unrelated sweep failed',
+    );
+    expect(expire).toHaveBeenCalledExactlyOnceWith(broken);
+    expire.mockRejectedValueOnce(new Error('expiry failed'));
+    await expect(new StalledTaskSweeper({ db: emptyDb() }).sweep()).resolves.toEqual({
+      redriven: 0,
+    });
+  });
   it('reconciles the bundles stranded at syncing on every sweep', async () => {
     const db = emptyDb();
 
     await new StalledTaskSweeper({ db }).sweep();
 
-    expect(reconcile.mock.calls.map(([arg]) => arg === db)).toEqual([true]);
-    expect(reconcileRepos.mock.calls.map(([arg]) => arg === db)).toEqual([true]);
+    expect(reconcile).toHaveBeenLastCalledWith(db);
+    expect(reconcileRepos).toHaveBeenLastCalledWith(db);
   });
 });
 

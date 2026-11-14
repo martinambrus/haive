@@ -110,7 +110,7 @@ describe('phase2ImplementStep fix-pass browser guidance', () => {
     expect(p).toContain('Fix the behaviour');
     expect(p).toContain('approved spec proves');
     expect(p).toContain('name the spec section');
-    expect(p).toContain('no private or unseen grader');
+    expect(p).toContain('report only the checks that actually ran');
   });
 
   it('adds reproduce-and-verify browser steps on a fix pass when browserTesting is on', () => {
@@ -737,6 +737,14 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
     phase2ImplementStep.llm!.buildPrompt({ detected: detect(over), formValues: {} } as never);
   const form = (over: Record<string, unknown>) =>
     phase2ImplementStep.form!({} as StepContext, detect(over) as never)?.description ?? '';
+
+  it('keeps one behaviour contract across the tester hand-off and lets a human revise the spec', () => {
+    const text = prompt({ fixMarked: true, fixGuidance: BEHAVIOUR_FIX_LINES.join('\n') });
+    expect(text.split(BEHAVIOUR_FIX_LINES[0]!).length - 1).toBe(1);
+    expect(text).toContain(
+      'A human directive revising the spec or an expectation takes precedence',
+    );
+  });
 
   it('drops prior rounds a detect output stored before the mark rendered', () => {
     const prior = 'PRIOR-ROUNDS-MARK';

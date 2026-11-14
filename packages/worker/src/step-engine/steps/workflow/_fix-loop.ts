@@ -707,8 +707,9 @@ export const BEHAVIOUR_FIX_LINES = [
   'Change a test expectation only where the approved spec proves it wrong; name the spec section',
   'and explain that mismatch in your notes. Without that evidence, fix the application behaviour.',
   'Final checks are the workflow validation, related test run and code review that actually run,',
-  'using the current tree, including your test edits. There is no private or unseen grader.',
+  'using the current tree, including your test edits; report only the checks that actually ran.',
   'Report checks that did not run as unknown; do not claim independent verification from them.',
+  'A human directive revising the spec or an expectation takes precedence over this repair guidance.',
 ];
 
 export const ROOT_CAUSE_LINES = [

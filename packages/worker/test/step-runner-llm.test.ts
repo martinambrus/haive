@@ -378,7 +378,11 @@ describe('repair evidence at the dispatch boundary', () => {
     expect(result.status).toBe('failed');
     expect(enqueue).not.toHaveBeenCalled();
   });
-
+  it('leaves an empty 07b notice out of the prompt', async () => {
+    const base = await dispatch(0, 'test-llm-step');
+    const validator = await dispatch(0, '07b-phase-4-validate');
+    expect(validator.state.cliInvocationRow!.prompt).toBe(base.state.cliInvocationRow!.prompt);
+  });
   it('adds only measured paths to 07b, never the saved patch or arbitrary record prose', async () => {
     vi.mocked(loadFixTestRecords).mockResolvedValueOnce([
       {

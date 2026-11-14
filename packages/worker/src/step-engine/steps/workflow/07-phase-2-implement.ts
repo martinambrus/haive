@@ -508,7 +508,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           ...BEHAVIOUR_FIX_LINES,
           ...ROOT_CAUSE_LINES,
           '',
-          ...(detected.fixGuidance ? [detected.fixGuidance, ''] : []),
+          ...(detected.fixGuidance?.replaceAll(BEHAVIOUR_FIX_LINES.join('\n'), '').trim()
+            ? [detected.fixGuidance.replaceAll(BEHAVIOUR_FIX_LINES.join('\n'), '').trim(), '']
+            : []),
           // Fenced ONLY when the diagnosis is machine-sourced. `fixIsHuman` means a person
           // rejected at gate 2 or hand-picked adversarial findings, and the framing above
           // calls that an AUTHORITATIVE DIRECTIVE — fencing it would tell the agent not to

@@ -570,7 +570,7 @@ describe('testManagementStep.fixLoop', () => {
     // The implementer must not treat the failing assertion as gospel.
     expect(v!.guidance).toContain('approved spec proves');
     expect(v!.guidance).toContain('application behaviour');
-    expect(v!.guidance).toContain('no private or unseen grader');
+    expect(v!.guidance).toContain('report only the checks that actually ran');
   });
 
   it('hands the three-way framing over as guidance, verbatim, and keeps the fact in the diagnosis', () => {
@@ -805,7 +805,7 @@ describe('test-management fix pass prompt', () => {
     expect(p).toContain('Fix the behaviour');
     expect(p).toContain('approved spec proves');
     expect(p).toContain('name the spec section');
-    expect(p).toContain('no private or unseen grader');
+    expect(p).toContain('report only the checks that actually ran');
     expect(p).not.toContain('→ fix the test');
   });
 

@@ -1021,7 +1021,8 @@ async function resolveLlmPhase(
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
 
   if (stepDef.metadata.id === '07b-phase-4-validate') {
-    prompt += '\n\n' + fixTestReviewNotice(await loadFixTestRecords(db, params.taskId));
+    const notice = fixTestReviewNotice(await loadFixTestRecords(db, params.taskId));
+    if (notice) prompt += '\n\n' + notice;
   }
   // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
   // guidance is quoted text, not a persona the prompt step's author chose.

@@ -4472,7 +4472,7 @@ describe('the fix coder prompt asks for the root cause and says when a file was 
     expect(p).toContain('Fix the behaviour');
     expect(p).toContain('approved spec proves');
     expect(p).toContain('name the spec section');
-    expect(p).toContain('no private or unseen grader');
+    expect(p).toContain('report only the checks that actually ran');
   });
 
   it('asks once, above the findings fence, and says nothing of a repeat by default', () => {
