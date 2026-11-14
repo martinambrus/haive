@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   DEFAULT_AGENT_RULES,
@@ -33,6 +33,8 @@ import { RefreshFailures } from '@/components/refresh-failures';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
+import { Dialog } from '@/components/dialog';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
@@ -184,6 +186,22 @@ export function CliProviderForm({
 
   const networkIssues = (issues ?? []).filter((i) => i.path?.startsWith('networkPolicy') === true);
   const [submitting, setSubmitting] = useState(false);
+  const [disableImpact, setDisableImpact] = useState<{
+    taskCount: number;
+    stepCount: number;
+  } | null>(null);
+  const disableAnswer = useRef<((confirmed: boolean) => void) | null>(null);
+  useEffect(
+    () => () => {
+      disableAnswer.current?.(false);
+    },
+    [],
+  );
+  function answerDisable(confirmed: boolean) {
+    disableAnswer.current?.(confirmed);
+    disableAnswer.current = null;
+    setDisableImpact(null);
+  }
   const [existingSecrets, setExistingSecrets] = useState<CliProviderSecret[]>([]);
   // The load rewrites the text when it answers, and a save deletes every secret the text does not
   // list, so the field takes no typing until then.
@@ -499,9 +517,19 @@ export function CliProviderForm({
   // dirty flag clears. Shared between Rebuild image (stays on page) and Save
   // (redirects) so both flows persist the same payload and leave the form in
   // a consistent "clean" state.
-  async function persistEdit(): Promise<void> {
-    if (mode !== 'edit' || !provider?.id) return;
+  async function persistEdit(): Promise<boolean> {
+    if (mode !== 'edit' || !provider?.id) return false;
     const snapshot = state;
+    if (savedState.enabled && !snapshot.enabled) {
+      const impact = await api.get<{ taskCount: number; stepCount: number }>(
+        `/cli-providers/${provider.id}/disable-impact`,
+      );
+      const confirmed = await new Promise<boolean>((resolve) => {
+        disableAnswer.current = resolve;
+        setDisableImpact(impact);
+      });
+      if (!confirmed) return false;
+    }
 
     const networkPolicy: CliNetworkPolicy = {
       mode: snapshot.networkMode,
@@ -564,21 +592,18 @@ export function CliProviderForm({
 
     setState((prev) => ({ ...prev, secretsText: nextSecretsText }));
     setSavedState({ ...snapshot, secretsText: nextSecretsText });
+    return true;
   }
 
   async function handleRebuildImage() {
     if (mode !== 'edit' || !provider?.id) return;
     setBuildRequesting(true);
     clearError();
-    // Flip build gating on synchronously with the click so the Test connection
-    // button stays disabled through the dirty -> building handoff. Without
-    // this, persistEdit clears the dirty flag before the setBuildState call
-    // completes, briefly opening the button in the intermediate render.
-    setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
     try {
       if (formDirty) {
-        await persistEdit();
+        if (!(await persistEdit())) return;
       }
+      setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
       await api.post(`/cli-providers/${provider.id}/sandbox-image/build`);
     } catch (err) {
       captureError(err, 'Failed to start build');
@@ -650,7 +675,7 @@ export function CliProviderForm({
           }
         }
       } else if (provider) {
-        await persistEdit();
+        if (!(await persistEdit())) return;
       } else {
         throw new Error('No provider context for edit mode');
       }
@@ -666,6 +691,28 @@ export function CliProviderForm({
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <Dialog
+        open={disableImpact !== null}
+        onOpenChange={(open) => {
+          if (!open) answerDisable(false);
+        }}
+        aria-label="Disable CLI provider"
+      >
+        <div className="flex flex-col gap-4 p-6">
+          <h2 className="text-lg font-semibold">Disable CLI provider</h2>
+          <MarkdownView
+            body={`${disableImpact?.taskCount ?? 0} tasks have ${disableImpact?.stepCount ?? 0} remaining steps pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
+          />
+          <div className="flex gap-2">
+            <Button type="button" onClick={() => answerDisable(true)}>
+              Disable provider
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => answerDisable(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Dialog>
       <FormError message={error} />
 
       <div>

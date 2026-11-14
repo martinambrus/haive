@@ -65,6 +65,7 @@ import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
 import { isSignOutSecret, withCliAuthLocks, withCliAuthWrite } from '../lib/cli-auth-write.js';
+import { providerDisableImpact } from '../lib/provider-disable-impact.js';
 
 function secretAuditMetadata(names: Iterable<string>): {
   secretCount: number;
@@ -527,6 +528,15 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
     },
     201,
   );
+});
+
+// Informational snapshot only. PATCH remains authoritative and never requires this read.
+cliProviderRoutes.get('/:id/disable-impact', async (c) => {
+  const db = getDb();
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  await loadOwnedProvider(db, userId, id);
+  return c.json(await providerDisableImpact(db, userId, id));
 });
 
 cliProviderRoutes.patch('/:id', async (c) => {
