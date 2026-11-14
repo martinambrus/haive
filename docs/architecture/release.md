@@ -113,7 +113,11 @@ or hash-mismatched files refuse with `bundle-invalid` before install files are c
 image's own manifest never replaces the supplied manifest's hashes. A target without `bundle` needs no public
 release-image pull and introduces no classification or required-key refusal.
 
-`bundle.ts` classifies the installed base/run files and installed GPU or Vulkan overlay. A valid
+`bundle.ts` classifies base/run and every installed GPU or Vulkan overlay, including an inactive
+overlay when both exist. Preflight and backup classification derive this list from the installed
+hashes through the same swap-candidate function used to plan replacements; Compose still selects
+only the GPU overlay when both exist. Recorded files are also checked, so a missing recorded file
+still counts as modified. A valid
 `.haive-bundle.json` record whose files match is `pristine`; a differing or malformed record is
 `modified`. Without a record, an entry in `bundle.known` matching the installed file list is
 `legacy-known`; otherwise it is `legacy-unknown`. Historical hashes for an uninstalled overlay do
@@ -189,8 +193,11 @@ names the backup path that must be repaired before retrying.
 Generated `.env` keys stay after rollback intentionally; removing them could reopen missing auth.
 
 After an updater crash, recovery loads `metadata.bundle` from the running journal row without
-fetching a new release. A crash between file renames therefore restores the old bytes and finishes
-rollback. A failed restore leaves the run running for the next invocation to retry. Once the
+fetching a new release. Recovery constructs its context from journal data without validating a
+synthetic release manifest: a missing journalled `migrationHead` cannot block it, because rollback
+and forward commit do not repeat the health gate. A crash between file renames therefore restores
+the old bytes and finishes rollback. A failed restore leaves the run running for the next invocation
+to retry. Once the
 journal phase is `commit`, recovery finishes forward and keeps the new files, because destructive
 data migrations may already have run. This pivot is unchanged.
 
