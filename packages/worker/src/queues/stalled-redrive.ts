@@ -1,3 +1,4 @@
+import { expireFixTestImages } from '../step-engine/steps/workflow/_fix-test-store.js';
 import {
   and,
   asc,
@@ -1026,6 +1027,7 @@ export class StalledTaskSweeper {
     await reconcileStrandedCloningRepos(this.db);
     await reconcileStrandedSyncingBundles(this.db);
     await this.bundleOrphans.sweep(this.db);
+    await expireFixTestImages(this.db);
     return { redriven };
   }
 }

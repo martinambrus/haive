@@ -44,6 +44,10 @@ import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
 
 // Wraps the real dispatcher so one test can stub a single call.
+vi.mock('./steps/workflow/_fix-test-store.js', () => ({
+  beginFixTestCapture: vi.fn(),
+  finishFixTestCapture: vi.fn(),
+}));
 vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/secret-mask.js')>()),
   taskSecretMaskPolicy: async () => null,

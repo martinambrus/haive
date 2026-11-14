@@ -1,5 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+vi.mock('../src/step-engine/steps/workflow/_fix-test-store.js', () => ({
+  beginFixTestCapture: vi.fn(async () => undefined),
+  finishFixTestCapture: vi.fn(async () => undefined),
+  loadFixTestRecords: vi.fn(async () => []),
+}));
+vi.mock('../src/repo/worktree-git-boundary.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveInvocationWorkerTree: async () => '/tmp',
+}));
+import {
+  beginFixTestCapture,
+  finishFixTestCapture,
+  loadFixTestRecords,
+} from '../src/step-engine/steps/workflow/_fix-test-store.js';
 
 vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -269,6 +283,79 @@ function makeProvider(): CliProviderRecord {
     updatedAt: new Date(),
   } as CliProviderRecord;
 }
+
+describe('repair evidence at the dispatch boundary', () => {
+  const dispatch = async (pass: number, id = '08b-test-management') => {
+    const state = freshState();
+    const original = baseStep();
+    const step: StepDefinition = {
+      ...original,
+      metadata: { ...original.metadata, id },
+      loop: { maxIterations: 5, shouldContinue: () => false },
+    };
+    state.taskStepRow.stepId = id;
+    state.taskStepRow.round = 2;
+    state.taskStepRow.iterations = Array.from({ length: pass }, (_, iteration) => ({
+      iteration,
+      continueRequested: true,
+      recordedAt: new Date().toISOString(),
+    }));
+    const enqueue = vi.fn();
+    const params = {
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    };
+    const result = await advanceStep(params);
+    return { result, state, params, enqueue };
+  };
+  it('takes no author-pass image, captures pass 1 before queueing and settles before apply', async () => {
+    const before = vi.mocked(beginFixTestCapture).mock.calls.length;
+    await dispatch(0);
+    expect(vi.mocked(beginFixTestCapture).mock.calls).toHaveLength(before);
+    const { result, enqueue, state, params } = await dispatch(1);
+    expect(result.status).toBe('waiting_cli');
+    expect(beginFixTestCapture).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ pass: 1, round: 2 }),
+    );
+    expect(vi.mocked(beginFixTestCapture).mock.invocationCallOrder.at(-1)).toBeLessThan(
+      enqueue.mock.invocationCallOrder[0]!,
+    );
+    const invocationId = String(state.cliInvocationRow!.id);
+    Object.assign(state.cliInvocationRow!, { endedAt: new Date(), exitCode: 0, rawOutput: '{}' });
+    await advanceStep(params);
+    expect(finishFixTestCapture).toHaveBeenLastCalledWith(expect.anything(), invocationId);
+  });
+  it('refuses dispatch when its required evidence write fails', async () => {
+    vi.mocked(beginFixTestCapture).mockRejectedValueOnce(new Error('evidence write failed'));
+    const { result, enqueue } = await dispatch(1);
+    expect(result.status).toBe('failed');
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+  it('adds only measured paths to 07b, never the saved patch or arbitrary record prose', async () => {
+    vi.mocked(loadFixTestRecords).mockResolvedValueOnce([
+      {
+        invocationId: 'run',
+        stepId: '08b-test-management',
+        round: 1,
+        pass: 1,
+        beforeEventId: 'event',
+        state: 'captured',
+        changes: [{ path: 'tests/a.test.ts', kind: 'modified', patch: 'DO-NOT-RELAY' }],
+      },
+    ]);
+    const { enqueue } = await dispatch(0, '07b-phase-4-validate');
+    expect(JSON.stringify(enqueue.mock.calls)).toContain('tests/a.test.ts');
+    expect(JSON.stringify(enqueue.mock.calls)).not.toContain('DO-NOT-RELAY');
+  });
+});
 
 describe('advanceStep LLM phase', () => {
   it('runs apply without a CLI reservation when preparation finds nothing to classify', async () => {

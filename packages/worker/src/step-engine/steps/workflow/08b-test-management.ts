@@ -1,3 +1,4 @@
+import { TEST_FILE_RE } from './_test-paths.js';
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -145,9 +146,6 @@ export function parseTesterOutput(raw: unknown): {
     }) ?? { testsCreated: [], testsUpdated: [], testsDeleted: [], notes: '' }
   );
 }
-
-const TEST_FILE_RE =
-  /(\.(spec|test)\.[cm]?[jt]sx?|Test\.php|\.test\.php|(^|\/)test_[^/]+\.py|_test\.py)$/;
 
 const CONTROL_CHAR_RE = /\p{Cc}/u;
 
@@ -701,8 +699,7 @@ export function priorPassNotes(previous: StepLoopPassRecord[]): string {
   }
 }
 
-/** The three-way framing the tester agent was given, so the implementer does not treat the
- *  failing assertion as gospel. */
+/** The approved-behaviour contract also governs the implementer after the tester's budget. */
 const DECIDE_PER_FAILURE = BEHAVIOUR_FIX_LINES.join('\n');
 
 /** The fix-loop diagnosis handed to the implementer once the tester's own passes are
