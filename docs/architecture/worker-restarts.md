@@ -119,7 +119,11 @@ not provider-sensitive, implicit defaults and other owners' tasks are excluded. 
 asks for confirmation; two zero counts skip it. A failed preview also proceeds without a dialog,
 since this read is advisory and PATCH remains authoritative. Rebuild sets its build gate before
 persistence clears dirty state, defers polling until the request finishes, and restores the previous
-build state if confirmation is cancelled.
+build state if confirmation is cancelled. Save and Rebuild share a synchronous in-flight
+guard acquired before either awaits the preview, held through confirmation and persistence
+(and the rebuild request), and released in `finally`. A second action is refused while the
+first holds it, so it cannot overwrite the confirmation resolver. Both controls reflect the
+shared pending state.
 
 **A park whose poll chain was lost is re-driven.** A parked row (`pending` with
 `waiting_started_at`: a runtime slot, a pause, module schema setup, a required integration or a disabled explicit CLI provider) is
