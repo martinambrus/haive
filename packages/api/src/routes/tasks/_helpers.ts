@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   logger,
@@ -215,7 +215,9 @@ async function loadTaskCliChoices(
   const rows = await db
     .select()
     .from(schema.taskStepCliChoices)
-    .where(inArray(schema.taskStepCliChoices.taskId, taskIds));
+    .where(inArray(schema.taskStepCliChoices.taskId, taskIds))
+    // Keep full database timestamp precision and the worker's tie break.
+    .orderBy(desc(schema.taskStepCliChoices.updatedAt), asc(schema.taskStepCliChoices.role));
   for (const r of rows) {
     const byStep = out.get(r.taskId) ?? new Map<string, Map<string, TaskCliChoice>>();
     const byRole = byStep.get(r.stepId) ?? new Map<string, TaskCliChoice>();
@@ -226,13 +228,28 @@ async function loadTaskCliChoices(
   return out;
 }
 
-export async function enrichStepsWithCliPreferences<T extends { stepId: string }>(
+// loadTaskCliChoices keeps each role map newest first. Only the implementation's
+// exact fix round competes with the ordinary default slot; other roles stay independent.
+function taskCliSlot(
+  choices: Map<string, TaskCliChoice> | undefined,
+  stepId: string,
+  role: string,
+  round = 0,
+): TaskCliChoice | undefined {
+  if (stepId !== '07-phase-2-implement' || role !== 'default' || round < 1)
+    return choices?.get(role);
+  const roundRole = `fix:${round}:default`;
+  return [...(choices ?? [])].find(([slot]) => slot === role || slot === roundRole)?.[1];
+}
+
+export async function enrichStepsWithCliPreferences<T extends { stepId: string; round?: number }>(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
   userId: string,
   steps: T[],
   taskId: string | null,
   ignoreSaved = false,
+  round = 0,
 ): Promise<
   (T & {
     preferredCliProviderId: string | null;
@@ -284,13 +301,13 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
     const honor = (role: string, value: string | null): string | null =>
       !ignoreSaved || touchedRoles?.has(role) ? value : null;
     const provider = (role: string, saved: string | null): string | null => {
-      const choice = choices?.get(role);
+      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round);
       return choice ? choice.cliProviderId : honor(role, saved);
     };
     // A cleared slot has no effort, including one whose chosen provider was deleted since:
     // SET NULL clears the provider and leaves the effort that went with it.
     const effort = (role: string, saved: string | null): string | null => {
-      const choice = choices?.get(role);
+      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round);
       if (choice) return choice.cliProviderId ? choice.effortLevel : null;
       return honor(role, saved);
     };
@@ -353,6 +370,7 @@ export async function resolveCurrentStepCliProviderIds(
   tasks: readonly {
     id: string;
     currentStepId: string | null;
+    currentRound?: number;
     cliProviderId: string | null;
     ignoreSavedStepClis: boolean;
   }[],
@@ -388,7 +406,7 @@ export async function resolveCurrentStepCliProviderIds(
     const honor = (role: string, value: string | null): string | null =>
       !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
     const slot = (role: string, saved: string | null): string | null => {
-      const choice = stepChoices?.get(role);
+      const choice = taskCliSlot(stepChoices, stepId ?? '', role, task.currentRound);
       return choice ? choice.cliProviderId : honor(role, saved);
     };
     const usable = (id: string | null): string | null => (id && listed.has(id) ? id : null);
@@ -991,6 +1009,7 @@ export async function buildUpcomingCliSteps(
   existingStepIds: Iterable<string>,
   ignoreSaved = false,
   runListSnapshot: readonly string[] | null = null,
+  round = 0,
 ) {
   const started = new Set<string>(existingStepIds);
   const candidates = runListSnapshot
@@ -1009,7 +1028,7 @@ export async function buildUpcomingCliSteps(
     .filter((f) => !MODEL_HEALTH_STEP_ID_SET.has(f.stepId) && !started.has(f.stepId))
     .map((f) => ({ stepId: f.stepId, title: f.title }));
   if (upcoming.length === 0) return [];
-  return enrichStepsWithCliPreferences(db, flags, userId, upcoming, taskId, ignoreSaved);
+  return enrichStepsWithCliPreferences(db, flags, userId, upcoming, taskId, ignoreSaved, round);
 }
 
 async function directoryExists(p: string): Promise<boolean> {

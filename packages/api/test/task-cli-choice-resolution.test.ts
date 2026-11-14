@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   enrichStepsWithCliPreferences,
+  buildUpcomingCliSteps,
   resolveCurrentStepCliProviderIds,
 } from '../src/routes/tasks/_helpers.js';
 import { STEP_MINING_SEATS } from '@haive/shared';
@@ -45,13 +46,19 @@ function setup() {
           cliProviderId,
           explicit: true,
         });
-  const choose = (stepId: string, cliProviderId: string | null, role = 'default') =>
+  const choose = (
+    stepId: string,
+    cliProviderId: string | null,
+    role = 'default',
+    updatedAt = new Date(1),
+  ) =>
     fake.insert(schema.taskStepCliChoices, {
       taskId: TASK,
       stepId,
       role,
       cliProviderId,
       effortLevel: cliProviderId ? 'high' : null,
+      updatedAt,
     });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return { fake, db: fake.db as any, save, choose };
@@ -139,6 +146,94 @@ describe("a step card's CLI", () => {
       TASK,
     );
     expect(step?.cliRoleProviders).toMatchObject({ fixer: PICKED_CLI, tester: null });
+  });
+});
+
+describe('active fix-round CLI readers', () => {
+  const stepId = '07-phase-2-implement';
+  it('shows and meters the round choice above an older card choice, only for that round', async () => {
+    const { db, choose } = setup();
+    choose(stepId, TASK_CLI);
+    choose(stepId, PICKED_CLI, 'fix:2:default', new Date(2));
+    const cards = await enrichStepsWithCliPreferences(
+      db,
+      flags,
+      USER,
+      [
+        { stepId, round: 1 },
+        { stepId, round: 2 },
+        { stepId, round: 3 },
+      ],
+      TASK,
+      true,
+    );
+    expect(cards.map((s) => s.preferredCliProviderId)).toEqual([TASK_CLI, PICKED_CLI, TASK_CLI]);
+    const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      {
+        id: TASK,
+        currentStepId: stepId,
+        currentRound: 2,
+        cliProviderId: TASK_CLI,
+        ignoreSavedStepClis: true,
+      },
+    ]);
+    expect(listing.get(TASK)).toEqual([PICKED_CLI]);
+  });
+
+  it('meters the active round override in the task listing', async () => {
+    const { db, choose } = setup();
+    choose(stepId, PICKED_CLI, 'fix:2:default', new Date(2));
+    const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      {
+        id: TASK,
+        currentStepId: stepId,
+        currentRound: 2,
+        cliProviderId: TASK_CLI,
+        ignoreSavedStepClis: false,
+      },
+    ]);
+    expect(listing.get(TASK)).toEqual([PICKED_CLI]);
+  });
+
+  it('shows the round choice on the CLIs tab before the step has a row', async () => {
+    const { db, choose } = setup();
+    choose(stepId, PICKED_CLI, 'fix:2:default');
+    const upcoming = await buildUpcomingCliSteps(
+      db,
+      flags,
+      USER,
+      TASK,
+      'workflow',
+      [],
+      false,
+      [stepId],
+      2,
+    );
+    expect(upcoming[0]?.preferredCliProviderId).toBe(PICKED_CLI);
+  });
+
+  it('keeps a newer card pick above the round choice, including its effort', async () => {
+    const { db, choose } = setup();
+    choose(stepId, PICKED_CLI, 'fix:2:default', new Date(1));
+    choose(stepId, TASK_CLI, 'default', new Date(2));
+    const [card] = await enrichStepsWithCliPreferences(
+      db,
+      flags,
+      USER,
+      [{ stepId, round: 2 }],
+      TASK,
+    );
+    expect(card).toMatchObject({ preferredCliProviderId: TASK_CLI, preferredEffortLevel: 'high' });
+    const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      {
+        id: TASK,
+        currentStepId: stepId,
+        currentRound: 2,
+        cliProviderId: SAVED_CLI,
+        ignoreSavedStepClis: false,
+      },
+    ]);
+    expect(listing.get(TASK)).toEqual([TASK_CLI]);
   });
 });
 

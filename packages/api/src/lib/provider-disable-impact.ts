@@ -79,7 +79,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
         );
         return !row || row.status === 'pending';
       })
-      .map((stepId) => ({ stepId }));
+      .map((stepId) => ({ stepId, round: task.currentRound }));
     const steps = await enrichStepsWithCliPreferences(
       db,
       flags,

@@ -138,6 +138,47 @@ describe('provider disable impact', () => {
     expect(await response.json()).toEqual({ taskCount: 2, stepCount: 2 });
   });
 
+  it('counts the active round override, then the later card pick that supersedes it', async () => {
+    const stepId = '07-phase-2-implement';
+    fake.insert(schema.stepCatalog, {
+      stepId,
+      title: 'Implement',
+      workflowType: 'test',
+      stepIndex: 0,
+      dispatchesStepCli: true,
+      providerSensitive: false,
+      composable: false,
+    });
+    const other = randomUUID();
+    fake.insert(schema.cliProviders, { id: other, userId: h.userId, enabled: true });
+    const id = task({
+      currentStepId: stepId,
+      currentRound: 2,
+      cliProviderId: other,
+      runListSnapshot: [stepId],
+    });
+    fake.insert(schema.taskStepCliChoices, {
+      taskId: id,
+      stepId,
+      role: 'fix:2:default',
+      cliProviderId: providerId,
+      updatedAt: new Date(1),
+    });
+    expect(await (await read()).json()).toEqual({ taskCount: 1, stepCount: 1 });
+    fake.insert(schema.taskStepCliChoices, {
+      taskId: id,
+      stepId,
+      role: 'default',
+      cliProviderId: other,
+      updatedAt: new Date(2),
+    });
+    expect(await (await read()).json()).toEqual({ taskCount: 0, stepCount: 0 });
+    expect(await (await app.request('/' + other + '/disable-impact')).json()).toEqual({
+      taskCount: 1,
+      stepCount: 1,
+    });
+  });
+
   it('counts a pending run_app task whose CLI steps belong to other workflows', async () => {
     fake.insert(schema.stepCatalog, {
       stepId: '01-declare-deps',

@@ -12,7 +12,11 @@ const flags = staticStepFlags();
 function makeFakeDb(): never {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db: any = {
-    select: () => ({ from: () => ({ where: async () => [] }) }),
+    select: () => ({
+      from: () => ({
+        where: () => Object.assign(Promise.resolve([]), { orderBy: async () => [] }),
+      }),
+    }),
   };
   return db as never;
 }
