@@ -242,7 +242,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
         d.nodeTitles = Object.fromEntries(d.planRead.nodes.map((n) => [n.id, n.title]));
       }
       if (d.planRead) d.focusTooLarge = planFocusTooLarge(() => buildPrompt(d));
-      return d.focusTooLarge || d.commitsOmitted > 0 || d.pathsOmitted > 0 ? false : undefined;
+      return d.focusTooLarge ? false : undefined;
     },
     planSnapshot: ({ detected }) => (detected as ExternalPlanSyncDetect).planRead,
     promptBudget: {
@@ -264,11 +264,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     skipIf: (args) => {
       const d = args.detected as ExternalPlanSyncDetect | null;
       return (
-        !d?.repositoryId ||
-        d.focusTooLarge === true ||
-        d.nodeCount === 0 ||
-        d.commits.length === 0 ||
-        (!!d.planRead && (d.commitsOmitted > 0 || d.pathsOmitted > 0))
+        !d?.repositoryId || d.focusTooLarge === true || d.nodeCount === 0 || d.commits.length === 0
       );
     },
     buildPrompt: (args) => buildPrompt(args.detected as ExternalPlanSyncDetect),
@@ -330,22 +326,24 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       summary: '',
     };
 
+    const warnHold = (reason: string): void => {
+      ctx.logger.warn(
+        {
+          repositoryId: d.repositoryId,
+          since: d.since,
+          reason,
+          commitsOmitted: d.commitsOmitted,
+          pathsOmitted: d.pathsOmitted,
+        },
+        'external plan sync held its watermark',
+      );
+    };
+
     // Same rule as the knowledge-base catch-up: only a MEASURED range may advance the
     // watermark, because "nothing changed" and "could not tell" are the same empty list.
     if (!d.repositoryId || !d.measured || !d.branchPoint) {
+      warnHold('range_not_measured');
       return { ...base, summary: d.reason ?? 'external changes could not be measured' };
-    }
-    if (
-      d.commits.length > 0 &&
-      d.nodeCount > 0 &&
-      d.planRead &&
-      (d.commitsOmitted > 0 || d.pathsOmitted > 0)
-    ) {
-      return {
-        ...base,
-        summary:
-          'The external range was not fully reviewed: omitted commits or paths leave its plan focus incomplete. The watermark is held.',
-      };
     }
     if (
       d.commits.length > 0 &&
@@ -353,6 +351,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
       d.planRead &&
       (d.focusTooLarge || !args.llmOutput || planFocusTooLarge(() => buildPrompt(d)))
     ) {
+      warnHold(d.focusTooLarge ? 'focus_too_large' : 'no_agent_output_or_focus_too_large');
       return {
         ...base,
         summary:
@@ -436,6 +435,7 @@ export const externalPlanSyncStep: StepDefinition<ExternalPlanSyncDetect, Extern
     } catch (err) {
       if (!(err instanceof PlanPatchError) || err.kind !== 'conflict') throw err;
       // Not stamped: the range stays unreviewed, so the next run proposes against the new plan.
+      warnHold('plan_conflict');
       return {
         ...base,
         decision: 'conflict',

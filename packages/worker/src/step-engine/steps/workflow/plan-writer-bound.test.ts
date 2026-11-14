@@ -21,9 +21,9 @@ vi.mock('@haive/shared/plan', async (importOriginal) => ({
   applyPlanPatch: vi.fn(),
 }));
 vi.mock('../../../plan/mirror.js', () => ({ writePlanMirror: vi.fn() }));
-vi.mock('./_external-drift.js', () => ({
+vi.mock('./_external-drift.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./_external-drift.js')>()),
   resolveExternalDrift: vi.fn(),
-  externalCommitBlock: () => 'commits',
   stampExternalWatermark: vi.fn(),
 }));
 import { boundedPlanWriterPrompt, PlanFocusTooLargeError } from './_plan-ops.js';
@@ -134,8 +134,9 @@ it('holds the external watermark when the whole affected focus cannot fit', asyn
   read.nodes[1]!.body = 'x'.repeat(96_000);
   read.codeLinks.push({ nodeId: read.nodes[1]!.id, repoPath: 'src/changed.ts' });
   vi.mocked(stampExternalWatermark).mockClear();
+  const warn = vi.fn();
   const result = await externalPlanSyncStep.apply(
-    {} as never,
+    { logger: { warn } } as never,
     {
       detected: detected(read),
       llmOutput: null,
@@ -144,6 +145,14 @@ it('holds the external watermark when the whole affected focus cannot fit', asyn
   );
   expect(result.reviewedThrough).toBeNull();
   expect(result.summary).toMatch(/not reviewed|held|too large/i);
+  expect(warn).toHaveBeenCalledWith(
+    expect.objectContaining({
+      repositoryId: 'repo',
+      since: detected(read).since,
+      reason: expect.any(String),
+    }),
+    expect.any(String),
+  );
   expect(stampExternalWatermark).not.toHaveBeenCalled();
 });
 
@@ -340,19 +349,25 @@ it.each([planReconcileStep, externalPlanSyncStep])(
 );
 
 it.each(['commitsOmitted', 'pathsOmitted'] as const)(
-  'holds the watermark when %s hides part of the focus',
+  'reviews a capped %s range and stamps after disclosing the omission',
   async (field) => {
     vi.mocked(stampExternalWatermark).mockClear();
-    const result = await externalPlanSyncStep.apply(
-      {} as never,
-      {
-        detected: { ...detected(), [field]: 1 },
-        llmOutput: { ops: [] },
-        formValues: {},
-      } as never,
+    const d = { ...detected(), [field]: 1 };
+    const args = { detected: d, llmOutput: { ops: [] }, formValues: {} };
+    expect(externalPlanSyncStep.llm!.skipIf!(args as never)).toBe(false);
+    expect(await externalPlanSyncStep.llm!.prepare!({ ...args, ctx: {} } as never)).not.toBe(false);
+    const prompt = externalPlanSyncStep.llm!.buildPrompt(args as never) as string;
+    expect(prompt).toMatch(field === 'commitsOmitted' ? /1 further commit/ : /1 further path/);
+    const proposal = {
+      ops: [{ op: 'upsert', parentRef: d.planRead.nodes[0]!.id, title: 'New capability' }],
+    };
+    expect(externalPlanSyncStep.form!({} as never, d, proposal)?.description).toContain(
+      field === 'commitsOmitted' ? '(+1 not listed)' : 'touching 1 file(s)',
     );
-    expect(result.reviewedThrough).toBeNull();
-    expect(result.summary).toContain('focus incomplete');
-    expect(stampExternalWatermark).not.toHaveBeenCalled();
+    const result = await externalPlanSyncStep.apply({} as never, args as never);
+    expect(result.decision).toBe('nothing_to_review');
+    expect(result.commitsReviewed).toBe(1);
+    expect(result.reviewedThrough).toBe(d.branchPoint);
+    expect(stampExternalWatermark).toHaveBeenCalledWith(undefined, 'repo', 'plan', d.branchPoint);
   },
 );
