@@ -100,7 +100,7 @@ customize".
   skipped at creation, never guessed. A core upgrade that renames a step shows the overlay as needing
   attention.
 - **Storage.** A new `run_list_strategy` value (`derived`) with `base_slug` and `changes` columns on
-  `task_type_definitions`, both declared last (schema-parity rule). Admin-only to start, like custom
+  `task_type_definitions`, both declared last (schema-parity rule). Admin-only (owner decision 2026-11-14), like custom
   types. Presets and loop limits work as for admin types.
 
 ### Design: replacing a step
@@ -203,4 +203,4 @@ uses it.
 - Pricing: who pays for DE runs (the instance owner's DE account), and is a per-task cost cap needed?
 - Is DE's invite-only preview with no SLA acceptable for a public module, or does it wait for
   general availability?
-- Part A: are derived types admin-only, or may any user derive a personal type?
+
