@@ -55,6 +55,7 @@ import {
   FolderGit2,
 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
+import { useActiveTime } from '@/lib/active-time/use-active-time';
 import { shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
@@ -2855,104 +2856,26 @@ const RETRYABLE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
   'skipped',
 ]);
 
-// "User active time": the time the user actively spends on a step while it
-// waits for input (waiting_form) AND the tab is visible AND the window is
-// focused. It is the focused subset of idle time and pauses whenever the agent
-// works (we only count while a step is waiting_form). The browser is the only
-// place that knows focus/visibility, so we measure locally and post increments
-// to the server (postUserActive). Returns the active step id and a live display
-// total for it. `baseMs` is that step's server-side total, read once at
-// activation; `committed + pending` is then driven locally so flushes don't make
-// the live timer jump backwards.
+// Retain the task-page contract; the shared hook owns activity and delivery.
 function useUserActiveTimer(
   taskId: string,
   activeWaitingStepId: string | null,
   baseMs: number,
 ): { activeStepId: string | null; displayMs: number } {
-  const [pendingMs, setPendingMs] = useState(0);
-  const committedRef = useRef(baseMs); // server total we've locally accounted for
-  const pendingRef = useRef(0); // measured, not yet flushed
-  const lastTickRef = useRef(Date.now());
-  const lastFlushRef = useRef(Date.now());
-  const activeStepRef = useRef<string | null>(activeWaitingStepId);
-  const baseRef = useRef(baseMs);
-  baseRef.current = baseMs; // latest; consumed only at the next activation
-
-  const flush = useCallback(() => {
-    const stepId = activeStepRef.current;
-    const ms = Math.round(pendingRef.current);
-    if (stepId && ms > 0) {
-      pendingRef.current = 0;
-      committedRef.current += ms; // account locally so the display doesn't dip
-      setPendingMs(0); // keep state in lock-step with pendingRef (no double count)
-      lastFlushRef.current = Date.now();
-      postUserActive(taskId, stepId, ms);
-    }
-  }, [taskId]);
-
-  // Activation: when the waiting step changes, flush the prior step's pending,
-  // then seed the committed total from the new step's server value.
-  useEffect(() => {
-    if (activeStepRef.current !== activeWaitingStepId) {
-      flush();
-      activeStepRef.current = activeWaitingStepId;
-      committedRef.current = baseRef.current;
-      pendingRef.current = 0;
-      setPendingMs(0);
-      lastTickRef.current = Date.now();
-    }
-  }, [activeWaitingStepId, flush]);
-
-  useEffect(() => {
-    const counting = () =>
-      !!activeStepRef.current && document.visibilityState === 'visible' && document.hasFocus();
-
-    const sample = () => {
-      const now = Date.now();
-      const elapsed = now - lastTickRef.current;
-      lastTickRef.current = now;
-      // Drop large gaps (throttled background tab, machine asleep) — not active.
-      if (counting() && elapsed > 0 && elapsed < 5000) {
-        pendingRef.current += elapsed;
-        setPendingMs(pendingRef.current);
-      }
-    };
-
-    const tick = () => {
-      sample();
-      // Safety flush so a crash loses at most ~60s; ordinary stops flush sooner.
-      if (Date.now() - lastFlushRef.current >= 60_000) flush();
-    };
-    const onVisibility = () => {
-      sample();
-      if (document.visibilityState === 'hidden') flush();
-    };
-    const onBlur = () => {
-      sample();
-      flush();
-    };
-    // Returning focus must not retro-count the away gap.
-    const onFocus = () => {
-      lastTickRef.current = Date.now();
-    };
-
-    const interval = setInterval(tick, 1000);
-    document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('blur', onBlur);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('blur', onBlur);
-      window.removeEventListener('focus', onFocus);
-      flush();
-    };
-  }, [flush]);
-
-  return {
-    activeStepId: activeWaitingStepId,
-    displayMs: committedRef.current + pendingMs,
-  };
+  const sink = useCallback(
+    (deltaMs: number) => {
+      if (activeWaitingStepId) postUserActive(taskId, activeWaitingStepId, deltaMs);
+    },
+    [taskId, activeWaitingStepId],
+  );
+  const displayMs = useActiveTime({
+    enabled: activeWaitingStepId !== null,
+    pending: false,
+    contentKey: activeWaitingStepId,
+    sink,
+    baseMs,
+  });
+  return { activeStepId: activeWaitingStepId, displayMs };
 }
 
 // Per-step ACTIVE-work timer: wall-clock since start minus idle (time spent
@@ -3029,14 +2952,14 @@ function StepDuration({
 }
 
 // Per-step "user active time": the time you actively spent on this step (tab
-// visible + window focused) while it waited for input. Hidden when zero so it
+// visible, window focused, and recently present) while it waited for input. Hidden when zero so it
 // only appears on steps that actually gated on you.
 function UserActiveDuration({ ms }: { ms: number }) {
   if (ms < 1000) return null;
   return (
     <span
       className="font-mono text-xs text-emerald-300"
-      title="Your active time on this step (page focused while it waited for input)"
+      title="Your active time while this step waited for input, with a reading allowance of 1–5 minutes after input. Editor iframe focus counts for up to 15 minutes; longer editing may be undercounted."
     >
       user {formatDuration(ms)}
     </span>
