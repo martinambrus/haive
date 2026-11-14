@@ -73,66 +73,171 @@ Re-measure all of this in Phase 0: it is a preview and may have changed.
 
 ### Design: an overlay, not a copy
 
-A derived type stores its base and a short list of changes, never a copy of the base's run list:
+The accepted design stores a base and a strict, ordered changes list, never a flattened copy:
 
 ```
-base: 'workflow'
+baseSlug: 'workflow'
 changes: [
-  { replace: '08c-code-review', with: 'module.deeppattern.review' },
-  { insertAfter: '08c-code-review', step: 'module.other.check' },
+  { insertAfter: '08c-code-review', step: 'module.deeppattern.review' },
   { remove: '04a-spec-audit' }
 ]
 ```
 
-**Recommendation and why.** A static copy freezes the base at the moment of copying: every later
-release that adds, fixes or reorders a workflow step skips the copy silently, and the copy loses
-triage's execution paths. An overlay applies its changes to the base's run list at task creation,
-so it keeps the paths and every core update. The editor still presents it as "Duplicate and
-customize".
+An overlay picks up the base's current order at task creation and keeps triage's paths; a static
+copy would silently miss core additions and fixes. The editor calls this “Duplicate and customize”,
+but saves the overlay only. V1 accepts built-in bases only, with **workflow the sole eligible base**.
+Admin, module and derived parents are refused, so there is no derived-of-derived chain.
+`run_app` is ineligible: it chooses its runtime after `01-declare-deps`, lacks complete composable
+coverage, and needs a mode-finalization seam separate from triage. Show that precise disabled reason.
 
-- **Run list.** Build the base's list as today (path-aware for `workflow`), then apply the changes in
-  order. A change whose target step is not on the chosen path is skipped for that task, and the task
-  records which changes applied. The result is validated with `validateComposition`; an invalid
-  result fails task creation with the issues, as an admin type does today.
-- **Snapshot.** The applied run list is pinned to the task like any snapshot run list, so a running
-  task never changes under a later edit of the overlay or a core upgrade.
-- **Staleness.** A change that names a step the base no longer has is reported in the editor and
-  skipped at creation, never guessed. A core upgrade that renames a step shows the overlay as needing
-  attention.
-- **Storage.** A new `run_list_strategy` value (`derived`) with `base_slug` and `changes` columns on
-  `task_type_definitions`, both declared last (schema-parity rule). Admin-only (owner decision 2026-11-14), like custom
-  types. Presets and loop limits work as for admin types.
+**Authoring and execution.** Admin-only means authoring, as for static custom types. Signed-in users
+may create enabled/selectable derived types under `CUSTOM_TASK_TYPES_ENABLED`; module-state admission
+still applies. No new user-owned type model or module manifest strategy is introduced.
+
+**Changes and diagnostics.** Each strict operation is `{replace: id, with: id}`,
+`{insertAfter: id, step: id}` or `{remove: id}`; reject extra keys, invalid namespaced IDs and IDs over
+128 characters. The list holds 0–64 operations with an injectable bound. Apply in order to actual IDs:
+
+- A target on another base path is `path-absent`; a target absent from the whole base and not
+  introduced by an earlier valid change is `stale-target`. Both skip. An inserted step is a legal
+  later anchor, and a skipped producer's reason propagates through its anchor chain.
+- A target consumed by an earlier applied operation is `target-removed-by-change`, a hard issue.
+  Never alias an old ID to a replacement. After a future supported replacement, anchor to its explicit
+  new ID. Repeated inserts at a surviving anchor put the later insertion nearest the anchor.
+- Record each operation's index, original change, outcome and reason per candidate. The evaluator
+  records `refused` for hard failures, alongside `applied`, `path-absent` and `stale-target`.
+  Reject duplicate final IDs, missing active installed payloads, unsupported replacements and every
+  `validateComposition` issue. Validate prompt quotes per candidate; detect prompt orphans against
+  the union, not one path.
+- Stale changes remain visible with their target and index: “Base no longer includes this step; this
+  change will be skipped.” Save/create may proceed with warnings only if all candidates validate.
+  Never infer a rename. Missing/deactivated payload modules are hard issues when active. Editor
+  diagnostics use today's base; task diagnostics remain the history recorded at INSERT.
+
+**All paths are pinned before triage.** Expand null/pre-triage, `quick_bugfix`, `plan_tasklist` and
+`full_workflow`, including the environment prelude, through the existing `taskRunListIds` selector.
+API supplies coherent ordered `step_catalog` rows (`workflowType`/`stepIndex`); worker supplies
+registry order. Check parity; ID-sorted catalog reads are insufficient. A synced catalog is mandatory.
+Shared owns the pure adapter/evaluator, with no worker import into API/web.
+
+Validate every complete candidate at locked task creation. Preserve the exact first three workflow
+steps, `00-model-health-workflow`, `00a-sync-base`, `00-triage`; no remove/replace or insertion inside
+that prefix. Only that shared prefix executes before selection. Pin versioned `derived_run_plan` v1
+at INSERT: base slug/strategy, overlay revision/changes, ordered base candidates and actual catalog
+fingerprint, composable declarations, all final candidates/outcomes, common prefix and warnings.
+The existing workflow `content_hash` hashes null IDs and cannot identify this catalog/order.
+Pin the full/null candidate in `run_list_snapshot` and raw prompt definitions used by any candidate in
+`custom_steps`. This freezes IDs/order and raw prompt content, not historical executable code or accounts.
+
+At first `00-triage.apply`, a derived-only helper locks the owned step before the task, fences step,
+round, epoch, live status and unselected path, validates the chosen pinned candidate against pinned
+declarations and confirms all IDs still resolve. It atomically stores path, broad-audit choice, chosen
+snapshot and event; event failure rolls back selection. Missing code marks the task dead by name.
+This is the sole new UPDATE exception for `run_list_snapshot`, only on an unselected derived workflow;
+`custom_steps` and `derived_run_plan` stay INSERT-only. Same-choice replay is idempotent. A different
+choice returns `derived_path_pinned`: “Create a new task to change path.” A triage Retry shows that pin;
+Skip of unselected triage is refused. Retry, full Retry, Resume, fix/revise resets, duplicate deliveries
+and boot recovery never clear or recompute it. Refresh path/snapshot before successor selection so
+pickup context cannot advance on the old list. Death between selection and handoff reuses the pin.
+
+Run-list, dead-task, provider-disable and context readers prefer the derived pin regardless of live
+definition edits. Malformed/missing required plans fail by name, never fall back to the custom slug's
+empty registry list. Do not reinterpret unrelated literal workflow-slug behaviors.
+
+**Admission, dependencies and defaults.** Derive root/database/repository/simplify traits, canary,
+module dependencies, integration admission/preview and saved-step CLI preview from the candidate union
+before selection, chosen snapshot afterward. Integration preview labels possible later steps “may run
+after path selection”; dispatch still resolves required accounts. Module deactivation/purge must
+count candidate-only dependencies through a derived predicate in `moduleTaskDependency`.
+Keep existing preflight-versus-locked-trait refusal. Read base/overlay FOR SHARE, referenced modules
+FOR KEY SHARE and catalog coherently under share locks in task INSERT; never hold a connection over
+queue IO. Catalog sync may refuse admission rather than produce a mixed plan.
+
+Presets and loop limits are the derived row's own maps, without live base-default inheritance.
+Validate keys against the union and limits only on `loopBudgetEditable` steps, 1–50; request limits
+win. Report obsolete default keys after an upgrade and omit them from new task copies; explicit
+invalid edits fail. Prune task-only irrelevant defaults when selecting the path, never saved maps.
+Preserve `06-run-config` omitted-answer/default semantics and use pinned membership for its derived
+QA/browser branch.
+
+**Storage and rollback.** Append `derived` to `run_list_strategy`; append nullable `base_slug
+varchar(128)` and `changes jsonb` after `prompt_steps`, and nullable `tasks.derived_run_plan jsonb`
+after the current final column (recheck at implementation). Existing rows stay NULL. Derived rows
+are admin-authored, `step_ids=NULL`, base/changes non-NULL; other strategies retain both NULL.
+Named CHECKs use explicit NULL tests; forbid self-reference and add a self-FK to slug ON DELETE
+RESTRICT. Mirror constraints in Drizzle. Locked API base validation enforces builtin eligibility and
+inherited `requiresRepository`. Base/strategy are immutable after create.
+
+Use two fresh consecutive migrations after the current highest number: commit guarded ADD VALUE
+first, then append columns and guarded named CHECK/FK blocks in the next transaction. Never edit an
+applied migration. No backfill. Down disables creation and retains capable workers, locks creation and
+definition mutation in maintenance, then refuses if ANY task uses a derived definition or carries a
+plan, including terminal/dead tasks. Export unused definitions, delete only unused rows and drop new
+constraints/columns IF EXISTS. Keep the enum label. Match the migration journal before roll-forward;
+prefer additive code rollback. Reverting runtime while a derived task is resumable is unsafe.
+
+**API and editor (later PRs).** Extend the existing admin routes with a strict derived create branch,
+exclusive with flat `stepIds`, and derived-only change PATCH. Keep static bodies, source/strategy/slug
+immutability, field ownership, expectedUpdatedAt 409/Reload, non-deleting seeds, transaction-required
+audit and delete refusal for any task usage. Preview is POST `/admin/task-types/preview`, registered
+before `/:slug`, read-only and unaudited. Admin authoring/preview requires auth+admin (403 for a
+regular user). Preview/detail return eligibility/revision, candidates, operation diagnostics,
+composition/default/prompt issues and fingerprint. Save/preview invalidity is 400; locked task
+creation invalidity is 409 with structured path/operation issues and no task/event/job. A base rename
+between preview/create is evaluated freshly at the locked read. Public list/detail exposes non-secret
+availability/warnings, and task detail exposes pinned diagnostics.
+
+“Duplicate and customize” opens an unsaved overlay editor with blank slug and copied display metadata.
+Reuse TaskTypeEditor/Composer, palette, prompt and loop-budget controls, integration overview,
+FormRenderer, MarkdownView and existing dirty/save/reload helpers. Show ordered changes and path
+preview, keep invalid rows/unsaved work, distinguish skipped-on-path from stale warnings, validate
+locally through shared code and debounce server preview with stale-response cancellation. Save only
+the overlay, never preview arrays. Keep creator mode static-only until its positive-list protocol
+supports overlays; preserve existing static behavior.
 
 ### Design: replacing a step
 
-A replacement must keep every reader of the replaced step working:
+The schema stores all three operations, but **every active replace is refused with
+`replacement-contract-unavailable` until prerequisite 4**. Equal composition tokens do not prove
+output compatibility. UI explains this boundary.
 
-- A composable entry may declare `replaces: '<core step id>'` and must then produce output that
-  satisfies the replaced step's declared output contract (a shared zod schema per replaceable step,
-  starting with 08c and 08c2).
-- Readers that find a step by id (gate 2 for 08c2, `task-history.ts` and others) resolve "the step
-  in the 08c2 role" through one helper that honours `replaces`. A source-scan test pins the list of
-  readers that may still use a literal id.
-- Only steps with a declared output contract are replaceable. Others can be removed (when the
-  composition stays valid) or have steps inserted beside them, not replaced.
-- `07-phase-2-implement` and the gates are never replaceable.
+Prerequisite 4 adds declared output contracts (shared Zod schemas, starting with 08c/08c2),
+`replaces` declarations and one role-resolving reader helper. Gate 2, task history and other literal-ID
+readers must resolve the replaced role; a source-scan test pins the remaining literal readers.
+Only steps with contracts become replaceable. `07-phase-2-implement` and gates never do.
 
 ### Prerequisites and order
 
 1. Composable entries for 04a, 08c2, 08d and 09, so a derived workflow can hold every built-in step.
    Extend the guard test that the shipped workflow order raises no ordering issue.
    **Prerequisite 1 implemented:** 23 entries added (58 total); every shipped workflow path,
-   including its environment prelude, now has complete catalog coverage and validates with no issues.
+   including its environment prelude, has complete catalog coverage and validates with no issues.
 2. The step SDK seam: the step types and helpers a module step needs without importing
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
-3. Derived types: storage, run-list builder, editor ("Duplicate and customize" on a built-in, the
-   changes list, live validation), task creation.
+3. Derived types. **PR1 of 4 implemented:** pure shared strict schemas, versioned run-plan type,
+   ordered base catalog adapter/parity helper, evaluator and diagnostics; no routes, migrations or
+   runtime/UI behavior change. The four PRs are:
+   1. Shared foundation above; controls cover operations/order, skips/staleness/consumed anchors,
+      every path/prelude, duplicate/missing payloads, protected prefix, replacement refusal and real
+      registry/catalog parity. Rollback: revert code.
+   2. Storage expansion; xhigh review required for enum transaction boundary, column order,
+      guarded constraints/FK and down refusal. Controls apply migrations twice on clean/ahead
+      throwaway PG, schema parity, terminal-task down refusal and unchanged existing rows.
+   3. API admission/pinning, triage and ALL execution/advisory/dependency readers in one atomic
+      behavior change, no UI; xhigh review required for late choice, ownership and lock order.
+      Controls cover create/edit/delete races, upgrades at triage, every path, replay/refusal,
+      crash/recovery and Retry/Skip/Stop/Cancel/epoch races, candidate-only module dependencies,
+      audit rollback, built-in/static/custom prompt and defaults regressions. Disable new creation
+      for rollback; retain runtime support for existing pins.
+   4. Existing editor extension/diagnostics; controls cover unsaved duplicate, local/server parity,
+      path preview, stale responses, warnings, 403, 409 Reload and static composer/creator defaults.
+      Rollback: revert UI; persisted plans/API continue working.
 4. Output contracts and `replaces` for 08c and 08c2, and the role-resolving reader helper.
 
-Each is its own PR. Rollback: revert in reverse order. A derived type left in the database after a
-revert of 3 is unusable but harmless; the migration's down path drops the two columns only when no
-task uses a derived type.
+Use red controls before code, relevant tests, touched-package typechecks and Prettier. Inject small
+bounds, use fake timers and keep each new/changed test file under 5 s. Register new gated tests in CI
+within its budget. Built-in and static-admin semantics remain unchanged throughout.
 
 ## Part B: DeepPattern as a steps-only public module (only after a go)
 ### Module shape
