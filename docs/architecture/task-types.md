@@ -37,14 +37,15 @@ by `DELETE /admin/task-types/:slug` while no task of that type exists.
 `content_hash` (sha256 of strategy and step ids) is read only by the seeder's own "did anything change"
 test. `fix_loop` is written by nothing today and only its `targetStepId` is read.
 
-On `tasks`: `type` is `text` (it was the `workflow_type` enum until 0193); `run_list_snapshot` pins a
-static type's step ids at create (null for the dynamic strategies, for tasks created before snapshots,
-and for a built-in created before the worker seeded its row); `custom_steps` pins the type's prompt
-steps that the snapshot uses; `dead_at` / `dead_reason` mark a dead task. Only the task INSERT sites
-write the two pinned columns — no UPDATE of either exists — so editing a type never reaches a task that
-already exists, and Retry reuses the pin.
+On `tasks`: `type` is `text` (it was the `workflow_type` enum until 0193). `run_list_snapshot` pins
+static step IDs at creation; built-in dynamic strategies and legacy/unseeded tasks retain their
+existing null semantics. Derived tasks pin the full/null candidate initially and the chosen candidate
+at first triage. That derived-only, fenced selection is the sole snapshot UPDATE exception.
+`custom_steps` pins raw prompt definitions used by the snapshot (candidate union for derived tasks);
+`derived_run_plan` pins the derived v1 plan. Both remain INSERT-only. Definition edits and Retry never
+recompute existing task pins. `dead_at` / `dead_reason` mark a dead task.
 
-**Derived storage (PR2 of 4).** Migration 0240 adds `derived` alone, committing the enum value
+**Derived storage (shipped in PR2).** Migration 0240 adds `derived` alone, committing the enum value
 before 0241 uses it. Migration 0241 appends `base_slug`, `changes` and nullable
 `tasks.derived_run_plan jsonb` (last, after `pr_remote_url`), with no backfill or defaults. It uses
 `ADD COLUMN IF NOT EXISTS` and a `duplicate_object` guard for every named CHECK/FK; Drizzle mirrors
@@ -59,12 +60,11 @@ unchanged, and existing tasks have no plan.
   key, with `ON DELETE RESTRICT` and `ON UPDATE NO ACTION`.
 
 The CHECKs use explicit SQL null tests. Builtin-only eligibility, base immutability and inherited
-repository policy are future API admission rules, not cross-row SQL CHECKs. Both new JSON columns
-are `unknown` in database: shared already depends on database for secrets services, so importing its
-`DerivedChange`/`DerivedRunPlanV1` types would create a package cycle. Future consumers must validate
-or narrow them at their own boundary. No application writer sets these columns in PR2. Shared
-availability/run-list selection and the worker definition reader explicitly refuse `derived` with
-`derived task types are not available yet`; existing strategies keep their behavior.
+repository policy are enforced at locked API admission, not as cross-row SQL CHECKs. Both JSON
+columns are `unknown` in database: shared already depends on database for secrets services, so
+importing its types would create a package cycle. Consumers validate the versioned execution plan
+at their boundary. API authoring writes base/changes; task creation writes the immutable plan.
+Existing builtin/static columns and execution semantics retain their behavior.
 
 **Rollback** is additive code rollback: revert the application commits and leave nullable columns
 and the inert enum value. There is no executable down migration or down script. The 0241 header
@@ -179,7 +179,8 @@ wrote itself.
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →
 `module-missing` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes
 before `missing-step` so a removed module is named instead of "a step is not installed". Without a
-synced catalog the step and composition checks are skipped. Over HTTP: disabled, not selectable and the
+synced catalog the step and composition checks are skipped for existing strategies; derived admission
+requires a coherent synced catalog. Over HTTP: disabled, not selectable and the
 switches are 403; the module reasons, a missing step and a bad composition are 409 naming what is wrong.
 The switch over reasons ends in an exhaustive `never`, so a new reason cannot fall through to a create.
 
@@ -189,7 +190,7 @@ CLI step even with an unsynced catalog); the prompt steps the snapshot uses, cop
 answers and loop limits for non-built-ins (request limits win); `simplifyCode` (a non-built-in with
 `07a-code-simplify`); `takesRootLock` (workflow, or a list with `00a-sync-base`, `01-worktree-setup` or
 `12-worktree-cleanup`); `pinsDatabase` (a non-built-in with `01c1-restore-database` or
-`11g-save-database`); `restoresDatabase` (a non-built-in static list with `01c1-restore-database`);
+`11g-save-database`); `restoresDatabase` (a non-built-in static list or derived candidate union with `01c1-restore-database`);
 `requiresRepository`. Module-seeded types get every trait an admin type gets
 except prompt steps.
 
@@ -215,7 +216,7 @@ Task form can say why.
 
 `buildRunList` dispatches on the strategy: `run_app_modes` builds the run-app list, `workflow_paths`
 orders the workflow steps with the environment prelude for the execution path, `static` resolves the
-snapshot (`resolveRunList`). The pure strategy selection and dynamic step IDs live in
+snapshot (`resolveRunList`), and `derived` resolves the task's pinned prefix/selected candidate. The pure strategy selection and dynamic step IDs live in
 `@haive/shared/run-list`; path ordering lives in `@haive/shared/execution-paths`. The worker
 resolves those IDs through its registry and retains the run-app database-compatibility check.
 The provider-disable preview uses the same selector with catalog steps, the stored execution
@@ -283,75 +284,111 @@ upcoming-CLI list, completion release) read the snapshot. Step flags come from `
 Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the run list: always on
 `run_app`, and on a snapshot task when the composition stays as valid without it.
 
-## Derived overlays (PR2 of 4)
+## Derived overlays (PR3 of 4)
 
-The shared foundation exists in `modularity/derived-task-types.ts` and `@haive/shared/run-list`.
-The persisted `derived` strategy and nullable storage exist, with explicit reader refusals; no route
-can author derived definitions or pin a derived task, and no runtime/UI behavior is enabled in PR2.
-The accepted delivery plan and the remaining admission/runtime/editor gates are in
-[Derived task types](../plans/deeppattern-module.md#part-a-derived-task-types-core).
+Derived types are admin-authored overlays of the built-in workflow. The API and worker support
+admission, task pins and triage; the web editor is PR4. V1 accepts only the builtin `workflow`
+with `workflow_paths`. Admin/module/derived parents are refused. `run_app` remains ineligible:
+it chooses a runtime after `01-declare-deps`, lacks complete composable lists and needs a
+finalization seam separate from triage. Derived `requiresRepository` follows the locked base.
+The base and strategy are immutable after creation. Module manifests remain static-only.
 
-`derivedChangesSchema` is a strict union of `{replace, with}`, `{insertAfter, step}` and `{remove}`:
-extra keys are refused, every ID uses the existing core/module/custom grammar and fits 128 characters.
-An empty overlay is legal; `MAX_DERIVED_CHANGES` is 64, and `createDerivedChangesSchema` accepts a
-smaller injected bound for controls. `DerivedRunPlanV1` describes future task pins: version 1,
-base slug/strategy and ordered candidates/fingerprint, overlay revision/changes, repository policy,
-composable declarations, final candidates/outcomes, common prefix and historical warnings.
-It is a shared type, not a database writer or a persisted-data parser.
+`derivedChangesSchema` accepts strict `{replace, with}`, `{insertAfter, step}` and `{remove}`
+operations. Extra keys, invalid namespaced IDs and IDs over 128 characters are refused. An empty
+overlay is legal. All HTTP routes use the fixed `MAX_DERIVED_CHANGES` (64), never a request-supplied
+bound; small injected bounds exist for controls only. Operations apply sequentially to actual IDs:
 
-V1 bases are builtin-only, and workflow is the only eligible base. No admin/module/derived parent
-or derived-of-derived chain is allowed. `derivedBaseEligibility` gives `run_app` the precise
-`run-app-mode-selection-unavailable` reason: its runtime is selected after `01-declare-deps`,
-complete composable lists are unavailable, and its finalization seam differs from triage. Admin-only
-means authoring; later signed-in consumption retains the custom-types switch and module admission.
+- `applied` changes the list. A target known on another base path is `path-absent`; a target absent
+  from the whole base and not earlier introduced is `stale-target`. Both skip without inferred renames.
+- A consumed target is `target-removed-by-change`, a hard issue. Removed IDs never alias replacements.
+  Earlier inserted steps may anchor later changes; a skipped producer propagates its reason and root
+  operation index through chains. Repeated inserts put the later insertion nearest the anchor.
+- Every active replacement is `replacement-contract-unavailable` until prerequisite 4 supplies output
+  contracts and role readers. A stale or off-path replacement still has an explicit skipped outcome
+  in save/preview diagnostics. Token compatibility does not authorize replacement.
+- Missing active payloads, duplicate final IDs and every `validateComposition` issue refuse the
+  overlay. Prompt quotes are checked per candidate; orphan prompt definitions against the union.
+  No additional server rule forbids removing an implementation step or gate: composition decides.
+- The exact prefix `00-model-health-workflow`, `00a-sync-base`, `00-triage` is protected on every
+  candidate. Remove/replace and insertion inside it are refused; insertion after triage is legal.
 
-`workflowBaseCandidates` calls the existing `taskRunListIds` for null/pre-triage and EVERY
-`EXECUTION_PATHS` value. Every candidate includes the environment prelude. The shared
-`OrderedStepCatalogRow` shape carries `stepId`, `workflowType`, `stepIndex`;
-`catalogWorkflowBaseCandidates` reconstructs registry index order, refusing duplicate IDs or
-ambiguous equal indices rather than sorting IDs. `baseCandidateParityIssues` compares paths and
-every ordered ID, detecting missing/extra/duplicate candidates as well as reordering. API catalog
-reads and synced-catalog admission belong to a later PR; the current ID-sorted `readStepCatalog`
-must not be used as derived base order.
+Warning summaries are deduplicated by `operationIndex`, name the operation/target and list affected
+candidates inside each warning. Save/create permit stale anchors only when every candidate validates.
+Missing/deactivated active module payloads are hard failures. Editor/detail diagnostics use today's
+base; task warnings remain the history pinned at creation. Obsolete-default notices are pinned separately in
+`defaultWarnings` and returned with task warnings. Neither seeding nor a later preview rewrites history.
 
-`evaluateDerivedTaskType` is pure, with no DB or worker import. Callers supply every base candidate,
-parsed changes, installed IDs and composable declarations (including merged prompt IDs when used).
-It applies changes sequentially against actual IDs per candidate:
+**Locked admission.** `workflowBaseCandidates` expands null/pre-triage and every `EXECUTION_PATHS`
+value through the existing selector, including the environment prelude. The API reads coherent
+`step_catalog` workflow type/index data under share locks and reconstructs registry index order;
+ID sorting is insufficient. Unsynced catalogs, NULL indices, duplicate IDs and ambiguous indices
+are named admission issues. Catalog/registry parity controls include every ordered candidate.
 
-- `applied` changes the list; a target absent from that path but known to the base is `path-absent`.
-  A target absent from the whole base and not earlier introduced is `stale-target`, a warning.
-  Neither skipped outcome mutates the list, and no rename is inferred.
-- A removed target is `target-removed-by-change`, a hard issue. There is no alias to a replacement.
-  Earlier inserted steps may anchor later changes; skipped/refused producers propagate their outcome,
-  root operation index and reason through chains. A skipped insertion never renames an existing base ID.
-  Repeated inserts at a surviving anchor put the later insertion nearest that anchor.
-- Hard failures have an explicit `refused` outcome. Missing active installed payloads are hard
-  issues; inactive payloads are not diagnosed. Every active replace is refused with
-  `replacement-contract-unavailable` until output contracts, `replaces` and role readers land in
-  prerequisite 4. Equal provided/required tokens never authorize replacement.
-- The first three workflow steps are untouchable: `00-model-health-workflow`, `00a-sync-base`,
-  `00-triage`. Refuse remove/replace and insertion inside that prefix; insertion after triage is
-  legal. Verify the final prefix too. A protected replace also reports replacement unavailability.
-- Diagnose duplicate final IDs and missing installed final steps. Run `validateComposition` on
-  EVERY final candidate, retaining all issues, including unknown declarations and unmet needs.
-  Optional prompt validation checks quotes per path and orphan entries against the union.
+Task creation reads overlay/base `FOR SHARE` and referenced modules `FOR KEY SHARE` in the INSERT
+transaction, evaluates all complete candidates and applies existing module/switch policy. Invalidity
+returns 409 with structured path/operation issues and no task, event or job. Existing preflight versus
+locked trait checks still refuse changed root/database/repository policy. No connection is held over
+queue IO. Module-state checks include active attempted payloads even when installed-step
+validation refuses their insertion, so a removed module is named before a composition error.
+Stale/off-path skipped operations and payloads behind skipped producer chains do not introduce
+module dependencies.
 
-Future task creation must lock/read the base, overlay, module state and ordered catalog coherently,
-validate every candidate and pin v1 at INSERT before executing only the shared prefix. Pin raw used
-prompt definitions across the union in `custom_steps`, with the null/full candidate initially in
-`run_list_snapshot`. At first triage, lock owned step before task, fence ownership/round/epoch,
-validate the selected pinned candidate/declarations and resolvable IDs, then atomically store path,
-chosen snapshot and event. Same-choice replay is idempotent; a different choice returns
-`derived_path_pinned`; unselected triage cannot be skipped. Retry (including full Retry), Resume,
-fix/revise resets and boot recovery retain the pin. This will be the only new snapshot UPDATE
-exception; plans and raw prompts remain INSERT-only. No such exception is enabled in PR2.
+At INSERT, `derived_run_plan` v1 stores base identity/strategy, overlay revision/changes, ordered base
+candidates and catalog fingerprint, composable declarations, all final candidates/outcomes, common
+prefix and warnings. The fingerprint covers actual order/declarations, not workflow's null-list
+`content_hash`. `run_list_snapshot` initially holds the full/null candidate; `custom_steps` pins raw
+prompt definitions used by any candidate. Traits, canary, module admission, integration admission and
+saved-step CLI previews use the candidate union before selection. Integration previews identify steps
+that may run after path selection. Dispatch still resolves each required account.
 
-Use candidate unions for pre-selection traits, dependencies, integrations and saved CLI previews,
-and chosen snapshots afterward. Default maps belong to the derived row, validated against the union;
-do not inherit live base defaults. Saved editor diagnostics recompute against today's base, while task
-warnings remain pinned history. Invalid candidates block save/preview (400) or creation (409); stale
-warnings alone are permitted only when every final candidate validates. Existing builtin and static
-admin paths keep their current semantics.
+**First triage.** Only the common prefix executes before selection. The derived-only selection
+transaction locks the owned step before the task, checks current step/round, epoch, live status and
+selection state, then validates the chosen candidate against pinned declarations and resolves its IDs.
+Missing executable code marks the task dead by name. It atomically stores path, broad-audit choice,
+chosen snapshot and event; an event failure rolls back selection. This is the sole UPDATE exception
+for `run_list_snapshot`, only on an unselected derived workflow. `derived_run_plan` and `custom_steps`
+remain INSERT-only. Same-choice replay is idempotent. A different choice is `derived_path_pinned`:
+“Create a new task to change path.” Triage Retry displays the pin; Skip before selection is refused.
+
+`handleResult` refreshes path/snapshot before choosing a successor. Retry, full Retry, Resume,
+fix/revise resets, duplicate delivery and boot recovery reuse the pin, including death after selection
+but before handoff. Execution, dead-task, provider-disable and context readers prefer pinned state
+independently of definition edits. Read paths validate strict pinned shape/invariants only, without
+re-running composition rules; composition is validated at admission, preview and first triage for
+the selected candidate. An unselected derived task that exhausts the common prefix fails by name
+with derived_path_unselected instead of completing. Malformed/missing required plans fail by name and never fall back
+to an empty custom-slug registry list. Module dependency/deactivation/purge checks inspect the pinned
+candidate union before selection and chosen snapshot afterward, without reading live overlay JSON.
+A non-secret per-category module admission map is pinned at task INSERT so retained integration
+admissions, choices and grants from an unselected-only candidate do not keep its module dependent.
+Live invocation bindings still protect modules they use; selection does not delete those bindings.
+
+Presets and loop limits belong to the derived row; there is no live inheritance of base defaults.
+Keys are validated against the candidate union, with limits 1–50 only on `loopBudgetEditable` steps.
+Request limits win. After an upgrade, obsolete saved defaults are reported and omitted from a new task;
+explicit invalid default edits still fail. Selection prunes irrelevant task defaults without editing
+the definition. `06-run-config` retains omitted-answer semantics and reads pinned derived membership
+for QA/browser options.
+
+**API.** The strict derived POST branch is mutually exclusive with static `stepIds` and accepts
+`runListStrategy: 'derived'`, `baseSlug` and `changes` alongside admin metadata/defaults/prompts.
+PATCH permits changes only on derived rows and cannot change slug, source, strategy or base. Existing
+field ownership, `expectedUpdatedAt` 409/Reload, transactional audit and refusal to DELETE while any
+task uses the type remain. Flat edits can save with diagnostics while an overlay needs attention.
+`POST /admin/task-types/preview` is registered before `/:slug`, requires auth plus admin, and writes
+nothing (no audit). It accepts an unsaved payload and returns eligibility/revision, candidates,
+operation outcomes, warnings, composition/default/prompt issues and fingerprint. Save/preview
+invalidity is 400; authoritative task admission is 409. Detail recomputes the same diagnostics.
+`GET /task-types` returns a non-secret warning/availability summary; creation and task detail expose
+stored application diagnostics. Task list and detail/poll payloads omit the full pinned plan; detail
+still computes and returns historical warnings before stripping it. A persisted derived row never
+makes either list endpoint return 500.
+The creator protocol remains static-only, and no step-specific or derived editor UI is added here.
+
+Pins freeze ID order/selection and raw prompts, not historical code or account availability.
+Rollback disables new derived creation and retains a capable worker until existing derived tasks
+cannot resume; reverting runtime while those tasks remain is unsafe. The additive storage and
+maintenance cleanup policy above still apply. See the [delivery plan](../plans/deeppattern-module.md#part-a-derived-task-types-core).
 
 ## The admin api and the editor
 
@@ -366,7 +403,7 @@ commit, so an audit refusal undoes the create, update or delete. Draft start rec
 `task_type_draft.start` with the task, opening message and queued state in their transaction,
 before enqueueing START; it never records message or prompt content.
 
-- **Create** runs, each stage a 400 with `issues`: built-in slug (409) → strict schema → slug taken
+- **Static create** runs, each stage a 400 with `issues`: built-in slug (409) → strict schema → slug taken
   (409) → catalog synced (409) → prompt steps → composition → defaults.
 - **Update** reads the row `FOR UPDATE`; a stale `expectedUpdatedAt` (compared as Dates: milliseconds
   against the column's microseconds) answers 409 `task_type_changed` with the current row and writes

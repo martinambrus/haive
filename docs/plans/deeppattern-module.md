@@ -61,7 +61,8 @@ Re-measure all of this in Phase 0: it is a preview and may have changed.
 - Module steps register as `module.<id>.<local>` and join the admin catalog. An admin composes a
   custom type from core and module steps in the task-type editor, validated by `validateComposition`
   (see [Task types](../architecture/task-types.md)).
-- An admin type is a `static` run list. The built-in `workflow` uses the `workflow_paths` strategy:
+- A static admin type is a flat run list; derived admin overlays now retain the built-in paths.
+  The built-in `workflow` uses the `workflow_paths` strategy:
   triage picks the execution path and `buildRunList` (`worker/src/queues/run-list.ts`) builds a
   path-aware list.
 - The editor has no way to start from a built-in type.
@@ -176,7 +177,7 @@ plan, including terminal/dead tasks. Export unused definitions, delete only unus
 constraints/columns IF EXISTS. Keep the enum label. Match the migration journal before roll-forward;
 prefer additive code rollback. Reverting runtime while a derived task is resumable is unsafe.
 
-**API and editor (later PRs).** Extend the existing admin routes with a strict derived create branch,
+**API (PR3) and editor (PR4).** Extend the existing admin routes with a strict derived create branch,
 exclusive with flat `stepIds`, and derived-only change PATCH. Keep static bodies, source/strategy/slug
 immutability, field ownership, expectedUpdatedAt 409/Reload, non-deleting seeds, transaction-required
 audit and delete refusal for any task usage. Preview is POST `/admin/task-types/preview`, registered
@@ -216,10 +217,12 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
    Status: PR2 of 4 implemented.
-3. Derived types. **PR2 of 4 implemented:** pure shared schemas/evaluator and versioned plan type,
-   ordered base catalog adapter/parity, plus additive derived storage (enum, nullable columns,
-   guarded CHECKs/self-FK and commented guarded cleanup). Existing rows remain unchanged; derived
-   availability/execution explicitly refuse until PR3. No authoring/runtime/UI enablement. The four PRs are:
+3. Derived types. **PR3 of 4 implemented:** shared schemas/evaluator and ordered catalog adapter,
+   additive storage in 0240/0241, and the atomic API/shared/worker admission, task pinning, triage
+   selection and execution/advisory/dependency readers. Tasks pin all candidates before triage;
+   selection reuses that plan with step-before-task fencing. Stale operations remain explicit
+   diagnostics; active replacements still refuse until prerequisite 4. Built-in/static behavior
+   is retained. No web editor enablement (PR4). The four PRs are:
    1. Shared foundation above; controls cover operations/order, skips/staleness/consumed anchors,
       every path/prelude, duplicate/missing payloads, protected prefix, replacement refusal and real
       registry/catalog parity. Rollback: revert code.
@@ -229,8 +232,8 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
       existing rows, and terminal/dead-task cleanup refusal. Rollback: revert application code;
       optional commented maintenance SQL refuses any task pin/reference before dropping storage.
       There is no executable down migration; the harmless enum value stays.
-   3. API admission/pinning, triage and ALL execution/advisory/dependency readers in one atomic
-      behavior change, no UI; xhigh review required for late choice, ownership and lock order.
+   3. API admission/pinning, triage and ALL execution/advisory/dependency readers implemented as
+      one atomic behavior change, no UI; xhigh review covers late choice, ownership and lock order.
       Controls cover create/edit/delete races, upgrades at triage, every path, replay/refusal,
       crash/recovery and Retry/Skip/Stop/Cancel/epoch races, candidate-only module dependencies,
       audit rollback, built-in/static/custom prompt and defaults regressions. Disable new creation
