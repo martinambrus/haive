@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createStreamJsonCollector } from '../src/queues/cli-exec/stream.js';
+import { aggregateRequestUsage } from '../src/cli-executor/request-usage.js';
 
 const fixture = JSON.parse(
   readFileSync(new URL('./fixtures/streams/request-claude.json', import.meta.url), 'utf8'),
@@ -22,14 +23,109 @@ describe('Claude request coverage', () => {
       'utf8',
     ),
   );
+  it.each(['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'outputTokens'])(
+    'records same-name billed %s excess without withholding coverage',
+    (bucket) => {
+      const events = structuredClone(billingCases[2]!.events);
+      events[3].modelUsage['claude-sonnet-4-6'][bucket]++;
+      expect(read(events)).toMatchObject({
+        coverage: 'complete',
+        reasons: [],
+        unobservedSameModel: [{ model: 'claude-sonnet-4-6' }],
+      });
+    },
+  );
   it.each(billingCases)('reconciles billed tokens for $name', ({ events, coverage, reasons }) => {
     expect(read(events)).toMatchObject({ coverage, reasons });
   });
   it.each(['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'outputTokens'])(
-    'refuses contradictory billed %s for an observed model',
+    'refuses a billed %s below the observed sum even with a matching alias',
     (bucket) => {
       const events = structuredClone(billingCases[2]!.events);
-      events[3].modelUsage['claude-sonnet-4-6'][bucket]++;
+      events[3].modelUsage['matching-alias'] = structuredClone(
+        events[3].modelUsage['claude-sonnet-4-6'],
+      );
+      events[3].modelUsage['claude-sonnet-4-6'][bucket]--;
+      expect(read(events)).toMatchObject({
+        coverage: 'incomplete',
+        reasons: ['model-usage-mismatch'],
+      });
+    },
+  );
+  const haikuMain = () => {
+    const events = structuredClone(billingCases[2]!.events);
+    const model = 'claude-haiku-4-5';
+    events[0].model = model;
+    for (const event of events) if (event.message) event.message.model = model;
+    events[3].modelUsage = {
+      [model]: {
+        inputTokens: 311,
+        outputTokens: 12,
+        cacheReadInputTokens: 73,
+        cacheCreationInputTokens: 32,
+      },
+    };
+    return events;
+  };
+  it('accepts Haiku main-model titling excess as aggregate usage without inventing requests', () => {
+    const events = haikuMain();
+    const collector = createStreamJsonCollector();
+    collector.onChunk(events.map((e: unknown) => JSON.stringify(e)).join('\n') + '\n');
+    const capture = collector.getRequestUsage();
+    expect(capture).toMatchObject({ coverage: 'complete', reasons: [], requestCount: 2 });
+    expect(capture.requests?.map((r) => r.inputTokens)).toEqual([100, 200]);
+    expect(capture.unobservedSameModel).toEqual([
+      {
+        model: 'claude-haiku-4-5',
+        inputTokens: 11,
+        outputTokens: 7,
+        cacheReadTokens: 3,
+        cacheCreationTokens: 2,
+        cacheCreation5mTokens: null,
+        cacheCreation1hTokens: null,
+      },
+    ]);
+    expect(collector.getRequestUsage()).toEqual(capture);
+    expect(collector.getTokenUsage()).toMatchObject({ inputTokens: 300, outputTokens: 5 });
+    expect(collector.getRequestUsageDiagnostics().sameNameLedgerExcess).toBe(true);
+  });
+  it('keeps same-model excess through sequential sub-step aggregation', () => {
+    const usage = read(haikuMain());
+    const aggregate = aggregateRequestUsage([
+      { id: 'first', usage },
+      { id: 'second', usage },
+    ]);
+    expect(aggregate).toMatchObject({ coverage: 'complete', requestCount: 4 });
+    expect(aggregate.unobservedSameModel).toEqual([
+      ...usage.unobservedSameModel!,
+      ...usage.unobservedSameModel!,
+    ]);
+  });
+  it('accepts an exact same-name ledger without excess', () => {
+    const capture = read(billingCases[2]!.events);
+    expect(capture.coverage).toBe('complete');
+    expect(capture.unobservedSameModel ?? []).toEqual([]);
+  });
+  it('keeps unobservable excess output and cache-write TTL unknown', () => {
+    const events = haikuMain();
+    events[3].usage.output_tokens = 100;
+    events[3].modelUsage['claude-haiku-4-5'].outputTokens = 107;
+    const capture = read(events);
+    expect(capture.coverage).toBe('complete');
+    expect(capture.unobservedSameModel).toMatchObject([
+      {
+        inputTokens: 11,
+        outputTokens: null,
+        cacheCreation5mTokens: null,
+        cacheCreation1hTokens: null,
+      },
+    ]);
+  });
+  it.each(['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'outputTokens'])(
+    'keeps a no-same-name ledger with excess %s incomplete',
+    (bucket) => {
+      const events = structuredClone(billingCases[0]!.events);
+      events[3].modelUsage['grok-4.6-build'][bucket]++;
       expect(read(events)).toMatchObject({
         coverage: 'incomplete',
         reasons: ['model-usage-mismatch'],

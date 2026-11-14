@@ -46,7 +46,7 @@ describe('read-only request replay', () => {
     expect(JSON.stringify(report)).not.toMatch(/requestId|msg_redacted|"result"|"usage"|"prompt"/);
   });
 
-  it('counts same-name side-model excess and output-only contradictions without relaxing coverage', async () => {
+  it('reports recorded same-model excess while keeping output-only contradictions incomplete', async () => {
     const sameName = fixture('request-claude');
     sameName[0].model = 'claude-haiku-4-5';
     for (const e of sameName) if (e.message) e.message.model = 'claude-haiku-4-5';
@@ -65,9 +65,11 @@ describe('read-only request replay', () => {
     const promptChange = structuredClone(outputOnly);
     promptChange[2].message.usage.input_tokens++;
     const report = await replayRequestUsage([row(sameName), row(outputOnly), row(promptChange)]);
-    expect(report.total).toMatchObject({ complete: 0, incomplete: 3 });
+    expect(report.total).toMatchObject({ complete: 1, incomplete: 2 });
     expect(report.counters).toMatchObject({
       sameNameSideModelCandidates: 1,
+      sameNameLedgerExcessRuns: 1,
+      unobservedSameModelRuns: 1,
       outputOnlyContradictoryRuns: 1,
     });
   });
@@ -120,6 +122,7 @@ describe('read-only request replay', () => {
     expect(report.counters).toMatchObject({
       emptyModelUsageAcceptedComplete: 0,
       noResultFallbackRuns: 0,
+      unobservedSameModelRuns: 0,
     });
   });
 

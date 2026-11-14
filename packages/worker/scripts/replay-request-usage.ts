@@ -98,6 +98,7 @@ export async function replayRequestUsage(
   const counters = {
     sameNameSideModelCandidates: 0,
     sameNameLedgerExcessRuns: 0,
+    unobservedSameModelRuns: 0,
     emptyModelUsageAcceptedComplete: 0,
     outputOnlyContradictoryRuns: 0,
     killedFallbackRuns: 0,
@@ -198,6 +199,7 @@ export async function replayRequestUsage(
     }
     if (truncated) continue;
     counters.sameNameLedgerExcessRuns += Number(diagnostics.sameNameLedgerExcess);
+    counters.unobservedSameModelRuns += Number((capture.unobservedSameModel?.length ?? 0) > 0);
     // VOLATILE: Haiku is the measured Claude titling family. Excess is a candidate,
     // not proof of a side call: raw streams do not identify CLI-owned requests.
     counters.sameNameSideModelCandidates += Number(
