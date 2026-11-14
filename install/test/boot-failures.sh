@@ -57,7 +57,7 @@ STUB
 
 cat > "$WORK/bin/curl" <<'STUB'
 #!/usr/bin/env sh
-# Answers only what install.sh asks for: the release manifest (existence check), the compose
+# Answers only what install.sh asks for: the release manifest (downloaded once), the compose
 # bundle (written to the -o target), and the api health probe.
 url=""; out=""; prev=""
 for a in "$@"; do
@@ -66,7 +66,7 @@ for a in "$@"; do
   prev="$a"
 done
 case "$url" in
-  *release.json)      exit 0 ;;
+  *release.json)      [ -n "$out" ] && printf '{}\n' > "$out"; exit 0 ;;
   *docker-compose*)   [ -n "$out" ] && printf 'services: {}\n' > "$out"; exit 0 ;;
   *"/health")         exit 0 ;;
 esac

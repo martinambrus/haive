@@ -219,9 +219,8 @@ resolve_version() {
   printf '%s' "$tag"
 }
 
-# Authenticate and validate before creating anything in the destination. The staged config
-# becomes this install's .docker only after the entire manifest has passed.
-read_channel_manifest() {
+# Keep manifest and bundle downloads private and remove them on every exit.
+init_manifest_scratch() {
   CHANNEL_UMASK=$(umask)
   umask 077
   CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
@@ -244,6 +243,12 @@ read_channel_manifest() {
   }
   trap cleanup_channel 0
   trap 'exit 1' HUP INT TERM
+  umask "$CHANNEL_UMASK"
+}
+
+read_channel_manifest() {
+  init_manifest_scratch
+  umask 077
   mkdir "$CHANNEL_SCRATCH/.docker"
   chmod 700 "$CHANNEL_SCRATCH/.docker"
   CHANNEL_USER_CONFIG=${DOCKER_CONFIG:-${HOME:-/}/.docker}
@@ -411,9 +416,17 @@ read_channel_manifest() {
   [ -f "$CHANNEL_SCRATCH/release.json" ] && [ ! -L "$CHANNEL_SCRATCH/release.json" ] \
     || die "channel release.json must be a regular file"
   [ "$(wc -c < "$CHANNEL_SCRATCH/release.json")" -le 1048576 ] || die "channel manifest is too large"
+  parse_release_manifest
+  API_IMAGE=$(sed -n '1p' "$CHANNEL_SCRATCH/pins")
+  WORKER_IMAGE=$(sed -n '2p' "$CHANNEL_SCRATCH/pins")
+  WEB_IMAGE=$(sed -n '3p' "$CHANNEL_SCRATCH/pins")
+  umask "$CHANNEL_UMASK"
+}
+
+parse_release_manifest() {
   # Recursive JSON grammar, not a grep for strings that might be inside an unrelated object.
   # awk is already required by preflight and the port probe; no host JSON runtime is needed.
-  if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" '
+  if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" -v bundleFile="$CHANNEL_SCRATCH/bundle-files" '
     # Keep records separate: repeatedly appending the whole input is quadratic in mawk.
     # Only whitespace can cross records; an actual newline inside a string is invalid.
     # BusyBox recomputes the source length in substr(); scan bounded windows.
@@ -455,6 +468,7 @@ read_channel_manifest() {
       if (depth > 64) fail()
       ws(); c=slice(p,1)
       if (c == "{") {
+        objects[path]=1
         p++; ws(); if (slice(p,1)=="}") { p++; return }
         while (1) {
           ws(); k=str(); if (index(k,"\\") || index(k,"/")) fail()
@@ -494,23 +508,41 @@ read_channel_manifest() {
       if (bad) exit 1
       line=1; s=lines[line]; delete lines[line]; size=length(s); windowStart=windowEnd=0
       p=1; ws(); if(slice(p,1)!="{") fail(); val("",0); ws(); if(p<=size) fail()
-      if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
+      hasBundle=(("" SUBSEP "bundle") in keys)
+      if (hasBundle) {
+        if (!objects["/bundle"] || !objects["/bundle/files"]) fail()
+        split("docker-compose.yml docker-compose.run.yml docker-compose.gpu.yml docker-compose.vulkan.yml",names," ")
+        for (i=1;i<=4;i++) allowed[names[i]]=1
+        for (key in keys) {
+          split(key,parts,SUBSEP)
+          if (parts[1]=="/bundle/files" && !(parts[2] in allowed)) fail()
+        }
+        for (i=1;i<=4;i++) {
+          hash=strings["/bundle/files/" names[i]]
+          if (i<=2 || (("/bundle/files" SUBSEP names[i]) in keys)) {
+            if (length(hash)!=71 || substr(hash,1,7)!="sha256:" || substr(hash,8) ~ /[^0-9a-f]/) fail()
+          }
+        }
+      }
+      if (channel!="public" || hasBundle) {
+        if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
+      }
       split("api worker web builder",hosts," ")
-      for(i=1;i<=4;i++) {
+      if (channel!="public") for(i=1;i<=4;i++) {
         pin=strings["/images/" hosts[i]]; prefix=registry "/haive-" channel "-" hosts[i] "@sha256:"
         if(index(pin,prefix)!=1) fail()
         digest=substr(pin,length(prefix)+1)
         if(length(digest)!=64 || digest ~ /[^0-9a-f]/) fail()
       }
-      for(i=1;i<=3;i++) print strings["/images/" hosts[i]]
+      if (hasBundle && bundleFile!="") for(i=1;i<=4;i++) {
+        hash=strings["/bundle/files/" names[i]]
+        if (hash!="") print names[i],hash > bundleFile
+      }
+      if (channel!="public") for(i=1;i<=3;i++) print strings["/images/" hosts[i]]
     }
   ' "$CHANNEL_SCRATCH/release.json" > "$CHANNEL_SCRATCH/pins"; then
-    die "invalid channel manifest: channel, version and all image pins must match the requested registry release"
+    die "invalid release manifest: bundle hashes, channel, version and image pins must match the requested release"
   fi
-  API_IMAGE=$(sed -n '1p' "$CHANNEL_SCRATCH/pins")
-  WORKER_IMAGE=$(sed -n '2p' "$CHANNEL_SCRATCH/pins")
-  WEB_IMAGE=$(sed -n '3p' "$CHANNEL_SCRATCH/pins")
-  umask "$CHANNEL_UMASK"
 }
 
 # ── Install ──────────────────────────────────────────────────────────────────
@@ -606,7 +638,8 @@ say "  resolved          ${PINNED}  (tag ${TAG})"
 # nothing. Its manifest is the artefact an upgrade reads too.
 MANIFEST_URL="${RELEASES}/${TAG}/release.json"
 if [ "$CHANNEL" = "public" ]; then
-  curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
+  init_manifest_scratch
+  curl -fsSL -o "$CHANNEL_SCRATCH/release.json" "$MANIFEST_URL" 2>/dev/null \
   || die "release ${TAG} has no published manifest at ${MANIFEST_URL}.
        Check the version, or list what exists: https://github.com/${REPO}/releases"
 fi
@@ -617,7 +650,11 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   say "--check: nothing was installed."
   exit 0
 fi
-if [ "$CHANNEL" = "public" ]; then say "  manifest          found"; fi
+if [ "$CHANNEL" = "public" ]; then
+  [ "$(wc -c < "$CHANNEL_SCRATCH/release.json")" -le 1048576 ] || die "release manifest is too large"
+  parse_release_manifest
+  say "  manifest          found"
+fi
 
 : "${INSTALL_DIR:=${HOME:-.}/${INSTALL_ID}}"
 case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$(pwd)/$INSTALL_DIR" ;; esac
@@ -656,15 +693,15 @@ if [ "$CHANNEL" != "public" ]; then
 fi
 
 step "Writing the install to $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/snapshots"
-cd "$INSTALL_DIR"
+# Download and verify in scratch before touching the destination, including --force installs.
+mkdir "$CHANNEL_SCRATCH/bundle"
 
 # The compose bundle is fetched AT THE TAG, so it always matches the images being pinned.
-fetch "${RAW}/${TAG}/docker-compose.yml"     docker-compose.yml
-fetch "${RAW}/${TAG}/docker-compose.run.yml" docker-compose.run.yml
+fetch "${RAW}/${TAG}/docker-compose.yml"     "$CHANNEL_SCRATCH/bundle/docker-compose.yml"
+fetch "${RAW}/${TAG}/docker-compose.run.yml" "$CHANNEL_SCRATCH/bundle/docker-compose.run.yml"
 # A release older than its installer may not pass the generated password to Mailpit; the
 # summary then says the inbox is open rather than promise a login it does not have.
-if grep -q '^[[:space:]]*MP_UI_AUTH:' docker-compose.run.yml; then
+if grep -q '^[[:space:]]*MP_UI_AUTH:' "$CHANNEL_SCRATCH/bundle/docker-compose.run.yml"; then
   MAIL_LOGIN="(user haive, MAILPIT_UI_PASSWORD from .env)"
 else
   MAIL_LOGIN="(no login in this release: anyone who can reach this port can read its mail)"
@@ -688,13 +725,48 @@ has_nvidia_runtime() {
 if [ "${HAIVE_GPU:-auto}" = "cpu" ]; then
   GPU_MODE="CPU (forced)"
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 && has_nvidia_runtime; then
-  fetch "${RAW}/${TAG}/docker-compose.gpu.yml" docker-compose.gpu.yml
+  fetch "${RAW}/${TAG}/docker-compose.gpu.yml" "$CHANNEL_SCRATCH/bundle/docker-compose.gpu.yml"
   GPU_FILE="docker-compose.gpu.yml"; GPU_MODE="NVIDIA"
 elif [ -e /dev/dri/renderD128 ]; then
-  fetch "${RAW}/${TAG}/docker-compose.vulkan.yml" docker-compose.vulkan.yml
+  fetch "${RAW}/${TAG}/docker-compose.vulkan.yml" "$CHANNEL_SCRATCH/bundle/docker-compose.vulkan.yml"
   GPU_FILE="docker-compose.vulkan.yml"; GPU_MODE="Vulkan (Intel/AMD)"
 fi
 say "  ollama            ${GPU_MODE}"
+
+if [ -s "$CHANNEL_SCRATCH/bundle-files" ]; then
+  # Hash only installed files: an unselected overlay must not be recorded as present.
+  printf '{"version":"%s","files":{' "$PINNED" > "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
+  separator=""
+  for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"}; do
+    expected=$(awk -v name="$name" '$1==name {print $2}' "$CHANNEL_SCRATCH/bundle-files")
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual=$(sha256sum "$CHANNEL_SCRATCH/bundle/$name") || die "could not hash bundle file: $name"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual=$(shasum -a 256 "$CHANNEL_SCRATCH/bundle/$name") || die "could not hash bundle file: $name"
+    else
+      die "bundle verification requires sha256sum or shasum -a 256"
+    fi
+    [ "sha256:${actual%% *}" = "$expected" ] || die "release bundle hash mismatch: $name"
+    printf '%s"%s":"%s"' "$separator" "$name" "$expected" >> "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
+    separator=","
+  done
+  printf '}}\n' >> "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
+  chmod 644 "$CHANNEL_SCRATCH/bundle/.haive-bundle.json"
+fi
+
+mkdir -p "$INSTALL_DIR/snapshots"
+cd "$INSTALL_DIR"
+for name in docker-compose.yml docker-compose.run.yml ${GPU_FILE:+"$GPU_FILE"}; do
+  cp "$CHANNEL_SCRATCH/bundle/$name" "$name"
+done
+if [ -f "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" ]; then
+  cp "$CHANNEL_SCRATCH/bundle/.haive-bundle.json" .haive-bundle.json
+  # Match the root updater writer: install directory owner/group, mode 0644.
+  if owner=$(stat -c '%u:%g' . 2>/dev/null); then :
+  else owner=$(stat -f '%u:%g' .); fi
+  chown "$owner" .haive-bundle.json
+  chmod 644 .haive-bundle.json
+fi
 
 WEB_PORT=$(free_port 3000)
 API_PORT=$(free_port "$((WEB_PORT + 1))")
@@ -849,7 +921,7 @@ ${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
     shift
     v=""
     while [ \$# -gt 0 ]; do case "\$1" in --version) v="\${2:-}"; shift 2 ;; *) break ;; esac; done
-    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]${CHANNEL_CHANGE_USAGE}" >&2; exit 2; }
+    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--replace-modified-bundle] [--force]${CHANNEL_CHANGE_USAGE}" >&2; exit 2; }
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
     ${LOAD_INSTALL_ENV}
@@ -885,7 +957,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
       "\${HAIVE_REGISTRY}/haive-updater:\${HAIVE_VERSION#v}" \\
       packages/updater/dist/recover-admin-cli.js "\$@"
     ;;
-  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>] [--force]" >&2; exit 2 ;;
+  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v> [--replace-modified-bundle]${CHANNEL_CHANGE_USAGE}|recover-admin --email <addr> [--user-id <id>] [--force]" >&2; exit 2 ;;
 esac
 EOF
 chmod +x haive

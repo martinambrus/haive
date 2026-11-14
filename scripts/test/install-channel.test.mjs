@@ -70,10 +70,11 @@ esac
 exit 0
 `;
 const curl = `#!/bin/sh
-printf network >> "$CASE_ROOT/network-calls"
+printf "%s\\n" "$*" >> "$CASE_ROOT/network-calls"
 [ "$FAIL_AT" != bundle ] || exit 1
 prev=; out=
 for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
+case "$*" in *release.json*) cp "$CASE_ROOT/manifest.json" "$out"; exit 0 ;; esac
 case "$out" in
   *docker-compose.run.yml) if [ "$FAIL_AT" = old-bundle ]; then printf 'services: {}\\n'; else printf 'services:\\n  mailpit:\\n    environment:\\n      MP_UI_AUTH: x\\n'; fi > "$out" ;;
   *docker-compose*) printf 'services: {}\\n' > "$out" ;;
@@ -81,7 +82,8 @@ esac
 exit 0
 `;
 // Only these secret-transport edits, the recovery subcommand tested below and the
-// explicit PowerShell install-id reorder and Mailpit env addition may differ from the public baseline.
+// explicit PowerShell install-id reorder, Mailpit env, bundle flag usage and forwarding
+// may differ from the public baseline.
 const publicSecretChanges = {
   sh: [
     [
@@ -95,6 +97,14 @@ const publicSecretChanges = {
     ['      -e CONFIG_ENCRYPTION_KEY="${CONFIG_ENCRYPTION_KEY}"', '      -e CONFIG_ENCRYPTION_KEY'],
   ],
   ps1: [
+    [
+      "param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain)",
+      "[CmdletBinding(PositionalBinding=$false)]\nparam([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain,\n  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)",
+    ],
+    [
+      "    if ($ForceDrain) { $dargs += '--force' }",
+      "    if ($ForceDrain) { $dargs += '--force' }\n    if ($RemainingArgs.Count -gt 0) { $dargs += $RemainingArgs }",
+    ],
     [
       "      '-e', \"DATABASE_URL=postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive\",",
       "      '-e', 'DATABASE_URL',",
@@ -118,7 +128,15 @@ function approvedPublicSecrets(lang, text) {
 }
 function fixture(
   lang,
-  { publicInstall = false, data = manifest, fail = '', source, installDir, start = false } = {},
+  {
+    publicInstall = false,
+    data = manifest,
+    fail = '',
+    source,
+    installDir,
+    start = false,
+    gpu = false,
+  } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'channel-installer-'));
   const bin = join(root, 'bin');
@@ -129,7 +147,17 @@ function fixture(
     join(root, 'manifest.json'),
     typeof data === 'string' ? data : JSON.stringify(data),
   );
-  writeFileSync(join(bin, 'docker'), docker, { mode: 0o755 });
+  writeFileSync(
+    join(bin, 'docker'),
+    gpu
+      ? docker.replace(
+          'case "$1" in',
+          'case "$*" in \'info --format\'*) echo nvidia; exit 0 ;; esac\ncase "$1" in',
+        )
+      : docker,
+    { mode: 0o755 },
+  );
+  if (gpu) writeFileSync(join(bin, 'nvidia-smi'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(bin, 'curl'), curl, { mode: 0o755 });
   for (const command of ['mkdir', 'mv'])
     writeFileSync(
@@ -184,7 +212,7 @@ printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
-    HAIVE_GPU: 'cpu',
+    HAIVE_GPU: gpu ? 'auto' : 'cpu',
     HAIVE_REGISTRY_TOKEN: token,
     CASE_ROOT: root,
     CALLS: calls,
@@ -205,7 +233,7 @@ printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; if($OutFile -like '*docker-compose.run.yml' -and $env:FAIL_AT -ne 'old-bundle'){ [IO.File]::WriteAllText($OutFile, "services:\`n  mailpit:\`n    environment:\`n      MP_UI_AUTH: x\`n") } else { [IO.File]::WriteAllText($OutFile, "services: {}\\n") } } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile -and $Uri -like '*/release.json'){ Copy-Item (Join-Path $env:CASE_ROOT 'manifest.json') $OutFile; return }; if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; if($OutFile -like '*docker-compose.run.yml' -and $env:FAIL_AT -ne 'old-bundle'){ [IO.File]::WriteAllText($OutFile, "services:\`n  mailpit:\`n    environment:\`n      MP_UI_AUTH: x\`n") } else { [IO.File]::WriteAllText($OutFile, "services: {}\`n") } } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -242,7 +270,7 @@ printf '%s' '${fixtureEntropy}' | cut -c "1-$(($3 * 2))"
         'run',
         '--rm',
         '--name',
-        `t536-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
+        `${process.env.HAIVE_INSTALLER_CONTAINER_PREFIX ?? 't536-installer'}-${process.pid}-${Math.random().toString(16).slice(2)}`,
         '--pull',
         'never',
         '--network',
@@ -312,6 +340,181 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  for (const publicInstall of [true, false]) {
+    const files = {
+      'docker-compose.yml': 'services: {}\n',
+      'docker-compose.run.yml': 'services:\n  mailpit:\n    environment:\n      MP_UI_AUTH: x\n',
+      'docker-compose.gpu.yml': 'services: {}\n',
+      'docker-compose.vulkan.yml': 'services: {}\n',
+    };
+    const hashes = Object.fromEntries(
+      Object.entries(files).map(([name, bytes]) => [
+        name,
+        'sha256:' + createHash('sha256').update(bytes).digest('hex'),
+      ]),
+    );
+    const data = {
+      ...manifest,
+      channel: publicInstall ? 'public' : 'customer',
+      bundle: { files: hashes, env: [], known: [] },
+    };
+    check(`bundle record contains only installed verified files (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall, data });
+      try {
+        const r = f.install();
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const record = join(f.dir, '.haive-bundle.json');
+        assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), {
+          version: '9.9.9',
+          files: Object.fromEntries(Object.entries(hashes).slice(0, 2)),
+        });
+        if (lang === 'sh' || process.platform !== 'win32') {
+          assert.equal(statSync(record).mode & 0o777, 0o644);
+          assert.equal(statSync(record).uid, statSync(f.dir).uid);
+          assert.equal(statSync(record).gid, statSync(f.dir).gid);
+        }
+        if (publicInstall)
+          assert.equal(
+            readFileSync(join(f.root, 'network-calls'), 'utf8').match(
+              /https:\/\/github.com\/[^\s]*release.json/g,
+            )?.length,
+            1,
+            'one public manifest fetch',
+          );
+      } finally {
+        f.clean();
+      }
+    });
+    check(`bundle hash mismatch refuses before creating install (public=${publicInstall})`, () => {
+      const name = 'docker-compose.run.yml';
+      const f = fixture(lang, {
+        publicInstall,
+        data: {
+          ...data,
+          bundle: { ...data.bundle, files: { ...hashes, [name]: 'sha256:' + '0'.repeat(64) } },
+        },
+      });
+      try {
+        const r = f.install();
+        assert.notEqual(r.status, 0);
+        assert.match(r.stdout + r.stderr, /hash mismatch.*docker-compose.run.yml/i);
+        assert.ok(!existsSync(f.dir), 'no half-installed tree');
+        mkdirSync(f.dir);
+        writeFileSync(join(f.dir, 'docker-compose.yml'), 'operator file');
+        const retry = f.install([f.flag('force')]);
+        assert.notEqual(retry.status, 0);
+        assert.deepEqual(readdirSync(f.dir), ['docker-compose.yml']);
+        assert.equal(readFileSync(join(f.dir, 'docker-compose.yml'), 'utf8'), 'operator file');
+        assert.ok(!existsSync(join(f.root, 'container')), 'manifest container removed');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+          'scratch removed',
+        );
+      } finally {
+        f.clean();
+      }
+    });
+    if (lang === 'sh') {
+      check(`selected GPU overlay is verified and recorded (public=${publicInstall})`, () => {
+        const f = fixture(lang, { publicInstall, data, gpu: true });
+        try {
+          const r = f.install();
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const record = JSON.parse(readFileSync(join(f.dir, '.haive-bundle.json'), 'utf8'));
+          assert.deepEqual(record.files, Object.fromEntries(Object.entries(hashes).slice(0, 3)));
+        } finally {
+          f.clean();
+        }
+      });
+      check(`selected GPU overlay hash mismatch refuses (public=${publicInstall})`, () => {
+        const f = fixture(lang, {
+          publicInstall,
+          gpu: true,
+          data: {
+            ...data,
+            bundle: {
+              ...data.bundle,
+              files: { ...hashes, 'docker-compose.gpu.yml': 'sha256:' + '0'.repeat(64) },
+            },
+          },
+        });
+        try {
+          const r = f.install();
+          assert.notEqual(r.status, 0);
+          assert.match(r.stdout + r.stderr, /hash mismatch.*docker-compose.gpu.yml/i);
+          assert.ok(!existsSync(f.dir));
+        } finally {
+          f.clean();
+        }
+      });
+    }
+    check(`legacy release writes no bundle record (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall });
+      try {
+        const r = f.install();
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.ok(!existsSync(join(f.dir, '.haive-bundle.json')));
+        assert.ok(existsSync(join(f.dir, '.env')));
+      } finally {
+        f.clean();
+      }
+    });
+  }
+  for (const publicInstall of [true, false])
+    check(`generated helper forwards bundle replacement flag (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall });
+      try {
+        assert.equal(f.install().status, 0);
+        const args =
+          lang === 'sh'
+            ? ['upgrade', '--version', '10.0.0', '--replace-modified-bundle']
+            : ['upgrade', '-Version', '10.0.0', '--replace-modified-bundle'];
+        const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), args);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const argv = f.calls().trim().split('\n').at(-1).split('\t');
+        const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
+        assert.ok(imageAt > 0);
+        assert.ok(argv.indexOf('--replace-modified-bundle') > imageAt);
+      } finally {
+        f.clean();
+      }
+    });
+  check('unknown Bundle field is legacy and writes no record', () => {
+    const f = fixture(lang, {
+      data: {
+        ...manifest,
+        Bundle: {
+          files: {
+            'docker-compose.yml':
+              'sha256:' + createHash('sha256').update('services: {}\n').digest('hex'),
+            'docker-compose.run.yml':
+              'sha256:' +
+              createHash('sha256')
+                .update('services:\n  mailpit:\n    environment:\n      MP_UI_AUTH: x\n')
+                .digest('hex'),
+          },
+        },
+      },
+    });
+    try {
+      const r = f.install();
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.ok(!existsSync(join(f.dir, '.haive-bundle.json')));
+    } finally {
+      f.clean();
+    }
+  });
+  check('generated upgrade usage documents replacement of modified bundles', () => {
+    const f = fixture(lang);
+    try {
+      assert.equal(f.install().status, 0);
+      const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), ['upgrade']);
+      assert.match(r.stdout + r.stderr, /--replace-modified-bundle/);
+    } finally {
+      f.clean();
+    }
+  });
   check('Mailpit summary warns when the release bundle has no login', () => {
     const f = fixture(lang, { start: true, fail: 'old-bundle' });
     try {
@@ -1186,6 +1389,41 @@ for (const lang of ['sh', 'ps1']) {
       '',
     ]),
     ['wrong channel', { ...manifest, channel: 'other' }, ''],
+    ['null bundle', { ...manifest, bundle: null }, ''],
+    ['bundle array', { ...manifest, bundle: [] }, ''],
+    ['bundle missing files', { ...manifest, bundle: {} }, ''],
+    [
+      'bundle Files wrong case',
+      {
+        ...manifest,
+        bundle: {
+          Files: {
+            'docker-compose.yml':
+              'sha256:' + createHash('sha256').update('services: {}\n').digest('hex'),
+            'docker-compose.run.yml':
+              'sha256:' +
+              createHash('sha256')
+                .update('services:\n  mailpit:\n    environment:\n      MP_UI_AUTH: x\n')
+                .digest('hex'),
+          },
+        },
+      },
+      '',
+    ],
+    [
+      'bundle unknown file',
+      {
+        ...manifest,
+        bundle: {
+          files: {
+            'docker-compose.yml': 'sha256:' + 'a'.repeat(64),
+            'docker-compose.run.yml': 'sha256:' + 'a'.repeat(64),
+            other: 'sha256:' + 'a'.repeat(64),
+          },
+        },
+      },
+      '',
+    ],
     ['wrong version', { ...manifest, version: '1.0.0' }, ''],
     [
       'foreign pin',
@@ -1449,7 +1687,14 @@ for (const lang of ['sh', 'ps1']) {
                 ),
             );
           }
-          if (name === names[1]) bytes = Buffer.from(approvedPublicSecrets(lang, bytes.toString()));
+          if (name === names[1])
+            bytes = Buffer.from(
+              approvedPublicSecrets(lang, bytes.toString()).replaceAll(
+                lang === 'sh' ? 'upgrade --version <v>' : 'upgrade -Version <v>',
+                (lang === 'sh' ? 'upgrade --version <v>' : 'upgrade -Version <v>') +
+                  ' [--replace-modified-bundle]',
+              ),
+            );
           return [name, bytes];
         }),
       );
