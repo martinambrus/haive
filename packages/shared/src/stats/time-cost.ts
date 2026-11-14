@@ -42,6 +42,15 @@ const STEP_END_EVENTS = new Set([
   'step.resume',
 ]);
 
+/** The query projection and reducer share this list so irrelevant events never cross the wire. */
+export const FORM_WAIT_EVENT_TYPES: readonly string[] = Object.freeze([
+  'step.waiting_form',
+  'step.form_submitted',
+  ...RESET_EVENTS,
+  ...TASK_END_EVENTS,
+  ...STEP_END_EVENTS,
+]);
+
 /** Keep PostgreSQL's sub-millisecond order: Date alone truncates auto-submit events
  * into the same millisecond, at which point a uuid tie-break can reverse the lifecycle. */
 function eventMicros(value: Date | string): bigint | null {

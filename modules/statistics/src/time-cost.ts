@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   buildTimeCostReport,
+  FORM_WAIT_EVENT_TYPES,
   type TimeCostStep,
   type FormWaitEvent,
   type TimeCostInvocation,
@@ -58,7 +59,7 @@ export async function timeCostOver(
           createdAt: sql<string>`to_char(${te.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
         })
         .from(te)
-        .where(inArray(te.taskId, ids))
+        .where(and(inArray(te.taskId, ids), inArray(te.eventType, FORM_WAIT_EVENT_TYPES)))
         .orderBy(te.taskId, te.createdAt, te.id),
       db
         .select({

@@ -440,9 +440,8 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
   );
 
   useEffect(() => {
-    if (!params || tab !== 'report') return;
+    if (!params || tab !== 'report' || report?.params === params) return;
     let cancelled = false;
-    setReport(null);
     setReportError(null);
     getStatsTimeCost(api, params)
       .then((data) => {
@@ -458,7 +457,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
     return () => {
       cancelled = true;
     };
-  }, [params, tab, reportRetry]);
+  }, [params, tab, reportRetry, report]);
 
   // Summary and timeline back the header and two tabs, so they always load. The other three
   // load only when their tab is opened — the point of one endpoint per tab.

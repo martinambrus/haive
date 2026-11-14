@@ -8,6 +8,7 @@ import createStatsRoutes from '../src/routes.js';
 import type { timeCostOver } from '../src/time-cost.js';
 import { timeCostOver as loadReport, TIME_COST_BATCH_SIZE } from '../src/time-cost.js';
 import { sql } from 'drizzle-orm';
+import { FORM_WAIT_EVENT_TYPES } from '@haive/shared/stats';
 
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -110,9 +111,17 @@ describe('completed-task report endpoint', () => {
     );
     const eventPredicates = f.predicates.filter((p) => p.includes('"task_events"'));
     expect(eventPredicates).toHaveLength(2);
-    expect(eventPredicates[0]?.match(/\$/g)).toHaveLength(2);
-    expect(eventPredicates[1]?.match(/\$/g)).toHaveLength(1);
+    expect(FORM_WAIT_EVENT_TYPES).toHaveLength(20);
+    const eventParams = f.parameters[f.predicates.indexOf(eventPredicates[0]!)];
+    expect(eventParams?.slice(0, 2)).toEqual([
+      '00000000-0000-4000-8000-000000000001',
+      '00000000-0000-4000-8000-000000000002',
+    ]);
+    expect(eventParams?.slice(2)).toEqual(FORM_WAIT_EVENT_TYPES);
+    expect(eventPredicates[0]?.match(/\$/g)).toHaveLength(2 + 20);
+    expect(eventPredicates[1]?.match(/\$/g)).toHaveLength(1 + 20);
     expect(eventPredicates.join('\n')).not.toContain('"created_at"');
+    expect(eventPredicates.every((p) => p.includes('"event_type" in ('))).toBe(true);
   });
   it('uses completed-task timing, full-history costs, provider disclosure and window FX', async () => {
     const f = fixture();

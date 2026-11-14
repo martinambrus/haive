@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { HostApi } from '@haive/web-kit/host';
 import { StatsPage } from '../../../modules/statistics/src/web/stats-page';
@@ -113,4 +113,38 @@ it('renders aggregate command coverage and preserves each mixed-population row l
   ).toBeTruthy();
   for (const label of ['command ran', 'not run', 'execution not recorded'])
     expect(screen.getByText('1s · ' + label)).toBeTruthy();
+});
+
+it('caches a loaded report across tab reopens and lazily reloads changed windows and facets', async () => {
+  h.search = 'preset=7d&tab=report';
+  let reportCalls = 0;
+  const get = vi.fn(async (path: string): Promise<unknown> => {
+    if (path === '/user-settings/ui-prefs') return { settingsJson: '{}' };
+    if (path === '/repos') return { repositories: [] };
+    if (path.includes('/settings/')) return { values: {} };
+    if (path.includes('/time-cost')) return { marker: String(++reportCalls) };
+    return null;
+  });
+  const api = { get } as unknown as HostApi;
+  const view = render(<StatsPage moduleId="statistics" path={[]} api={api} />);
+  await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('1'));
+
+  const visit = async (search: string) => {
+    h.search = search;
+    await act(async () => {
+      view.rerender(<StatsPage moduleId="statistics" path={[]} api={api} />);
+    });
+  };
+  await visit('preset=7d&tab=plan');
+  await visit('preset=7d&tab=report');
+  expect(reportCalls).toBe(1);
+  expect(screen.getByTestId('report').textContent).toBe('1');
+
+  await visit('preset=30d&tab=plan');
+  expect(reportCalls).toBe(1);
+  await visit('preset=30d&tab=report');
+  await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('2'));
+  await visit('preset=30d&tab=report&repositoryId=repo2&taskClass=work');
+  await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('3'));
+  expect(get.mock.calls.filter(([path]) => path.includes('/time-cost'))).toHaveLength(3);
 });
