@@ -12,10 +12,11 @@ in [Worker restarts](worker-restarts.md), module states in [Modules](modules.md)
 ## Storage
 
 `task_type_definitions` (`database/src/schema/task-types.ts`): `slug` (primary key), display name,
-description, `run_list_strategy` (`static`, `workflow_paths`, `run_app_modes`), `step_ids` (static
+description, `run_list_strategy` (`static`, `workflow_paths`, `run_app_modes`, `derived`), `step_ids` (static
 types only), `pre_answer_defaults`, `step_loop_limit_defaults`, `fix_loop`, `enabled`, `selectable`,
 `source` (`builtin`, `admin` or `module:<moduleId>`), `requires_repository`, `sort_order`,
-`content_hash` and `prompt_steps` (declared last).
+`content_hash`, `prompt_steps`, then nullable `base_slug varchar(128)` and `changes jsonb` (declared
+last, in that order).
 
 Each source owns its own columns, and every upsert carries `setWhere source = <own source> AND some
 owned column IS DISTINCT FROM excluded`:
@@ -42,6 +43,36 @@ and for a built-in created before the worker seeded its row); `custom_steps` pin
 steps that the snapshot uses; `dead_at` / `dead_reason` mark a dead task. Only the task INSERT sites
 write the two pinned columns — no UPDATE of either exists — so editing a type never reaches a task that
 already exists, and Retry reuses the pin.
+
+**Derived storage (PR2 of 4).** Migration 0240 adds `derived` alone, committing the enum value
+before 0241 uses it. Migration 0241 appends `base_slug`, `changes` and nullable
+`tasks.derived_run_plan jsonb` (last, after `pr_remote_url`), with no backfill or defaults. It uses
+`ADD COLUMN IF NOT EXISTS` and a `duplicate_object` guard for every named CHECK/FK; Drizzle mirrors
+the names, definitions and column order. Existing builtin/static-admin columns and timestamps are
+unchanged, and existing tasks have no plan.
+
+- `task_type_definitions_derived_shape_check`: derived rows have non-null base/changes, null
+  `step_ids`, `source = 'admin'`, and JSON-array changes (JSON null is refused).
+- `task_type_definitions_non_derived_shape_check`: every other strategy has null base/changes.
+- `task_type_definitions_base_not_self_check`: a non-null base differs from the row's slug.
+- `task_type_definitions_base_slug_task_type_definitions_slug_fk`: base references the slug primary
+  key, with `ON DELETE RESTRICT` and `ON UPDATE NO ACTION`.
+
+The CHECKs use explicit SQL null tests. Builtin-only eligibility, base immutability and inherited
+repository policy are future API admission rules, not cross-row SQL CHECKs. Both new JSON columns
+are `unknown` in database: shared already depends on database for secrets services, so importing its
+`DerivedChange`/`DerivedRunPlanV1` types would create a package cycle. Future consumers must validate
+or narrow them at their own boundary. No application writer sets these columns in PR2. Shared
+availability/run-list selection and the worker definition reader explicitly refuse `derived` with
+`derived task types are not available yet`; existing strategies keep their behavior.
+
+**Rollback** is additive code rollback: revert the application commits and leave nullable columns
+and the inert enum value. There is no executable down migration or down script. The 0241 header
+contains optional manual cleanup as one commented `DO $$` block. It locks tasks and definitions in a
+maintenance transaction and refuses if **any** task carries a plan or references a derived type,
+including completed, cancelled and dead tasks. Otherwise it deletes unused derived definitions and
+drops the named FK/CHECKs and all three columns with `IF EXISTS`, leaving legacy rows and the enum
+value intact. Reconcile the applied migration journal before any later roll-forward.
 
 **The enum stays.** A plain `ALTER … TYPE text` failed (`text = workflow_type`) because the partial
 unique index `tasks_one_live_upgrade_per_repo_idx` compares the column with an enum literal; 0193 drops
@@ -252,11 +283,12 @@ upcoming-CLI list, completion release) read the snapshot. Step flags come from `
 Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the run list: always on
 `run_app`, and on a snapshot task when the composition stays as valid without it.
 
-## Derived overlays (PR1 of 4)
+## Derived overlays (PR2 of 4)
 
 The shared foundation exists in `modularity/derived-task-types.ts` and `@haive/shared/run-list`.
-There is no persisted `derived` strategy, derived route or runtime/UI behavior in PR1. The accepted
-delivery plan and the remaining storage/runtime/editor gates are in
+The persisted `derived` strategy and nullable storage exist, with explicit reader refusals; no route
+can author derived definitions or pin a derived task, and no runtime/UI behavior is enabled in PR2.
+The accepted delivery plan and the remaining admission/runtime/editor gates are in
 [Derived task types](../plans/deeppattern-module.md#part-a-derived-task-types-core).
 
 `derivedChangesSchema` is a strict union of `{replace, with}`, `{insertAfter, step}` and `{remove}`:
@@ -312,7 +344,7 @@ validate the selected pinned candidate/declarations and resolvable IDs, then ato
 chosen snapshot and event. Same-choice replay is idempotent; a different choice returns
 `derived_path_pinned`; unselected triage cannot be skipped. Retry (including full Retry), Resume,
 fix/revise resets and boot recovery retain the pin. This will be the only new snapshot UPDATE
-exception; plans and raw prompts remain INSERT-only. No such exception is enabled in PR1.
+exception; plans and raw prompts remain INSERT-only. No such exception is enabled in PR2.
 
 Use candidate unions for pre-selection traits, dependencies, integrations and saved CLI previews,
 and chosen snapshots afterward. Default maps belong to the derived row, validated against the union;

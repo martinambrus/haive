@@ -216,15 +216,19 @@ Only steps with contracts become replaceable. `07-phase-2-implement` and gates n
    `@haive/worker` (which has no package exports). The deep-analysis module (`kind-riding-dream.md`)
    needs the same seam; build it once.
    Status: PR1 of 4 implemented.
-3. Derived types. **PR1 of 4 implemented:** pure shared strict schemas, versioned run-plan type,
-   ordered base catalog adapter/parity helper, evaluator and diagnostics; no routes, migrations or
-   runtime/UI behavior change. The four PRs are:
+3. Derived types. **PR2 of 4 implemented:** pure shared schemas/evaluator and versioned plan type,
+   ordered base catalog adapter/parity, plus additive derived storage (enum, nullable columns,
+   guarded CHECKs/self-FK and commented guarded cleanup). Existing rows remain unchanged; derived
+   availability/execution explicitly refuse until PR3. No authoring/runtime/UI enablement. The four PRs are:
    1. Shared foundation above; controls cover operations/order, skips/staleness/consumed anchors,
       every path/prelude, duplicate/missing payloads, protected prefix, replacement refusal and real
       registry/catalog parity. Rollback: revert code.
-   2. Storage expansion; xhigh review required for enum transaction boundary, column order,
-      guarded constraints/FK and down refusal. Controls apply migrations twice on clean/ahead
-      throwaway PG, schema parity, terminal-task down refusal and unchanged existing rows.
+   2. Storage expansion implemented in 0240/0241; xhigh review required for enum transaction
+      boundary, appended column order, guarded constraints/FK and cleanup refusal. Controls apply
+      twice on clean/ahead throwaway PG18, prove schema parity, constraint enforcement, unchanged
+      existing rows, and terminal/dead-task cleanup refusal. Rollback: revert application code;
+      optional commented maintenance SQL refuses any task pin/reference before dropping storage.
+      There is no executable down migration; the harmless enum value stays.
    3. API admission/pinning, triage and ALL execution/advisory/dependency readers in one atomic
       behavior change, no UI; xhigh review required for late choice, ownership and lock order.
       Controls cover create/edit/delete races, upgrades at triage, every path, replay/refusal,
