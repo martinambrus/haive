@@ -7,7 +7,7 @@ import { listIntegrationCategories } from '@haive/shared/integrations';
 import {
   COMPOSABLE_STEP_GROUPS,
   checkPromptSteps,
-  adminTaskTypeCreateSchema as customTaskTypeCreateSchema,
+  customTaskTypeCreateSchema,
   derivedTaskTypeCreateSchema,
   mergePromptStepCatalog,
   parsePromptSteps,
@@ -337,7 +337,10 @@ adminTaskTypeRoutes.post('/', async (c) => {
   if (typeof rawSlug === 'string' && BUILTIN_SLUGS.has(rawSlug)) {
     throw new HttpError(409, 'That slug belongs to a built-in type');
   }
-  const body = customTaskTypeCreateSchema.parse(raw);
+  const body =
+    (raw as { runListStrategy?: unknown } | null)?.runListStrategy === 'derived'
+      ? derivedTaskTypeCreateSchema.parse(raw)
+      : customTaskTypeCreateSchema.parse(raw);
   const db = getDb();
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
   if ('runListStrategy' in body) {
@@ -457,9 +460,8 @@ adminTaskTypeRoutes.post('/', async (c) => {
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const { expectedUpdatedAt, ...body } = taskTypePatchSchema.parse(await c.req.json());
+  const raw: unknown = await c.req.json();
   const db = getDb();
-  const fields = Object.keys(body);
   // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
   const outcome = await db.transaction(async (tx) => {
     const [row] = await tx
@@ -468,6 +470,13 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .for('update');
     if (!row) throw new HttpError(404, 'Task type not found');
+    const patchSchema =
+      row.runListStrategy === 'derived'
+        ? taskTypePatchSchema
+        : taskTypePatchSchema.omit({ changes: true });
+    const parsed: z.infer<typeof taskTypePatchSchema> = patchSchema.parse(raw);
+    const { expectedUpdatedAt, ...body } = parsed;
+    const fields = Object.keys(body);
     // A JS Date holds milliseconds and the column microseconds, so the two are compared as Dates.
     if (
       expectedUpdatedAt !== undefined &&

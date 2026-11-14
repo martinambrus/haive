@@ -53,7 +53,7 @@ function rows(table: unknown) {
     then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
       Promise.resolve(result).then(resolve, reject),
   };
-  for (const method of ['where', 'orderBy', 'limit', 'groupBy']) chain[method] = () => chain;
+  for (const method of ['where', 'orderBy', 'limit', 'groupBy', 'for']) chain[method] = () => chain;
   return chain;
 }
 
@@ -250,4 +250,41 @@ describe('DT3 derived list admission boundary', () => {
       expect(h.write).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('static authoring validation compatibility', () => {
+  it('keeps the exact per-field issues for an invalid static create body', async () => {
+    h.role = 'admin';
+    const res = await send('POST', '/admin/task-types', {
+      slug: 'x',
+      displayName: 'X',
+      stepIds: 'nope',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: 'Validation failed',
+      issues: [
+        { path: 'stepIds', message: 'Invalid input: expected array, received string' },
+        {
+          path: 'requiresRepository',
+          message: 'Invalid input: expected boolean, received undefined',
+        },
+      ],
+    });
+    expect(h.getDb).not.toHaveBeenCalled();
+  });
+
+  it('keeps the strict-schema response for changes on a static PATCH', async () => {
+    h.role = 'admin';
+    h.defs = [{ slug: 'my-type', source: 'admin', runListStrategy: 'static' }];
+    h.write.mockImplementationOnce(async (fn: (tx: unknown) => unknown) =>
+      fn({ select: () => ({ from: (table: unknown) => rows(table) }) }),
+    );
+    const res = await send('PATCH', '/admin/task-types/my-type', { changes: [] });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: 'Validation failed',
+      issues: [{ path: '', message: 'Unrecognized key: "changes"' }],
+    });
+  });
 });
