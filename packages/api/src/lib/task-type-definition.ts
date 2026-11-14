@@ -162,11 +162,10 @@ export async function definitionForCreate(
     return handle.transaction((tx) => definitionForCreate(tx, slug, { ...opts, locked: true }));
   const derived =
     def.runListStrategy === 'derived' ? await readDerivedDefinition(handle, def) : null;
-  if (derived && !derived.plan) throw new DerivedTaskAdmissionError(derived.issues);
   const membership = derived?.stepIds ?? def.stepIds;
   const modules = await readModuleStates(
     handle,
-    moduleIdsOfTaskType({ ...def, stepIds: membership }),
+    moduleIdsOfTaskType({ ...def, stepIds: derived?.dependencyStepIds ?? membership }),
   );
   const storedCatalog =
     (def.runListStrategy === 'static' || def.runListStrategy === 'derived') && def.stepIds !== null
@@ -186,7 +185,15 @@ export async function definitionForCreate(
     modules,
     catalog,
     generic: opts.generic,
-    ...(derived ? { derived: { stepIds: derived.stepIds, valid: derived.plan !== null } } : {}),
+    ...(derived
+      ? {
+          derived: {
+            stepIds: derived.stepIds,
+            dependencyStepIds: derived.dependencyStepIds,
+            valid: derived.plan !== null,
+          },
+        }
+      : {}),
   });
   if (!availability.available) {
     switch (availability.reason) {
@@ -223,6 +230,7 @@ export async function definitionForCreate(
           availability.reason,
         );
       case 'invalid-composition':
+        if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
           `Task type ${slug} has an invalid step composition: ${(availability.issues ?? []).map(describeIssue).join(', ')}`,

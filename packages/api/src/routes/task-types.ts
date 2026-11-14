@@ -85,6 +85,7 @@ function availabilityOf(
       ? {
           derived: {
             stepIds: derived.stepIds,
+            dependencyStepIds: derived.dependencyStepIds,
             valid: derived.plan !== null,
           },
         }

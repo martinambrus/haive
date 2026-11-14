@@ -2128,4 +2128,159 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       ]),
     });
   });
+  it.each(
+    ['recorded-missing', 'row-removed'].flatMap((state) =>
+      ['public', 'admin', 'create'].map((boundary) => [state, boundary]),
+    ),
+  )(
+    'names an active derived payload module after uninstall (%s, %s) before catalog errors',
+    async (state, boundary) => {
+      await derivedCatalog();
+      const draft = derivedDraft([
+        { insertAfter: '08a-browser-verify', step: 'module.acme.check' },
+      ]);
+      expect((await send('POST', '/admin/task-types', draft)).status).toBe(201);
+      await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.stepId, 'module.acme.check'));
+      if (state === 'recorded-missing')
+        await db
+          .update(schema.modules)
+          .set({ missingAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'acme'));
+      else await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'acme'));
+      const expectedModules = [{ id: 'acme', name: state === 'recorded-missing' ? 'Acme' : null }];
+      if (boundary === 'public') {
+        const publicList = await send('GET', '/task-types');
+        expect(publicList.status).toBe(200);
+        expect(await publicList.json()).toMatchObject({
+          taskTypes: expect.arrayContaining([
+            expect.objectContaining({
+              slug: 'tt-derived',
+              available: false,
+              reason: 'module-missing',
+              modules: expectedModules,
+            }),
+          ]),
+        });
+      }
+      if (boundary === 'admin') {
+        const adminList = await send('GET', '/admin/task-types');
+        expect(adminList.status).toBe(200);
+        expect(await adminList.json()).toMatchObject({
+          taskTypes: expect.arrayContaining([
+            expect.objectContaining({
+              slug: 'tt-derived',
+              availability: {
+                available: false,
+                reason: 'module-missing',
+                modules: expectedModules,
+              },
+            }),
+          ]),
+        });
+      }
+      if (boundary !== 'create') return;
+      h.add.mockClear();
+      const beforeEvents = await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents);
+      const refused = await send('POST', '/tasks', { type: 'tt-derived', title: 'missing module' });
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ code: 'module-missing' });
+      expect(
+        await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-derived')),
+      ).toEqual([]);
+      expect(await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents)).toEqual(
+        beforeEvents,
+      );
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+  it('does not require an inactive payload or infer a module through a refused producer alias', async () => {
+    await derivedCatalog();
+    await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.stepId, 'module.acme.check'));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'acme'));
+    expect(
+      (
+        await send(
+          'POST',
+          '/admin/task-types',
+          derivedDraft([{ insertAfter: 'retired-anchor', step: 'module.acme.check' }]),
+        )
+      ).status,
+    ).toBe(201);
+    const list = await send('GET', '/task-types');
+    expect(await list.json()).toMatchObject({
+      taskTypes: expect.arrayContaining([
+        expect.objectContaining({ slug: 'tt-derived', available: true }),
+      ]),
+    });
+    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).resolves.toMatchObject({
+      candidateStepIds: expect.not.arrayContaining(['module.acme.check']),
+    });
+    // The missing core producer is refused. Its absent output never becomes a legal anchor for a module payload.
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({
+        changes: [
+          { insertAfter: '08a-browser-verify', step: 'missing-producer' },
+          { insertAfter: 'missing-producer', step: 'module.acme.check' },
+        ],
+      })
+      .where(eq(schema.taskTypeDefinitions.slug, 'tt-derived'));
+    const refused = await send('POST', '/tasks', {
+      type: 'tt-derived',
+      title: 'invalid core producer',
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({
+      code: 'derived_admission_refused',
+      issues: expect.arrayContaining([
+        expect.objectContaining({ kind: 'missing-installed-step', stepId: 'missing-producer' }),
+      ]),
+    });
+  });
+  it.each(['list', 'create'])(
+    'reports deactivation before simultaneous derived composition failure (%s)',
+    async (boundary) => {
+      await derivedCatalog();
+      expect(
+        (
+          await send(
+            'POST',
+            '/admin/task-types',
+            derivedDraft([{ insertAfter: '08a-browser-verify', step: 'module.acme.check' }]),
+          )
+        ).status,
+      ).toBe(201);
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'acme'));
+      await db
+        .update(schema.stepCatalog)
+        .set({
+          entry: entry('module.acme.check', {
+            requires: [{ needs: 'unprovided', reason: 'fixture input' }],
+          }),
+        })
+        .where(eq(schema.stepCatalog.stepId, 'module.acme.check'));
+      if (boundary === 'list') {
+        const list = await send('GET', '/task-types');
+        expect(await list.json()).toMatchObject({
+          taskTypes: expect.arrayContaining([
+            expect.objectContaining({
+              slug: 'tt-derived',
+              reason: 'module-deactivated',
+              modules: [{ id: 'acme', name: 'Acme' }],
+            }),
+          ]),
+        });
+        return;
+      }
+      const refused = await send('POST', '/tasks', {
+        type: 'tt-derived',
+        title: 'deactivated module',
+      });
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ code: 'module-deactivated' });
+    },
+  );
 });

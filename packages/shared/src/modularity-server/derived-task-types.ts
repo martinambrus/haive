@@ -87,6 +87,27 @@ export function inspectDerivedDefinition(
         });
   issues.push(...evaluation.issues);
   const stepIds = [...new Set(evaluation.candidates.flatMap((c) => c.stepIds))];
+  // A refused active payload never entered a candidate. Keep its module diagnosis,
+  // without treating skipped anchors (including propagated producer refusals) as dependencies.
+  const attemptedPayloads = evaluation.issues.flatMap((issue) => {
+    if (
+      !('operationIndex' in issue) ||
+      issue.operationIndex === undefined ||
+      ![
+        'missing-installed-step',
+        'replacement-contract-unavailable',
+        'protected-prefix-edit',
+      ].includes(issue.kind)
+    )
+      return [];
+    const change = changes.success ? changes.data[issue.operationIndex] : undefined;
+    return change && 'insertAfter' in change
+      ? [change.step]
+      : change && 'replace' in change
+        ? [change.with]
+        : [];
+  });
+  const dependencyStepIds = [...new Set([...stepIds, ...attemptedPayloads])];
   const defaultIssues = validateTaskTypeDefaults(
     {
       stepIds,
@@ -136,6 +157,7 @@ export function inspectDerivedDefinition(
     issues,
     defaultIssues,
     stepIds,
+    dependencyStepIds,
     plan,
   };
 }

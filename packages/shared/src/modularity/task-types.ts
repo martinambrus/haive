@@ -71,7 +71,7 @@ export interface TaskTypeAvailabilityInput {
     composable: ReadonlyMap<string, ComposableStepEntry>;
   } | null;
   generic: boolean;
-  derived?: { stepIds: readonly string[]; valid: boolean };
+  derived?: { stepIds: readonly string[]; dependencyStepIds?: readonly string[]; valid: boolean };
 }
 
 export type TaskTypeAvailability =
@@ -114,12 +114,19 @@ export function resolveTaskTypeAvailability(
     return { available: false, reason: 'module-types-off' };
   }
   if (definition.runListStrategy === 'derived') {
-    if (!input.derived?.valid) return { available: false, reason: 'invalid-composition' };
-    return resolveTaskTypeAvailability({
+    const moduleAvailability = resolveTaskTypeAvailability({
       ...input,
-      definition: { ...definition, runListStrategy: 'static', stepIds: [...input.derived.stepIds] },
+      definition: {
+        ...definition,
+        runListStrategy: 'static',
+        stepIds: [...(input.derived?.dependencyStepIds ?? input.derived?.stepIds ?? [])],
+      },
       catalog: null,
     });
+    if (!moduleAvailability.available) return moduleAvailability;
+    return input.derived?.valid
+      ? { available: true }
+      : { available: false, reason: 'invalid-composition' };
   }
   if (modules !== null) {
     const used = moduleIdsOfTaskType(definition);
