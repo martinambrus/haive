@@ -101,15 +101,32 @@ it('bounds the entire 800-node 11f prompt and gives every shown ref its read ver
   const read = fixture(800);
   for (const n of read.nodes) {
     n.title += ' long title'.repeat(30);
-    n.body = 'body'.repeat(100);
+    n.body = `Whole body for ${n.id}:\n` + 'body'.repeat(100);
   }
+  const focus = read.nodes.slice(-3);
+  read.codeLinks = focus.map((n) => ({ nodeId: n.id, repoPath: 'src/changed.ts' }));
   const prompt = planReconcileStep.llm!.buildPrompt({
     detected: detected(read),
   } as never) as string;
   expect(PLAN_EXPANSION_CONTEXT_MAX_CHARS).toBe(96_000);
   expect(prompt.length).toBeLessThanOrEqual(PLAN_EXPANSION_CONTEXT_MAX_CHARS);
-  for (const n of read.nodes)
-    if (prompt.includes(`node:${n.id}`)) expect(prompt).toContain(`version ${n.version}`);
+  const shownVersions = [
+    ...prompt
+      .replaceAll('` · `', ', ')
+      .replaceAll('`', '')
+      .matchAll(/node:([0-9a-f-]+), version ([0-9]+)/g),
+  ];
+  for (const n of read.nodes) {
+    if (prompt.includes(`node:${n.id}`)) {
+      expect(shownVersions.filter((m) => m[1] === n.id).map((m) => m[0])).toContain(
+        `node:${n.id}, version ${n.version}`,
+      );
+    }
+  }
+  for (const n of focus) {
+    expect(prompt).toContain(`node:${n.id}, version ${n.version}\n`);
+    expect(prompt).toContain(n.body!.replaceAll('\n', '\\n'));
+  }
   expect(prompt).toContain(PLAN_CHAT_SNAPSHOT_PATH);
 });
 
