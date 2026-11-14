@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { learningContent } from '@haive/shared/learning-provenance';
+import { learningContent, parseLearningRecord } from '@haive/shared/learning-provenance';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
 const io = vi.hoisted(() => ({
@@ -289,6 +289,77 @@ describe('reconcile outcome', () => {
         writes: { attempted: 1, succeeded: 0, failed: 0, notWritten: 1 },
       },
     });
+  });
+});
+
+describe('learning filesystem replay', () => {
+  it('retains the final update when a proposal deletes then rewrites the same target', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [
+      { op: 'delete', targetId: 'old' },
+      entry('old', { op: 'update', targetId: 'old' }),
+    ];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/old.md`);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/old.md`)).toBe(first);
+  });
+  it('distinguishes a changed proposal even when the invocation and slug are retained', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    (s.args.llmOutput as any).entries = [entry('fresh', { body: 'Different lesson src/a.ts:11.' })];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/fresh-2.md`)).toContain('Different lesson');
+    expect(io.files.get(`${dir}/fresh.md`)).toContain('private-body-fresh');
+  });
+
+  it.each(['recovery', 'retry'])('reuses insert files and staged edits on %s', async (replay) => {
+    const s = setup();
+    io.files.set(`${drafts}/fresh.md`, '# Human title\n\nHuman correction src/a.ts:10.');
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    if (replay === 'recovery') s.ctx.epoch = 9;
+    else (s.ctx as any).rerunGeneration = 1;
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+    expect(io.files.get(`${dir}/fresh.md`)).toContain('Human correction');
+  });
+  it('reuses an allocated suffix but preserves a genuinely different collision', async () => {
+    const s = setup();
+    io.files.set(`${dir}/fresh.md`, '# Existing\n\nDifferent lesson src/a.ts:1.');
+    io.files.set(`${drafts}/fresh-2.md`, '# Human title\n\nHuman correction src/a.ts:10.');
+    const original = io.files.get(`${dir}/fresh.md`);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-3.md`)).toBe(false);
+    expect(io.files.get(`${dir}/fresh.md`)).toBe(original);
+    expect(io.files.get(`${dir}/fresh-2.md`)).toContain('Human correction');
+    s.args.llmInvocationId = 'different-invocation';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-3.md`)).toBe(true);
+  });
+  it('recovers a partial write without depending on the reconcile event', async () => {
+    const s = setup();
+    s.refuse();
+    io.failAt = `${dir}/old.md`;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    io.failAt = '';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-2.md`)).toBe(false);
+    expect(io.files.get(`${dir}/old.md`)).toContain('private-body-old');
+    expect(s.rows.size).toBe(0);
+  });
+  it('does not repeat a sequence of updates or consume more provenance history', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = ['First', 'Second'].map((body) =>
+      entry('old', { op: 'update', targetId: 'old', body: `${body} src/a.ts:10.` }),
+    );
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/old.md`)!;
+    expect(parseLearningRecord(first).provenance.updates).toHaveLength(2);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/old.md`)).toBe(first);
   });
 });
 

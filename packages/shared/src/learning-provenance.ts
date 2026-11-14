@@ -7,6 +7,11 @@ export const LEARNING_UPDATE_HISTORY_MAX = 5;
 const stampSchema = z.object({
   taskId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
   date: z.iso.datetime(),
+  /** Stable writer operation, retained across recovery and Retry of the same proposal. */
+  operationId: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
 });
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const provenanceSchema = z.object({
