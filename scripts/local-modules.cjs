@@ -1,5 +1,6 @@
 // Shared by pnpm and code generation: private dependencies never enter host manifests.
 const { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');
+const { createHash } = require('node:crypto');
 const { join } = require('node:path');
 const root = join(__dirname, '..');
 const directory = join(root, 'external-modules');
@@ -36,9 +37,15 @@ function updateConfig(config) {
   const lockfileDir = join(directory, '.lock');
   mkdirSync(lockfileDir, { recursive: true });
   const file = join(lockfileDir, 'pnpm-lock.yaml');
-  if (!existsSync(file) && existsSync(join(root, 'pnpm-lock.yaml'))) {
+  const seedFile = join(lockfileDir, '.seed.sha256');
+  const canonicalFile = join(root, 'pnpm-lock.yaml');
+  const canonical = existsSync(canonicalFile) ? readFileSync(canonicalFile, 'utf8') : null;
+  const hash = canonical === null ? null : createHash('sha256').update(canonical).digest('hex');
+  if (
+    canonical !== null &&
+    (!existsSync(file) || !existsSync(seedFile) || readFileSync(seedFile, 'utf8') !== hash)
+  ) {
     // Importer keys are relative to the lockfile directory; link: values remain relative to importers.
-    const canonical = readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8');
     const seeded = canonical.replace(
       /(importers:\n)([\s\S]*?)(?=^\S|$(?![\s\S]))/m,
       (_, heading, body) =>
@@ -49,6 +56,7 @@ function updateConfig(config) {
         ),
     );
     writeFileSync(file, seeded);
+    writeFileSync(seedFile, hash);
   }
   return {
     ...config,

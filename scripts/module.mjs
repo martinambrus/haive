@@ -13,9 +13,20 @@ const fail = (message) => {
   process.exit(1);
 };
 
+if (command === 'lock' && target === undefined) {
+  if (publicModuleLock(root).status !== 0) fail('public lock refresh failed');
+  if (
+    local.localMode() &&
+    spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' }).status !== 0
+  )
+    fail('public lock updated, but refreshing the local lock failed');
+  console.log('module: refreshed pnpm-lock.yaml from the public workspace');
+  process.exit(0);
+}
+
 if ((command !== 'add' && command !== 'remove') || target === undefined || extra.length > 0) {
   console.error(
-    'usage: pnpm module add <id> | pnpm module add @haive-module/<id>@<version> | pnpm module remove <id> | pnpm module remove @haive-module/<id>',
+    'usage: pnpm module add <id> | pnpm module add @haive-module/<id>@<version> | pnpm module remove <id> | pnpm module remove @haive-module/<id> | pnpm module lock',
   );
   process.exit(1);
 }

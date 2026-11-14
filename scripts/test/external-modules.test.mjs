@@ -64,6 +64,23 @@ test('local lock seeding rebases importers, keeps the normal store, and does not
   assert.equal(config.lockfileDir, join(tree.root, 'external-modules/.lock'));
 });
 
+test('local lock keeps local resolutions until the tracked public lock changes', (t) => {
+  const tree = makeTree(t);
+  const local = createRequire(import.meta.url)(join(tree.root, 'scripts/local-modules.cjs'));
+  mkdirSync(join(tree.root, 'external-modules/privateone'));
+  local.updateConfig({});
+  const file = join(tree.root, 'external-modules/.lock/pnpm-lock.yaml');
+  writeFileSync(file, 'local resolutions\n');
+  local.updateConfig({});
+  assert.equal(tree.read('external-modules/.lock/pnpm-lock.yaml'), 'local resolutions\n');
+  writeFileSync(join(tree.root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n# changed upstream\n');
+  local.updateConfig({});
+  assert.equal(tree.read('external-modules/.lock/pnpm-lock.yaml'), tree.read('pnpm-lock.yaml'));
+  rmSync(file);
+  local.updateConfig({});
+  assert.equal(tree.read('external-modules/.lock/pnpm-lock.yaml'), tree.read('pnpm-lock.yaml'));
+});
+
 test('workspace tasks preserve ordinary Turbo behavior, and build local modules before forcing host caches', (t) => {
   const tree = makeTree(t);
   assert.equal(tree.run('workspace-task.mjs', ['build']).status, 0);
