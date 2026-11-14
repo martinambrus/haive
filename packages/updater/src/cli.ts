@@ -147,8 +147,8 @@ export async function loadManifest(options: {
     throw new Error('manifest version differs from requested target version');
   if (target.bundle) {
     if (
-      source &&
-      (!source.startsWith('https://') || (response?.url && !response.url.startsWith('https://')))
+      response &&
+      (!source?.startsWith('https://') || (response.url && !response.url.startsWith('https://')))
     )
       throw new UpgradeRefusal(
         'bundle-manifest-insecure',

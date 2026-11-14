@@ -200,21 +200,39 @@ describe('bundle preflight', () => {
     expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(value);
     expect(JSON.stringify(vi.mocked(journal.startRun).mock.calls)).not.toContain(value);
   });
-  it.each(['http://release.test/release.json', '/local/release.json'])(
-    'bundle refuses non-HTTPS manifest even with override: %s',
-    async (source) => {
-      // A local path needs a real manifest fixture; HTTP uses the fake fetch seam.
-      if (source.startsWith('/')) {
-        source = join(dir, 'release.json');
-        await writeFile(source, JSON.stringify(manifest));
+  it.each(['http', 'https-downgrade'])(
+    'bundle refuses an insecure manifest transport even with override: %s',
+    async (transport) => {
+      if (transport === 'http')
+        process.argv[process.argv.indexOf('--manifest') + 1] = 'http://release.test/release.json';
+      else {
+        const response = new Response(JSON.stringify(manifest));
+        Object.defineProperty(response, 'url', { value: 'http://release.test/release.json' });
+        vi.mocked(fetch).mockResolvedValue(response);
       }
-      process.argv[process.argv.indexOf('--manifest') + 1] = source;
       process.argv.push('--replace-modified-bundle');
       expect(await main()).toBe(3);
+      expect(journal.recordAttempt).toHaveBeenCalledWith(
+        h.sql,
+        expect.objectContaining({
+          metadata: { refusal: 'bundle-manifest-insecure' },
+        }),
+      );
+      expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
       expect(journal.startRun).not.toHaveBeenCalled();
       expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
     },
   );
+  it('accepts an operator-controlled local bundle manifest without fetching it', async () => {
+    const source = join(dir, 'release.json');
+    await writeFile(source, JSON.stringify(manifest));
+    process.argv[process.argv.indexOf('--manifest') + 1] = source;
+    expect(await main()).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).toHaveBeenCalled();
+    expect(dk.validateCompose).toHaveBeenCalled();
+    expect(journal.startRun).toHaveBeenCalled();
+  });
   it('records added names after a staged validation refusal, with no generated values', async () => {
     const { UpgradeRefusal } = await import('./refusal.js');
     vi.mocked(dk.validateCompose).mockRejectedValue(
