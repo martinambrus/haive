@@ -1772,6 +1772,12 @@ const workerDeps: WorkerDeps = {
       // Keep INVOKE's age aligned so its finishes cannot prune young polled results.
       ...CLI_POLLABLE_JOB_OPTS,
     };
+    // Plan chat carries its immutable read until execution ends. Results are
+    // consumed from Postgres, so Redis need not retain the private plan payload.
+    if (payload.spec?.planSnapshot) {
+      opts.removeOnComplete = true;
+      opts.removeOnFail = true;
+    }
     // Fair scheduling (kill-switch'd): composite priority round-robins across tasks
     // (primary = this task's in-flight rank) so one task's fan-out cannot front-load
     // its later terminals ahead of another task's first terminal, then breaks ties
