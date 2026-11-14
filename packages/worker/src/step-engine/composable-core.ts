@@ -266,7 +266,10 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Sync external plan changes',
     group: 'knowledge',
     dispatchesCli: true,
-    requires: [needRepository('Measures external commits against the repository plan.')],
+    requires: [
+      needWorktree,
+      needRepository('Measures external commits against the repository plan.'),
+    ],
     provides: ['external-plan-synced'],
     precedes: ['discovery', 'spec', 'plan-reconciled', 'cleaned'],
   },
@@ -370,6 +373,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     // Quality and broad-audit findings are optional; the draft is the fallback body.
     requires: [
+      needWorktree,
       { needs: 'spec', reason: 'Resolves findings against the drafted or reviewed spec.' },
     ],
     provides: ['spec', 'spec-warnings-resolved'],
@@ -547,6 +551,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       },
     ],
     provides: ['browser-test-choice'],
+    // Automated testing runs in 08a; manual/direct testing moves to gate 2.
+    entails: ['browser-verification', 'verify-approved'],
     precedes: ['browser-verification', 'verify-approved', 'commit'],
   },
   {
@@ -721,7 +727,10 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Reconcile project plan',
     group: 'knowledge',
     dispatchesCli: true,
-    requires: [needRepository('Reconciles the repository plan and writes its mirror.')],
+    requires: [
+      needWorktree,
+      needRepository('Reconciles the repository plan and writes its mirror.'),
+    ],
     // Missing plan/spec/committed changedPaths have explicit empty/worktree fallbacks.
     provides: ['plan-reconciled'],
     precedes: ['pushed', 'cleaned'],

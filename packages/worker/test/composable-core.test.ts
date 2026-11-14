@@ -542,6 +542,45 @@ describe('core composable catalog', () => {
     expect(validateComposition(['01-worktree-setup', '01e-external-kb-sync'], catalog)).toEqual([]);
   });
 
+  it.each(['01f-external-plan-sync', '05a-resolve-spec-warnings', '11f-plan-reconcile'])(
+    'requires a prior worktree for repository writer %s',
+    (stepId) => {
+      const head = stepId === '05a-resolve-spec-warnings' ? ['04-phase-0b-pre-planning'] : [];
+      expect(validateComposition([...head, stepId], catalog)).toContainEqual(
+        expect.objectContaining({ kind: 'unmet-need', stepId, needs: 'worktree' }),
+      );
+      expect(validateComposition([...head, stepId, '01-worktree-setup'], catalog)).toContainEqual(
+        expect.objectContaining({ kind: 'unmet-need', stepId, needs: 'worktree' }),
+      );
+      expect(validateComposition(['01-worktree-setup', ...head, stepId], catalog)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['08a-browser-verify', 'verify-approved'],
+    ['09-gate-2-verify-approval', 'browser-verification'],
+  ])('requires both browser method routes when only %s is present', (stepId, token) => {
+    const head = [
+      '01-declare-deps',
+      '02-generate-dockerfile',
+      '03-build-image',
+      '01-worktree-setup',
+      '01a-app-boot',
+      '07-phase-2-implement',
+      '08-phase-5-verify',
+      '08a-browser-setup',
+    ];
+    expect(validateComposition([...head, stepId], catalog)).toEqual([
+      expect.objectContaining({ kind: 'unfulfilled', stepId: '08a-browser-setup', token }),
+    ]);
+    expect(
+      validateComposition(
+        [...head, '08a-browser-verify', '09-gate-2-verify-approval', '10-gate-3-commit'],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
   it('requires the DAG planner before execution and run configuration before planning', () => {
     expect(validateComposition(['01-worktree-setup', '06c-dag-execute'], catalog)).toContainEqual(
       expect.objectContaining({
