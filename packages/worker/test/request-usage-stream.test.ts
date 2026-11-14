@@ -11,6 +11,34 @@ const read = (events = structuredClone(fixture), suffix = '') => {
   return c.getRequestUsage();
 };
 describe('Claude request coverage', () => {
+  const billingCases = JSON.parse(
+    readFileSync(
+      new URL('./fixtures/streams/request-claude-billing.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  it.each(billingCases)('reconciles billed tokens for $name', ({ events, coverage, reasons }) => {
+    expect(read(events)).toMatchObject({ coverage, reasons });
+  });
+  it.each(['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'outputTokens'])(
+    'refuses contradictory billed %s for an observed model',
+    (bucket) => {
+      const events = structuredClone(billingCases[2]!.events);
+      events[3].modelUsage['claude-sonnet-4-6'][bucket]++;
+      expect(read(events)).toMatchObject({
+        coverage: 'incomplete',
+        reasons: ['model-usage-mismatch'],
+      });
+    },
+  );
+  it('still refuses mismatched priced totals with a matching billing alias', () => {
+    const events = structuredClone(billingCases[0]!.events);
+    events[3].usage.input_tokens++;
+    expect(read(events)).toMatchObject({
+      coverage: 'incomplete',
+      reasons: expect.arrayContaining(['prompt-mismatch']),
+    });
+  });
   it('keeps zero request output unknown when result output is absent', () => {
     const events = structuredClone(fixture);
     for (const e of events) if (e.message) e.message.usage.output_tokens = 0;
@@ -67,7 +95,7 @@ describe('Claude request coverage', () => {
     'missing-input',
     'contradiction',
     'unknown-ttl',
-    'hidden-model',
+    'invalid-billed-usage',
     'truncated',
     'malformed',
   ])('refuses exact coverage for %s', (kind) => {
@@ -78,7 +106,7 @@ describe('Claude request coverage', () => {
     if (kind === 'missing-usage') delete events[1].message.usage;
     if (kind === 'missing-input') delete events[1].message.usage.input_tokens;
     if (kind === 'unknown-ttl') delete events[1].message.usage.cache_creation;
-    if (kind === 'hidden-model') events[3].modelUsage = { 'model-a': {}, 'model-b': {} };
+    if (kind === 'invalid-billed-usage') events[3].modelUsage = { 'model-a': { inputTokens: -1 } };
     if (kind === 'contradiction') {
       const other = structuredClone(events[1]);
       other.message.usage.input_tokens++;

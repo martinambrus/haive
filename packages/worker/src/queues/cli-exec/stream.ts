@@ -126,6 +126,7 @@ export function createStreamJsonCollector(
   const requestIssues = new Set<string>();
   // Same message ids as assistantUsageByMessage; this strict view never changes legacy totals.
   const requestsByMessage = new Map<string, RequestUsage>();
+  let billedUsageByModel = new Map<string, RequestUsage | null>();
   let reportedWindow: number | null = null;
   let resultApiDurationMs: number | null = null;
   // Live fallback before the `result` event: one usage per assistant message.id, summed like the
@@ -273,6 +274,26 @@ export function createStreamJsonCollector(
       // call for session titling). The keys are not an identity source (grok bills under
       // `grok-4.6-build` while serving `grok-4.6`); only the init or served model's entry
       // gives the window.
+      // Keep the latest cumulative billed totals separate from identity and legacy usage.
+      // The billing ledger also includes CLI-owned calls outside result.usage.
+      billedUsageByModel = new Map(
+        Object.entries(record(event.modelUsage) ?? {}).map(([model, raw]) => {
+          const u = record(raw);
+          return [
+            model,
+            claudeRequestUsage(
+              {
+                input_tokens: u?.inputTokens,
+                output_tokens: u?.outputTokens,
+                cache_read_input_tokens: u?.cacheReadInputTokens,
+                cache_creation_input_tokens: u?.cacheCreationInputTokens,
+              },
+              model,
+              model,
+            ),
+          ];
+        }),
+      );
       const modelUsage = event.modelUsage as Record<string, unknown> | undefined;
       if (modelUsage && typeof modelUsage === 'object') {
         for (const key of Object.keys(modelUsage)) {
@@ -566,8 +587,52 @@ export function createStreamJsonCollector(
         reasons.add('unknown-cache-ttl');
       const modelCoverage = requestModelCoverage(requests);
       if (modelCoverage !== 'single') reasons.add('model-coverage');
-      if ([...billedModels].some((m) => !requests.some((r) => r.model === m)))
-        reasons.add('unobserved-model');
+      // Reconcile the billed entry for each observed model, not every ledger key:
+      // titling tokens can be outside result.usage. A differently named entry may
+      // corroborate the same token vector (grok/GLM aliases), without changing identity.
+      // An exact-name contradiction must never be rescued by another billed entry.
+      const modelSums = new Map<string | null, RequestUsage>();
+      for (const r of requests) {
+        const prior = modelSums.get(r.model);
+        if (!prior) modelSums.set(r.model, { ...r });
+        else {
+          prior.inputTokens += r.inputTokens;
+          prior.cacheReadTokens += r.cacheReadTokens;
+          prior.cacheCreationTokens += r.cacheCreationTokens;
+          prior.outputTokens =
+            prior.outputTokens !== null && r.outputTokens !== null
+              ? prior.outputTokens + r.outputTokens
+              : null;
+        }
+      }
+      const billedMatches = (sum: RequestUsage, billed: RequestUsage | null | undefined) =>
+        billed != null &&
+        sum.inputTokens === billed.inputTokens &&
+        sum.cacheReadTokens === billed.cacheReadTokens &&
+        sum.cacheCreationTokens === billed.cacheCreationTokens &&
+        (!outputKnown || sum.outputTokens === billed.outputTokens);
+      const billedUsages = [...billedUsageByModel.values()];
+      // If the ledger itself partitions the priced prompt, every observed model
+      // must have a matching vector. This catches multiple billing aliases whose
+      // combined tokens are inside result.usage. Otherwise unrelated ledger-only
+      // calls (even a ledger containing only titling) cannot disprove coverage.
+      const billingCoversPricedPrompt =
+        billedUsages.length > 0 &&
+        billedUsages.every((billed) => billed !== null) &&
+        (['inputTokens', 'cacheReadTokens', 'cacheCreationTokens'] as const).every(
+          (key) => billedUsages.reduce((n, billed) => n + billed![key], 0) === sum(key),
+        );
+      for (const [model, sum] of modelSums) {
+        // Mixed/unknown models already withhold coverage. Probe aliases only for
+        // the single observed model, keeping reconciliation linear in stream size.
+        if (modelCoverage !== 'single' || billedUsageByModel.size === 0) break;
+        const matches =
+          model !== null && billedUsageByModel.has(model)
+            ? billedMatches(sum, billedUsageByModel.get(model))
+            : !billingCoversPricedPrompt ||
+              billedUsages.some((billed) => billedMatches(sum, billed));
+        if (!matches) reasons.add('model-usage-mismatch');
+      }
       const complete = reasons.size === 0;
       return {
         requests,
