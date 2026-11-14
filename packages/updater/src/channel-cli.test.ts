@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
@@ -47,6 +51,190 @@ const settings: images.ImageSettings = {
   HAIVE_BUILDER_IMAGE: '',
   HAIVE_OWN_MODULES_REBUILD_WEB: '',
 };
+
+describe('bundle preflight', () => {
+  let dir: string;
+  const body = Buffer.from('services: {}\n');
+  const hash = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+  const files = { 'docker-compose.yml': hash, 'docker-compose.run.yml': hash };
+  const manifest = {
+    manifestVersion: 1,
+    channel: 'public',
+    version: '9.9.9',
+    builtAt: '2026-11-14',
+    migrationHead: '0221',
+    bundle: {
+      files,
+      known: [files],
+      env: [
+        { key: 'MAILPIT_UI_PASSWORD', generate: 'hex', bytes: 24 },
+        { key: 'JWT_SECRET', generate: 'never' },
+      ],
+    },
+  };
+  let env: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rbr-cli-'));
+    env = `JWT_SECRET=${randomBytes(24).toString('hex')}\n`;
+    await writeFile(join(dir, '.env'), env);
+    for (const name of Object.keys(files)) await writeFile(join(dir, name), body);
+    process.argv = [
+      'node',
+      'updater',
+      '--install-dir',
+      dir,
+      '--manifest',
+      'https://release.test/release.json',
+      '--version',
+      '9.9.9',
+    ];
+    vi.mocked(images.readImageSettings).mockResolvedValue({ ...settings, HAIVE_CHANNEL: 'public' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(manifest))),
+    );
+    vi.mocked(dk.readReleaseManifestImage).mockResolvedValue({
+      text: JSON.stringify(manifest),
+      bundle: new Map(Object.keys(files).map((name) => [name, body])),
+    });
+    if ('validateCompose' in dk) vi.spyOn(dk, 'validateCompose').mockResolvedValue(undefined);
+  });
+  afterEach(async () => rm(dir, { recursive: true, force: true }));
+  it('records bundle-modified with the first file and remedy before any write or hold', async () => {
+    await writeFile(join(dir, 'docker-compose.run.yml'), 'edited');
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'bundle-modified' },
+        error: expect.stringContaining('docker-compose.run.yml'),
+      }),
+    );
+    expect(vi.mocked(journal.recordAttempt).mock.calls[0]![1].error).toContain(
+      '--replace-modified-bundle',
+    );
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+    expect(await readdir(dir)).toHaveLength(3);
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+  });
+  it('records env-key-missing before changing anything', async () => {
+    await writeFile(join(dir, '.env'), '');
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'env-key-missing' },
+        error: expect.stringContaining('JWT_SECRET'),
+      }),
+    );
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe('');
+    expect(await readdir(dir)).toHaveLength(3);
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it('check validates but writes no env, staging, journal or hold', async () => {
+    process.argv.push('--check');
+    expect(await main()).toBe(0);
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+    expect(await readdir(dir)).toHaveLength(3);
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(dk.validateCompose).not.toHaveBeenCalled();
+  });
+  it('bundle-absent keeps the old path, without a release-image pull or new refusal', async () => {
+    const { bundle: _bundle, ...older } = manifest;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(older))),
+    );
+    await writeFile(join(dir, '.env'), '');
+    await writeFile(join(dir, 'docker-compose.run.yml'), 'edited');
+    expect(await main()).toBe(0);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('bundle-absent'));
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(dk.validateCompose).not.toHaveBeenCalled();
+    expect(await readdir(dir)).toHaveLength(3);
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe('');
+    expect(images.prepareImages).toHaveBeenCalledWith(
+      { dir, files: ['docker-compose.yml', 'docker-compose.run.yml'] },
+      join(dir, '.env'),
+      '9.9.9',
+      expect.any(String),
+      expect.any(Object),
+      undefined,
+    );
+  });
+  it('override records intent, adds only key names and pulls/validates staged files before holding', async () => {
+    await writeFile(join(dir, 'docker-compose.run.yml'), 'edited');
+    process.argv.push('--replace-modified-bundle');
+    expect(await main()).toBe(0);
+    const staged = join(dir, '.haive-upgrade', 'pending', 'new');
+    expect(images.prepareImages).toHaveBeenCalledWith(
+      { dir, files: [join(staged, 'docker-compose.yml'), join(staged, 'docker-compose.run.yml')] },
+      join(dir, '.env'),
+      '9.9.9',
+      expect.any(String),
+      expect.any(Object),
+      undefined,
+    );
+    expect(dk.validateCompose).toHaveBeenCalled();
+    expect(vi.mocked(dk.validateCompose).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(journal.startRun).mock.invocationCallOrder[0]!,
+    );
+    expect(journal.startRun).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          envAdded: ['MAILPIT_UI_PASSWORD'],
+          replaceModifiedBundle: true,
+        }),
+      }),
+    );
+    expect(await readFile(join(dir, 'docker-compose.run.yml'), 'utf8')).toBe('edited');
+    const value = (await readFile(join(dir, '.env'), 'utf8')).match(
+      /^MAILPIT_UI_PASSWORD=(.+)$/m,
+    )![1]!;
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(value);
+    expect(JSON.stringify(vi.mocked(journal.startRun).mock.calls)).not.toContain(value);
+  });
+  it.each(['http://release.test/release.json', '/local/release.json'])(
+    'bundle refuses non-HTTPS manifest even with override: %s',
+    async (source) => {
+      // A local path needs a real manifest fixture; HTTP uses the fake fetch seam.
+      if (source.startsWith('/')) {
+        source = join(dir, 'release.json');
+        await writeFile(source, JSON.stringify(manifest));
+      }
+      process.argv[process.argv.indexOf('--manifest') + 1] = source;
+      process.argv.push('--replace-modified-bundle');
+      expect(await main()).toBe(3);
+      expect(journal.startRun).not.toHaveBeenCalled();
+      expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+    },
+  );
+  it('records added names after a staged validation refusal, with no generated values', async () => {
+    const { UpgradeRefusal } = await import('./refusal.js');
+    vi.mocked(dk.validateCompose).mockRejectedValue(
+      new UpgradeRefusal('bundle-config-invalid', 'invalid staged compose'),
+    );
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        metadata: { refusal: 'bundle-config-invalid', envAdded: ['MAILPIT_UI_PASSWORD'] },
+      }),
+    );
+    expect(journal.startRun).not.toHaveBeenCalled();
+    const value = (await readFile(join(dir, '.env'), 'utf8')).match(
+      /^MAILPIT_UI_PASSWORD=(.+)$/m,
+    )![1]!;
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(value);
+    expect(JSON.stringify(vi.mocked(journal.recordAttempt).mock.calls)).not.toContain(value);
+  });
+});
 let argv: string[];
 beforeEach(() => {
   vi.mocked(postgres)
@@ -84,8 +272,8 @@ beforeEach(() => {
     settings.HAIVE_WORKER_IMAGE,
     settings.HAIVE_WEB_IMAGE,
   ]);
-  vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(
-    JSON.stringify({
+  vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue({
+    text: JSON.stringify({
       manifestVersion: 1,
       channel: 'acme',
       version: '9.9.9',
@@ -93,7 +281,7 @@ beforeEach(() => {
       migrationHead: '0221',
       images: refs,
     }),
-  );
+  });
 });
 afterEach(() => {
   process.argv = argv;
@@ -151,14 +339,16 @@ it('does not open a boot pool when configuration already has a key', async () =>
 it('check applies install credentials before manifest IO, emits pins, and starts no run', async () => {
   vi.mocked(dk.readReleaseManifestImage).mockImplementation(async () => {
     expect(process.env.DOCKER_CONFIG).toBe('/host/install/.docker');
-    return JSON.stringify({
-      manifestVersion: 1,
-      channel: 'acme',
-      version: '9.9.9',
-      builtAt: '2026-11-05',
-      migrationHead: '0221',
-      images: refs,
-    });
+    return {
+      text: JSON.stringify({
+        manifestVersion: 1,
+        channel: 'acme',
+        version: '9.9.9',
+        builtAt: '2026-11-05',
+        migrationHead: '0221',
+        images: refs,
+      }),
+    };
   });
   expect(await main()).toBe(0);
   expect(dk.localImages).toHaveBeenCalledWith(true);
@@ -328,15 +518,15 @@ it.each([0, 1, 2, 3, 4, 5, 6, 7])(
       HAIVE_WEB_IMAGE: mask & 4 ? settings.HAIVE_WEB_IMAGE : '',
       HAIVE_CHANNEL: 'public',
     });
-    vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
-      JSON.stringify({
+    vi.mocked(dk.readReleaseManifestImage).mockResolvedValue({
+      text: JSON.stringify({
         manifestVersion: 1,
         channel: 'public',
         version: '9.9.9',
         builtAt: '2026-11-05',
         migrationHead: '0221',
       }),
-    );
+    });
     vi.mocked(dk.localImages).mockImplementation(async (digests) => [
       ...['api', 'worker', 'web'].map((host) => `ghcr.io/martinambrus/haive-${host}:1.0.0`),
       ...(digests
@@ -597,8 +787,8 @@ describe('terminal attempts before a run exists', () => {
     if (refusal === 'same-version') vi.mocked(run.readEnvVar).mockResolvedValue('9.9.9');
     if (refusal === 'downgrade') vi.mocked(run.readEnvVar).mockResolvedValue('10.0.0');
     if (refusal === 'illegal-jump')
-      vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
-        JSON.stringify({
+      vi.mocked(dk.readReleaseManifestImage).mockResolvedValue({
+        text: JSON.stringify({
           manifestVersion: 1,
           channel: 'acme',
           version: '9.9.9',
@@ -607,7 +797,7 @@ describe('terminal attempts before a run exists', () => {
           minFrom: '5.0.0',
           images: refs,
         }),
-      );
+      });
     if (refusal === 'rollback-images-missing') vi.mocked(dk.localImages).mockResolvedValue([]);
     if (refusal === 'insufficient-disk')
       process.argv.push('--free-bytes', '1', '--snapshot-bytes', '2');

@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import {
+  RELEASE_BUNDLE_FILES,
+  parseReleaseManifest,
+  type ReleaseManifest,
+} from '@haive/shared/release';
+import { bundleHash } from './bundle.js';
+import { UpgradeRefusal } from './refusal.js';
 
 const exec = promisify(execFile);
 
@@ -53,7 +60,28 @@ async function run(
 }
 
 function composeArgs(ctx: ComposeContext, rest: string[]): string[] {
-  return [...ctx.files.flatMap((f) => ['-f', f]), ...rest];
+  return [
+    ...ctx.files.flatMap((f) => ['-f', f]),
+    ...(ctx.files.some(isAbsolute) ? ['--project-directory', ctx.dir] : []),
+    ...rest,
+  ];
+}
+
+/** Compose can echo .env values even on config -q failure. Discard both output and error. */
+export async function validateCompose(ctx: ComposeContext, env: NodeJS.ProcessEnv): Promise<void> {
+  try {
+    await exec('docker', ['compose', ...composeArgs(ctx, ['config', '-q'])], {
+      cwd: ctx.dir,
+      env,
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch {
+    throw new UpgradeRefusal(
+      'bundle-config-invalid',
+      'could not validate staged compose bundle; check .env syntax and Compose availability',
+    );
+  }
 }
 
 /** Image references present on this daemon. Used by preflight to prove a rollback has somewhere to
@@ -74,12 +102,28 @@ export async function localImages(includeDigests = false): Promise<string[]> {
 }
 
 export async function pullImages(ctx: ComposeContext, env: NodeJS.ProcessEnv): Promise<void> {
-  await exec('docker', ['compose', ...composeArgs(ctx, ['pull'])], {
-    cwd: ctx.dir,
-    env,
-    timeout: 1_800_000,
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  await runCompose(ctx, env, ['pull']);
+}
+
+/** Pull, deployment and rollback can also echo the now-populated .env on a config failure. */
+async function runCompose(
+  ctx: ComposeContext,
+  env: NodeJS.ProcessEnv,
+  args: string[],
+  timeout = 1_800_000,
+): Promise<void> {
+  try {
+    await exec('docker', ['compose', ...composeArgs(ctx, args)], {
+      cwd: ctx.dir,
+      env,
+      timeout,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch {
+    throw new Error(
+      `Docker Compose ${args[0]} failed; check install configuration and Docker availability`,
+    );
+  }
 }
 
 /** Bring services up. `services` empty means the whole stack. */
@@ -88,12 +132,7 @@ export async function composeUp(
   env: NodeJS.ProcessEnv,
   services: string[] = [],
 ): Promise<void> {
-  await exec('docker', ['compose', ...composeArgs(ctx, ['up', '-d', ...services])], {
-    cwd: ctx.dir,
-    env,
-    timeout: 1_800_000,
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  await runCompose(ctx, env, ['up', '-d', ...services]);
 }
 
 /** Stop services WITHOUT `-v`. Never `-v`: several volumes are globally named and shared with any
@@ -103,11 +142,7 @@ export async function composeStop(
   env: NodeJS.ProcessEnv,
   services: string[],
 ): Promise<void> {
-  await exec('docker', ['compose', ...composeArgs(ctx, ['stop', ...services])], {
-    cwd: ctx.dir,
-    env,
-    timeout: 600_000,
-  });
+  await runCompose(ctx, env, ['stop', ...services], 600_000);
 }
 
 /** Snapshot filenames are ours, not a user's — but they are the only values that reach a shell in
@@ -291,11 +326,10 @@ export async function resolveImageSettings(
   }
 }
 
-const MANIFEST_MAX = 1024 * 1024;
-// One header, payload padded to a 512-byte block, and two end blocks.
-const MANIFEST_TAR_MAX = MANIFEST_MAX + 1536;
+export const MANIFEST_MAX = 1024 * 1024;
+export const BUNDLE_FILE_MAX = 256 * 1024;
 
-function manifestHeaderSize(header: Buffer): number {
+function singleFileHeaderSize(header: Buffer, expectedName: string, max: number): number {
   const invalid = () => new Error('invalid release manifest tar header');
   const string = (start: number, end: number) => {
     const field = header.subarray(start, end);
@@ -315,21 +349,28 @@ function manifestHeaderSize(header: Buffer): number {
   const size = octal(124, 136);
   if (
     sum !== octal(148, 156) ||
-    string(0, 100) !== 'release.json' ||
+    string(0, 100) !== expectedName ||
     string(345, 500) !== '' ||
     string(157, 257) !== '' ||
     (header[156] !== 0 && header[156] !== 48) ||
-    size > MANIFEST_MAX
+    size > max
   )
     throw invalid();
   return size;
 }
 
 /** Docker emits tar on stdout. Bound it while reading, before retaining any payload, and never
- * extract paths supplied by an image. Only one ordinary release.json entry is accepted. */
-async function streamReleaseManifest(id: string): Promise<string> {
+ * extract paths supplied by an image. Only one ordinary entry of the exact name is accepted. */
+export async function streamSingleFile(
+  id: string,
+  path: string,
+  expectedName: string,
+  max: number,
+): Promise<Buffer> {
+  // One header, payload rounded up to a block, and two end blocks. Limits are injectable.
+  const tarMax = Math.ceil(max / 512) * 512 + 1536;
   return new Promise((done, reject) => {
-    const child = spawn('docker', ['cp', `${id}:/release.json`, '-'], {
+    const child = spawn('docker', ['cp', `${id}:${path}`, '-'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 600_000,
       killSignal: 'SIGKILL',
@@ -347,7 +388,7 @@ async function streamReleaseManifest(id: string): Promise<string> {
     };
     child.stdout.on('data', (chunk: Buffer) => {
       if (failure) return;
-      if (total + chunk.length > MANIFEST_TAR_MAX) {
+      if (total + chunk.length > tarMax) {
         fail(new Error('release manifest tar is too large'));
         return;
       }
@@ -355,7 +396,7 @@ async function streamReleaseManifest(id: string): Promise<string> {
       total += chunk.length;
       if (size === undefined && total >= 512) {
         try {
-          size = manifestHeaderSize(header);
+          size = singleFileHeaderSize(header, expectedName, max);
         } catch (error) {
           fail(error as Error);
           return;
@@ -390,7 +431,7 @@ async function streamReleaseManifest(id: string): Promise<string> {
         reject(new Error('release manifest tar contains unexpected entries or padding'));
         return;
       }
-      done(archive.subarray(512, payloadEnd).toString('utf8'));
+      done(archive.subarray(512, payloadEnd));
     });
   });
 }
@@ -399,7 +440,8 @@ async function streamReleaseManifest(id: string): Promise<string> {
 export async function readReleaseManifestImage(
   image: string,
   onCleanupError?: (container: string, error: unknown) => void,
-): Promise<string> {
+  options: { manifest?: ReleaseManifest; maxManifestBytes?: number; maxBundleBytes?: number } = {},
+): Promise<{ text: string; bundle?: Map<string, Buffer> }> {
   await run('docker', ['pull', image], undefined, 1_800_000);
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
@@ -407,7 +449,39 @@ export async function readReleaseManifestImage(
   try {
     // A scratch release image has no CMD. This command is never executed.
     id = await run('docker', ['create', '--name', name, image, '/unused']);
-    return await streamReleaseManifest(id);
+    const text = (
+      await streamSingleFile(
+        id,
+        '/release.json',
+        'release.json',
+        options.maxManifestBytes ?? MANIFEST_MAX,
+      )
+    ).toString('utf8');
+    // Public callers supply the URL manifest as the trust anchor. Never use the image's hashes
+    // instead, even when its release.json differs. Channel callers read everything from this id.
+    const manifest = options.manifest ?? parseReleaseManifest(JSON.parse(text));
+    if (!manifest.bundle) return { text };
+    const bundle = new Map<string, Buffer>();
+    for (const name of RELEASE_BUNDLE_FILES) {
+      const expected = manifest.bundle.files[name];
+      if (!expected) continue;
+      try {
+        const bytes = await streamSingleFile(
+          id,
+          `/bundle/${name}`,
+          name,
+          options.maxBundleBytes ?? BUNDLE_FILE_MAX,
+        );
+        if (bundleHash(bytes) !== expected) throw new Error('hash mismatch');
+        bundle.set(name, bytes);
+      } catch {
+        throw new UpgradeRefusal(
+          'bundle-invalid',
+          `release bundle is missing, invalid or has a hash mismatch: ${name}`,
+        );
+      }
+    }
+    return { text, bundle };
   } catch (error) {
     failed = true;
     throw error;
