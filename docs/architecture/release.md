@@ -18,6 +18,55 @@ Pass `--min-from` to `scripts/build-release-manifest.mjs` only to declare a REQU
 pass through v0.3 first"). It defaults permissive on purpose: a floor equal to the release blocks
 every upgrade to it.
 
+The manifest schema also accepts an optional `bundle` field while `manifestVersion` stays 1.
+Its `files` record maps only `docker-compose.yml`, `docker-compose.run.yml`,
+`docker-compose.gpu.yml` and `docker-compose.vulkan.yml` to `sha256:` followed by 64 lowercase
+hex digits. The target `files` must include `docker-compose.yml` and `docker-compose.run.yml`;
+the GPU and Vulkan overlays are optional. Each historical record in `known` may omit files absent
+from that tree, including base or run. Unknown file names are rejected by both records.
+`known` contains the historical bundle hash records; it will
+let the updater recognise an unmodified older install that predates a local bundle record.
+An older manifest still parses without `bundle`, and an older reader's plain zod `z.object`
+strips the new field. The updater, upgrade API and channel publisher keep their existing behavior.
+
+`node scripts/build-release-manifest.mjs --version <tag> --bundle-dir <tree>` hashes the required
+base/run files and any allowed overlays present in `<tree>`. It validates
+`<tree>/install/bundle-env.json` with the shared env schema before embedding the parsed `bundle.env`.
+It reads the invoking checkout's `v*` tags merged into `HEAD`, except the target tag, in refname
+order and hashes their blobs with `git show`. Missing historical files are omitted; tags with no
+bundle files contribute no record. Duplicate records are retained only at their first occurrence,
+and file keys follow the fixed allowlist order. RC tags remain eligible because pristine installs
+made from an RC need the same legacy recognition as stable releases.
+
+With `--bundle-dir`, a shallow checkout always fails with a non-zero exit, a clear stderr message
+and no stdout. Use a complete checkout with the release tags and their trees available. An empty
+merged `v*` tag list also fails unless `--allow-no-history` explicitly declares a first release;
+that opt-out permits `known: []` only in a non-shallow checkout and must not be used to hide missing
+tags on an existing project. Any git read failure aborts generation. The bundle tree may be an
+archive without its own `.git`; the generator's own tree must carry the shared schema source and
+its dependencies. Without `--bundle-dir`, no bundle metadata, shared schema or git history is read
+and the original JSON format is unchanged, including property order and final newline.
+
+`install/bundle-env.json` is a declaration of required keys, not a store of values. A `hex` entry
+permits later generation and requires an integer `bytes` from 16 through 64. A `never` entry
+requires an existing value and forbids `bytes`, even when explicitly undefined. Keys follow shell
+environment-name syntax and must be unique across the declaration. Unknown optional fields on
+either kind of env entry are stripped so future metadata does not reject an otherwise valid manifest.
+Only `MAILPIT_UI_PASSWORD` is `hex` (24 bytes, matching both installers): the run overlay consumes
+it as `MP_UI_AUTH`, so adding it enables an inbox login. `POSTGRES_PASSWORD` is `never` because
+the base/run files use it to connect to an already-initialised database; `JWT_SECRET` is `never`
+because the API uses it for existing sessions; `CONFIG_ENCRYPTION_KEY` is `never` because the API
+and worker use it to decrypt stored credentials. The consistency control parses the installers'
+generation assignments and `.env` mappings, pins their matching byte counts, and checks that each
+key allowed to be generated is referenced by the compose bundle. A change outside the recognised
+assignment grammar fails the control and requires updating its extractor.
+
+This schema/generator change does not yet publish or install the bundle. Publishing, classification,
+required-key writes, swapping and rollback follow the approved
+[compose bundle plan](../plans/release-compose-bundle.md). That plan refuses a modified or unknown
+legacy bundle with `bundle-modified` unless `--replace-modified-bundle` is supplied; those runtime
+behaviors remain for the later PRs.
+
 To run a published release instead of building from source:
 
 ```bash

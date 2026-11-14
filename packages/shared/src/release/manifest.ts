@@ -27,6 +27,60 @@ export const releaseImagesSchema = z.object({
   builder: z.string().min(1).optional(),
 });
 
+/** The installer/helper knows only these names. A manifest cannot introduce a new path. */
+export const RELEASE_BUNDLE_FILES = [
+  'docker-compose.yml',
+  'docker-compose.run.yml',
+  'docker-compose.gpu.yml',
+  'docker-compose.vulkan.yml',
+] as const;
+
+// Historical tags can lack an overlay (or even the run file), so this is a partial record.
+const bundleFilesSchema = z.partialRecord(
+  z.enum(RELEASE_BUNDLE_FILES),
+  z
+    .string()
+    .length(71)
+    .regex(/^sha256:[0-9a-f]{64}$/),
+);
+// The final negative lookahead requires the actual end, unlike $ before a trailing newline.
+const bundleEnvKeySchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/);
+export const releaseBundleEnvSchema = z
+  .array(
+    z.discriminatedUnion('generate', [
+      z.object({
+        key: bundleEnvKeySchema,
+        generate: z.literal('hex'),
+        bytes: z.number().int().min(16).max(64),
+      }),
+      // Keep bytes declared so stripping unknown future fields cannot hide an illegal bytes key.
+      // A never key already protects persisted data or sessions; no new value may be generated.
+      z
+        .object({
+          key: bundleEnvKeySchema,
+          generate: z.literal('never'),
+          bytes: z.never().optional(),
+        })
+        .refine((entry) => !Object.hasOwn(entry, 'bytes'), {
+          message: 'never entries must not declare bytes',
+          path: ['bytes'],
+        }),
+    ]),
+  )
+  .refine((entries) => new Set(entries.map(({ key }) => key)).size === entries.length, {
+    message: 'bundle env keys must be unique',
+  });
+
+export const releaseBundleSchema = z.object({
+  files: bundleFilesSchema.refine(
+    (files) =>
+      files['docker-compose.yml'] !== undefined && files['docker-compose.run.yml'] !== undefined,
+    { message: 'target bundle requires docker-compose.yml and docker-compose.run.yml' },
+  ),
+  env: releaseBundleEnvSchema,
+  known: z.array(bundleFilesSchema),
+});
+
 export const releaseManifestSchema = z.object({
   /** Schema version of THIS document, so a future updater can refuse one it cannot read. */
   manifestVersion: z.literal(1),
@@ -68,6 +122,8 @@ export const releaseManifestSchema = z.object({
    */
   contracts: z.boolean().default(false),
   images: releaseImagesSchema.default({}),
+  /** Optional in v1: older z.object readers strip this field; older manifests omit it. */
+  bundle: releaseBundleSchema.optional(),
 });
 
 export type ReleaseImages = z.infer<typeof releaseImagesSchema>;
