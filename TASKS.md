@@ -663,17 +663,19 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 5. `OrderedStepCatalogRow.stepIndex` is `number` but `step_catalog.step_index` is nullable; a NULL throws "Invalid base catalog index" (`run-list.ts:129`). PR3's ordered catalog read must map NULL explicitly.
 6. PR2's fail-closed refusals throw inside the row map of `GET /task-types` and `GET /admin/task-types` (`availabilityOf`, `shared/src/modularity/task-types.ts:106`): with a derived row present on PR2 code (a PR3 revert) the whole list answers 500. PR3 must replace every refusal in one change; a revert past PR3 must delete derived definitions first.
 
-### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 (+5)
+### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
 
 status: open · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
 
-Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md`.
+Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md` and `SD2-S/review-{1,2}.md`.
 
 1. A module's local step id passes `isCoreStepId` (`modules/loader.ts:108`, pattern `contracts.ts:8`), so `_x` or `-x` registers, while the namespaced-id pattern (`contracts.ts:9`) needs an alphanumeric first character. PRE-EXISTING. Validate the local id against the namespaced form.
 2. No length bound on a module's local step id (`modules/loader.ts:107-119`); `task_steps.step_id` is `varchar(128)` (`database/src/schema/tasks.ts:514`) and the namespace adds up to 31 characters, so a local id over 97 characters cannot be stored. PRE-EXISTING. Refuse at registration.
 3. `step-sdk-module.test.ts:16` mocks `emitsLoop` to return `undefined`; a later fixture with composable steps would take the "does not loop" branch silently. Make the mock throw.
 4. `worker/tsconfig.typecheck.json:8` excludes the package `dist` only; a stale ignored `test/fixtures/step-sdk/dist/*.d.ts` on an existing dev tree is still in the `test/**/*` glob. Exclude it.
 5. `step-sdk-module.test.ts` throws each control class from module `apply` but has no `PromptBudgetExceededError` case (added to the entry by the #1183 rebase); identity is pinned, the throw path is not.
+6. `worker/src/step-engine/dag-executor.ts:1914-1927`: a leftover "moved to" comment block sits after a `/** */` doc that described the old fence definitions and now describes nothing. PRE-EXISTING. Delete both.
+7. No test pairs the worker's `isSingleLine && survivesFence` (`_untrusted-repo.ts:177-185`) against shared `isListableName`, and the guard test omits U+0000, U+001C-001E and U+007F. Equivalent by construction; add the pairing and those characters.
 
 ### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
 
@@ -2125,6 +2127,7 @@ All low unless marked.
 - Derived task types PR 1 (#1186): `@haive/shared` evaluates a derived type's ordered change list (remove, insertAfter, replace) against every candidate run list of its built-in base (no path plus each execution path, with the environment prelude), with explicit applied/skipped/refused outcomes, stale-target warnings, a protected triage prefix, `replace` refused until output contracts exist, and `validateComposition` on every result; nothing calls it yet. Lows and PR3 decisions filed as T679.
 
 - Step SDK seam, derived task types prerequisite 2 PR 1 (#1184): `@haive/shared/step` carries the step contract (15 interfaces, the seven runtime control classes defined once and re-exported by the worker, `ChatPlanRead`, the form/metadata types), unreachable from every other shared entry; the module loader types `steps` from it; a compiled fixture module proves class identity through the loader. Lows filed as T678. Deploy note: the worker crashed on the pull (new shared entry not built yet) and needed `pnpm docker restart worker`.
+- Step SDK seam PR 2 (#1188): `@haive/shared/step/prompts` and `step/review` carry the canonical untrusted-repo fence guards, `fencedAgentBlock`, `changedFilesBlock`, `isListableName` and the diff-hunk parser, defined once and re-exported by the worker; review may import prompts, no other entry reaches another. Lows added to T678. Deploy note: the worker crashed on the libs rebuild and recovered by itself once dist was written.
 
 - Bounded plan writers, AIDE² P5 (#1183): 11f and 01f send a depth-4 plan index plus whole versioned focus nodes; ops with a missing or stale version drop individually; a capped 01f range is reviewed and stamped; the runner persists what `prepare` writes before dispatch (08d now sees 08a's real login outcome). Lows filed in T675.
 
