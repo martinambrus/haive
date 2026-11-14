@@ -1692,10 +1692,12 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(parkPatches()).toHaveLength(1);
       expect(Object.keys(parkPatches()[0]!).sort()).toEqual([
         'integrationWait',
+        'providerWaitProviderId',
         'statusMessage',
         'updatedAt',
       ]);
       expect(parkPatches()[0]?.integrationWait).toBeNull();
+      expect(parkPatches()[0]?.providerWaitProviderId).toBeNull();
       expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: true }]);
       parkQueued(5_000);
     });
