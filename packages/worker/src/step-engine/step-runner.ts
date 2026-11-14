@@ -3956,7 +3956,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       };
     }
     const cancelled = err instanceof TaskCancelledError;
-    const errorMessage = cancelled ? 'task cancelled by user' : safeErrorMessage(err);
+    const errorMessage = cancelled
+      ? 'task cancelled by user'
+      : scrubErrorPaths(safeErrorMessage(err));
     if (cancelled) {
       log.info({ stepId: meta.id, taskId }, 'step aborted by task cancel');
     } else {

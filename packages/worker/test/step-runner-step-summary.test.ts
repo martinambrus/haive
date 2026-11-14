@@ -1,8 +1,34 @@
 import { DrizzleQueryError } from 'drizzle-orm/errors';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { logger } from '@haive/shared';
+
+const boundary = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: (...args: Parameters<typeof real.open>) => {
+      if (boundary.error && String(args[0]) === BOUNDARY_ANCHOR) throw boundary.error;
+      return real.open(...args);
+    },
+  };
+});
+vi.mock('../src/queues/cli-exec-queue.js', async (original) => ({
+  ...(await original<object>()),
+  resolveSandboxImageTag: async () => null,
+  loadProviderRuntimeConfig: async () => ({ sandboxImage: null }),
+  resolveAuthMounts: async () => [],
+  resolveInvocationRepoMount: async () => ({
+    repoMount: { source: 'haive_repos', target: '/haive/workdir', subpath: 'user/repo' },
+    hasWorktree: false,
+    hasRepo: true,
+  }),
+}));
+afterEach(() => {
+  boundary.error = null;
+});
 
 const stamp = vi.hoisted(() => `tree:${'ab'.repeat(20)}`);
 vi.mock('../src/build-stamp.js', () => ({ currentBuildStamp: () => stamp }));
@@ -19,6 +45,11 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
 import { advanceStep, buildAgentMiningSummaryPrompt } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+
+import { runStepCommandInSandbox } from '../src/sandbox/step-command.js';
+import { installPluginsStep } from '../src/step-engine/steps/workflow/01b-install-plugins.js';
+import { WORKER_REPO_STORAGE_ROOT } from '../src/repo/worktree-git-boundary.js';
+const BOUNDARY_ANCHOR = WORKER_REPO_STORAGE_ROOT + '/user/repo';
 
 // The DB-backed smokes set HAIVE_TEST_BYPASS_LLM=1, which writes no cli_invocations row,
 // so the summarizer returns early there and cannot be exercised.
@@ -510,3 +541,38 @@ it.each([true, false, 'path'] as const)(
     }
   },
 );
+
+describe('stored sandbox-boundary failures', () => {
+  it.each(
+    ['step-command', 'install-plugins'].flatMap((kind) =>
+      ['EACCES', 'EIO', 'EMFILE'].map((code) => [kind, code] as const),
+    ),
+  )('scrubs %s failures at the real repository anchor open (%s)', async (kind, code) => {
+    const state = freshState({ summaryLlmEnabled: false });
+    const db = makeMockDb(state);
+    Object.assign(db.query, { cliProviders: { findFirst: async () => makeProvider() } });
+    boundary.error = Object.assign(new Error(code + ': open ' + BOUNDARY_ANCHOR), { code });
+    const stepDef = baseStep();
+    stepDef.apply = async (ctx) => {
+      if (kind === 'step-command') {
+        return runStepCommandInSandbox(ctx, { argv: ['node', '--version'], timeoutMs: 1 });
+      }
+      return installPluginsStep.apply!(ctx, {
+        detected: { skip: false, commands: [] },
+      } as never);
+    };
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: BOUNDARY_ANCHOR,
+      workspacePath: BOUNDARY_ANCHOR,
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: async () => {} },
+    });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toBe(code + ': open [path]');
+  });
+});
