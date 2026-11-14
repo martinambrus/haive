@@ -582,10 +582,23 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
-### T655 · upgrade postgres.js to v4 and drop the local patch
+### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+13)
 
-status: open · kind: fix · found: PGF driver 2026-11-13 · priority: P2
-MEASURED 2026-11-13 (`.claude/tmp/codex-run/PGF-S/codex-1/decision-data.md`): unpatched postgres.js v4.1.1 already fixes every defect `patches/postgres@3.4.9.patch` works around (closed-socket write, unbounded startup reconnects) plus two more: an abandoned transaction callback writing after its connection reopened (fenced in the 3.4.9 patch by the PGF PR), and a handle kept after a successful COMMIT still writing outside its transaction (3.4.9 only, NOT fenced: consequential, third-party). Upstream folded porsager/postgres #1209, #1215, #1201 into v4 (06cf28470), so nothing needs filing upstream. Blockers measured on v4.1.1: two migration overload type errors (`packages/database/src/migrate/client.ts` ~:99), the startup guards' deadlines differ (`pg-startup-storm.test.ts`, 2 mismatches), and `smoke:pg-drop` gets `57P01` where it expects `CONNECTION_CLOSED`. Do: upgrade, fix the typing, re-key the guards on v4's error class/code (not wording), keep the fence control and `smoke:pg-drop` green unpatched, remove the patch and its AGENTS.md paragraph, and lift the dependabot hold in `.github/dependabot.yml`. Read v4's CHANGELOG for every breaking change against the inventory in decision-data.md.
+status: open · kind: fix · found: T655 run · priority: P3
+
+1. `connectTimeoutSeconds: 0` from settings is forwarded to postgres.js; on v4 a 0 or unset `connect_timeout` means retry forever at startup instead of the old hosts x 3 bound. Also a DSN or env `connect_timeout=0`. Clamp to a positive minimum where Haive builds the options. PRE-EXISTING value path, REGRESSION in consequence (unbounded startup).
+2. `pg-startup-storm.test.ts` drain waits are bounded by count, not time; the end test restores real timers outside `finally`; one bound (15) is loose. Tests only.
+3. No `ssl: false` case pinned for user DSNs. Tests only.
+4. `dsnDialHost`: a non-numeric port claims NaN handling the code does not have (comment overclaims); dropped positive password cases; the tests depend on ambient `PGHOST`; the `skipped.invalid` count shrank with the v4 parser. Tests and comment.
+5. User Postgres DSN guard (`@haive/shared` egress/user-postgres-dsn.ts): a stored DSN already carrying a refused parameter is hidden on RAG search and re-embed rather than reported, and is not refused at save time in every path. PRE-EXISTING rows, new guard.
+6. `userPostgresErrorMessage` collapses distinct error classes into one message. Low.
+7. Red evidence was shown on earlier control versions only, not the final ones. Evidence only.
+8. `error-diagnostics.md`: the DSN guard's scope (admin vs global KB settings) is not stated. Docs.
+9. `worker/scripts/rekey-global-kb.mts` reflow noise. Cosmetic.
+10. Nothing fails if a future ^4 release adds another file-reading connection parameter (the guard is a fixed refuse-list). Add a test that diffs postgres.js's parsed option keys against the known set.
+11. Third-party record: Node 26 `Socket.end` type mismatch in postgres.js v4 typings (worked around locally). Third-party, needs approval to report.
+12. Upgrade guidance for the next major lives in AGENTS.md; `smoke:pg-drop` and `pg-transaction-fence` must be re-run unpatched on any bump. Process note.
+13. E2E helpers were missed by the first `sql.array` inventory (packages/ only); a future inventory must include `tests/`. Process note.
 
 ### T662 · FNF[relink-reconcile-lows] · remote relink reconcile lows, after #1158 (+8)
 
@@ -644,7 +657,7 @@ Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
 4. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
 5. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
-6. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
+6. DONE 2026-11-14 #1159: a bracketed `[::1]` DSN host now parses to `::1` (`dsn-dial-host.test.ts`).
 7. Shipped in PR #1048 (local NAT64 and Teredo cannot be lifted by a hostname entry).
 8. (T555 run) `isUnliftableByHostname` returns false for a non-address string while the base table blocks it. Unreachable today, since resolvers return address literals. PRE-EXISTING, theoretical.
 9. (T555 item 7 review) Tests only: the 'explicit entry still lifts' cases in shared test/probe-egress.test.ts ~:335-348 assert only that the code is not ENOTFOUND, so any other failure passes (house style, the link-local test beside them does the same), and no test pairs a built-in host with an answer in the tunnel ranges. NEW, minor.
@@ -733,7 +746,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 
 status: parked · reason: owner left as is (owner triage 2026-11-10): third-party log noise only; resume on a user-facing effect · kind: third-party · needs approval · found: T347 run · priority: P3
 
-1. The patched postgres.js 3.4.9 (`patches/postgres@3.4.9.patch`) still emits unattributed unhandled `CONNECTION_CLOSED` rejections. Extend the patch or report upstream. PRE-EXISTING.
+1. The patched postgres.js 3.4.9 emitted unattributed unhandled `CONNECTION_CLOSED` rejections. #1159 (2026-11-14) moved to unpatched v4.1.1 and removed the patch; re-measure on v4 before resuming (the api/worker error-level handlers still log any). PRE-EXISTING.
 2. worker package.json has no `postgres` dependency (the guarded DSN host goes through shared `dsnDialHost`); adding it changes the lockfile and needs `pnpm docker rebuild`. PRE-EXISTING.
 
 ### T561 · FNF[npm-cache-hardening] · shared npm cache base: pruning, retries, races, warm input
@@ -1869,6 +1882,7 @@ All low unless marked.
 
 ## Done
 
+- T655 — upgrade postgres.js to unpatched v4.1.1, drop the local patch, guard file-reading DSN parameters — PR #1159 (d82c683fb), 2026-11-14; bots clean (Codex none, Greptile 5), CI 17 pass; deployed via pnpm docker rebuild, postgres@4.1.1 loaded, api/worker ready, 0 error logs. Lows T664, T555 item 6 done.
 - T659 — plan-canvas smoke race checks wait on PostgreSQL lock waits or peer settlement instead of sleeps (the CI failure was smoke timing; the merge it saw is correct); lows in T663 — PR #1161 (034003dea), 2026-11-14
 - T508 — a remote relink records a durable intent on the row; a fresh locked read reconciles Git's origin after a lost connection, failed COMMIT or process death, on the request path and through a sweep that skips locked and in-process-fenced repositories; lows in T662 — PR #1158 (8305c3d2d), 2026-11-14
 - T658 — relink SIGTERM lock-file flake: the test now waits on a FIFO open handshake instead of wall time — PR #1158 (8305c3d2d), 2026-11-14
