@@ -267,8 +267,8 @@ function childrenByParent(nodes: PlanNodeSkeleton[]): Map<string, PlanNodeSkelet
  * commit.
  *
  * No `expectedVersion`: this records a fact derived from edges that are already
- * in the database. The atomic write still detects races; rebuild a conflicted
- * chunk from fresh nodes and edges before retrying, with a bounded attempt count.
+ * in the database. The atomic write still detects races; a conflict rebuilds the
+ * whole pass from fresh nodes and edges, with a bounded attempt count.
  */
 export async function applyDeterministicOrder(
   ctx: StepContext,
@@ -298,31 +298,33 @@ export async function applyDeterministicOrder(
   // an idempotent assignment derived from edges that are not changing, so a run
   // interrupted between chunks leaves a partly reordered tree that the next run
   // finishes. It is a projection being brought up to date, not a unit of intent.
+  //
+  // A conflict restarts the WHOLE pass from a fresh read rather than retrying the one chunk: a
+  // changed dependency can move a node no earlier chunk named, so a chunk-filtered retry would
+  // write half of the new order. Chunks already written match the fresh order and drop out.
   let reordered = 0;
-  for (let i = 0; i < ops.length; i += PLAN_PATCH_MAX_OPS) {
-    const chunk = ops.slice(i, i + PLAN_PATCH_MAX_OPS);
-    const ids = new Set(chunk.map((op) => op.nodeRef));
-    let retry = false;
-    await retryPlanConflict(async () => {
-      const freshOps = retry
-        ? orderingOps(
-            await loadPlanSkeletons(ctx.db, repositoryId),
-            await loadPlanEdges(ctx.db, repositoryId),
-          ).filter((op) => ids.has(op.nodeRef))
-        : chunk;
-      retry = true;
-      if (freshOps.length === 0) return;
+  let fresh = false;
+  await retryPlanConflict(async () => {
+    const all = fresh
+      ? orderingOps(
+          await loadPlanSkeletons(ctx.db, repositoryId),
+          await loadPlanEdges(ctx.db, repositoryId),
+        )
+      : ops;
+    fresh = true;
+    for (let i = 0; i < all.length; i += PLAN_PATCH_MAX_OPS) {
+      const chunk = all.slice(i, i + PLAN_PATCH_MAX_OPS);
       await applyPlanPatch(
         ctx.db,
         {
-          ops: freshOps,
+          ops: chunk,
           summary: 'build order from declared dependencies',
         },
         { repositoryId, origin: 'llm', sourceTaskId: ctx.taskId },
       );
-      reordered += freshOps.length;
-    });
-  }
+      reordered += chunk.length;
+    }
+  });
   return reordered;
 }
 
