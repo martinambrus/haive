@@ -650,6 +650,12 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+1)
+
+status: open · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
+
+1. PRE-EXISTING, consequential. A re-run of step 11 apply re-reads existing learnings (`11-phase-8-learning.ts` ~:1722) and re-plans, so an insert already written is "taken" and `resolveInsertId` (~:763) returns `<id>-2`: a duplicate learning file, and the staged draft (keyed by the old id) is lost for the copy. Fix direction: make a replayed insert idempotent (match the already-written body or the reconcile event's attempt key) rather than suffixing.
+
 ### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
 
 status: open · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
@@ -1982,6 +1988,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Time and cost report PR 3 (#1176): idle time is labelled "Idle" on the statistics tile and "parked" on the task pages, never "waiting on you"; the plan is complete apart from the idle-detection note line.
 
 - Time and cost report PR 2 (#1170): every 08/08b check run is recorded in `task_check_runs` (migration 0239) as observation only, with bounded writes; the report counts passed, failed, not run and incomplete runs. Lows filed as T671.
 
