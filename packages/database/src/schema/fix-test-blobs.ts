@@ -25,6 +25,7 @@ export const fixTestBlobs = pgTable(
     content: bytea('content'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     expiredAt: timestamp('expired_at'),
+    manifestGzip: bytea('manifest_gzip'),
   },
   (t) => [
     primaryKey({ columns: [t.taskId, t.contentHash] }),

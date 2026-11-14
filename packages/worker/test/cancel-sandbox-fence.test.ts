@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { createUnlessSuperseded, supersedeTaskRuns } from '../src/sandbox/cli-sandbox-fence.js';
 import {
@@ -114,12 +114,17 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     });
     const payload = JSON.stringify(saved!.payload);
     expect(payload).not.toContain('base64');
+    expect(payload).not.toContain('manifest\":');
+    expect(Buffer.byteLength(payload)).toBeLessThan(600);
+    expect(saved!.payload!.manifestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(payload).not.toContain(meta.workspace);
     expect(payload).not.toContain('"image":');
     const blobs = await db
       .select()
       .from(schema.fixTestBlobs)
-      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
     expect(blobs).toHaveLength(2);
     expect(blobs.map((b) => b.content?.toString()).sort()).toEqual(['after one', 'before']);
     const [next] = await db
@@ -127,6 +132,12 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       .values({ taskId: meta.taskId, taskStepId: meta.taskStepId, mode: 'cli', prompt: 'next' })
       .returning();
     await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2 });
+    const boundaries = await db.query.taskEvents.findMany({
+      where: eq(schema.taskEvents.taskId, meta.taskId),
+    });
+    expect(boundaries.find((e) => e.eventType === FIX_TEST_AFTER)!.payload!.manifestHash).toBe(
+      boundaries.find((e) => e.payload!.invocationId === next!.id)!.payload!.manifestHash,
+    );
     await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after two');
     await end(next!.id);
     await finishFixTestCapture(db, next!.id);
@@ -142,7 +153,12 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       await db
         .select()
         .from(schema.fixTestBlobs)
-        .where(eq(schema.fixTestBlobs.taskId, meta.taskId)),
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        ),
     ).toHaveLength(3);
     expect(
       (await db.query.taskEvents.findFirst({
@@ -230,17 +246,21 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     await db
       .update(schema.fixTestBlobs)
       .set({ createdAt: new Date(0) })
-      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
     await expireFixTestImages(db);
     const expired = await db.query.taskEvents.findFirst({
       where: eq(schema.taskEvents.id, first.beforeEventId),
     });
     expect(expired!.payload).toEqual(before!.payload);
-    expect((expired!.payload!.manifest as { hash: string }).hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(expired!.payload!.manifestHash).toMatch(/^[a-f0-9]{64}$/);
     const blobs = await db
       .select()
       .from(schema.fixTestBlobs)
-      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
     expect(blobs).toHaveLength(2);
     expect(blobs.every((b) => b.content === null && b.expiredAt instanceof Date)).toBe(true);
     expect((await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.patch).toContain(
@@ -306,7 +326,9 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     const blobs = await db
       .select()
       .from(schema.fixTestBlobs)
-      .where(eq(schema.fixTestBlobs.taskId, meta.taskId));
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), isNull(schema.fixTestBlobs.manifestGzip)),
+      );
     expect(blobs).toHaveLength(0);
     expect((await loadFixTestRecords(db, meta.taskId))[0]!.changes[0]!.patch).toContain(
       'content withheld',
@@ -323,7 +345,12 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       await db
         .select()
         .from(schema.fixTestBlobs)
-        .where(eq(schema.fixTestBlobs.taskId, meta.taskId)),
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        ),
     ).toHaveLength(0);
     const records = await loadFixTestRecords(db, meta.taskId);
     expect(records[0]).toMatchObject({ state: 'captured', changes: [] });

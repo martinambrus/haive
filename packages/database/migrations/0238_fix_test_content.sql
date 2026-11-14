@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS fix_test_blobs (
   expired_at timestamp,
   CONSTRAINT fix_test_blobs_task_id_content_hash_pk PRIMARY KEY (task_id, content_hash)
 );
+ALTER TABLE fix_test_blobs ADD COLUMN IF NOT EXISTS manifest_gzip bytea;
 DO $$ BEGIN
   ALTER TABLE fix_test_blobs ADD CONSTRAINT fix_test_blobs_task_id_tasks_id_fk
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
@@ -20,8 +21,10 @@ CREATE INDEX IF NOT EXISTS fix_test_blobs_expiry_idx ON fix_test_blobs(created_a
 -- Their references survive, with unavailable legacy content disclosed rather than copied
 -- into the new store without the effective secret policy.
 UPDATE task_events
-SET payload = (payload - 'image' - 'workspace' - 'changes') ||
-  jsonb_build_object('manifest', jsonb_build_object(
-    'state', 'not captured', 'reason', 'Legacy content removed; no policy-checked manifest.'))
+SET payload = jsonb_build_object(
+  'invocationId', payload->'invocationId', 'stepId', payload->'stepId',
+  'pass', payload->'pass', 'round', payload->'round', 'epoch', payload->'epoch',
+  'beforeEventId', payload->'beforeEventId', 'state', 'not captured',
+  'reason', 'Legacy content removed; no policy-checked manifest.')
 WHERE event_type IN ('fix_tests.before', 'fix_tests.after')
-  AND (payload ? 'image' OR payload ? 'workspace' OR payload ? 'changes');
+  AND (payload ? 'image' OR payload ? 'workspace' OR payload ? 'changes' OR payload ? 'manifest');

@@ -1,3 +1,4 @@
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -12,6 +13,7 @@ import {
   captureTestImage,
   compareTestImages,
   testFileChanged,
+  sha256,
   type FixTestRecord,
   type TestImage,
   type TestFile,
@@ -35,7 +37,18 @@ interface CaptureMeta {
   workspace: string | null;
   epoch?: number | null;
 }
-type Reference = Omit<CaptureMeta, 'workspace'> & { manifest: TestImage; beforeEventId?: string };
+interface Reference {
+  invocationId: string;
+  stepId: string;
+  round: number;
+  pass: number;
+  epoch?: number | null;
+  beforeEventId?: string;
+  manifestHash?: string;
+  fileCount: number;
+  state: TestImage['state'];
+  reason?: string;
+}
 export interface CaptureOptions {
   capture?: typeof captureTestImage;
   taskBytes?: number;
@@ -76,12 +89,71 @@ const manifest = (image: TestImage): TestImage => ({
   files: image.files?.map(({ base64: _bytes, ...f }) => f),
 });
 
+/** Full manifests stay compressed in the blob table, never event/history payloads.
+ * The separate column survives content eviction/expiry, preserving measured hashes. */
+export function fixTestManifestReference(
+  meta: Pick<CaptureMeta, 'invocationId' | 'stepId' | 'pass' | 'round' | 'epoch'>,
+  image: TestImage,
+): Reference {
+  const data = JSON.stringify(manifest(image));
+  return {
+    invocationId: meta.invocationId,
+    stepId: meta.stepId,
+    pass: meta.pass,
+    round: meta.round,
+    epoch: meta.epoch,
+    manifestHash: sha256(data),
+    fileCount: image.files?.length ?? 0,
+    state: image.state,
+    reason: image.reason,
+  };
+}
+async function retainManifest(tx: Tx, taskId: string, image: TestImage, hash: string) {
+  await tx
+    .insert(schema.fixTestBlobs)
+    .values({
+      taskId,
+      contentHash: `manifest:${hash}`,
+      sizeBytes: 0,
+      manifestGzip: gzipSync(JSON.stringify(manifest(image))),
+    })
+    .onConflictDoNothing();
+}
+async function readManifests(
+  db: Database,
+  taskId: string,
+  refs: Reference[],
+): Promise<Map<string, TestImage>> {
+  const hashes = [
+    ...new Set(refs.flatMap((r) => (r.manifestHash ? [`manifest:${r.manifestHash}`] : []))),
+  ];
+  const rows = hashes.length
+    ? await db
+        .select({ hash: schema.fixTestBlobs.contentHash, data: schema.fixTestBlobs.manifestGzip })
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, taskId),
+            inArray(schema.fixTestBlobs.contentHash, hashes),
+          ),
+        )
+    : [];
+  return new Map(
+    rows
+      .filter((r) => r.data)
+      .map((r) => [
+        r.hash.slice('manifest:'.length),
+        JSON.parse(gunzipSync(r.data!).toString()) as TestImage,
+      ]),
+  );
+}
+
 /** The partial index finds live metadata; never inspect/detoast content to expire it. */
 export async function expireFixTestImages(db: Database): Promise<void> {
   await db.execute(sql`
     with expired as (
       select task_id, content_hash from fix_test_blobs
-      where expired_at is null and created_at < now() - (${FIX_TEST_RETENTION_DAYS} * interval '1 day')
+      where expired_at is null and content is not null and created_at < now() - (${FIX_TEST_RETENTION_DAYS} * interval '1 day')
       order by created_at limit 100
     )
     update fix_test_blobs b set content = null, expired_at = now()
@@ -156,7 +228,7 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
       size: schema.fixTestBlobs.sizeBytes,
     })
     .from(schema.fixTestBlobs)
-    .where(sql`${schema.fixTestBlobs.expiredAt} is null`)
+    .where(sql`${schema.fixTestBlobs.expiredAt} is null and ${schema.fixTestBlobs.sizeBytes} > 0`)
     .orderBy(asc(schema.fixTestBlobs.createdAt));
   let total = usage.reduce((n, b) => n + b.size, 0);
   let task = usage.filter((b) => b.taskId === taskId).reduce((n, b) => n + b.size, 0);
@@ -220,17 +292,16 @@ export async function beginFixTestCapture(
   await db.transaction(async (tx) => {
     const owns = await owned(tx, meta, false);
     if (await stored(tx, meta.taskId, meta.invocationId, FIX_TEST_BEFORE)) return;
-    const { workspace: _hostPath, ...ref } = meta;
+    const measured = owns
+      ? image
+      : { state: 'not captured' as const, reason: 'Begin did not own the invocation.' };
+    const ref = fixTestManifestReference(meta, measured);
+    await retainManifest(tx, meta.taskId, measured, ref.manifestHash!);
     await tx.insert(schema.taskEvents).values({
       taskId: meta.taskId,
       taskStepId: meta.taskStepId,
       eventType: FIX_TEST_BEFORE,
-      payload: {
-        ...ref,
-        manifest: manifest(
-          owns ? image : { state: 'not captured', reason: 'Begin did not own the invocation.' },
-        ),
-      },
+      payload: { ...ref },
     });
     if (owns) remember(meta.invocationId, image, options);
   });
@@ -263,11 +334,16 @@ export async function finishFixTestCapture(
     : undefined;
   const meta: CaptureMeta = {
     ...ref,
+    taskId: run.taskId,
+    taskStepId: before.taskStepId!,
     workspace:
       issue?.worktreePath ??
       task?.worktreePath ??
       (await resolveInvocationWorkerTree(db, run.taskId)),
   };
+  const beforeManifest = (await readManifests(db, run.taskId, [ref])).get(
+    ref.manifestHash ?? '',
+  ) ?? { state: 'not captured' as const, reason: 'Missing manifest.' };
   const after = await capture(db, meta, options);
   // Deleted/refused after paths cannot carry a withheld status. Recheck their before
   // contents against the effective policy as well, before any bytes enter the store.
@@ -276,7 +352,7 @@ export async function finishFixTestCapture(
     if (!(await owned(tx, meta, true))) return;
     if (await stored(tx, run.taskId, invocationId, FIX_TEST_AFTER)) return;
     const interrupted = run.exitCode == null || [-1, 137, 124].includes(run.exitCode);
-    const left = pending.get(invocationId) ?? ref.manifest;
+    const left = pending.get(invocationId) ?? beforeManifest;
     const next = new Map(after.files?.map((f) => [f.path, f]));
     const old = new Map(left.files?.map((f) => [f.path, f]));
     const changed = [...new Set([...old.keys(), ...next.keys()])].filter((p) =>
@@ -285,7 +361,7 @@ export async function finishFixTestCapture(
     const withheld = new Set(
       after.files?.filter((f) => f.status === 'content withheld').map((f) => f.path),
     );
-    if (!interrupted && ref.manifest.state === 'captured' && after.state === 'captured')
+    if (!interrupted && beforeManifest.state === 'captured' && after.state === 'captured')
       await retain(
         tx,
         run.taskId,
@@ -294,20 +370,16 @@ export async function finishFixTestCapture(
           .flatMap((p) => [old.get(p), next.get(p)].filter((f): f is TestFile => !!f)),
         options,
       );
+    const measured = interrupted
+      ? { state: 'not captured' as const, reason: 'Invocation interrupted.' }
+      : after;
+    const reference = fixTestManifestReference(ref, measured);
+    await retainManifest(tx, run.taskId, measured, reference.manifestHash!);
     await tx.insert(schema.taskEvents).values({
       taskId: run.taskId,
       taskStepId: meta.taskStepId,
       eventType: FIX_TEST_AFTER,
-      payload: {
-        invocationId,
-        stepId: ref.stepId,
-        pass: ref.pass,
-        round: ref.round,
-        beforeEventId: before.id,
-        manifest: manifest(
-          interrupted ? { state: 'not captured', reason: 'Invocation interrupted.' } : after,
-        ),
-      },
+      payload: { ...reference, beforeEventId: before.id },
     });
   });
   forget(invocationId);
@@ -340,13 +412,19 @@ export async function loadFixTestRecords(
       ),
     );
   const settled = new Map(ends.map((e) => [e.payload?.invocationId, e]));
+  const manifests = await readManifests(
+    db,
+    taskId,
+    [...starts, ...ends].map((e) => e.payload as unknown as Reference),
+  );
+  const imageFor = (ref?: Reference) => manifests.get(ref?.manifestHash ?? '');
   const policy = await taskSecretMaskPolicy(db, taskId);
   const hashes = new Set<string>();
   for (const start of starts) {
-    const a = (start.payload as unknown as Reference).manifest;
-    const b = (
-      settled.get(start.payload?.invocationId)?.payload as unknown as Reference | undefined
-    )?.manifest;
+    const a = imageFor(start.payload as unknown as Reference);
+    const b = imageFor(
+      settled.get(start.payload?.invocationId)?.payload as unknown as Reference | undefined,
+    );
     const next = new Map(b?.files?.map((f) => [f.path, f]));
     const old = new Map(a?.files?.map((f) => [f.path, f]));
     for (const p of new Set([...old.keys(), ...next.keys()])) {
@@ -398,8 +476,8 @@ export async function loadFixTestRecords(
       pass: p.pass,
       beforeEventId: e.id,
       ...compareTestImages(
-        hydrate(p.manifest),
-        hydrate((end?.payload as unknown as Reference | undefined)?.manifest),
+        hydrate(imageFor(p)),
+        hydrate(imageFor(end?.payload as unknown as Reference | undefined)),
       ),
     };
   });
