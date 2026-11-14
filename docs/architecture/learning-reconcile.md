@@ -83,8 +83,9 @@ partial insert/update/delete/investigation/promotion failures, failed event inse
 and body-free payloads. Its snapshot was captured on unchanged production code: prompt,
 form, apply output, written bytes and promotion arguments compare identically after
 normalizing only the investigation clock. `step-runner-park-fold.test.ts` pins captured
-generation delivery. The isolated PostgreSQL proof runs production insertion concurrently
-and demonstrates one row after replay and two after explicit Retry, with no warnings.
+generation delivery. The committed tests pin deduplication through a fake store; the real
+`ON CONFLICT` path was checked once on a throwaway PostgreSQL before merge (one row after
+replay, two after an explicit Retry) and has no committed test.
 
 ## Reading the events
 
