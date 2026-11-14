@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { EXECUTION_PATHS } from '@haive/shared';
+import { taskRunListIds } from '@haive/shared/run-list';
 import { validateComposition, type ComposableStepEntry } from '@haive/shared/modularity';
 import { registerStepsOnce } from '../src/step-engine/boot.js';
 import {
@@ -16,8 +18,8 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 35 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(35);
+  it('holds the 58 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(58);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -67,9 +69,13 @@ describe('core composable catalog', () => {
         '01b-install-plugins',
         '01d-browser-access',
         '01c1-restore-database',
+        '03b-business-requirements',
+        '03b2-humanize-requirements',
+        '04a-spec-audit',
         '07a-code-simplify',
         '07b-phase-4-validate',
         '08c-code-review',
+        '08c2-code-audit',
         '11d-skill-sync',
         '11c-rag-reindex',
         '11g-save-database',
@@ -257,6 +263,14 @@ describe('core composable catalog', () => {
   });
 
   it.each([
+    ['03-phase-0a-discovery', '03b-business-requirements', 'business-requirements'],
+    ['04a-spec-audit', '05-phase-0b5-spec-quality', 'spec-reviewed'],
+    ['05a-resolve-spec-warnings', '06-gate-1-spec-approval', 'spec-approved'],
+    ['07-phase-2-implement', '08c2-code-audit', 'code-audit'],
+    ['07a-code-simplify', '08d-adversarial-qa', 'adversarial-qa'],
+    ['07b-phase-4-validate', '09-gate-2-verify-approval', 'verify-approved'],
+    ['08b-test-management', '09-gate-2-verify-approval', 'verify-approved'],
+    ['08c-code-review', '09-gate-2-verify-approval', 'verify-approved'],
     ['07c-ddev-reconcile', '08-phase-5-verify', 'verification'],
     ['07c-ddev-reconcile', '08b-test-management', 'tests'],
     ['08b-test-management', '08c-code-review', 'review'],
@@ -421,21 +435,27 @@ describe('core composable catalog', () => {
     ).toContainEqual({ kind: 'too-late', index: 7, stepId: '11g-save-database', token: 'cleaned' });
   });
 
-  it('needs the skill sync before the knowledge commit and the scope picker before re-indexing', () => {
+  it('allows knowledge commit without skill sync but orders it first when present', () => {
     const head = [
       '01-worktree-setup',
       '07-phase-2-implement',
       '10-gate-3-commit',
       '11-phase-8-learning',
     ];
-    expect(validateComposition([...head, '11b-kb-commit'], catalog)).toEqual([
+    expect(validateComposition([...head, '11b-kb-commit'], catalog)).toEqual([]);
+    expect(
+      validateComposition([...head, '11b-kb-commit', '11d-skill-sync'], catalog),
+    ).toContainEqual(
       expect.objectContaining({
-        kind: 'unmet-need',
-        stepId: '11b-kb-commit',
-        needs: 'skills-synced',
+        kind: 'too-late',
+        stepId: '11d-skill-sync',
+        token: 'knowledge-committed',
       }),
-    ]);
+    );
     expect(validateComposition([...head, '11d-skill-sync', '11b-kb-commit'], catalog)).toEqual([]);
+  });
+
+  it('needs the scope picker before re-indexing', () => {
     expect(validateComposition(['01-worktree-setup', '11c-rag-reindex'], catalog)).toEqual([
       expect.objectContaining({
         kind: 'unmet-need',
@@ -451,16 +471,208 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
-  it('raises no issue at all on the built-in workflow run list, environment prelude included', () => {
-    const order = orderWorkflowRunList(
-      stepRegistry.listByWorkflow('workflow'),
-      stepRegistry.listByWorkflow('env_replicate'),
-      null,
-    )
-      .map((s) => s.metadata.id)
-      .filter((id) => catalog.has(id));
-    expect(order.length).toBeGreaterThan(30);
+  it.each([null, ...EXECUTION_PATHS])(
+    'catalogues every step of shipped workflow path %s, environment prelude included',
+    (executionPath) => {
+      const order = taskRunListIds(
+        {
+          workflowType: 'workflow',
+          runListStrategy: 'workflow_paths',
+          runListSnapshot: null,
+          executionPath,
+        },
+        (type) => stepRegistry.listByWorkflow(type).map((step) => step.metadata.id),
+      );
+      expect(order.filter((id) => !catalog.has(id))).toEqual([]);
+    },
+  );
+
+  it.each([null, ...EXECUTION_PATHS])(
+    'validates the entire shipped workflow path %s without filtering out steps or issues',
+    (executionPath) => {
+      const order = taskRunListIds(
+        {
+          workflowType: 'workflow',
+          runListStrategy: 'workflow_paths',
+          runListSnapshot: null,
+          executionPath,
+        },
+        (type) => stepRegistry.listByWorkflow(type).map((step) => step.metadata.id),
+      );
+      expect(validateComposition(order, catalog)).toEqual([]);
+    },
+  );
+
+  it('keeps broad audits report-only and gate 2 usable without optional reports', () => {
+    expect(validateComposition(['04-phase-0b-pre-planning', '04a-spec-audit'], catalog)).toEqual(
+      [],
+    );
+    expect(validateComposition(['01-worktree-setup', '08c2-code-audit'], catalog)).toEqual([]);
+    const head = ['01-worktree-setup', '07-phase-2-implement', '08-phase-5-verify'];
+    expect(
+      validateComposition([...head, '09-gate-2-verify-approval', '10-gate-3-commit'], catalog),
+    ).toEqual([]);
+    expect(
+      validateComposition([...head, '10-gate-3-commit', '09-gate-2-verify-approval'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'loop-after-closing', stepId: '09-gate-2-verify-approval' }),
+    );
+    expect(
+      validateComposition([...head, '09-gate-2-verify-approval', '08c2-code-audit'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: 'too-late',
+        stepId: '08c2-code-audit',
+        token: 'verify-approved',
+      }),
+    );
+  });
+
+  it('requires a prior worktree for external knowledge-base sync', () => {
+    expect(validateComposition(['01e-external-kb-sync'], catalog)).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '01e-external-kb-sync',
+        needs: 'worktree',
+      }),
+    );
+    expect(
+      validateComposition(['01e-external-kb-sync', '01-worktree-setup'], catalog),
+    ).toContainEqual(expect.objectContaining({ kind: 'unmet-need', needs: 'worktree' }));
+    expect(validateComposition(['01-worktree-setup', '01e-external-kb-sync'], catalog)).toEqual([]);
+  });
+
+  it.each(['01f-external-plan-sync', '05a-resolve-spec-warnings', '11f-plan-reconcile'])(
+    'requires a prior worktree for repository writer %s',
+    (stepId) => {
+      const head = stepId === '05a-resolve-spec-warnings' ? ['04-phase-0b-pre-planning'] : [];
+      expect(validateComposition([...head, stepId], catalog)).toContainEqual(
+        expect.objectContaining({ kind: 'unmet-need', stepId, needs: 'worktree' }),
+      );
+      expect(validateComposition([...head, stepId, '01-worktree-setup'], catalog)).toContainEqual(
+        expect.objectContaining({ kind: 'unmet-need', stepId, needs: 'worktree' }),
+      );
+      expect(validateComposition(['01-worktree-setup', ...head, stepId], catalog)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['08a-browser-verify', 'verify-approved'],
+    ['09-gate-2-verify-approval', 'browser-verification'],
+  ])('requires both browser method routes when only %s is present', (stepId, token) => {
+    const head = [
+      '01-declare-deps',
+      '02-generate-dockerfile',
+      '03-build-image',
+      '01-worktree-setup',
+      '01a-app-boot',
+      '07-phase-2-implement',
+      '08-phase-5-verify',
+      '08a-browser-setup',
+    ];
+    expect(validateComposition([...head, stepId], catalog)).toEqual([
+      expect.objectContaining({ kind: 'unfulfilled', stepId: '08a-browser-setup', token }),
+    ]);
+    expect(
+      validateComposition(
+        [...head, '08a-browser-verify', '09-gate-2-verify-approval', '10-gate-3-commit'],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
+  it('requires the DAG planner before execution and run configuration before planning', () => {
+    expect(validateComposition(['01-worktree-setup', '06c-dag-execute'], catalog)).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '06c-dag-execute',
+        needs: 'sprint-plan',
+      }),
+    );
+    const order = [
+      '01-worktree-setup',
+      '04-phase-0b-pre-planning',
+      '06-gate-1-spec-approval',
+      '06b-sprint-planning',
+      '06c-dag-execute',
+      '07-phase-2-implement',
+    ];
     expect(validateComposition(order, catalog)).toEqual([]);
+    expect(validateComposition([...order, '06-run-config'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'too-late', stepId: '06-run-config', token: 'sprint-plan' }),
+    );
+  });
+
+  it.each([
+    ['06c-dag-execute', 'single-implementation'],
+    ['07-phase-2-implement', 'dag-implementation'],
+  ])('requires both planner mode implementations when only %s is present', (stepId, token) => {
+    const head = [
+      '01-worktree-setup',
+      '04-phase-0b-pre-planning',
+      '06-gate-1-spec-approval',
+      '06b-sprint-planning',
+    ];
+    expect(validateComposition([...head, stepId, '10-gate-3-commit'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unfulfilled', stepId: '06b-sprint-planning', token }),
+    );
+  });
+
+  it('requires a draft for humanization and the revise target for requirements approval', () => {
+    expect(validateComposition(['03b2-humanize-requirements'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', needs: 'business-requirements' }),
+    );
+    expect(validateComposition(['03c-business-requirements-review'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'missing-loop-target', target: '03b-business-requirements' }),
+    );
+    expect(
+      validateComposition(
+        [
+          '03b-business-requirements',
+          '03c-business-requirements-review',
+          '04-phase-0b-pre-planning',
+        ],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
+  it('requires QA findings for their review and keeps its human fix loop before commit', () => {
+    const head = ['01-worktree-setup', '07-phase-2-implement'];
+    expect(validateComposition([...head, '08d2-adversarial-qa-review'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', needs: 'adversarial-qa' }),
+    );
+    const qa = [...head, '08d-adversarial-qa'];
+    expect(
+      validateComposition([...qa, '08d2-adversarial-qa-review', '10-gate-3-commit'], catalog),
+    ).toEqual([]);
+    expect(
+      validateComposition([...qa, '10-gate-3-commit', '08d2-adversarial-qa-review'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'loop-after-closing', stepId: '08d2-adversarial-qa-review' }),
+    );
+  });
+
+  it('does not let insight edits leave push with an uncommitted tree', () => {
+    const head = ['01-worktree-setup', '07-phase-2-implement', '10-gate-3-commit'];
+    expect(
+      validateComposition([...head, '08e-insights-triage', '11a-gate-4-push'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11a-gate-4-push',
+        needs: 'clean-tree',
+      }),
+    );
+  });
+
+  it('requires the separate repository scope before pre-sync', () => {
+    expect(validateComposition(['02-pre-rag-sync'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', needs: 'pre-rag-scope' }),
+    );
+    expect(validateComposition(['01g-rag-source-selection', '02-pre-rag-sync'], catalog)).toEqual(
+      [],
+    );
   });
 
   it('runs the RAG scope picker inside the worktree', () => {
