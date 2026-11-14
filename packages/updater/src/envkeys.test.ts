@@ -105,3 +105,37 @@ it.each(['regular', 'symlink'])(
     if (kind === 'symlink') expect(await readFile(target, 'utf8')).toBe(untouched);
   },
 );
+
+it.each([
+  ['unquoted default', 'REQUIRED=${OTHER:-}\n'],
+  ['double-quoted', 'REQUIRED="${OTHER}"\n'],
+  ['bare name', 'REQUIRED=$OTHER\n'],
+])(
+  'refuses a required key whose %s value Compose would interpolate, writing nothing',
+  async (_kind, text) => {
+    await writeFile(file, text);
+    const emit = vi.fn();
+    for (const generate of ['hex', 'never'] as const)
+      await expect(
+        ensureEnvKeys(
+          file,
+          [
+            generate === 'hex'
+              ? { key: 'REQUIRED', generate, bytes: 16 }
+              : { key: 'REQUIRED', generate },
+          ],
+          { emit },
+        ),
+      ).rejects.toMatchObject({ refusal: 'env-key-interpolated', key: 'REQUIRED' });
+    expect(await readFile(file, 'utf8')).toBe(text);
+    expect(emit).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["REQUIRED='${OTHER}'\n", 'REQUIRED=a$$b\n'])(
+  'accepts a literal value Compose does not interpolate: %j',
+  async (text) => {
+    await writeFile(file, text);
+    expect(await ensureEnvKeys(file, [{ key: 'REQUIRED', generate: 'never' }])).toEqual([]);
+  },
+);

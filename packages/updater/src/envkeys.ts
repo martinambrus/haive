@@ -6,8 +6,10 @@ import { UpgradeRefusal } from './refusal.js';
 type EnvKeys = NonNullable<ReleaseManifest['bundle']>['env'];
 
 /** Read assignments, skipping comments and assignment-shaped lines inside quoted values.
- * Values stay private to this module; callers receive only names. */
-function values(text: string): Map<string, string> {
+ * Values stay private to this module; callers receive only names. A key whose unquoted or
+ * double-quoted value holds a `$` reference goes into `interpolated`: Compose substitutes it
+ * when it reads `.env`, so the written text says nothing about the value it will use. */
+function values(text: string, interpolated: Set<string>): Map<string, string> {
   const result = new Map<string, string>();
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -34,6 +36,9 @@ function values(text: string): Map<string, string> {
       }
       value = value.slice(1, end);
     } else value = value.replace(/(?:^|\s)#.*$/, '').trim();
+    if (quote !== "'" && /\$[{A-Za-z_]/.test(value.replaceAll('$$', '')))
+      interpolated.add(match[1]!);
+    else interpolated.delete(match[1]!);
     result.set(match[1]!, value);
   }
   return result;
@@ -42,6 +47,15 @@ function values(text: string): Map<string, string> {
 export class EnvKeyMissing extends UpgradeRefusal {
   constructor(public readonly key: string) {
     super('env-key-missing', `required .env key ${key} is missing or empty`);
+  }
+}
+
+export class EnvKeyInterpolated extends UpgradeRefusal {
+  constructor(public readonly key: string) {
+    super(
+      'env-key-interpolated',
+      `required .env key ${key} refers to another variable; set a literal value (single-quote it to keep a $)`,
+    );
   }
 }
 
@@ -64,7 +78,9 @@ export async function ensureEnvKeys(
   } finally {
     await input.close();
   }
-  const current = values(text);
+  const interpolated = new Set<string>();
+  const current = values(text, interpolated);
+  for (const { key } of keys) if (interpolated.has(key)) throw new EnvKeyInterpolated(key);
   const missing = keys.filter(({ key }) => !current.get(key));
   for (const entry of missing) if (entry.generate === 'never') throw new EnvKeyMissing(entry.key);
   if (options.check || missing.length === 0) return [];

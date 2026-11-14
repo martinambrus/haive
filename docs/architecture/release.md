@@ -114,6 +114,10 @@ staging files, pulling service images, recording an attempt or starting a run.
 
 After classification, `envkeys.ts` checks every `never` declaration before writing anything.
 A missing, empty or commented-out `never` key refuses with `env-key-missing` and the key's name.
+A declared key (`never` or `hex`) whose unquoted or double-quoted value holds a `$` reference
+refuses with `env-key-interpolated`: Compose substitutes it when it reads `.env`, so
+`${MAIL_PASSWORD:-}` would pass as non-empty text and reach Mailpit empty. A single-quoted value
+and `$$` are literal and pass.
 Missing or empty `hex` keys get `crypto.randomBytes(bytes).toString('hex')`; existing non-empty
 values are retained. The updater appends the additions through an exclusively created
 `.env.haive-tmp`, applies the original uid/gid with `fchown` and the original mode, fsyncs it and
