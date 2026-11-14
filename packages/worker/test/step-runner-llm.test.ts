@@ -14,6 +14,8 @@ import {
   finishFixTestCapture,
   loadFixTestRecords,
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -51,6 +53,7 @@ import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
 
 interface MockState {
+  roundChoice?: CliProviderRecord;
   taskStepRow: Record<string, unknown>;
   cliInvocationRow: Record<string, unknown> | null;
   /** Rows the WIDE invocation reads see — the trailing-history counters
@@ -177,7 +180,13 @@ function makeMockDb(state: MockState): Database {
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
-      taskStepCliChoices: { findFirst: async () => undefined },
+      taskStepCliChoices: {
+        findFirst: async ({ where }: { where: SQL }) =>
+          state.roundChoice && new PgDialect().sqlToQuery(where).params.includes('fix:2:default')
+            ? { cliProviderId: state.roundChoice.id, effortLevel: null }
+            : undefined,
+      },
+      cliProviders: { findFirst: async () => state.roundChoice },
       taskStepCliTouched: { findFirst: async () => undefined },
       tasks: {
         findFirst: async (opts?: { columns?: { customSteps?: boolean } }) =>
@@ -402,6 +411,44 @@ describe('repair evidence at the dispatch boundary', () => {
 });
 
 describe('advanceStep LLM phase', () => {
+  it.each([false, true])(
+    'honors the next-round CLI with no fallback (capability lost: %s)',
+    async (lostCapability) => {
+      const state = freshState();
+      state.roundChoice = { ...makeProvider(), id: 'picked', name: 'codex' };
+      state.taskStepRow.stepId = '07-phase-2-implement';
+      state.taskStepRow.round = 2;
+      const stepDef = baseStep();
+      stepDef.metadata.id = '07-phase-2-implement';
+      stepDef.llm!.requiredCapabilities = lostCapability ? ['subagents'] : ['tool_use'];
+      const enqueueCliInvocation = vi.fn();
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        round: 2,
+        stepDef,
+        providers: [makeProvider(), state.roundChoice],
+        deps: { enqueueCliInvocation },
+      };
+      const result = await advanceStep(params);
+      if (lostCapability) {
+        expect(result.status).toBe('failed');
+        expect(state.cliInvocationRow).toBeNull();
+        expect(enqueueCliInvocation).not.toHaveBeenCalled();
+      } else {
+        expect(result.status).toBe('waiting_cli');
+        expect(state.cliInvocationRow?.cliProviderId).toBe('picked');
+        // Duplicate delivery cannot start the original CLI beside the chosen one.
+        expect((await advanceStep(params)).status).toBe('waiting_cli');
+        expect(enqueueCliInvocation).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
   it('runs apply without a CLI reservation when preparation finds nothing to classify', async () => {
     const state = freshState();
     const stepDef = baseStep();

@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
+import { fixRoundCliField, type FixRoundCliOptions } from './_fix-round-cli.js';
 import {
   cleanText,
   contentFingerprint,
@@ -80,6 +81,7 @@ export function buildFixLoopEscalationSchema(
   cap: number,
   guidance?: string,
   person?: boolean,
+  cliOptions?: FixRoundCliOptions,
 ): FormSchema {
   return {
     title: `Fix loop reached the ${cap}-round limit`,
@@ -109,6 +111,7 @@ export function buildFixLoopEscalationSchema(
         default: 'continue',
       },
       instructionField(),
+      fixRoundCliField(cliOptions),
     ],
     submitLabel: 'Apply decision',
   };
@@ -126,6 +129,7 @@ export function buildOscillationEscalationSchema(
   guidanceA?: string,
   guidanceB?: string,
   persons?: { a: boolean; b: boolean },
+  cliOptions?: FixRoundCliOptions,
 ): FormSchema {
   const excerpt = (step: string, diagnosis: string, person?: boolean): string =>
     excerptDiagnosis(diagnosis, 1500, person ?? HUMAN_REJECT_SOURCES.has(step));
@@ -162,6 +166,7 @@ export function buildOscillationEscalationSchema(
         default: 'continue',
       },
       instructionField(),
+      fixRoundCliField(cliOptions),
     ],
     submitLabel: 'Apply decision',
   };
