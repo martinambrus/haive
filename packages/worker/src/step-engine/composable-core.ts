@@ -421,6 +421,9 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'spec-approved', reason: 'Reads the gate-1 decision and feedback before planning.' },
     ],
     provides: ['sprint-plan'],
+    // The planner may choose DAG or single (including override and parse fallback).
+    // Keep both routes available so its runtime choice always has an implementation.
+    entails: ['dag-implementation', 'single-implementation'],
     precedes: ['implementation'],
   },
   {
@@ -435,7 +438,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
         reason: 'Reads 06b mode and the task_dag_* rows it creates in DAG mode.',
       },
     ],
-    provides: ['implementation'],
+    provides: ['implementation', 'dag-implementation'],
     entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }],
     removes: ['clean-tree'],
     precedes: EDITS_PRECEDE,
@@ -446,7 +449,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'build',
     dispatchesCli: true,
     requires: [needWorktree],
-    provides: ['implementation'],
+    provides: ['implementation', 'single-implementation'],
     entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }],
     removes: ['clean-tree'],
     precedes: EDITS_PRECEDE,

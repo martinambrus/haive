@@ -542,10 +542,26 @@ describe('core composable catalog', () => {
       '06-gate-1-spec-approval',
       '06b-sprint-planning',
       '06c-dag-execute',
+      '07-phase-2-implement',
     ];
     expect(validateComposition(order, catalog)).toEqual([]);
     expect(validateComposition([...order, '06-run-config'], catalog)).toContainEqual(
       expect.objectContaining({ kind: 'too-late', stepId: '06-run-config', token: 'sprint-plan' }),
+    );
+  });
+
+  it.each([
+    ['06c-dag-execute', 'single-implementation'],
+    ['07-phase-2-implement', 'dag-implementation'],
+  ])('requires both planner mode implementations when only %s is present', (stepId, token) => {
+    const head = [
+      '01-worktree-setup',
+      '04-phase-0b-pre-planning',
+      '06-gate-1-spec-approval',
+      '06b-sprint-planning',
+    ];
+    expect(validateComposition([...head, stepId, '10-gate-3-commit'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unfulfilled', stepId: '06b-sprint-planning', token }),
     );
   });
 
