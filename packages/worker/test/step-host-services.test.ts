@@ -1,0 +1,135 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
+import { TaskCancelledError, type StepContext } from '@haive/shared/step';
+import { createStepHostServices } from '../src/step-engine/step-host-services.js';
+import { loadPreviousStepOutput } from '../src/step-engine/steps/onboarding/_helpers.js';
+import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
+vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
+  loadPreviousStepOutput: vi.fn(),
+}));
+vi.mock('../src/step-engine/steps/workflow/_impl-changes.js', () => ({
+  collectImplementationFiles: vi.fn(),
+}));
+vi.mock('@haive/shared/fs-safe', async (original) => ({
+  ...(await original<typeof import('@haive/shared/fs-safe')>()),
+  openDirNoFollow: vi.fn(async () => ({ close: vi.fn() })),
+}));
+const task = vi.fn();
+const step = vi.fn();
+let controller = new AbortController();
+const ctx: StepContext = {
+  taskId: 'task',
+  taskStepId: 'step',
+  userId: 'user',
+  round: 2,
+  repoPath: '/repo',
+  workspacePath: '/repo',
+  sandboxWorkdir: '/workspace',
+  cliProviderId: null,
+  signal: controller.signal,
+  db: {
+    query: { tasks: { findFirst: task }, taskSteps: { findFirst: step } },
+  } as unknown as Database,
+  logger: logger.child({ test: 'host' }),
+  async emitProgress() {},
+  throwIfCancelled() {
+    if (controller.signal.aborted) throw new TaskCancelledError();
+  },
+};
+beforeEach(() => {
+  vi.clearAllMocks();
+  controller = new AbortController();
+  ctx.signal = controller.signal;
+  task.mockResolvedValue({
+    id: 'task',
+    userId: 'user',
+    currentRound: 2,
+    worktreePath: '/repo/.haive/worktrees/task',
+  });
+  step.mockResolvedValue({ taskId: 'task', round: 2 });
+  vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+    detect: null,
+    output: { worktreePath: '/repo/.haive/worktrees/task' },
+    iterations: [],
+  });
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    files: ['a'],
+    total: 1,
+    truncated: false,
+    scanError: null,
+  });
+});
+afterEach(() => vi.useRealTimers());
+it('adapts the existing previous-output helper with the captured round bound', async () => {
+  const host = createStepHostServices(ctx);
+  await host.loadPreviousStepOutput('previous');
+  expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
+});
+it.each([
+  ['task', () => task.mockResolvedValue({ userId: 'other', currentRound: 2 })],
+  ['round', () => step.mockResolvedValue({ taskId: 'task', round: 3 })],
+] as const)('refuses %s binding mismatches', async (_name, setup) => {
+  setup();
+  await expect(
+    createStepHostServices(ctx).loadPreviousStepOutput('previous'),
+  ).rejects.toMatchObject({ name: 'StepHostBindingError' });
+  expect(loadPreviousStepOutput).not.toHaveBeenCalled();
+});
+it('refuses arbitrary paths before collecting and adapts the actual collector', async () => {
+  const host = createStepHostServices(ctx);
+  await expect(host.collectImplementationFiles('/elsewhere')).rejects.toMatchObject({
+    name: 'StepHostBindingError',
+  });
+  expect(collectImplementationFiles).not.toHaveBeenCalled();
+  await host.collectImplementationFiles('/repo/.haive/worktrees/task');
+  expect(collectImplementationFiles).toHaveBeenCalledWith(
+    expect.objectContaining({ taskId: 'task', round: 2 }),
+    '/repo/.haive/worktrees/task',
+    expect.objectContaining({ maxRound: 2, signal: ctx.signal }),
+  );
+});
+it('captures context identity and refuses a worktree retarget after the first call', async () => {
+  const mutable = { ...ctx };
+  const host = createStepHostServices(mutable);
+  mutable.taskId = 'other-task';
+  mutable.userId = 'other-user';
+  mutable.round = 99;
+  await host.loadPreviousStepOutput('previous');
+  expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
+  task.mockResolvedValue({
+    id: 'task',
+    userId: 'user',
+    currentRound: 2,
+    worktreePath: '/repo/other',
+  });
+  await expect(host.loadPreviousStepOutput('previous')).rejects.toMatchObject({
+    name: 'StepHostBindingError',
+  });
+});
+it('refuses a foreign task step and a future context round', async () => {
+  step.mockResolvedValue({ taskId: 'other-task', round: 2 });
+  await expect(
+    createStepHostServices(ctx).loadPreviousStepOutput('previous'),
+  ).rejects.toMatchObject({ name: 'StepHostBindingError' });
+  step.mockResolvedValue({ taskId: 'task', round: 2 });
+  task.mockResolvedValue({ id: 'task', userId: 'user', currentRound: 1, worktreePath: '/repo' });
+  await expect(
+    createStepHostServices(ctx).loadPreviousStepOutput('previous'),
+  ).rejects.toMatchObject({ name: 'StepHostBindingError' });
+  await expect(
+    createStepHostServices(ctx).readReviewDiff({ worktreePath: '/elsewhere', maxBytes: 1000 }),
+  ).rejects.toMatchObject({ name: 'StepHostBindingError' });
+});
+it('normalizes cancellation during an awaited read, using fake time', async () => {
+  vi.useFakeTimers();
+  vi.mocked(loadPreviousStepOutput).mockImplementation(
+    () => new Promise((resolve) => setTimeout(() => resolve(null), 100)),
+  );
+  const promise = createStepHostServices(ctx).loadPreviousStepOutput('previous');
+  const rejected = expect(promise).rejects.toBeInstanceOf(TaskCancelledError);
+  await vi.advanceTimersByTimeAsync(1);
+  controller.abort();
+  await rejected;
+  await vi.advanceTimersByTimeAsync(100);
+});

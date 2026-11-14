@@ -3,7 +3,7 @@ import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, lte } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
   AGENT_DIRECTORIES,
@@ -225,11 +225,18 @@ export async function loadPreviousStepOutput(
   db: Database,
   taskId: string,
   stepId: string,
+  maxRound?: number,
 ): Promise<{ detect: unknown; output: unknown; iterations: unknown[] } | null> {
   const rows = await db
     .select()
     .from(schema.taskSteps)
-    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, stepId)))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        maxRound === undefined ? undefined : lte(schema.taskSteps.round, maxRound),
+      ),
+    )
     // Latest round wins: during forward execution the current round is the highest
     // that exists, so this returns the current round's row for repeating steps and
     // round 0 for steps that never recur. (Fix-loop rounds.)

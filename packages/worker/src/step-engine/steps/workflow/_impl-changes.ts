@@ -14,7 +14,7 @@ import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
-import { gitExec } from '../../../repo/git-exec.js';
+import { gitExec, gitRun } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
 
@@ -77,12 +77,12 @@ interface DirtyScan {
  *
  *  Cost: a repo with a large un-gitignored untracked tree now enumerates it and can crowd
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
-async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
+async function dirtyWorktreeFiles(worktreePath: string, signal?: AbortSignal): Promise<DirtyScan> {
   try {
     // -z keeps a name literal; plain porcelain C-quotes one with a space or a non-ASCII byte.
     const { stdout } = await gitExec(
       ['--no-optional-locks', 'status', '--porcelain', '-z', '-uall'],
-      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER },
+      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER, signal },
     );
     const files: string[] = [];
     const untracked: string[] = [];
@@ -93,7 +93,11 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
         untracked.push(entry.path);
         // -uall expands ordinary directories, but never an embedded checkout.
         if (entry.path.endsWith('/')) {
-          const head = await nestedRepositoryHead(worktreePath, entry.path);
+          const head = await nestedRepositoryHead(
+            worktreePath,
+            entry.path,
+            signal ? (cwd, args, env, io) => gitRun(cwd, args, env, { ...io, signal }) : undefined,
+          );
           if (head)
             nestedRepositories[entry.path] = head.commit === null ? 'unborn' : 'with commits';
         }
@@ -144,12 +148,14 @@ async function resolveDiffBase(
   baseBranch: string | null,
   timeout?: number,
   forkPointOnly = false,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
       const { stdout } = await gitExec(['merge-base', 'HEAD', baseBranch], {
         cwd: worktreePath,
         timeout,
+        signal,
       });
       const sha = stdout.toString().trim();
       if (sha) return sha;
@@ -161,7 +167,7 @@ async function resolveDiffBase(
   }
   if (forkPointOnly) return null;
   try {
-    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout });
+    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout, signal });
     return 'HEAD';
   } catch {
     return null;
@@ -171,8 +177,9 @@ async function resolveDiffBase(
 async function readChangeDiff(
   worktreePath: string,
   baseBranch: string | null,
+  signal?: AbortSignal,
 ): Promise<string | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch);
+  const base = await resolveDiffBase(worktreePath, baseBranch, undefined, false, signal);
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
@@ -189,7 +196,7 @@ async function readChangeDiff(
         base,
         '--',
       ],
-      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES },
+      { cwd: worktreePath, maxBuffer: MAX_DIFF_BUFFER_BYTES, signal },
     );
     return stdout.toString();
   } catch {
@@ -204,19 +211,26 @@ async function readChangeDiff(
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean; timeoutMs?: number; forkPointOnly?: boolean } = {},
+  options: {
+    includeDeleted?: boolean;
+    timeoutMs?: number;
+    forkPointOnly?: boolean;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<string[] | null> {
   const base = await resolveDiffBase(
     worktreePath,
     baseBranch,
     options.timeoutMs,
     options.forkPointOnly,
+    options.signal,
   );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
       cwd: worktreePath,
       timeout: options.timeoutMs,
+      signal: options.signal,
     });
     const fields = stdout.split('\0');
     const paths: string[] = [];
@@ -233,14 +247,20 @@ export async function readChangedPaths(
 async function readCommittedDeletions(
   worktreePath: string,
   baseBranch: string | null,
-  options: { forkPointOnly?: boolean } = {},
+  options: { forkPointOnly?: boolean; signal?: AbortSignal } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch, undefined, options.forkPointOnly);
+  const base = await resolveDiffBase(
+    worktreePath,
+    baseBranch,
+    undefined,
+    options.forkPointOnly,
+    options.signal,
+  );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
       ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--'],
-      { cwd: worktreePath },
+      { cwd: worktreePath, signal: options.signal },
     );
     const fields = stdout.split('\0');
     const paths: string[] = [];
@@ -260,8 +280,9 @@ async function readCommittedDeletions(
 async function changedLineNotes(
   worktreePath: string,
   baseBranch: string | null,
+  signal?: AbortSignal,
 ): Promise<ChangedLineNotes> {
-  const diff = await readChangeDiff(worktreePath, baseBranch);
+  const diff = await readChangeDiff(worktreePath, baseBranch, signal);
   return diff === null ? {} : parseChangedLineRanges(diff);
 }
 
@@ -277,8 +298,14 @@ async function changedLineNotes(
 export async function collectImplementationFiles(
   ctx: StepContext,
   worktreePath: string,
+  options: { maxRound?: number; signal?: AbortSignal } = {},
 ): Promise<ImplementationFileSet> {
-  return collectChangeSet(worktreePath, await taskBaseBranch(ctx), await reportedFiles(ctx));
+  return collectChangeSet(
+    worktreePath,
+    await taskBaseBranch(ctx, options.maxRound),
+    await reportedFiles(ctx, options.maxRound),
+    options.signal,
+  );
 }
 
 /** The change one worktree holds against `baseBranch`, beside the files an agent `files` reported. */
@@ -286,26 +313,33 @@ export async function collectChangeSet(
   worktreePath: string,
   baseBranch: string | null,
   files: Set<string>,
+  signal?: AbortSignal,
 ): Promise<ImplementationFileSet> {
-  const scan = await dirtyWorktreeFiles(worktreePath);
+  const scan = await dirtyWorktreeFiles(worktreePath, signal);
   for (const f of scan.files) files.add(f);
 
   // Which lines of each file the change wrote. Measured against the fork point, so
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
-  const measured = await changedLineNotes(worktreePath, baseBranch);
+  const measured = await changedLineNotes(worktreePath, baseBranch, signal);
   for (const p of scan.untracked) {
     const nested = scan.nestedRepositories[p];
     measured[p] ??= nested ? `nested repository (${nested})` : 'new file';
   }
   // A committed deletion may be unreported, and the sandbox masks git: only this list names it.
-  const deletions = await readCommittedDeletions(worktreePath, baseBranch, { forkPointOnly: true });
+  const deletions = await readCommittedDeletions(worktreePath, baseBranch, {
+    forkPointOnly: true,
+    signal,
+  });
   for (const p of deletions ?? []) {
     files.add(p);
     measured[p] ??= 'deleted';
   }
   // Last, so a capped list keeps the reported and dirty files.
-  const committed = await readChangedPaths(worktreePath, baseBranch, { forkPointOnly: true });
+  const committed = await readChangedPaths(worktreePath, baseBranch, {
+    forkPointOnly: true,
+    signal,
+  });
   for (const p of committed ?? []) files.add(p);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
@@ -336,9 +370,14 @@ export async function collectChangeSet(
   };
 }
 
-async function reportedFiles(ctx: StepContext): Promise<Set<string>> {
+async function reportedFiles(ctx: StepContext, maxRound?: number): Promise<Set<string>> {
   const files = new Set<string>();
-  const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
+  const implement = await loadPreviousStepOutput(
+    ctx.db,
+    ctx.taskId,
+    '07-phase-2-implement',
+    maxRound,
+  );
   const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;
   for (const f of touched ?? []) files.add(f);
   if (files.size === 0) {
@@ -353,8 +392,8 @@ async function reportedFiles(ctx: StepContext): Promise<Set<string>> {
   return files;
 }
 
-async function taskBaseBranch(ctx: StepContext): Promise<string | null> {
-  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+async function taskBaseBranch(ctx: StepContext, maxRound?: number): Promise<string | null> {
+  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup', maxRound);
   return (worktree?.output as { baseBranch?: string } | null)?.baseBranch ?? null;
 }
 

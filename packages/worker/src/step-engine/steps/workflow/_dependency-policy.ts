@@ -127,17 +127,22 @@ async function readBaseline(
   workspace: string,
   refPath: string,
   existenceOnly = false,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const result = await gitRun(
     workspace,
     existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath],
+    undefined,
+    { signal },
   );
   if (result.code === 0) return result.stdout;
   const description = existenceOnly ? `the Drupal 7 marker ${refPath}` : refPath;
   if (gitGaveNoAnswer(result)) {
     throw new Error(`Cannot read ${description} at the repository baseline: git gave no answer.`);
   }
-  const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath]);
+  const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath], undefined, {
+    signal,
+  });
   if (presence.code === 1) return null;
   throw new Error(`Cannot read ${description} at the repository baseline: git read failed.`);
 }
@@ -146,21 +151,41 @@ async function readBaseline(
 export async function loadDependencyPolicy(
   ctx: StepContext,
   workspace: string,
+  options: { maxRound?: number; signal?: AbortSignal } = {},
 ): Promise<DependencyPolicy> {
-  const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const previous = await loadPreviousStepOutput(
+    ctx.db,
+    ctx.taskId,
+    '01-worktree-setup',
+    options.maxRound,
+  );
   const worktree = previous?.output as {
     baseBranch?: string;
     sandboxWorktreePath?: string;
   } | null;
   const baseBranch = worktree?.baseBranch;
   const base = baseBranch
-    ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch])
-    : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD']);
+    ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch], undefined, {
+        signal: options.signal,
+      })
+    : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD'], undefined, {
+        signal: options.signal,
+      });
   if (base.code !== 0) {
     throw new Error('Cannot establish the repository baseline for dependency ownership.');
   }
-  const ownership = await readBaseline(workspace, `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`);
-  const baselineComposer = await readBaseline(workspace, `${base.stdout.trim()}:composer.json`);
+  const ownership = await readBaseline(
+    workspace,
+    `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
+    false,
+    options.signal,
+  );
+  const baselineComposer = await readBaseline(
+    workspace,
+    `${base.stdout.trim()}:composer.json`,
+    false,
+    options.signal,
+  );
   const { anchor, prefix } = workspaceAnchor(workspace);
   const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
   let drupal = false;
@@ -193,7 +218,12 @@ export async function loadDependencyPolicy(
   const drupal7Roots: string[] = [];
   for (const root of new Set(roots)) {
     const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
-    const baselineDrupal7 = await readBaseline(workspace, `${base.stdout.trim()}:${marker}`, true);
+    const baselineDrupal7 = await readBaseline(
+      workspace,
+      `${base.stdout.trim()}:${marker}`,
+      true,
+      options.signal,
+    );
     if (baselineDrupal7 !== null || (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null) {
       drupal7Roots.push(root);
     }

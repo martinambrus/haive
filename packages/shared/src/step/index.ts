@@ -44,6 +44,8 @@ export interface StepContext {
   db: Database;
   logger: Logger;
   signal: AbortSignal;
+  /** Task-bound worker capabilities. Production contexts always supply this. */
+  host?: StepHostServices;
   /** Update the step's status_message column (shown in UI during running state). */
   emitProgress(message: string): Promise<void>;
   /** Throws TaskCancelledError when the task has been cancelled. Call inside long loops. */
@@ -730,3 +732,36 @@ export type {
   FileCoverage,
   Insight,
 } from './review-types.js';
+
+/** The existing previous-step projection, bounded to the calling round. */
+export interface PreviousStepOutput {
+  detect: unknown;
+  output: unknown;
+  iterations: unknown[];
+}
+export interface ReviewDiffOptions {
+  worktreePath: string;
+  maxBytes: number;
+  /** Include full post-change text after the diff when it fits the same byte budget. */
+  includeFileContents?: boolean;
+}
+export type ReviewDiff =
+  | {
+      status: 'ready';
+      content: string;
+      bytes: number;
+      diffHash: string;
+      scope: import('./review-types.js').ImplementationFileSet;
+    }
+  | {
+      status: 'too-large' | 'unavailable';
+      reason: string;
+      scope: import('./review-types.js').ImplementationFileSet;
+    };
+export interface StepHostServices {
+  loadPreviousStepOutput(stepId: string): Promise<PreviousStepOutput | null>;
+  collectImplementationFiles(
+    worktreePath: string,
+  ): Promise<import('./review-types.js').ImplementationFileSet>;
+  readReviewDiff(options: ReviewDiffOptions): Promise<ReviewDiff>;
+}

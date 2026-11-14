@@ -69,3 +69,26 @@ const step = {
 } satisfies StepDefinition<{ path: string }, { report: string }>;
 
 export default [step] as const;
+
+// A real module checks the optional port once, then uses only the public DTOs.
+export async function reviewWithHost(ctx: import('@haive/shared/step').StepContext) {
+  const host = ctx.host;
+  if (!host) throw new Error('This module requires step host services.');
+  const previous = await host.loadPreviousStepOutput('01-worktree-setup');
+  const output = previous?.output;
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    !('worktreePath' in output) ||
+    typeof output.worktreePath !== 'string'
+  )
+    throw new Error('The worktree output is unavailable.');
+  const worktreePath = output.worktreePath;
+  const scope = await host.collectImplementationFiles(worktreePath);
+  const review = await host.readReviewDiff({
+    worktreePath,
+    maxBytes: 4096,
+    includeFileContents: true,
+  });
+  return { scope, review };
+}

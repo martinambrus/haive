@@ -1,4 +1,5 @@
 import { UnresolvedStepError } from './registry.js';
+import { createStepHostServices } from './step-host-services.js';
 import {
   beginFixTestCapture,
   finishFixTestCapture,
@@ -2806,7 +2807,7 @@ function buildStepContext(
 ): StepContext {
   const { db, taskId } = params;
   const round = params.round ?? 0;
-  return {
+  const ctx: StepContext = {
     taskId,
     taskStepId: row.id,
     userId: params.userId,
@@ -2833,6 +2834,8 @@ function buildStepContext(
       }
     },
   };
+  ctx.host = createStepHostServices(ctx);
+  return ctx;
 }
 
 /** Whether the step's own `shouldRun` already says skip, asked before runtime admission so a step

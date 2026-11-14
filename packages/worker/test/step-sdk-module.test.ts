@@ -17,6 +17,7 @@ vi.mock('../src/step-engine/steps/index.js', () => ({ emitsLoop: vi.fn() }));
 
 const require = createRequire(import.meta.url);
 let entries: typeof import('./fixtures/step-sdk/host.typecheck.js').entries;
+let reviewWithHost: typeof import('./fixtures/step-sdk/src/steps.js').reviewWithHost;
 let errors: typeof import('./fixtures/step-sdk/src/steps.js').errors;
 let fixtureRoot: string | undefined;
 
@@ -45,7 +46,7 @@ beforeAll(async () => {
     entryPath,
     [
       "export { default as manifest } from '@haive/module-sdk-fixture/manifest';",
-      "export { default, errors } from '@haive/module-sdk-fixture/steps';",
+      "export { default, errors, reviewWithHost } from '@haive/module-sdk-fixture/steps';",
     ].join('\n'),
   );
   const built = (await import(
@@ -57,6 +58,7 @@ beforeAll(async () => {
     { packageName: '@haive/module-sdk-fixture', manifest: built.manifest, steps: built.default },
   ];
   errors = built.errors;
+  reviewWithHost = built.reviewWithHost;
 }, 30_000);
 
 afterAll(() => {
@@ -82,6 +84,49 @@ describe('compiled module step SDK consumer', () => {
     for (const name of Object.keys(errors) as (keyof typeof errors)[]) {
       expect(errors[name]).toBe(worker[name]);
     }
+  });
+
+  it('calls all three host services through the compiled public-only fixture', async () => {
+    const host = {
+      loadPreviousStepOutput: vi.fn(async () => ({
+        detect: null,
+        output: { worktreePath: '/fixture/tree' },
+        iterations: [],
+      })),
+      collectImplementationFiles: vi.fn(async () => ({ files: ['a'], total: 1, truncated: false })),
+      readReviewDiff: vi.fn(async () => ({
+        status: 'unavailable' as const,
+        reason: 'fixture',
+        scope: { files: [], total: 0, truncated: false },
+      })),
+    };
+    const ctx: StepContext = {
+      taskId: 'fixture-task',
+      taskStepId: 'fixture-step',
+      userId: 'fixture-user',
+      repoPath: '/fixture',
+      workspacePath: '/fixture',
+      sandboxWorkdir: '/workspace',
+      cliProviderId: null,
+      round: 0,
+      db: {} as Database,
+      logger: logger.child({ test: 'sdk-host' }),
+      signal: new AbortController().signal,
+      throwIfCancelled() {},
+      async emitProgress() {},
+      host,
+    };
+    await reviewWithHost(ctx);
+    expect(host.loadPreviousStepOutput).toHaveBeenCalledWith('01-worktree-setup');
+    expect(host.collectImplementationFiles).toHaveBeenCalledWith('/fixture/tree');
+    expect(host.readReviewDiff).toHaveBeenCalledWith({
+      worktreePath: '/fixture/tree',
+      maxBytes: 4096,
+      includeFileContents: true,
+    });
+    await expect(reviewWithHost({ ...ctx, host: undefined })).rejects.toThrow(
+      'requires step host services',
+    );
   });
 
   const signals = [
