@@ -164,6 +164,38 @@ describe('GET /tasks/:id repository', () => {
       testSuiteRuns: 1,
     });
   });
+  it('returns an empty summary when the check-run read fails', async () => {
+    const f = setup({ writable: true });
+    const db = routeDb(f.db);
+    h.db = {
+      ...db,
+      select: (...args: Parameters<typeof db.select>) => {
+        const query = db.select(...args);
+        return {
+          ...query,
+          from: (table: unknown) => {
+            if (table === schema.taskCheckRuns)
+              return {
+                where: async () => {
+                  throw new Error('check history offline');
+                },
+              };
+            return query.from(table as never);
+          },
+        };
+      },
+    };
+    const response = await app.request(`/${TASK}`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { task: { id: string }; testChecks: unknown };
+    expect(body.task.id).toBe(TASK);
+    expect(body.testChecks).toEqual({
+      testSuiteMs: null,
+      testSuiteRuns: 0,
+      testCheckCounts: { passed: 0, failed: 0, not_run: 0, running: 0, interrupted: 0 },
+      testPassShare: { ratio: null, n: 0, sufficient: false },
+    });
+  });
   it('A1 names a read-only local repository by the fields the attachments tab needs, and no more', async () => {
     setup({ writable: false });
     expect(await repositoryOf()).toEqual({
