@@ -6,6 +6,11 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import {
+  learningContent,
+  stampLearningRecord,
+  type LearningStamp,
+} from '@haive/shared/learning-provenance';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
@@ -666,13 +671,15 @@ export async function readExistingLearnings(worktree: string): Promise<ExistingL
 }
 
 function renderLearningBody(entry: LearningEntry): string {
-  return `# ${entry.title}\n\n${entry.body}`;
+  return learningContent(`# ${entry.title}\n\n${entry.body}`);
 }
 
 /** First ~200 chars of a learning's prose (minus its `# heading`) — the bounded
  *  context the prompt shows so the agent can dedup/update without the full body. */
 function learningExcerpt(body: string): string {
-  const prose = body.replace(/^#\s+.+$/m, '').trim();
+  const prose = learningContent(body)
+    .replace(/^#\s+.+$/m, '')
+    .trim();
   return prose.length > 200 ? `${prose.slice(0, 200)}…` : prose;
 }
 
@@ -778,6 +785,7 @@ export function planLearningReconciliation(
   existing: ExistingLearning[],
   logger?: StepContext['logger'],
   counts?: LearningOutcome['learnings']['downgraded'],
+  writer?: LearningStamp,
 ): PlannedLearningOp[] {
   const byId = new Map(existing.map((e) => [e.id, e]));
   const taken = new Set(existing.map((e) => e.id));
@@ -824,7 +832,16 @@ export function planLearningReconciliation(
     taken.add(id);
     plan.push({ op: 'insert', id, title: e.title, newBody: renderLearningBody(e), oldBody: '' });
   }
-  return plan;
+  return writer
+    ? plan.map((p) =>
+        p.op === 'delete'
+          ? p
+          : {
+              ...p,
+              newBody: stampLearningRecord(p.newBody, p.op === 'insert' ? null : p.oldBody, writer),
+            },
+      )
+    : plan;
 }
 
 /** Staging (`LEARNING_DRAFTS_DIR`) exists because the drafts are the one half of
@@ -917,11 +934,15 @@ export async function applyStagedLearningEdits(
       out.push(p);
       continue;
     }
-    if (staged.trim().length === 0) {
+    if (learningContent(staged).trim().length === 0) {
       if (counts) counts.removed++;
       continue;
     }
-    if (counts && staged.replace(/\n+$/, '') !== p.newBody.replace(/\n+$/, '')) counts.edited++;
+    if (
+      counts &&
+      learningContent(staged).replace(/\n+$/, '') !== learningContent(p.newBody).replace(/\n+$/, '')
+    )
+      counts.edited++;
     // applyLearningOps appends the trailing newline; keep exactly one however
     // many the editor left.
     out.push({ ...p, newBody: staged.replace(/\n+$/, '') });
@@ -953,7 +974,8 @@ export function learningOpsToDiffFiles(
 export async function applyLearningOps(
   worktree: string,
   plan: PlannedLearningOp[],
-  counts?: LearningOutcome['learnings']['writes'],
+  counts: LearningOutcome['learnings']['writes'] | undefined,
+  writer: LearningStamp,
 ): Promise<{ written: string[]; deleted: string[] }> {
   // Hoisted out of the delete branch: both sides anchor at the repository root, and the `mkdir` is
   // now `createParents`. `rel` is exactly what `path.relative(worktree, file)` returned, so the
@@ -961,6 +983,8 @@ export async function applyLearningOps(
   const wa = workspaceAnchor(worktree);
   const written: string[] = [];
   const deleted: string[] = [];
+  // Repeated updates in one proposal must record the body the previous op actually wrote.
+  const appliedBodies = new Map<string, string>();
   for (const p of plan) {
     const rel = `${LEARNINGS_DIR}/${p.id}.md`;
     if (counts) counts.attempted[p.op]++;
@@ -969,9 +993,15 @@ export async function applyLearningOps(
         await removeNoFollow(wa.anchor, `${wa.prefix}${rel}`);
         deleted.push(rel);
       } else {
-        await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, `${p.newBody}\n`, {
+        const content = stampLearningRecord(
+          p.newBody,
+          p.op === 'insert' ? null : (appliedBodies.get(p.id) ?? p.oldBody),
+          writer,
+        );
+        await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, content, {
           createParents: true,
         });
+        appliedBodies.set(p.id, content);
         written.push(rel);
       }
       if (counts) counts.succeeded[p.op]++;
@@ -1233,7 +1263,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     try {
       const existing = await readExistingLearnings(detected.worktreePath);
       const parsed = parseLearningOutput(llmOutput ?? null) ?? [];
-      const plan = planLearningReconciliation(parsed, existing);
+      const plan = planLearningReconciliation(parsed, existing, undefined, undefined, {
+        taskId: ctx.taskId,
+        date: new Date().toISOString(),
+      });
       const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
       const investigationContent = investigation
         ? renderInvestigation(
@@ -1750,7 +1783,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       let written: string[] = [];
       let deleted: string[] = [];
       if (values.writeFiles !== false) {
-        const res = await applyLearningOps(worktreePath, plan, outcome.learnings.writes);
+        const res = await applyLearningOps(worktreePath, plan, outcome.learnings.writes, {
+          taskId: ctx.taskId,
+          date: new Date().toISOString(),
+        });
         written = res.written;
         deleted = res.deleted;
       }

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { learningContent } from '@haive/shared/learning-provenance';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
 const io = vi.hoisted(() => ({
@@ -424,7 +425,10 @@ describe('behavior fixture', () => {
       prompt,
       form,
       output,
-      files: [...io.files].sort(),
+      // P1.2 adds a separately tested footer. Keep the original P1.1 content snapshot intact.
+      files: [...io.files]
+        .map(([file, body]) => [file, file.startsWith(`${dir}/`) ? learningContent(body) : body])
+        .sort(),
       promotions: io.promote.mock.calls,
     };
     // The real investigation renderer receives the clock; normalize only its timestamp.
