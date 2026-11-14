@@ -1,0 +1,6 @@
+[
+  { "key": "MAILPIT_UI_PASSWORD", "generate": "hex", "bytes": 24 },
+  { "key": "POSTGRES_PASSWORD", "generate": "never" },
+  { "key": "JWT_SECRET", "generate": "never" },
+  { "key": "CONFIG_ENCRYPTION_KEY", "generate": "never" }
+]
