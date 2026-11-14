@@ -11,6 +11,8 @@ import type {
   ComposableStepEntry,
   CompositionIssue,
   CustomTaskTypeCreate,
+  DerivedChange,
+  DerivedEvaluatedCandidate,
   DashboardSpec,
   ModuleDiff,
   ModuleIntentRow,
@@ -2633,7 +2635,9 @@ export interface AdminTaskType {
   slug: string;
   displayName: string;
   description: string | null;
-  runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
+  runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes' | 'derived';
+  baseSlug?: string | null;
+  changes?: DerivedChange[] | null;
   stepIds: string[] | null;
   preAnswerDefaults: Record<string, Record<string, unknown>>;
   stepLoopLimitDefaults: Record<string, number>;
@@ -2652,11 +2656,35 @@ export interface AdminTaskType {
 
 export type AdminTaskTypeListed = AdminTaskType & {
   builtin: boolean;
+  diagnostics?: DerivedTaskTypeDiagnostics;
   availability: TaskTypeAvailability;
   taskCount: number;
 };
 
+export type DerivedTaskTypeCreate = Omit<CustomTaskTypeCreate, 'stepIds'> & {
+  runListStrategy: 'derived';
+  baseSlug: string;
+  changes: DerivedChange[];
+};
+export interface DerivedTaskTypeDiagnostics {
+  eligibility: { eligible: boolean; reason?: string; message?: string };
+  revision: string | null;
+  candidates: DerivedEvaluatedCandidate[];
+  issues: { kind: string; [key: string]: unknown }[];
+  defaultIssues: { kind: string; stepId: string; field?: string }[];
+  warnings: NonNullable<PublicTaskType['warnings']>;
+  catalogFingerprint: string;
+}
 export interface TaskTypeCatalog {
+  bases?: {
+    slug: string;
+    eligibility: { eligible: true } | { eligible: false; reason: string; message: string };
+    orderedBaseLists?: {
+      executionPath: import('@haive/shared').ExecutionPath | null;
+      stepIds: string[];
+    }[];
+    orderedSteps?: { stepId: string; workflowType: string; stepIndex: number | null }[];
+  }[];
   /** Filtered declarations for existing rows' read-only overview; never selectable. */
   unavailableSteps?: {
     stepId: string;
@@ -2680,12 +2708,16 @@ export const getAdminTaskType = (slug: string) =>
     availability: TaskTypeAvailability;
     compositionIssues: CompositionIssue[];
     promptStepIssues?: PromptStepIssue[];
+    diagnostics?: DerivedTaskTypeDiagnostics;
   }>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
 export const getTaskTypeCatalog = (signal?: AbortSignal) =>
   api.get<TaskTypeCatalog>('/admin/task-types/catalog', signal);
 
-export const createTaskType = (body: CustomTaskTypeCreate) =>
+export const previewDerivedTaskType = (body: DerivedTaskTypeCreate, signal?: AbortSignal) =>
+  api.post<DerivedTaskTypeDiagnostics>('/admin/task-types/preview', body, signal);
+
+export const createTaskType = (body: CustomTaskTypeCreate | DerivedTaskTypeCreate) =>
   api.post<{ taskType: AdminTaskType }>('/admin/task-types', body);
 
 /** `expectedUpdatedAt` is the row's `updatedAt` as the editor read it; the api refuses a stale edit. */

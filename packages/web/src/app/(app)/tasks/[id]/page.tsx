@@ -1,4 +1,6 @@
 'use client';
+
+import { DerivedTaskWarnings } from '@/components/derived-task-warnings';
 import { PostLoginRetryDialog } from '@/components/post-login-retry-dialog';
 import { LinkButton } from '@/components/ui';
 
@@ -599,6 +601,7 @@ interface LinkedTask {
 }
 
 interface TaskDetailResponse {
+  warnings?: import('@/lib/derived-diagnostics').DerivedTaskWarning[];
   testChecks?: ReturnType<typeof import('@haive/shared/stats').summarizeTestChecks>;
   task: Task;
   /** The steps the worker could not resolve; null while the task is alive. */
@@ -738,6 +741,7 @@ export default function TaskDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
+  const [derivedWarnings, setDerivedWarnings] = useState<TaskDetailResponse['warnings']>();
   const [testChecks, setTestChecks] = useState<TaskDetailResponse['testChecks']>();
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
@@ -880,6 +884,7 @@ export default function TaskDetailPage() {
       const data = await api.get<TaskDetailResponse>(`/tasks/${id}`);
       if (!current()) return;
       scope.applied = request;
+      setDerivedWarnings(data.warnings);
       setTask(data.task);
       setTestChecks(data.testChecks);
       setSteps(data.steps);
@@ -1741,6 +1746,7 @@ export default function TaskDetailPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <DerivedTaskWarnings warnings={derivedWarnings} />
       <TaskHistoryPanel
         history={history}
         roundLabels={roundLabels.byRound}
