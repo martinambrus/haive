@@ -1,4 +1,4 @@
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorDetails, safeErrorMessage } from '@haive/shared/logger';
 import { and, eq, isNull, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -229,9 +229,27 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
     }
   }
 
-  const { inserted, closed, unchanged, perProvider } = desired.length
-    ? await applyDesiredRows(db, desired)
-    : { inserted: 0, closed: 0, unchanged: 0, perProvider: new Map<CliProviderName, number>() };
+  let applied: Awaited<ReturnType<typeof applyDesiredRows>>;
+  try {
+    applied = desired.length
+      ? await applyDesiredRows(db, desired)
+      : { inserted: 0, closed: 0, unchanged: 0, perProvider: new Map<CliProviderName, number>() };
+  } catch (err) {
+    // The transaction rolled back: preserve last-good sync metadata as well as prices.
+    // Use SQLSTATE through Drizzle's cause, never driver wording, for the bounded lock wait.
+    const error =
+      safeErrorDetails(err).code === '55P03'
+        ? 'Model price refresh lock timed out'
+        : safeErrorMessage(err).slice(0, 2000);
+    log.warn({ err, error }, 'failed to apply model prices');
+    return {
+      ok: false,
+      refreshed: [],
+      errors: [...errors, { name: 'price:database', error }],
+      unsupported,
+    };
+  }
+  const { inserted, closed, unchanged, perProvider } = applied;
   // A successful empty feed also clears its prior failure. A failed feed preserves
   // its last-good count and fetchedAt through recordSyncError instead.
   for (const provider of synced) if (!perProvider.has(provider)) perProvider.set(provider, 0);

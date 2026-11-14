@@ -1,5 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import { CLI_PROVIDER_LIST, configService } from '@haive/shared';
+import { refreshModelPrices } from '../src/cli-versions/model-prices.js';
 import { createFakeDb } from '@haive/database/testing';
 
 const h = vi.hoisted(() => ({
@@ -180,3 +182,61 @@ it('persists known unsupported pricing reasons without failing the refresh', asy
     result: { ok: true, errors: [], unsupported },
   });
 });
+
+it.each(['55P03', '23505'])(
+  'finishes the run as failed and refreshes FX after price SQLSTATE %s',
+  async (code) => {
+    const fake = createFakeDb({
+      refreshRuns: schema.refreshRuns,
+      cliPricingSync: schema.cliPricingSync,
+      cliModelPrices: schema.cliModelPrices,
+    });
+    for (const provider of CLI_PROVIDER_LIST)
+      fake.insert(schema.cliPricingSync, {
+        name: provider.name,
+        autoUpdateEnabled: provider.name === 'codex',
+      });
+    const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    const network = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        x: { mode: 'chat', litellm_provider: 'openai', input_cost_per_token: 1 },
+      }),
+    } as Response);
+    const error = Object.assign(new Error('query values must stay private'), {
+      params: ['private-value'],
+      cause: Object.assign(new Error('driver detail must stay private'), { code }),
+    });
+    const transaction = vi.spyOn(fake.db, 'transaction').mockRejectedValueOnce(error);
+    h.prices.mockImplementation(refreshModelPrices);
+    h.fx.mockResolvedValue({
+      ok: true,
+      refreshed: [{ name: 'fx', count: 1, latest: '2026-11-14' }],
+      errors: [],
+    });
+    try {
+      const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
+      expect(result).toMatchObject({
+        ok: false,
+        errors: [
+          {
+            name: 'price:database',
+            error:
+              code === '55P03' ? 'Model price refresh lock timed out' : 'Database operation failed',
+          },
+        ],
+        refreshed: [{ name: 'fx', count: 1 }],
+      });
+      expect(h.fx).toHaveBeenCalledOnce();
+      expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+        finishedAt: expect.any(Date),
+        result,
+      });
+      expect(JSON.stringify(result)).not.toMatch(/private/);
+    } finally {
+      transaction.mockRestore();
+      network.mockRestore();
+      config.mockRestore();
+    }
+  },
+);

@@ -108,6 +108,36 @@ describe('tier refresh lifecycle', () => {
     expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(2);
     expect(await live()).toMatchObject([{ rates: { pricingState: 'unsupported' } }]);
   });
+  it.each(['55P03', '23505'])(
+    'returns a safe failed result when the price transaction fails with SQLSTATE %s',
+    async (code) => {
+      await refreshModelPrices(db);
+      const before = await fake.db.select().from(schema.cliModelPrices);
+      const syncBefore = await fake.db.select().from(schema.cliPricingSync);
+      const error = Object.assign(new Error('bound values must stay private'), {
+        query: 'UPDATE cli_model_prices SET rates = $1',
+        params: ['private-value'],
+        cause: Object.assign(new Error('driver detail must stay private'), { code }),
+      });
+      vi.spyOn(db, 'transaction').mockRejectedValueOnce(error);
+      feed = { x: { ...raw, input_cost_per_token: 3 } };
+      const result = await refreshModelPrices(db);
+      expect(result).toMatchObject({
+        ok: false,
+        refreshed: [],
+        errors: [
+          {
+            name: 'price:database',
+            error:
+              code === '55P03' ? 'Model price refresh lock timed out' : 'Database operation failed',
+          },
+        ],
+      });
+      expect(JSON.stringify(result)).not.toMatch(/private|UPDATE/);
+      expect(await fake.db.select().from(schema.cliModelPrices)).toEqual(before);
+      expect(await fake.db.select().from(schema.cliPricingSync)).toEqual(syncBefore);
+    },
+  );
   it('leaves untiered rows alone, replaces tiered rows once, then stops writing', async () => {
     for (const [modelKey, tiers] of [
       ['x', undefined],
@@ -171,7 +201,11 @@ describe('tier refresh lifecycle', () => {
     fake.hooks.beforeInsert = (table) => {
       if (table === schema.cliModelPrices) throw new Error('insert failed');
     };
-    await expect(refreshModelPrices(db)).rejects.toThrow('insert failed');
+    expect(await refreshModelPrices(db)).toMatchObject({
+      ok: false,
+      refreshed: [],
+      errors: expect.arrayContaining([{ name: 'price:database', error: 'insert failed' }]),
+    });
     expect(await cost()).toMatchObject({ source: 'computed' });
     expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(1);
   });
