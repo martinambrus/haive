@@ -146,6 +146,18 @@ describe('release bundle', () => {
     }
   });
 
+  it('rejects repeated env keys with matching or conflicting generation policies', () => {
+    const entry = { key: 'KEY', generate: 'hex', bytes: 24 };
+    for (const duplicate of [entry, { key: 'KEY', generate: 'never' }]) {
+      expect(() => parse({ ...bundle, env: [entry, duplicate] })).toThrow();
+    }
+  });
+
+  it('strips future optional env fields for both generation modes', () => {
+    const env = bundle.env.map((entry) => ({ ...entry, futureOption: true }));
+    expect(parse({ ...bundle, env }).bundle?.env).toEqual(bundle.env);
+  });
+
   it('rejects invalid env names and generation modes', () => {
     for (const key of ['', '1KEY', 'WITH-DASH', 'WITH SPACE', 'KEY=VALUE', 'KEY\n']) {
       expect(() => parse({ ...bundle, env: [{ key, generate: 'never' }] })).toThrow();

@@ -50,7 +50,7 @@ function normalizeVersion(v) {
 const sha256 = (body) => `sha256:${createHash('sha256').update(body).digest('hex')}`;
 const git = (...args) => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-function buildBundle(dir, version) {
+async function buildBundle(dir, version) {
   // Read only fixed names, in allowlist order. A missing overlay is legitimate; other I/O
   // failures must abort rather than publish a hash record that silently omits a file.
   const present = new Set(readdirSync(dir));
@@ -63,7 +63,11 @@ function buildBundle(dir, version) {
       sha256(readFileSync(join(dir, name))),
     ]),
   );
-  const env = JSON.parse(readFileSync(join(dir, 'install/bundle-env.json'), 'utf8'));
+  // Load only on the bundle path: legacy channel archives contain just this script and migrations.
+  const { releaseBundleEnvSchema } = await import('../packages/shared/src/release/manifest.ts');
+  const env = releaseBundleEnvSchema.parse(
+    JSON.parse(readFileSync(join(dir, 'install/bundle-env.json'), 'utf8')),
+  );
   if (git('rev-parse', '--is-shallow-repository').toString('utf8').trim() !== 'false') {
     throw new Error('shallow checkout: fetch the full release history before building a bundle');
   }
@@ -148,7 +152,7 @@ const manifest = {
 const bundleDir = arg('bundle-dir');
 if (bundleDir !== undefined) {
   try {
-    manifest.bundle = buildBundle(bundleDir, version);
+    manifest.bundle = await buildBundle(bundleDir, version);
   } catch (error) {
     die(`could not build compose bundle: ${error.message}`);
   }

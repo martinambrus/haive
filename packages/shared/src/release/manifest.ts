@@ -45,19 +45,31 @@ const bundleFilesSchema = z.partialRecord(
 );
 // The final negative lookahead requires the actual end, unlike $ before a trailing newline.
 const bundleEnvKeySchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/);
-export const releaseBundleEnvSchema = z.array(
-  z.discriminatedUnion('generate', [
-    z
-      .object({
+export const releaseBundleEnvSchema = z
+  .array(
+    z.discriminatedUnion('generate', [
+      z.object({
         key: bundleEnvKeySchema,
         generate: z.literal('hex'),
         bytes: z.number().int().min(16).max(64),
-      })
-      .strict(),
-    // A never key already protects persisted data or sessions; no new value may be generated.
-    z.object({ key: bundleEnvKeySchema, generate: z.literal('never') }).strict(),
-  ]),
-);
+      }),
+      // Keep bytes declared so stripping unknown future fields cannot hide an illegal bytes key.
+      // A never key already protects persisted data or sessions; no new value may be generated.
+      z
+        .object({
+          key: bundleEnvKeySchema,
+          generate: z.literal('never'),
+          bytes: z.never().optional(),
+        })
+        .refine((entry) => !Object.hasOwn(entry, 'bytes'), {
+          message: 'never entries must not declare bytes',
+          path: ['bytes'],
+        }),
+    ]),
+  )
+  .refine((entries) => new Set(entries.map(({ key }) => key)).size === entries.length, {
+    message: 'bundle env keys must be unique',
+  });
 
 export const releaseBundleSchema = z.object({
   files: bundleFilesSchema.refine(

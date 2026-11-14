@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -49,6 +57,17 @@ before(() => {
   archivedScript = join(root, 'archive/scripts/build-release-manifest.mjs');
   copyFileSync(script, archivedScript);
   cpSync(join(root, 'packages'), join(root, 'archive/packages'), { recursive: true });
+  // The bundled path imports the shared schema; the legacy archived entrypoint has no shared source.
+  mkdirSync(join(root, 'packages/shared/src/release'), { recursive: true });
+  copyFileSync(
+    fileURLToPath(new URL('../../packages/shared/src/release/manifest.ts', import.meta.url)),
+    join(root, 'packages/shared/src/release/manifest.ts'),
+  );
+  symlinkSync(
+    fileURLToPath(new URL('../../packages/shared/node_modules', import.meta.url)),
+    join(root, 'packages/shared/node_modules'),
+    'dir',
+  );
   writeFileSync(preload, "Date.prototype.toISOString = () => '2026-11-14T00:00:00.000Z';\n");
   const git = (...args) =>
     execFileSync('/usr/bin/git', args, {
@@ -181,6 +200,34 @@ test('--bundle-dir refuses a target missing either mandatory compose file', (t) 
     assert.equal(result.stdout, '');
     assert.ok(result.stderr.includes(missing), result.stderr);
   }
+});
+
+test('--bundle-dir validates env declarations before emitting a manifest', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mfb-env-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'install'));
+  for (const [name, body] of Object.entries(second)) writeFileSync(join(dir, name), body);
+  for (const entries of [
+    [{ key: 'KEY', generate: 'hex', bytes: 15 }],
+    [{ key: 'KEY', generate: 'never', bytes: 24 }],
+    [
+      { key: 'KEY', generate: 'never' },
+      { key: 'KEY', generate: 'never' },
+    ],
+  ]) {
+    writeFileSync(join(dir, 'install/bundle-env.json'), JSON.stringify(entries));
+    const result = build(['--bundle-dir', dir]);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+    assert.notEqual(result.stderr, '');
+  }
+  writeFileSync(
+    join(dir, 'install/bundle-env.json'),
+    JSON.stringify(env.map((entry) => ({ ...entry, futureOption: true }))),
+  );
+  const result = build(['--bundle-dir', dir]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).bundle.env, env);
 });
 
 test('--bundle-dir fails rather than publishing incomplete metadata when git cannot be read', () => {
