@@ -1,6 +1,6 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRenderer, findAll, fire } from '../../../test/render-tree';
-import type { PlanNodeDetail } from '@/lib/api-client';
+import type { PlanNodeTask, PlanNodeDetail } from '@/lib/api-client';
 import { PlanDetailPanel } from './plan-detail-panel';
 
 vi.mock('react', async (original) => ({
@@ -15,9 +15,14 @@ vi.mock('next/link', async () => {
       createElement('a', { href }, children as never),
   };
 });
+
 vi.mock('lucide-react', async (original) =>
   Object.fromEntries(Object.keys(await original<object>()).map((name) => [name, () => null])),
 );
+const net = vi.hoisted(() => ({
+  tasks: [] as PlanNodeTask[],
+  advisory: null as PlanNodeTask | null,
+}));
 vi.mock('@/lib/api-client', async (original) => ({
   ...(await original<typeof import('@/lib/api-client')>()),
   getPlanNode: async (_repo: string, id: string): Promise<PlanNodeDetail> => ({
@@ -47,7 +52,8 @@ vi.mock('@/lib/api-client', async (original) => ({
     children: [],
     edges: [],
     codeLinks: [],
-    tasks: [],
+    tasks: net.tasks,
+    advisoryTask: net.advisory,
   }),
   getPlanMessages: async () => ({ messages: [], conversations: [] }),
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
@@ -119,4 +125,59 @@ it('keeps each node’s draft through a switch from A to B and back in PlanDetai
   view.draw();
   await settle();
   expect(textarea().props.value).toBe('Draft for B');
+});
+
+describe.each(['node', 'advisory'] as const)('%s work', (source) => {
+  it.each([
+    ['waiting_user', false],
+    ['created', false],
+    ['waiting_pr', false],
+    ['queued', true],
+    ['running', true],
+    ['completed', false],
+    ['failed', false],
+    ['cancelled', false],
+  ] as const)('reports pending %s work as %s', async (status, pending) => {
+    net.tasks = [
+      {
+        taskId: 'task-1',
+        title: 'Work',
+        status,
+        type: source === 'advisory' ? 'advisory' : 'workflow',
+        createdAt: '',
+      },
+    ];
+    if (source === 'advisory') {
+      net.advisory = net.tasks[0]!;
+      net.tasks = [];
+    }
+    const reportActivity = vi.fn();
+    let visible = true;
+    const view = createRenderer(() =>
+      visible ? (
+        <PlanDetailPanel
+          repositoryId="repo-1"
+          nodeId="node-A"
+          tree={[]}
+          tab="details"
+          chatDrafts={new Map()}
+          unreadCount={0}
+          onRead={() => {}}
+          onTabChange={() => {}}
+          onChanged={() => {}}
+          onNavigate={() => {}}
+          onClose={() => {}}
+          reportActivity={reportActivity}
+        />
+      ) : null,
+    );
+    dispose = () => {
+      visible = false;
+      view.draw();
+      net.tasks = [];
+      net.advisory = null;
+    };
+    await view.flush();
+    expect(reportActivity.mock.lastCall?.[1]).toBe(pending);
+  });
 });

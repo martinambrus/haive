@@ -2,6 +2,7 @@
 import { LinkButton } from '@/components/ui';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePlanAnswer, usePlanPending, type PlanActivityReporter } from './plan-activity';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight, GitBranch, Info } from 'lucide-react';
 import {
@@ -84,6 +85,8 @@ export function PlanChat({
   onRead,
   unreadCount = 0,
   drafts: savedDrafts,
+  reportActivity,
+  onAnswer,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -99,6 +102,8 @@ export function PlanChat({
   /** Page-owned drafts survive the detail panel's loading, tab and selection unmounts.
    *  Keys include the repository as well as the node. */
   drafts?: Map<string, string>;
+  reportActivity?: PlanActivityReporter;
+  onAnswer?: () => void;
 }) {
   const [messages, setMessages] = useState<PlanMessage[]>([]);
   const [conversations, setConversations] = useState<PlanConversation[]>([]);
@@ -160,12 +165,17 @@ export function PlanChat({
 
   const displayedNodeRef = useRef(draftKey);
   displayedNodeRef.current = draftKey;
+  const reportAnswer = usePlanAnswer(onAnswer);
   const reloadMessages = useCallback(async (): Promise<void> => {
     const res = await getPlanMessages(repositoryId, nodeId);
     if (displayedNodeRef.current !== `${repositoryId}:${nodeId}`) return;
+    reportAnswer(
+      `${repositoryId}:${nodeId}`,
+      res.messages.findLast((message) => message.role === 'assistant')?.id ?? null,
+    );
     setMessages(res.messages);
     setConversations(res.conversations);
-  }, [repositoryId, nodeId]);
+  }, [repositoryId, nodeId, reportAnswer]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +234,7 @@ export function PlanChat({
   const parked = isAwaitingFormInput(liveStep);
   const dead = liveTaskId !== null && deadTaskId === liveTaskId;
   const working = liveTaskId !== null && !parked && !dead;
+  usePlanPending(reportActivity, sending || working);
   // A dead conversation takes no turn, parked or not: the api refuses it with 409 task_dead.
   const locked = working || dead;
 

@@ -229,8 +229,12 @@ afterEach(() => {
 
 describe('PlanChat with a live conversation', () => {
   const onPatched = vi.fn();
+  const reportActivity = vi.fn();
+  const onAnswer = vi.fn();
   const open = async (response: unknown, providers: unknown[] = []) => {
     onPatched.mockReset();
+    reportActivity.mockReset();
+    onAnswer.mockReset();
     net.messages = {
       messages: [
         {
@@ -247,9 +251,31 @@ describe('PlanChat with a live conversation', () => {
       conversations: [{ taskId: 'task-1', status: 'running', completedAt: null }],
     };
     respondWith(response, providers);
-    unmount = mount(PlanChat, { repositoryId: 'repo-1', nodeId: 'node-1', onPatched });
+    unmount = mount(PlanChat, {
+      repositoryId: 'repo-1',
+      nodeId: 'node-1',
+      onPatched,
+      reportActivity,
+      onAnswer,
+    });
     await settle();
   };
+
+  it('reports the running turn, announces its answer once and clears pending on park', async () => {
+    await open(taskResponse(PLAN_CHAT_STEP_ID));
+    expect(reportActivity.mock.lastCall?.[1]).toBe(true);
+    expect(onAnswer).not.toHaveBeenCalled();
+    net.messages = {
+      ...(net.messages as object),
+      messages: [
+        { id: 'answer-1', role: 'assistant', body: 'Done', taskId: 'task-1', createdAt: '' },
+      ],
+    };
+    respondWith(taskResponse(PLAN_CHAT_STEP_ID, { parked: true }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(reportActivity.mock.lastCall?.[1]).toBe(false);
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+  });
 
   it('keeps polling a conversation that is still working', async () => {
     await open(taskResponse(PLAN_CHAT_STEP_ID));
@@ -622,21 +648,38 @@ describe('PlanMergePanel with a merge task', () => {
   };
   const onChanged = vi.fn();
   const onSettled = vi.fn();
+  const reportActivity = vi.fn();
   const open = async (response: unknown) => {
     onChanged.mockReset();
     onSettled.mockReset();
+    reportActivity.mockReset();
     respondWith(response);
     const mounted = mount(PlanMergePanel, {
       repositoryId: 'repo-1',
       merge: merge as PlanMergeState | null,
       onChanged,
       onSettled,
+      reportActivity,
     });
     unmount = mounted;
     await settle();
     return (next: PlanMergeState | null) =>
-      mounted.rerender({ repositoryId: 'repo-1', merge: next, onChanged, onSettled });
+      mounted.rerender({
+        repositoryId: 'repo-1',
+        merge: next,
+        onChanged,
+        onSettled,
+        reportActivity,
+      });
   };
+
+  it('reports a merge while it runs and clears pending when its form parks', async () => {
+    await open(taskResponse(PLAN_MERGE_STEP_ID));
+    expect(reportActivity.mock.lastCall?.[1]).toBe(true);
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(reportActivity.mock.lastCall?.[1]).toBe(false);
+  });
 
   it('keeps polling a merge that is still working', async () => {
     await open(taskResponse(PLAN_MERGE_STEP_ID));

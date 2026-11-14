@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { usePlanPending, type PlanActivityReporter } from './plan-activity';
 import Link from 'next/link';
 import {
   PLAN_MERGE_STEP_ID,
@@ -60,6 +61,7 @@ export function PlanMergePanel({
   failedMerge,
   onChanged,
   onSettled,
+  reportActivity,
 }: {
   repositoryId: string;
   /** Polled by the page, which already watches this to gate Save and Pull. Passed
@@ -74,6 +76,7 @@ export function PlanMergePanel({
   /** Called when an end is polled or recovered, or a discard settles (including when
    *  nothing was discarded), so the page can refresh. */
   onSettled: () => void;
+  reportActivity?: PlanActivityReporter;
 }) {
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
   const [draft, setDraft] = useState('');
@@ -199,6 +202,7 @@ export function PlanMergePanel({
 
   const parked = !discarding && !dead && isAwaitingFormInput(liveStep);
   const working = merge !== null && !parked && !dead;
+  usePlanPending(reportActivity, busy || working);
 
   async function answer(decision: 'confirm' | 'revise'): Promise<void> {
     if (!merge) return;

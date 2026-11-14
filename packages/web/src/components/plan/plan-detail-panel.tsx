@@ -35,6 +35,7 @@ import { groupPlanEdges } from './plan-edge-groups';
 import { DEFAULT_IMPACT_DEPTH, IMPACT_DEPTH_CHOICES } from './plan-impact-groups';
 import { PlanImpactList } from './plan-impact-list';
 import { PlanChat } from './plan-chat';
+import { usePlanPending, type PlanActivityReporter } from './plan-activity';
 import { PlanGraph } from './plan-graph';
 import {
   BLOCKED_GLYPH,
@@ -76,6 +77,8 @@ export function PlanDetailPanel({
   onNavigate,
   onClose,
   chatDrafts,
+  reportActivity,
+  onChatAnswer,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -95,9 +98,17 @@ export function PlanDetailPanel({
   onClose: () => void;
   /** Owned by the plan page because this panel unmounts when selection clears. */
   chatDrafts: Map<string, string>;
+  reportActivity?: PlanActivityReporter;
+  onChatAnswer?: () => void;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
+  const pendingTask = [...(detail?.tasks ?? []), detail?.advisoryTask].some(
+    (task) =>
+      task != null && !task.deadAt && (task.status === 'queued' || task.status === 'running'),
+  );
+  usePlanPending(reportActivity, pendingTask);
+
   const [impact, setImpact] = useState<PlanImpact | null>(null);
   // The radius the Impact tab opens at. One hop, because on a real plan two
   // reach a median of 130 nodes — a transitive answer is "the whole plan".
@@ -1020,6 +1031,8 @@ export function PlanDetailPanel({
 
       {tab === 'chat' && (
         <PlanChat
+          reportActivity={reportActivity}
+          onAnswer={onChatAnswer}
           repositoryId={repositoryId}
           nodeId={nodeId}
           onPatched={onChanged}

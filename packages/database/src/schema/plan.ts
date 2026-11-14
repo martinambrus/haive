@@ -21,6 +21,22 @@ import { cliProviders } from './cli-providers.js';
 import { repositories } from './repos.js';
 import { tasks } from './tasks.js';
 
+/** Attention on the plan page, attributed to the server's receipt hour in UTC. */
+export const planActiveTime = pgTable(
+  'plan_active_time',
+  {
+    repositoryId: uuid('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    hourStart: timestamp('hour_start').notNull(),
+    activeMs: integer('active_ms').notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.repositoryId, table.userId, table.hourStart] })],
+);
+
 /**
  * The plan canvas: a durable, per-repo tree of what the project IS meant to be.
  *

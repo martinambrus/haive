@@ -1,5 +1,6 @@
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -129,6 +130,33 @@ async function requireOwnedRepo(c: {
   if (!repo) throw new HttpError(404, 'Repository not found');
   return { userId, repositoryId, repo };
 }
+
+const userActiveRequestSchema = z.object({
+  deltaMs: z.number().int().min(0).max(60_000),
+});
+
+planRoutes.post('/:id/plan/user-active', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const { deltaMs } = userActiveRequestSchema.parse(await c.req.json());
+  if (deltaMs > 0) {
+    // Receipt hour, in UTC wall clock like the other timestamp columns. A flush
+    // crossing an hour belongs wholly to this hour.
+    const hourStart = new Date();
+    hourStart.setUTCMinutes(0, 0, 0);
+    await getDb()
+      .insert(schema.planActiveTime)
+      .values({ repositoryId, userId, hourStart, activeMs: deltaMs })
+      .onConflictDoUpdate({
+        target: [
+          schema.planActiveTime.repositoryId,
+          schema.planActiveTime.userId,
+          schema.planActiveTime.hourStart,
+        ],
+        set: { activeMs: sql`least(${schema.planActiveTime.activeMs} + ${deltaMs}, 3600000)` },
+      });
+  }
+  return c.json({ ok: true });
+});
 
 /** Map the shared applier's typed refusal onto HTTP. `conflict` is a 409 the UI
  *  must SHOW: a silent refetch would discard the loser's edit without telling

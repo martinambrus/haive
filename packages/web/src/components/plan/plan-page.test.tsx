@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PlanPage from '../../app/(app)/repos/[id]/plan/page';
-import { buttons, createRenderer, findAll, isDisabled, textOf } from '../../../test/render-tree';
+import {
+  buttons,
+  createRenderer,
+  findAll,
+  fire,
+  isDisabled,
+  textOf,
+} from '../../../test/render-tree';
 
 vi.mock('react', async (original) => ({
   ...(await original<typeof import('react')>()),
@@ -35,29 +42,59 @@ vi.mock('@/components/markdown/inline-markdown', () => ({
   InlineMarkdown: ({ body }: { body: string }) => <span>{body}</span>,
 }));
 vi.mock('./plan-card-grid', () => ({ PlanCardGrid: () => null }));
-vi.mock('./plan-detail-panel', () => ({ PlanDetailPanel: () => null }));
+vi.mock('./plan-detail-panel', () => ({
+  PlanDetailPanel: (props: unknown) => {
+    net.detail(props);
+    return null;
+  },
+}));
 vi.mock('./plan-tree', () => ({ PlanTree: () => null }));
 vi.mock('./plan-delete-dialog', () => ({ PlanDeleteDialog: () => null }));
-vi.mock('./plan-starter', () => ({ PlanStarter: () => null }));
+vi.mock('./plan-starter', () => ({
+  PlanStarter: (props: unknown) => {
+    net.starter(props);
+    return null;
+  },
+}));
 vi.mock('@/components/repos/link-origin-dialog', () => ({ LinkOriginDialog: () => null }));
 vi.mock('@/components/project-state-conflicts-banner', () => ({
   ProjectStateConflictsBanner: () => null,
 }));
 
 const net = vi.hoisted(() => ({
+  sequence: vi.fn(),
   merge: vi.fn(),
   nodeCount: 1,
+  ordering: null as { activeTaskId: string } | null,
+  active: vi.fn(),
+  overview: vi.fn(),
+  postPlan: vi.fn(),
+  starter: vi.fn(),
+  detail: vi.fn(),
 }));
+vi.mock('@/lib/active-time/use-active-time', () => ({ useActiveTime: net.active }));
 vi.mock('@/lib/api-client', async (original) => ({
   ...(await original<typeof import('@/lib/api-client')>()),
-  api: { get: async () => ({ task: { id: 'live', status: 'running' }, steps: [], providers: [] }) },
+  api: {
+    get: async (path: string) =>
+      path === '/repositories/repo-1/plan'
+        ? { ordering: net.ordering }
+        : { task: { id: 'live', status: 'running' }, steps: [], providers: [] },
+  },
+  postPlanUserActive: net.postPlan,
+  startPlanSequence: net.sequence,
   getUiPrefs: async () => ({}),
-  getPlanOverview: async () => ({
-    repositoryName: 'Fixture',
-    nodeCount: net.nodeCount,
-    root: null,
-  }),
+  getPlanOverview: async () => {
+    net.overview();
+    return {
+      repositoryName: 'Fixture',
+      nodeCount: net.nodeCount,
+      ordering: net.ordering,
+      root: null,
+    };
+  },
   getPlanTree: async () => ({ nodes: [] }),
+  getPlanNode: async () => ({ node: { id: 'node-1' }, children: [], ancestry: [] }),
   getPlanUnread: async () => ({ counts: {} }),
   getPlanMerge: net.merge,
   getRepoOnboardingStatus: async () => ({ onboarded: true }),
@@ -94,6 +131,11 @@ const failure = {
 beforeEach(() => {
   vi.useFakeTimers();
   net.nodeCount = 1;
+  net.ordering = null;
+  net.active.mockClear();
+  net.overview.mockClear();
+  net.postPlan.mockClear();
+  net.starter.mockClear();
   net.merge.mockReset().mockResolvedValue({ merge: null, failedMerge: failure });
   vi.stubGlobal('window', {
     location: { search: '', href: 'http://localhost/repos/repo-1/plan' },
@@ -166,4 +208,78 @@ describe('plan page failed merge recovery', () => {
       findAll(view.tree(), (h) => h.tag === 'a' && h.props.href === '/tasks/failed-merge'),
     ).toHaveLength(1);
   });
+});
+
+describe('plan page attention wiring', () => {
+  it('counts on an empty plan and keeps the repository sink stable across polls', async () => {
+    net.nodeCount = 0;
+    const view = createRenderer(() => <PlanPage />);
+    await flush(view);
+    const first = net.active.mock.lastCall?.[0];
+    expect(first).toMatchObject({ enabled: true, pending: false });
+    first.sink(1234);
+    expect(net.postPlan).toHaveBeenCalledWith('repo-1', 1234);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush(view);
+    expect(net.active.mock.lastCall?.[0].sink).toBe(first.sink);
+  });
+  it('combines independent reporters and clears pending only after the last one clears', async () => {
+    net.nodeCount = 0;
+    const view = createRenderer(() => <PlanPage />);
+    await flush(view);
+    const report = net.starter.mock.lastCall?.[0].reportActivity;
+    expect(report).toBeTypeOf('function');
+    const chat = Symbol(),
+      build = Symbol();
+    report(chat, true);
+    report(build, true);
+    await flush(view);
+    expect(net.active.mock.lastCall?.[0].pending).toBe(true);
+    report(chat, false);
+    await flush(view);
+    expect(net.active.mock.lastCall?.[0].pending).toBe(true);
+    report(build, false);
+    await flush(view);
+    expect(net.active.mock.lastCall?.[0].pending).toBe(false);
+  });
+  it('does not infer pending from a loaded ordering task id without a status', async () => {
+    net.ordering = { activeTaskId: 'ordering-task' };
+    const view = createRenderer(() => <PlanPage />);
+    await flush(view);
+    expect(net.active.mock.lastCall?.[0].pending).toBe(false);
+  });
+});
+
+it('renews the content key when the selected node chat reports an answer, not on polling', async () => {
+  window.location.search = '?node=node-1';
+  const view = createRenderer(() => <PlanPage />);
+  await flush(view);
+  const before = net.active.mock.lastCall?.[0].contentKey;
+  const answer = net.detail.mock.lastCall?.[0].onChatAnswer;
+  expect(answer).toBeTypeOf('function');
+  answer();
+  await flush(view);
+  const after = net.active.mock.lastCall?.[0].contentKey;
+  expect(after).not.toBe(before);
+  await vi.advanceTimersByTimeAsync(10_000);
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].contentKey).toBe(after);
+});
+
+it('reports ordering only while the page’s start request is in flight', async () => {
+  let resolve!: (result: { taskId: string }) => void;
+  net.sequence.mockReturnValue(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const view = createRenderer(() => <PlanPage />);
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(false);
+  fire.click(buttons(view.tree(), /^order the plan$/i)[0]!);
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(true);
+  resolve({ taskId: 'ordering-task' });
+  await flush(view);
+  expect(net.active.mock.lastCall?.[0].pending).toBe(false);
 });
