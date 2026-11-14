@@ -1,7 +1,14 @@
 import { EXECUTION_PATHS, type ExecutionPath } from '../schemas/tasks.js';
 import { orderWorkflowRunList } from './execution-paths.js';
 
-export type RunListStrategy = 'static' | 'workflow_paths' | 'run_app_modes';
+export type RunListStrategy = 'static' | 'workflow_paths' | 'run_app_modes' | 'derived';
+
+/** The enum is persisted before runtime support ships. Refuse rather than falling back to static. */
+export function assertRunListStrategyAvailable(
+  strategy: RunListStrategy,
+): asserts strategy is Exclude<RunListStrategy, 'derived'> {
+  if (strategy === 'derived') throw new Error('derived task types are not available yet');
+}
 
 /** Used by the boot seeder and by readers before that seed exists. */
 export function builtinRunListStrategy(type: string): RunListStrategy {
@@ -22,6 +29,7 @@ export function taskRunListIds(
   listByWorkflow: (type: string) => readonly string[],
   containerTool?: string | null,
 ): string[] {
+  assertRunListStrategyAvailable(task.runListStrategy);
   if (task.runListStrategy === 'run_app_modes') {
     const runtime =
       containerTool === 'ddev'

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolveRunList } from '../src/queues/run-list.js';
+import type { Database } from '@haive/database';
+import { resolveRunList, taskTypeRuntimeFor } from '../src/queues/run-list.js';
 import { StepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -50,5 +51,20 @@ describe('StepRegistry.require', () => {
     expect(thrown).toBeInstanceOf(UnresolvedStepError);
     expect((thrown as UnresolvedStepError).ids).toEqual(['gone']);
     expect((thrown as Error).message).toBe('Step gone not registered');
+  });
+});
+
+describe('taskTypeRuntimeFor', () => {
+  it('refuses a persisted derived definition before it reaches a run-list reader', async () => {
+    const db = {
+      query: {
+        taskTypeDefinitions: {
+          findFirst: async () => ({ runListStrategy: 'derived', fixLoop: null }),
+        },
+      },
+    } as unknown as Database;
+    await expect(taskTypeRuntimeFor(db, 'derived-example')).rejects.toThrow(
+      'derived task types are not available yet',
+    );
   });
 });

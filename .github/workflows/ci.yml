@@ -679,6 +679,7 @@ jobs:
           worker test/onboarding-recorded-membership.test.ts T118_DATABASE_URL test_t118_recorded_ci pg
           worker test/checkout-watch-queue.test.ts T117_DATABASE_URL codex_t117_queue_ci pg
           worker test/imported-removed-cli-targets.test.ts T118_DATABASE_URL test_t118_removed_cli_ci pg
+          database test/derived-task-types-storage.test.ts DERIVED_TASK_TYPES_TEST_URL derived_task_types_test pg
           GATED
           exit "$failed"
 

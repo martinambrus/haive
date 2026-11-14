@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import { parseStepId, type PromptStepEntry } from '@haive/shared/modularity';
-import { taskRunListIds } from '@haive/shared/run-list';
+import { assertRunListStrategyAvailable, taskRunListIds } from '@haive/shared/run-list';
 import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
@@ -133,10 +133,14 @@ export async function taskTypeRuntimeFor(
   const row = await db.query.taskTypeDefinitions.findFirst({
     where: eq(schema.taskTypeDefinitions.slug, slug),
   });
-  if (row) return { runListStrategy: row.runListStrategy, fixLoop: row.fixLoop ?? null };
+  if (row) {
+    assertRunListStrategyAvailable(row.runListStrategy);
+    return { runListStrategy: row.runListStrategy, fixLoop: row.fixLoop ?? null };
+  }
   // Smokes and a fresh install run worker code on a database the boot never seeded.
   const builtin = builtinTaskTypeRows(stepRegistry).find((r) => r.slug === slug);
   if (!builtin) throw new Error(`task type ${slug} has no definition`);
+  assertRunListStrategyAvailable(builtin.runListStrategy);
   return { runListStrategy: builtin.runListStrategy, fixLoop: null };
 }
 
