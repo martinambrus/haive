@@ -73,12 +73,16 @@ async function loadRoundProvider(
   providerId: string | null,
 ): Promise<CliProviderRecord> {
   if (!providerId)
-    throw new Error('Next fix round CLI was deleted; choose another CLI before retrying.');
+    throw new Error(
+      'Next fix round CLI was deleted; Retry the escalation gate and choose another CLI.',
+    );
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
   });
   if (!provider || provider.userId !== userId)
-    throw new Error('Next fix round CLI is not available or owned by you; choose another CLI.');
+    throw new Error(
+      'Next fix round CLI is not available or owned by you; Retry the escalation gate and choose another CLI.',
+    );
   if (!provider.enabled)
     throw new Error(
       `Next fix round CLI "${provider.label}" is disabled; enable it before retrying.`,
@@ -114,7 +118,19 @@ export async function recordFixRoundCliChoice(
   round: number,
   providerId: string | undefined,
 ): Promise<void> {
-  if (!providerId || providerId === 'same') return;
+  if (!providerId) return;
+  if (providerId === 'same') {
+    await db
+      .delete(schema.taskStepCliChoices)
+      .where(
+        and(
+          eq(schema.taskStepCliChoices.taskId, taskId),
+          eq(schema.taskStepCliChoices.stepId, target.metadata.id),
+          eq(schema.taskStepCliChoices.role, fixRoundCliRole(round)),
+        ),
+      );
+    return;
+  }
   const provider = await loadRoundProvider(db, userId, providerId);
   if (eligibleFixRoundProviders(userId, [provider], target).length === 0)
     throw new Error(
@@ -129,5 +145,12 @@ export async function recordFixRoundCliChoice(
       cliProviderId: provider.id,
       effortLevel: null,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [
+        schema.taskStepCliChoices.taskId,
+        schema.taskStepCliChoices.stepId,
+        schema.taskStepCliChoices.role,
+      ],
+      set: { cliProviderId: provider.id, effortLevel: null, updatedAt: new Date() },
+    });
 }

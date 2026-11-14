@@ -120,6 +120,17 @@ describe('next-round CLI', () => {
       provider('unconfigured', { name: 'ollama' }),
     ];
     expect(eligibleFixRoundProviders('owner', candidates, phase2ImplementStep)).toEqual([picked]);
+    const needsSubagents = {
+      ...phase2ImplementStep,
+      llm: { ...phase2ImplementStep.llm!, requiredCapabilities: ['subagents' as const] },
+    };
+    expect(
+      eligibleFixRoundProviders(
+        'owner',
+        [provider('no-subagents', { name: 'codex' })],
+        needsSubagents,
+      ),
+    ).toEqual([]);
   });
 
   it.each(['cap', 'oscillation'])(
