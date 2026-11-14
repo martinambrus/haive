@@ -993,6 +993,11 @@ async function resolveLlmPhase(
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
     const prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    // Preparation may hydrate a saved detection from before versioned plan reads.
+    // Checkpoint it through the same owned write as detect, before dispatch: a
+    // completed invocation returns above without preparing again, and its form
+    // and approval must use the exact read and titles the agent was shown.
+    current = await updateRow(db, current.id, { detectOutput: detected });
     if (prepared === false) {
       ctx.logger.info({ phase: 'llm' }, 'preparation skipped an unnecessary invocation');
       return { resolved: true, llmOutput: null, llmInvocationId: null, current };

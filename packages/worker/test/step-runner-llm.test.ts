@@ -57,6 +57,10 @@ import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-exte
 import { planChatStep } from '../src/step-engine/steps/plan/01-plan-chat.js';
 import * as attachmentsContext from '../src/step-engine/attachments-context.js';
 import * as taskLedger from '../src/step-engine/task-ledger.js';
+import * as planOps from '../src/step-engine/steps/workflow/_plan-ops.js';
+import * as patchRetry from '../src/plan/patch-retry.js';
+import * as planMirror from '../src/plan/mirror.js';
+import * as externalDrift from '../src/step-engine/steps/workflow/_external-drift.js';
 
 interface MockState {
   roundChoice?: CliProviderRecord;
@@ -361,6 +365,123 @@ describe('plan writers through the real runner dispatch', () => {
     });
     return { result, state, detected, enqueue, buildPrompt, prefix, suffix };
   };
+
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'persists a hydrated legacy read before dispatch and filters approval after reload ($metadata.id)',
+    async (writer) => {
+      const state = freshState();
+      const id = '00000000-0000-4000-8000-000000000001';
+      const read = {
+        nodes: [
+          {
+            id,
+            parentId: null,
+            path: `/${id}/`,
+            ordinal: 0,
+            title: 'Current title',
+            body: 'Whole body',
+            version: 7,
+            kind: 'component',
+            status: 'todo',
+            taskable: false,
+          },
+        ],
+        edges: [],
+        codeLinks: [],
+      };
+      vi.spyOn(planOps, 'readPlanSnapshot').mockResolvedValue(read as never);
+      const patch = vi.spyOn(patchRetry, 'applyPlanPatchWithRetry').mockResolvedValue({
+        created: [],
+        updated: [id],
+        deleted: [],
+        linked: 0,
+        unlinked: 0,
+        codeLinked: 0,
+        refs: {},
+        dropped: [],
+        strippedCodeLinks: [],
+      });
+      vi.spyOn(planMirror, 'writePlanMirror').mockResolvedValue(undefined as never);
+      vi.spyOn(externalDrift, 'stampExternalWatermark').mockResolvedValue(undefined);
+      const legacy = {
+        repositoryId: 'repo-1',
+        planMarkdown: 'stale markdown',
+        nodeTitles: { [id]: 'Stale title' },
+        nodeCount: 1,
+        affected: [{ id, title: 'Stale title' }],
+        spec: '',
+        changedPaths: ['src/changed.ts'],
+        branchPoint: 'a'.repeat(40),
+        since: 'b'.repeat(40),
+        firstRun: false,
+        measured: true,
+        commits: [{ sha: 'a'.repeat(40), subject: 'Changed capability' }],
+        commitsOmitted: 0,
+        pathsOmitted: 0,
+        reason: null,
+        linksMarkedStale: 0,
+      };
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        stepId: writer.metadata.id,
+        status: 'running',
+        detectOutput: structuredClone(legacy),
+      };
+      let durable: unknown = structuredClone(legacy);
+      const enqueue = vi.fn(async () => {
+        // JSON storage has no reference to the object prepare mutates in memory.
+        const writes = state.updates.filter((u) => u.table === 'task_steps' && 'detectOutput' in u);
+        durable = JSON.parse(JSON.stringify(writes.at(-1)?.detectOutput ?? legacy));
+      });
+      const stepDef = { ...writer, shouldRun: async () => true, detect: vi.fn() };
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef,
+        cliProviderId: 'prov-1',
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation: enqueue },
+      };
+      expect((await advanceStep(params)).status).toBe('waiting_cli');
+      expect(enqueue).toHaveBeenCalledOnce();
+      expect(durable).toMatchObject({
+        planRead: read,
+        planMarkdown: '',
+        nodeTitles: { [id]: 'Current title' },
+      });
+      if (writer === planReconcileStep)
+        expect(durable).toMatchObject({ affected: [{ id, title: 'Current title', version: 7 }] });
+      const valid = { op: 'upsert', nodeRef: id, status: 'done', expectedVersion: 7 };
+      const reply = { ops: [{ op: 'upsert', nodeRef: id, ordinal: 2 }, valid] };
+      state.cliInvocationRow = {
+        ...state.cliInvocationRow!,
+        endedAt: new Date(),
+        exitCode: 0,
+        errorMessage: null,
+        parsedOutput: reply,
+        rawOutput: JSON.stringify(reply),
+      };
+      state.taskStepRow.detectOutput = structuredClone(durable);
+      const completed = await advanceStep(params);
+      expect(completed.status).toBe('waiting_form');
+      expect(JSON.stringify(completed.row.formSchema)).toContain('Current title');
+      expect(JSON.stringify(completed.row.formSchema)).not.toContain('Stale title');
+      state.taskStepRow.detectOutput = structuredClone(durable);
+      state.taskStepRow.formValues = { applyOps: ['0', '1'] };
+      const approved = await advanceStep(params);
+      expect(approved.status).toBe('done');
+      expect(approved.row.output).toMatchObject({
+        applied: 1,
+        dropped: [expect.stringContaining('read version')],
+      });
+      expect(patch.mock.lastCall?.[1]).toMatchObject({ ops: [valid] });
+      expect(planOps.readPlanSnapshot).toHaveBeenCalledOnce();
+      expect(stepDef.detect).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([planChatStep, planReconcileStep, externalPlanSyncStep])(
     'repackages $metadata.id and attaches the same owned plan read',
