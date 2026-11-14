@@ -51,6 +51,7 @@ import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capa
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { PromptTooLargeError } from '../src/cli-adapters/prompt-delivery.js';
+import { AGENT_RULES_MARKER } from '../src/orchestrator/agent-rules.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
 import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-reconcile.js';
 import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
@@ -543,6 +544,48 @@ describe('plan writers through the real runner dispatch', () => {
       expect(f.enqueue).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps the pre-budget rule fallback for required plan chat and records the omission', async () => {
+    vi.spyOn(configService, 'getBoolean').mockImplementation(
+      async (key) => key === CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED,
+    );
+    const adapter = cliAdapterRegistry.get('claude-code');
+    const originalBuild = adapter.buildCliInvocation.bind(adapter);
+    const build = vi
+      .spyOn(adapter, 'buildCliInvocation')
+      .mockImplementation((provider, prompt, opts) => {
+        if (prompt.includes(AGENT_RULES_MARKER)) throw new PromptTooLargeError('argv-only', 123456);
+        return originalBuild(provider, prompt, opts);
+      });
+    const f = await run(false, planChatStep as StepDefinition, 64_000);
+    expect(f.result.status).toBe('waiting_cli');
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(f.buildPrompt).toHaveBeenCalledOnce();
+    expect(f.enqueue).toHaveBeenCalledOnce();
+    expect(f.enqueue.mock.calls[0]![0].spec.agentRules).toMatchObject({
+      injected: false,
+      reason: 'prompt-too-large',
+    });
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.detected.pendingQuestion);
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.prefix);
+    expect(f.state.cliInvocationRow!.prompt).toContain(f.suffix);
+    expect(f.state.cliInvocationRow!.prompt).not.toContain(AGENT_RULES_MARKER);
+  });
+
+  it('fails required plan chat if its argv prompt still cannot fit after dropping rules', async () => {
+    vi.spyOn(configService, 'getBoolean').mockImplementation(
+      async (key) => key === CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED,
+    );
+    const build = vi
+      .spyOn(cliAdapterRegistry.get('claude-code'), 'buildCliInvocation')
+      .mockImplementation(() => {
+        throw new PromptTooLargeError('argv-only', 123456);
+      });
+    const f = await run(false, planChatStep as StepDefinition, 64_000);
+    expect(f.result.status).toBe('failed');
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(f.enqueue).not.toHaveBeenCalled();
+  });
 
   it('refuses dispatch when an augmenter has replaced the base prompt', async () => {
     const f = await run(true);

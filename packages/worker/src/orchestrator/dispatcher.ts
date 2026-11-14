@@ -839,6 +839,7 @@ function buildCliSidePlan(
       } catch (err) {
         // An argv-only adapter must never fail just because rules push a prompt
         // that fits past that limit: drop the house rules, then the agent rules, and say so.
+        // This pre-budget contract applies to required steps too; input that still cannot fit fails.
         if (!(err instanceof PromptTooLargeError)) throw err;
         if (houseBlock !== null) {
           houseBlock = null;
