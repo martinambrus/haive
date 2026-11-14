@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./learning-provenance": {
+      "types": "./dist/learning-provenance.d.ts",
+      "import": "./dist/learning-provenance.js"
+    },
     "./execution-paths": {
       "types": "./dist/step-engine/execution-paths.d.ts",
       "import": "./dist/step-engine/execution-paths.js"
