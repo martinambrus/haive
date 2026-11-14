@@ -3,18 +3,24 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
-import { parseReleaseManifest } from '../../packages/shared/src/release/manifest.ts';
+import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import {
+  parseReleaseManifest,
+  RELEASE_BUNDLE_FILES,
+} from '../../packages/shared/src/release/manifest.ts';
 import { run } from '../publish-channel.mjs';
 
 const KEYS = ['api', 'worker', 'web', 'builder'];
@@ -48,6 +54,66 @@ const digests = Object.fromEntries(
   ]),
 );
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+const bundle = Object.fromEntries(RELEASE_BUNDLE_FILES.map((name) => [name, `${name}\r\n`]));
+const bundleEnv = [{ key: 'LATER_KEY', generate: 'hex', bytes: 24 }];
+const dockerfile =
+  'FROM scratch\nCOPY release.json /release.json\nCOPY bundle/ /bundle/\nLABEL org.haive.release=1\n';
+const gitAt = (root, ...args) => {
+  const result = spawnSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+};
+let template;
+let templateCommit;
+// Fault-injection cases reuse identical recorded trees. Exercise real git and the
+// generator once per distinct input, rather than repeat the same subprocess work.
+const gitArchives = new Map();
+const gitTrees = new Map();
+const extractedArchives = new Map();
+const generatedManifests = new Map();
+before(() => {
+  template = mkdtempSync(join(tmpdir(), 'publish-template-'));
+  for (const file of [
+    'scripts/build-release-manifest.mjs',
+    'packages/shared/src/release/manifest.ts',
+  ]) {
+    mkdirSync(dirname(join(template, file)), { recursive: true });
+    writeFileSync(join(template, file), readFileSync(new URL(`../../${file}`, import.meta.url)));
+  }
+  mkdirSync(join(template, 'packages/database/migrations'), { recursive: true });
+  writeFileSync(
+    join(template, 'packages/database/migrations/0000_baseline.sql'),
+    'CREATE TABLE x();',
+  );
+  writeFileSync(
+    join(template, 'packages/database/migrations/0001_record.sql'),
+    'ALTER TABLE x ADD y int;',
+  );
+  mkdirSync(join(template, 'install'));
+  writeFileSync(join(template, 'install/bundle-env.json'), JSON.stringify(bundleEnv));
+  for (const [name, body] of Object.entries(bundle)) writeFileSync(join(template, name), body);
+  gitAt(template, 'init', '--quiet');
+  gitAt(template, 'config', 'core.autocrlf', 'false');
+  gitAt(template, 'config', 'commit.gpgSign', 'false');
+  gitAt(template, 'config', 'tag.gpgSign', 'false');
+  gitAt(template, 'add', '.');
+  gitAt(
+    template,
+    '-c',
+    'user.name=Publish fixture',
+    '-c',
+    'user.email=fixture@example.test',
+    'commit',
+    '-qm',
+    'fixture',
+  );
+  gitAt(template, 'tag', 'v9.9.8');
+  templateCommit = gitAt(template, 'rev-parse', 'HEAD');
+});
+after(() => {
+  rmSync(template, { recursive: true, force: true });
+  for (const path of extractedArchives.values()) rmSync(path, { recursive: true, force: true });
+});
 
 function fixture(t, config = {}) {
   const archiveConfigs = {
@@ -68,26 +134,42 @@ function fixture(t, config = {}) {
   const dir = mkdtempSync(join(tmpdir(), 't352-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, 'repo');
-  mkdirSync(join(root, 'scripts'), { recursive: true });
-  mkdirSync(join(root, 'packages/database/migrations'), { recursive: true });
-  writeFileSync(
-    join(root, 'scripts/build-release-manifest.mjs'),
-    readFileSync(new URL('../build-release-manifest.mjs', import.meta.url)),
+  cpSync(template, root, {
+    recursive: true,
+    filter: (path) => path !== join(template, '.git'),
+  });
+  if (config.contractingSnapshot || config.omitBundle?.length)
+    cpSync(join(template, '.git'), join(root, '.git'), { recursive: true });
+  else symlinkSync(join(template, '.git'), join(root, '.git'), 'dir');
+  symlinkSync(
+    fileURLToPath(new URL('../../packages/shared/node_modules', import.meta.url)),
+    join(root, 'packages/shared/node_modules'),
+    'dir',
   );
-  writeFileSync(join(root, 'packages/database/migrations/0000_baseline.sql'), 'CREATE TABLE x();');
-  writeFileSync(
-    join(root, 'packages/database/migrations/0001_record.sql'),
-    config.contractingSnapshot ? 'DROP TABLE x;' : 'ALTER TABLE x ADD y int;',
-  );
-  const git = (...args) => {
-    const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout.trim();
-  };
-  git('init', '--quiet');
-  git('add', '.');
-  git('-c', 'user.name=T352', '-c', 'user.email=t352@example.test', 'commit', '-qm', 'fixture');
-  const commit = git('rev-parse', 'HEAD');
+  const git = (...args) => gitAt(root, ...args);
+  if (config.contractingSnapshot || config.omitBundle?.length) {
+    if (config.contractingSnapshot)
+      writeFileSync(join(root, 'packages/database/migrations/0001_record.sql'), 'DROP TABLE x;');
+    for (const name of config.omitBundle ?? []) rmSync(join(root, name));
+    git('add', '-u');
+    git(
+      '-c',
+      'user.name=Publish fixture',
+      '-c',
+      'user.email=fixture@example.test',
+      'commit',
+      '-qm',
+      'variant',
+    );
+  }
+  const commit =
+    config.contractingSnapshot || config.omitBundle?.length
+      ? git('rev-parse', 'HEAD')
+      : templateCommit;
+  for (const name of RELEASE_BUNDLE_FILES) writeFileSync(join(root, name), 'wrong working tree\n');
+  writeFileSync(join(root, '.env'), 'not a bundle file\n');
+  writeFileSync(join(root, 'docker-compose.dev.yml'), 'not a bundle file\n');
+  writeFileSync(join(root, 'install/bundle-env.json'), '[]');
   writeFileSync(join(root, 'packages/database/migrations/9999_wrong_tree.sql'), 'DROP TABLE x;');
   const record = {
     schema: 2,
@@ -133,6 +215,7 @@ function fixture(t, config = {}) {
   let archiveHost;
   let idReads = 0;
   let releaseBytes;
+  let releaseBundle;
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.ok(options.timeout > 0);
@@ -178,14 +261,33 @@ function fixture(t, config = {}) {
         assert.deepEqual(attempted, KEYS, 'release build follows every runtime push');
         assert.ok(existsSync(manifest), 'release build follows the local write');
         const context = args.at(-1);
-        assert.deepEqual(readdirSync(context).sort(), ['Dockerfile', 'release.json']);
-        assert.equal(
-          readFileSync(join(context, 'Dockerfile'), 'utf8'),
-          'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
+        assert.deepEqual(readdirSync(context).sort(), ['bundle', 'release.json']);
+        assert.deepEqual(
+          readdirSync(join(context, 'bundle')).sort(),
+          RELEASE_BUNDLE_FILES.filter((name) => !config.omitBundle?.includes(name)).sort(),
         );
+        assert.equal(readFileSync(args[args.indexOf('--file') + 1], 'utf8'), dockerfile);
         if (!config.releaseBuildBeforeLoadFailure)
           localTags.set(args[args.indexOf('--tag') + 1], IDS.release);
         releaseBytes = readFileSync(join(context, 'release.json'));
+        releaseBundle = Object.fromEntries(
+          readdirSync(join(context, 'bundle')).map((name) => [
+            name,
+            readFileSync(join(context, 'bundle', name), 'utf8'),
+          ]),
+        );
+        assert.deepEqual(
+          releaseBundle,
+          Object.fromEntries(
+            Object.entries(bundle).filter(([name]) => !config.omitBundle?.includes(name)),
+          ),
+        );
+        assert.deepEqual(
+          JSON.parse(releaseBytes).bundle.files,
+          Object.fromEntries(
+            Object.entries(releaseBundle).map(([name, body]) => [name, sha256(body)]),
+          ),
+        );
         assert.deepEqual(releaseBytes, readFileSync(manifest));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         assert.ok(args.includes('--load'));
@@ -300,6 +402,46 @@ function fixture(t, config = {}) {
           : archiveBodies[archiveHost],
       );
     }
+    if (cmd === 'tar' && args[0] === '-xf') {
+      const key = sha256(readFileSync(args[1]));
+      if (extractedArchives.has(key)) {
+        cpSync(extractedArchives.get(key), args.at(-1), { recursive: true });
+        return ok();
+      }
+      const result = spawnSync(cmd, args, { ...options, encoding: 'utf8' });
+      if (result.status === 0) {
+        const path = mkdtempSync(join(tmpdir(), 'publish-archive-'));
+        cpSync(args.at(-1), path, { recursive: true });
+        extractedArchives.set(key, path);
+      }
+      return result;
+    }
+    if (cmd === 'git' && args[0] === 'ls-tree') {
+      const key = JSON.stringify(args);
+      if (!gitTrees.has(key))
+        gitTrees.set(key, spawnSync(cmd, args, { ...options, encoding: 'utf8' }));
+      return gitTrees.get(key);
+    }
+    if (cmd === 'git' && args[0] === 'archive') {
+      const archive = args.find((arg) => arg.startsWith('--output=')).slice('--output='.length);
+      const key = JSON.stringify(args.filter((arg) => !arg.startsWith('--output=')));
+      if (gitArchives.has(key)) {
+        writeFileSync(archive, gitArchives.get(key));
+        return ok();
+      }
+      const result = spawnSync(cmd, args, { ...options, encoding: 'utf8' });
+      if (result.status === 0) gitArchives.set(key, readFileSync(archive));
+      return result;
+    }
+    if (cmd === process.execPath && args[0].endsWith('/scripts/build-release-manifest.mjs')) {
+      const normalized = args.map((arg, i) =>
+        i === 0 || args[i - 1] === '--bundle-dir' ? '<fixture-path>' : arg,
+      );
+      const key = JSON.stringify([commit, normalized]);
+      if (!generatedManifests.has(key))
+        generatedManifests.set(key, spawnSync(cmd, args, { ...options, encoding: 'utf8' }));
+      return generatedManifests.get(key);
+    }
     return spawnSync(cmd, args, { ...options, encoding: 'utf8' });
   };
   const request = async (url, options) => {
@@ -334,6 +476,9 @@ function fixture(t, config = {}) {
     bootCalls,
     get releaseBytes() {
       return releaseBytes;
+    },
+    get releaseBundle() {
+      return releaseBundle;
     },
     invoke: (extra = [], options = {}) =>
       run(['--record', path, '--out', out, ...extra], {
@@ -416,10 +561,47 @@ test('publish orders api, worker, web copy, then writes a valid manifest from th
   assert.equal(manifest.version, '9.9.9');
   assert.equal(manifest.migrationHead, '0001_record');
   assert.equal(manifest.contracts, false);
+  assert.deepEqual(manifest.bundle.env, bundleEnv);
+  assert.deepEqual(
+    manifest.bundle.files,
+    Object.fromEntries(Object.entries(bundle).map(([name, body]) => [name, sha256(body)])),
+  );
+  assert.deepEqual(manifest.bundle.known, [manifest.bundle.files]);
+  assert.equal(
+    existsSync(`${f.manifest}.image`),
+    false,
+    'successful publish removes recovery context',
+  );
   assert.ok(
     f.logs.findIndex((s) => s.includes('plan')) < f.logs.findIndex((s) => s.includes('published')),
   );
 });
+
+test('a recorded tree without optional overlays publishes only base and run', async (t) => {
+  const f = fixture(t, { omitBundle: ['docker-compose.gpu.yml', 'docker-compose.vulkan.yml'] });
+  assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+  assert.deepEqual(Object.keys(f.releaseBundle), ['docker-compose.run.yml', 'docker-compose.yml']);
+});
+
+test('an existing recovery context is preserved and refuses before any push', async (t) => {
+  const f = fixture(t);
+  const context = `${f.manifest}.image`;
+  mkdirSync(context, { recursive: true });
+  writeFileSync(join(context, 'marker'), 'previous attempt');
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, []);
+  assert.equal(readFileSync(join(context, 'marker'), 'utf8'), 'previous attempt');
+  assert.match(f.logs.join('\n'), /release image context already exists/);
+});
+
+for (const name of ['docker-compose.yml', 'docker-compose.run.yml', 'install/bundle-env.json']) {
+  test(`a recorded tree missing required ${name} refuses before any push`, async (t) => {
+    const f = fixture(t, { omitBundle: [name] });
+    assert.equal(await f.invoke(), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.equal(existsSync(f.manifest), false);
+  });
+}
 
 for (const kind of ['pushFailure', 'rereadFailure', 'rereadMismatch']) {
   for (const host of KEYS) {
@@ -1197,11 +1379,11 @@ for (const failure of [
     writeFileSync(
       docker,
       `#!${process.execPath}
-import {appendFileSync, readFileSync} from 'node:fs';
+import {appendFileSync, readFileSync, readdirSync} from 'node:fs';
 import {join} from 'node:path';
 const args=process.argv.slice(2);
 const build=args[0]==='buildx' && args[1]==='build';
-appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {body:readFileSync(join(args.at(-1),'release.json'),'utf8'), dockerfile:readFileSync(join(args.at(-1),'Dockerfile'),'utf8')} : {})})+'\\n');
+appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {body:readFileSync(join(args.at(-1),'release.json'),'utf8'), dockerfile:readFileSync(args[args.indexOf('--file')+1],'utf8'), files:readdirSync(args.at(-1)).sort(), bundle:Object.fromEntries(readdirSync(join(args.at(-1),'bundle')).map(name=>[name,readFileSync(join(args.at(-1),'bundle',name),'utf8')]))} : {})})+'\\n');
 `,
     );
     chmodSync(docker, 0o700);
@@ -1217,7 +1399,7 @@ appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {b
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const calls = readFileSync(captured, 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].args.slice(0, -1), [
+    assert.deepEqual(calls[0].args.slice(0, -3), [
       'buildx',
       'build',
       '--platform',
@@ -1226,13 +1408,17 @@ appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {b
       '--tag',
       destination('release'),
     ]);
+    assert.equal(calls[0].args.at(-3), '--file');
+    assert.deepEqual(calls[0].files, ['bundle', 'release.json']);
+    assert.deepEqual(calls[0].bundle, bundle);
     assert.equal(calls[0].body, readFileSync(f.manifest, 'utf8'));
-    assert.equal(
-      calls[0].dockerfile,
-      'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
-    );
+    assert.equal(calls[0].dockerfile, dockerfile);
     assert.deepEqual(calls[1].args, ['push', '--platform', 'linux/amd64', destination('release')]);
-    assert.equal(existsSync(calls[0].args.at(-1)), false, 'recovery context removed');
+    assert.equal(
+      existsSync(calls[0].args.at(-1)),
+      true,
+      'retained recovery context remains available',
+    );
     assert.doesNotMatch(recovery, /\bT\d+\b/);
   });
 }

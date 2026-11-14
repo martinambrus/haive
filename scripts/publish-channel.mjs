@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import {
+  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { parseReleaseManifest } from '../packages/shared/src/release/manifest.ts';
+import {
+  parseReleaseManifest,
+  RELEASE_BUNDLE_FILES,
+} from '../packages/shared/src/release/manifest.ts';
 import { parseRecord, run as checkBoot } from './channel-boot-check.mjs';
 
 import { createCapture, LOCAL_IMAGE_NOT_FOUND } from './channel-capture.mjs';
@@ -50,6 +56,7 @@ export async function run(
   let scratch;
   let output;
   let manifestWritten = false;
+  let retainedContext = false;
   let recovery;
   const attempted = [];
   const verified = [];
@@ -396,6 +403,17 @@ export async function run(
     const tree = join(scratch, 'tree');
     mkdirSync(tree);
     const archive = join(scratch, 'release-tree.tar');
+    // An absent overlay is legitimate, but required files must come from the recorded
+    // commit even when the working tree has a replacement. List only the fixed allowlist.
+    const bundleFiles = (
+      await command('git', ['ls-tree', '--name-only', record.commit, '--', ...RELEASE_BUNDLE_FILES])
+    ).stdout
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    for (const name of ['docker-compose.yml', 'docker-compose.run.yml'])
+      if (!bundleFiles.includes(name))
+        throw new Error(`record tree is missing required file ${name}`);
     await command('git', [
       'archive',
       '--format=tar',
@@ -404,8 +422,23 @@ export async function run(
       '--',
       'scripts/build-release-manifest.mjs',
       'packages/database/migrations',
+      'packages/shared/src/release/manifest.ts',
+      'install/bundle-env.json',
+      ...bundleFiles,
     ]);
     await command('tar', ['-xf', archive, '-C', tree]);
+    // Use the tagged schema source with the invoking checkout's installed dependencies.
+    symlinkSync(
+      join(root, 'packages/shared/node_modules'),
+      join(tree, 'packages/shared/node_modules'),
+      'dir',
+    );
+    const imageDir = mkdtempSync(join(scratch, 'manifest-image-'));
+    const context = join(imageDir, 'context');
+    const bundleDir = join(context, 'bundle');
+    mkdirSync(join(bundleDir, 'install'), { recursive: true });
+    for (const name of bundleFiles) renameSync(join(tree, name), join(bundleDir, name));
+    renameSync(join(tree, 'install/bundle-env.json'), join(bundleDir, 'install/bundle-env.json'));
     const images = Object.fromEntries(
       KEYS.map((host) => [
         host,
@@ -418,6 +451,8 @@ export async function run(
       record.tag,
       '--channel',
       record.channel,
+      '--bundle-dir',
+      bundleDir,
       ...['api', 'worker', 'web'].flatMap((host) => [`--${host}`, images[host]]),
     ]);
     const generated = JSON.parse(result.stdout);
@@ -425,6 +460,15 @@ export async function run(
       ...generated,
       images: { ...generated.images, builder: images.builder },
     });
+    if (!manifest.bundle) throw new Error('record tree produced no compose bundle');
+    rmSync(join(bundleDir, 'install'), { recursive: true });
+    const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+    writeFileSync(join(context, 'release.json'), manifestText, { mode: 0o600, flag: 'wx' });
+    writeFileSync(
+      join(imageDir, 'Dockerfile'),
+      'FROM scratch\nCOPY release.json /release.json\nCOPY bundle/ /bundle/\nLABEL org.haive.release=1\n',
+      { mode: 0o600, flag: 'wx' },
+    );
     if (
       manifest.version !== record.version ||
       manifest.channel !== record.channel ||
@@ -432,15 +476,22 @@ export async function run(
     )
       throw new Error('record tree produced an inconsistent release manifest');
     output = join(resolve(values.out?.[0] ?? dirname(recordPath)), 'release.json');
+    recovery.dir = `${output}.image`;
     emit(
       `publish-channel: plan manifest ${output} then ${destinations.release} LAST (metadata from ${record.commit})`,
     );
     if (existsSync(output)) throw new Error(`manifest already exists: ${output}`);
+    if (existsSync(recovery.dir))
+      throw new Error(`release image context already exists: ${recovery.dir}`);
     if (values['dry-run']) {
       emit('publish-channel: dry-run passed; nothing pushed; no manifest written');
       return 0;
     }
     mkdirSync(dirname(output), { recursive: true });
+    // Claim the recovery directory before any push; never overwrite another run's context.
+    mkdirSync(recovery.dir, { mode: 0o700 });
+    retainedContext = true;
+    cpSync(imageDir, recovery.dir, { recursive: true });
     for (const host of KEYS) {
       if (!(await absent(destinations[host]))) {
         emit(
@@ -482,19 +533,12 @@ export async function run(
       `.release-${process.pid}-${scratch.split(sep).at(-1)}.json`,
     );
     try {
-      writeFileSync(pending, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      writeFileSync(pending, manifestText, { mode: 0o600, flag: 'wx' });
       linkSync(pending, output);
       manifestWritten = true;
     } finally {
       rmSync(pending, { force: true });
     }
-    const context = mkdtempSync(join(scratch, 'manifest-image-'));
-    writeFileSync(join(context, 'release.json'), readFileSync(output), { mode: 0o600, flag: 'wx' });
-    writeFileSync(
-      join(context, 'Dockerfile'),
-      'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
-      { mode: 0o600, flag: 'wx' },
-    );
     await withLocalTag(destinations.release, async () => {
       await docker([
         'buildx',
@@ -504,7 +548,9 @@ export async function run(
         '--load',
         '--tag',
         destinations.release,
-        context,
+        '--file',
+        join(recovery.dir, 'Dockerfile'),
+        join(recovery.dir, 'context'),
       ]);
       expected.release = await platformDigest('release', { id: destinations.release });
       if (!(await absent(destinations.release)))
@@ -526,13 +572,13 @@ export async function run(
   } catch (error) {
     if (manifestWritten) {
       emit(
-        `publish-channel: recovery: inspect ${recovery.ref} before retrying; if it is already published, verify its /release.json against the retained file`,
+        `publish-channel: recovery: inspect ${recovery.ref} before retrying; if it is already published, verify its /release.json and /bundle against the retained context at ${recovery.dir}`,
       );
       emit(
         `publish-channel: recovery inspect: docker buildx imagetools inspect ${shellQuote(recovery.ref)}`,
       );
       emit(
-        `publish-channel: recovery command: ( recovery_dir=$(mktemp -d) && trap 'rm -rf -- "$recovery_dir"' EXIT && cp -- ${shellQuote(output)} "$recovery_dir/release.json" && printf '%s\\n' 'FROM scratch' 'COPY release.json /release.json' 'LABEL org.haive.release=1' > "$recovery_dir/Dockerfile" && docker buildx build --platform ${shellQuote(recovery.platform)} --load --tag ${shellQuote(recovery.ref)} "$recovery_dir" && docker push --platform ${shellQuote(recovery.platform)} ${shellQuote(recovery.ref)} )`,
+        `publish-channel: recovery command: docker buildx build --platform ${shellQuote(recovery.platform)} --load --tag ${shellQuote(recovery.ref)} --file ${shellQuote(join(recovery.dir, 'Dockerfile'))} ${shellQuote(join(recovery.dir, 'context'))} && docker push --platform ${shellQuote(recovery.platform)} ${shellQuote(recovery.ref)}`,
       );
     }
     emit(
@@ -540,6 +586,16 @@ export async function run(
     );
     return 2;
   } finally {
+    let cleanupFailed = false;
+    if (retainedContext && (!manifestWritten || verified.includes(recovery.ref))) {
+      try {
+        rmSync(recovery.dir, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        emit(`publish-channel: cleanup failed; leftover path ${recovery.dir}`);
+        // Continue to remove scratch even if removing the retained context failed.
+        cleanupFailed = true;
+      }
+    }
     if (scratch) {
       try {
         rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
@@ -548,6 +604,7 @@ export async function run(
         return 2;
       }
     }
+    if (cleanupFailed) return 2;
   }
 }
 
