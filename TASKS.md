@@ -633,20 +633,25 @@ status: open · kind: fix · found: #1156 reviews 2026-11-14 · priority: P4
 5. PRE-EXISTING, connected: a throw between the container ensure and the registry write (`worker/terminal/terminal-session-manager.ts` ~:490-527: turn, trust seed, workdir probe, exec, start) leaves a freshly created container that only the next worker boot/shutdown sweep removes. Write the registry entry right after the ensure.
 6. PRE-EXISTING, theoretical: the registry write is `hset` then three `hsetnx` (not atomic); a reaper sweep between them reads no `lastSeenAt`/`refcount` and may remove a just-attached container. Use one MULTI.
 
-### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold (+2)
+### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold (+9)
 
 status: open · kind: fix · priority: P3
 From the T406/T408 build (2026-11-07).
 
-1. Disabling a provider gives no warning that it now holds tasks and steps pinned to it (api cli-providers.ts PATCH ~:441-512). Introduced by the hold's semantics.
-2. A provider-hold park shows the "runtime slot" list badge: `deriveSlotWait` (shared step-engine/slot-wait.ts ~:97) has no structural column for a provider wait. Cosmetic, introduced.
-3. The hold copy names only enabling the provider, not switching the step's CLI (worker orchestrator/provider-hold.ts).
+1. DONE 2026-11-14 #1162: warns before a disable that would hold tasks (impact preview + confirm).
+2. DONE 2026-11-14 #1162: a provider hold shows its own badge (`provider_wait_provider_id`, `deriveSlotWait` kind provider).
+3. DONE 2026-11-14 #1162: the hold copy names enabling the provider and switching the step CLI.
 4. A step held on a disabled provider shows "usage not connected": the usage poll covers enabled providers only (worker usage-poll-queue.ts ~:424). PRE-EXISTING, widened.
-5. The recap filters `summaryCliProviderId` to enabled only and falls to the step CLI; a recap whose resolved CLI is a disabled explicit pick is skipped silently (worker step-runner.ts ~:3999-4000). PRE-EXISTING.
-6. The module-schema-wins precedence of the hold is untested.
+5. DONE 2026-11-14 #1162: the recap skip is logged at warn.
+6. DONE 2026-11-14 #1162: the hold precedence is tested.
 7. DONE 2026-11-14 #1156: a disable that races an open now closes with 4425.
 8. From #1145 review: the web task page loads providers once (`tasks/[id]/page.tsx` ~:1220), so a provider disabled in another tab leaves the shell picker stale until the server refuses the next connect. PRE-EXISTING, minor.
 9. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
+10. (#1162 review) The impact count runs per-task queries (N+1) over affected tasks (api lib/provider-disable-impact.ts). Low: admin action, bounded by open tasks.
+11. (#1162 review) The impact preview's list select is untested against a real DB; 404 and non-JSON preview replies are untested through the real web client. Tests only.
+12. (#1162 review) A reset path keeps `provider_wait_provider_id`; masked because the badge also requires `waiting_started_at`. Latent.
+13. (#1162 review) Save or Rebuild leaves the form in "building" if both the PATCH and the refetch fail (web cli-provider-form.tsx). PRE-EXISTING.
+14. (#1162 review) The deferred-poll control's red run was not isolated from the other changes; stale comment at worker step-engine `_helpers.ts` ~:980. Evidence and comment.
 
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
@@ -1882,6 +1887,7 @@ All low unless marked.
 
 ## Done
 
+- T553 items 1, 2, 3, 5, 6 — impact preview and confirm before a provider disable, provider-hold badge via `task_steps.provider_wait_provider_id` (migration 0236), hold copy names both ways out, recap skip logged, run-list and execution-path selection shared by api and worker — PR #1162 (d7a6a43ad), 2026-11-14; bots clean (Codex none, Greptile 5, P1 fixed and resolved), CI 17 pass; 0236 applied, libs rebuilt, api/worker ready, 0 error logs. Confirm dialog not browser-checked (a 0/0 disable saves at once and would change an owner provider row). Items 4, 8, 9 and lows 10-14 stay open.
 - T655 — upgrade postgres.js to unpatched v4.1.1, drop the local patch, guard file-reading DSN parameters — PR #1159 (d82c683fb), 2026-11-14; bots clean (Codex none, Greptile 5), CI 17 pass; deployed via pnpm docker rebuild, postgres@4.1.1 loaded, api/worker ready, 0 error logs. Lows T664, T555 item 6 done.
 - T659 — plan-canvas smoke race checks wait on PostgreSQL lock waits or peer settlement instead of sleeps (the CI failure was smoke timing; the merge it saw is correct); lows in T663 — PR #1161 (034003dea), 2026-11-14
 - T508 — a remote relink records a durable intent on the row; a fresh locked read reconciles Git's origin after a lost connection, failed COMMIT or process death, on the request path and through a sweep that skips locked and in-process-fenced repositories; lows in T662 — PR #1158 (8305c3d2d), 2026-11-14
