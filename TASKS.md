@@ -746,9 +746,9 @@ Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
 7. A dev-checkout image build copies local clones, `.selection.json` and the local `.lock` into the own-module builder; release builds from a clean checkout are required (documented).
 8. `.claude/memory-mirror/haive_next_build_on_dev_tree.md` still says to revert `next-env.d.ts`, which is now ignored.
 
-### T675 · FNF[plan-chat-bound] · bounded plan chat, plan writers and plan write fence lows, after #1178 and #1183 (+18)
+### T675 · FNF[plan-chat-bound] · bounded plan chat, plan writers and plan write fence lows, after #1178, #1183 and #1193 (+21)
 
-status: open (queued 2026-11-14 overnight: items 10 REGRESSION, 1 and 3; item 9 owed live check rides the capped workflow run; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
+status: open (items 10, 1 and 3 resolved 2026-11-14 in #1193; item 9 owed live check rides the capped workflow run; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md).
 
@@ -773,6 +773,9 @@ From #1183 (bounded plan writers 11f/01f), reviews in `.claude/tmp/codex-run/PB5
 16. The source-scan test exempts the whole bounded helper file and does not see wrappers outside step sources (`plan-prompt-render-source.test.ts`).
 17. The boundary tests now reach 01f/11f's sizing lambdas only through the helper; dropping the `maxChars` argument from a lambda would pass.
 18. A losing concurrent dispatch pass can overwrite the winner's checkpointed `detected` (runner checkpoint after `prepare`); safe direction (drops), theoretical.
+19. (#1193) A fold reply that carries a caller version on one op and also hits a conflict from a derived write is classified per reply, not per op, so it degrades to a re-ask (`_plan-prompt.ts` ~:330-347, `01-plan-build.ts` ~:892, `02-plan-coverage.ts` ~:799). LOW, parked.
+20. (#1193) `step-runner-llm.test.ts` ~:160-176: the mock's `insert().values()` is not thenable, so a bare `await db.insert(t).values(row)` records nothing and the assertion cannot see it. Test strength. LOW, parked.
+21. (#1193) The legacy recovery opens a transaction on every advance of 01-plan-chat even when the hook returns null. NIT, parked.
 
 ### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+33)
 
@@ -2172,6 +2175,7 @@ All low unless marked.
 
 ## Done
 
+- Plan chat bound follow-ups (#1193, 587b868a7): budgeted dispatch again drops house rules then agent rules for an argv-only adapter (pre-#1178 contract, required plan chat included); an oversized original is kept durably in `plan_node_messages` in the same transaction as the edit-form park, ordered before its replacement; clarification, build and coverage folds retry unversioned conflicts up to three times and re-ask a stale agent version. T675 items 1, 3 and 10.
 - Derived task types PR 4 (#1191, af136c094): the web editor for derived types: "Duplicate and customize" on the built-in workflow (no write until save; other bases show the catalog's reason), an ordered changes editor with a read-only path preview, live shared validation plus a debounced server preview, split skipped/stale warnings, gate-removal warning, overlay-only saves, 403/409 handling. Prerequisite 3 complete. Browser-checked on the dev stack 2026-11-14. Lows filed as T679 items 14-19.
 - Derived task types PR 2 (#1187): migrations 0240 (the `derived` run-list strategy) and 0241 (nullable `base_slug`, `changes` and `tasks.derived_run_plan`, named shape CHECKs, a restrictive self foreign key) with every existing row unchanged; readers refuse a derived type explicitly until PR3; the header's guarded manual cleanup refuses while any task uses a derived type. Applied to the dev database 2026-11-14. Its PR3 hazard is filed in T679 item 6.
 
