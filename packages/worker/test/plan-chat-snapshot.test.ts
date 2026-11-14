@@ -32,6 +32,19 @@ afterEach(async () => {
 const empty = { exitCode: 0, stdout: '', stderr: '', durationMs: 0, timedOut: false };
 
 describe('owned dispatch plan snapshot', () => {
+  it('lays out node ids, versions and bodies on separate lines for file tools', async () => {
+    const read = {
+      ...snapshot,
+      nodes: [{ id: 'find-this-node', version: 7, body: 'line one\nline two' }],
+    } as unknown as PlanChatSnapshot;
+    const file = await createPlanChatSnapshot(root, read);
+    const text = await readFile(join(root, file.subpath), 'utf8');
+    expect(JSON.parse(text)).toEqual(read);
+    expect(text.split('\n')).toContain('      "id": "find-this-node",');
+    expect(text.split('\n')).toContain('      "version": 7,');
+    expect(text.split('\n')).toContain('      "body": "line one\\nline two"');
+    await file.remove();
+  });
   it('keeps the same owned read when codex falls back before accepting a turn', () => {
     const fallback = codexExecFallbackSpec({
       command: 'codex',

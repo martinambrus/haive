@@ -43,7 +43,9 @@ export async function createPlanChatSnapshot(
   const rel = `${ROOT}/${randomUUID()}`;
   await ensureDirNoFollow(anchor, rel, { mode: 0o700 });
   try {
-    await writeFileNoFollow(anchor, `${rel}/plan.json`, JSON.stringify(snapshot), {
+    // Keep valid JSON with fields on separate lines: file tools can search an id
+    // and read its surrounding fields without consuming the whole plan at once.
+    await writeFileNoFollow(anchor, `${rel}/plan.json`, JSON.stringify(snapshot, null, 2), {
       mode: 'create-exclusive',
       fileMode: 0o644,
     });

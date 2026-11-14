@@ -128,6 +128,8 @@ describe('plan chat patches use the dispatch read', () => {
   it('patches a node beyond the focus neighbourhood using the index version', async () => {
     const f = await fixture();
     const prompt = planChatStep.llm!.buildPrompt({ detected: f.detected, formValues: {} });
+    expect(prompt).toContain('pretty-printed JSON');
+    expect(prompt).toContain('Search for the node id');
     expect(prompt.split('## Bounded plan index')[0]).not.toContain(`node:${id(4)}`);
     expect(prompt).toContain(`node:${id(4)}`);
     const out = await f.answer({
