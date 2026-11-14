@@ -45,7 +45,7 @@ export function DerivedTaskTypeChanges({
   error: string | null;
   disabled: boolean;
   editable: boolean;
-  revision: number;
+  revision: number | string;
   entries: CatalogEntries;
   requiresRepository: boolean;
   onChange: (changes: DerivedChange[]) => void;

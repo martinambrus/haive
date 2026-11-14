@@ -647,7 +647,7 @@ export function TaskTypeEditor({
             error={preview.error}
             disabled={saving || authoringForbidden}
             editable={editableFields.includes('changes')}
-            revision={formRevision}
+            revision={`${formRevision}:${typeSlug}`}
             entries={withPrompts!}
             requiresRepository={requiresRepository}
             onChange={(next) => {

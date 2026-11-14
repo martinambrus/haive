@@ -499,6 +499,55 @@ describe('derived editor', () => {
     expect(screen.queryByText('Static creator')).toBeNull();
   });
 
+  it('keeps renamed prompt ids and unsaved fields when editing a change after a slug rename', async () => {
+    const actualApi = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
+    mocks.createTaskType.mockImplementation(actualApi.createTaskType);
+    const fetch = wireResponse({ taskType: { ...row, slug: 'renamed' } });
+    await mount();
+    fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: 'mine' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Unsaved name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add prompt step' }));
+    fireEvent.change(screen.getByLabelText('Prompt template'), {
+      target: { value: 'Unsaved prompt' },
+    });
+    fireEvent.change(screen.getByLabelText(/^Target step/), { target: { value: 'a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add prompt step' }));
+    fireEvent.change(screen.getByLabelText('Prompt template'), {
+      target: { value: 'Second prompt' },
+    });
+    fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: 'renamed' } });
+    expect((screen.getAllByLabelText(/^Target step/)[0] as HTMLInputElement).value).toBe('a');
+    fireEvent.change(screen.getAllByLabelText(/^Target step/)[0]!, {
+      target: { value: '00-triage' },
+    });
+    const save = screen.getByRole('button', { name: 'Create task type' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await act(async () => {});
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetch.mock.calls[0]![1].body);
+    expect(body).toMatchObject({
+      slug: 'renamed',
+      displayName: 'Unsaved name',
+      changes: [
+        { insertAfter: '00-triage', step: 'custom.renamed.prompt-step' },
+        { insertAfter: 'custom.renamed.prompt-step', step: 'custom.renamed.prompt-step-2' },
+      ],
+      promptSteps: {
+        'prompt-step': { template: 'Unsaved prompt' },
+        'prompt-step-2': { template: 'Second prompt' },
+      },
+    });
+    const evaluation = evaluateDerivedEditor({
+      ...body,
+      typeSlug: body.slug,
+      catalog: fixture.catalog,
+      loopLimits: body.stepLoopLimitDefaults ?? {},
+    });
+    expect(evaluation.issues).toEqual([]);
+    expect(evaluation.defaultIssues).toEqual([]);
+  });
+
   it('warns on safeguard removal while shared composition decides validity', async () => {
     await mount({ slug: 'mine', duplicateBaseSlug: '' });
     fireEvent.click(screen.getByRole('button', { name: 'Add change' }));
