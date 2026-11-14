@@ -508,6 +508,43 @@ describe('derived task pin readers', () => {
     // Persisted pins take precedence over the definition's strategy.
     expect(taskRunListIds({ ...task, runListStrategy: 'run_app_modes' }, () => [])).toEqual(prefix);
   });
+  it('reads a pinned plan without applying tightened composition rules', async () => {
+    const { parseDerivedRunPlan, pinnedTaskStepIds, derivedTaskWarnings } =
+      await import('../src/modularity/derived-task-types.js');
+    const { validateComposition } = await import('../src/modularity/composition.js');
+    const { taskRunListIds } = await import('../src/step-engine/run-list.js');
+    const raw = plan();
+    raw.composableEntries = raw.composableEntries.map((entry) =>
+      entry.stepId === 'a'
+        ? { ...entry, requires: [{ needs: 'new-token', reason: 'a later composition rule' }] }
+        : entry,
+    );
+    expect(
+      validateComposition(
+        raw.candidates[0]!.stepIds,
+        new Map(raw.composableEntries.map((entry) => [entry.stepId, entry])),
+        { requiresRepository: true },
+      ),
+    ).toEqual([expect.objectContaining({ kind: 'unmet-need' })]);
+    expect(parseDerivedRunPlan(raw)).toEqual(raw);
+    expect(pinnedTaskStepIds({ derivedRunPlan: raw, executionPath: 'full_workflow' })).toEqual([
+      ...prefix,
+      'a',
+    ]);
+    expect(
+      taskRunListIds(
+        {
+          workflowType: 'derived-test',
+          runListStrategy: 'derived',
+          runListSnapshot: null,
+          executionPath: 'full_workflow',
+          derivedRunPlan: raw,
+        },
+        () => [],
+      ),
+    ).toEqual([...prefix, 'a']);
+    expect(derivedTaskWarnings(raw)).toEqual([]);
+  });
   it('names malformed and missing plans rather than using a custom slug live fallback', async () => {
     const { parseDerivedRunPlan, pinnedTaskStepIds } =
       await import('../src/modularity/derived-task-types.js');
@@ -516,6 +553,7 @@ describe('derived task pin readers', () => {
       null,
       {},
       { ...plan(), version: 2 },
+      { ...plan(), unexpected: true },
       { ...plan(), candidates: plan().candidates.slice(1) },
       { ...plan(), commonPrefix: ['a'] },
     ]) {

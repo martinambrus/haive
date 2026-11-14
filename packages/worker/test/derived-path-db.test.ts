@@ -229,6 +229,26 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
       expect((await task()).runListSnapshot).toEqual(selected.runListSnapshot);
     },
   );
+  it('revalidates only the chosen candidate at first triage', async () => {
+    const stored = pin();
+    stored.composableEntries = stored.composableEntries.map((entry) =>
+      entry.stepId === 'quick'
+        ? { ...entry, requires: [{ needs: 'new-token', reason: 'tightened composition rule' }] }
+        : entry,
+    );
+    await db
+      .update(schema.tasks)
+      .set({ derivedRunPlan: stored })
+      .where(eq(schema.tasks.id, taskId));
+    await expect(
+      pinDerivedWorkflowPath(ctx(), 'quick_bugfix', true, registry()),
+    ).rejects.toMatchObject({ code: 'invalid-derived-run-plan' });
+    expect((await task()).executionPath).toBeNull();
+    expect(await events()).toHaveLength(0);
+    await pinDerivedWorkflowPath(ctx(), 'full_workflow', false, registry());
+    expect((await task()).executionPath).toBe('full_workflow');
+  });
+
   it('prunes task-only defaults and keeps the immutable plan through a full retry', async () => {
     await pinDerivedWorkflowPath(ctx(), 'quick_bugfix', false, registry());
     expect(await task()).toMatchObject({

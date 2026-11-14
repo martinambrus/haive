@@ -1,7 +1,12 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { ExecutionPath } from '@haive/shared';
-import { derivedCandidateIds, parseDerivedRunPlan } from '@haive/shared/modularity';
+import {
+  DerivedRunPlanError,
+  derivedCandidateIds,
+  parseDerivedRunPlan,
+  validateComposition,
+} from '@haive/shared/modularity';
 import { UnresolvedStepError, stepRegistry, type StepRegistry } from './registry.js';
 import type { StepContext } from './step-definition.js';
 import { lockOwnedStep, StepSupersededError } from './step-ownership.js';
@@ -64,6 +69,16 @@ export async function pinDerivedWorkflowPath(
     if (task.executionPath !== null && task.executionPath !== path)
       throw new DerivedPathPinnedError();
     const stepIds = derivedCandidateIds(plan, path);
+    if (
+      task.executionPath === null &&
+      validateComposition(
+        stepIds,
+        new Map(plan.composableEntries.map((entry) => [entry.stepId, entry])),
+        { requiresRepository: plan.requiresRepository },
+      ).length > 0
+    )
+      throw new DerivedRunPlanError();
+
     const scope = {
       taskId: task.id,
       runListSnapshot: stepIds,

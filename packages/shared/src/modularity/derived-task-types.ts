@@ -353,13 +353,12 @@ const planSchema = z
   })
   .strict();
 
-/** Never rebuild an existing task from today's definition or catalog. */
+/** Read pinned shape/invariants only. Composition rules run at admission and first triage. */
 export function parseDerivedRunPlan(raw: unknown): DerivedRunPlan {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) throw new DerivedRunPlanError();
   const plan = parsed.data;
   const paths = [null, ...EXECUTION_PATHS];
-  const catalog = new Map(plan.composableEntries.map((entry) => [entry.stepId, entry]));
   if (
     JSON.stringify(plan.commonPrefix) !== JSON.stringify(DERIVED_WORKFLOW_PREFIX) ||
     [plan.base.candidates, plan.candidates].some(
@@ -379,9 +378,7 @@ export function parseDerivedRunPlan(raw: unknown): DerivedRunPlan {
             outcome.operationIndex !== i ||
             outcome.outcome === 'refused' ||
             JSON.stringify(outcome.change) !== JSON.stringify(plan.overlay.changes[i]),
-        ) ||
-        validateComposition(c.stepIds, catalog, { requiresRepository: plan.requiresRepository })
-          .length > 0,
+        ),
     )
   ) {
     throw new DerivedRunPlanError();
