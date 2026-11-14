@@ -1,5 +1,12 @@
 import { loadFixTestRecords } from './_fix-test-store.js';
-import { fixTestEditsRow, type FixTestRecord } from './_fix-test-edits.js';
+import {
+  fixTestEditsRow,
+  fixTestSummaries,
+  type FixTestSummary,
+  type FixTestRecord,
+} from './_fix-test-edits.js';
+
+const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 import { findingUpstream, type UpstreamKind } from './_dependency-policy.js';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -250,7 +257,7 @@ interface VerifyGateDetect {
   } | null;
   /** Same code or defect elsewhere that the implementation left alone. Optional because this
    *  payload is persisted: a gate parked before the field existed replays without it. */
-  fixTestRecords?: FixTestRecord[];
+  fixTestRecords?: FixTestSummary[];
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   /** Optional improvements agents noted outside the task that nobody picked at 08e. Optional for
@@ -947,13 +954,29 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       dbAccess,
       screenshotsArtifactPath,
       runtimeSmoke,
-      fixTestRecords: await loadFixTestRecords(ctx.db, ctx.taskId),
+      fixTestRecords: fixTestSummaries(
+        await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false }),
+      ),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
       outOfScopeInsightsOmitted: insights.omitted,
       houseRules,
     };
+  },
+
+  async prepareForm(ctx, detected): Promise<void> {
+    const records = detected.fixTestRecords?.length
+      ? await loadFixTestRecords(ctx.db, ctx.taskId)
+      : [];
+    // Strip even a legacy detect payload; patches are only for this form construction.
+    detected.fixTestRecords = fixTestSummaries(
+      (detected.fixTestRecords ?? []).map((r) => ({
+        ...r,
+        changes: r.changes.map((c) => ({ ...c, patch: '' })),
+      })),
+    );
+    displayTestRecords.set(detected, records);
   },
 
   form(_ctx, detected): FormSchema {
@@ -1443,7 +1466,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       'To have this task fix one, reject with feedback that names it; otherwise consider a follow-up task.',
     );
     if (similarRow) rows.push(similarRow);
-    const testRow = fixTestEditsRow(detected.fixTestRecords ?? []);
+    const testRow = fixTestEditsRow(displayTestRecords.get(detected) ?? []);
     if (testRow) rows.push(testRow);
     const insightRow = insightsRow(
       detected.outOfScopeInsights ?? [],

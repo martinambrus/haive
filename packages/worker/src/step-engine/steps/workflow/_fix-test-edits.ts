@@ -73,6 +73,15 @@ export interface FixTestRecord {
   changes: TestEdit[];
   couldNotMeasure?: number;
 }
+export type FixTestSummary = Omit<FixTestRecord, 'changes'> & {
+  changes: Omit<TestEdit, 'patch' | 'cut'>[];
+};
+export const fixTestSummaries = (records: readonly FixTestRecord[]): FixTestSummary[] =>
+  records.map((record) => ({
+    ...record,
+    changes: record.changes.map(({ patch: _patch, cut: _cut, ...change }) => change),
+  }));
+
 const safePath = (path: string): boolean =>
   sanitizeSimilarSites([{ path, reason: '' }])[0]?.path === path && !path.includes('\\');
 

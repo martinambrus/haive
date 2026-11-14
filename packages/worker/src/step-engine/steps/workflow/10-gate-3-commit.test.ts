@@ -916,7 +916,7 @@ describe('gate 3 repair evidence', () => {
     },
   );
 
-  it('renders the saved record without sending its patch to the message writer', () => {
+  it('loads patches at display time without persisting them in detect or sending them to the message writer', async () => {
     const detected = {
       workspacePath: '/repo',
       dirtyFiles: 1,
@@ -935,6 +935,9 @@ describe('gate 3 repair evidence', () => {
         },
       ],
     };
+    vi.mocked(loadFixTestRecords).mockResolvedValueOnce(detected.fixTestRecords as never);
+    await gate3CommitStep.prepareForm!({ taskId: 'task', db: {} } as never, detected as never);
+    expect(JSON.stringify(detected)).not.toContain('PRIVATE-PATCH');
     const form = gate3CommitStep.form!({} as never, detected as never)!;
     expect(
       form.statusSummary?.find((r) => r.label === 'Test edits during fix passes')?.body,

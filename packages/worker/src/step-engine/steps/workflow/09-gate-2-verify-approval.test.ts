@@ -785,22 +785,28 @@ describe('gate-2 similar sites', () => {
   const form = (detected: unknown) =>
     gate2VerifyApprovalStep.form!({} as never, detected as never)!;
 
-  it('renders a durable repair record as a separate multiline evidence row', () => {
-    const rows =
-      form({
-        ...base,
-        fixTestRecords: [
-          {
-            invocationId: 'run',
-            stepId: '08b-test-management',
-            round: 2,
-            pass: 1,
-            beforeEventId: 'event',
-            state: 'captured',
-            changes: [{ path: 'tests/a.test.ts', kind: 'modified', patch: '-old\n+new' }],
-          },
-        ],
-      }).statusSummary ?? [];
+  it('loads repair patches while preparing the form, keeping detect metadata patch-free', async () => {
+    const detected = {
+      ...base,
+      fixTestRecords: [
+        {
+          invocationId: 'run',
+          stepId: '08b-test-management',
+          round: 2,
+          pass: 1,
+          beforeEventId: 'event',
+          state: 'captured',
+          changes: [{ path: 'tests/a.test.ts', kind: 'modified', patch: '-old\n+new' }],
+        },
+      ],
+    };
+    m.loadFixTestRecords.mockResolvedValueOnce(detected.fixTestRecords as never);
+    await gate2VerifyApprovalStep.prepareForm!(
+      { taskId: 'task', db: {} } as never,
+      detected as never,
+    );
+    expect(JSON.stringify(detected)).not.toContain('-old');
+    const rows = form(detected).statusSummary ?? [];
     expect(rows.find((r) => r.label === 'Test edits during fix passes')?.body).toContain(
       '-old\n+new',
     );

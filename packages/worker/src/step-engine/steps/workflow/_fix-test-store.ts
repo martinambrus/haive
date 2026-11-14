@@ -393,6 +393,7 @@ export async function loadFixTestRecords(
   db: Database,
   taskId: string,
   limit = FIX_TEST_RECORD_LIMIT,
+  options: { patches?: boolean } = {},
 ): Promise<FixTestRecord[]> {
   const starts = await db
     .select()
@@ -439,17 +440,18 @@ export async function loadFixTestRecords(
       if (y?.hash) hashes.add(y.hash);
     }
   }
-  const blobs = hashes.size
-    ? await db
-        .select()
-        .from(schema.fixTestBlobs)
-        .where(
-          and(
-            eq(schema.fixTestBlobs.taskId, taskId),
-            inArray(schema.fixTestBlobs.contentHash, [...hashes]),
-          ),
-        )
-    : [];
+  const blobs =
+    options.patches !== false && hashes.size
+      ? await db
+          .select()
+          .from(schema.fixTestBlobs)
+          .where(
+            and(
+              eq(schema.fixTestBlobs.taskId, taskId),
+              inArray(schema.fixTestBlobs.contentHash, [...hashes]),
+            ),
+          )
+      : [];
   const bytes = new Map(
     blobs
       .filter((b) => b.content && !b.expiredAt)
@@ -481,6 +483,7 @@ export async function loadFixTestRecords(
       ...compareTestImages(
         hydrate(imageFor(p)),
         hydrate(imageFor(end?.payload as unknown as Reference | undefined)),
+        options.patches === false ? { bytes: 0, lines: 0 } : undefined,
       ),
     };
   });

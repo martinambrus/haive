@@ -1,5 +1,12 @@
 import { loadFixTestRecords } from './_fix-test-store.js';
-import { fixTestEditsRow, type FixTestRecord } from './_fix-test-edits.js';
+import {
+  fixTestEditsRow,
+  fixTestSummaries,
+  type FixTestSummary,
+  type FixTestRecord,
+} from './_fix-test-edits.js';
+
+const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
 import type { CommitDiffArtifact } from '@haive/shared/commit-diff-artifact';
@@ -67,7 +74,7 @@ interface CommitGateDetect {
   commitMessageContext?: string;
   /** Only when no gate 2 decided on this run's similar sites (quick_bugfix has none). Optional
    *  because this payload is persisted. */
-  fixTestRecords?: FixTestRecord[];
+  fixTestRecords?: FixTestSummary[];
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
@@ -270,7 +277,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactPath: null,
         changedFileCount: 0,
         diffArtifactTruncated: false,
-        fixTestRecords: hadGate2Decision ? [] : await loadFixTestRecords(ctx.db, ctx.taskId),
+        fixTestRecords: hadGate2Decision
+          ? []
+          : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
         similarSites: similar.sites,
         similarSitesOmitted: similar.omitted,
         outOfScopeInsights: insights.insights,
@@ -343,7 +352,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       changedFileCount,
       diffArtifactTruncated,
       commitMessageContext: messageContext,
-      fixTestRecords: hadGate2Decision ? [] : await loadFixTestRecords(ctx.db, ctx.taskId),
+      fixTestRecords: hadGate2Decision
+        ? []
+        : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
       outOfScopeInsights: insights.insights,
@@ -395,6 +406,20 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     bypassStub: () => ({ commitMessage: 'test: describe pending workflow changes' }),
   },
 
+  async prepareForm(ctx, detected): Promise<void> {
+    const records = detected.fixTestRecords?.length
+      ? await loadFixTestRecords(ctx.db, ctx.taskId)
+      : [];
+    // Strip even a legacy detect payload; patches are only for this form construction.
+    detected.fixTestRecords = fixTestSummaries(
+      (detected.fixTestRecords ?? []).map((r) => ({
+        ...r,
+        changes: r.changes.map((c) => ({ ...c, patch: '' })),
+      })),
+    );
+    displayTestRecords.set(detected, records);
+  },
+
   form(_ctx, detected, llmOutput): FormSchema {
     const suggestedMessage = generatedCommitMessage(llmOutput);
     const similarRow = similarSitesRow(
@@ -410,7 +435,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const statusRows = [
       houseRulesRow(detected.houseRules),
       similarRow,
-      fixTestEditsRow(detected.fixTestRecords ?? []),
+      fixTestEditsRow(displayTestRecords.get(detected) ?? []),
       insightRow,
     ].filter((r) => r !== null);
     return {
