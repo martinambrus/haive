@@ -1915,7 +1915,17 @@ All low unless marked.
 8. Failed-merge notice edges (display only): cancelling the newest failed conversation surfaces an older failed one; the notice persists after Save/Pull discards its worktree; two reads in `Promise.all` can show one task as both `merge` and `failedMerge` for one poll.
 9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
 
+- T667 FNF[learning-reconcile-lows]: step 11 reconcile event follow-ups (+6)
+  - Replay or Retry inserts a suffixed duplicate learning (`11-phase-8-learning.ts` resolveInsertId ~:763). PRE-EXISTING, consequential: duplicates learnings and inflates the event's insert counts on retried runs.
+  - Re-rolled pre-form drafts (`shouldRetryPreForm`) leave no admission-rejection trace; M3 under-counts. PRE-EXISTING, LOW.
+  - Real `ON CONFLICT` path has only a fake-store test; add a throwaway-DB smoke (`_learning-outcome.ts`). LOW.
+  - A failed row is kept if the same generation+invocation later succeeds (`DO NOTHING`); no path found today; `DO UPDATE ... WHERE status='failed'` if one appears. LOW.
+  - 'learning.reconciled' string duplicated in worker `_learning-outcome.ts` and web `activity-events.ts`; move to shared event-type constants (`shared/src/schemas/tasks.ts`). LOW.
+  - Live check owed: a real task's step 11 writes the event with nonzero counts (plan P1 verification). OWED.
+
 ## Done
+
+- Agent-memory P1.1 (#1168): step 11 records one versioned `learning.reconciled` event per apply (counts only; replay-safe id); docs/architecture/learning-reconcile.md. Lows filed as T667.
 
 - Context-tiered pricing PR 2 (#1167): per-request usage capture (Claude family, codex app-server watermarks, Gemini count) with complete/incomplete coverage; prices nothing yet. PR 3 prerequisites filed under T665.
 
