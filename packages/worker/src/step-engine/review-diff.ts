@@ -171,10 +171,12 @@ export function serializeReviewPayload(
   };
 }
 
+export const REVIEW_GITLINK_PATHSPEC_BYTES = 32 * 1024;
 export const REVIEW_METADATA_BYTES = 16 * 1024 * 1024;
 export const REVIEW_RETAINED_CONTENT_BYTES = 16 * 1024 * 1024;
 interface CaptureLimits {
   retainedContentBytes?: number;
+  gitlinkPathspecBytes?: number;
 }
 class DiffTooLarge extends Error {}
 const EMPTY_SCOPE: ImplementationFileSet = {
@@ -302,14 +304,37 @@ export async function readReviewDiff(
       const indexPaths = withholdAll
         ? []
         : [...safePaths.values()].filter((p) => !deniedPaths.has(p)).map((p) => ':(literal)' + p);
-      const gitlinks = new Set(
-        (indexPaths.length ? await run(['ls-files', '--stage', '-z', '--', ...indexPaths]) : '')
-          .split('\0')
-          .flatMap((record) => {
-            const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
-            return match ? [match[1]!] : [];
-          }),
+      // Bound argv bytes, not just count: git paths can have very different lengths.
+      const pathspecBudget = Math.min(
+        captureLimits.gitlinkPathspecBytes ?? REVIEW_GITLINK_PATHSPEC_BYTES,
+        REVIEW_GITLINK_PATHSPEC_BYTES,
       );
+      if (!Number.isSafeInteger(pathspecBudget) || pathspecBudget <= 0)
+        throw new Error('The gitlink pathspec budget must be a positive safe integer.');
+      const gitlinks = new Set<string>();
+      const readGitlinks = async (batch: string[]) => {
+        for (const record of (await run(['ls-files', '--stage', '-z', '--', ...batch])).split(
+          '\0',
+        )) {
+          const match = /^160000 [a-f0-9]{40,64} [0-3]\t(.*)$/s.exec(record);
+          if (match) gitlinks.add(match[1]!);
+        }
+      };
+      let batch: string[] = [];
+      let batchBytes = 0;
+      for (const pathspec of indexPaths) {
+        const bytes = Buffer.byteLength(pathspec) + 1;
+        if (bytes > pathspecBudget)
+          throw new Error('A review path exceeds the gitlink argument budget.');
+        if (batchBytes + bytes > pathspecBudget) {
+          await readGitlinks(batch);
+          batch = [];
+          batchBytes = 0;
+        }
+        batch.push(pathspec);
+        batchBytes += bytes;
+      }
+      if (batch.length) await readGitlinks(batch);
       for (const p of allPaths) {
         checkHostCancellation(ctx);
         const safe = safePaths.get(p);

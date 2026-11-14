@@ -11,6 +11,7 @@ import {
   readReviewDiff,
   serializeReviewPayload,
   REVIEW_RETAINED_CONTENT_BYTES,
+  REVIEW_GITLINK_PATHSPEC_BYTES,
 } from '../src/step-engine/review-diff.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { gitRun } from '../src/repo/git-exec.js';
@@ -611,4 +612,62 @@ it('keeps ordinary evidence beside a phantom denied reported path', async () => 
   expect(
     vi.mocked(gitRun).mock.calls.some((call) => call[1].includes(':(literal)phantom.bak')),
   ).toBe(false);
+});
+
+it('batches gitlink pathspecs within an injected argv-byte budget across the uncapped change', async () => {
+  expect(REVIEW_GITLINK_PATHSPEC_BYTES).toBe(32 * 1024);
+  const gitlinkPathspecBytes = 24;
+  vi.mocked(collectImplementationFiles).mockResolvedValue({
+    ...scope,
+    files: ['a', 'b'],
+    total: 4,
+    truncated: true,
+  });
+  const run = vi.mocked(gitRun).getMockImplementation()!;
+  vi.mocked(gitRun).mockImplementation(async (...args) => {
+    if (args[1].includes('--name-status'))
+      return {
+        code: 0,
+        stdout: 'M\0a\0M\0b\0M\0c\0M\0d\0',
+        stderr: '',
+      };
+    if (!args[1].includes('--stage')) return run(...args);
+    const pathspecs = args[1].slice(args[1].indexOf('--') + 1);
+    const bytes = pathspecs.reduce((sum, p) => sum + Buffer.byteLength(p) + 1, 0);
+    if (bytes > gitlinkPathspecBytes)
+      return {
+        code: -1,
+        noExit: 'E2BIG',
+        stdout: '',
+        stderr: '',
+      };
+    return {
+      code: 0,
+      stderr: '',
+      stdout: pathspecs.includes(':(literal)b') ? '160000 ' + 'a'.repeat(40) + ' 0\tb\0' : '',
+    };
+  });
+  const result = await readReviewDiff(ctx, '/repo', options, { gitlinkPathspecBytes });
+  expect(result).toMatchObject({ status: 'ready', partial: true });
+  if (result.status !== 'ready') return;
+  expect(JSON.parse(result.content).files).toContainEqual(
+    expect.objectContaining({ path: 'b', kind: 'gitlink' }),
+  );
+  expect(JSON.parse(result.content).fileContents).toContainEqual({ path: 'a', content: 'z' });
+  const calls = vi.mocked(gitRun).mock.calls.filter((call) => call[1].includes('--stage'));
+  expect(calls).toHaveLength(4);
+  for (const call of calls) {
+    const pathspecs = call[1].slice(call[1].indexOf('--') + 1);
+    expect(pathspecs.reduce((sum, p) => sum + Buffer.byteLength(p) + 1, 0)).toBeLessThanOrEqual(
+      gitlinkPathspecBytes,
+    );
+    expect(call[3]?.signal).toBe(ctx.signal);
+  }
+  for (const pass of [calls.slice(0, 2), calls.slice(2)])
+    expect(pass.flatMap((call) => call[1].slice(call[1].indexOf('--') + 1))).toEqual([
+      ':(literal)a',
+      ':(literal)b',
+      ':(literal)c',
+      ':(literal)d',
+    ]);
 });
