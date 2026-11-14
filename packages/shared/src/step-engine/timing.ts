@@ -107,6 +107,36 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
   return { workMs: 0, idleMs: c.idleMs + c.workMs, userActiveMs: c.userActiveMs };
 }
 
+/** Per-step contributions with task-wide park suppression and carried timing. */
+function taskContributions(steps: TaskTimingStep[], nowMs: number): TaskTiming[] {
+  // A task with a live step is not queued for a slot, so NO pre-run park counts: whatever the
+  // orchestrator is doing now is the task's real state. This matters because a park's poll chain
+  // can end while its marker is still open — the advance is skipped once another step becomes
+  // active, and a dead loop cannot fold its own park — and that stale marker would otherwise
+  // tick idle for as long as the other step works, billing the same wall clock twice.
+  const taskIsElsewhere = steps.some(
+    (s) => s.status === 'running' || s.status === 'waiting_cli' || s.status === 'waiting_form',
+  );
+  let liveParkIdx = -1;
+  let liveParkAt = -Infinity;
+  for (let i = 0; i < steps.length && !taskIsElsewhere; i++) {
+    const at = openPreRunParkAt(steps[i]!);
+    if (at !== null && at > liveParkAt) {
+      liveParkAt = at;
+      liveParkIdx = i;
+    }
+  }
+  return steps.map((s, i) => {
+    const superseded = i !== liveParkIdx && openPreRunParkAt(s) !== null;
+    const c = computeStepContribution(superseded ? { ...s, waitingStartedAt: null } : s, nowMs);
+    return {
+      workMs: c.workMs + (s.carriedWorkMs ?? 0),
+      idleMs: c.idleMs + (s.carriedIdleMs ?? 0),
+      userActiveMs: c.userActiveMs + (s.carriedUserActiveMs ?? 0),
+    };
+  });
+}
+
 /** Active-work / idle / user-active breakdown for a task, summed across its steps.
  *
  *  `nowMs` is the task's EFFECTIVE now — `completedAt ?? Date.now()` — never a bare wall
@@ -132,35 +162,107 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
  *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
  *  was already folded into carried_idle_ms. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
-  // A task with a live step is not queued for a slot, so NO pre-run park counts: whatever the
-  // orchestrator is doing now is the task's real state. This matters because a park's poll chain
-  // can end while its marker is still open — the advance is skipped once another step becomes
-  // active, and a dead loop cannot fold its own park — and that stale marker would otherwise
-  // tick idle for as long as the other step works, billing the same wall clock twice.
-  const taskIsElsewhere = steps.some(
-    (s) => s.status === 'running' || s.status === 'waiting_cli' || s.status === 'waiting_form',
+  return taskContributions(steps, nowMs).reduce(
+    (total, c) => ({
+      workMs: total.workMs + c.workMs,
+      idleMs: total.idleMs + c.idleMs,
+      userActiveMs: total.userActiveMs + c.userActiveMs,
+    }),
+    { workMs: 0, idleMs: 0, userActiveMs: 0 },
   );
-  let liveParkIdx = -1;
-  let liveParkAt = -Infinity;
-  for (let i = 0; i < steps.length && !taskIsElsewhere; i++) {
-    const at = openPreRunParkAt(steps[i]!);
-    if (at !== null && at > liveParkAt) {
-      liveParkAt = at;
-      liveParkIdx = i;
-    }
-  }
-  let workMs = 0;
-  let idleMs = 0;
-  let userActiveMs = 0;
-  for (let i = 0; i < steps.length; i++) {
-    const s = steps[i]!;
-    const superseded = i !== liveParkIdx && openPreRunParkAt(s) !== null;
-    const c = computeStepContribution(superseded ? { ...s, waitingStartedAt: null } : s, nowMs);
-    workMs += c.workMs + (s.carriedWorkMs ?? 0);
-    idleMs += c.idleMs + (s.carriedIdleMs ?? 0);
-    userActiveMs += c.userActiveMs + (s.carriedUserActiveMs ?? 0);
-  }
-  return { workMs, idleMs, userActiveMs };
+}
+
+export const TIME_CATEGORIES = [
+  'setup',
+  'planning',
+  'implementation',
+  'tests',
+  'review',
+  'delivery',
+  'other',
+] as const;
+export type TimeCategory = (typeof TIME_CATEGORIES)[number];
+
+/** Persisted ids, never display names or positions. Unknown/custom/module steps are Other. */
+export const TIME_CATEGORY_BY_STEP: Readonly<Record<string, TimeCategory>> = Object.freeze({
+  '00-model-health-workflow': 'setup',
+  '00a-sync-base': 'setup',
+  '00-triage': 'setup',
+  '00b-estimate': 'setup',
+  '01-debug-mode': 'setup',
+  '01-worktree-setup': 'setup',
+  '01a-app-boot': 'setup',
+  '01b-install-plugins': 'setup',
+  '01c-ddev-env': 'setup',
+  '01c1-restore-database': 'setup',
+  '01d-browser-access': 'setup',
+  '01e-external-kb-sync': 'setup',
+  '01f-external-plan-sync': 'setup',
+  '01g-rag-source-selection': 'setup',
+  '02-pre-rag-sync': 'setup',
+  '06a-db-migrate': 'setup',
+  '03-phase-0a-discovery': 'planning',
+  '03b-business-requirements': 'planning',
+  '03b2-humanize-requirements': 'planning',
+  '03c-business-requirements-review': 'planning',
+  '04-phase-0b-pre-planning': 'planning',
+  '04a-spec-audit': 'planning',
+  '05-phase-0b5-spec-quality': 'planning',
+  '05a-resolve-spec-warnings': 'planning',
+  '06-gate-1-spec-approval': 'planning',
+  '06-run-config': 'planning',
+  '06b-sprint-planning': 'planning',
+  '06c-dag-execute': 'implementation',
+  '07-phase-2-implement': 'implementation',
+  '07a-code-simplify': 'implementation',
+  '07c-ddev-reconcile': 'implementation',
+  '08b-test-management': 'tests',
+  '08-phase-5-verify': 'tests',
+  '08a-browser-setup': 'tests',
+  '08a-browser-verify': 'tests',
+  '08d-adversarial-qa': 'tests',
+  '08d2-adversarial-qa-review': 'tests',
+  '07b-phase-4-validate': 'review',
+  '08c-code-review': 'review',
+  '08c2-code-audit': 'review',
+  '08e-insights-triage': 'review',
+  '09-gate-2-verify-approval': 'review',
+  '10-gate-3-commit': 'delivery',
+  '11-phase-8-learning': 'delivery',
+  '11a-gate-4-push': 'delivery',
+  '11b-kb-commit': 'delivery',
+  '11b1-rag-source-selection': 'delivery',
+  '11c-rag-reindex': 'delivery',
+  '11d-skill-sync': 'delivery',
+  '11e-prompt-guidance': 'delivery',
+  '11f-plan-reconcile': 'delivery',
+  '11g-save-database': 'delivery',
+  '12-worktree-cleanup': 'delivery',
+  '13-pr-wait': 'delivery',
+});
+
+export function timeCategoryOf(stepId: string): TimeCategory {
+  return Object.hasOwn(TIME_CATEGORY_BY_STEP, stepId) ? TIME_CATEGORY_BY_STEP[stepId]! : 'other';
+}
+
+/** Uses the exact task-wide suppression and carried-time fold used by computeTaskTiming. */
+export function computeWorkByCategory(
+  steps: (TaskTimingStep & { stepId: string })[],
+  nowMs: number,
+): Record<TimeCategory, number> {
+  const totals: Record<TimeCategory, number> = {
+    setup: 0,
+    planning: 0,
+    implementation: 0,
+    tests: 0,
+    review: 0,
+    delivery: 0,
+    other: 0,
+  };
+  taskContributions(steps, nowMs).forEach((c, i) => {
+    totals[timeCategoryOf(steps[i]!.stepId)] += c.workMs;
+  });
+  return totals;
 }
 
 /** Marker time of a step parked BEFORE its run began (the runtime-slot park: no started_at, no

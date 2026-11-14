@@ -1,7 +1,7 @@
 # Time and cost report: tests, human, AI
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **NOT STARTED.** Written 2026-11-09 from the tree at `18a6cde1d` and read-only queries on the dev
+> **PR 1 IMPLEMENTED on `feat/time-cost-report`; integration checks pending after merge. PRs 2–3 not started.** Written 2026-11-09 from the tree at `18a6cde1d` and read-only queries on the dev
 > install. Three independently revertible PRs, in the order below. PR 1 needs no schema change and shows history.
 
 ## Context

@@ -316,3 +316,64 @@ pending work or editor focus can extend a still-present epoch to 15 minutes. Con
 restart only with recent real input. The task and plan pages share a browser-profile attention
 lease; additive delivery is best-effort without retries and the server caps each user/repo/hour
 at one hour. These are attention estimates, never proof of reading or completed-task effort.
+
+## Time & cost report
+
+The **Time & cost report** tab lazily loads `GET /m/statistics/time-cost` and caches a
+loaded report while the window and facets stay unchanged. Reopening the tab reuses it;
+a changed window or facet fetches a new report when the tab opens. Every figure
+covers the same population as `/summary` effort: tasks completed in the half-open window,
+filtered by owner, repository and class. The route re-checks `allUsers` against the caller's
+admin role. Provider filtering is ignored and disclosed because step work has no provider.
+Costs and form events cover each completed task's whole history, so report costs can differ
+from Money's invocation-window totals. FX uses the window-end rate, as on `/summary`.
+
+`TIME_CATEGORY_BY_STEP` in the import-free `@haive/shared/timing` module classifies persisted
+workflow ids. Unknown, onboarding, module and custom ids are Other. A worker control walks
+the real workflow registry, including ids set through constants. The plan's omitted
+`11d-skill-sync` belongs in Delivery: it persists reusable guidance after implementation.
+`computeWorkByCategory` shares task-wide park suppression and carried timing with
+`computeTaskTiming`; category work sums exactly to workflow work. Each task is evaluated at
+its completion instant. Work is elapsed step work, including deterministic setup and tests;
+agent-hours separately sum concurrent invocation spans.
+
+Test phase covers the six test-category steps, including setup and skipped commands. It
+never proves test execution. Before check-run recording, surviving `08-phase-5-verify`
+`output.test.ran` outcomes provide execution coverage: true is recorded execution, false
+is **not run**, and missing evidence is **execution not recorded**. Reset outputs cannot
+recover earlier attempts. The aggregate reports per-task ran, not-run and unrecorded counts
+over the full population before the display cap. Commands agents run during implementation stay in Implementation.
+The task page's Total time card shows **tests** after work, with the tooltip **part of work**,
+only when its steps include a test phase. A recorded zero-duration test phase remains visible.
+
+Human active is task-form attention, including carried time. Plan-page attention remains
+separately reported on the Time tab and is never added here. Steering, testing another tab
+and forge review are outside this measurement. Waiting for a person pairs each park with
+its submit (or, for a merge clarification, its `step.clarified` answer) over the full lifecycle stream, per task and step-row id, ordered by timestamp
+and event id. The event projection preserves PostgreSQL microseconds: converting to `Date`
+first could reverse an auto-submit within one millisecond when ids break the tie. Retry,
+automatic retry, revise/reset, loop-back, skip, abort, failure, stop, cancellation and
+replacement parks invalidate open waits. Orphan submits, open waits and detached attribution
+are unmeasured and their count is disclosed; a measured zero remains zero.
+
+Money reuses the shared real/notional helpers and `pricedCostRowSql` coverage, which accepts
+usable legacy reported costs without a snapshot and distinguishes an unpriced run from a
+recorded zero. A task with no invocations has no recorded cost measurement: Billed and
+At API rates remain dashes, while a priced invocation recording zero renders zero.
+Billed stays separate from At API rates (real plus notional), with a lower-bound
+mark when any included run is unpriced. Recaps join through
+`coalesce(task_step_id, summary_for_step_id)`. Superseded and legacy unattributed runs are
+excluded as on task provider cards; excluded legacy counts and included runs whose step
+cannot be resolved are disclosed. Missing snapshots are counted separately from missing prices. Retained snapshots after a
+provider is deleted can differ from older task provider cards, which omit those providers;
+the report discloses this pre-existing card limitation rather than dropping known costs.
+
+All task-id reads use batches of 200. Totals and category sums cover every completed task;
+only displayed rows are capped at the 200 with most work, with `taskCount` and `truncated`.
+Titles and repository names load after the cap. The lifecycle query filters to the 20
+event types read by the reducer, exported from the reducer's own event sets as
+`FORM_WAIT_EVENT_TYPES`. The query uses the migrated
+`task_events_task_id_idx` (verified with a migrated two-year fixture population and EXPLAIN:
+a 200-task batch retained 3,949 of 5,919 events and executed in 4.551 ms); events
+are not window-filtered. Null renders as a dash, never zero. Fixed category colours are
+contrast-checked against `#0a0a0a`; report text is neutral-400 or lighter, including the share legend.
