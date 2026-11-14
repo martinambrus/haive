@@ -38,10 +38,21 @@ function specifiersOf(source: ts.SourceFile): string[] {
   return found;
 }
 
+// Every entry walks a fresh closure, so parse each file once for the whole test.
+const specifierCache = new Map<string, string[]>();
+const cachedSpecifiers = (file: string): string[] => {
+  let found = specifierCache.get(file);
+  if (found === undefined) {
+    found = specifiersOf(parse(file));
+    specifierCache.set(file, found);
+  }
+  return found;
+};
+
 function closureOf(entry: string, seen = new Set<string>()): Set<string> {
   if (seen.has(entry)) return seen;
   seen.add(entry);
-  for (const spec of specifiersOf(parse(entry))) {
+  for (const spec of cachedSpecifiers(entry)) {
     if (spec.startsWith('.')) {
       closureOf(path.resolve(path.dirname(entry), spec.replace(/\.js$/, '.ts')), seen);
     } else if (spec === '@haive/shared/step') {
