@@ -191,6 +191,10 @@ export async function readReviewDiff(
       maxBuffer: budget,
     });
     checkHostCancellation(ctx);
+    if (isResourceLimitError({ code: result.noExit }))
+      throw Object.assign(new Error('Git could not start due to a resource limit.'), {
+        code: result.noExit,
+      });
     if (result.noExit === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
       if (change) throw new DiffTooLarge();
       throw new Error('Review metadata exceeds the internal limit.');

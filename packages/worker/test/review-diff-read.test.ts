@@ -411,3 +411,13 @@ it('reports overflowing metadata as unavailable rather than a large change', asy
     partial: true,
   });
 });
+
+it.each(['EMFILE', 'ENFILE'])('rethrows git spawn %s for step retry', async (code) => {
+  vi.mocked(gitRun).mockResolvedValueOnce({
+    code: -1,
+    noExit: code,
+    stdout: '',
+    stderr: 'spawn refused in /host/private/tree',
+  });
+  await expect(readReviewDiff(ctx, '/repo', options)).rejects.toMatchObject({ code });
+});
