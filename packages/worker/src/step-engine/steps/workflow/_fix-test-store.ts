@@ -390,7 +390,9 @@ export async function finishFixTestCapture(
       old.get(p)?.status === 'content withheld' || next.get(p)?.status === 'content withheld';
     // A protected path in the change under any status may have moved its bytes to an allowed
     // name (a rename shows as delete + add), so the whole op keeps no content, as gate 3 does.
-    const protectedChanged = changed.some((p) => withheld(p) || finishDeniesPath(p));
+    // An uncaptured before image hides a moved source, so it counts as a protected change.
+    const protectedChanged =
+      left.state !== 'captured' || changed.some((p) => withheld(p) || finishDeniesPath(p));
     // The moved bytes are an ordinary file's before-image in every later pass, so the task
     // stays without content once any pass has changed a protected path.
     const [tainted] = await tx
