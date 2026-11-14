@@ -650,6 +650,18 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 (+5)
+
+status: open · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md`.
+
+1. A module's local step id passes `isCoreStepId` (`modules/loader.ts:108`, pattern `contracts.ts:8`), so `_x` or `-x` registers, while the namespaced-id pattern (`contracts.ts:9`) needs an alphanumeric first character. PRE-EXISTING. Validate the local id against the namespaced form.
+2. No length bound on a module's local step id (`modules/loader.ts:107-119`); `task_steps.step_id` is `varchar(128)` (`database/src/schema/tasks.ts:514`) and the namespace adds up to 31 characters, so a local id over 97 characters cannot be stored. PRE-EXISTING. Refuse at registration.
+3. `step-sdk-module.test.ts:16` mocks `emitsLoop` to return `undefined`; a later fixture with composable steps would take the "does not loop" branch silently. Make the mock throw.
+4. `worker/tsconfig.typecheck.json:8` excludes the package `dist` only; a stale ignored `test/fixtures/step-sdk/dist/*.d.ts` on an existing dev tree is still in the `test/**/*` glob. Exclude it.
+5. `step-sdk-module.test.ts` throws each control class from module `apply` but has no `PromptBudgetExceededError` case (added to the entry by the #1183 rebase); identity is pinned, the throw path is not.
+
 ### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
 
 status: open · kind: fix · found: #1182 reviews 2026-11-14 · priority: P4
@@ -2082,6 +2094,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Step SDK seam, derived task types prerequisite 2 PR 1 (#1184): `@haive/shared/step` carries the step contract (15 interfaces, the seven runtime control classes defined once and re-exported by the worker, `ChatPlanRead`, the form/metadata types), unreachable from every other shared entry; the module loader types `steps` from it; a compiled fixture module proves class identity through the loader. Lows filed as T678. Deploy note: the worker crashed on the pull (new shared entry not built yet) and needed `pnpm docker restart worker`.
 
 - Bounded plan writers, AIDE² P5 (#1183): 11f and 01f send a depth-4 plan index plus whole versioned focus nodes; ops with a missing or stale version drop individually; a capped 01f range is reviewed and stamped; the runner persists what `prepare` writes before dispatch (08d now sees 08a's real login outcome). Lows filed in T675.
 
