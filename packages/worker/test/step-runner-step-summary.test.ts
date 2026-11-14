@@ -448,18 +448,22 @@ describe('fan-out summary prompt is bounded', () => {
   });
 });
 
-it.each([true, false])(
+it.each([true, false, 'path'] as const)(
   'fix6 preserves ordinary step diagnoses and sanitizes bound ones (bound: %s)',
   async (bound) => {
     const state = freshState({ summaryLlmEnabled: false });
-    const message = 'ordinary diagnosis\n  exact whitespace';
-    const err = bound
-      ? new DrizzleQueryError(
-          'select $1',
-          ['B8nM2qW9eR3tY7uI4oP6aS1dF5gH0jK'],
-          new Error('synthetic driver'),
-        )
-      : new Error(message);
+    const message =
+      bound === 'path'
+        ? 'EIO: open ' + BOUNDARY_ANCHOR + '; nginx: syntax error in /etc/nginx/x.conf:5'
+        : 'ordinary diagnosis\n  exact whitespace';
+    const err =
+      bound === true
+        ? new DrizzleQueryError(
+            'select $1',
+            ['B8nM2qW9eR3tY7uI4oP6aS1dF5gH0jK'],
+            new Error('synthetic driver'),
+          )
+        : new Error(message);
     const stepDef = baseStep();
     stepDef.apply = async () => {
       throw err;
@@ -476,9 +480,14 @@ it.each([true, false])(
       deps: { enqueueCliInvocation: async () => {} },
     });
     expect(result.status).toBe('failed');
-    expect(state.taskStepRow.errorMessage === (bound ? 'Database operation failed' : message)).toBe(
-      true,
-    );
+    expect(
+      state.taskStepRow.errorMessage ===
+        (bound === 'path'
+          ? 'EIO: open [path]; nginx: syntax error in /etc/nginx/x.conf:5'
+          : bound
+            ? 'Database operation failed'
+            : message),
+    ).toBe(true);
   },
 );
 

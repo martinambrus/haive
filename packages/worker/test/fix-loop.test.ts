@@ -1923,6 +1923,13 @@ describe('fix-loop guidance', () => {
       expect(result.status).toBe('loop_back');
       if (result.status === 'loop_back') expect(result.diagnosis).toBe(message);
       expect(state.taskStepRow).toMatchObject({ status: 'done', errorMessage: message });
+      const recovered = await finishedStepResult(
+        makeMockDb(state),
+        'task-1',
+        throwing(new Error(message), isDdevAgentFixableFailure),
+        state.taskStepRow as unknown as TaskStepRow,
+      );
+      expect(recovered).toMatchObject({ status: 'loop_back', diagnosis: message });
     });
 
     it('still fails a step that does not route the error, with the whole message', async () => {

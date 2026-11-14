@@ -10,7 +10,8 @@ if (url && !new URL(url).pathname.startsWith('/pending_fail_path_test'))
   throw new Error('Use a dedicated pending_fail_path_test database for pending fail path tests');
 
 const STEP_ID = 'pending-fail-path';
-const BROKEN = 'the precondition read broke';
+const BROKEN =
+  'nginx: [emerg] unknown directive "foo" in /etc/nginx/sites-enabled/nginx-site.conf:5';
 
 const KINDS = [
   {
