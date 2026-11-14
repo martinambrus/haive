@@ -1083,6 +1083,7 @@ export async function executeCliSpec(
         parsedOutput: tryJsonParse(text),
         errorMessage: formatCliErrorMessage(result.exitCode, result.stderr, text, result.error),
         tokenUsage: appServer.getTokenUsage(),
+        requestUsage: appServer.getRequestUsage(),
         modelIdentity,
         toolUsage: appServer.getToolUsage(),
         ...persisted,
@@ -1100,6 +1101,7 @@ export async function executeCliSpec(
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         'codex emitted no agent message',
       tokenUsage: appServer.getTokenUsage(),
+      requestUsage: appServer.getRequestUsage(),
       modelIdentity,
       toolUsage: appServer.getToolUsage(),
       ...persisted,
