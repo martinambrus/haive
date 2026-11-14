@@ -174,6 +174,47 @@ describe('learning provenance reader boundaries', () => {
 });
 
 describe('provenance preserves write and review semantics', () => {
+  it('reuses its own suffixed insert on disk, retaining the approved draft and original record', async () => {
+    worktree = await mkdtemp(path.join(tmpdir(), 'learning-provenance-'));
+    const proposal = [entry()];
+    await applyLearningOps(worktree, planLearningReconciliation(proposal, []), undefined, origin);
+    const writer = { ...update, operationId: 'a'.repeat(64) };
+    const firstPlan = planLearningReconciliation(
+      proposal,
+      await readExistingLearnings(worktree),
+      undefined,
+      undefined,
+      writer,
+    );
+    expect(firstPlan[0]!.id).toBe('rule-2');
+    await stageLearningDrafts(worktree, firstPlan, null);
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(
+      path.join(worktree, '.haive/learning-drafts/learnings/rule-2.md'),
+      '# Rule\n\nHuman correction src/a.ts:10.',
+    );
+    await applyLearningOps(
+      worktree,
+      await applyStagedLearningEdits(worktree, firstPlan),
+      undefined,
+      writer,
+    );
+    const first = await readExistingLearnings(worktree);
+    const replayPlan = planLearningReconciliation(proposal, first, undefined, undefined, {
+      ...writer,
+      date: '2026-11-16T01:02:03.000Z',
+    });
+    expect(replayPlan[0]!.id).toBe('rule-2');
+    await applyLearningOps(
+      worktree,
+      await applyStagedLearningEdits(worktree, replayPlan),
+      undefined,
+      writer,
+    );
+    expect(await readExistingLearnings(worktree)).toEqual(first);
+    expect(first.find((item) => item.id === 'rule-2')!.body).toContain('Human correction');
+  });
+
   it('chains every update of the same target within one apply', async () => {
     worktree = await mkdtemp(path.join(tmpdir(), 'learning-provenance-'));
     const initial = stampLearningRecord('# Rule\n\nUse src/a.ts:7.', null, origin);

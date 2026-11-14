@@ -8,11 +8,13 @@ import {
 } from '@haive/shared/fs-safe';
 import {
   learningContent,
+  parseLearningRecord,
   stampLearningRecord,
   type LearningStamp,
 } from '@haive/shared/learning-provenance';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { normalizeGlobalKbDescription } from '@haive/shared/global-kb';
@@ -644,8 +646,12 @@ interface PlannedLearningOp {
   /** Rendered new body (without the reviewer note, appended at write time); ''
    *  for a delete. */
   newBody: string;
-  /** Prior on-disk body; '' for an insert. */
+  /** Prior on-disk body; '' for a fresh insert. */
   oldBody: string;
+  /** Stored with the file itself, so a kill before telemetry cannot lose write identity. */
+  operationId?: string;
+  /** A successful write from this proposal already covers this operation. */
+  replayed?: boolean;
 }
 
 /** Read the existing learnings so the agent can reconcile against them and the
@@ -776,6 +782,16 @@ function resolveInsertId(slug: string, taken: Set<string>): string {
   }
 }
 
+function learningWriter(ctx: StepContext, invocationId?: string | null): LearningStamp {
+  return {
+    taskId: ctx.taskId,
+    date: new Date().toISOString(),
+    operationId: createHash('sha256')
+      .update(JSON.stringify([ctx.taskId, ctx.taskStepId, ctx.round ?? 0, invocationId ?? null]))
+      .digest('hex'),
+  };
+}
+
 /** Validate the parsed entries against the existing set and resolve each into a
  *  concrete op: an update/delete whose targetId is unknown is downgraded (update
  *  -> insert, delete -> dropped) so a hallucinated target never overwrites or
@@ -787,10 +803,33 @@ export function planLearningReconciliation(
   counts?: LearningOutcome['learnings']['downgraded'],
   writer?: LearningStamp,
 ): PlannedLearningOp[] {
-  const byId = new Map(existing.map((e) => [e.id, e]));
+  // Keep the apply key visible so target planning can exclude this apply's inserts,
+  // including entries dropped on the original pass. Still reserve every on-disk id.
+  const operationHashes = entries.map((e, index) =>
+    writer?.operationId
+      ? createHash('sha256')
+          .update(JSON.stringify([writer.operationId, index, e]))
+          .digest('hex')
+      : undefined,
+  );
+  const priorOperationHashes = new Set(operationHashes);
+  const byId = new Map<string, ExistingLearning>();
   const taken = new Set(existing.map((e) => e.id));
+  const insertedByOperation = new Map<string, ExistingLearning>();
+  for (const item of existing) {
+    const { origin } = parseLearningRecord(item.body).provenance;
+    const originId = origin !== 'unknown' ? origin.operationId : undefined;
+    if (writer?.operationId && originId) {
+      insertedByOperation.set(originId, item);
+      if (originId.startsWith(`${writer.operationId}:`) || priorOperationHashes.has(originId))
+        continue;
+    }
+    byId.set(item.id, item);
+  }
   const plan: PlannedLearningOp[] = [];
-  for (const e of entries) {
+  for (const [index, e] of entries.entries()) {
+    const operationHash = operationHashes[index];
+    const operationId = operationHash ? `${writer!.operationId}:${operationHash}` : undefined;
     if (e.op === 'delete') {
       const target = e.targetId ? byId.get(e.targetId) : undefined;
       if (!target) {
@@ -815,6 +854,7 @@ export function planLearningReconciliation(
         title: e.title,
         newBody: renderLearningBody(e),
         oldBody: target.body,
+        ...(operationId ? { operationId } : {}),
       });
       continue;
     }
@@ -828,9 +868,37 @@ export function planLearningReconciliation(
     // slugify the AGENT's id, not just the title fallback: it names a file
     // (`<id>.md`) in the learnings dir and in the draft staging dir, and nothing
     // downstream re-checks it — an id of `../../x` would write outside both.
-    const id = resolveInsertId(slugify(e.id) || slugify(e.title), taken);
+    const prior = operationId
+      ? (insertedByOperation.get(operationId) ?? insertedByOperation.get(operationHash!))
+      : undefined;
+    const id = prior?.id ?? resolveInsertId(slugify(e.id) || slugify(e.title), taken);
     taken.add(id);
-    plan.push({ op: 'insert', id, title: e.title, newBody: renderLearningBody(e), oldBody: '' });
+    plan.push({
+      op: 'insert',
+      id,
+      title: e.title,
+      newBody: renderLearningBody(e),
+      oldBody: prior?.body ?? '',
+      ...(operationId ? { operationId } : {}),
+    });
+  }
+  // An update sequence may have overwritten its earlier operations (and bounded history).
+  // The last recorded operation proves the prefix for that target already completed.
+  const completedThrough = new Map<string, number>();
+  for (const [index, p] of plan.entries()) {
+    if (!p.operationId) continue;
+    const record = parseLearningRecord(p.oldBody).provenance;
+    const matchesOperation = (id: string | undefined) =>
+      id === p.operationId ||
+      (id !== undefined && `${writer?.operationId}:${id}` === p.operationId);
+    if (
+      (record.origin !== 'unknown' && matchesOperation(record.origin.operationId)) ||
+      record.updates.some((update) => matchesOperation(update.operationId))
+    )
+      completedThrough.set(p.id, index);
+  }
+  for (const [index, p] of plan.entries()) {
+    if (index <= (completedThrough.get(p.id) ?? -1)) p.replayed = true;
   }
   return writer
     ? plan.map((p) =>
@@ -838,7 +906,12 @@ export function planLearningReconciliation(
           ? p
           : {
               ...p,
-              newBody: stampLearningRecord(p.newBody, p.op === 'insert' ? null : p.oldBody, writer),
+              newBody: p.replayed
+                ? p.oldBody
+                : stampLearningRecord(p.newBody, p.op === 'insert' ? null : p.oldBody, {
+                    ...writer,
+                    ...(p.operationId ? { operationId: p.operationId } : {}),
+                  }),
             },
       )
     : plan;
@@ -987,6 +1060,14 @@ export async function applyLearningOps(
   const appliedBodies = new Map<string, string>();
   for (const p of plan) {
     const rel = `${LEARNINGS_DIR}/${p.id}.md`;
+    if (p.replayed) {
+      if (p.op === 'delete') deleted.push(rel);
+      else {
+        appliedBodies.set(p.id, p.oldBody);
+        written.push(rel);
+      }
+      continue;
+    }
     if (counts) counts.attempted[p.op]++;
     try {
       if (p.op === 'delete') {
@@ -996,7 +1077,7 @@ export async function applyLearningOps(
         const content = stampLearningRecord(
           p.newBody,
           p.op === 'insert' ? null : (appliedBodies.get(p.id) ?? p.oldBody),
-          writer,
+          { ...writer, ...(p.operationId ? { operationId: p.operationId } : {}) },
         );
         await writeFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, content, {
           createParents: true,
@@ -1770,6 +1851,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         existingLearnings,
         ctx.logger,
         outcome.learnings.downgraded,
+        learningWriter(ctx, args.llmInvocationId),
       );
       outcome.learnings.planned = countLearningOps(reconciled);
       const plan = await applyStagedLearningEdits(

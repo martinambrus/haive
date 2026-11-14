@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { learningContent } from '@haive/shared/learning-provenance';
+import {
+  learningContent,
+  parseLearningRecord,
+  renderLearningRecord,
+} from '@haive/shared/learning-provenance';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
 const io = vi.hoisted(() => ({
@@ -289,6 +293,166 @@ describe('reconcile outcome', () => {
         writes: { attempted: 1, succeeded: 0, failed: 0, notWritten: 1 },
       },
     });
+  });
+});
+
+describe('learning filesystem replay', () => {
+  // Supersession uses the protocol's delete + insert pair; there is no supersede op.
+  const sequence = (op: string, phase: string) => {
+    const next = entry('fresh', { title: phase, body: `${phase} src/a.ts:7` });
+    if (op === 'delete') return [{ op: 'delete', targetId: 'fresh' }];
+    if (op === 'supersede') return [{ op: 'delete', targetId: 'fresh' }, next];
+    return [{ ...next, op, ...(op === 'update' ? { targetId: 'fresh' } : {}) }];
+  };
+  const operationKinds = ['insert', 'update', 'delete', 'supersede'];
+  const matrix = [false, true].flatMap((preExisting) =>
+    operationKinds.flatMap((first) =>
+      operationKinds.map((second) => ({ preExisting, first, second })),
+    ),
+  );
+  // A deleted pre-existing target leaves no provenance to recover its original existence.
+  // These two known failures are captured by the full-matrix diagnostic, not fixed here.
+  const recoverableMatrix = matrix.filter(
+    ({ preExisting, first, second }) =>
+      !(preExisting && first === 'update' && ['delete', 'supersede'].includes(second)),
+  );
+  it.each(recoverableMatrix)(
+    'replays $first then $second (pre-existing target: $preExisting)',
+    async ({ preExisting, first, second }) => {
+      const s = setup();
+      if (preExisting) io.files.set(`${dir}/fresh.md`, '# Original\nOriginal src/a.ts:1');
+      (s.args.llmOutput as any).entries = [
+        ...sequence(first, 'First'),
+        ...sequence(second, 'Second'),
+      ];
+      const files = () => new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+      await phase8LearningStep.apply(s.ctx, s.args);
+      const initial = files();
+      // The unknown delete must stay dropped; it cannot delete the preceding insert.
+      if (!preExisting && first === 'insert' && second === 'delete')
+        expect(initial.get(`${dir}/fresh.md`)).toContain('First');
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(files()).toEqual(initial);
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(files()).toEqual(initial);
+    },
+  );
+
+  it('keeps identical insert entries distinct through replay', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh'), entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    expect(io.files.has(`${dir}/fresh.md`)).toBe(true);
+    expect(io.files.has(`${dir}/fresh-2.md`)).toBe(true);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+  });
+  it('does not plan targets against another insert from the same apply key', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/fresh.md`);
+    // A retained apply key still identifies the file when this entry is no longer proposed.
+    (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'fresh' }];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/fresh.md`)).toBe(first);
+    s.args.llmInvocationId = 'another-invocation';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh.md`)).toBe(false);
+  });
+  it('reuses original unprefixed operation identities for inserts and update prefixes', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [
+      entry('fresh'),
+      { op: 'delete', targetId: 'fresh' },
+      entry('old', { op: 'update', targetId: 'old', body: 'First src/a.ts:7' }),
+      entry('old', { op: 'update', targetId: 'old', body: 'Second src/a.ts:7' }),
+    ];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    for (const [file, body] of io.files) {
+      if (!file.startsWith(dir + '/')) continue;
+      const { content, provenance } = parseLearningRecord(body);
+      const stamps = [
+        ...(provenance.origin === 'unknown' ? [] : [provenance.origin]),
+        ...provenance.updates,
+      ];
+      if (!stamps.some((stamp) => stamp.operationId)) continue;
+      for (const stamp of stamps)
+        if (stamp.operationId) stamp.operationId = stamp.operationId.split(':').at(-1)!;
+      io.files.set(file, renderLearningRecord(content, provenance));
+    }
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+  });
+  it('retains the final update when a proposal deletes then rewrites the same target', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [
+      { op: 'delete', targetId: 'old' },
+      entry('old', { op: 'update', targetId: 'old' }),
+    ];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/old.md`);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/old.md`)).toBe(first);
+  });
+  it('distinguishes a changed proposal even when the invocation and slug are retained', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [entry('fresh')];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    (s.args.llmOutput as any).entries = [entry('fresh', { body: 'Different lesson src/a.ts:11.' })];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/fresh-2.md`)).toContain('Different lesson');
+    expect(io.files.get(`${dir}/fresh.md`)).toContain('private-body-fresh');
+  });
+
+  it.each(['recovery', 'retry'])('reuses insert files and staged edits on %s', async (replay) => {
+    const s = setup();
+    io.files.set(`${drafts}/fresh.md`, '# Human title\n\nHuman correction src/a.ts:10.');
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')));
+    if (replay === 'recovery') s.ctx.epoch = 9;
+    else (s.ctx as any).rerunGeneration = 1;
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(new Map([...io.files].filter(([file]) => file.startsWith(dir + '/')))).toEqual(first);
+    expect(io.files.get(`${dir}/fresh.md`)).toContain('Human correction');
+  });
+  it('reuses an allocated suffix but preserves a genuinely different collision', async () => {
+    const s = setup();
+    io.files.set(`${dir}/fresh.md`, '# Existing\n\nDifferent lesson src/a.ts:1.');
+    io.files.set(`${drafts}/fresh-2.md`, '# Human title\n\nHuman correction src/a.ts:10.');
+    const original = io.files.get(`${dir}/fresh.md`);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-3.md`)).toBe(false);
+    expect(io.files.get(`${dir}/fresh.md`)).toBe(original);
+    expect(io.files.get(`${dir}/fresh-2.md`)).toContain('Human correction');
+    s.args.llmInvocationId = 'different-invocation';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-3.md`)).toBe(true);
+  });
+  it('recovers a partial write without depending on the reconcile event', async () => {
+    const s = setup();
+    s.refuse();
+    io.failAt = `${dir}/old.md`;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    io.failAt = '';
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/fresh-2.md`)).toBe(false);
+    expect(io.files.get(`${dir}/old.md`)).toContain('private-body-old');
+    expect(s.rows.size).toBe(0);
+  });
+  it('does not repeat a sequence of updates or consume more provenance history', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = ['First', 'Second'].map((body) =>
+      entry('old', { op: 'update', targetId: 'old', body: `${body} src/a.ts:10.` }),
+    );
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const first = io.files.get(`${dir}/old.md`)!;
+    expect(parseLearningRecord(first).provenance.updates).toHaveLength(2);
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.get(`${dir}/old.md`)).toBe(first);
   });
 });
 

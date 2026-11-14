@@ -22,6 +22,28 @@ describe('learning provenance record', () => {
     expect(record.provenance.updates).toEqual([]);
     expect(record.content).toBe(body);
   });
+  it('retains optional operation identity on both insert and update records', () => {
+    const insert = { ...first, operationId: 'a'.repeat(64) };
+    const update = { ...next, operationId: 'b'.repeat(64) };
+    const inserted = stampLearningRecord(body, null, insert);
+    const corrected = stampLearningRecord(body + 'Correction.', inserted, update);
+    expect(parseLearningRecord(corrected).provenance.origin).toMatchObject(insert);
+    expect(parseLearningRecord(corrected).provenance.updates[0]).toMatchObject(update);
+    expect(learningContent(corrected)).not.toContain(insert.operationId);
+    expect(learningContent(corrected)).not.toContain(update.operationId);
+  });
+  it('retains apply-prefixed operation identity while accepting the original hash format', () => {
+    const operationId = `${'a'.repeat(64)}:${'b'.repeat(64)}`;
+    const inserted = stampLearningRecord(body, null, { ...first, operationId });
+    expect(parseLearningRecord(inserted).provenance.origin).toMatchObject({ operationId });
+    const corrected = stampLearningRecord(body + 'Correction.', inserted, {
+      ...next,
+      operationId: `${'a'.repeat(64)}:${'c'.repeat(64)}`,
+    });
+    expect(parseLearningRecord(corrected).provenance.updates[0]).toMatchObject({
+      operationId: `${'a'.repeat(64)}:${'c'.repeat(64)}`,
+    });
+  });
   it('keeps the original origin and the bounded last updates with before/after identities', () => {
     expect(LEARNING_UPDATE_HISTORY_MAX).toBe(5);
     const inserted = stampLearningRecord(body, null, first);
