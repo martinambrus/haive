@@ -937,7 +937,7 @@ export interface Task {
   activeCliInvocationId?: string | null;
   activeCliStepId?: string | null;
   /** Per-task time breakdown attached by the list endpoint (GET /tasks): wall
-   *  clock, agent work, idle (time waiting on you), and your active time at
+   *  clock, agent work, idle (time parked), and your active time at
    *  gates. A snapshot at request time; the listing's poll keeps running tasks
    *  current. Absent on the create response. The detail page ignores this and
    *  computes its own live figures from the steps it already holds. */

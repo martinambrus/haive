@@ -20,7 +20,7 @@ export interface TaskTiming {
   /** Sum of every step's active-work span (wall minus idle minus open wait). */
   workMs: number;
   /** Sum of idle time: every span a step spent parked (on a form, a CLI or runtime slot, a rate
-   *  limit, a pause or a worker restart), whether or not anyone was present. Not human time. */
+   *  limit, a pull request, a pause, a stop or a worker restart), whether or not anyone was present. Not human time. */
   idleMs: number;
   /** Sum of user-active time (the focused subset of idle, at gates). */
   userActiveMs: number;

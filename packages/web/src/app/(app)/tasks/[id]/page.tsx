@@ -3068,7 +3068,7 @@ function StepUsageStamp({ step }: { step: TaskStep }) {
   );
 }
 
-// Task time summary: agent work, idle (time waiting on you), your active time at
+// Task time summary: agent work, idle (time parked), your active time at
 // gates, total effort, and wall clock. Shown live while the task runs (ticks each
 // second) and frozen once it ends. Renders nothing until the task has started.
 /** Live effort-vs-estimate chip for the fixed header (top-right). Owns its own
@@ -3343,7 +3343,7 @@ function TaskTotalTime({
   const wallMs = Math.max(0, endMs - startMs);
   // Work / idle / user from the shared helper (the same numbers the server sends
   // to the tasks listing). Work excludes idle waits and the gaps between steps;
-  // idle is time spent waiting on you; user is the focused subset of idle.
+  // idle is time spent parked, whether or not anyone was there; user is the focused subset of idle.
   // Effort = agent work + your active time — the real task effort, which
   // agent-only "work" undercounts. Open steps use endMs (now while running).
   // Override the active waiting step's stored user-active time with the live
