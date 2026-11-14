@@ -1,11 +1,13 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { CLI_DISPATCH_STEP_IDS, type FormSchema } from '@haive/shared';
+import { CLI_DISPATCH_STEP_IDS, FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
 import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
 import type { StepDefinition } from '../../step-definition.js';
-import { FIX_LOOP_ACTION_FIELD, FIX_LOOP_TARGET_STEP_ID } from './_fix-loop.js';
+/** The implementation step every fix round re-enters. Kept here so the form builder
+ * and dispatch lookup share it without importing the gate/diagnosis module. */
+export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
 
 export class FixRoundCliUnavailable extends Error {}
 

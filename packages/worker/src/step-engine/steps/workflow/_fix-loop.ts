@@ -3,7 +3,11 @@ import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
-import { fixRoundCliField, type FixRoundCliOptions } from './_fix-round-cli.js';
+import {
+  FIX_LOOP_TARGET_STEP_ID,
+  fixRoundCliField,
+  type FixRoundCliOptions,
+} from './_fix-round-cli.js';
 import {
   cleanText,
   contentFingerprint,
@@ -27,7 +31,7 @@ import {
 
 /** The step every fix round re-enters at: the implementation phase re-runs in fix
  *  mode, then the whole post-implementation chain re-runs as new round-N rows. */
-export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
+export { FIX_LOOP_TARGET_STEP_ID };
 /** Fallback cap when a task predates tasks.max_fix_rounds (set on the Gate-1 form). */
 export const DEFAULT_MAX_FIX_ROUNDS = 5;
 const FIX_LOOP_REQUESTED = 'fix_loop.requested';
