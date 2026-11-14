@@ -54,3 +54,18 @@ describe('plan chat dispatch budget', () => {
     expect(plan.effectivePrompt).toContain(house);
   });
 });
+
+it('reports prompt overflow generically for every budgeted step', () => {
+  expect(() =>
+    resolveDispatch({
+      providers: [provider],
+      invokeOpts: {},
+      input: { kind: 'prompt', prompt: 'small', capabilities: [] },
+      promptBudget: {
+        maxChars: 1000,
+        outputReserveChars: 100,
+        repack: () => 'oversized'.repeat(200),
+      },
+    }),
+  ).toThrow(/^The prompt exceeds its input budget/);
+});

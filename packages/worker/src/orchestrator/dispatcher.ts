@@ -824,7 +824,7 @@ function buildCliSidePlan(
       effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
       if (effectivePrompt.length > limit)
         throw new Error(
-          `The plan chat prompt exceeds its input budget after reserving output and dispatch instructions (${effectivePrompt.length} > ${limit}; source ${sourcePrompt.length}, overhead ${overhead}).`,
+          `The prompt exceeds its input budget after reserving output and dispatch instructions (${effectivePrompt.length} > ${limit}; source ${sourcePrompt.length}, overhead ${overhead}).`,
         );
     }
     let agentRules = rules.stamp;

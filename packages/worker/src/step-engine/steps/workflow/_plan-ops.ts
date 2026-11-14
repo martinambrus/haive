@@ -52,7 +52,6 @@ export interface PlanWriterContext {
   repositoryId: string | null;
   planRead?: WorkflowPlanRead;
   changedPaths: string[];
-  focusTooLarge?: boolean;
 }
 
 export class PlanFocusTooLargeError extends PromptBudgetExceededError {}

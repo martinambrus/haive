@@ -1,4 +1,3 @@
-import { PromptBudgetExceededError } from './step-definition.js';
 import {
   beginFixTestCapture,
   finishFixTestCapture,
@@ -103,6 +102,7 @@ import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
   AdvisedStepError,
+  PromptBudgetExceededError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,

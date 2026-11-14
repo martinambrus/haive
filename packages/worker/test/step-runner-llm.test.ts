@@ -50,6 +50,7 @@ import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
+import { PromptTooLargeError } from '../src/cli-adapters/prompt-delivery.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../src/step-engine/steps/_untrusted-repo.js';
 import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-reconcile.js';
 import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
@@ -397,6 +398,24 @@ describe('plan writers through the real runner dispatch', () => {
       expect(f.enqueue).not.toHaveBeenCalled();
       if (writer.metadata.id === '01f-external-plan-sync')
         expect(f.result.row.output).toMatchObject({ reviewedThrough: null });
+    },
+  );
+
+  it.each([planReconcileStep, externalPlanSyncStep])(
+    'keeps the argv-size failure visible for optional $metadata.id without dropping rules',
+    async (writer) => {
+      const build = vi
+        .spyOn(cliAdapterRegistry.get('claude-code'), 'buildCliInvocation')
+        .mockImplementation(() => {
+          throw new PromptTooLargeError('claude-code', 123456);
+        });
+      const f = await run(false, writer as StepDefinition);
+      expect(f.result.status).toBe('failed');
+      expect(f.result).toMatchObject({
+        error: expect.stringContaining('no documented way to read a prompt from stdin'),
+      });
+      expect(build).toHaveBeenCalledOnce();
+      expect(f.enqueue).not.toHaveBeenCalled();
     },
   );
 
