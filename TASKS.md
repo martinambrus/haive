@@ -675,7 +675,7 @@ Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
 7. A dev-checkout image build copies local clones, `.selection.json` and the local `.lock` into the own-module builder; release builds from a clean checkout are required (documented).
 8. `.claude/memory-mirror/haive_next_build_on_dev_tree.md` still says to revert `next-env.d.ts`, which is now ignored.
 
-### T675 · FNF[plan-chat-bound] · bounded plan chat and plan write fence lows, after #1178 (+9)
+### T675 · FNF[plan-chat-bound] · bounded plan chat, plan writers and plan write fence lows, after #1178 and #1183 (+18)
 
 status: open · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
 
@@ -690,6 +690,18 @@ Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md
 7. No multi-chunk test that chunks written before a sequencing conflict drop out of the rebuilt pass (needs more than 500 ops).
 8. AGENTS.md is within a few bytes of the 32 KiB Codex limit; any addition must trim first.
 9. Owed live checks: each CLI reads the per-turn snapshot from its sandbox path; the Docker file-subpath mount works; rerun a large plan chat on Ollama.
+
+From #1183 (bounded plan writers 11f/01f), reviews in `.claude/tmp/codex-run/PB5-S/review-{1,2,3}.md`:
+
+10. REGRESSION, narrow. A budgeted dispatch no longer drops rules on `PromptTooLargeError` (`dispatcher.ts` ~:842), and the runner degrades only `PromptBudgetExceededError` for optional steps (`step-runner.ts` ~:1147), so a 11f/01f prompt that fits an argv-only adapter only without rules now fails the optional step instead of running; Skip/Retry remain. Degrade that error for optional budgeted steps.
+11. A capped, stamped 01f range with no proposal says "the plan already described them" with no omitted counts (`01f` ~:413); append `(+M not listed)` and omitted paths. The `pathsOmitted` form assertion in `plan-writer-bound.test.ts` cannot fail.
+12. `warnHold('range_not_measured')` drops `d.reason` and fires with no repository; the `plan_conflict` warn is untested.
+13. A dropped-op message numbers ops by position among ticked ops, not the form's option number (`_plan-ops.ts` ~:172).
+14. `step-runner.ts` ~:1111 still says "Cannot locate the plan chat prompt" for all three budgeted writers.
+15. 01f now holds its watermark on no agent output (base stamped); consistent with 11f, but 01e still stamps.
+16. The source-scan test exempts the whole bounded helper file and does not see wrappers outside step sources (`plan-prompt-render-source.test.ts`).
+17. The boundary tests now reach 01f/11f's sizing lambdas only through the helper; dropping the `maxChars` argument from a lambda would pass.
+18. A losing concurrent dispatch pass can overwrite the winner's checkpointed `detected` (runner checkpoint after `prepare`); safe direction (drops), theoretical.
 
 ### T674 · FNF[release-bundle-publish] · release bundle publish and read lows, after #1180 and #1181 (+15)
 
@@ -2070,6 +2082,8 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Bounded plan writers, AIDE² P5 (#1183): 11f and 01f send a depth-4 plan index plus whole versioned focus nodes; ops with a missing or stale version drop individually; a capped 01f range is reviewed and stamped; the runner persists what `prepare` writes before dispatch (08d now sees 08a's real login outcome). Lows filed in T675.
 
 - Every built-in workflow step is composable, derived task types prerequisite 1 (#1182): 23 catalog entries (58 total) so a composed or derived workflow can hold any built-in step; sprint planning requires both implementation steps, repository writers require a worktree, and every shipped path validates with no issue. Lows filed as T677.
 
