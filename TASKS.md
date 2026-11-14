@@ -681,7 +681,7 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186 and #1190 (+13)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190 and #1191 (+19)
 
 status: open (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); queued overnight: items 10 and 11; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
@@ -700,6 +700,12 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 11. (#1190) CI's gated test list is at 155 of its 156 budget; the next gated test fails CI. Raise or rebalance the budget with a measurement.
 12. (#1190) The catalog fingerprint orders with `localeCompare`, which depends on the runtime locale. LOW.
 13. (#1190) The admission preflight reads the same rows twice. LOW.
+14. (#1191) The create path with a base whose `requiresRepository` is false has no test; only the true base is pinned. LOW, parked.
+15. (#1191) `FormRenderer`'s `onSubmit` is now optional; nothing pins that every caller that renders a submit button still passes one. LOW, parked.
+16. (#1191) A web test imports the shared derived-overlay fixtures by relative path (`packages/shared/test/derived-overlay-fixtures.ts`) rather than through a package export. LOW, parked.
+17. (#1191) The web keeps its own copy of `SAFEGUARD_STEP_IDS` for the gate-removal warning; it can drift from the server's list. LOW, parked.
+18. (#1191) Removing a base step when the change list is already at its cap silently does nothing. PRE-EXISTING. LOW, parked.
+19. (#1191) The server preview only runs once the slug is valid, and the editor does not say so; live validation still runs. Browser check 2026-11-14. LOW, parked.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
 
@@ -2166,6 +2172,7 @@ All low unless marked.
 
 ## Done
 
+- Derived task types PR 4 (#1191, af136c094): the web editor for derived types: "Duplicate and customize" on the built-in workflow (no write until save; other bases show the catalog's reason), an ordered changes editor with a read-only path preview, live shared validation plus a debounced server preview, split skipped/stale warnings, gate-removal warning, overlay-only saves, 403/409 handling. Prerequisite 3 complete. Browser-checked on the dev stack 2026-11-14. Lows filed as T679 items 14-19.
 - Derived task types PR 2 (#1187): migrations 0240 (the `derived` run-list strategy) and 0241 (nullable `base_slug`, `changes` and `tasks.derived_run_plan`, named shape CHECKs, a restrictive self foreign key) with every existing row unchanged; readers refuse a derived type explicitly until PR3; the header's guarded manual cleanup refuses while any task uses a derived type. Applied to the dev database 2026-11-14. Its PR3 hazard is filed in T679 item 6.
 
 - Release bundle swap, T648 PR 5 (#1185): the updater installs the release's compose bundle with a journalled backup, restores only the files a run changed on rollback, refuses linked or non-regular install files before any hold, classifies every installed file a swap replaces (all overlays) for edit detection and retention, keeps backups that hold operator edits, cleans abandoned writer temps, and recovers a crashed run from the journal without a migration head. Lows filed in T674.
