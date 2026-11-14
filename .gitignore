@@ -78,3 +78,7 @@ packages/worker/scripts/*-backup*.json
 # drizzle-kit scratch. The migration corpus lives in packages/database/migrations/ and is
 # applied by our own runner; drizzle-kit only ever writes its diff working files here.
 packages/database/.drizzle/
+
+# Private development modules and their local install state
+/external-modules/*
+!/external-modules/.gitkeep

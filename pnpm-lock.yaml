@@ -24,6 +24,8 @@ overrides:
   '@haive/database': workspace:*
   '@haive/web-kit': workspace:*
 
+pnpmfileChecksum: sha256-hify6g8CaSrXvkJB/N/omAXXoXRH/8Wpp2mcXLE/TFQ=
+
 importers:
 
   .:

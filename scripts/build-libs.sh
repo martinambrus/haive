@@ -25,7 +25,7 @@ DIST_DIRS="$APP/packages/database/dist $APP/packages/shared/dist $APP/packages/w
 # Deliberately not `set -e`-fatal: the outputs still need handing back after a FAILED
 # build, or a half-written dist stays root-owned and the next host build cannot repair it.
 rc=0
-pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/web-kit build && pnpm --filter './modules/*' build || rc=$?
+pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/web-kit build && pnpm --filter './modules/*' --filter './external-modules/*' build || rc=$?
 
 # The repo's owner as the container sees it, so no UID/GID has to be plumbed in from the
 # host. A mount that cannot represent ownership makes this a harmless no-op rather than a
@@ -33,7 +33,7 @@ pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm
 # Constraints), and that is where it matters.
 OWNER="$(stat -c '%u:%g' "$APP" 2>/dev/null || true)"
 if [ -n "$OWNER" ]; then
-  MODULE_DIST_DIRS="$(ls -d "$APP"/modules/*/dist 2>/dev/null | tr '\n' ' ')"
+  MODULE_DIST_DIRS="$(ls -d "$APP"/modules/*/dist "$APP"/external-modules/*/dist 2>/dev/null | tr '\n' ' ')"
   chown -R "$OWNER" $DIST_DIRS $MODULE_DIST_DIRS 2>/dev/null || true
 fi
 

@@ -67,7 +67,14 @@ export function makeTree(
 
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'modules'), { recursive: true });
-  for (const script of ['gen-modules.mjs', 'module.mjs']) {
+  mkdirSync(join(root, 'external-modules'), { recursive: true });
+  for (const script of [
+    'gen-modules.mjs',
+    'module.mjs',
+    'local-modules.cjs',
+    'public-module-lock.mjs',
+    'workspace-task.mjs',
+  ]) {
     copyFileSync(join(scriptsDir, script), join(root, 'scripts', script));
   }
   put(

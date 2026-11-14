@@ -21,6 +21,9 @@ COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
 COPY packages/web-kit/package.json ./packages/web-kit/
 COPY modules ./modules
+COPY external-modules ./external-modules
+COPY .pnpmfile.cjs ./
+COPY scripts/local-modules.cjs ./scripts/local-modules.cjs
 # The @haive-module registry token reaches pnpm only through this optional BuildKit secret: never
 # an ARG or ENV, and never a line in /app/.npmrc.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install --frozen-lockfile
@@ -40,7 +43,7 @@ COPY scripts/gen-modules.mjs ./scripts/gen-modules.mjs
 RUN pnpm --filter @haive/database build \
  && pnpm --filter @haive/shared build \
  && pnpm --filter @haive/web-kit build \
- && pnpm --filter './modules/*' build \
+ && pnpm --filter './modules/*' --filter './external-modules/*' build \
  && pnpm --filter @haive/web build
 
 FROM base AS production

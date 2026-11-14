@@ -269,6 +269,9 @@ export async function run(
       }
       return result;
     };
+    emit(
+      'build-channel: local external-modules clones are excluded; using tagged public modules and explicit --modules registry entitlements',
+    );
     const version = tag.slice(1);
     const platform = `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`;
     const resolved = await command(

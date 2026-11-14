@@ -14,6 +14,9 @@ COPY packages/api ./packages/api
 COPY packages/worker ./packages/worker
 COPY packages/web ./packages/web
 COPY modules ./modules
+COPY external-modules ./external-modules
+COPY .pnpmfile.cjs ./
+COPY scripts/local-modules.cjs ./scripts/local-modules.cjs
 COPY scripts/gen-modules.mjs scripts/own-module-builder.mjs ./scripts/
 # Store and installed packages stay baked in: the customer's rebuild has no vendor token.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install --frozen-lockfile
