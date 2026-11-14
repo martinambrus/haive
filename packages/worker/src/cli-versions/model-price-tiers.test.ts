@@ -7,6 +7,8 @@ import { refreshOpenRouterModels } from './openrouter-models.js';
 import { refreshModelPrices } from './model-prices.js';
 import { resolveInvocationCost } from '../queues/cli-exec/invocation-cost.js';
 
+import modalities from '../../../shared/test/fixtures/pricing/litellm-modalities.json' with { type: 'json' };
+
 const base = {
   inputRate: 1,
   outputRate: 2,
@@ -193,4 +195,17 @@ it('counts unsupported catalog overrides in the refresh result and retains cache
   vi.mocked(fetch).mockRejectedValue(new Error('gateway unavailable'));
   expect((await refreshOpenRouterModels(db)).ok).toBe(false);
   expect((await fake.db.query.openrouterModelCache!.findFirst())!.models).toEqual(stored!.models);
+});
+
+it('syncs live Gemini modality shapes without a price error', async () => {
+  await fake.db
+    .update(schema.cliPricingSync)
+    .set({ autoUpdateEnabled: true })
+    .where(eq(schema.cliPricingSync.name, 'gemini'));
+  feed = modalities;
+  const result = await refreshModelPrices(db);
+  expect(result.ok).toBe(true);
+  expect(result.errors).toEqual([]);
+  expect((await live()).filter((r) => r.provider === 'gemini')).toHaveLength(2);
+  expect((await live()).every((r) => !r.rates.pricingState)).toBe(true);
 });

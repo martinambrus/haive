@@ -238,6 +238,18 @@ const LITELLM_RATE_FIELDS: Record<string, (typeof PRICE_RATE_KEYS)[number]> = {
   cache_creation_input_token_cost_above_1hr: 'cacheWrite1hRate',
 };
 
+/** VOLATILE: non-text base-rate families in LiteLLM's public feed (2026-11-14).
+ * These never price an agent's text-token buckets. Match only the base before
+ * `_above_`, so an unknown text threshold cannot hide behind its suffix. */
+const LITELLM_NON_TEXT_RATE_FAMILIES = [
+  /(?:^|_)audio(?:_|$)/,
+  /(?:^|_)image(?:_|$)/,
+  /(?:^|_)video(?:_|$)/,
+  /(?:^|_)character(?:_|$)/,
+  /(?:^|_)per_second(?:_|$)/,
+  /(?:^|_)per_query(?:_|$)/,
+] as const;
+
 interface RawLitellmEntry {
   [key: string]: unknown;
   input_cost_per_token?: unknown;
@@ -287,6 +299,8 @@ export function parseLitellmPrices(payload: unknown): LitellmPriceEntry[] {
           )
             continue;
           if (field === 'cache_creation_input_token_cost_above_1hr') continue;
+          const baseField = field.slice(0, field.indexOf('_above_'));
+          if (LITELLM_NON_TEXT_RATE_FAMILIES.some((family) => family.test(baseField))) continue;
           const match =
             /^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost|cache_creation_input_token_cost_above_1hr)_above_(\d+)k_tokens$/.exec(
               field,

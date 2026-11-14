@@ -4,6 +4,8 @@ import { trimOpenRouterModels } from '../src/cli-providers/openrouter-models.js'
 import litellm from './fixtures/pricing/litellm.json' with { type: 'json' };
 import openrouter from './fixtures/pricing/openrouter.json' with { type: 'json' };
 
+import modalities from './fixtures/pricing/litellm-modalities.json' with { type: 'json' };
+
 const base = {
   inputRate: 1,
   outputRate: 2,
@@ -248,4 +250,36 @@ it('blocks a stale fallback feed behind the preferred unsupported marker', () =>
       'litellm',
     )!.id,
   ).toBe('manual');
+});
+
+it('prices live Gemini text buckets despite non-text threshold rates', () => {
+  const rows = pricing.litellmRowsForProviders(pricing.parseLitellmPrices(modalities), ['gemini']);
+  expect(rows).toHaveLength(2);
+  for (const row of rows) {
+    expect(row.rates.pricingState).toBeUndefined();
+    expect(pricing.hasAnyRate(row.rates)).toBe(true);
+  }
+});
+it.each(['audio', 'image', 'video', 'character', 'per_second', 'per_query'])(
+  'ignores the non-text %s threshold family',
+  (family) => {
+    const [row] = pricing.parseLitellmPrices({
+      x: {
+        mode: 'chat',
+        input_cost_per_token: 1,
+        [`input_cost_${family}_above_128k_tokens`]: 3,
+      },
+    });
+    expect(row!.rates.pricingState).toBeUndefined();
+  },
+);
+it('fails loud for an unclassified threshold family', () => {
+  const [row] = pricing.parseLitellmPrices({
+    x: {
+      mode: 'chat',
+      input_cost_per_token: 1,
+      unknown_cost_above_128k_tokens: 3,
+    },
+  });
+  expect(row!.rates.pricingReason).toBe('unsupported-tier');
 });
