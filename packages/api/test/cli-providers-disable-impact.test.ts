@@ -29,6 +29,8 @@ beforeEach(() => {
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     stepCatalog: schema.stepCatalog,
+    taskTypeDefinitions: schema.taskTypeDefinitions,
+    envTemplates: schema.envTemplates,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
     taskStepCliChoices: schema.taskStepCliChoices,
@@ -134,6 +136,84 @@ describe('provider disable impact', () => {
     const response = await read();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ taskCount: 2, stepCount: 2 });
+  });
+
+  it('counts a pending run_app task whose CLI steps belong to other workflows', async () => {
+    fake.insert(schema.stepCatalog, {
+      stepId: '01-declare-deps',
+      title: 'Declare dependencies',
+      workflowType: 'env_replicate',
+      stepIndex: 0,
+      dispatchesStepCli: true,
+      providerSensitive: false,
+      composable: false,
+    });
+    task({ type: 'run_app', status: 'queued', currentStepId: null, runListSnapshot: null });
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ taskCount: 1, stepCount: 1 });
+  });
+
+  it.each([
+    ['ddev', '06a-db-migrate'],
+    ['docker-compose', '01a-app-boot'],
+    [null, null],
+  ])('counts only the run_app runtime selected by %s', async (containerTool, runtimeStep) => {
+    for (const stepId of ['06a-db-migrate', '01a-app-boot'])
+      fake.insert(schema.stepCatalog, {
+        stepId,
+        title: stepId,
+        workflowType: 'workflow',
+        stepIndex: 1,
+        dispatchesStepCli: true,
+        providerSensitive: false,
+        composable: false,
+      });
+    const envTemplateId = randomUUID();
+    fake.insert(schema.envTemplates, { id: envTemplateId, declaredDeps: { containerTool } });
+    // A strategy is read from the definition, including on types with a different slug.
+    fake.insert(schema.taskTypeDefinitions, { slug: 'runner', runListStrategy: 'run_app_modes' });
+    task({ type: 'runner', currentStepId: '98-choose-view', runListSnapshot: null, envTemplateId });
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      taskCount: runtimeStep ? 1 : 0,
+      stepCount: runtimeStep ? 1 : 0,
+    });
+  });
+
+  it.each([
+    [null, 3],
+    ['full_workflow', 3],
+    ['quick_bugfix', 2],
+    ['plan_tasklist', 2],
+  ])('counts the workflow prelude and only steps retained by %s', async (executionPath, count) => {
+    for (const [stepId, workflowType, dispatchesStepCli, stepIndex] of [
+      ['00-triage', 'workflow', false, 0],
+      ['01-declare-deps', 'env_replicate', true, 0],
+      ['07-phase-2-implement', 'workflow', true, 1],
+      ['08d-adversarial-qa', 'workflow', true, 2],
+    ] as const)
+      fake.insert(schema.stepCatalog, {
+        stepId,
+        title: stepId,
+        workflowType,
+        stepIndex,
+        dispatchesStepCli,
+        providerSensitive: false,
+        composable: false,
+      });
+    task({ type: 'workflow', currentStepId: '00-triage', runListSnapshot: null, executionPath });
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ taskCount: 1, stepCount: count });
+  });
+
+  it('uses the live workflow list for legacy static tasks without snapshots', async () => {
+    task({ runListSnapshot: null });
+    const response = await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ taskCount: 1, stepCount: 2 });
   });
 
   it('hides impact for a provider owned by somebody else', async () => {

@@ -1,3 +1,5 @@
+import type { ExecutionPath } from '@haive/shared';
+import { builtinRunListStrategy, taskRunListIds } from '@haive/shared/run-list';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { loadTaskStepFlags } from './step-flags.js';
@@ -40,12 +42,32 @@ export async function providerDisableImpact(db: Database, userId: string, provid
   let stepCount = 0;
   for (const task of tasks) {
     const flags = await loadTaskStepFlags(db, task);
-    const runList =
-      task.runListSnapshot ??
-      [...flags.values()]
-        .filter((f) => f.workflowType === task.type)
-        .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
-        .map((f) => f.stepId);
+    const [definition] = await db
+      .select({ runListStrategy: schema.taskTypeDefinitions.runListStrategy })
+      .from(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, task.type));
+    const strategy = definition?.runListStrategy ?? builtinRunListStrategy(task.type);
+    const [envTemplate] =
+      strategy === 'run_app_modes' && task.envTemplateId
+        ? await db
+            .select({ declaredDeps: schema.envTemplates.declaredDeps })
+            .from(schema.envTemplates)
+            .where(eq(schema.envTemplates.id, task.envTemplateId))
+        : [];
+    const runList = taskRunListIds(
+      {
+        workflowType: task.type,
+        runListStrategy: strategy,
+        runListSnapshot: task.runListSnapshot,
+        executionPath: (task.executionPath as ExecutionPath | null) ?? null,
+      },
+      (type) =>
+        [...flags.values()]
+          .filter((f) => f.workflowType === type)
+          .sort((a, b) => (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity))
+          .map((f) => f.stepId),
+      (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)?.containerTool,
+    );
     const currentIndex = task.currentStepId ? runList.indexOf(task.currentStepId) : -1;
     const candidates = [...new Set(runList)]
       .filter((stepId) => {

@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import { parseStepId, type PromptStepEntry } from '@haive/shared/modularity';
-import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
+import { taskRunListIds } from '@haive/shared/run-list';
 import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
@@ -117,17 +117,9 @@ export async function buildRunList(
   // full registered list for the type — only the 99-run-app-ready gate is native).
   if (ctx.runListStrategy === 'run_app_modes') return buildRunAppRunList(ctx, db);
   if (ctx.runListStrategy === 'workflow_paths') {
-    const main = stepRegistry.listByWorkflow('workflow');
-    const prelude = stepRegistry.listByWorkflow('env_replicate');
-    // The model-health canary runs first (a dead model fails loudly before any path is
-    // chosen — the path is moot when no model can run it), then base-sync and triage, ahead of
-    // the env-replicate prelude so the path is chosen up front; execution_path (null
-    // pre-triage / on legacy rows) then trims the workflow steps to the chosen path. The
-    // ordering + filtering is a pure helper in orchestrator/execution-paths.ts so it can
-    // be unit-tested. Safe with the forward walk because every path set contains the
-    // canary + triage + the spine, so the just-finished step is always present in the
-    // filtered list.
-    return orderWorkflowRunList(main, prelude, ctx.executionPath);
+    return taskRunListIds(ctx, (type) =>
+      stepRegistry.listByWorkflow(type).map((step) => step.metadata.id),
+    ).map((id) => stepRegistry.require(id));
   }
   const { steps, unresolved } = resolveRunList(ctx);
   if (unresolved.length > 0) throw new UnresolvedStepError(unresolved);
@@ -188,14 +180,6 @@ async function buildRunAppRunList(
   ctx: ResolvedTaskContext,
   db: Database,
 ): Promise<StepDefinition[]> {
-  const prefix = [
-    stepRegistry.require('01-declare-deps'),
-    stepRegistry.require('01-worktree-setup'),
-    stepRegistry.require('01-debug-mode'),
-  ];
-  const chooseView = stepRegistry.require('98-choose-view');
-  const ready = stepRegistry.require('99-run-app-ready');
-
   const envTemplate = await getTaskEnvTemplate(db, ctx.taskId);
   const containerTool = (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
     ?.containerTool;
@@ -210,24 +194,5 @@ async function buildRunAppRunList(
       );
   }
 
-  let runtime: StepDefinition[] = [];
-  if (containerTool === 'ddev') {
-    // 01c starts DDEV; 01c1 restores the selected database; 06a runs the framework
-    // DB migrations (drush updatedb / artisan migrate / …) so an imported DB matches
-    // the code before browsing. 06a self-gates on .ddev/config.yaml and is skippable.
-    runtime = [
-      stepRegistry.require('01c-ddev-env'),
-      stepRegistry.require('01c1-restore-database'),
-      stepRegistry.require('06a-db-migrate'),
-    ];
-  } else if (containerTool) {
-    // Non-DDEV (none / docker / docker-compose): build the env image, then boot the
-    // app in the app-runner (01a-app-boot's optional LLM infers the run command).
-    runtime = [
-      stepRegistry.require('02-generate-dockerfile'),
-      stepRegistry.require('03-build-image'),
-      stepRegistry.require('01a-app-boot'),
-    ];
-  }
-  return [...prefix, chooseView, ...runtime, ready, stepRegistry.require('11g-save-database')];
+  return taskRunListIds(ctx, () => [], containerTool).map((id) => stepRegistry.require(id));
 }
