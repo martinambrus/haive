@@ -650,6 +650,17 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T681 · Insight loop: act on consequential insights during the task, and pick insights at gate 3
+
+status: open (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
+
+Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INSTRUCTION`); DAG reviewers' withheld findings join them (`loadInsightOutputs`). Step `08e-insights-triage` shows them once as a multi-select and one agent applies the picks; gates 2 and 3 list the unpicked rest as plain text (`_gate-insights.ts`; gate 3 says "needs a follow-up task"). An `Insight` has no severity, and nothing loops.
+
+1. Per-task insight mode `manual` (default, today's behaviour) or `auto`, with a per-user default.
+2. `auto`: each 08e round runs a separate triage agent that classifies every new insight (consequential vs minor/nit, with kind and reason; security, data loss and regression are always consequential), auto-selects the consequential ones, applies them, re-runs 08 verify and 08c review, and returns to 08e. Stops when a round finds no new consequential insight or after 3 rounds. Identity across rounds via `findingIdentity`. Minor items and nits are never acted on and are listed in the end summary with their class.
+3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
+4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
+
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
 status: parked (OWNER DECISION 2026-11-14: build paused until a full workflow run gives a fresh 08c baseline to compare DE against) · kind: design · found: owner GO 2026-11-14 · priority: P4
