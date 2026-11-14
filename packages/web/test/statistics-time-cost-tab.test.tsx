@@ -60,6 +60,11 @@ it('shows durable recording coverage, suite totals and incomplete checks alongsi
   expect(screen.getAllByText('Test suite runs')).toHaveLength(2);
   expect(screen.getAllByText('1 run · 2s · incomplete')).toHaveLength(2);
   expect(screen.getByText(/Recording began 2026-11-14/)).toBeTruthy();
+  expect(
+    screen.getByText(
+      /Pass share:.*Suite time can include agent-slot wait and the 08b post-failure enumerate probe/,
+    ),
+  ).toBeTruthy();
   expect(screen.getAllByText(/Pass share: n=1.*1 incomplete/)).toHaveLength(2);
   const oldRow = screen.getByRole('link', { name: 'old' }).closest('tr');
   expect(oldRow?.children[3]?.textContent).toBe('—');

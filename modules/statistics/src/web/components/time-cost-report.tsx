@@ -82,7 +82,7 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
         <Tile
           label="Test suite runs"
           value={reportTestSuite(t)}
-          hint={`${reportCheckCoverage(t)}. ${report.recordingStartedAt ? `Recording began ${report.recordingStartedAt.slice(0, 10)} (UTC)` : 'Recording start unavailable'}`}
+          hint={`${reportCheckCoverage(t)}. Suite time can include agent-slot wait and the 08b post-failure enumerate probe. ${report.recordingStartedAt ? `Recording began ${report.recordingStartedAt.slice(0, 10)} (UTC)` : 'Recording start unavailable'}`}
         />
         <Tile
           label="Workflow work"
@@ -216,7 +216,8 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
           Workflow work is elapsed step work, including deterministic setup and the test phase;
           agent-hours sum concurrent invocations. Test phase includes setup and skipped commands and
           does not prove that tests executed. Suite time sums finished test checks, including
-          selective runs and retries; lint and typecheck are excluded. Not-run and incomplete checks
+          selective runs and retries; lint and typecheck are excluded. Suite time can include
+          agent-slot wait and the 08b post-failure enumerate probe. Not-run and incomplete checks
           are excluded from pass share. A task with test check records uses those for execution
           coverage: passed or failed means ran, only not-run records means not run, otherwise
           execution is unrecorded. Tasks without test check records fall back to surviving
