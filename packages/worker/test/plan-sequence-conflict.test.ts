@@ -29,7 +29,7 @@ it('recomputes a conflicted chunk from fresh dependency and node reads', async (
   vi.mocked(loadPlanEdges).mockResolvedValue([
     { fromNodeId: 'a', toNodeId: 'b', kind: 'depends_on' },
   ] as never);
-  await applyDeterministicOrder(ctx, 'repo', nodes, []);
+  expect(await applyDeterministicOrder(ctx, 'repo', nodes, [])).toBe(0);
   expect(applyPlanPatch).toHaveBeenCalledOnce();
   // The new dependency already matches stored ordinals, so this chunk needs no retry write.
   expect(loadPlanSkeletons).toHaveBeenCalledOnce();

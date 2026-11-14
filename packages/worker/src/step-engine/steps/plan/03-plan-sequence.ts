@@ -298,6 +298,7 @@ export async function applyDeterministicOrder(
   // an idempotent assignment derived from edges that are not changing, so a run
   // interrupted between chunks leaves a partly reordered tree that the next run
   // finishes. It is a projection being brought up to date, not a unit of intent.
+  let reordered = 0;
   for (let i = 0; i < ops.length; i += PLAN_PATCH_MAX_OPS) {
     const chunk = ops.slice(i, i + PLAN_PATCH_MAX_OPS);
     const ids = new Set(chunk.map((op) => op.nodeRef));
@@ -319,9 +320,10 @@ export async function applyDeterministicOrder(
         },
         { repositoryId, origin: 'llm', sourceTaskId: ctx.taskId },
       );
+      reordered += freshOps.length;
     });
   }
-  return ops.length;
+  return reordered;
 }
 
 /** The runs an agent still has to decide, in plan order so the fan-out works
