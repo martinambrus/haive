@@ -56,6 +56,7 @@ import {
   scanInstalledTooling,
 } from '@haive/shared/stats-server';
 import { DEFAULT_RANGE_DAYS, MAX_RANGE_DAYS, parseStatsQuery, type StatsQuery } from './query.js';
+import { timeCostOver } from './time-cost.js';
 
 /** Task statuses that mean "this task produced nothing".
  *
@@ -531,6 +532,37 @@ async function resolveUnusedTooling(
 }
 export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv> {
   const statsRoutes = new Hono<AppEnv>();
+
+  statsRoutes.get('/time-cost', async (c) => {
+    const q = parseStatsQuery(c.req.query());
+    if (q.allUsers && c.get('userRole') !== 'admin') {
+      throw new HttpError(403, 'Admin access required for install-wide statistics');
+    }
+    const from = new Date(q.fromMs);
+    const to = new Date(q.toMs);
+    const tasks = await completedTasksOver(ctx.db, taskScopeFilter(q, c.get('userId')), from, to);
+    const [report, currency] = await Promise.all([
+      timeCostOver(ctx.db, tasks, invocationAttributionFilter()),
+      configService.get(CONFIG_KEYS.COST_DISPLAY_CURRENCY),
+    ]);
+    const costDisplay = await resolveCostDisplay(
+      ctx.db,
+      isDisplayCurrency(currency) ? currency : 'USD',
+      to,
+    );
+    return c.json({
+      range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
+      scope: {
+        allUsers: q.allUsers,
+        repositoryId: q.repositoryId,
+        taskClass: q.taskClass,
+        cliProviderId: q.cliProviderId,
+        providerIgnored: q.cliProviderId !== null,
+      },
+      costDisplay,
+      ...report,
+    });
+  });
 
   /**
    * Range summary: what this window cost, saved, ran and produced.
