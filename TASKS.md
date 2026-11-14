@@ -582,9 +582,9 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
-### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+10)
+### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+17)
 
-status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
 1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
 2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
@@ -596,6 +596,13 @@ status: open (OWNER DECISION 2026-11-14: fix these prerequisites and measure the
 8. #1167 An empty `result.modelUsage` ledger is still accepted as complete when prompt sums match (stream.ts reconcile loop break on size 0). NIT, PRE-EXISTING in design.
 9. #1167 `contradictory-request` compares output tokens too (stream.ts ~354); if a binary updates output between content blocks of one message, runs go incomplete. Compare prompt buckets + model only if it shows. LOW.
 10. Killed Claude/Ollama fallback under-counts output (stream.ts ~646: fallback output 0 vs completed 141 on the retained fixture). PRE-EXISTING, consequential for token stats.
+11. #1173 PR 3 contract: the rate for same-model excess with null cache-write TTL or excess output is undefined (stream.ts ~:659). Define it in PR 3 before pricing excess. CONNECTED, consequential.
+12. #1173 The replay counts absent and empty `modelUsage` only; a null, array, string or number ledger is accepted complete with both counters 0 (replay-request-usage.ts ~:178). LOW.
+13. #1173 The volatile Haiku titling matcher says "fail loud" but nothing fails loud when it stops matching (replay-request-usage.ts ~:55). NIT.
+14. #1173 `refreshModelPrices` can still throw out of the job: `recordSyncError` (model-prices.ts ~:131, ~:206, ~:228) and the post-apply `cli_pricing_sync` upserts (~:264-276) are unguarded; also DB failures outside price application (~:91). PRE-EXISTING, low.
+15. #1173 Serialization does not stop an older fetched feed replacing newer data (model-prices.ts ~:334). PRE-EXISTING, minor.
+16. #1173 The unsupported-model list on the refresh card is unbounded (web latest-refresh.tsx ~:120). PRE-EXISTING, minor.
+17. #1173 Killed-run output undercount (item 10) is not quantified by the replay (~:266). Minor.
 
 ### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
@@ -642,6 +649,22 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 6. A partial `git remote add` (origin added, pushurl write failed) is reconciled only on the next tick; covered by the intent but untested.
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
+
+### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+9)
+
+status: open · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
+
+Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, review-6/review-2.md).
+
+1. An agent can copy a tracked secret (or a protected file outside the test set, such as a root `.env`) into an allowed test file; the copy's content is stored and shown. Same exposure as the gate-3 diff viewer; decide one rule for both. PRE-EXISTING class, low-medium.
+2. A moved secret's full-file sha256 is stored in the manifest and shown as the after identity. Low.
+3. A superseded or stopped repair pass never reaches `finishFixTestCapture` (step-runner.ts ~:760, ~:775), writes no after event and so does not taint the task; a later edit of the moved file would retain the secret. Low-medium.
+4. Withheld same-size `contentUnknown` counting has no negative controls (a withheld file that changed size, a non-withheld same-size edit).
+5. Review-2 F3: the in-memory pending before image (`pending` map) is lost on a worker restart; see P6-S/review-2.md.
+6. Review-2 F9: workspace path resolution for the after capture; see P6-S/review-2.md.
+7. `/events` is polled every 2 s unpaged. PRE-EXISTING.
+8. The event digest loads all payloads. PRE-EXISTING.
+9. `.auth/` directories are not in the default secret deny globs. PRE-EXISTING.
 
 ### T669 · External modules: private repositories and a dev install that leaves haive clean
 
@@ -1042,7 +1065,7 @@ status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 ### T648 · upgrades never refresh the compose bundle (design)
 
-status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 in progress) · kind: design · found: #1136 review 2026-11-13 · priority: P2
+status: open (OWNER DECISION 2026-11-13: the release manifest image carries the compose bundle; the updater swaps it with backup and rollback alongside the images, and generates any `.env` keys the new bundle needs so it never fails open; PR1 done 2026-11-14 #1157 (1cfbef464): the updater keeps the install's GPU/Vulkan compose overlay on every compose call; PR2-6 plan APPROVED by the owner 2026-11-14 as drafted, with a hand-edited or unknown bundle refused as `bundle-modified` unless `--replace-modified-bundle`; PR2 done 2026-11-14 #1172 (9233cfc97): the release manifest describes the bundle (`install/bundle-env.json`, `build-release-manifest.mjs --bundle-dir`); PR4 must also refuse a non-https manifest URL when a bundle is present (updater `cli.ts` ~:132 accepts http via operator override); PR3 next) · kind: design · found: #1136 review 2026-11-13 · priority: P2
 PRE-EXISTING. The installer fetches the compose bundle once, at install time (`install/install.sh` ~:662-665), and `haive upgrade` only rewrites the `.env` image pin (updater `cli.ts` ~:197-200). Any compose-level change reaches fresh installs only. Measured consequence: an install upgraded past #1136 keeps the Ollama daemon on the models network with no gate, so the T645 fix is absent there (documented in `sandbox.md`). Options: ship the compose bundle inside the release manifest image and have the updater swap it (with rollback alongside the images), or have the updater refuse an upgrade whose bundle hash differs and tell the operator to re-run the installer. Decide before the next release that changes compose.
 Also from #1139: an existing install whose bundle predates MP_UI_AUTH keeps an open Mailpit UI after any upgrade, and a refreshed bundle installed over an `.env` with no `MAILPIT_UI_PASSWORD` fails open (empty value = no auth). Whatever refreshes the bundle must also generate missing keys it needs.
 
@@ -1944,6 +1967,12 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Fix-pass test edits, AIDE² P6 (#1171): repair passes record before/after images of test files (`fix_test_blobs`, migration 0238) and gates 2 and 3 show the edits; protected paths stay withheld, and a protected move keeps the task contentless. Lows filed as T670.
+
+- Release manifest describes the compose bundle, T648 PR 2 (#1172).
+
+- Context-tiered pricing prerequisites (#1173): read-only request-usage replay with measured coverage, complete-only ledger excess, serialized price refresh that finishes on failure. Remaining under T665.
 
 - Time and cost report PR 1 (#1169): "Time & cost report" statistics tab (test phase, workflow work by category, human active, waiting for a person, billed and at-API-rates) plus the task page tests cell. Live: tab totals equal /summary (50 tasks, work and active ms exact). Lows filed as T668.
 
