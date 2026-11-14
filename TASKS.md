@@ -650,6 +650,22 @@ status: open · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · pr
 7. No real-PostgreSQL probe for the sweep-vs-request race itself (the PG probe covers the lock skip only).
 8. Naming: the `skipLocked` option of `reconcileRemote` also means "skip fenced repositories"; rename to `sweep` or split.
 
+### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
+
+status: open · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
+
+Reviews in `.claude/tmp/codex-run/NRC-S/`.
+
+1. Clock-stamp precedence between the pick and the park is not pinned; a default pick leaves stale `fix:*` choice rows that should be deleted.
+2. A re-park leaves `completed_at` and `error_message` on the row, drops the user's typed text, and has no test for a lost park epoch.
+3. The api hard-codes the gate step id and the round slot format with no parity constant shared with the worker.
+4. The gate header's meter (review-3, low).
+5. The fence regex at `07-phase-2-implement.ts` ~:174-179 is hand-rolled; use `scanFences`.
+6. Weak assertions in the round-choice tests; an upsert error in the `.catch` (`task-queue.ts`) masks `FixRoundCliUnavailable`.
+7. `steps.find` in the submit-state helpers matches the first row of a step id across rounds.
+8. A preset's `appliedValues` can override values after a re-park.
+9. Owed live check: the gate UI picks a next-round CLI on a real escalation.
+
 ### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+1)
 
 status: open · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
@@ -1988,6 +2004,10 @@ All low unless marked.
   - Owed: real-browser check of the tab at 1600 px and 900 px plus an empty window (driver checked DOM on a fixture only).
 
 ## Done
+
+- Next-round CLI choice at the fix-loop escalation gates (#1175): the user picks the CLI for the next fix round; an unavailable CLI re-parks the gate. Lows filed as T673.
+
+- Learning provenance (#1177): each learning file records its origin and last five updates as a trailing comment with before/after hashes, stripped from excerpts and RAG chunks.
 
 - Time and cost report PR 3 (#1176): idle time is labelled "Idle" on the statistics tile and "parked" on the task pages, never "waiting on you"; the plan is complete apart from the idle-detection note line.
 
