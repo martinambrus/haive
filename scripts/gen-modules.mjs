@@ -1,6 +1,7 @@
 import { chownSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import local from './local-modules.cjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const modulesDir = join(root, 'modules');
@@ -8,15 +9,21 @@ const modulesDir = join(root, 'modules');
 const MODULE_PACKAGE = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
 const idOf = (name) => MODULE_PACKAGE.exec(name)?.[1] ?? null;
 
-const folders = readdirSync(modulesDir, { withFileTypes: true })
-  .filter((entry) => entry.isDirectory())
-  .map((entry) => join(modulesDir, entry.name, 'package.json'))
+const folders = [modulesDir, local.directory]
+  .flatMap((directory) =>
+    readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => ({ entry, directory })),
+  )
+  .filter(({ entry }) => entry.isDirectory())
+  .map(({ entry, directory }) => join(directory, entry.name, 'package.json'))
   .flatMap((file) => {
     try {
       return [
         {
           ...JSON.parse(readFileSync(file, 'utf8')),
           dir: basename(dirname(file)),
+          location: dirname(dirname(file)) === modulesDir ? 'modules' : 'external-modules',
           source: 'local',
         },
       ];
@@ -26,11 +33,15 @@ const folders = readdirSync(modulesDir, { withFileTypes: true })
     }
   });
 
-const apiPackage = JSON.parse(readFileSync(join(root, 'packages', 'api', 'package.json'), 'utf8'));
-const workerPackage = JSON.parse(
-  readFileSync(join(root, 'packages', 'worker', 'package.json'), 'utf8'),
+const apiPackage = local.effectivePackage(
+  JSON.parse(readFileSync(join(root, 'packages', 'api', 'package.json'), 'utf8')),
 );
-const webPackage = JSON.parse(readFileSync(join(root, 'packages', 'web', 'package.json'), 'utf8'));
+const workerPackage = local.effectivePackage(
+  JSON.parse(readFileSync(join(root, 'packages', 'worker', 'package.json'), 'utf8')),
+);
+const webPackage = local.effectivePackage(
+  JSON.parse(readFileSync(join(root, 'packages', 'web', 'package.json'), 'utf8')),
+);
 const dependsOn = (host, pkg) => host.dependencies?.[pkg.name] !== undefined;
 const specOf = (pkg) => (pkg.source === 'registry' ? pkg.version : 'workspace:*');
 
@@ -68,7 +79,7 @@ const providers = new Map();
 for (const [name, where] of [
   ...folders
     .filter((pkg) => pkg.exports?.['./manifest'] !== undefined)
-    .map((pkg) => [pkg.name, `modules/${pkg.dir}`]),
+    .map((pkg) => [pkg.name, `${pkg.location}/${pkg.dir}`]),
   ...apiRegistryNames.map((name) => [name, 'a dependency of @haive/api']),
 ]) {
   const id = idOf(name);
@@ -95,7 +106,7 @@ for (const folder of folders.filter(({ name }) => name.startsWith('@haive-module
   );
   if (pinned.length > 0) {
     console.error(
-      `gen-modules: ${folder.name} is the folder modules/${folder.dir}, but ${pinned.map(({ file, pkg }) => `${file} pins it to "${pkg.dependencies[folder.name]}"`).join(', ')}, which pnpm installs from the registry instead; depend on the folder as "workspace:*" or rename its package`,
+      `gen-modules: ${folder.name} is the folder ${folder.location}/${folder.dir}, but ${pinned.map(({ file, pkg }) => `${file} pins it to "${pkg.dependencies[folder.name]}"`).join(', ')}, which pnpm installs from the registry instead; depend on the folder as "workspace:*" or rename its package`,
     );
     process.exit(1);
   }
@@ -166,6 +177,15 @@ for (const name of apiRegistryNames) {
   ) {
     console.error(
       `gen-modules: ${name} is declared as "${apiSpec}" but packages/api/node_modules/${name} is "${installed}", and the generated module lists would come from that old copy; run pnpm install (pnpm docker rebuild on the dev stack)`,
+    );
+    process.exit(1);
+  }
+}
+
+for (const entry of Object.values(local.selection())) {
+  if (!apiModules.some((pkg) => pkg.name === entry.name)) {
+    console.error(
+      `gen-modules: selected external module ${entry.name} is missing; restore its clone or run pnpm module remove`,
     );
     process.exit(1);
   }
@@ -247,6 +267,8 @@ ${workerEntries.join('\n')}
 ];
 `;
 
+const selectedExternal = (pkg) =>
+  pkg.location === 'external-modules' && local.selection()[pkg.dir] !== undefined;
 const webModuleFor = (pkg, part) => {
   if (pkg.exports?.['./manifest'] === undefined) {
     console.error(
@@ -264,7 +286,7 @@ const webModuleFor = (pkg, part) => {
   }
   if (webPackage.dependencies?.[pkg.name] === undefined) {
     console.error(
-      `gen-modules: ${pkg.name} exports ${part} but is not a dependency of @haive/web; add "${pkg.name}": "${specOf(pkg)}" to packages/web/package.json`,
+      `gen-modules: ${pkg.name} exports ${part} but is not a dependency of @haive/web; ${selectedExternal(pkg) ? `run pnpm module add ${pkg.dir}` : `add "${pkg.name}": "${specOf(pkg)}" to packages/web/package.json`}`,
     );
     process.exit(1);
   }
@@ -282,7 +304,7 @@ for (const pkg of apiModules) {
   const hasWebPart = pkg.exports['./web'] !== undefined || pkg.exports['./dashboard'] !== undefined;
   if (!hasWebPart && dependsOn(webPackage, pkg)) {
     console.error(
-      `gen-modules: ${pkg.name} is a dependency of @haive/web but exports neither ./web nor ./dashboard; remove "${pkg.name}" from packages/web/package.json`,
+      `gen-modules: ${pkg.name} is a dependency of @haive/web but exports neither ./web nor ./dashboard; ${selectedExternal(pkg) ? `run pnpm module add ${pkg.dir}` : `remove "${pkg.name}" from packages/web/package.json`}`,
     );
     process.exit(1);
   }

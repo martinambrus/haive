@@ -62,6 +62,7 @@ services:
              corepack enable &&
              pnpm install --frozen-lockfile=false &&
              ( chown -R $$(stat -c '%u:%g' /app) /app/node_modules 2>/dev/null || true ) &&
+             ( if [ -d /app/external-modules/.lock ]; then chown -R $$(stat -c '%u:%g' /app) /app/external-modules/.lock 2>/dev/null || true; fi ) &&
              pnpm --filter @haive/database migrate:tsx"
     networks:
       - haive-network

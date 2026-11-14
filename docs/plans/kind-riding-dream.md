@@ -37,17 +37,16 @@ Each gap they find is filed and fixed in core, never worked around inside the mo
 - Split: the core changes listed under "Core changes this needs" land in haive as generic,
   module-agnostic capabilities with their own tests, naming no module id. Everything module-specific
   lands in the private repository.
-- Prerequisite in core, before the first module commit: today `modules/` is tracked, and
-  `pnpm module add <id>` edits tracked `package.json` files and `pnpm-lock.yaml`, so a dev install of
-  a private module would end up in a haive commit. Core must make a dev install of an external module
-  leave nothing in a haive commit (its folder ignored, its dependency entries kept out of tracked
-  files; the mechanism is a design choice of that task). A CI check must refuse a tracked file naming a
-  module that is not public in haive.
-- Development: clone the private repository into `modules/<id>/` of a haive checkout, then
-  `pnpm module add <id>` and `pnpm docker rebuild`, as for any folder module.
+- Core prerequisite: external clones live in ignored `external-modules/<id>/`, with selection and
+  dependency resolution in ignored local files; public first-party modules remain under `modules/`.
+  The CI public-reference check guards tracked install/runtime wiring, reading the public set from
+  `public-modules.json`; unlisted tracked module folders fail, and prose and synthetic test examples
+  are exempt.
+- Development: clone the private repository into `external-modules/<id>/` of a haive checkout, then
+  `pnpm module add <id>`, `pnpm install`, `pnpm build` and `pnpm docker rebuild`.
 - Module CI: the core packages are never published (`pnpm.overrides` pins them to `workspace:*`), so
   the module repository's CI checks out haive at a pinned release tag, places the module at
-  `modules/<id>/`, and builds and tests it there.
+  `external-modules/<id>/`, adds it locally, and builds and tests it there.
 - Release: a tag in the private repository publishes `@haive-module/<id>@<version>` to GitHub
   Packages with restricted access; entitled customers receive it through the vendor channel build
   below. A published-image install can instead pin the private repository as a git install source

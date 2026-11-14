@@ -26,7 +26,8 @@ written; the public haive repository holds none of it. It follows the same exter
 the deep-analysis module (`kind-riding-dream.md`, "Source lives in its own private repository"): the
 core changes land in haive as generic capabilities, the core prerequisite that keeps a dev install
 out of haive commits lands first, module CI builds against a pinned haive release tag, and each gap
-found is fixed in core. The two are the first external modules.
+found is fixed in core. Development uses ignored `external-modules/<id>/` with local selection and
+lockfiles, leaving the tracked haive manifests and lockfile unchanged. The two are the first external modules.
 
 Ships as `@haive-module/translator`, distributed exactly like the deep-analysis module (private
 registry, BuildKit-secret token, `entitlementId`) per the distribution and module-step rules in

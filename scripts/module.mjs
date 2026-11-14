@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import local from './local-modules.cjs';
+import { publicModuleLock } from './public-module-lock.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const [command, target, ...extra] = process.argv.slice(2);
@@ -11,9 +13,20 @@ const fail = (message) => {
   process.exit(1);
 };
 
+if (command === 'lock' && target === undefined) {
+  if (publicModuleLock(root).status !== 0) fail('public lock refresh failed');
+  if (
+    local.localMode() &&
+    spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' }).status !== 0
+  )
+    fail('public lock updated, but refreshing the local lock failed');
+  console.log('module: refreshed pnpm-lock.yaml from the public workspace');
+  process.exit(0);
+}
+
 if ((command !== 'add' && command !== 'remove') || target === undefined || extra.length > 0) {
   console.error(
-    'usage: pnpm module add <id> | pnpm module add @haive-module/<id>@<version> | pnpm module remove <id> | pnpm module remove @haive-module/<id>',
+    'usage: pnpm module add <id> | pnpm module add @haive-module/<id>@<version> | pnpm module remove <id> | pnpm module remove @haive-module/<id> | pnpm module lock',
   );
   process.exit(1);
 }
@@ -32,6 +45,46 @@ if (
 }
 if (registry !== null && command === 'remove' && version !== undefined) {
   fail(`remove takes the package name without a version: pnpm module remove @haive-module/${id}`);
+}
+
+// Clones outside the public modules tree use only ignored local selection/lock state.
+const selected = local.selection();
+const externalFile = join(local.directory, id, 'package.json');
+if (registry === null && (existsSync(externalFile) || selected[id] !== undefined)) {
+  if (existsSync(join(root, 'modules', id, 'package.json')))
+    fail(`${id} exists in both module trees; keep one`);
+  const before = existsSync(local.selectionFile) ? readFileSync(local.selectionFile, 'utf8') : null;
+  if (command === 'add') {
+    const pkg = JSON.parse(readFileSync(externalFile, 'utf8'));
+    if (
+      ![`@haive/module-${id}`, `@haive-module/${id}`].includes(pkg.name) ||
+      pkg.exports?.['./manifest'] === undefined
+    )
+      fail(`${externalFile} needs a matching module name and ./manifest export`);
+    selected[id] = { name: pkg.name };
+  } else delete selected[id];
+  mkdirSync(local.directory, { recursive: true });
+  if (Object.keys(selected).length)
+    writeFileSync(local.selectionFile, `${JSON.stringify(selected, null, 2)}\n`);
+  else rmSync(local.selectionFile, { force: true });
+  const lock = spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' });
+  if (lock.status !== 0) {
+    if (before === null) rmSync(local.selectionFile, { force: true });
+    else writeFileSync(local.selectionFile, before);
+    fail('pnpm install --lockfile-only failed; local selection was reverted');
+  }
+  const gen = spawnSync('node', [join(root, 'scripts/gen-modules.mjs')], {
+    cwd: root,
+    stdio: 'inherit',
+  });
+  if (gen.status !== 0) fail('gen-modules rejected the local selection above');
+  console.log(
+    `module: ${command === 'add' ? 'added' : 'removed'} external ${id}; host manifests and pnpm-lock.yaml unchanged`,
+  );
+  console.log(
+    'module: next, run pnpm install, build, then pnpm docker rebuild; local clones are excluded from tagged channel builds',
+  );
+  process.exit(0);
 }
 
 let name = registry === null ? `@haive/module-${id}` : `@haive-module/${id}`;
@@ -117,15 +170,24 @@ if (changes.length === 0) {
 }
 
 for (const { rel, after } of changes) writeFileSync(join(root, rel), after);
-const lock = spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' });
+const lock = local.localMode()
+  ? publicModuleLock(root)
+  : spawnSync('pnpm', ['install', '--lockfile-only'], { cwd: root, stdio: 'inherit' });
 if (lock.status !== 0) {
   for (const { rel, before } of changes) writeFileSync(join(root, rel), before);
   fail(
     `pnpm install --lockfile-only failed${lock.error ? `: ${lock.error.message}` : ''}; the package.json edits were reverted`,
   );
 }
+if (local.localMode()) {
+  const localLock = spawnSync('pnpm', ['install', '--lockfile-only'], {
+    cwd: root,
+    stdio: 'inherit',
+  });
+  if (localLock.status !== 0) fail('public lock updated, but refreshing the local lock failed');
+}
 const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
-const gen = spawnSync(process.execPath, [join(root, 'scripts', 'gen-modules.mjs')], {
+const gen = spawnSync('node', [join(root, 'scripts', 'gen-modules.mjs')], {
   cwd: root,
   stdio: 'inherit',
   env: { ...process.env, [INSTALL_MAY_LAG]: '1' },

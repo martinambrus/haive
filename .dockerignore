@@ -25,3 +25,5 @@ playwright-report
 README.md
 LICENSE
 orchestration.zip
+
+external-modules/.lock

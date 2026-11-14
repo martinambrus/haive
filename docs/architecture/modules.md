@@ -1,6 +1,7 @@
 # Modules
 
-A module is a package named `@haive/module-<id>` (a workspace folder under `modules/<id>/`) or
+A module is a package named `@haive/module-<id>` (a workspace folder under `modules/<id>/` or
+`external-modules/<id>/`) or
 `@haive-module/<id>` (published to the registry; `modulePackageId` in `@haive/shared/modularity` is
 the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
 loaders refuse at boot a manifest whose id does not match its name), whose
@@ -279,7 +280,7 @@ loaded has no row, so removing it leaves nothing for `/admin/modules` to show.
 
 ## What the build requires
 
-A module is **installed** when `@haive/api` depends on it (`"@haive/module-<id>": "workspace:*"`
+A module is **installed** when the effective `@haive/api` manifest depends on it (`"@haive/module-<id>": "workspace:*"`
 for a folder, `"@haive-module/<id>": "<exact version>"` for a registry module). Each generated entry
 records its source (`local` or `registry`) and the worker writes it to the `modules` row at boot. The
 same id from a folder and a registry dependency is refused (`gen-modules` exits 1 naming both; keep
@@ -301,13 +302,89 @@ since the generated lists would come from that old copy: run `pnpm install` (`pn
 the dev stack). `pnpm module add|remove` skip that one check (`HAIVE_INSTALL_MAY_LAG=1`), because their
 lockfile-only install leaves `node_modules` behind on purpose.
 
-A folder under `modules/` that exports `./manifest` and that nobody depends on is **present, not
+A folder under `modules/` or `external-modules/` that exports `./manifest` and that nobody depends on is **present, not
 installed**. `gen-modules` prints `present, not installed: pnpm module add <id>`, leaves it out of
 every registry and exits 0, so a module folder you are not using does not break the build. The images
-still copy and build every folder under `modules/`; an uninstalled one is dead weight there and is
+still copy and build every folder under `modules/` and `external-modules/`; an uninstalled one is dead weight there and is
 never loaded.
 
 ## Installing and removing from a source checkout
+
+### External development modules
+
+Clone private module repositories into `external-modules/<id>/`, then run `pnpm module add <id>`,
+`pnpm install`, and `pnpm build`. Rebuild the dev stack with `pnpm docker rebuild` when ready.
+Use this separate tree because `modules/` remains the tracked public first-party tree. External
+folders, `.selection.json`, and `.lock/pnpm-lock.yaml` are ignored; only `.gitkeep` is tracked.
+`pnpm module remove <id>` removes the local selection and keeps the clone and all application data.
+The command still removes a selection if its clone has already been deleted. A selected clone that
+is missing fails code generation rather than disappearing from the build. The selection stores the
+package name; web parts are derived from the clone's current exports rather than a stored snapshot.
+
+Removing the final selection deletes `.selection.json`; remaining clones keep local mode active.
+To return to public mode, run `pnpm module remove <id>` for each selected module, move or delete all
+clone directories under `external-modules/`, remove `external-modules/.lock`, and run
+`pnpm install --frozen-lockfile`. Delete a legacy empty `.selection.json` too, if present. Local mode
+ends when neither a clone nor a selection remains; `.lock` alone does not activate it. If selection
+JSON is corrupt, delete `external-modules/.selection.json` and re-add the intended modules.
+
+`.pnpmfile.cjs` shares `scripts/local-modules.cjs` with code generation. Its `readPackage` hook adds
+selected workspace dependencies to the effective api and worker manifests, and to web for web parts,
+without writing their tracked package files. While clones or local selection state exist, `updateConfig`
+uses an ignored local lock seeded from the public lock (importer keys rebased), retains the normal
+root dependency store, and permits updating that local lock even under a frozen dev-image install.
+It records the public lock's SHA-256 beside the seed and re-seeds when that hash changes, for example
+after pulling a dependency update. With the same hash, local resolutions are retained. db-migrate
+returns ownership of the local lock directory to the repository owner when it exists, as it does
+for the shared `node_modules` tree.
+Installs with no external clone or selection retain the public frozen lock. Public module add/remove while local state
+exists resolves a manifest-only public workspace in scratch before refreshing the ignored local lock.
+
+A `pnpm add` or dependency-version edit in local mode updates only the ignored local lock; it does
+not update the tracked public lock. Run `pnpm module lock` before committing such manifest edits.
+That command resolves the public manifests in a scratch workspace with no external clones or
+selection, copies the resulting public lock back, then refreshes the local lock. The hash check
+above re-seeds local resolutions when that tracked lock changes.
+
+Turbo reads on-disk manifests rather than pnpm hooks. Root build/test/typecheck commands therefore
+build the external workspace closure first, then exclude those external packages from the Turbo
+pass so no second build races the host readers. The root `test` and `typecheck` therefore do not
+run an external module's own tests or typecheck; the module's repository runs those. While local state exists, `--force --no-cache` disables
+both cache reads and writes: local outputs must never overwrite a public cache entry. The dev
+library builder and runtime Dockerfiles also build external folders. Docker copies local selection
+and source, seeds its own local lock, and retains external module targets in api/worker runtime images.
+A direct image build from a development checkout includes that checkout's external folders, just as
+it includes public module folders. Release CI builds from its clean checkout; channel builds use a
+release tag's archive plus explicit registry entitlements, never local clones, and print that policy.
+Registry installs still use exact-version tracked dependency edits for disposable vendor builds;
+the public-reference CI check prevents committing private registry dependencies to haive.
+
+The existing CI Module scripts step runs the public-reference check. `public-modules.json` is the
+single declared list of public module ids; adding a public first-party module requires updating it.
+The guard rejects every tracked `modules/<id>/` file whose id is absent, so committing a private
+module manifest cannot make that module public automatically. It also rejects private package
+names in install/runtime wiring, explicit workspace entries and lockfile importers, production source
+and tracked generated registries, and all tracked external-module source/state. Folder paths are
+checked in manifests, locks, workspace configuration, `.pnpmfile.cjs`, Dockerfiles,
+`docker-compose*.yml`, workflow files and tracked `scripts/**/*.{sh,mjs,cjs}`, including `./`, `link:` and `file:` prefixes.
+Documentation and synthetic tests are excluded from literal checks; install inputs remain checked
+even in test directories, except for the existing three narrow registry-smoke file exemptions.
+
+Re-run the real-pnpm clean exercise on every pnpm version bump: from a clean public-mode checkout,
+create a disposable external stub, then run `pnpm module add <id>`,
+`pnpm install --offline --frozen-lockfile`, `pnpm module lock`, `pnpm build`,
+`node scripts/gen-modules.mjs`, and
+`pnpm typecheck --filter=@haive/api --filter=@haive/worker --filter=@haive/web --filter=@haive/updater`.
+Run `pnpm module remove <id>`, remove the stub clone and `.lock`, then repeat the public frozen
+install and code generation. Check `git status --porcelain` after each stage and assert
+`require('./scripts/local-modules.cjs').localMode()` is false after cleanup. The pnpm hook's
+`lockfileDir`/`virtualStoreDir` contract is covered by this real install exercise; script unit tests
+stub pnpm and cannot prove it.
+
+Next's mode-dependent `next-env.d.ts` is ignored too; stable Next ambient references live in
+`packages/web/src/next-types.d.ts`, so switching dev/build does not dirty a tracked generated file.
+
+### Public first-party and registry modules
 
 From the repository root:
 
@@ -378,9 +455,10 @@ same states either way.
 `node scripts/channel-gate.mjs --expect <expect.json> --token-file <file>`. The vendor npm token must
 appear nowhere (`scripts/smoke/scan-image.sh`, the token passed in its environment). The module names
 found in every layer, registry `@haive-module+<id>@<version>` and folder modules under
-`app/modules/<dir>/`, must equal the entitled set for the api and the worker and be a subset of the
+`app/modules/<dir>/` and `app/external-modules/<dir>/`, must equal the entitled set for the api and the worker and be a subset of the
 modules with web parts for the web image. A folder's `package.json` is read in every layer that
-writes it, so a name a later layer overwrote still counts. A non-directory entry under `app/modules/` other than
+writes it, so a name a later layer overwrote still counts. The two folder trees retain distinct
+paths even when their directory names match. A non-directory entry under either tree other than
 `.gitkeep` is refused. Every registry module in the expectation names its version (one without is a
 malformed expectation, exit 2). The api and worker images must carry exactly that version: another
 version, or a module linked in with no version to read, is an offender. The standalone web image has
@@ -623,7 +701,9 @@ per-customer.
 store. Its Dockerfile is `docker/own-module-builder/Dockerfile` (repository-root context); the
 ordinary release matrix publishes it. A vendor builds the same Dockerfile from an entitlement-filtered
 context for a customer with paid modules. Only that customer's packages may be installed or present:
-the public builder must never contain private packages. Vendor registry credentials use the optional
+the public builder must never contain private packages. Publish it only from the clean public
+release checkout: a direct development-checkout build includes that checkout's external clones.
+Vendor registry credentials use the optional
 `npmrc` BuildKit secret, which is not copied into the image. A customer-side rebuild uses the baked
 closure and can fetch public npm dependencies without receiving a vendor token. An incomplete private
 closure fails the build; there is no credential fallback.
