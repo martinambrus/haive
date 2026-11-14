@@ -5,8 +5,6 @@ import {
   type FixTestSummary,
   type FixTestRecord,
 } from './_fix-test-edits.js';
-
-const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
 import type { CommitDiffArtifact } from '@haive/shared/commit-diff-artifact';
@@ -44,6 +42,8 @@ import {
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './_gitlink-registration.js';
+
+const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
  *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a

@@ -5,8 +5,6 @@ import {
   type FixTestSummary,
   type FixTestRecord,
 } from './_fix-test-edits.js';
-
-const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 import { findingUpstream, type UpstreamKind } from './_dependency-policy.js';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -67,6 +65,8 @@ import {
 import type { Insight } from './08e-insights-triage.js';
 import { codeBlock } from './_plan-ops.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
+
+const displayTestRecords = new WeakMap<object, FixTestRecord[]>();
 
 /** Coverage as a step wrote it into `task_steps.output`. */
 interface CoverageOutput {
