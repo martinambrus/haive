@@ -35,8 +35,15 @@ The result's `num_turns` is not a request count.
 Billing keys alone never establish an unseen priced model. The collector reconciles each
 observed model's input, cache-read and cache-creation sums with its same-name
 `result.modelUsage` entry; output is checked only when the request output sum is independently
-observable and reconciles with `result.usage`. A contradictory or unreadable same-name entry
-withholds coverage. With no same-name entry, a differently named entry must carry exactly
+observable and reconciles with `result.usage`. A readable same-name entry must CONTAIN the
+observed sum in every checked bucket (input, cache read, cache creation and known output).
+A deficit in any checked bucket still withholds coverage, even if another entry matches.
+Only otherwise complete captures expose same-name excess in `unobservedSameModel`, with per-bucket totals
+and model but no invented request count, size or identity. Unobservable output and cache-write
+TTL stay null; zero cache-write excess has zero TTL buckets. Exact entries need no excess
+block. Sequential sub-step aggregation preserves these blocks only when the aggregate is complete;
+incomplete sub-steps and aggregates expose no excess. Request sizes and legacy
+`tokenUsage` remain unchanged. With no same-name entry, a differently named entry must carry exactly
 the observed vector, corroborating it without renaming the served model (Grok's build suffix,
 GLM's context variant). Ledger-only tokens outside the priced totals, such as Claude's Haiku
 titling call, do not block coverage beside a matching main-model or alias entry, but a
@@ -100,3 +107,113 @@ Admin control is two-level. The global `CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED`
 A refresh reports per source. The refresh job (`handleRefreshCliVersionsJob`) does not fail for one bad source: it completes with `ok: false` and an `errors` list of `{ name, error }`, one per failed source (a CLI's name, `price:<provider>`, `fx`, ...), each error sanitized at the worker. "Refresh now" on `/admin/pricing` and the version Refresh on the provider form wait for the job and, when `result.ok` is false, list the failed sources with their reasons (`RefreshFailures`; identical reasons merge, since a feed outage fails one `price:<provider>` per enabled CLI), while the sources that refreshed still reload. The notice gates on `result.ok`, never on message presence. `GET /cli-providers/catalog/:name/refresh-versions/:jobId` hands the result to an admin only, because its errors carry the price and FX failures that `/cli-pricing` keeps admin-only; a non-admin's form shows the refreshed versions and no notice. The job also keeps its latest run in `refresh_runs` (one row per kind: trigger, start and finish time, the result with its sanitized per-source errors and any source the kill switch skipped), so a scheduled refresh, or a manual one that outlasted the browser's poll, shows on `/admin/pricing` and the provider form (`LatestRefresh`, `GET /cli-pricing/refresh/latest`, admin only). A run a crash interrupted stays unfinished; an older overlapping run never replaces a newer one, neither by its start write (it updates only a row that started no later) nor by its completion (matched on its run id). Both writes are best-effort: a database error is logged and never fails the refresh. After its own job's result arrives, the page prefers that result over an older stored run.
 
 Costs are stored canonically in USD. `fx_rates` holds daily ECB USD-per-unit rates and a task converts at the rate effective on ITS OWN date (`resolveCostDisplay`), so re-rendering a finished task yields the same figure; dated on the task rather than per invocation because FX drift within one task is far below the displayed precision. ECB publishes only the current day, so past rows cannot be re-fetched — do not truncate that table. A task older than FX collection converts at the earliest rate on record and is flagged `approximate`.
+
+## Refresh serialization and request-coverage inventory
+
+Feed price batches take the transaction-scoped advisory lock `model-price-refresh`
+before reading live rows, and keep that lock through the diff, close and replacement.
+A row lock alone cannot protect a model that has no price row yet. Fetches finish before
+this section; its lock wait is bounded to 30 seconds. Closing a price also requires
+`effective_to IS NULL`. An overlapping refresh of the same rates reads the winner's
+replacement and writes nothing. An `applyDesiredRows` failure returns a failed
+`price:database` source with a bounded, sanitized error; SQLSTATE `55P03` identifies a lock
+timeout through driver causes. The rolled-back batch preserves last-good prices and sync
+metadata. The job still refreshes FX and finishes `refresh_runs` with `ok: false` (subject to
+the result store's existing best-effort writes). This changes neither manual prices nor historical snapshots.
+
+`refresh_runs.result` includes the optional `unsupported` list. The shared `LatestRefresh`
+component displays each model and its reason for a completed stored or manual result,
+including on `/admin/pricing`. Known unsupported pricing is informational rather than a
+refresh failure; models remain unpriced unless a manual rate or valid reported total applies.
+
+`packages/worker/scripts/replay-request-usage.ts` is an explicit, SELECT-only operator tool:
+
+```bash
+cd packages/worker
+pnpm exec tsx scripts/replay-request-usage.ts --since 2026-11-01T00:00:00Z --limit 1000
+pnpm exec tsx scripts/replay-request-usage.ts --cli claude-code --limit 100
+```
+
+Supply `DATABASE_URL` in the environment; the script never loads `.env`. Its server-enforced
+`REPEATABLE READ READ ONLY` transaction selects non-null retained logs through a cursor,
+newest first with an id tie-breaker. The default is all matching rows; `--limit` optionally
+narrows the inventory. Cursor batches stay bounded at 50 rows. Output is one aggregate JSON
+with invocation coverage counts and reason histograms per CLI and per main model, without
+invocation ids, prompts or stream bodies. Main model comes from served/requested stream
+identity, falling back to stored invocation identity; billing keys never supply it.
+
+Replay uses the real stream-json collector and Codex app-server session parser, with all
+outgoing handshake data discarded in memory. Codex exec, Gemini and antigravity have no
+request list and count as `none`.
+
+The stored transcript contains the header and raw stdout/stderr interleaved without stream
+markers. Replay feeds only complete single-line JSON objects with a string `type` or an
+app-server `method`/`id`. Object-prefixed lines that fail this filter increment
+`skippedNonEventLines` per CLI (and in totals and model buckets). General `malformed-stream`
+evidence is unobservable from this mixed source and excluded. Replay complete-coverage
+rates are therefore an upper bound: stdout malformed lines cannot be distinguished from
+stderr noise in stored logs, whereas the live collector sees the stdout channel. An explicitly event-prefixed
+broken line such as a cut-off `{"type":` is separately counted in `malformedEventLines` and
+withholds coverage as `malformed-event-line`; it is never fed to either live parser. A
+complete stderr object shaped like an event remains indistinguishable from stdout.
+
+The writer retains 2 Mi characters of head and 2 Mi characters of tail. A log bearing its
+elision marker, or reaching the conservative combined 4 MiB byte threshold, increments
+`truncatedLogs` with coverage `unknown-truncated`. It never counts as complete, incomplete
+or none, and contributes no request diagnostic counters. The byte threshold also refuses
+large Unicode logs conservatively even if their character count is below the writer cap.
+The counts describe retained evidence in the selected sample, not logs already expired or
+recovered completions whose in-memory request evidence was lost.
+
+`sameNameSideModelCandidates` identifies same-name ledger excess on the measured Haiku
+titling family; `sameNameLedgerExcessRuns` catches other families too. These remain candidates,
+since streams do not label a CLI-owned side call. The collector now accepts per-bucket
+containment for same-name entries and records the excess; replay's `unobservedSameModelRuns`
+counts only complete captures bearing those blocks. All three excess counters exclude
+incomplete and truncated captures. A differently named alias still needs exact equality.
+Other-model ledger-only titling was already ignored beside a corroborating main-model or
+alias entry; this applies the same treatment when the side call shares the main model's name.
+`absentModelUsageAcceptedComplete` counts a missing `modelUsage` key accepted as complete;
+`emptyModelUsageAcceptedComplete` counts an explicitly empty object accepted as complete.
+They are separate, mutually exclusive counters, both restricted to complete replay captures.
+Their sum inventories accepted captures lacking ledger corroboration; the empty-object
+counter alone does not measure that population. Null or other malformed ledger values are
+neither absent keys nor empty objects.
+Per main model, `sameModelExcess.histogram` counts complete captures bearing excess by
+its aggregate prompt total `inputTokens + cacheReadTokens + cacheCreationTokens`. Buckets
+are half-open at 0, 1,000, 10,000, 100,000, 200,000 and 272,000; the final bucket is unbounded
+(`maxExclusive: null`). Output-only excess has a zero prompt and enters the first bucket;
+exact ledgers with no excess enter none. `atOrAboveTierThreshold` counts complete runs whose
+excess prompt total reaches 100,000 / 200,000 / 272,000, conservatively including equality
+for inclusive tiers. These are aggregate potential-ambiguity bounds, not inferred request
+sizes or a pricing decision; strict tiers still require `>` at pricing time.
+
+`outputOnlyContradictoryRuns` counts conflicting duplicate requests with identical prompt,
+model and TTL fields and differing output; it informs whether output comparison is too strict.
+`killedFallbackRuns` counts nonzero-usage, no-result fallbacks with exit 137/143 or a finalized
+null exit; active null-exit rows do not count as killed. `noResultFallbackRuns` includes other
+exit codes, and `fallbackOutputZeroRuns` isolates the zero-output population.
+
+The retained Ollama recording proves assistant output values of 0 and completed result output
+of 141. Its thinking counter is an estimate ending at 198. Without the result, 141 cannot be
+reconstructed from this evidence; replay counts that under-reporting rather than manufacturing
+an exact output count. No real database was replayed during this fix.
+
+MEASURED 2026-11-14 by the session, read-only across all 6,444 retained logs
+(`TPR-S/measure-2.json`, before this containment change): claude-code had 2,748/3,153
+complete captures. Main model `claude-haiku-4-5-20251001` had 0/191 complete, with 185
+`model-usage-mismatch` runs. `sameNameSideModelCandidates` was 185 and
+`sameNameLedgerExcessRuns` was 689 before the complete-only diagnostic gate.
+`emptyModelUsageAcceptedComplete` and `outputOnlyContradictoryRuns` were both 0; the former
+measured explicit empty objects only, not absent ledgers. Haiku main-model entries also
+contain unobserved titling calls, so exact equality rejected them.
+
+MEASURED 2026-11-14 by the session after containment (`TPR-S/measure-3.json`): claude-code
+had 2,941/3,153 complete captures; Haiku main model `claude-haiku-4-5-20251001` had 178/191.
+Claude-code `model-usage-mismatch` fell from 208 to 0. These replay coverage rates are upper
+bounds for the retained sample because malformed stdout lines are unobservable in stored
+mixed logs. The session's `unobservedSameModelRuns` / `sameNameLedgerExcessRuns` value 689
+predates the complete-only gate and must not be read as a complete-run excess count.
+The absent-ledger counter and excess magnitude inventory were added later; neither has
+been measured against a real database in this fix. The measurements above are supplied
+session evidence, not a new database run.
