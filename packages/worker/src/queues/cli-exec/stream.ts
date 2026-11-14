@@ -689,7 +689,7 @@ export function createStreamJsonCollector(
       const complete = reasons.size === 0;
       return {
         requests,
-        ...(unobservedSameModel.length ? { unobservedSameModel } : {}),
+        ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
         coverage: complete ? 'complete' : 'incomplete',
         inputConvention: 'exclusive',
         requestCount: complete ? requests.length : null,

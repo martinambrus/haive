@@ -74,6 +74,34 @@ describe('read-only request replay', () => {
     });
   });
 
+  it('counts same-model excess only for complete replay captures', async () => {
+    const events = fixture('request-claude');
+    events[0].model = 'claude-haiku-4-5';
+    for (const event of events) if (event.message) event.message.model = 'claude-haiku-4-5';
+    events[3].modelUsage = {
+      'claude-haiku-4-5': {
+        inputTokens: 301,
+        outputTokens: 5,
+        cacheReadInputTokens: 70,
+        cacheCreationInputTokens: 30,
+      },
+    };
+    const dropped = structuredClone(events);
+    dropped.splice(2, 1);
+    const good = row(events);
+    const report = await replayRequestUsage([
+      good,
+      row(dropped),
+      { ...good, streamLog: `${good.streamLog}\n{"type":` },
+    ]);
+    expect(report.total).toMatchObject({ complete: 1, incomplete: 2 });
+    expect(report.counters).toMatchObject({
+      sameNameLedgerExcessRuns: 1,
+      unobservedSameModelRuns: 1,
+      sameNameSideModelCandidates: 1,
+    });
+  });
+
   it('skips pretty-printed stderr and non-event objects while replaying complete events', async () => {
     const good = row(fixture('request-claude'));
     const stderr = JSON.stringify({ diagnostic: { details: [{ message: 'retry' }] } }, null, 2);

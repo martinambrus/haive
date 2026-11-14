@@ -198,12 +198,18 @@ export async function replayRequestUsage(
           bucket.incompleteReasons[reason] = (bucket.incompleteReasons[reason] ?? 0) + 1;
     }
     if (truncated) continue;
-    counters.sameNameLedgerExcessRuns += Number(diagnostics.sameNameLedgerExcess);
-    counters.unobservedSameModelRuns += Number((capture.unobservedSameModel?.length ?? 0) > 0);
+    counters.sameNameLedgerExcessRuns += Number(
+      coverage === 'complete' && diagnostics.sameNameLedgerExcess,
+    );
+    counters.unobservedSameModelRuns += Number(
+      coverage === 'complete' && (capture.unobservedSameModel?.length ?? 0) > 0,
+    );
     // VOLATILE: Haiku is the measured Claude titling family. Excess is a candidate,
     // not proof of a side call: raw streams do not identify CLI-owned requests.
     counters.sameNameSideModelCandidates += Number(
-      diagnostics.sameNameLedgerExcess && /^claude-haiku(?:-|$)/.test(model),
+      coverage === 'complete' &&
+        diagnostics.sameNameLedgerExcess &&
+        /^claude-haiku(?:-|$)/.test(model),
     );
     counters.emptyModelUsageAcceptedComplete += Number(
       diagnostics.emptyModelUsageAcceptedComplete && coverage === 'complete',

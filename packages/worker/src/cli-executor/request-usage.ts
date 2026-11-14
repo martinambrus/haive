@@ -14,7 +14,7 @@ export interface RequestUsage {
 
 export interface RequestUsageCapture {
   requests: RequestUsage[] | null;
-  /** Ledger excess for an observed model, outside the request inventory. These are
+  /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
    * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */
   unobservedSameModel?: Omit<RequestUsage, 'requestId' | 'turnId'>[];
   coverage: 'complete' | 'incomplete' | 'unknown';
@@ -50,7 +50,7 @@ export function aggregateRequestUsage(
     })),
   );
   const unobservedSameModel = captures.flatMap((c) =>
-    (c.unobservedSameModel ?? []).map((usage) => ({ ...usage })),
+    (c.coverage === 'complete' ? (c.unobservedSameModel ?? []) : []).map((usage) => ({ ...usage })),
   );
   const conventions = new Set(captures.map((c) => c.inputConvention));
   const inputConvention = conventions.size === 1 ? captures[0]!.inputConvention : 'unknown';
@@ -66,7 +66,7 @@ export function aggregateRequestUsage(
     : null;
   return {
     requests: captures.some((c) => c.requests !== null) ? requests : null,
-    ...(unobservedSameModel.length ? { unobservedSameModel } : {}),
+    ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
     coverage: complete ? 'complete' : requests.length ? 'incomplete' : 'unknown',
     inputConvention,
     requestCount: count !== null && Number.isSafeInteger(count) ? count : null,

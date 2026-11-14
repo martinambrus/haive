@@ -101,6 +101,22 @@ describe('Claude request coverage', () => {
       ...usage.unobservedSameModel!,
     ]);
   });
+  it('does not call a dropped main-line request same-model excess (S1)', () => {
+    const events = structuredClone(billingCases[2]!.events);
+    events.splice(2, 1);
+    const capture = read(events);
+    expect(capture).toMatchObject({ coverage: 'incomplete', reasons: ['prompt-mismatch'] });
+    expect(capture.unobservedSameModel).toBeUndefined();
+  });
+  it('never carries excess through an incomplete sub-step aggregate', () => {
+    const usage = read(haikuMain());
+    const incomplete = { ...usage, coverage: 'incomplete' as const, reasons: ['prompt-mismatch'] };
+    for (const parts of [[incomplete], [usage, incomplete]]) {
+      const aggregate = aggregateRequestUsage(parts.map((usage, i) => ({ id: String(i), usage })));
+      expect(aggregate.coverage).toBe('incomplete');
+      expect(aggregate.unobservedSameModel).toBeUndefined();
+    }
+  });
   it('accepts an exact same-name ledger without excess', () => {
     const capture = read(billingCases[2]!.events);
     expect(capture.coverage).toBe('complete');
