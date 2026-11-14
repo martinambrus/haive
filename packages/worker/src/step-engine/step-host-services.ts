@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import {
   isResourceLimitError,
@@ -90,10 +91,16 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     collectImplementationFiles(worktreePath) {
       return hostCall(ctx, async () => {
         const resolved = await bind(worktreePath);
-        return collectImplementationFiles(ctx, resolved, {
+        const scope = await collectImplementationFiles(ctx, resolved, {
           maxRound: ctx.round,
           signal: ctx.signal,
         });
+        return {
+          ...scope,
+          scanError: scope.scanError
+            ? scrubErrorPaths(safeErrorMessage(scope.scanError))
+            : scope.scanError,
+        };
       });
     },
     readReviewDiff(options) {

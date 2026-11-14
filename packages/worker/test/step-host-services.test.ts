@@ -160,3 +160,19 @@ it('loads previous output with identity checks but without opening a worktree', 
   expect(step).toHaveBeenCalledOnce();
   expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
 });
+
+it('scrubs collector scanError before returning it to a module without mutating the scan', async () => {
+  const scan = {
+    files: ['a'],
+    total: 1,
+    truncated: false,
+    scanError: 'Cannot scan /host/private/tree (EACCES)',
+  };
+  vi.mocked(collectImplementationFiles).mockResolvedValue(scan);
+  const result = await createStepHostServices(ctx).collectImplementationFiles(
+    '/repo/.haive/worktrees/task',
+  );
+  expect(result).toEqual({ ...scan, scanError: 'Cannot scan [path] (EACCES)' });
+  expect(JSON.stringify(result)).not.toContain('/host/private/tree');
+  expect(scan.scanError).toBe('Cannot scan /host/private/tree (EACCES)');
+});
