@@ -65,3 +65,11 @@ export async function reapPlanChatSnapshots(anchor = wrapperWorkerRoot()): Promi
     }
   }
 }
+
+/** The worker boot's reap: a failed listing is logged and never stops boot, since the reap is
+ *  hygiene and every other task must still recover. */
+export async function reapPlanChatSnapshotsAtBoot(anchor?: string): Promise<void> {
+  await reapPlanChatSnapshots(anchor).catch((err: unknown) => {
+    log.error({ err }, 'plan chat snapshot reap on boot failed');
+  });
+}
