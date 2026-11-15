@@ -931,9 +931,18 @@ Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.
 7. No test sets setuid, setgid or sticky on a tracked file, though the `& 0o7777` mode check refuses them (`committed-snapshot.ts` ~:384); coverage only.
 8. `{ ...SNAPSHOT_LIMITS, ...opts.limits }` (~:142) turns an explicit `undefined` limit into `NaN`, which never refuses; no production caller passes `limits` (theoretical, same for every limit).
 
+### T686 · FNF[dag-partial] · record-and-continue DAG policy lows, after #1217 (+2)
+
+status: open (item 1 MUST land before any workflow opts into `record-and-continue`) · kind: fix · found: #1217 review-2 2026-11-15 · priority: P2
+
+Reviews in `.claude/tmp/codex-run/P9-S/` (review-2.md, review-3.md).
+
+1. MEDIUM, REGRESSION (opt-in only, unreachable today): a deterministic auxiliary fault (for example a replanner prompt the provider always content-filters) faults again on every Retry, because a fault spends neither `advisorInvocations` nor `replannerInvocations` and `resetDagCurrentLevelForRetry` re-runs the same prompt (`worker/src/step-engine/dag-executor.ts` parseReplanner ~:2133, parseAdvisor ~:2093). The replanner has no `isProviderRefusal` branch, unlike the advisor (~:2246). Fix direction: treat a replanner content-filter refusal like the advisor's (an explicit outcome), and/or bound consecutive hard faults per auxiliary role with a counter separate from the replan budget, ending in a clear non-retry message. Docs (fix-loop.md) currently say Retry does not cure it and to switch the step's CLI.
+2. LOW: `dag-executor.test.ts` runs about 10 s, over the 5 s per-file budget (testing.md); split the per-policy provider cases into their own file if it grows.
+
 ### T685 · Typed step ports: roles in addition to step ids (series, approved)
 
-status: in progress (approved 2026-11-15; PR1 DONE #1214 f6fc8fb0e; PR2 canvas in build) · kind: feature · found: owner request 2026-11-15 · priority: P2
+status: in progress (approved 2026-11-15; PR1 DONE #1214 f6fc8fb0e; PR2 DONE #1216 1689a5f57, live canvas checked through the web origin; PR3 next, after INS3b) · kind: feature · found: owner request 2026-11-15 · priority: P2
 
 Plan: `docs/plans/typed-step-ports.md` (archived when PR1 starts; session copy `~/.claude/plans/tranquil-hugging-willow.md`). Analysis: `.claude/tmp/codex-run/ROLE-S/codex-1/design.md` + `edge-index.md`. Owner decisions 2026-11-15: ports carry data only (no loop/skip/gate/commit power); spec is a stage chain (04 draft, 05 checked, 05a resolved) plus an effective-spec host adapter; node canvas (`@xyflow/react`) from the first UI PR; spec chain is the first port. PRs: 1 registry + spec chain (xhigh); 2 read-only canvas (high; CSP check); 3 universal v3 per-consumer pins, nullable task column (xhigh; after INS3b); 4 module/SDK/prompt ports + canvas binding (xhigh); 5 discovery/requirements/implementation summary (high); 6 checks and advisory results (xhigh); 7 optional fan-in. Physical step-id reads stay for gate forms, worktree/runtime, receipts/side effects, replay, migrations, insight inventory.
 
