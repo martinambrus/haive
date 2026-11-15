@@ -1,7 +1,7 @@
 import type { FormField, FormSchema } from './form.js';
 
-/** Flip only when automatic insight execution ships. Hidden forms always offer false. */
-export const INSIGHT_AUTO_ACTION_AVAILABLE = false;
+/** Automatic insight execution is available; legacy parked schemas are upgraded below. */
+export const INSIGHT_AUTO_ACTION_AVAILABLE = true;
 
 export function autoActOnInsightsField(defaultValue = false): FormField {
   return {
@@ -24,10 +24,25 @@ export function upgradeRunConfigSchema(
   schema: FormSchema | null,
 ): FormSchema | null {
   if (stepId !== '06-run-config' || !schema) return schema;
-  const hasField = schema.fields.some((field) =>
-    field.type === 'accordion'
-      ? field.items.some((item) => item.fields.some((leaf) => leaf.id === 'autoActOnInsights'))
-      : field.id === 'autoActOnInsights',
-  );
-  return hasField ? schema : { ...schema, fields: [...schema.fields, autoActOnInsightsField()] };
+  let found = false;
+  let changed = false;
+  const upgrade = (field: FormField): FormField => {
+    if (field.type === 'accordion') {
+      const items = field.items.map((item) => {
+        const fields = item.fields.map(upgrade);
+        return fields.some((leaf, i) => leaf !== item.fields[i]) ? { ...item, fields } : item;
+      });
+      return items.some((item, i) => item !== field.items[i])
+        ? ({ ...field, items } as FormField)
+        : field;
+    }
+    if (field.id !== 'autoActOnInsights') return field;
+    found = true;
+    if (!INSIGHT_AUTO_ACTION_AVAILABLE || !field.visibleWhen) return field;
+    changed = true;
+    return autoActOnInsightsField(field.type === 'checkbox' && field.default === true);
+  };
+  const fields = schema.fields.map(upgrade);
+  if (!found) return { ...schema, fields: [...fields, autoActOnInsightsField()] };
+  return changed ? { ...schema, fields } : schema;
 }

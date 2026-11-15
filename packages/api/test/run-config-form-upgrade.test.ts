@@ -46,7 +46,6 @@ it('displays a parked 06 upgrade without rewriting saved answers, recommendation
       { id: 'simplifyCode', default: true },
       {
         id: 'autoActOnInsights',
-        visibleWhen: { field: 'autoActOnInsights', in: [] },
         default: false,
       },
     ],
@@ -77,7 +76,7 @@ it('displays a parked 06 upgrade without rewriting saved answers, recommendation
   expect(fake.rows(schema.taskSteps)[0]!.iterations).toEqual(original.iterations);
 });
 
-it('stores and queues false when a parked 06 receives true before automatic execution ships', async () => {
+it('stores and queues true when a parked hidden 06 field becomes available', async () => {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
@@ -127,6 +126,6 @@ it('stores and queues false when a parked 06 receives true before automatic exec
     body: JSON.stringify({ values: { autoActOnInsights: true } }),
   });
   expect(res.status).toBe(200);
-  expect(fake.rows(schema.taskSteps)[0]!.formValues).toEqual({ autoActOnInsights: false });
-  expect(h.add.mock.calls[0]?.[1]).toMatchObject({ formValues: { autoActOnInsights: false } });
+  expect(fake.rows(schema.taskSteps)[0]!.formValues).toEqual({ autoActOnInsights: true });
+  expect(h.add.mock.calls[0]?.[1]).toMatchObject({ formValues: { autoActOnInsights: true } });
 });
