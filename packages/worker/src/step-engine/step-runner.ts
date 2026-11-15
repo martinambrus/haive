@@ -8,6 +8,7 @@ import {
 } from '../repo/committed-snapshot.js';
 import {
   INSIGHT_STEP,
+  selectOfferedInsights,
   insightBatchId,
   recordInsightInvocation,
   recordInsightReservation,
@@ -1891,31 +1892,37 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results, newResults, current };
   }
 
-  if (stepDef.metadata.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
-    if (!params.providers || !params.deps) {
-      // An empty manual selection needs no editor dependencies. Other mining steps
-      // retain their existing missing-dependency guard before selectAgents can act.
-      if (stepDef.metadata.id === INSIGHT_STEP) {
-        const empty = await spec.selectAgents({
-          ctx,
-          detected,
-          formValues: formValues ?? {},
-          llmOutput,
-        });
-        ctx.throwIfCancelled();
-        if (empty.length === 0) return { resolved: true, results: [], newResults: [], current };
-      }
-      const failed = await updateRow(db, current.id, {
-        status: 'failed',
-        errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
-        endedAt: new Date(),
+  if (!params.providers || !params.deps) {
+    // Only an empty manual selection can finish without editor dependencies. Validate
+    // the saved selection before calling selectAgents, which may write a batch intent.
+    if (
+      stepDef.metadata.id === INSIGHT_STEP &&
+      selectOfferedInsights(
+        (detected as { insights: Parameters<typeof selectOfferedInsights>[0] }).insights,
+        formValues,
+      ).length === 0
+    ) {
+      const empty = await spec.selectAgents({
+        ctx,
+        detected,
+        formValues: formValues ?? {},
+        llmOutput,
       });
-      return {
-        resolved: false,
-        result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
-      };
+      ctx.throwIfCancelled();
+      if (empty.length === 0) return { resolved: true, results: [], newResults: [], current };
     }
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
+    };
+  }
 
+  if (stepDef.metadata.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
     const dispatches = await spec.selectAgents({
       ctx,
       detected,
