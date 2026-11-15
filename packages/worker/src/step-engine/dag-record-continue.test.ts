@@ -1417,3 +1417,41 @@ it('F9 keeps explicit structured ABORT recordable even with fallback-like reason
   expect(h.rows[0]!.concerns).toContain(DAG_FINAL_FAILURE_MARKER);
   expect(h.plan.replannerInvocations).toBe(1);
 });
+
+for (const policy of [undefined, 'fail-step', 'record-and-continue']) {
+  it.each([
+    { parsedOutput: null, rawOutput: 'no structured reply' },
+    { parsedOutput: { action: 'UNKNOWN' }, rawOutput: null },
+  ])(`F9 malformed advisor under ${policy}: %j`, async (output) => {
+    const h = fixture([issue('A', failure)], true);
+    h.stepDef.dagExecute.failurePolicy = policy as string;
+    h.invocations.push({
+      id: 'malformed-advisor',
+      startedAt: new Date(),
+      endedAt: new Date(),
+      exitCode: 0,
+      errorMessage: null,
+      ...output,
+    });
+    h.runs.push({
+      id: 'advice',
+      dagIssueId: 'A',
+      role: 'issue_advisor',
+      cliInvocationId: 'malformed-advisor',
+      consumedAt: null,
+    });
+    if (policy === 'record-and-continue') {
+      await expect(h.escalate()).rejects.toThrow(/advisor.*no valid structured decision/i);
+      expect(h.runs[0]!.consumedAt).toBeNull();
+      expect(h.rows[0]!.advisorInvocations).toBe(0);
+      expect(h.enqueued).toEqual([]);
+    } else {
+      expect((await h.escalate()).status).toBe('waiting');
+      expect(h.rows[0]!.lastAdvisorAction).toBe('ESCALATE_TO_REPLAN');
+      expect(h.rows[0]!.advisorInvocations).toBe(1);
+      expect(h.plan.replannerInvocationId).not.toBeNull();
+    }
+    expect(h.rows[0]!.concerns).toBe('');
+    expect(h.checkpoints).toEqual([]);
+  });
+}

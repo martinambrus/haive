@@ -2097,7 +2097,10 @@ export function replannerPrompt(
     .join('\n');
 }
 
-export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
+export function parseAdvisor(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  requireDecision = false,
+): AdvisorOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -2105,14 +2108,16 @@ export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): Ad
     c = b ? safeJsonParse(b) : null;
   }
   const p = advisorOutputSchema.safeParse(c);
-  return p.success
-    ? p.data
-    : {
-        action: 'ESCALATE_TO_REPLAN',
-        reasoning: 'advisor returned no valid structured decision',
-        drop_criteria: [],
-        sub_issues: [],
-      };
+  if (p.success) return p.data;
+  if (requireDecision) {
+    throw new Error('DAG required advisor returned no valid structured decision; Retry to recover');
+  }
+  return {
+    action: 'ESCALATE_TO_REPLAN',
+    reasoning: 'advisor returned no valid structured decision',
+    drop_criteria: [],
+    sub_issues: [],
+  };
 }
 
 export function parseReplanner(
@@ -2202,21 +2207,24 @@ export async function ingestAdvisor(
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<'retry' | 'split' | 'accept' | 'escalate'> {
   assertEscalationEnvironment(inv, ea.stepDef);
-  await ea.db
-    .update(schema.dagAgentRuns)
-    .set({
-      status: 'done',
-      consumedAt: new Date(),
-      endedAt: new Date(),
-      rawOutput: inv.rawOutput ?? null,
-    })
-    .where(eq(schema.dagAgentRuns.id, run.id));
+  const consumeRun = async () => {
+    await ea.db
+      .update(schema.dagAgentRuns)
+      .set({
+        status: 'done',
+        consumedAt: new Date(),
+        endedAt: new Date(),
+        rawOutput: inv.rawOutput ?? null,
+      })
+      .where(eq(schema.dagAgentRuns.id, run.id));
+  };
   // An advisor that never answered, or was cut at the output limit (once), must not be charged an
   // attempt or read as ESCALATE_TO_REPLAN.
   const truncatedOnce =
     classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
       'truncated' && truncationRetryable(inv);
   if (runNeverAnswered(inv) || truncatedOnce) {
+    await consumeRun();
     const ok = await spawnReviewAgent(
       ea,
       issue,
@@ -2236,10 +2244,12 @@ export async function ingestAdvisor(
   // Opt-in records the refusal without relaying the refused assignment to another agent.
   // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
   if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
+    await consumeRun();
     await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
     return 'escalate';
   }
-  const out = parseAdvisor(inv);
+  const out = parseAdvisor(inv, recordsFailures(ea.stepDef));
+  await consumeRun();
   await ea.db
     .update(schema.taskDagIssues)
     .set({
