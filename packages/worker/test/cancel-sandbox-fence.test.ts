@@ -1426,16 +1426,14 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       .set({ autoActOnInsights: true })
       .where(eq(schema.tasks.id, ctx.taskId));
     await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
-    await db
-      .insert(schema.taskSteps)
-      .values({
-        taskId: ctx.taskId,
-        stepId: source.stepId,
-        stepIndex: 8.95,
-        title: 'Abandoned checkpoint',
-        status: 'pending',
-        round: 1,
-      });
+    await db.insert(schema.taskSteps).values({
+      taskId: ctx.taskId,
+      stepId: source.stepId,
+      stepIndex: 8.95,
+      title: 'Abandoned checkpoint',
+      status: 'pending',
+      round: 1,
+    });
     await db
       .update(schema.tasks)
       .set({ currentStepId: source.stepId, currentRound: 2 })
