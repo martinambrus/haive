@@ -683,7 +683,7 @@ Review in `.claude/tmp/codex-run/DAGP-S/review-2.md`. All opt-in only; the defau
 5. LOW: `prepareReviewAgent` and `issueChangeSet` run before branches that may not dispatch (~:1659, :1887), so a missing provider throws instead of recording the issue's own failure; the prompt and change set are built twice.
 6. INFO: under opt-in, a persistently failing MCP server is an interruption (never counted), so only a person stops its Retry loop, and the thrown text omits the underlying message.
 
-### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+8)
+### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+12)
 
 status: open (lows; bundle with the next insight-loop change or park) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
@@ -697,6 +697,10 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 6. LOW, theoretical: `requires[].after` compares the LATEST token provider, while the runtime checks specific step ids. They diverge only if a module step also provides `verification` or `review` (`shared/src/modularity/composition.ts` ~:62, :81-85). None does. Key on the earliest provider if a module ever does.
 7. LOW, cosmetic: for `need-out-of-order` the composer shows "Provided by: <review step>" for a step already in the list (`web/src/lib/composition-messages.ts` ~:113-117). Return no providers for that kind.
 8. LOW, coverage: no test creates a task from a STORED static type with review before verification (`task-type-definition.ts` ~:91-96, :235-241); the path was read and returns 409.
+9. NIT, from #1218 review: the `08e-insights-triage` step id, the `triage` seat name and the auto-mode rule are duplicated as literals in `api/src/routes/tasks/_helpers.ts` (`hidesInsightTriageSeat`, `resolveCurrentStepCliProviderIds`). Import the shared ids and one predicate.
+10. LOW, REGRESSION (comment), from #1218 review: `worker/src/queues/_step-reset.ts` ~:326-344 says the auto-resume marker is scoped to the barrier guard's own predicate, but the guard now skips consumed mining rows while `failedAgents` still selects them. Harmless (08e never re-dispatches). Add `isNull(consumedAt)` to that select or reword.
+11. LOW, PRE-EXISTING: `recordFailedStepHint` (`worker/src/queues/task-queue.ts` ~:1943-1963) picks the newest outage among the step's unsuperseded invocations, not the failure just written, so after a Resume fold a later non-outage failure can still write a `provider_unavailable` hint and arm the allowance watch. Bounded by the auto-resume counter.
+12. NIT: `holdReopenedForm` derives the expected generation as `nextGeneration - 1` (`worker/src/step-engine/step-runner.ts` ~:2246); pass it explicitly and mention the compare in its doc comment.
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
