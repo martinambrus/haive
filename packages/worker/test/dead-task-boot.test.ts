@@ -522,6 +522,26 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     },
   );
 
+  it.each(['running', 'failed'] as const)(
+    'fails a permanently malformed data pin once from %s instead of keeping the revival timer alive',
+    async (status) => {
+      const id = await makeDead({ status });
+      await db
+        .update(schema.tasks)
+        .set({ dataEdgePlan: { version: 3 } })
+        .where(eq(schema.tasks.id, id));
+      frozenPins.set(id, { version: 3 });
+      const { deps, sent } = recorder();
+      expect(await reviveDeadTasks(db, deps)).toEqual({ revived: 0, held: 0, failed: 1 });
+      expect(await task(id)).toMatchObject({ status: 'failed', deadAt: null });
+      expect(await reviveDeadTasks(db, deps)).toEqual({ revived: 0, held: 0, failed: 0 });
+      expect(await events(id, 'task.failed')).toHaveLength(1);
+      await reconcileDeadTasks(db, deps);
+      expect(await events(id, 'task.failed')).toHaveLength(1);
+      expect(sent).toHaveLength(0);
+    },
+  );
+
   describe('a dead task whose run list resolves again', () => {
     const CASES = [
       { status: 'queued', current: null, row: null, job: 'start' },
