@@ -1296,8 +1296,8 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           const detected = await insightsTriageStep.detect!(stepCtx);
           expect(detected.insightCheckpoint).toBeUndefined();
           const form = await insightsTriageStep.form!(stepCtx, detected, null);
-          expect(form.autoSubmit).not.toBe(true);
-          expect(form.fields).toMatchObject([
+          expect(form!.autoSubmit).not.toBe(true);
+          expect(form!.fields).toMatchObject([
             { id: 'selectedInsights', options: [{ label: 'New optional improvement (new.ts)' }] },
           ]);
         } finally {
