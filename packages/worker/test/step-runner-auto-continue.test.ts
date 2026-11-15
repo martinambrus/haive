@@ -1393,6 +1393,36 @@ describe('successful output contract boundary', () => {
     );
     expect(state.taskStepRow.output).toBe(value);
   });
+
+  it('a takeover during pinned-role lookup wins before output diagnostics', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', ...rolePin(2) };
+    const db = makeMockDb(state);
+    Object.defineProperty(db.query.tasks, 'findFirst', {
+      value: async (options: { columns?: Record<string, boolean> }) => {
+        if (options.columns?.derivedRunPlan) state.taskStepRow.status = 'pending';
+        return state.taskRow ?? undefined;
+      },
+    });
+    const stepDef = {
+      ...makeStep({}),
+      metadata: { ...makeStep({}).metadata, id: PRODUCER },
+      outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+      replaces: [REVIEW] as const,
+      apply: async () => ({ invalid: true }),
+    };
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef,
+    });
+    expect(result.status).toBe('superseded');
+    expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+  });
   it('fails an actual pinned replacement mismatch before host routing or persistence', async () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', ...rolePin(2) };

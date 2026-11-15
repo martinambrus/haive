@@ -3796,14 +3796,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // terminal-row recovery, retain their existing semantics. Check ownership before
     // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
     if (stepDef.outputContract) {
-      await assertOwnsStep(db, current.id);
-      throwIfCancelled();
       const taskPin = stepDef.replaces?.length
         ? await db.query.tasks.findFirst({
             where: eq(schema.tasks.id, taskId),
             columns: { derivedRunPlan: true, executionPath: true, runListSnapshot: true },
           })
         : undefined;
+      await assertOwnsStep(db, current.id);
+      throwIfCancelled();
       const replacedRole =
         taskPin?.derivedRunPlan == null
           ? undefined

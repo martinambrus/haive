@@ -1838,15 +1838,13 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         });
         acquired();
         await gate;
-        await tx
-          .insert(schema.tasks)
-          .values({
-            userId: ACTOR,
-            type: 'tt-derived',
-            title: 'locked replacement',
-            runListSnapshot: definition.runListSnapshot,
-            derivedRunPlan: definition.derivedRunPlan,
-          });
+        await tx.insert(schema.tasks).values({
+          userId: ACTOR,
+          type: 'tt-derived',
+          title: 'locked replacement',
+          runListSnapshot: definition.runListSnapshot,
+          derivedRunPlan: definition.derivedRunPlan,
+        });
       });
       await locked;
       const writer = db.transaction(async (tx) => {
