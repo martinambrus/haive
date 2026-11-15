@@ -1909,9 +1909,12 @@ interface EscalationArgs extends ReviewArgs {
   plan: DagPlanRow;
 }
 
-function assertEscalationEnvironment(inv: typeof schema.cliInvocations.$inferSelect) {
+function assertEscalationEnvironment(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  stepDef: StepDefinition,
+) {
   // Retry supersedes the invocation but keeps the plan's pointer until re-entry frees it.
-  if (runNeverAnswered(inv)) return;
+  if (!recordsFailures(stepDef) || runNeverAnswered(inv)) return;
   const fault = dagEnvironmentHaltReason({ errorMessage: inv.errorMessage });
   if (fault || isProviderOutage(inv.errorMessage)) {
     throw new Error(`DAG required agent failed: ${fault ?? inv.errorMessage}`);
@@ -2192,7 +2195,7 @@ export async function ingestAdvisor(
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<'retry' | 'split' | 'accept' | 'escalate'> {
-  assertEscalationEnvironment(inv);
+  assertEscalationEnvironment(inv, ea.stepDef);
   await ea.db
     .update(schema.dagAgentRuns)
     .set({
@@ -2486,7 +2489,7 @@ async function ingestReplanner(
   inv: typeof schema.cliInvocations.$inferSelect,
   failed: DagIssueRow[],
 ): Promise<'continue' | 'abort'> {
-  assertEscalationEnvironment(inv);
+  assertEscalationEnvironment(inv, ea.stepDef);
   if (recordsFailures(ea.stepDef)) {
     return ea.db.transaction(async (tx) => {
       const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
@@ -2650,7 +2653,7 @@ export async function resolveEscalationPhase(
       return { status: 'waiting', row: ea.current };
     }
     if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
-    assertEscalationEnvironment(inv);
+    assertEscalationEnvironment(inv, ea.stepDef);
     // A replanner that never answered, or was cut at the output limit (once), is not an attempt:
     // free the slot instead of parseReplanner's ABORT-on-no-output default.
     const truncatedOnce =

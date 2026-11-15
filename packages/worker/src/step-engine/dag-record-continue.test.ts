@@ -715,35 +715,36 @@ it.each([false, true])(
 );
 
 for (const policy of ['fail-step', 'record-and-continue'] as const) {
-  it.each(['advisor', 'replanner'])(
-    'keeps %s environment faults hard under ' + policy,
-    async (role) => {
-      const h = fixture([issue('A', failure)], true);
-      h.stepDef.dagExecute.failurePolicy = policy;
-      const inv = {
-        id: 'agent',
-        taskStepId: 'step',
-        startedAt: new Date(),
-        endedAt: new Date(),
-        exitCode: 1,
-        errorMessage: 'permission denied',
-        parsedOutput: { action: 'ABORT' },
-      };
-      h.invocations.push(inv);
-      if (role === 'replanner') h.plan.replannerInvocationId = inv.id;
-      else
-        h.runs.push({
-          id: 'advice',
-          dagIssueId: 'A',
-          role: 'issue_advisor',
-          consumedAt: null,
-          cliInvocationId: inv.id,
-        });
-      await expect(h.run()).rejects.toThrow(/permission denied/);
-      expect(h.checkpoints).toEqual([]);
-      expect(h.rows[0]?.concerns).toBe('');
-    },
-  );
+  if (policy === 'record-and-continue')
+    it.each(['advisor', 'replanner'])(
+      'keeps %s environment faults hard under ' + policy,
+      async (role) => {
+        const h = fixture([issue('A', failure)], true);
+        h.stepDef.dagExecute.failurePolicy = policy;
+        const inv = {
+          id: 'agent',
+          taskStepId: 'step',
+          startedAt: new Date(),
+          endedAt: new Date(),
+          exitCode: 1,
+          errorMessage: 'permission denied',
+          parsedOutput: { action: 'ABORT' },
+        };
+        h.invocations.push(inv);
+        if (role === 'replanner') h.plan.replannerInvocationId = inv.id;
+        else
+          h.runs.push({
+            id: 'advice',
+            dagIssueId: 'A',
+            role: 'issue_advisor',
+            consumedAt: null,
+            cliInvocationId: inv.id,
+          });
+        await expect(h.run()).rejects.toThrow(/permission denied/);
+        expect(h.checkpoints).toEqual([]);
+        expect(h.rows[0]?.concerns).toBe('');
+      },
+    );
   it('keeps a refused merge fixer hard under ' + policy, async () => {
     const h = fixture([issue('D', { mergeStatus: 'conflict' })]);
     h.stepDef.dagExecute.failurePolicy = policy;
@@ -1042,34 +1043,35 @@ it('blocks a dependent when an advisor is the first agent refused, while later i
 });
 
 for (const policy of ['fail-step', 'record-and-continue'] as const) {
-  it.each(['advisor', 'replanner'])(
-    'does not interpret a started %s crash as a legitimate decision under ' + policy,
-    async (role) => {
-      const h = fixture([issue('A', failure)], true);
-      h.stepDef.dagExecute.failurePolicy = policy;
-      h.invocations.push({
-        id: 'crashed',
-        startedAt: new Date(),
-        endedAt: new Date(),
-        exitCode: 137,
-        errorMessage: null,
-        parsedOutput: null,
-      });
-      if (role === 'replanner') h.plan.replannerInvocationId = 'crashed';
-      else
-        h.runs.push({
-          id: 'advice',
-          dagIssueId: 'A',
-          role: 'issue_advisor',
-          cliInvocationId: 'crashed',
-          consumedAt: null,
+  if (policy === 'record-and-continue')
+    it.each(['advisor', 'replanner'])(
+      'does not interpret a started %s crash as a legitimate decision under ' + policy,
+      async (role) => {
+        const h = fixture([issue('A', failure)], true);
+        h.stepDef.dagExecute.failurePolicy = policy;
+        h.invocations.push({
+          id: 'crashed',
+          startedAt: new Date(),
+          endedAt: new Date(),
+          exitCode: 137,
+          errorMessage: null,
+          parsedOutput: null,
         });
-      await expect(h.run()).rejects.toThrow(/interrupted/);
-      expect(h.plan.replannerInvocations).toBe(0);
-      expect(h.checkpoints).toEqual([]);
-      expect(h.enqueued).toEqual([]);
-    },
-  );
+        if (role === 'replanner') h.plan.replannerInvocationId = 'crashed';
+        else
+          h.runs.push({
+            id: 'advice',
+            dagIssueId: 'A',
+            role: 'issue_advisor',
+            cliInvocationId: 'crashed',
+            consumedAt: null,
+          });
+        await expect(h.run()).rejects.toThrow(/interrupted/);
+        expect(h.plan.replannerInvocations).toBe(0);
+        expect(h.checkpoints).toEqual([]);
+        expect(h.enqueued).toEqual([]);
+      },
+    );
 }
 
 for (const policy of ['fail-step', 'record-and-continue']) {
@@ -1142,4 +1144,49 @@ for (const policy of [undefined, 'fail-step']) {
       }
     },
   );
+}
+
+for (const policy of [undefined, 'fail-step', 'record-and-continue']) {
+  for (const role of ['advisor', 'replanner']) {
+    it.each([
+      { exitCode: 1, errorMessage: 'permission denied' },
+      { exitCode: 137, errorMessage: null },
+      { exitCode: 143, errorMessage: 'CLI process exceeded its time budget' },
+      { exitCode: null, errorMessage: 'orphaned by a worker restart' },
+    ])(`F3 auxiliary fallback: ${role} under ${policy}: %j`, async (signal) => {
+      const h = fixture([issue('A', failure)], true);
+      h.stepDef.dagExecute.failurePolicy = policy as string;
+      h.invocations.push({ id: 'aux', startedAt: new Date(), endedAt: new Date(), ...signal });
+      if (role === 'replanner') h.plan.replannerInvocationId = 'aux';
+      else
+        h.runs.push({
+          id: 'advice',
+          dagIssueId: 'A',
+          role: 'issue_advisor',
+          cliInvocationId: 'aux',
+          consumedAt: null,
+        });
+      if (policy === 'record-and-continue') {
+        await expect(h.escalate()).rejects.toThrow(/DAG required agent/);
+        expect(h.enqueued).toEqual([]);
+        expect(h.plan.replannerInvocations).toBe(0);
+      } else if (role === 'advisor') {
+        expect((await h.escalate()).status).toBe('waiting');
+        expect(h.rows[0]!.lastAdvisorAction).toBe('ESCALATE_TO_REPLAN');
+        expect(h.rows[0]!.advisorInvocations).toBe(1);
+        expect(h.plan.replannerInvocationId).not.toBeNull();
+        expect(h.enqueued).toHaveLength(1);
+      } else {
+        const result = await h.escalate();
+        expect(result.status).toBe('aborted');
+        expect(result.error).toBe('DAG aborted by replanner at level 0: A');
+        expect(h.step.status).toBe('failed');
+        expect(h.plan.replannerInvocations).toBe(1);
+        expect(h.plan.replannerInvocationId).toBeNull();
+        expect(h.enqueued).toEqual([]);
+      }
+      expect(h.rows[0]!.concerns).toBe('');
+      expect(h.checkpoints).toEqual([]);
+    });
+  }
 }
