@@ -101,9 +101,19 @@ it('pins review consumers to the direct gate reader and the house-rules/history 
       .map((node) => node.id)
       .sort(),
   ).toEqual(consumers);
-  const direct = stepSources.filter((name) =>
-    readFileSync(new URL(name, workflow), 'utf8').includes('role: STEP_ROLES.codeReview'),
+  const readers = sources.filter((name) =>
+    readFileSync(new URL(name, workflow), 'utf8').includes('STEP_ROLES.codeReview'),
   );
+  expect(readers.sort()).toEqual(
+    [
+      '09-gate-2-verify-approval.ts',
+      '_fix-loop.ts',
+      '_gate-house-rules.ts',
+      '_prompt-defect.ts',
+      '_task-history-digest.ts',
+    ].sort(),
+  );
+  const direct = readers.filter((name) => /^\d/.test(name));
   expect(direct).toEqual(['09-gate-2-verify-approval.ts']);
   expect(imports('10-gate-3-commit.ts')).toContainEqual(
     expect.objectContaining({
