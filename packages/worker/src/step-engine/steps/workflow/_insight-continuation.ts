@@ -1,5 +1,5 @@
 import { lockOwnedStep, StepSupersededError, updateOwnedStep } from '../../step-ownership.js';
-import { and, desc, eq, gte, lte, isNull, notInArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, isNull, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { InsightReviseContinuation } from '@haive/shared/step';
 import { z } from 'zod';
@@ -75,7 +75,7 @@ export async function activeInsightContinuation(
         gte(schema.taskSteps.round, continuation.round),
         lte(schema.taskSteps.round, round),
       ),
-      orderBy: [desc(schema.taskSteps.round)],
+      orderBy: [asc(schema.taskSteps.round)],
     });
     return checkpoint?.status === 'done' || checkpoint?.status === 'skipped' ? null : continuation;
   }

@@ -4,6 +4,7 @@ import {
   publishInsightStep,
   continuationForOutcome,
 } from '../src/step-engine/steps/workflow/_insight-continuation.js';
+import * as specArtifacts from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import * as validationSnapshots from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 import { finishedStepResult } from '../src/step-engine/step-runner.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
@@ -1229,6 +1230,71 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     expect(events.some((e) => e.eventType === 'fix_loop.started')).toBe(false);
     expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
   });
+  it.each(['done', 'skipped', 'pending', 'failed', null] as const)(
+    'uses the earliest checkpoint (%s) even after a later round row exists',
+    async (status) => {
+      const { ctx, source, continuation } = await seedRoute();
+      await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+      if (status)
+        await db.insert(schema.taskSteps).values({
+          taskId: ctx.taskId,
+          stepId: source.stepId,
+          stepIndex: 8.95,
+          title: 'Checkpoint',
+          status,
+          round: 1,
+        });
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: source.stepId,
+        stepIndex: 8.95,
+        title: 'Later manual triage',
+        status: 'pending',
+        round: 2,
+      });
+      expect(await activeInsightContinuation(db, ctx.taskId, 2)).toEqual(
+        status === 'done' || status === 'skipped' ? null : continuation,
+      );
+      if (status === 'done') {
+        // The gate-2 rejection forks a later implementation round after the checkpoint settled.
+        await db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          eventType: 'fix_loop.requested',
+          payload: { sourceStepId: '09-gate-2-verify-approval', round: 2, diagnosis: 'Revise' },
+        });
+        await db.insert(schema.cliInvocations).values({
+          taskId: ctx.taskId,
+          taskStepId: source.id,
+          mode: 'cli',
+          prompt: 'review',
+          rawOutput: '## INSIGHTS\n- INSIGHT: New optional improvement | new.ts | Detail',
+        });
+        const spec = vi
+          .spyOn(specArtifacts, 'resolveSpecView')
+          .mockResolvedValue({ text: '' } as never);
+        try {
+          const stepCtx = {
+            db,
+            taskId: ctx.taskId,
+            round: 2,
+            workspacePath: '/repo',
+            sandboxWorkdir: '/ws',
+            throwIfCancelled() {},
+          } as StepContext;
+          expect(await insightsTriageStep.shouldRun!(stepCtx)).toBe(true);
+          const detected = await insightsTriageStep.detect!(stepCtx);
+          expect(detected.insightCheckpoint).toBeUndefined();
+          const form = await insightsTriageStep.form!(stepCtx, detected, null);
+          expect(form.autoSubmit).not.toBe(true);
+          expect(form.fields).toMatchObject([
+            { id: 'selectedInsights', options: [{ label: 'New optional improvement (new.ts)' }] },
+          ]);
+        } finally {
+          spec.mockRestore();
+        }
+      }
+    },
+  );
   it('boot epoch recovery preserves the batch, and downstream Retry retains the active route', async () => {
     const { ctx, source, continuation } = await seedRoute();
     await db
