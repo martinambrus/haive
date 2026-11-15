@@ -361,6 +361,10 @@ it('disables optional locks on review git reads and forwards the abort signal', 
 });
 it('uses the held cwd for capture git calls and both helper chains', async () => {
   const gitCwd = '/proc/self/fd/42';
+  const lstat = vi.mocked(lstatNoFollow).getMockImplementation()!;
+  vi.mocked(lstatNoFollow).mockImplementation(async (...args) =>
+    args[1] === '' ? ({ kind: 'directory', stats: { dev: 1, ino: 2 } } as never) : lstat(...args),
+  );
   expect((await readReviewDiff(ctx, '/repo', options, { gitCwd })).status).toBe('ready');
   for (const [cwd] of vi.mocked(gitRun).mock.calls) expect(cwd).toBe(gitCwd);
   for (const [, , limits] of vi.mocked(collectImplementationFiles).mock.calls)

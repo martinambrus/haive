@@ -227,6 +227,22 @@ export async function readReviewDiff(
     return result.stdout;
   };
   try {
+    const prefix = relUnder(ctx.repoPath, worktree);
+    const verifyWorktree = async () => {
+      if (!captureLimits.gitCwd || captureLimits.gitCwd === worktree) return;
+      // fs-safe takes path anchors, not a held handle. Bracket path-based reads with
+      // inode checks against the verified descriptor so a replacement cannot mix checkouts.
+      const held = await lstatNoFollow(captureLimits.gitCwd, '', { strict: true });
+      const named = await lstatNoFollow(ctx.repoPath, prefix, { strict: true });
+      if (
+        held?.kind !== 'directory' ||
+        named?.kind !== 'directory' ||
+        held.stats.dev !== named.stats.dev ||
+        held.stats.ino !== named.stats.ino
+      )
+        throw new ReviewContentChanged('The review worktree changed during collection.');
+    };
+    await verifyWorktree();
     const policy = await hostCall(ctx, () => taskSecretMaskPolicy(ctx.db, ctx.taskId));
     if (!policy) return unavailable(scope, 'The task secret policy is unavailable.');
     // At-rest capture covers tracked files too, unlike the sandbox mount policy.
@@ -268,8 +284,8 @@ export async function readReviewDiff(
       loadDependencyPolicy(ctx, worktree, readLimits),
     );
     const dimensions = await hostCall(ctx, () => resolveTaskReviewDimensions(ctx.db, ctx.taskId));
-    const prefix = relUnder(ctx.repoPath, worktree);
     const capture = async (retainContents: boolean): Promise<ReviewSnapshot> => {
+      await verifyWorktree();
       let remainingContentBytes = Math.min(
         captureLimits.retainedContentBytes ?? REVIEW_RETAINED_CONTENT_BYTES,
         REVIEW_RETAINED_CONTENT_BYTES,
@@ -593,6 +609,7 @@ export async function readReviewDiff(
       const changeHash = createHash('sha256')
         .update(JSON.stringify(ordered(files.map(fileIdentity))))
         .digest('hex');
+      await verifyWorktree();
       return {
         forkPoint,
         partial: withheld.size > 0 || !!dependencyPolicy.withheldPaths?.length,
