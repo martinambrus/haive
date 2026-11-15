@@ -888,9 +888,21 @@ Reviews in `.claude/tmp/codex-run/TC2-S/` (review-2.md, review-3.md).
 7. Residual unbounded waits: pool acquisition (`max: 10`, no client-side timeout), and BEGIN/SET before the timeout applies. Each recording write now holds a pooled connection across its round trips. Unmeasured.
 8. Owed live check: a real workflow task records rows for 08 and 08b and the "Time & cost report" tab shows them.
 
-### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+9)
+### T682 · FNF[scratch-reaper] · task scratch cleanup lows, after #1206 (+5)
 
-status: open (OWNER DECISION 2026-11-14: one rule for both sinks: run the committed-secret scanner over stored test-edit content and the gate-3 diff viewer, redact matches with a withheld marker; add `.auth/**` to the default deny globs; queued overnight with items 3 and 9; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
+status: parked: diminishing returns (2026-11-15, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1206 reviews · priority: P4
+
+Reviews in `.claude/tmp/codex-run/RPR-S/` (review-1.md, review-2.md).
+
+1. The Editor stat (`worker/src/sandbox/ide-runner.ts` ~:160) and the api Editor root check (`api/src/routes/tasks/_helpers.ts` ~:1164) read a repository-less task's scratch without the per-task section; read-only, path-based, ratchet-pinned.
+2. The scratch section has no overall wait timeout; a hung docker listing (bounded 10 s) or `rm` holding it stalls `ensure` for that task.
+3. Shell and IDE containers are not `haive-cli-` containers, so the clean-sandbox listing never counts them.
+4. The fence-versus-removal test relies on completion order rather than an injected barrier (`worker/test/scratch-workspace.test.ts` ~:485).
+5. The owner and epoch admission rechecks have no dedicated controls (only status is exercised).
+
+### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+18)
+
+status: parked (items 1 and 3 resolved 2026-11-15 in #1204; item 9 was already shipped in #1171 (`**/.auth/**` default deny), pinned by a control in #1204; the rest parked: diminishing returns) (OWNER DECISION 2026-11-14: one rule for both sinks: run the committed-secret scanner over stored test-edit content and the gate-3 diff viewer, redact matches with a withheld marker; add `.auth/**` to the default deny globs; queued overnight with items 3 and 9; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, review-6/review-2.md).
 
@@ -903,6 +915,15 @@ Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, revie
 7. `/events` is polled every 2 s unpaged. PRE-EXISTING.
 8. The event digest loads all payloads. PRE-EXISTING.
 9. `.auth/` directories are not in the default secret deny globs. PRE-EXISTING.
+10. (#1204) The original sha256 of a redacted blob is kept as its identity, which is a guessing oracle for short secrets; make it a per-task HMAC together with item 2. LOW.
+11. (#1204) Blobs and built forms stored before #1204 are not backfilled; they age out after 30 days. LOW.
+12. (#1204) `PUT /files/content` has no server-side refusal of marker text; only the viewer stops a withheld preview being saved over a real KB file. LOW, defense in depth.
+13. (#1204) `/files/archive`, the editor and live `/files/content` still serve real worktree bytes; the viewer recheck only stops display. Credentials can still be committed with no commit-time warning. LOW.
+14. (#1204) An ended pass that still owns its step is re-examined, with a step-row lock, by every begin and load: k ended-not-ingested DAG siblings cost k short transactions per begin. LOW, perf.
+15. (#1204) No controls for ownership lost by task status alone (failed/cancelled/completed at the same epoch) or a `skipped` step; the invalid-UTF-8 withholding is covered only by the DB-gated test. LOW.
+16. (#1204) Not proven: an ended, owned pass that no flow re-enters never settles or taints; no such path found in step-runner or DAG ingestion, escalation and replan branches not traced. LOW.
+17. (#1204) A KB draft that quotes the withheld marker, or holds any scanner candidate, is read-only in the gate viewer. LOW, by design.
+18. (#1204) The settlement reason "Invocation lost ownership" is also written for a superseded pass that still owns its step. NIT.
 
 ### T669 · External modules: private repositories and a dev install that leaves haive clean
 
@@ -2209,6 +2230,10 @@ All low unless marked.
 
 ## Done
 
+- Credential redaction in repair evidence (#1204, 2d3e62822): stored test-edit content and every gate artifact that serves diff or file text (gate-3, run-app, learning incl. extra files, KB commit, external KB) run through the committed-secret scanner and are rechecked when served; NUL and invalid-UTF-8 blobs are withheld whole; a pass that can no longer finish taints the task while an ended pass whose owner can still finish keeps its evidence; one exported marker; a change hidden by redaction shows a notice. T670 items 1 and 3. Lows filed in T670. Deploy note: api and worker crashed on the new shared export before libs finished; `pnpm docker restart worker` and `api` fixed it.
+- Scratch reaper for repository-backed tasks (#1206, 2cd957697): completed or cancelled tasks (not paused; a stale `dead_at` no longer strands one) have their canonical scratch removed under a per-task in-process fence shared with acquisition and the boot sweep; any unended, unsuperseded invocation or a live CLI sandbox holds it; the missing-task boot branch needs a clean listing. Lows filed as T682.
+- Module core-row write rules (#1205, ec16f7281): modules.md "Core-row writes" (ctx.db authority, extension rows, pre_answers merge, no core tables, cross-database intents, owner-scoped routes, review history); single-writer claims in review-findings.md and schema comments now say "core"; stale deep-analysis plan passages corrected.
+- Module fan-out seats (#1203, a3f5fe991): optional manifest `miningSeats` on module mining steps, validated in shared and at worker load (a seat id may not reuse a `cliRoles` id); one API resolver replaces the three readers of `STEP_MINING_SEATS`; deactivated modules hide their seats and keep stored choices.
 - Postgres DSN guard on save (#1200, 324dc1326): a user Postgres DSN carrying a refused file-reading or unsafe parameter is refused when saved; a refused global DSN degrades RAG search, re-embed and custom MCP to repository hits with a note instead of failing them; a parser test diffs postgres.js's option inventory so a new file-reading parameter fails CI; the relink sweep logs fenced and locked skips. T664 items 5 and 10, T662 item 4. Lows filed in T664.
 - Learning deletion identity (#1202, 3de12aa36): every delete in step 11 apply first writes an apply-keyed record under `.haive/learning-deletions/`, then unlinks, so a replay cannot resurrect an updated-then-deleted learning or lose a replacement draft's slug; records are read strictly. T672 items 2-3. Lows filed in T672.
 - Learning insert replay (#1194, 9ed6cd004): learning provenance records a stable, apply-keyed operation id; a replay of step 11 apply reuses the file its first run wrote (suffix and staged draft kept) and plans against the pre-apply state, so dropped operations stay dropped (an insert-then-delete no longer erases the learning). T672 item 1 (also T667 item 1).
