@@ -542,6 +542,8 @@ describe('bootRecoveryAction', () => {
 });
 
 interface RunningScenario {
+  stepId?: string;
+  insightIntent?: boolean;
   iterationCount: number;
   agentRows: boolean;
   ownRun: boolean;
@@ -558,11 +560,11 @@ function makeRunningCurrentDb(
   const running = {
     taskStepId: 'ts-3',
     taskId: 'task-1',
-    stepId: '09_5-skill-generation',
+    stepId: scenario.stepId ?? '09_5-skill-generation',
     round: 0,
     userId: 'user-1',
     epoch: 3,
-    currentStepId: '09_5-skill-generation',
+    currentStepId: scenario.stepId ?? '09_5-skill-generation',
     currentRound: 0,
     iterationCount: scenario.iterationCount,
   };
@@ -579,6 +581,7 @@ function makeRunningCurrentDb(
             cliWorkReads.push({ table: name, where: cond });
             if (name === 'task_step_agent_minings') return scenario.agentRows ? [{ id: 'm' }] : [];
             if (name === 'cli_invocations') return scenario.ownRun ? [{ id: 'inv' }] : [];
+            if (name === 'task_events') return scenario.insightIntent ? [{ id: 'intent' }] : [];
             return [];
           },
           then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
@@ -655,6 +658,22 @@ describe('reconcileOrphanedSteps recovering the current step left running', () =
     expect(advances).toEqual([{ stepId: '09_5-skill-generation', epoch: 4 }]);
     expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
     expect(recorded.filter((u) => 'formValues' in u.set)).toEqual([]);
+  });
+
+  it('keeps an approved insight snapshot after a crash before mining reservation', async () => {
+    const { demote, recorded, cliWorkReads } = await recover({
+      ...none,
+      stepId: '08e-insights-triage',
+      insightIntent: true,
+    });
+    expect(demote).toBeDefined();
+    expect(resetStepAndDownstream).not.toHaveBeenCalled();
+    expect(recorded.filter((r) => 'formValues' in r.set || 'detectOutput' in r.set)).toEqual([]);
+    const probe = cliWorkReads.find((r) => (r as { table: string }).table === 'task_events') as {
+      where: unknown;
+    };
+    expect(conditionColumns(probe.where)).toContain('rerun_generation');
+    expect(advances).toEqual([{ stepId: '08e-insights-triage', epoch: 4 }]);
   });
 
   it('demotes one with a finished loop pass', async () => {

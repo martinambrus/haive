@@ -1,4 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { buildInsightPrompt } from './workflow/08e-insights-triage.js';
+
+// Journal persistence is tested at the store seam; this sweep builds the actual selected prompt.
+vi.mock('./workflow/_insight-batch.js', async (original) => ({
+  ...(await original<object>()),
+  ensureInsightIntent: async (_ctx: unknown, selected: unknown[]) => ({
+    batchId: 'batch',
+    selected,
+  }),
+}));
 import { promptNamesAgentPath } from '@haive/shared';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
 import { StepRegistry } from '../registry.js';
@@ -328,6 +338,24 @@ const SEQUENCE_PLAN = [
 );
 
 const NAMED_PROMPT_BUILDERS: PromptSource[] = [
+  {
+    label: '08e-insights-triage buildInsightPrompt',
+    exportKey: 'step-engine/steps/workflow/08e-insights-triage.ts#buildInsightPrompt',
+    build: () =>
+      buildInsightPrompt(
+        permissive(),
+        [
+          {
+            id: 'insight-v1-one',
+            sourceStep: 'review',
+            title: 'One',
+            location: 'a.ts',
+            description: 'Detail',
+          },
+        ],
+        'batch',
+      ),
+  },
   {
     label: '08c-code-review buildRefutePrompt (wave 2)',
     exportKey: 'step-engine/steps/workflow/08c-code-review.ts#buildRefutePrompt',
@@ -1388,6 +1416,18 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   '08c-code-review': { implementationFiles: CHANGE_SET, level: 'enterprise' },
   '08c2-code-audit': { implementationFiles: CHANGE_SET },
   '08d-adversarial-qa': { implementationFiles: CHANGE_SET },
+  '08e-insights-triage': {
+    insights: [
+      {
+        id: 'insight-v1-one',
+        identity: 'a.ts::one',
+        sourceStep: 'review',
+        title: 'One',
+        location: 'a.ts',
+        description: 'Detail',
+      },
+    ],
+  },
   '07b-phase-4-validate': { implementationFiles: CHANGE_SET },
   '07a-code-simplify': { implementationFiles: CHANGE_SET },
   '08a-browser-verify': { implementationFiles: CHANGE_SET },
@@ -1576,7 +1616,10 @@ function promptSources(): PromptSource[] {
             const dispatches = await mining.selectAgents({
               ctx: permissive(),
               detected: permissive(variant.fields),
-              formValues: permissive(),
+              formValues:
+                id === '08e-insights-triage'
+                  ? { selectedInsights: ['insight-v1-one'] }
+                  : permissive(),
               llmOutput: permissive(),
             });
             return dispatches.map((d, i) => ({
@@ -1804,7 +1847,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(219);
+    ).toBe(220);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 

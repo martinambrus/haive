@@ -135,7 +135,7 @@ export const HOUSE_RULE_ROLES: Readonly<Record<string, Readonly<Record<string, H
   '08a-browser-verify': { fixer: 'write' },
   '08b-test-management': { default: 'write' },
   '08c-code-review': { 'peer-reviewer': 'review' },
-  '08e-insights-triage': { default: 'write' },
+  '08e-insights-triage': { default: 'write', implementer: 'write' },
 };
 
 /** Step id -> role (`*` for all) -> why it is shown none. A worker test covers file_write roles. */
@@ -182,6 +182,7 @@ export const HOUSE_RULE_EXEMPT: Readonly<Record<string, Readonly<Record<string, 
  *  Keep in sync with `REVIEW_LENSES` / `REFUTE_LENSES` in 08c-code-review.ts and
  *  `ADVERSARIES` in 08d-adversarial-qa.ts. */
 export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
+  '08e-insights-triage': [{ id: 'implementer', label: 'Implementer' }],
   '00b-plan-clarify': [
     { id: 'planner', label: 'Planner' },
     { id: 'questioner', label: 'Questioner' },

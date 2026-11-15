@@ -7,6 +7,12 @@ import {
   isCommittedSnapshotFailure,
 } from '../repo/committed-snapshot.js';
 import {
+  INSIGHT_STEP,
+  insightBatchId,
+  recordInsightInvocation,
+  recordInsightReservation,
+} from './steps/workflow/_insight-batch.js';
+import {
   validateSuccessfulStepOutput,
   StepOutputContractInvalidError,
 } from './step-output-contract.js';
@@ -1588,11 +1594,44 @@ async function resolveAgentMiningPhase(
   reread = false,
 ): Promise<AgentMiningResolved> {
   const spec = stepDef.agentMining!;
+  ctx.throwIfCancelled();
 
   let existing = await db
     .select(MINING_ROW_COLUMNS)
     .from(schema.taskStepAgentMinings)
     .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+
+  if (stepDef.metadata.id === INSIGHT_STEP && existing.length === 0) {
+    // A parked legacy 08e already bought its single editor. Never convert that row into a
+    // second mining writer; its scalar reply is folded as per-item unconfirmed instead.
+    const [legacy] = await db
+      .select()
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, current.id),
+          ne(schema.cliInvocations.mode, 'agent_mining'),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      )
+      .orderBy(desc(schema.cliInvocations.createdAt))
+      .limit(1);
+    ctx.throwIfCancelled();
+    if (legacy) {
+      if (!legacy.endedAt)
+        return { resolved: false, result: { status: 'waiting_cli', row: current } };
+      const result: AgentMiningResult = {
+        agentId: `implementer-${insightBatchId(current.id, current.rerunGeneration)}`,
+        agentTitle: 'Legacy insight application',
+        invocationId: legacy.id,
+        status: 'done',
+        output: legacy.parsedOutput,
+        rawOutput: legacy.rawOutput,
+        errorMessage: legacy.errorMessage,
+      };
+      return { resolved: true, results: [result], newResults: [result], current };
+    }
+  }
 
   if (existing.length > 0) {
     // Recover agents orphaned by a worker restart BEFORE the barrier check: a
@@ -1734,6 +1773,12 @@ async function resolveAgentMiningPhase(
     // half an hour. Scans every row, not just the newest, because a sibling can finish AFTER
     // the one that hit the wall.
     // A content-filter refusal is that one agent's failure and degrades like any other.
+    if (stepDef.metadata.id === INSIGHT_STEP) {
+      for (const row of existing) {
+        if (row.cliInvocationId) await finishFixTestCapture(db, row.cliInvocationId);
+        ctx.throwIfCancelled();
+      }
+    }
     const fatalAgent = existing.find(
       (r) =>
         r.status === 'failed' &&
@@ -1846,16 +1891,23 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results, newResults, current };
   }
 
-  if (!params.providers || !params.deps) {
-    const failed = await updateRow(db, current.id, {
-      status: 'failed',
-      errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
-      endedAt: new Date(),
+  if (stepDef.metadata.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+    const dispatches = await spec.selectAgents({
+      ctx,
+      detected,
+      formValues: formValues ?? {},
+      llmOutput,
     });
-    return {
-      resolved: false,
-      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
-    };
+    ctx.throwIfCancelled();
+    const results: AgentMiningResult[] = dispatches.map((d) => ({
+      agentId: d.agentId,
+      agentTitle: d.agentTitle,
+      status: 'done',
+      output: null,
+      rawOutput: null,
+      errorMessage: null,
+    }));
+    return { resolved: true, results, newResults: results, current };
   }
 
   const dispatches = await spec.selectAgents({
@@ -1868,6 +1920,18 @@ async function resolveAgentMiningPhase(
   if (dispatches.length === 0) {
     ctx.logger.warn('agent mining selectAgents returned empty list, skipping mining');
     return { resolved: true, results: [], newResults: [], current };
+  }
+
+  if (!params.providers || !params.deps) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
+    };
   }
 
   const { sent: dispatched, lost } = await dispatchMiningAgents(
@@ -2125,6 +2189,7 @@ async function reserveMiningAgents(
   stepId: string,
   taskStepId: string,
   dispatches: RunnerMiningDispatch[],
+  ctx: StepContext,
 ): Promise<MiningRetryTargets> {
   const values: (typeof schema.taskStepAgentMinings.$inferInsert)[] = [];
   for (const dispatch of dispatches) {
@@ -2167,6 +2232,14 @@ async function reserveMiningAgents(
       );
     }
     await assertOwnsStep(tx, taskStepId);
+    if (stepId === INSIGHT_STEP) {
+      for (const row of rows)
+        await recordInsightReservation(
+          { ...ctx, db: tx as unknown as Database },
+          row.agentId,
+          row.id,
+        );
+    }
     return rows;
   });
   return new Map(
@@ -2211,9 +2284,17 @@ async function dispatchMiningAgents(
   for (const dispatch of dispatches)
     await resolveTaskCommittedSnapshots(db, params.taskId, dispatch, undefined, snapshotCache);
   const spec = stepDef.agentMining!;
+  ctx.throwIfCancelled();
   const targets = new Map(
     existing ??
-      (await reserveMiningAgents(db, params.taskId, stepDef.metadata.id, current.id, dispatches)),
+      (await reserveMiningAgents(
+        db,
+        params.taskId,
+        stepDef.metadata.id,
+        current.id,
+        dispatches,
+        ctx,
+      )),
   );
   const taken = dispatches.filter((d) => !targets.has(d.agentId)).map((d) => d.agentId);
   let lost = taken.length;
@@ -2302,6 +2383,7 @@ async function dispatchMiningAgents(
     const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
     let enqueued = 0;
     for (const dispatch of dispatches) {
+      ctx.throwIfCancelled();
       const toolProfile = snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
@@ -2464,6 +2546,24 @@ async function dispatchMiningAgents(
           'mining agent dispatched with a non-declared timeout budget',
         );
       }
+      if (stepDef.metadata.id === INSIGHT_STEP) {
+        await recordInsightInvocation(ctx, dispatch.agentId, target.id, invRow.id);
+        ctx.throwIfCancelled();
+        await beginFixTestCapture(db, {
+          invocationId: invRow.id,
+          taskId: params.taskId,
+          taskStepId: current.id,
+          stepId: stepDef.metadata.id,
+          round: current.round,
+          pass: current.rerunGeneration,
+          epoch: ctx.epoch,
+          workspace: await resolveInvocationWorkerTree(db, params.taskId),
+        });
+        // Capture may wait on the filesystem or policy. Re-read the owned task fence
+        // afterwards so a pause or Stop that arrived during it prevents enqueue too.
+        await recordInsightInvocation(ctx, dispatch.agentId, target.id, invRow.id);
+      }
+      ctx.throwIfCancelled();
       await params.deps!.enqueueCliInvocation({
         invocationId: invRow.id,
         taskId: params.taskId,
@@ -4597,6 +4697,9 @@ async function retryMiningAgents(
   agentIds: string[],
   maxAttempts: number,
 ): Promise<MiningDispatchOutcome> {
+  // A writer may have edited before losing its reply. Only explicit step Retry creates
+  // a new generation; Resume must retain this batch's uncertain outcome.
+  if (stepDef.metadata.id === INSIGHT_STEP) return NOTHING_SENT;
   if (agentIds.length === 0 || !params.providers || !params.deps) return NOTHING_SENT;
 
   const rows = await db
@@ -4905,6 +5008,7 @@ async function reconcileOrphanedMiningAgents(
     // Same rule as the LLM path: a run that was evicted or never started re-dispatches whatever
     // the budget says, since neither is evidence the agent cannot run.
     if (
+      stepDef.metadata.id !== INSIGHT_STEP &&
       isTransientCliFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) &&
       (isFreeRedispatch(inv) || row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
     ) {

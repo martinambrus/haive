@@ -3991,6 +3991,7 @@ async function hasCliWork(
   db: Database,
   taskStepId: string,
   iterationCount: number,
+  stepId?: string,
 ): Promise<boolean> {
   if (iterationCount > 0) return true;
   const [agent] = await db
@@ -3999,6 +4000,24 @@ async function hasCliWork(
     .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId))
     .limit(1);
   if (agent) return true;
+  if (stepId === '08e-insights-triage') {
+    // An insight intent is required state even before its mining reservation exists. Keep
+    // its approved snapshot and answers when recovering that pre-dispatch crash window.
+    const [intent] = await db
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .innerJoin(schema.taskSteps, eq(schema.taskEvents.taskStepId, schema.taskSteps.id))
+      .where(
+        and(
+          eq(schema.taskEvents.taskStepId, taskStepId),
+          eq(schema.taskEvents.eventType, 'insight.batch'),
+          sql`${schema.taskEvents.payload}->>'stage' = 'intent'`,
+          sql`${schema.taskEvents.payload}->>'generation' = ${schema.taskSteps.rerunGeneration}::text`,
+        ),
+      )
+      .limit(1);
+    if (intent) return true;
+  }
   const [run] = await db
     .select({ id: schema.cliInvocations.id })
     .from(schema.cliInvocations)
@@ -4424,7 +4443,7 @@ export async function reconcileOrphanedSteps(
       const current = isCurrentStep(s);
       const action = bootRecoveryAction({
         current,
-        cliWork: current && (await hasCliWork(db, s.taskStepId, s.iterationCount)),
+        cliWork: current && (await hasCliWork(db, s.taskStepId, s.iterationCount, s.stepId)),
       });
       // Abandoned chain: requeue the row so it stops blocking the other-step-active guard, but
       // do NOT reset its downstream or bump the epoch — this row is upstream of whatever the

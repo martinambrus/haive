@@ -14,6 +14,14 @@ const m = vi.hoisted(() => ({
   ensureScreenshotsDir: vi.fn(),
 }));
 
+vi.mock('./_insight-batch.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ensureInsightIntent: async (_ctx: unknown, selected: unknown[]) => ({
+    batchId: 'batch',
+    selected,
+  }),
+}));
+
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
   loadPreviousStepOutput: m.loadPreviousStepOutput,
@@ -76,7 +84,7 @@ const db = {
   select: () => ({
     from: () => ({
       innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
-      where: () => ({ orderBy: async () => [] }),
+      where: () => Object.assign(Promise.resolve([]), { orderBy: async () => [] }),
     }),
   }),
 };
@@ -88,6 +96,7 @@ const ctx = {
   sandboxWorkdir: '/ws',
   logger: { info: vi.fn(), warn: vi.fn() },
   emitProgress: vi.fn(async () => {}),
+  throwIfCancelled() {},
 } as never;
 
 /** detect()'s payload as the runner reads it back; an older detect left a blank spec blank. */
@@ -178,15 +187,24 @@ const STEPS: Array<[string, (spec: string) => Promise<string[]>]> = [
   [
     '08e-insights-triage',
     async (spec) => {
-      const payload = await persisted(insightsTriageStep, spec);
-      return [
-        await dispatch(insightsTriageStep, payload, (detected) =>
-          insightsTriageStep.llm!.buildPrompt({
-            detected,
-            formValues: { selectedInsights: [] },
-          } as never),
-        ),
+      const detected = JSON.parse(await persisted(insightsTriageStep, spec));
+      detected.insights = [
+        {
+          id: 'insight-v1-one',
+          identity: 'a::one',
+          sourceStep: 'review',
+          title: 'One',
+          location: 'a',
+          description: 'Detail',
+        },
       ];
+      const agents = await insightsTriageStep.agentMining!.selectAgents({
+        ctx,
+        detected,
+        formValues: { selectedInsights: ['insight-v1-one'] },
+        llmOutput: null,
+      });
+      return agents.map((a) => a.prompt);
     },
   ],
 ];

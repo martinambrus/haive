@@ -3,6 +3,10 @@ import {
   isCommittedSnapshotFailure,
   resolveTaskCommittedSnapshots,
 } from '../src/repo/committed-snapshot.js';
+import * as insightJournal from '../src/step-engine/steps/workflow/_insight-batch.js';
+import * as fixCapture from '../src/step-engine/steps/workflow/_fix-test-store.js';
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
+import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableColumns, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -3898,5 +3902,193 @@ describe('committed snapshot mining replay', () => {
     )?.set.errorMessage as string;
     expect(message).toContain('dispatch failed before the agent was queued: SNAPSHOT_INVALID:');
     expect(isCommittedSnapshotFailure(message)).toBe(true);
+  });
+});
+
+// The real 08e definition runs through the same reservation and continuation paths as reviewers.
+// Only journal persistence and filesystem evidence are replaced here; their SQL/redaction controls
+// live in cancel-sandbox-fence.test.ts and _fix-test-edits.test.ts.
+describe('08e implementer dispatch and recovery', () => {
+  const selected = [
+    {
+      id: 'insight-v1-one',
+      identity: 'a.ts::one',
+      picked: false,
+      sourceStep: 'review',
+      title: 'One',
+      location: 'a.ts',
+      description: 'detail',
+    },
+  ];
+  const batchId = insightJournal.insightBatchId('ts-1', 0);
+  let records: insightJournal.InsightBatchRecord[];
+  beforeEach(() => {
+    records = [];
+    vi.spyOn(insightJournal, 'ensureInsightIntent').mockImplementation(async () => {
+      let intent = records.find((r) => r.stage === 'intent');
+      if (!intent) {
+        intent = {
+          version: 1,
+          protocolVersion: 1,
+          mode: 'manual_08e',
+          batchId,
+          sourceStepRowId: 'ts-1',
+          generation: 0,
+          stage: 'intent',
+          selected: selected.map(({ picked, ...i }) => i),
+          items: [{ id: selected[0]!.id, outcome: 'unconfirmed', changes: [], reason: '' }],
+          notes: '',
+          miningId: null,
+          invocationId: null,
+        };
+        records.push(intent);
+      }
+      return intent;
+    });
+    vi.spyOn(insightJournal, 'loadInsightBatchRecords').mockImplementation(async () => records);
+    vi.spyOn(insightJournal, 'appendInsightBatch').mockImplementation(async (_ctx, record) => {
+      records.push(record);
+      return record;
+    });
+    vi.spyOn(insightJournal, 'recordInsightInvocation').mockResolvedValue(undefined);
+    vi.spyOn(insightJournal, 'recordInsightReservation').mockResolvedValue(undefined);
+    vi.spyOn(fixCapture, 'beginFixTestCapture').mockResolvedValue(undefined);
+    vi.spyOn(fixCapture, 'finishFixTestCapture').mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+  function stateFor(rows: MiningRow[] = []) {
+    const state = freshState(rows);
+    Object.assign(state.taskStepRow, {
+      stepId: '08e-insights-triage',
+      round: 0,
+      rerunGeneration: 0,
+      formValues: { selectedInsights: [selected[0]!.id] },
+      detectOutput: {
+        insights: selected,
+        spec: 'Task scope',
+        worktreePath: '/tmp',
+        sandboxWorktreePath: '/ws',
+      },
+    });
+    return state;
+  }
+  it('records invocation and begins repair capture before enqueue, using the implementer CLI preference', async () => {
+    const state = stateFor();
+    const db = makeMockDb(state);
+    db.query.userStepCliRolePreferences.findFirst = vi.fn(async () => ({
+      cliProviderId: 'prov-seat',
+      effortLevel: null,
+    })) as never;
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(db, insightsTriageStep, enqueued, [
+      makeProvider(),
+      makeProvider({ id: 'prov-seat' }),
+    ]);
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({
+      cliProviderId: 'prov-seat',
+      kind: 'agent_mining',
+      timeoutMs: 1800000,
+      toolProfile: 'rag_only',
+    });
+    expect(insightJournal.recordInsightInvocation).toHaveBeenCalledWith(
+      expect.anything(),
+      `implementer-${batchId}`,
+      expect.any(String),
+      enqueued[0]!.invocationId,
+    );
+    expect(fixCapture.beginFixTestCapture).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        invocationId: enqueued[0]!.invocationId,
+        stepId: '08e-insights-triage',
+        pass: 0,
+      }),
+    );
+    expect(state.inserts.find((i) => i.table === 'task_step_agent_minings')?.row).toMatchObject({
+      agentId: `implementer-${batchId}`,
+      roleKey: 'implementer',
+    });
+  });
+  it('event-write failure prevents enqueue even after reservation', async () => {
+    vi.mocked(insightJournal.recordInsightInvocation).mockRejectedValue(
+      new Error('journal refused'),
+    );
+    const state = stateFor();
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), insightsTriageStep, enqueued);
+    expect(result.status).toBe('failed');
+    expect(enqueued).toEqual([]);
+    expect(fixCapture.beginFixTestCapture).not.toHaveBeenCalled();
+  });
+  it('Stop during dispatch keeps the step failed and sends nothing', async () => {
+    const state = stateFor();
+    vi.mocked(insightJournal.recordInsightInvocation).mockImplementation(async () => {
+      state.taskStepRow.status = 'failed';
+      throw new StepSupersededError('ts-1');
+    });
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe('superseded');
+    expect(enqueued).toEqual([]);
+    expect(state.taskStepRow.status).toBe('failed');
+  });
+  it('folds malformed replies as unconfirmed after capture, with no automatic reroll', async () => {
+    const state = stateFor([miningRow(`implementer-${batchId}`, 1)]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), insightsTriageStep, enqueued);
+    expect(result.status).toBe('done');
+    expect(result.row.output).toMatchObject({
+      implemented: false,
+      items: [{ id: selected[0]!.id, outcome: 'unconfirmed' }],
+    });
+    expect(enqueued).toEqual([]);
+    expect(fixCapture.finishFixTestCapture).toHaveBeenCalledWith(
+      expect.anything(),
+      `inv-implementer-${batchId}`,
+    );
+  });
+  it('never buys another writer for an orphaned linked invocation', async () => {
+    const state = stateFor([miningRow(`implementer-${batchId}`, 1, { status: 'pending' })]);
+    state.afterMiningWrite = (patch) => {
+      if (patch.status === 'failed') state.miningRows[0]!.status = 'failed';
+    };
+    state.invocationRows = [
+      {
+        id: `inv-implementer-${batchId}`,
+        prompt: 'edit',
+        endedAt: new Date(),
+        startedAt: new Date(),
+        exitCode: 137,
+        errorMessage: 'CLI invocation orphaned by a worker restart',
+      },
+    ];
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe('done');
+    expect(enqueued).toEqual([]);
+    expect(insightJournal.recordInsightInvocation).not.toHaveBeenCalled();
+  });
+  it('recovers an unsent reservation under its original deterministic agent id', async () => {
+    const state = stateFor([
+      miningRow(`implementer-${batchId}`, 1, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'Implement selected improvements',
+        roleKey: 'implementer',
+      }),
+    ]);
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.agentMiningId).toBe(`mining-implementer-${batchId}`);
+    expect(state.inserts.filter((i) => i.table === 'task_step_agent_minings')).toEqual([]);
+  });
+  it('empty selection finishes with no editor', async () => {
+    const state = stateFor();
+    state.taskStepRow.formValues = { selectedInsights: [] };
+    const enqueued: CliExecJobPayload[] = [];
+    expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe('done');
+    expect(enqueued).toEqual([]);
+    expect(insightJournal.ensureInsightIntent).not.toHaveBeenCalled();
   });
 });

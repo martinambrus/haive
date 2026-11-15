@@ -1,3 +1,13 @@
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import type { StepContext } from '../src/step-engine/step-definition.js';
+import {
+  ensureInsightIntent,
+  appendInsightBatch,
+  recordInsightInvocation,
+  recordInsightReservation,
+  loadInsightBatchRecords,
+} from '../src/step-engine/steps/workflow/_insight-batch.js';
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -853,5 +863,218 @@ describe.skipIf(!url)('the cancel and a CLI run share one sandbox fence', () => 
     expect(await supersededAt(b.invocationId)).not.toBeNull();
     release();
     await creation;
+  });
+});
+
+// Insight batches use the same dedicated database and real row-lock fence as repair evidence.
+describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
+  let db: Database;
+  let userId: string;
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    userId = randomUUID();
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+  });
+  afterAll(async () => {
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await db.$client.end({ timeout: 5 });
+  });
+  const selected = [
+    {
+      id: 'insight-v1-one',
+      legacyId: 'i-1',
+      identity: 'a.ts::one',
+      picked: false,
+      title: 'One',
+      location: 'a.ts',
+      description: 'detail',
+      sourceStep: 'review',
+    },
+  ];
+  async function seed() {
+    const [task] = await db
+      .insert(schema.tasks)
+      .values({ userId, type: 'workflow', title: 'insights', status: 'running' })
+      .returning();
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task!.id,
+        stepId: '08e-insights-triage',
+        stepIndex: 8.95,
+        title: 'Insights',
+        status: 'running',
+        round: 0,
+      })
+      .returning();
+    return {
+      db,
+      taskId: task!.id,
+      taskStepId: step!.id,
+      userId,
+      epoch: 0,
+      rerunGeneration: 0,
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+  }
+  it('deduplicates concurrent stages under the source-row lock', async () => {
+    const ctx = await seed();
+    const [a, b] = await Promise.all([
+      ensureInsightIntent(ctx, selected),
+      ensureInsightIntent(ctx, selected),
+    ]);
+    expect(a).toEqual(b);
+    await Promise.all([
+      recordInsightReservation(ctx, `implementer-${a.batchId}`, 'mining'),
+      recordInsightReservation(ctx, `implementer-${a.batchId}`, 'mining'),
+    ]);
+    await Promise.all([
+      recordInsightInvocation(ctx, `implementer-${a.batchId}`, 'mining', 'run'),
+      recordInsightInvocation(ctx, `implementer-${a.batchId}`, 'mining', 'run'),
+    ]);
+    const outcome = {
+      ...a,
+      stage: 'outcome' as const,
+      items: [
+        { id: selected[0]!.id, outcome: 'applied' as const, changes: ['Edited a.ts'], reason: '' },
+      ],
+    };
+    await Promise.all([appendInsightBatch(ctx, outcome), appendInsightBatch(ctx, outcome)]);
+    expect((await loadInsightBatchRecords(db, ctx.taskId)).map((r) => r.stage).sort()).toEqual([
+      'intent',
+      'invocation',
+      'outcome',
+    ]);
+    await expect(
+      recordInsightInvocation(ctx, `implementer-${a.batchId}`, 'other', 'other'),
+    ).rejects.toThrow(/another invocation/);
+  });
+  it('retains an interrupted attempt and changes batch identity after explicit Retry', async () => {
+    const ctx = await seed();
+    const first = await ensureInsightIntent(ctx, selected);
+    await db.insert(schema.taskStepAgentMinings).values({
+      taskStepId: ctx.taskStepId,
+      agentId: `implementer-${first.batchId}`,
+      status: 'running',
+    });
+    const reset = await resetStepAndDownstream(db, ctx.taskId, '08e-insights-triage', 0, 0);
+    expect(reset).toEqual({ downstreamReset: 0, newEpoch: 1 });
+    const [row] = await db
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    expect(row).toMatchObject({ rerunGeneration: 1, output: null, status: 'pending' });
+    expect(
+      await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId)),
+    ).toEqual([]);
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running' })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await expect(ensureInsightIntent(ctx, selected)).rejects.toMatchObject({
+      name: 'StepSupersededError',
+    });
+    const second = await ensureInsightIntent({ ...ctx, rerunGeneration: 1, epoch: 1 }, selected);
+    expect(second.batchId).not.toBe(first.batchId);
+    const records = await loadInsightBatchRecords(db, ctx.taskId);
+    expect(records).toHaveLength(2);
+    expect(records[0]!.items[0]!.outcome).toBe('unconfirmed');
+  });
+  it.each(['pause', 'Stop', 'dead', 'Cancel', 'epoch', 'foreign owner'])(
+    'refuses %s at the journal fence',
+    async (kind) => {
+      const ctx = await seed();
+      const patch =
+        kind === 'pause'
+          ? { pausedAt: new Date() }
+          : kind === 'Stop'
+            ? { status: 'failed' as const }
+            : kind === 'dead'
+              ? { deadAt: new Date() }
+              : kind === 'Cancel'
+                ? { status: 'cancelled' as const }
+                : kind === 'epoch'
+                  ? { orchestrationEpoch: 1 }
+                  : {};
+      await db
+        .update(schema.tasks)
+        .set({ ...patch, updatedAt: new Date() })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      if (kind === 'foreign owner') ctx.userId = randomUUID();
+      await expect(ensureInsightIntent(ctx, selected)).rejects.toMatchObject({
+        name: 'StepSupersededError',
+      });
+      expect(await loadInsightBatchRecords(db, ctx.taskId)).toEqual([]);
+    },
+  );
+  it('required event failure blocks selectAgents before any dispatch can be reserved', async () => {
+    const ctx = await seed();
+    // A rejecting store seam is enough here; locking itself is exercised above on Postgres.
+    const failing = {
+      ...ctx,
+      db: {
+        transaction: async () => {
+          throw new Error('journal unavailable');
+        },
+      },
+    } as unknown as StepContext;
+    await expect(
+      insightsTriageStep.agentMining!.selectAgents({
+        ctx: failing,
+        detected: { insights: selected },
+        formValues: { selectedInsights: [selected[0]!.id] },
+        llmOutput: null,
+      }),
+    ).rejects.toThrow('journal unavailable');
+    expect(
+      await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId)),
+    ).toEqual([]);
+  });
+  it('folds a real editor result once and replays the stored outcome after a lost done write', async () => {
+    const ctx = await seed();
+    ctx.logger = { info() {} } as never;
+    const intent = await ensureInsightIntent(ctx, selected);
+    const args = {
+      detected: { insights: selected, worktreePath: '', sandboxWorktreePath: '', spec: '' },
+      formValues: { selectedInsights: [selected[0]!.id] },
+      llmOutput: null,
+      iteration: 0,
+      previousIterations: [],
+      agentMiningResults: [
+        {
+          agentId: `implementer-${intent.batchId}`,
+          agentTitle: 'Editor',
+          status: 'done' as const,
+          output: {
+            version: 1,
+            batchId: intent.batchId,
+            items: [
+              { id: selected[0]!.id, outcome: 'applied', changes: ['Changed a.ts'], reason: '' },
+            ],
+            notes: '',
+          },
+          rawOutput: null,
+          errorMessage: null,
+        },
+      ],
+    };
+    const first = await insightsTriageStep.apply(ctx, args);
+    const replay = await insightsTriageStep.apply(ctx, { ...args, agentMiningResults: [] });
+    expect(first).toEqual(replay);
+    expect(first.implemented).toBe(true);
+    expect(
+      (await loadInsightBatchRecords(db, ctx.taskId)).filter((r) => r.stage === 'outcome'),
+    ).toHaveLength(1);
   });
 });
