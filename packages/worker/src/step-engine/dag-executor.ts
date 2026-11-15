@@ -1331,8 +1331,7 @@ function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
  *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
  *  null when no provider would take it under fail-step; record-and-continue throws a
- *  retryable configuration fault instead. Every caller's truthiness check reads the same
- *  either way, and the one caller that must ROUTE the run's result back to the issue
+ *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
  *  (ingestAdvisor's fix coder) needs the id.
  *
  *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
