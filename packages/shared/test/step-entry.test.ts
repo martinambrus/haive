@@ -44,7 +44,22 @@ describe('public step entry', () => {
       name: 'ReopenStepFormError',
       message: 'step has another decision to present',
       notice: false,
+      newAttempt: false,
     });
     expect(new step.ReopenStepFormError('Next batch', { notice: true }).notice).toBe(true);
+  });
+
+  it.each([
+    { label: 'omitted', options: undefined, expected: false },
+    { label: 'notice only', options: { notice: true }, expected: false },
+    { label: 'explicit false', options: { newAttempt: false }, expected: false },
+    { label: 'explicit true', options: { newAttempt: true }, expected: true },
+  ])('reopen newAttempt is $expected for $label options', ({ options, expected }) => {
+    expect(new step.ReopenStepFormError('Next batch', options)).toMatchObject({
+      name: 'ReopenStepFormError',
+      message: 'Next batch',
+      newAttempt: expected,
+      notice: options?.notice === true,
+    });
   });
 });

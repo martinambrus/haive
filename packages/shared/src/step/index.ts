@@ -550,7 +550,9 @@ export class ReopenStepFormError extends Error {
   /** True when `message` is written for the user: the refreshed form then shows it as a note.
    *  Plan steps reopen with internal control text, which stays out of the form. */
   readonly notice: boolean;
-  /** Start a new durable batch after consuming the previous attempt's agent results. */
+  /** Start a new durable batch after consuming the previous attempt's agent results.
+   *  A generation bump is only safe for steps whose attempt identity is journal-backed,
+   *  currently 08e. */
   readonly newAttempt: boolean;
   constructor(
     message = 'step has another decision to present',
