@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T690 · codex CLI version list never refreshes (full npm document times out)
+
+status: open · kind: fix · found: worker log 2026-11-15 · priority: P3
+
+`cli_package_versions` row `codex` keeps `fetch_error` "Unterminated string in JSON at position 214128" while every other CLI refreshes. `fetchNpmVersions` (`worker/src/cli-versions/fetcher.ts` ~:7-18, ~:62-75) requests the full npm document (`Accept: application/json`, 19.3 MB for `@openai/codex`, 8.4 s from the host) under a 15 s abort, and reads only the `versions` keys and `dist-tags`. Fix: `Accept: application/vnd.npm.install-v1+json` (abbreviated, 5.6 MB, 4.1 s, same two fields); control with a fetch stub asserting the header. Check the same pattern in `tool_package_versions` / runtime fetchers.
+
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
 status: open, BLOCKED on an owner decision for P7's scan scenarios (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
