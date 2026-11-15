@@ -584,7 +584,7 @@ describe('projected output roles', () => {
       reviewed: true,
       blocking: false,
       peer: { verdict: 'APPROVE', findings: [] },
-      security: { verdict: 'SAFE', findings: [] },
+      security: { verdict: 'SECURE', findings: [] },
       extraLenses: [],
     },
   };
@@ -615,6 +615,9 @@ describe('projected output roles', () => {
       ],
       [fixEvent()],
     );
-    expect(entries[0]!.message).not.toContain('Recovery-marker');
+    expect(entries[0]).toMatchObject({
+      tone: 'success',
+      message: 'All reviewers approved; no issues found.',
+    });
   });
 });
