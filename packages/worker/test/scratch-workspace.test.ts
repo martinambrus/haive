@@ -371,13 +371,18 @@ describe('repository task scratch lifecycle', () => {
       runs.push({});
       return [];
     });
-    expect(await mod.cleanupTaskScratchWorkspace(dbArg(database(task(), runs)), TASK)).toBe(false);
+    expect(
+      await mod.cleanupTaskScratchWorkspace(
+        dbArg(database(task({ repositoryId: null, type: 'kb_author' }), runs)),
+        TASK,
+      ),
+    ).toBe(false);
     expect((await stat(scratch())).isDirectory()).toBe(true);
   });
 
   it('a wrong-user boot entry never triggers removal of the owner tree', async () => {
     await mkdir(scratch('u-wrong'), { recursive: true });
-    await rm(scratch(), { recursive: true });
+    await rm(path.join(root, 'u1'), { recursive: true });
     // Only the wrong-user entry is enumerated. If it triggers cleanup by task id, the
     // owner tree recreated during that read would be deleted despite not being visited.
     const db = database(task({ repositoryId: null, type: 'kb_author' }));
@@ -403,6 +408,28 @@ describe('repository task scratch lifecycle', () => {
     expect(await readFile(path.join(outside, 'keep'), 'utf8')).toBe('keep');
   });
 
+  it.each(['owner', 'scratch', 'task'])(
+    'never follows a %s link into another tree',
+    async (component) => {
+      const victim = path.join(root, 'u-victim');
+      await mkdir(path.join(victim, '_scratch', TASK), { recursive: true });
+      const keep = path.join(victim, '_scratch', TASK, 'keep');
+      await writeFile(keep, 'keep');
+      if (component === 'owner') {
+        await rm(path.join(root, 'u1'), { recursive: true });
+        await symlink(victim, path.join(root, 'u1'));
+      } else if (component === 'scratch') {
+        await rm(path.join(root, 'u1', '_scratch'), { recursive: true });
+        await symlink(path.join(victim, '_scratch'), path.join(root, 'u1', '_scratch'));
+      } else {
+        await rm(scratch(), { recursive: true });
+        await symlink(path.join(victim, '_scratch', TASK), scratch());
+      }
+      await mod.cleanupTaskScratchWorkspace(dbArg(database(task())), TASK);
+      expect(await readFile(keep, 'utf8')).toBe('keep');
+    },
+  );
+
   it('rejects noncanonical cleanup ids before querying or removing', async () => {
     const db = database(task({ repositoryId: null, type: 'kb_author' }));
     expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), '../repo')).toBe(false);
@@ -415,6 +442,11 @@ describe('repository task scratch lifecycle', () => {
     const release = gate();
     const current = task({ repositoryId: null, type: 'kb_author' });
     const db = database(current);
+    const read = gate();
+    db.query.tasks.findFirst.mockImplementation(async () => {
+      read.release();
+      return { ...current };
+    });
     const withWorkspace = (
       mod as typeof mod & {
         withTaskScratchWorkspace: <T>(u: string, t: string, f: () => Promise<T>) => Promise<T>;
@@ -426,6 +458,8 @@ describe('repository task scratch lifecycle', () => {
     });
     await acquired.promise;
     const reap = mod.cleanupTaskScratchWorkspace(dbArg(db), TASK);
+    await read.promise;
+    expect(db.query.cliInvocations.findFirst).not.toHaveBeenCalled();
     current.status = 'running';
     release.release();
     await reader;
@@ -453,10 +487,11 @@ describe('repository task scratch lifecycle', () => {
     // A fence on another task must remain independent, and its completion provides a
     // deterministic scheduling boundary without sleeps or elapsed-time assertions.
     await mod.ensureTaskScratchWorkspace('u1', '44444444-4444-4444-8444-444444444444');
-    expect(created).not.toHaveBeenCalled();
+    const createdDuringRemoval = created.mock.calls.length;
     release.release();
     expect(await reap).toBe(true);
     await ensure;
+    expect(createdDuringRemoval).toBe(0);
     expect((await stat(scratch())).isDirectory()).toBe(true);
   });
 });
