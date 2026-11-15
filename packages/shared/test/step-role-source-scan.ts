@@ -58,6 +58,8 @@ const key = (site: ReaderSite) =>
   JSON.stringify([site.file, site.symbol, site.context, site.value]);
 
 /** AST enumeration catches literals in predicates, collections, wrappers and TSX equally.
+ * Includes template fragments with substitutions and regular-expression literals.
+ * Concatenated fragments and prefix tests are out of scope: no constant folding is attempted.
  * Every use of an imported role table is also pinned, including renamed imports and aliases:
  * it cannot become a back door from a canonical constant into a physical-ID reader. */
 export function roleReaderSites(file: string, text: string): ReaderSite[] {
@@ -115,7 +117,11 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
   function visit(node: ts.Node) {
     let value: string | undefined;
     if (
-      (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      (ts.isStringLiteralLike(node) ||
+        ts.isTemplateHead(node) ||
+        ts.isTemplateMiddle(node) ||
+        ts.isTemplateTail(node) ||
+        ts.isRegularExpressionLiteral(node)) &&
       roles.some((role) => node.text.includes(role))
     )
       value = node.text;

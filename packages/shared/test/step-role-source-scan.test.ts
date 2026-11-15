@@ -30,6 +30,12 @@ describe('ungated step-role reader ratchet', () => {
   });
   it.each([
     `eq(schema.taskSteps.stepId, '08c-code-review')`,
+    "sql`${schema.taskSteps.stepId} = '08c-code-review' and task_id = ${id}`",
+    '`08c-code-review:${taskId}`',
+    '`${taskId}:08c-code-review:${round}`',
+    '`${taskId}:08c2-code-audit`',
+    'const role = /^08c-code-review/;',
+
     `const load = loadPreviousStepOutput; load(db, taskId, '08c-code-review')`,
     `function wrap(id) {return loadPreviousStepOutput(db, t, id)}; wrap('08c2-code-audit')`,
     `const ids = new Set(['08c-code-review']); rows.filter(r => ids.has(r.stepId))`,
