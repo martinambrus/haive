@@ -241,6 +241,42 @@ describe('automatic insight stages', () => {
     expect(await startAutoClassification(ctx, detected)).toEqual([]);
     expect(auto.claimAutoRound).not.toHaveBeenCalled();
   });
+  it.each(['result without intent', 'claim without result'])(
+    'Retry reoffers %s instead of settling it',
+    async (window) => {
+      const retried = { ...ctx, rerunGeneration: 1 };
+      if (window === 'result without intent')
+        history.results = [
+          {
+            version: 1,
+            batchId,
+            sourceStepRowId: 'row',
+            generation: 0,
+            complete: true,
+            items: [
+              {
+                id: one.id,
+                identity: one.identity,
+                class: 'consequential',
+                kind: 'correctness',
+                eligible: true,
+                outcome: 'unconfirmed',
+                reason: 'repair',
+              },
+            ],
+            invocationIds: ['classifier'],
+          },
+        ];
+      const detected = await detectAutoInsights(retried, [one], '/repo');
+      expect(detected).toMatchObject({
+        mode: 'manual',
+        candidates: [one],
+        stopReason: 'pending_writer',
+      });
+      expect(await startAutoClassification(retried, detected)).toEqual([]);
+      expect(auto.claimAutoRound).not.toHaveBeenCalled();
+    },
+  );
   it('an interrupted writer requires a human before further new automatic work', async () => {
     vi.mocked(batches.loadInsightBatchRecords).mockResolvedValue([
       { stage: 'intent', batchId: 'old', selected: [one] } as never,

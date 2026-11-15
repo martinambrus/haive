@@ -33,7 +33,13 @@ export interface AutoDetect {
   candidates: LoadedInsight[];
   roundsStarted: number;
   decisions: AutoDecision[];
-  stopReason: 'no_new_consequential' | 'incomplete' | 'cap' | 'interrupted' | 'classifying';
+  stopReason:
+    | 'no_new_consequential'
+    | 'incomplete'
+    | 'cap'
+    | 'interrupted'
+    | 'pending_writer'
+    | 'classifying';
   claim?: AutoClaim;
   dependencyPolicy?: DependencyPolicy;
   unsafeIds?: string[];
@@ -86,6 +92,19 @@ export async function detectAutoInsights(
     ...decisions.map((i) => i.identity),
     ...journal.flatMap((r) => r.selected.map((i) => i.identity)),
   ]);
+  // A spent classifier opportunity is not a writer selection. Retry must reoffer
+  // identities left between claim, result and the durable writer intent.
+  const selectedIdentities = new Set(journal.flatMap((r) => r.selected.map((i) => i.identity)));
+  const pendingWriter = new Set(
+    [
+      ...history.claims
+        .filter(
+          (c) => c.batchId !== batchId && !history.results.some((r) => r.batchId === c.batchId),
+        )
+        .flatMap((c) => c.insights.map((i) => i.identity)),
+      ...decisions.filter((i) => i.class === 'consequential' && i.eligible).map((i) => i.identity),
+    ].filter((identity) => !selectedIdentities.has(identity)),
+  );
   const candidates = ownClaim && !ownResult ? ownClaim.insights : autoCandidates(insights, seen);
   const cap = history.claims.length >= (limits.rounds ?? INSIGHT_AUTO_ROUNDS) && !ownClaim;
   let mode: AutoDetect['mode'] =
@@ -98,12 +117,16 @@ export async function detectAutoInsights(
         : priorUnknown
           ? 'interrupted'
           : 'no_new_consequential';
+  if (insights.some((i) => pendingWriter.has(i.identity))) {
+    mode = 'manual';
+    stopReason = 'pending_writer';
+  }
   // Unclassified and ineligible consequential items remain human decisions. Minor/nit items are listed only.
   const manualIdentities = new Set(
     decisions
       .filter((i) => i.class === 'unclassified' || (i.class === 'consequential' && !i.eligible))
       .map((i) => i.identity)
-      .concat([...unconfirmed]),
+      .concat([...unconfirmed], [...pendingWriter]),
   );
   if (
     mode !== 'classify' &&
