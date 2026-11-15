@@ -1592,6 +1592,71 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
 });
 
 for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it(`DGL-4 ${role} rejects a truncated structured result followed by a kill`, async () => {
+    const h = auxiliaryHarness(role);
+    const output =
+      role === 'issue_advisor'
+        ? { action: 'ESCALATE_TO_REPLAN', reasoning: 'needs planning' }
+        : role === 'replanner'
+          ? { action: 'CONTINUE', reasoning: 'proceed' }
+          : role === 'reviewer'
+            ? { verdict: 'approve', criteria_results: [], issues: [] }
+            : { issue_id: 'A', outcome: 'completed', files_modified: ['a.ts'] };
+    // The closing object bracket was never printed. Do not repair a killed partial reply.
+    const inv = auxiliaryFault('partial-then-kill', {
+      exitCode: 137,
+      errorMessage: null,
+      parsedOutput: null,
+      rawOutput: '```json\n' + JSON.stringify(output).slice(0, -1),
+    });
+    const streak = {
+      kind: 'dag_auxiliary_faults',
+      role,
+      level: 0,
+      providerId: 'provider',
+      invocationId: 'earlier-fault',
+      count: 1,
+    };
+    h.plan.escalationLog = [streak];
+    await expect(h.fold(inv)).rejects.toThrow(/interrupted.*Retry to recover/);
+    expect(h.runs[0]!.consumedAt).toBeNull();
+    expect(inv.consumedAt).toBeUndefined();
+    expect(h.plan.escalationLog).toEqual([streak]);
+    expect(h.rows[0]!.advisorInvocations).toBe(0);
+    expect(h.plan.replannerInvocations).toBe(0);
+    expect(h.rows[0]!.resolution).toBe(
+      role === 'issue_advisor' || role === 'replanner' ? 'failed_unrecoverable' : null,
+    );
+    expect(h.enqueued).toEqual([]);
+    expect(h.checkpoints).toEqual([]);
+  });
+}
+
+it('DGL-4 section C also rejects a truncated fix-coder result followed by a kill', async () => {
+  const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+  h.invocations.push(
+    auxiliaryFault('fix', {
+      exitCode: 137,
+      errorMessage: null,
+      parsedOutput: null,
+      rawOutput: '```json\n{"issue_id":"A","outcome":"completed","files_modified":[',
+    }),
+  );
+  h.runs.push({
+    id: 'fix-run',
+    dagIssueId: 'A',
+    role: 'coder',
+    cliInvocationId: 'fix',
+    consumedAt: null,
+  });
+  await expect(h.run()).rejects.toThrow(/interrupted.*Retry to recover/);
+  expect(h.rows[0]!.outcome).toBe('running');
+  expect(h.invocations[0]!.consumedAt).toBeUndefined();
+  expect(h.plan.escalationLog ?? []).toEqual([]);
+  expect(h.enqueued).toEqual([]);
+});
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
   it.each([false, true])(
     `DGL-3 ${role} content refusal neither counts nor clears (prior fault: %s)`,
     async (priorFault) => {
