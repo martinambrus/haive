@@ -1,3 +1,4 @@
+import { STEP_ROLES } from '@haive/shared/step-outputs';
 import type { TaskEvent, TaskStep } from './api-client';
 
 type Row = Record<string, unknown>;
@@ -17,6 +18,7 @@ export type HistoryStep = Pick<
   | 'title'
   | 'round'
   | 'status'
+  | 'outputRoles'
   | 'output'
   | 'usesCli'
   | 'cliInvocationCount'
@@ -49,8 +51,8 @@ const IMPLEMENTATION_STEPS = new Set([
   '08a-browser-setup',
   '08a-browser-verify',
   '08b-test-management',
-  '08c-code-review',
-  '08c2-code-audit',
+  STEP_ROLES.codeReview,
+  STEP_ROLES.codeAudit,
   '08d-adversarial-qa',
   '08d2-adversarial-qa-review',
   '08e-insights-triage',
@@ -295,7 +297,8 @@ export function buildTaskHistory(
   return steps
     .flatMap((step) => {
       if (
-        !IMPLEMENTATION_STEPS.has(step.stepId) ||
+        (!IMPLEMENTATION_STEPS.has(step.stepId) &&
+          !step.outputRoles?.some((role) => Object.values(STEP_ROLES).includes(role))) ||
         !['done', 'failed'].includes(step.status) ||
         !step.endedAt ||
         !Number.isFinite(Date.parse(step.endedAt))

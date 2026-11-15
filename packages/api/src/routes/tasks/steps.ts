@@ -1,3 +1,4 @@
+import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
@@ -647,6 +648,8 @@ stepRoutes.get('/:id/steps', async (c) => {
       repositoryId: true,
       runListSnapshot: true,
       customSteps: true,
+      derivedRunPlan: true,
+      executionPath: true,
     },
   });
   if (!task) throw new HttpError(404, 'Task not found');
@@ -679,7 +682,11 @@ stepRoutes.get('/:id/steps', async (c) => {
   const withSkip = await enrichStepsWithSkipFlag(db, flags, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
   const withActiveRole = await enrichStepsWithActiveRole(db, flags, id, withStats);
-  const steps = await enrichStepsWithAgentCounts(db, id, withActiveRole);
+  const steps = await projectTaskStepOutputRoles(
+    db,
+    task,
+    await enrichStepsWithAgentCounts(db, id, withActiveRole),
+  );
   return c.json({ steps });
 });
 

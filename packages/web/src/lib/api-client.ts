@@ -1,3 +1,4 @@
+import type { StepRoleId } from '@haive/shared/step-outputs';
 import type {
   RepositoryErrorCode,
   TaskIntegrationChoice,
@@ -1020,6 +1021,8 @@ export interface StatsThroughput {
 }
 
 export interface TaskStep {
+  /** Frozen output-role membership projected by the owner-scoped API. */
+  outputRoles?: StepRoleId[];
   /** Returned by the step API; used for structural merge failure advice. */
   mergeResolveState?: { phase: string; baseBranch: string; pushed?: boolean } | null;
   id: string;
