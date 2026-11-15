@@ -242,4 +242,44 @@ describe('installed module mining seats in API task readers', () => {
       ).rejects.toThrow(/Invalid manifest.*miningSeats/);
     },
   );
+
+  it.each([
+    [false, [DEFAULT], ['implementer']],
+    [true, [DEFAULT, SAVED], ['triage', 'implementer']],
+  ] as const)(
+    'lists the insight Triage seat only for a task that acts on insights automatically (auto %s)',
+    async (auto, spend, cardSeats) => {
+      const { fake, db, flags } = await setup();
+      await db
+        .update(schema.tasks)
+        .set({ autoActOnInsights: auto })
+        .where(eq(schema.tasks.id, TASK));
+      fake.insert(schema.userStepCliRolePreferences, {
+        userId: USER,
+        stepId: '08e-insights-triage',
+        role: 'triage',
+        cliProviderId: SAVED,
+        effortLevel: null,
+        explicit: true,
+      });
+      const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+        {
+          id: TASK,
+          currentStepId: '08e-insights-triage',
+          cliProviderId: DEFAULT,
+          ignoreSavedStepClis: false,
+          autoActOnInsights: auto,
+        },
+      ]);
+      expect(listing.get(TASK)).toEqual(spend);
+      const [insight] = await enrichStepsWithCliPreferences(
+        db,
+        flags,
+        USER,
+        [{ stepId: '08e-insights-triage' }],
+        TASK,
+      );
+      expect(insight?.miningSeats?.map((s) => s.id)).toEqual(cardSeats);
+    },
+  );
 });
