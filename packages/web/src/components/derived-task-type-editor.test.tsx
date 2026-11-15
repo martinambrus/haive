@@ -140,7 +140,7 @@ describe('derived editor', () => {
       });
       await mount();
       fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: slug } });
-      fireEvent.click(screen.getByRole('button', { name: 'Canvas', exact: true }));
+      fireEvent.click(screen.getByRole('button', { name: 'Canvas' }));
       await act(async () => {});
       expect(screen.queryByText('Projected graph')).not.toBeNull();
     },
