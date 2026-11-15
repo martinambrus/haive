@@ -159,16 +159,37 @@ it('automatic ownership is checked on the actual writer workspace, even with an 
     output: { worktreePath: '/stale' },
   } as never);
   vi.spyOn(specs, 'resolveSpecView').mockResolvedValue({ text: 'context' } as never);
+  vi.spyOn(specs, 'resolveTaskWorktreePath').mockResolvedValue('/repo/.haive/worktrees/feat');
   const detect = vi.spyOn(autoFlow, 'detectAutoInsights').mockResolvedValue(automatic);
   const ctx = {
     db: {},
     round: 0,
     taskId: 'task',
-    workspacePath: '/writer',
+    workspacePath: '/repo',
     sandboxWorkdir: '/ws',
     throwIfCancelled() {},
   } as never;
   const out = await insightsTriageStep.detect!(ctx);
-  expect(out.worktreePath).toBe('/writer');
-  expect(detect).toHaveBeenCalledWith(ctx, [insight], '/writer');
+  expect(out.worktreePath).toBe('/repo/.haive/worktrees/feat');
+  expect(detect).toHaveBeenCalledWith(ctx, [insight], '/repo/.haive/worktrees/feat');
+});
+
+it('automatic ownership falls back to the repository root only for a task without a worktree', async () => {
+  vi.spyOn(autoPolicy, 'insightAutoEnabled').mockResolvedValue(true);
+  vi.spyOn(loader, 'loadUnactedInsights').mockResolvedValue({ insights: [insight], omitted: 0 });
+  vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null as never);
+  vi.spyOn(specs, 'resolveSpecView').mockResolvedValue({ text: 'context' } as never);
+  vi.spyOn(specs, 'resolveTaskWorktreePath').mockResolvedValue(null);
+  const detect = vi.spyOn(autoFlow, 'detectAutoInsights').mockResolvedValue(automatic);
+  const ctx = {
+    db: {},
+    round: 0,
+    taskId: 'task',
+    workspacePath: '/repo',
+    sandboxWorkdir: '/ws',
+    throwIfCancelled() {},
+  } as never;
+  const out = await insightsTriageStep.detect!(ctx);
+  expect(out.worktreePath).toBe('/repo');
+  expect(detect).toHaveBeenCalledWith(ctx, [insight], '/repo');
 });

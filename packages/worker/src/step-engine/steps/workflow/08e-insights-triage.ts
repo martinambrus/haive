@@ -39,7 +39,7 @@ import {
   continuationForOutcome,
   readInsightContinuation,
 } from './_insight-continuation.js';
-import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveSpecView, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
@@ -258,7 +258,12 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
     const spec = (await resolveSpecView(ctx)).text;
-    const worktreePath = automatic ? ctx.workspacePath : (wt?.worktreePath ?? ctx.workspacePath);
+    // Automatic edits are authorized against the tree the writer is mounted on: the task's
+    // durable worktree decision (`resolveInvocationRepoMount` trusts the same columns), never a
+    // retained setup output and never the repository root.
+    const worktreePath = automatic
+      ? ((await resolveTaskWorktreePath(ctx)) ?? ctx.workspacePath)
+      : (wt?.worktreePath ?? ctx.workspacePath);
     const insights = await collectInsights(ctx, automatic);
     const auto = automatic ? await detectAutoInsights(ctx, insights, worktreePath) : undefined;
     const display = auto

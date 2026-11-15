@@ -439,6 +439,7 @@ describe('automatic insight stages', () => {
       vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
       vi.spyOn(specs, 'resolveSpecView').mockResolvedValue({ text: '' } as never);
       vi.spyOn(specs, 'hydrateNoSpecBrief').mockResolvedValue(undefined);
+      vi.spyOn(specs, 'resolveTaskWorktreePath').mockResolvedValue(null);
       vi.spyOn(secretPolicy, 'taskSecretMaskPolicy').mockResolvedValue({
         globs: { deny: [], ignore: [] },
       });
