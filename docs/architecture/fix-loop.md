@@ -414,3 +414,66 @@ no protected endpoint can be identified from its partial manifest.
 No backfill rewrites legacy blob rows or already-built form snapshots. Live legacy
 blob reads are rechecked, including the whole-blob binary/NUL rule; stored old content
 remains until normal expiry or eviction under the existing 30-day retention policy.
+
+## Optional partial DAG completion
+
+`DagExecuteSpec.failurePolicy` is a code-hook option only: omitted or `fail-step`
+retains workflow failure behavior; `record-and-continue` records final issue failures,
+merges successful siblings, checkpoints the level and runs independent later levels.
+No built-in workflow opts in. No manifest or administrator setting exposes the policy.
+The runner appends `dagOutcomes` to opt-in apply output, with disjoint counts for
+`merged`, `failed`, `refused`, `blocked`, `noChange`, `skipped`, `split` and `unconfirmed`,
+plus `total`. Split parents count in `split`, separately from their children's outcomes,
+and remain included in `total`. Counts come from persisted issue rows, never status
+copy or detect counts.
+
+Review, advisor and replanner budgets still run before final failure. A coder-refused
+issue is not relayed to a later advisor or replanner under either policy, including
+through another issue's graph, dependency levels or ledger context. Under opt-in, an
+advisor refusal is recorded without re-sending the assignment to a replanner. A required provider absent from configuration
+or refusing dispatch, an auxiliary execution-environment fault, an interrupted auxiliary
+run and an advisor or replanner reply with no valid structured decision are hard faults
+that fail the step for a Retry; they cannot be recorded as legitimate declined replans.
+A fault spends no advisor or replan budget, so Retry does not cure a deterministic one
+(for example a replanner prompt the provider always refuses): switch the step's CLI or
+fix the cause. An explicit structured ABORT
+remains recordable. Superseded, never-started and preempted auxiliary runs release their
+slots without spending an attempt, including when a superseded run retains fault text.
+
+The default policy keeps its existing soft failure/escalation paths for missing
+review-loop or replanner providers. An advisor with no usable decision (including an
+interrupted or refused advisor) escalates, and a replanner with no usable decision
+uses the ABORT fallback and fails the step with its existing message. Coder environment
+and exhausted infrastructure failures, provider outages, lost ownership and merge halts
+fail under either policy. Both policies bound the provider fault scan to the fifty
+newest ended, unsuperseded invocation errors for the step; an older error outside that
+window is not checked by that scan. Opt-in also checks the auxiliary run it is ingesting.
+Three prompt-text guards run under both policies, with no change to outcomes: replanner
+prompts and the advisor's ledger context leave out refused and blocked issues (an advisor
+prompt is never built for one),
+and a coder's `concerns` text matching the reserved `DAG_HOST_` marker syntax is replaced
+with `[reserved host marker]`.
+
+Host-reserved `DAG_HOST_FINAL_FAILURE`, `DAG_HOST_BLOCKED_BY:` and
+`DAG_HOST_NO_CHANGE` markers use existing `concerns`; coder/fix-coder concerns cannot
+introduce their syntax. Marker readers also require structural outcome, resolution,
+invocation and merge fields. A final failure is written before merge/checkpoint so
+re-entry cannot spend another advisor or replanner call. An opt-in replanner decision,
+its terminal issue writes and its invocation/cursor consumption commit together.
+A user Retry after a hard fault re-runs the current level's recorded final failures
+and resets their advisor budget; checkpointed levels stay intact.
+
+Before creating or dispatching the current level, the host propagates unavailable
+prerequisites transitively and records its blocked issues as `failed_unrecoverable`
+in both outcome and resolution, with the canonical blocked-by marker and no invocation.
+Final failures, refused issues, deliberate skips, earlier blocked issues and unmerged
+no-change outcomes are unavailable: an issue still eligible for advice is not final.
+A split parent is unavailable when any child linked by `parentIssueId` is unavailable,
+including through nested splits, so a dependent cannot assume the parent's whole
+assignment was delivered. Future-level blocked rows are written only when that level
+is reached, so a current-level Retry can recover a prerequisite before the dependent
+is considered. Independent work proceeds.
+
+No migration is needed. Rollback first disables new opt-ins and retains a capable
+executor while partial tasks can resume; retain the outcome rows and markers for
+reporting. An older executor must not reinterpret checkpointed partial levels.

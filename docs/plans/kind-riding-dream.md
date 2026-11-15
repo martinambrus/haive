@@ -3,7 +3,8 @@
 > **Not implemented; reviewed 2026-11-12 against `3426c8c34`.** The module/task-type foundations
 > now ship; use [Modules](../architecture/modules.md) and [Task types](../architecture/task-types.md)
 > as the implementation contracts. Snapshot mounts, guarded run-list spans, a module fix-loop
-> target and record-and-continue DAG outcomes remain prerequisites, not capabilities to assume.
+> target remain prerequisites, not capabilities to assume. The code-hook-only
+> record-and-continue DAG prerequisite is implemented; no workflow opts in yet.
 > The provider-refusal core change below has already landed; preserve it rather than rebuilding it.
 
 ## Context
