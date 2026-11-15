@@ -61,6 +61,30 @@ describe('parseInsights', () => {
     expect(detected.insights[0]!.sourceRefs).toHaveLength(1);
   });
 
+  it('offers only 30 of 31 eligible insights while the shared inventory remains unlimited', async () => {
+    const raw =
+      '## INSIGHTS\n' +
+      Array.from({ length: 31 }, (_, i) => `- INSIGHT: Improvement ${i} | a${i}.ts | detail`).join(
+        '\n',
+      );
+    const db = tableDb([{ stepId: 'review', raw }], []);
+    const ctx = {
+      db,
+      taskId: 't1',
+      workspacePath: '/repo',
+      sandboxWorkdir: '/workdir',
+      logger: { info() {} },
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+    const detected = await insightsTriageStep.detect!(ctx);
+    expect(detected.insights).toHaveLength(30);
+    expect((await loader.loadUnactedInsights(db, 't1')).insights).toHaveLength(31);
+    const form = await insightsTriageStep.form!(ctx, detected, null);
+    expect(form!.fields[0]).toMatchObject({
+      options: detected.insights.map((i) => expect.objectContaining({ value: i.id })),
+    });
+  });
+
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
     const raw =
       '```json\n{"summary":"x"}\n```\n\n## INSIGHTS\n- INSIGHT: Extract helper | src/a.ts:10 | dedupe the two loops\n- INSIGHT: Add index | db/schema.ts:5 | speeds the query\n';

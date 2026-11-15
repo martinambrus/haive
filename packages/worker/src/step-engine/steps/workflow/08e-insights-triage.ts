@@ -55,7 +55,7 @@ export function readTriageOutcome(
 }
 
 async function collectInsights(ctx: StepContext): Promise<LoadedInsight[]> {
-  const result = await loadUnactedInsights(ctx.db, ctx.taskId);
+  const result = await loadUnactedInsights(ctx.db, ctx.taskId, { limit: 30 });
   ctx.throwIfCancelled();
   return result.insights;
 }
