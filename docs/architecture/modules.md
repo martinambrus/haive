@@ -574,6 +574,40 @@ no database transaction spans git or file reads. `PreviousStepOutput`, `ReviewDi
 and `StepHostServices` are declared in the public contract entry, with no worker type imports.
 Fix-loop diagnosis and unacted-insight services remain deferred to the deep-analysis consumer.
 
+### Core-row writes
+
+`ctx.db` is trusted-module authority over the core database, not a database permission
+sandbox (`StepContext` in `packages/shared/src/step/index.ts`; the runner passes its database
+handle unchanged). Modules may make owner- and task-scoped writes to intended core extension
+rows: `review_findings`, `task_dag_*` and `tasks.pre_answers`. Preserve core invariants,
+row ownership, task epochs, step ownership, dispositions and idempotency across Retry and
+recovery; the context's identity fields do not automatically scope a SQL write.
+
+The API loader authenticates `/m/<id>` routes, but each module route must also constrain
+finding and task ids through the task's repository and the authenticated owner's repository
+ownership before reading or writing them. Authentication alone does not authorize an id.
+
+Merge `tasks.pre_answers` at both the step and field keys; never replace the map with only
+the module's answers. Account for `06-run-config`: it merges existing answers, fills missing
+keys, and overwrites mapped keys whose source fields were explicitly submitted in run config,
+then persists the whole merged map (`steps/workflow/06-run-config.ts`). Preserve that precedence
+and coordinate concurrent read/merge/write operations so unrelated answers survive.
+
+Modules add **no tables or columns to the core database**. Put module-owned schema in the
+module's own database through `./ensure-schema` and its `withSchemaLock` transaction
+(`packages/worker/src/modules/loader.ts`, `packages/shared/src/module-db/index.ts`). Required
+core schema changes belong to core migrations. The module database has a separate connection:
+a core transaction cannot atomically commit its writes too. Use idempotent intents and
+reconciliation for cross-database writes, with replay safe after either side fails.
+
+Preserve [review-row history](review-findings.md): never write `fixed` or the superseded
+`recurred` disposition, and never infer repair from absence, selection or a model's change
+report. Keep disposition updates scoped to the task and current round and guarded on `open`,
+so a refutation or human waiver keeps its verdict. A later scan records its own rows rather
+than rewriting earlier tasks or rounds. Core `recordReviewFindings` is best-effort, and a manual Retry nulls step output, so
+neither is a durable record a report can rely on. A module using rows as required state must make persistence and
+replay part of its own step contract rather than assume the telemetry writer guarantees them.
+
 ### Output contracts
 
 `@haive/shared/step-outputs` exposes frozen host references for `haive.code-review@1`

@@ -1,8 +1,8 @@
 # Review findings and waivers
 
-`review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. `recordReviewFindings` (`_review-findings.ts`) is the only insert, and its two readers only inform: `loadFindingRecurrence` counts earlier rounds for `recurrence_count`, and `GET /stats/quality` aggregates it. No behaviour gates on it, which is why every write there is best-effort and never throws — telemetry must not fail the review that produced it.
+`review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. `recordReviewFindings` (`_review-findings.ts`) is the only core insert (a module may record its own rows under the rules in [Modules](modules.md#core-row-writes)), and its two readers only inform: `loadFindingRecurrence` counts earlier rounds for `recurrence_count`, and `GET /stats/quality` aggregates it. No behaviour gates on it, which is why every write there is best-effort and never throws — telemetry must not fail the review that produced it.
 
-`disposition` is the verdict on a finding. Every value that is written has exactly one writer:
+`disposition` is the verdict on a finding. Every value that is written has exactly one core writer (module writes follow [Modules](modules.md#core-row-writes)):
 
 - `open` — default. Nobody has ruled on it.
 - `dismissed_refuted` — 08c's refuter panel disproved it. Written at INSERT, because the insert happens on the final apply() after refutation ran.
