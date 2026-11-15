@@ -84,7 +84,9 @@ describe('insight continuation identity and reachability', () => {
         expect(keepForPath(id, executionPath)).toBe(true);
         const original = vi.fn().mockResolvedValue(true);
         const def = { metadata: { id }, shouldRun: original } as unknown as StepDefinition;
-        const step = resolveTaskStep({ executionPath }, id, { get: () => def })!;
+        const step = resolveTaskStep({ executionPath, runListStrategy: 'workflow_paths' }, id, {
+          get: () => def,
+        })!;
         const conditional = id === '08e-insights-triage' || executionPath === 'quick_bugfix';
         const ctx = {
           db: database({ events: false }),
@@ -100,6 +102,33 @@ describe('insight continuation identity and reachability', () => {
       }
     },
   );
+  it.each([
+    { runListStrategy: 'workflow_paths', runListSnapshot: ['08c-code-review'] },
+    { runListStrategy: 'static', runListSnapshot: null },
+    { runListStrategy: 'derived', runListSnapshot: ['08c-code-review'] },
+  ] as const)('keeps explicitly listed quick reviews active (%j)', async (scope) => {
+    const original = vi.fn().mockResolvedValue(true);
+    const def = {
+      metadata: { id: '08c-code-review' },
+      shouldRun: original,
+    } as unknown as StepDefinition;
+    const step = resolveTaskStep(
+      {
+        ...scope,
+        runListSnapshot: scope.runListSnapshot ? [...scope.runListSnapshot] : null,
+        executionPath: 'quick_bugfix',
+      },
+      '08c-code-review',
+      { get: () => def },
+    )!;
+    expect(
+      await step.shouldRun!({
+        db: database({ events: false }),
+        throwIfCancelled() {},
+      } as StepContext),
+    ).toBe(true);
+    expect(original).toHaveBeenCalledOnce();
+  });
   it('preflights the complete verify/review/checkpoint path', () => {
     const steps = ['08-phase-5-verify', '08c-code-review', '08e-insights-triage'].map((id) => ({
       metadata: { id },

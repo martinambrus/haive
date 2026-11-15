@@ -63,6 +63,18 @@ const SPINE: readonly string[] = [
   '13-pr-wait',
 ];
 
+/** Members added only for built-in insight continuation reachability. Derived overlays
+ * keep their historical base membership, so anchors and removes retain their meaning. */
+export function isPathAddedInsightStep(
+  path: ExecutionPath | null | undefined,
+  id: string,
+): boolean {
+  return (
+    (id === '08c-code-review' && path === 'quick_bugfix') ||
+    (id === '08e-insights-triage' && (path === 'quick_bugfix' || path === 'plan_tasklist'))
+  );
+}
+
 /** plan_tasklist adds the spec + decomposition chain on top of the spine, plus a
  *  spec-quality review of the draft (05) and a peer/security code review of the
  *  result (08c). The broad audits (04a spec, 08c2 code) and their sinks (05a

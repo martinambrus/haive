@@ -1,3 +1,4 @@
+import { isPathAddedInsightStep } from '@haive/shared/execution-paths';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -76,7 +77,12 @@ const synthesisedSteps = new Map<string, StepDefinition>();
 type TaskStepScope = Partial<
   Pick<
     ResolvedTaskContext,
-    'taskId' | 'customSteps' | 'runListSnapshot' | 'derivedRunPlan' | 'executionPath'
+    | 'taskId'
+    | 'customSteps'
+    | 'runListSnapshot'
+    | 'derivedRunPlan'
+    | 'executionPath'
+    | 'runListStrategy'
   >
 >;
 
@@ -140,9 +146,10 @@ export function resolveTaskStep(
 
 export function isConditionalInsightStep(ctx: TaskStepScope, id: string): boolean {
   return (
-    (id === '08c-code-review' && ctx.executionPath === 'quick_bugfix') ||
-    (id === '08e-insights-triage' &&
-      (ctx.executionPath === 'quick_bugfix' || ctx.executionPath === 'plan_tasklist'))
+    ctx.runListStrategy === 'workflow_paths' &&
+    ctx.derivedRunPlan == null &&
+    !ctx.runListSnapshot?.includes(id) &&
+    isPathAddedInsightStep(ctx.executionPath, id)
   );
 }
 
