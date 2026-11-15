@@ -1589,6 +1589,8 @@ export async function ingestReviewRun(
     return;
   }
 
+  assertEscalationEnvironment(inv, ra.stepDef);
+
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
   // A fix coder cut at the output limit is re-run once, smaller, before anything reviews its edits;

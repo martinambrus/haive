@@ -10,8 +10,12 @@ import {
   resolveEscalationPhase,
   replannerPrompt,
   parseCoderResult,
+  ingestReviewRun,
 } from './dag-executor.js';
-import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
+import {
+  OUTPUT_TRUNCATION_HEADLINE,
+  PROVIDER_FATAL_HEADLINES,
+} from '../queues/cli-exec/failure-class.js';
 import { StepSupersededError } from './step-ownership.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { gitRun } from '../repo/git-exec.js';
@@ -31,6 +35,11 @@ import {
   DAG_BLOCKED_BY_MARKER,
   loadDagOutcomeCounts,
 } from './dag-outcomes.js';
+
+vi.mock('./steps/workflow/_fix-test-store.js', () => ({
+  beginFixTestCapture: vi.fn(),
+  finishFixTestCapture: vi.fn(),
+}));
 
 vi.mock('../orchestrator/dispatcher.js', () => ({ resolveTaskDispatch: vi.fn() }));
 vi.mock('../repo/git-exec.js', async (original) => ({
@@ -1454,4 +1463,75 @@ for (const policy of [undefined, 'fail-step', 'record-and-continue']) {
     expect(h.rows[0]!.concerns).toBe('');
     expect(h.checkpoints).toEqual([]);
   });
+}
+
+for (const role of ['reviewer', 'coder'] as const) {
+  it.each([
+    { exitCode: 1, errorMessage: 'permission denied' },
+    { exitCode: 1, errorMessage: PROVIDER_FATAL_HEADLINES.server_error },
+    { exitCode: 137, errorMessage: null },
+    { exitCode: 143, errorMessage: 'CLI process exceeded its time budget' },
+    { exitCode: null, errorMessage: 'orphaned by a worker restart' },
+  ])(`DAGP-1 opt-in ${role} stops before consuming a hard fault: %j`, async (signal) => {
+    const h = fixture([issue('A')], true);
+    const run = { id: 'review-run', role, consumedAt: null };
+    h.runs.push(run);
+    const inv = { id: 'fault', startedAt: new Date(), endedAt: new Date(), ...signal };
+    await expect(
+      ingestReviewRun(
+        {
+          db: h.db,
+          current: h.step,
+          level: h.levels[0],
+          stepDef: h.stepDef,
+          specView: { text: '', condensed: false },
+        } as never,
+        h.rows[0] as never,
+        run as never,
+        inv as never,
+      ),
+    ).rejects.toThrow(/DAG required agent/);
+    expect(run.consumedAt).toBeNull();
+    expect(h.rows[0]!.resolution).toBeNull();
+    expect(h.enqueued).toEqual([]);
+  });
+
+  it.each(['superseded', 'never-started', 'truncated'])(
+    `DAGP-1 opt-in ${role} preserves free %s redispatch`,
+    async (kind) => {
+      const h = fixture([issue('A')], true);
+      const run = { id: 'review-run', role, consumedAt: null };
+      h.runs.push(run);
+      const inv = {
+        id: 'old',
+        startedAt: kind === 'never-started' ? null : new Date(),
+        endedAt: new Date(),
+        exitCode: 137,
+        supersededAt: kind === 'superseded' ? new Date() : null,
+        errorMessage: kind === 'truncated' ? OUTPUT_TRUNCATION_HEADLINE : null,
+        truncationRetry: false,
+      };
+      await ingestReviewRun(
+        {
+          db: h.db,
+          current: h.step,
+          level: h.levels[0],
+          stepDef: h.stepDef,
+          specView: { text: '', condensed: false },
+          params: h.params,
+          providers: [],
+          deps: h.params.deps,
+          taskId: 'task',
+          attachmentsNotice: '',
+        } as never,
+        h.rows[0] as never,
+        run as never,
+        inv as never,
+      );
+      expect(h.enqueued).toHaveLength(1);
+      expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+      expect(h.rows[0]!.resolution).toBeNull();
+      if (kind === 'truncated') expect(h.invocations[0]!.truncationRetry).toBe(true);
+    },
+  );
 }
