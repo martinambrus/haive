@@ -1,6 +1,7 @@
 import { and, eq, isNull, notInArray, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database } from '@haive/database';
+import { INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/shared/schemas';
 import { scanFences } from '@haive/shared/markdown-fences';
 import type { LoadedInsight } from '@haive/shared/step';
 import { fencedAgentBlock, REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-repo.js';
@@ -234,7 +235,7 @@ export async function insightAutoEnabled(db: Database, taskId: string): Promise<
     .select({ auto: schema.tasks.autoActOnInsights })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId));
-  return task?.auto === true;
+  return INSIGHT_AUTO_ACTION_AVAILABLE && task?.auto === true;
 }
 export async function loadAutoHistory(
   db: Database,
@@ -303,7 +304,7 @@ export async function claimAutoRound(
   limits: InsightAutoLimits = {},
 ): Promise<AutoClaim | null> {
   return withAutoFence(ctx, async (db, task) => {
-    if (!task.autoActOnInsights || task.pausedAt) return null;
+    if (!INSIGHT_AUTO_ACTION_AVAILABLE || !task.autoActOnInsights || task.pausedAt) return null;
     const history = await loadAutoHistory(db, ctx.taskId);
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
     const existing = history.claims.find((r) => r.batchId === batchId);
