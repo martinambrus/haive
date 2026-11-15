@@ -384,6 +384,41 @@ stub pnpm and cannot prove it.
 Next's mode-dependent `next-env.d.ts` is ignored too; stable Next ambient references live in
 `packages/web/src/next-types.d.ts`, so switching dev/build does not dirty a tracked generated file.
 
+### CI for an external module repository
+
+Copy `scripts/templates/module-repo-ci.yml` into the module repository's
+`.github/workflows/ci.yml`. Replace both `HAIVE_REF` placeholders with the same full Haive
+commit SHA (or a tag containing the workflow), and set `MODULE_ID`. `v0.2.0` is too old.
+The reusable `.github/workflows/module-ci.yml` takes required `module-id` and `haive-ref`
+inputs and optional `node-version` (default 26). Its caller token reads only the caller
+module repository; neither checkout persists credentials and no additional secret is needed
+for public Haive. Every action is pinned to the same SHA as core CI.
+
+The workflow validates the id and ref before checking out the module into `modules/<id>/`.
+`scripts/module-ci.sh` relocates that checkout into ignored `external-modules/<id>/`, because
+only that tree selects #1179's development install without tracked manifest edits. It runs
+`pnpm module add <id>`, `pnpm install --frozen-lockfile`, builds the module and its workspace
+dependency closure, generates registrations, then runs the module's own `typecheck` and
+`test` scripts. The package must declare all three scripts and export `./manifest`.
+This checks the module against unpublished workspace core packages; it does not build or
+typecheck every Haive host application. Git's full porcelain status must be empty before
+commands run and on exit, including on command failure. No reset hides a dirty result.
+
+For a local run, use a disposable Haive checkout at the selected tag or full SHA, clone the
+module into `modules/<id>/` (or `external-modules/<id>/`), then run
+`bash scripts/module-ci.sh <id> <haive-ref>`. Branch refs, a different checkout HEAD, invalid
+ids, tracked-folder collisions, missing scripts and refs without the ignored dev-install
+hook contract are refused. `--check` validates inputs and host support without installing.
+The caller example lives under `scripts/templates/` so it can be copied verbatim without
+adding an executable workflow to Haive's own CI.
+
+`scripts/test/module-ci.test.mjs` runs automatically in `pnpm test:scripts`: one temporary
+clone, real git, the real dev installer and generator, and stubbed pnpm resolution with real
+stub-module build/typecheck/test commands. It proves success and a clean tree, dirty-file and
+failed-test rejection, id/ref validation, and old-feature rejection without a full install.
+No database/Redis guard or GATED row is needed. A real-pnpm integration run remains useful
+when changing this workflow or the dev-install hook.
+
 ### Public first-party and registry modules
 
 From the repository root:
