@@ -1360,12 +1360,12 @@
     "reason": "Physical core step gains conditional reachability on the quick path; pinned role reads remain separate."
   },
   {
-    "file": "packages/worker/src/queues/run-list.ts",
-    "symbol": "isConditionalInsightStep",
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "isPathAddedInsightStep",
     "context": "EqualsEqualsEqualsToken",
     "value": "08c-code-review",
     "count": 1,
-    "reason": "Conditional execution policy for the physical core review step on quick_bugfix; replacement host policy calls this too."
+    "reason": "Path membership policy names the physical built-in review added only to quick; derived bases exclude it while pinned replacements retain their own policy."
   },
   {
     "file": "packages/api/src/lib/task-type-definition.ts",
