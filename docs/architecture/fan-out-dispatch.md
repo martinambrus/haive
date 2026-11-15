@@ -142,9 +142,9 @@ allowance watch under the existing outage policy. On manual or automatic Resume,
 writer folds through its normal apply and outcome journal as unconfirmed, without another
 writer in that generation. Committed-snapshot failures retain their barrier refusal.
 
-**Manual insight application uses the `implementer` mining seat.** A settled nonempty batch
+**Insight application uses the `implementer` mining seat.** A settled nonempty batch
 with an applied report revises through fresh validation when needed, verification, review and
-the configured tail to a non-writing 08e checkpoint. Other batches keep their ordinary successor.
+the configured tail to an owned 08e checkpoint (non-writing after manual application). Other batches keep their ordinary successor.
 The seat uses the existing task,
 step, saved-seat and default-provider resolution and declares file-writing capabilities,
 `rag_only` and a 30-minute timeout. Empty selection sends nothing. The saved offered
@@ -159,3 +159,18 @@ is checked again at the owned journal fence before enqueue. Pause lets the in-fl
 finish; it holds the next fresh step and defers a queued invocation at pickup. Linked interrupted
 editors, malformed replies and Resume do not buy another writer in the same batch; an
 explicit Retry creates a new generation only after the person can inspect partial edits.
+
+The independent 08e `triage` seat uses ordinary CLI preference resolution, mining
+reservations and usage/spend rows, with tools disabled where supported and no MCP
+servers. It classifies whole new identity cohorts; aliases and attempted identities
+never buy a second classifier opportunity. Each cohort has at most two distinct
+classifier ids, with no automatic mining rerolls. Fully augmented input is bounded
+at 32,000 characters through the dispatch budget; classifier timeout is fixed at
+120 seconds, without the writer's learned escalation. Output is bounded at 8,000
+characters. Limits are injectable for controls. Detection, claim and both dispatch
+attempts build the same base prompt with the real batch id and injected input bound;
+an oversized base cohort goes to manual selection before a claim commits. Later
+augmentation is checked again by the dispatcher. Character/time budgets do not cap
+billed dollars. The follow-up wave applies only consequential, host-eligible identities
+through the same durable writer journal and fresh-check continuation. Both waves
+stay synthetic in the hostless test bypass, including the writer preflight guard.

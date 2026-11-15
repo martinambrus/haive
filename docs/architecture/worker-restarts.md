@@ -810,7 +810,8 @@ that absence and never reconstructs a before file from a later working tree.
 
 ## Insight application recovery
 
-A current-generation 08e `insight.batch` intent counts as durable work before any mining
+A current-generation 08e `insight.auto_round_started` claim or `insight.batch` intent
+counts as durable work before any mining
 row exists. Boot demotes that running row instead of clearing its approved detect snapshot
 and answers. Re-entry uses the same batch identity (source row and rerun generation);
 recovery's epoch bump does not create a new batch. Unsent reservations retain their
@@ -888,3 +889,24 @@ nothing. Neither path resets downstream rows or dispatches an editor after refus
 Each committed insight handoff records one `step.revise` with the continuation marker in
 the same transaction as the continuation and pointer. Duplicate delivery records neither
 event again; a failed event write rolls the entire handoff back.
+
+Automatic admission refuses stopped, dead, cancelled, completed, foreign-owned,
+overtaken and off-pointer work. A pause between detect and claim supersedes that pass
+without a claim or incomplete result; resume can classify the same cohort. It also
+holds a new automatic writer intent. Stored decisions and spent claims survive Retry.
+A claim without a result or an eligible consequential decision without a journal
+selection goes to the manual list rather than disappearing as already seen.
+
+Automatic checkpoints publish the same `payload.checkpoint` ownership reference as
+manual checkpoints, even when they settle without a writer or continue to another
+cohort. The publication shares the owned done transaction, so an abandoned earlier
+pending checkpoint cannot reopen a completed automatic route. The resolved-answer
+preflight still protects manual presets; automatic writer waves use the same pinned
+verification/review/triage validation before reservation or dispatch, through both
+START and advance. Skipping and classification-only visits do not require a writer path.
+
+Rollback sets `INSIGHT_AUTO_ACTION_AVAILABLE` false to disable new automatic detection
+and claims, including stored opt-ins, and disable new manual opt-ins. Keep capable
+workers until active version-1 batches and continuations settle. Retain spent claims
+and journal JSON. No schema migration is required; older workers cannot safely consume
+active automatic stages or checkpoint ownership references.

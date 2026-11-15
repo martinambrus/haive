@@ -23,14 +23,14 @@ The key is `(reviewerId, normalised path)` — deliberately NOT `fingerprint`. M
 The canonical `findingFingerprint` implementation lives in
 `packages/shared/src/step/review.ts`, re-exported by the worker's `_review-findings.ts`.
 
-## Manual insight application journal
+## Insight application journal
 
 `insight.batch` task events are required state, separate from review telemetry. Protocol
-and envelope version 1 record `manual_08e` intent, reservation, invocation and outcome stages.
+and envelope version 1 record `manual_08e` or `auto_08e` intent, reservation, invocation and outcome stages.
 The intent names the source step row, explicit rerun generation, stable occurrence ids and
 loader identities, and starts every selected item as unconfirmed. Each stage is deduplicated
 by batch/stage/generation while holding the owned source-row lock and the task owner/epoch
-fence; dead and terminal task states refuse writes. Pause lets the in-flight batch finish. A failed required write prevents
+fence; dead and terminal task states refuse writes. Pause lets an existing intent finish; a new automatic intent is held. A failed required write prevents
 dispatch. Reservation references share the mining insert transaction.
 
 The editor reports exactly the selected id set, with `applied`, `already_handled` or
@@ -51,5 +51,29 @@ are persisted in the output/routing verdict and required `insight.continuation` 
 The event and any `validation.recheck_requested` return address commit with the task
 pointer under owned fences; neither is best-effort telemetry. Continuations never alter
 review dispositions or report an item as verified merely because its writer said applied.
-The configured check tail ends at a non-writing 08e checkpoint; remaining/new insights
-are left for later gate choices. Automatic classification and gate-3 picks remain unavailable.
+The configured check tail returns to an owned 08e checkpoint. Manual applications end
+there without another selection; automatic applications refresh the inventory for the
+next bounded cohort. Gate-3 picks remain deferred.
+
+`insight.auto_round_started` is required protocol-v1 state. The owned source-row lock
+precedes a task-row lock, serializing task-wide admission and the event insert.
+Each task has at most three claims, including failed classifier opportunities. Retry
+and Resume retain these events; epoch takeover reuses the same source generation.
+Claim reads pick their known input fields and tolerate additive loader metadata;
+unknown claim protocol versions and invalid required fields still refuse replay.
+`insight.classified` records the exact id set, normalized consequence, host eligibility
+and classifier invocation references before an `auto_08e` writer intent is dispatched.
+Missing, duplicate, invented or malformed classifications get at most one second
+classifier attempt, then a manual reoffer with unclassified items. Security, data-loss
+and regression kinds are forced consequential on the host. Unknown ownership,
+unsafe/protected/missing/linked locations and upstream/framework source cannot authorize
+automatic edits. Minor and nit results remain listed, never selected automatically.
+New identities after the third claim remain unclassified with `cap_reached`.
+These are agent classifications and application reports, never verified-repair telemetry.
+
+A justified `not_applied` is a settled decline, not an interruption: it stays selectable
+manually and does not prevent new identities from being classified in the next round.
+Only `unconfirmed` or a missing writer outcome holds new automatic work for inspection.
+Claims without results and eligible consequential results without a journal selection
+are reoffered manually after explicit Retry, with `pending_writer`; spending a classifier
+opportunity never silently settles an unwritten improvement.

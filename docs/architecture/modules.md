@@ -587,7 +587,8 @@ a finite, safe, non-negative integer. The host adapter validates synchronously b
 or any identity read; the loader validates before source reads too. Zero returns
 nothing and counts every eligible record as omitted. Pick filtering precedes the limit, and
 `omitted` counts only eligible records that the limit cut. Full title, location and description
-stay in `LoadedInsight`; 08e and gate callers explicitly request 30. Before persistence, the shared gate
+stay in `LoadedInsight`; manual 08e and gate callers explicitly request 30, while automatic
+08e loads the inventory without a count limit and enforces its classifier prompt budget. Before persistence, the shared gate
 projection keeps only `{id, sourceStep, title, location, description}`, collapses every field
 to one line and clips it to 200 characters. The stored entries keep their original positional
 `i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
@@ -602,7 +603,7 @@ normalization on full fields, so line-shift aliases share an identity but keep d
 occurrence ids and legacy selection/count semantics. 08e's existing positional `i-N` selections
 continue to resolve against their persisted detect snapshot, not a new loader result.
 `picked` preserves selected-in-output semantics for legacy 08e rows; malformed legacy selections
-are ignored. For protocol-v1 manual batches it means an `applied` or `already_handled` agent
+are ignored. For protocol-v1 manual and automatic batches it means an `applied` or `already_handled` agent
 report in the durable task-event journal, projected across occurrence aliases by loader
 identity. `not_applied` and `unconfirmed` stay selectable even after selection and Retry.
 A v1 output selection alone never excludes an item. Neither legacy picks nor new agent reports
