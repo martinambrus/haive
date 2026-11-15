@@ -4,6 +4,8 @@ import { schema, isLockNotAvailable, type Database } from '@haive/database';
 import {
   DERIVED_WORKFLOW_PREFIX,
   derivedChangesSchema,
+  parseDerivedRunPlan,
+  DerivedRunPlanError,
   evaluateDerivedTaskType,
   mergePromptStepCatalog,
   parsePromptSteps,
@@ -97,6 +99,7 @@ export function inspectDerivedDefinition(
         'missing-installed-step',
         'replacement-contract-unavailable',
         'replacement-target-forbidden',
+        'replacement-not-composable',
         'replacement-not-declared',
         'replacement-contract-mismatch',
         'replacement-policy-incompatible',
@@ -121,20 +124,21 @@ export function inspectDerivedDefinition(
     },
     own.composable,
   );
+  const hasReplacement = evaluation.candidates.some((c) => c.roleBindings !== undefined);
   const fingerprint = createHash('sha256')
     .update(
       JSON.stringify({
         rows: [...catalog.orderedRows].sort((a, b) => a.stepId.localeCompare(b.stepId)),
         entries: [...own.composable].sort(([a], [b]) => a.localeCompare(b)),
-        candidates: evaluation.candidates,
+        ...(hasReplacement ? { candidates: evaluation.candidates } : {}),
       }),
     )
     .digest('hex');
-  const plan: DerivedRunPlan | null =
+  let plan: DerivedRunPlan | null =
     issues.length > 0
       ? null
       : ({
-          version: evaluation.candidates.some((c) => c.roleBindings !== undefined) ? 2 : 1,
+          version: hasReplacement ? 2 : 1,
           base: {
             slug: 'workflow',
             runListStrategy: 'workflow_paths',
@@ -146,34 +150,32 @@ export function inspectDerivedDefinition(
             changes: changes.success ? changes.data : [],
           },
           requiresRepository: definition.requiresRepository,
-          composableEntries: [...own.composable.values()]
-            .filter(
-              (entry) =>
-                stepIds.includes(entry.stepId) ||
-                evaluation.candidates.some((c) =>
-                  c.outcomes.some(
-                    (o) =>
-                      o.outcome === 'applied' &&
-                      'replace' in o.change &&
-                      o.change.replace === entry.stepId,
-                  ),
+          composableEntries: [...own.composable.values()].filter(
+            (entry) =>
+              stepIds.includes(entry.stepId) ||
+              evaluation.candidates.some((c) =>
+                c.outcomes.some(
+                  (o) =>
+                    o.outcome === 'applied' &&
+                    'replace' in o.change &&
+                    o.change.replace === entry.stepId,
                 ),
-            )
-            .map(
-              (entry) =>
-                evaluation.candidates
-                  .find((c) =>
-                    Object.values(c.roleBindings ?? {}).some(
-                      (binding) => binding?.stepId === entry.stepId,
-                    ),
-                  )
-                  ?.effectiveEntries?.find((e) => e.stepId === entry.stepId) ?? entry,
-            ),
+              ),
+          ),
           candidates: evaluation.candidates,
           commonPrefix: [...DERIVED_WORKFLOW_PREFIX],
           warnings: evaluation.warnings,
           defaultWarnings: defaultIssues,
         } as DerivedRunPlan);
+  if (plan) {
+    try {
+      parseDerivedRunPlan(plan);
+    } catch (error) {
+      if (!(error instanceof DerivedRunPlanError)) throw error;
+      issues.push({ kind: error.code });
+      plan = null;
+    }
+  }
   return {
     eligibility,
     revision: definition.updatedAt?.toISOString() ?? null,

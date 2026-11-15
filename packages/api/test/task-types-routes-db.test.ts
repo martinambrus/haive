@@ -1774,47 +1774,57 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     }
     throw new Error('Expected a blocked SQL statement: ' + fragment);
   };
-  it('serializes catalog upgrades with admission and pins the complete committed generation', async () => {
-    await derivedCatalog(true);
-    expect(
-      (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
-    ).toBe(201);
-    const old = await definitionForCreate(db, 'tt-derived', { generic: true });
-    expect(old.derivedRunPlan?.version).toBe(2);
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let acquired!: () => void;
-    const locked = new Promise<void>((resolve) => {
-      acquired = resolve;
-    });
-    const upgrading = db.transaction(async (tx) => {
-      await tx
-        .update(schema.stepCatalog)
-        .set({ title: 'new generation' })
-        .where(eq(schema.stepCatalog.stepId, '01-worktree-setup'));
-      acquired();
-      await gate;
-      await tx
-        .insert(schema.stepCatalog)
-        .values({ ...catalogRow('new-after-sync', true, entry('new-after-sync')), stepIndex: 99 });
-    });
-    await locked;
-    const creating = definitionForCreate(db, 'tt-derived', { generic: true });
-    try {
-      await waitForLock('LOCK TABLE');
-    } finally {
-      release();
-    }
-    await upgrading;
-    const fresh = await creating;
-    expect(fresh.derivedRunPlan?.base.candidates[0]?.stepIds).toContain('new-after-sync');
-    expect(old.derivedRunPlan?.base.candidates[0]?.stepIds).not.toContain('new-after-sync');
-    expect(fresh.derivedRunPlan?.base.catalogFingerprint).not.toBe(
-      old.derivedRunPlan?.base.catalogFingerprint,
-    );
-  });
+  it.each([1, 2])(
+    'serializes catalog upgrades with admission and pins the complete committed generation for v%s',
+    async (version) => {
+      await derivedCatalog(version === 2);
+      expect(
+        (
+          await send(
+            'POST',
+            '/admin/task-types',
+            derivedDraft(version === 2 ? replacementChanges() : []),
+          )
+        ).status,
+      ).toBe(201);
+      const old = await definitionForCreate(db, 'tt-derived', { generic: true });
+      expect(old.derivedRunPlan?.version).toBe(version);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let acquired!: () => void;
+      const locked = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const upgrading = db.transaction(async (tx) => {
+        await tx
+          .update(schema.stepCatalog)
+          .set({ title: 'new generation' })
+          .where(eq(schema.stepCatalog.stepId, '01-worktree-setup'));
+        acquired();
+        await gate;
+        await tx.insert(schema.stepCatalog).values({
+          ...catalogRow('new-after-sync', true, entry('new-after-sync')),
+          stepIndex: 99,
+        });
+      });
+      await locked;
+      const creating = definitionForCreate(db, 'tt-derived', { generic: true });
+      try {
+        await waitForLock('LOCK TABLE');
+      } finally {
+        release();
+      }
+      await upgrading;
+      const fresh = await creating;
+      expect(fresh.derivedRunPlan?.base.candidates[0]?.stepIds).toContain('new-after-sync');
+      expect(old.derivedRunPlan?.base.candidates[0]?.stepIds).not.toContain('new-after-sync');
+      expect(fresh.derivedRunPlan?.base.catalogFingerprint).not.toBe(
+        old.derivedRunPlan?.base.catalogFingerprint,
+      );
+    },
+  );
 
   it.each(['base', 'module'] as const)(
     'holds the replacement %s lock through v2 INSERT',
@@ -1876,12 +1886,18 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       ]);
     },
   );
-  it.each(['PATCH', 'DELETE'])(
-    'holds the derived definition through task INSERT against a concurrent %s',
-    async (method) => {
-      await derivedCatalog(true);
+  it.each([1, 2].flatMap((version) => ['PATCH', 'DELETE'].map((method) => ({ version, method }))))(
+    'holds the derived definition through task INSERT against a concurrent $method for v$version',
+    async ({ version, method }) => {
+      await derivedCatalog(version === 2);
       expect(
-        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+        (
+          await send(
+            'POST',
+            '/admin/task-types',
+            derivedDraft(version === 2 ? replacementChanges() : []),
+          )
+        ).status,
       ).toBe(201);
       const [user] = await db
         .select()
@@ -1929,19 +1945,20 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         .select()
         .from(schema.tasks)
         .where(eq(schema.tasks.type, 'tt-derived'));
-      expect(stored?.derivedRunPlan).toMatchObject({
-        version: 2,
-        candidates: expect.arrayContaining([
-          expect.objectContaining({
-            roleBindings: {
-              [STEP_ROLES.codeReview]: {
-                stepId: 'module.acme.check',
-                outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+      expect(stored?.derivedRunPlan).toMatchObject({ version });
+      if (version === 2)
+        expect(stored?.derivedRunPlan).toMatchObject({
+          candidates: expect.arrayContaining([
+            expect.objectContaining({
+              roleBindings: {
+                [STEP_ROLES.codeReview]: {
+                  stepId: 'module.acme.check',
+                  outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+                },
               },
-            },
-          }),
-        ]),
-      });
+            }),
+          ]),
+        });
       expect(stored?.runListSnapshot).toEqual(snapshot);
       expect(stored?.runListSnapshot).toContain('08a-browser-verify');
     },
@@ -1969,37 +1986,54 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect(await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents)).toEqual(before);
     expect(h.add).not.toHaveBeenCalled();
   });
-  it('rolls back derived create and PATCH when the transaction-required audit fails', async () => {
-    await derivedCatalog(true);
-    await db.execute(
-      sql`CREATE FUNCTION derived_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action IN ('task_type.create', 'task_type.update') THEN RAISE EXCEPTION 'audit refused'; END IF; RETURN NEW; END $$`,
-    );
-    await db.execute(
-      sql`CREATE TRIGGER derived_audit_failure BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION derived_audit_failure()`,
-    );
-    try {
-      expect(
-        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
-      ).toBe(500);
-      expect(await row('tt-derived')).toBeUndefined();
-      await db.execute(sql`ALTER TABLE audit_events DISABLE TRIGGER derived_audit_failure`);
-      expect(
-        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
-      ).toBe(201);
-      await db.execute(sql`ALTER TABLE audit_events ENABLE TRIGGER derived_audit_failure`);
-      expect(
-        (
-          await send('PATCH', '/admin/task-types/tt-derived', {
-            changes: [{ remove: '08a-browser-verify' }],
-          })
-        ).status,
-      ).toBe(500);
-      expect((await row('tt-derived'))?.changes).toEqual(replacementChanges());
-    } finally {
-      await db.execute(sql`DROP TRIGGER derived_audit_failure ON audit_events`);
-      await db.execute(sql`DROP FUNCTION derived_audit_failure()`);
-    }
-  });
+  it.each([1, 2])(
+    'rolls back derived create and PATCH when the transaction-required audit fails for v%s',
+    async (version) => {
+      await derivedCatalog(version === 2);
+      await db.execute(
+        sql`CREATE FUNCTION derived_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action IN ('task_type.create', 'task_type.update') THEN RAISE EXCEPTION 'audit refused'; END IF; RETURN NEW; END $$`,
+      );
+      await db.execute(
+        sql`CREATE TRIGGER derived_audit_failure BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION derived_audit_failure()`,
+      );
+      try {
+        expect(
+          (
+            await send(
+              'POST',
+              '/admin/task-types',
+              derivedDraft(version === 2 ? replacementChanges() : []),
+            )
+          ).status,
+        ).toBe(500);
+        expect(await row('tt-derived')).toBeUndefined();
+        await db.execute(sql`ALTER TABLE audit_events DISABLE TRIGGER derived_audit_failure`);
+        expect(
+          (
+            await send(
+              'POST',
+              '/admin/task-types',
+              derivedDraft(version === 2 ? replacementChanges() : []),
+            )
+          ).status,
+        ).toBe(201);
+        await db.execute(sql`ALTER TABLE audit_events ENABLE TRIGGER derived_audit_failure`);
+        expect(
+          (
+            await send('PATCH', '/admin/task-types/tt-derived', {
+              changes: [{ remove: '08a-browser-verify' }],
+            })
+          ).status,
+        ).toBe(500);
+        expect((await row('tt-derived'))?.changes).toEqual(
+          version === 2 ? replacementChanges() : [],
+        );
+      } finally {
+        await db.execute(sql`DROP TRIGGER derived_audit_failure ON audit_events`);
+        await db.execute(sql`DROP FUNCTION derived_audit_failure()`);
+      }
+    },
+  );
   it('preserves availability precedence before malformed derived catalog diagnostics', async () => {
     await derivedCatalog();
     expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
@@ -2019,6 +2053,64 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     });
   });
 
+  it('refuses replace-then-remove at authoring and task admission with no task, event, audit or job', async () => {
+    await derivedCatalog(true);
+    const changes = [...replacementChanges(), { remove: 'module.acme.check' }];
+    // Simulate a definition saved by an older install, bypassing current authoring checks.
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({ ...derivedDraft(changes), runListStrategy: 'derived', source: 'admin' });
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId: ACTOR,
+        name: 'refused-replacement',
+        source: 'local_path',
+        localPath: '/tmp',
+        storagePath: '/tmp',
+        status: 'ready',
+      })
+      .returning();
+    try {
+      const events = await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents);
+      const audits = await db.select({ id: schema.auditEvents.id }).from(schema.auditEvents);
+      h.add.mockClear();
+      const response = await send('POST', '/tasks', {
+        type: 'tt-derived',
+        title: 'refused',
+        repositoryId: repo!.id,
+      });
+      expect(response.status).toBe(409);
+      expect(
+        await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-derived')),
+      ).toEqual([]);
+      expect(await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents)).toEqual(events);
+      expect(await db.select({ id: schema.auditEvents.id }).from(schema.auditEvents)).toEqual(
+        audits,
+      );
+      expect(h.add).not.toHaveBeenCalled();
+      expect(await response.json()).toMatchObject({
+        code: 'derived_admission_refused',
+        issues: [{ kind: 'invalid-derived-run-plan' }],
+      });
+      await db
+        .delete(schema.taskTypeDefinitions)
+        .where(eq(schema.taskTypeDefinitions.slug, 'tt-derived'));
+      for (const path of ['/admin/task-types/preview', '/admin/task-types']) {
+        const refused = await send('POST', path, derivedDraft(changes));
+        expect(refused.status).toBe(400);
+        expect(await refused.json()).toMatchObject({
+          issues: [{ kind: 'invalid-derived-run-plan' }],
+        });
+      }
+      expect(await row('tt-derived')).toBeUndefined();
+      expect(await db.select({ id: schema.auditEvents.id }).from(schema.auditEvents)).toEqual(
+        audits,
+      );
+    } finally {
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+    }
+  });
   it('writes v2 on task POST, preserves it through Stop/Retry/Resume and rolls back a refused creation event', async () => {
     await derivedCatalog(true);
     expect(

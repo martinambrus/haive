@@ -4,6 +4,7 @@ import type { ExecutionPath } from '@haive/shared';
 import {
   DerivedRunPlanError,
   derivedCandidateIds,
+  derivedCandidateEntries,
   parseDerivedRunPlan,
   validateComposition,
 } from '@haive/shared/modularity';
@@ -74,9 +75,9 @@ export async function pinDerivedWorkflowPath(
       validateComposition(
         stepIds,
         new Map(
-          (
-            plan.candidates.find((c) => c.executionPath === path)!.effectiveEntries ??
-            plan.composableEntries
+          derivedCandidateEntries(
+            plan,
+            plan.candidates.find((c) => c.executionPath === path)!,
           ).map((entry) => [entry.stepId, entry]),
         ),
         { requiresRepository: plan.requiresRepository },

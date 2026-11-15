@@ -38,6 +38,7 @@ function evaluate(
   changes: DerivedChange[] = [{ replace: role, with: payload }],
   override: Partial<ComposableStepEntry> = {},
   omit: string[] = [],
+  installedOnly: string[] = [],
 ) {
   const entries = [
     ...prefix.map((id) => entry(id)),
@@ -64,7 +65,7 @@ function evaluate(
     })),
     changes,
     catalog,
-    installedStepIds: new Set(catalog.keys()),
+    installedStepIds: new Set([...catalog.keys(), ...installedOnly]),
   });
 }
 describe('contracted replacement admission', () => {
@@ -135,6 +136,11 @@ describe('contracted replacement admission', () => {
     });
     expect(result.candidates.every((c) => c.outcomes[0]?.outcome === 'refused')).toBe(true);
   });
+  it('names a non-composable installed payload separately from policy', () => {
+    expect(evaluate(undefined, {}, [payload], [payload]).issues).toContainEqual(
+      expect.objectContaining({ kind: 'replacement-not-composable', operationIndex: 0, payload }),
+    );
+  });
   it('names missing host contracts and forbidden targets', () => {
     expect(evaluate(undefined, {}, [role]).issues).toContainEqual(
       expect.objectContaining({ kind: 'replacement-contract-unavailable' }),
@@ -149,13 +155,17 @@ describe('contracted replacement admission', () => {
         { replace: role, with: payload },
         { insertAfter: payload, step: role },
       ]).issues,
-    ).toContainEqual(expect.objectContaining({ kind: 'replacement-role-ambiguous' }));
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'replacement-role-ambiguous', operationIndex: 1 }),
+    );
     expect(
       evaluate([
         { insertAfter: role, step: payload },
         { replace: role, with: payload },
       ]).issues,
-    ).toContainEqual(expect.objectContaining({ kind: 'replacement-role-ambiguous' }));
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'replacement-role-ambiguous', operationIndex: 1 }),
+    );
     expect(evaluate([{ replace: role, with: payload }, { remove: role }]).issues).toContainEqual(
       expect.objectContaining({ kind: 'target-removed-by-change' }),
     );

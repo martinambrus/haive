@@ -43,6 +43,7 @@ type RefusalReason =
   | 'missing-installed-step'
   | 'replacement-contract-unavailable'
   | 'replacement-target-forbidden'
+  | 'replacement-not-composable'
   | 'replacement-not-declared'
   | 'replacement-contract-mismatch'
   | 'replacement-policy-incompatible'
@@ -261,7 +262,7 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
           outcome = refuse('missing-installed-step', change.with);
         else if (!host?.outputContract || !stepOutputContractsEqual(expected, host.outputContract))
           outcome = refuse('replacement-contract-unavailable');
-        else if (!entry) outcome = refuse('replacement-policy-incompatible');
+        else if (!entry) outcome = refuse('replacement-not-composable');
         else if (!entry.replaces?.includes(role)) outcome = refuse('replacement-not-declared');
         else if (!stepOutputContractsEqual(expected, entry.outputContract))
           outcome = refuse('replacement-contract-mismatch');
@@ -337,9 +338,9 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
   const candidates = states.map(({ executionPath, stepIds, outcomes, roleBindings, effective }) => {
     for (const role of Object.values(STEP_ROLES)) {
       if (roleBindings[role] && stepIds.includes(role)) {
-        const operationIndex = outcomes.findIndex(
-          (o) => 'replace' in o.change && o.change.replace === role && o.outcome === 'applied',
-        );
+        const operationIndex = outcomes.findLast(
+          (o) => 'insertAfter' in o.change && o.change.step === role && o.outcome === 'applied',
+        )!.operationIndex;
         issues.push({
           kind: 'replacement-role-ambiguous',
           executionPath,
@@ -392,8 +393,8 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
       ...(hasReplacement
         ? {
             roleBindings,
-            effectiveEntries: stepIds.flatMap((id) =>
-              effective.get(id) ? [effective.get(id)!] : [],
+            effectiveEntries: Object.values(roleBindings).map((binding) =>
+              effective.get(binding!.stepId)!,
             ),
           }
         : {}),
@@ -446,6 +447,7 @@ const outcomeSchema = z
       'missing-installed-step',
       'replacement-contract-unavailable',
       'replacement-target-forbidden',
+      'replacement-not-composable',
       'replacement-not-declared',
       'replacement-contract-mismatch',
       'replacement-policy-incompatible',
@@ -523,6 +525,16 @@ const v2PlanSchema = planSchema.extend({
     .length(4),
 });
 
+/** Read frozen candidate declarations, accepting both full legacy arrays and sparse overrides. */
+export function derivedCandidateEntries(
+  plan: Pick<DerivedRunPlan, 'composableEntries'>,
+  candidate: Pick<DerivedEvaluatedCandidate, 'stepIds' | 'effectiveEntries'>,
+): ComposableStepEntry[] {
+  const entries = new Map(plan.composableEntries.map((e) => [e.stepId, e]));
+  for (const entry of candidate.effectiveEntries ?? []) entries.set(entry.stepId, entry);
+  return candidate.stepIds.flatMap((id) => (entries.has(id) ? [entries.get(id)!] : []));
+}
+
 /** Replay only the PINNED operations/outcomes. No current catalog or composition rules.
  * This verifies physical positions, one-hop bindings and removals without enabling admission. */
 function validV2Bindings(plan: DerivedRunPlanV2): boolean {
@@ -590,28 +602,28 @@ function validV2Bindings(plan: DerivedRunPlanV2): boolean {
     }
     if (JSON.stringify(ids) !== JSON.stringify(candidate.stepIds)) return false;
     if (candidate.effectiveEntries) {
-      const effective = new Map(candidate.effectiveEntries.map((e) => [e.stepId, e]));
+      const overrides = candidate.effectiveEntries;
       if (
-        effective.size !== candidate.stepIds.length ||
-        candidate.stepIds.some((id) => !effective.has(id))
+        new Set(overrides.map((e) => e.stepId)).size !== overrides.length ||
+        overrides.some((e) => !candidate.stepIds.includes(e.stepId))
       )
         return false;
+      const effective = new Map(derivedCandidateEntries(plan, candidate).map((e) => [e.stepId, e]));
+      if (effective.size !== candidate.stepIds.length) return false;
       for (const role of roles) {
         const binding = bindings[role];
         if (!binding) continue;
-        const raw = entries.get(binding.stepId);
+        const entry = effective.get(binding.stepId);
         const host = entries.get(role);
         if (
-          !raw ||
+          !entry ||
           !host ||
-          host.provides.some((t) => !raw.provides.includes(t) || raw.removes?.includes(t)) ||
-          (raw.closes ?? false) !== (host.closes ?? false) ||
-          (raw.loopTargetStepId !== undefined && raw.loopTargetStepId !== host.loopTargetStepId)
-        )
-          return false;
-        if (
-          JSON.stringify(effective.get(binding.stepId)) !==
-          JSON.stringify(composableStepEntrySchema.parse(effectiveReplacementEntry(raw, host)))
+          !entry.replaces?.includes(role) ||
+          !stepOutputContractsEqual(entry.outputContract, binding.outputContract) ||
+          host.provides.some((t) => !entry.provides.includes(t) || entry.removes?.includes(t)) ||
+          host.requires.some((r) => !entry.requires.some((e) => e.needs === r.needs)) ||
+          (entry.closes ?? false) !== (host.closes ?? false) ||
+          entry.loopTargetStepId !== host.loopTargetStepId
         )
           return false;
       }
