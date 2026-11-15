@@ -511,6 +511,32 @@ describe('implementation overview', () => {
     expect(entry({ output }).message).toContain('failing checks');
     expect(entry({ output: { ...output, phpLint: undefined } }).tone).toBe('success');
   });
+  it('keeps legacy insight application unconfirmed per item', () => {
+    const result = entry({
+      stepId: '08e-insights-triage',
+      output: { implemented: true, selected: [{ id: 'i-1' }], changes: ['Edited a.ts'] },
+    });
+    expect(result.message).toBe('Application outcomes were not confirmed per insight.');
+    expect(result.tone).toBe('warning');
+  });
+  it('reports partial insight outcomes without claiming every selection was implemented', () => {
+    const result = entry({
+      stepId: '08e-insights-triage',
+      output: {
+        version: 1,
+        implemented: true,
+        items: [
+          { id: 'one', outcome: 'applied' },
+          { id: 'two', outcome: 'not_applied' },
+          { id: 'three', outcome: 'unconfirmed' },
+        ],
+      },
+    });
+    expect(result.message).toBe(
+      'Agent report: 1 applied, 0 already handled, 1 not applied, 1 unconfirmed.',
+    );
+    expect(result.tone).toBe('warning');
+  });
   it('describes a fix pass concisely without reprinting the implementation recap', () => {
     const output = {
       filesTouched: ['a.php', 'b.php'],

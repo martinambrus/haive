@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import gateFixture from '../../../../test/fixtures/insight-gate-base.json' with { type: 'json' };
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
+import { loadInsightBatchRecords } from './_insight-batch.js';
 import {
   INSIGHTS_AT_GATE,
   gateInsights,
@@ -13,6 +15,7 @@ function tableDb(
   outputs: { stepId: string; raw: string }[],
   triage: unknown[],
   verdicts: unknown[] = [],
+  journal: unknown[] = [],
 ) {
   let rows: unknown[] = [];
   const chain: Record<string, unknown> = {};
@@ -31,7 +34,9 @@ function tableDb(
             ? triage
             : table === schema.taskDagIssues
               ? verdicts.map((reviewerVerdict, n) => ({ issueId: `issue-${n}`, reviewerVerdict }))
-              : [];
+              : table === schema.taskEvents
+                ? journal.map((payload) => ({ payload }))
+                : [];
       return chain;
     },
     innerJoin: () => chain,
@@ -378,4 +383,86 @@ describe('insightsRow', () => {
     expect(row.body).toContain('\\!\\[x\\]\\(http\\:\\/\\/e\\.test\\/i\\.png\\)');
     expect(row.detail).toBe("1 improvement noted outside the task's scope");
   });
+});
+
+describe('journal-backed acted insights', () => {
+  const raw = block(
+    '- INSIGHT: One | a.ts:1 | detail',
+    '- INSIGHT: One | a.ts:9 | same identity',
+    '- INSIGHT: Other | b.ts | another',
+  );
+  const record = (outcome: string) => ({
+    version: 1,
+    protocolVersion: 1,
+    mode: 'manual_08e',
+    batchId: 'batch',
+    sourceStepRowId: 'source',
+    generation: 0,
+    stage: 'outcome',
+    selected: [
+      {
+        id: 'selected',
+        identity: 'a.ts::one',
+        title: 'One',
+        location: 'a.ts:1',
+        description: 'detail',
+        sourceStep: 'review',
+      },
+    ],
+    items: [
+      {
+        id: 'selected',
+        outcome,
+        changes: outcome === 'applied' ? ['Changed a.ts'] : [],
+        reason: '',
+      },
+    ],
+    notes: '',
+    miningId: 'mining',
+    invocationId: 'inv',
+  });
+  it.each(['applied', 'already_handled'])(
+    'excludes %s and all occurrence aliases after output-clearing Retry',
+    async (outcome) => {
+      const db = tableDb([{ stepId: 'review', raw }], [{ output: null }], [], [record(outcome)]);
+      expect((await loadUnactedInsights(db, 't1')).insights.map((i) => i.title)).toEqual(['Other']);
+      const all = await loadUnactedInsights(db, 't1', { includePicked: true });
+      expect(all.insights.map((i) => i.picked)).toEqual([true, true, false]);
+    },
+  );
+  it.each(['not_applied', 'unconfirmed'])(
+    'keeps %s selectable despite the saved selection',
+    async (outcome) => {
+      const db = tableDb(
+        [{ stepId: 'review', raw }],
+        [{ output: { version: 1, selected: [{ title: 'One', location: 'a.ts:1' }] } }],
+        [],
+        [record(outcome)],
+      );
+      expect((await loadUnactedInsights(db, 't1')).insights).toHaveLength(3);
+    },
+  );
+  it.each([
+    { ...record('applied'), protocolVersion: 2 },
+    { ...record('applied'), notes: { secret: 'payload-must-not-be-logged' } },
+  ])(
+    're-offers insights for unreadable journal records without leaking payloads',
+    async (payload) => {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      try {
+        const db = tableDb([{ stepId: 'review', raw }], [], [], [payload]);
+        const out = await loadUnactedInsights(db, 't1');
+        expect(out.insights).toHaveLength(3);
+        expect(out.insights.every((i) => !i.picked)).toBe(true);
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn).toHaveBeenCalledWith(
+          { taskId: 't1' },
+          'Skipping unreadable insight batch in acted projection; items remain unacted',
+        );
+        await expect(loadInsightBatchRecords(db, 't1')).rejects.toThrow();
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
 });

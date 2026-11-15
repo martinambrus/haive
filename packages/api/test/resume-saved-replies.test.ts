@@ -247,6 +247,63 @@ describe('Resume after mining replies were saved', () => {
     expect(fake.rows(schema.taskSteps)[0]!.status).toBe('pending');
   });
 
+  it('08e Resume retains the failed writer for settlement; Retry advances its generation', async () => {
+    const stepId = '08e-insights-triage';
+    const outage = 'CLI provider rate limit or quota exhausted: 429';
+    const runId = '00000000-0000-4000-8000-000000000005';
+    const fake = setup(
+      'failed',
+      {
+        stepId,
+        rerunGeneration: 2,
+        errorMessage: outage,
+        detectOutput: { insights: [{ id: 'one' }] },
+        formValues: { selectedInsights: ['one'] },
+      },
+      { errorMessage: outage, cliInvocationId: runId },
+    );
+    fake.insert(schema.cliInvocations, {
+      id: runId,
+      taskId: TASK,
+      taskStepId: STEP_ROW,
+      mode: 'agent_mining',
+      endedAt: new Date(),
+      exitCode: 1,
+      errorMessage: outage,
+    });
+    const action = (action: string) =>
+      app.request(`/${TASK}/steps/${stepId}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action, round: 0 }),
+      });
+    expect((await action('resume')).status).toBe(200);
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({
+      status: 'running',
+      rerunGeneration: 2,
+      errorMessage: null,
+      detectOutput: { insights: [{ id: 'one' }] },
+      formValues: { selectedInsights: ['one'] },
+    });
+    expect(fake.rows(schema.taskStepAgentMinings)[0]).toMatchObject({
+      status: 'failed',
+      errorMessage: outage,
+      cliInvocationId: runId,
+      userRetryRequestedAt: expect.any(Date),
+    });
+    expect(fake.rows(schema.cliInvocations)).toHaveLength(1);
+    expect(fake.rows(schema.cliInvocations)[0]!.supersededAt).toBeNull();
+    expect(h.add).toHaveBeenCalledWith(
+      'advance-step',
+      expect.objectContaining({ stepId }),
+      expect.anything(),
+    );
+    expect((await action('retry')).status).toBe(200);
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'pending', rerunGeneration: 3 });
+    expect(fake.rows(schema.taskStepAgentMinings)).toEqual([]);
+    expect(fake.rows(schema.cliInvocations)).toHaveLength(1);
+  });
+
   it('refuses an already done step with all agents done', async () => {
     const fake = savedStep('done');
     expect(await act('resume')).toBe(409);

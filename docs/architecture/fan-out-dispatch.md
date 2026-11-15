@@ -136,3 +136,24 @@ coder, review-loop fix coder or reviewer it refuses fails its own issue, with th
 from there, never from the agent-written concerns) with no advisor, replanner or retry, since the
 same prompt is refused again. An apply that asks to re-roll a refused mining agent gets none
 (`isProviderRefusal` in `retryMiningAgents`); only a person's Retry sends it again.
+
+08e is the provider-outage exception on Resume: the first outage fails the step and arms the
+allowance watch under the existing outage policy. On manual or automatic Resume, a failed
+writer folds through its normal apply and outcome journal as unconfirmed, without another
+writer in that generation. Committed-snapshot failures retain their barrier refusal.
+
+**Manual insight application uses the `implementer` mining seat.** 08e keeps its ordinary
+successor and has no revise continuation in this phase. The seat uses the existing task,
+step, saved-seat and default-provider resolution and declares file-writing capabilities,
+`rag_only` and a 30-minute timeout. Empty selection sends nothing. The saved offered
+snapshot binds every selected occurrence id; a legacy positional id is resolved only in its
+persisted snapshot. Its deterministic agent id includes the batch identity.
+
+08e reserves and links through the ordinary mining path, recording required journal stages
+before any enqueue. Its reservation reference is committed with the reservation itself.
+Repair-test capture begins before enqueue and finishes before folding the settled reply,
+using the existing secret-redaction and unavailable-evidence rules. Stop during capture
+is checked again at the owned journal fence before enqueue. Pause lets the in-flight batch
+finish; it holds the next fresh step and defers a queued invocation at pickup. Linked interrupted
+editors, malformed replies and Resume do not buy another writer in the same batch; an
+explicit Retry creates a new generation only after the person can inspect partial edits.

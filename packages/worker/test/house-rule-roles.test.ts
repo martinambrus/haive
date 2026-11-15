@@ -107,11 +107,11 @@ describe('house rule roles', () => {
       '08a-browser-verify': { fixer: 'write' },
       '08b-test-management': { default: 'write' },
       '08c-code-review': { 'peer-reviewer': 'review' },
-      '08e-insights-triage': { default: 'write' },
+      '08e-insights-triage': { default: 'write', implementer: 'write' },
     });
   });
 
-  it('opts in one seat of one fan-out step: the 08c peer reviewer, and no seat of any other', () => {
+  it('opts in the peer reviewer and the insight writer', () => {
     const fanOuts = [...byId.values()].filter((def) => def.agentMining);
     expect(fanOuts.map((def) => def.metadata.id)).toContain('08c-code-review');
     const opted = fanOuts.flatMap((def) =>
@@ -119,7 +119,11 @@ describe('house rule roles', () => {
         (role) => `${def.metadata.id}/${role}`,
       ),
     );
-    expect(opted).toEqual(['08c-code-review/peer-reviewer']);
+    expect(opted).toEqual([
+      '08c-code-review/peer-reviewer',
+      '08e-insights-triage/default',
+      '08e-insights-triage/implementer',
+    ]);
     const seats = STEP_MINING_SEATS['08c-code-review']!.map((seat) => seat.id);
     expect(seats).toContain('peer-reviewer');
     expect(Object.keys(HOUSE_RULE_ROLES['08c-code-review']!)).toEqual(['peer-reviewer']);

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { openDirNoFollow } from '@haive/shared/fs-safe';
 import { TaskCancelledError, type StepContext } from '@haive/shared/step';
@@ -217,8 +217,10 @@ const dialect = new PgDialect();
 function insightContext() {
   const reads: unknown[][] = [];
   let answer: unknown[] = [];
+  let journalRead = false;
   const chain = {
-    from() {
+    from(table: unknown) {
+      journalRead = table === schema.taskEvents;
       return chain;
     },
     innerJoin() {
@@ -232,7 +234,7 @@ function insightContext() {
       return chain;
     },
     then(resolve: (value: unknown[]) => unknown) {
-      return Promise.resolve(answer).then(resolve);
+      return Promise.resolve(journalRead ? [] : answer).then(resolve);
     },
   };
   const select = vi.fn(() => chain);
@@ -366,11 +368,11 @@ it('refuses a result when cancellation arrives with the final insight read', asy
   const f = insightContext();
   let reads = 0;
   f.chain.then = (resolve) => {
-    if (++reads === 3) controller.abort();
+    if (++reads === 4) controller.abort();
     return Promise.resolve([]).then(resolve);
   };
   await expect(createStepHostServices(f.context).loadUnactedInsights()).rejects.toBeInstanceOf(
     TaskCancelledError,
   );
-  expect(reads).toBe(3);
+  expect(reads).toBe(4);
 });

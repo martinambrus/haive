@@ -1,3 +1,4 @@
+import { schema } from '@haive/database';
 import gateFixture from '../../../../test/fixtures/insight-gate-base.json' with { type: 'json' };
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
@@ -32,10 +33,14 @@ const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {
  *  01-worktree-setup, 09-gate-2, the DAG issues and 07's rounds, then the invocations' raw output
  *  and 08e's rows. Unqueued queries answer no rows. */
 function queuedDb(results: unknown[][]) {
-  const next = () => Promise.resolve(results.shift() ?? []);
+  let journalRead = false;
+  const next = () => Promise.resolve(journalRead ? [] : (results.shift() ?? []));
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
-    from: () => chain,
+    from: (table: unknown) => {
+      journalRead = table === schema.taskEvents;
+      return chain;
+    },
     innerJoin: () => chain,
     where: () => chain,
     orderBy: () => chain,

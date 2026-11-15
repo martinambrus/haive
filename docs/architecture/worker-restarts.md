@@ -807,3 +807,32 @@ Admission can expire older content earlier to make room under task/install caps.
 The durable manifest survives worker recovery; provisional before bytes are bounded
 process memory, so restart/eviction can leave old content unavailable. Display states
 that absence and never reconstructs a before file from a later working tree.
+
+## Insight application recovery
+
+A current-generation 08e `insight.batch` intent counts as durable work before any mining
+row exists. Boot demotes that running row instead of clearing its approved detect snapshot
+and answers. Re-entry uses the same batch identity (source row and rerun generation);
+recovery's epoch bump does not create a new batch. Unsent reservations retain their
+prompt and deterministic agent id. A linked invocation that ended without a report is
+unconfirmed, never an automatic second editor. A parked legacy single-invocation 08e
+folds its old reply as unconfirmed rather than starting a mining writer on deployment; a
+legacy run that failed or timed out folds the same way, so the step finishes with every item
+unconfirmed instead of failing, since its edits may exist.
+
+The first 08e writer provider outage fails the step visibly, preserving the
+`provider_unavailable` hint and arming the allowance watch under the existing outage policy.
+On manual or automatic Resume, the failed writer folds through apply as unconfirmed without
+another writer in that generation; its retained outage text cannot fail the barrier again.
+Unfenced reports must be whole, strictly valid JSON objects; fenced reports are also parsed
+strictly, with no repair or substitution of earlier examples.
+
+Outcome publication is required and replayed from the journal after a lost done write.
+The normal done-row replay keeps the ordinary successor. Retry clears output and mining
+rows and advances generation as before, while retaining journal history and every prior
+uncertain attempt. Stop, dead and Cancel refuse the journal's owned task fence. Pause lets
+the in-flight batch finish, including all journal stages; it holds the next fresh step and defers a queued invocation at pickup.
+Rollback first disables new batches and settles active mining writers with capable workers;
+keep journal JSON. Old workers ignore these additive events and cannot reconcile an
+active batch safely. No schema migration is needed. Future continuation and validation
+composition must retain these source/generation identities and ownership fences.

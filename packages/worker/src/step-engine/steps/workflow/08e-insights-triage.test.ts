@@ -5,7 +5,6 @@ import {
   insightsTriageStep,
   loadInsightOutputs,
   parseInsights,
-  readTriageOutcome,
 } from './08e-insights-triage.js';
 import * as loader from './_insight-loader.js';
 import { loadUnactedInsights } from './_gate-insights.js';
@@ -41,7 +40,7 @@ describe('parseInsights', () => {
     expect(findingIdentity).toBe(loader.findingIdentity);
     expect(loadUnactedInsights).toBe(loader.loadUnactedInsights);
   });
-  it('keeps provenance out of 08e detect and apply snapshots', async () => {
+  it('offers the loader occurrence ids, identity and provenance in the saved snapshot', async () => {
     const raw = '## INSIGHTS\n- INSIGHT: One | a.ts | detail';
     const db = tableDb([{ stepId: 'review', raw }], []);
     const ctx = {
@@ -50,26 +49,40 @@ describe('parseInsights', () => {
       workspacePath: '/repo',
       sandboxWorkdir: '/workdir',
       logger: { info() {} },
+      throwIfCancelled() {},
     } as unknown as StepContext;
     const detected = await insightsTriageStep.detect!(ctx);
-    const expected = {
-      id: 'i-1',
-      sourceStep: 'review',
-      title: 'One',
-      location: 'a.ts',
-      description: 'detail',
-    };
-    expect(detected.insights).toEqual([expected]);
-    const applied = await insightsTriageStep.apply(ctx, {
-      detected,
-      formValues: { selectedInsights: ['i-1'] },
-      llmOutput: null,
-      iteration: 0,
-      previousIterations: [],
-    });
-    expect(applied.selected).toEqual([expected]);
     const loaded = await loader.loadUnactedInsights(db, 't1');
-    expect(loaded.insights[0]!.sourceRefs).toHaveLength(1);
+    expect(detected.insights).toEqual(loaded.insights);
+    expect(detected.insights[0]).toMatchObject({
+      id: expect.stringMatching(/^insight-v1-/),
+      identity: 'a.ts::one',
+    });
+    expect(detected.insights[0]!.sourceRefs).toHaveLength(1);
+  });
+
+  it('offers only 30 of 31 eligible insights while the shared inventory remains unlimited', async () => {
+    const raw =
+      '## INSIGHTS\n' +
+      Array.from({ length: 31 }, (_, i) => `- INSIGHT: Improvement ${i} | a${i}.ts | detail`).join(
+        '\n',
+      );
+    const db = tableDb([{ stepId: 'review', raw }], []);
+    const ctx = {
+      db,
+      taskId: 't1',
+      workspacePath: '/repo',
+      sandboxWorkdir: '/workdir',
+      logger: { info() {} },
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+    const detected = await insightsTriageStep.detect!(ctx);
+    expect(detected.insights).toHaveLength(30);
+    expect((await loader.loadUnactedInsights(db, 't1')).insights).toHaveLength(31);
+    const form = await insightsTriageStep.form!(ctx, detected, null);
+    expect(form!.fields[0]).toMatchObject({
+      options: detected.insights.map((i) => expect.objectContaining({ value: i.id })),
+    });
   });
 
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
@@ -117,81 +130,6 @@ describe('parseInsights', () => {
     expect(parseInsights([{ stepId: 's', raw: 'just output, no insights' }])).toEqual([]);
     expect(parseInsights([{ stepId: 's', raw: '' }])).toEqual([]);
     expect(parseInsights([])).toEqual([]);
-  });
-});
-
-describe('readTriageOutcome', () => {
-  it('is implemented only when the agent listed a change', () => {
-    expect(readTriageOutcome({ implemented: ['Extracted helper'], notes: 'n' })).toEqual({
-      implemented: true,
-      changes: ['Extracted helper'],
-      notes: 'n',
-    });
-    expect(readTriageOutcome({ implemented: [], notes: 'nothing to do' })).toEqual({
-      implemented: false,
-      changes: [],
-      notes: 'nothing to do',
-    });
-  });
-
-  it('reads the fenced JSON reply the runner hands over as a string', () => {
-    const raw = 'Done.\n\n```json\n{ "implemented": ["Extracted helper"], "notes": "" }\n```\n';
-    expect(readTriageOutcome(raw)).toEqual({
-      implemented: true,
-      changes: ['Extracted helper'],
-      notes: '',
-    });
-    expect(readTriageOutcome('no json here')).toEqual({
-      implemented: false,
-      changes: [],
-      notes: '',
-    });
-  });
-
-  it('takes the final reply over JSON the agent quoted before it', () => {
-    const raw =
-      'I updated:\n```json\n{ "name": "pkg", "version": "1.0.0" }\n```\n' +
-      '```json\n{ "implemented": ["Bumped version"], "notes": "" }\n```\n';
-    expect(readTriageOutcome(raw)).toMatchObject({
-      implemented: true,
-      changes: ['Bumped version'],
-    });
-  });
-
-  it('is not implemented when the output is missing or malformed', () => {
-    const none = { implemented: false, changes: [], notes: '' };
-    expect(readTriageOutcome(null)).toEqual(none);
-    expect(readTriageOutcome(undefined)).toEqual(none);
-    expect(readTriageOutcome({ implemented: true })).toEqual(none);
-    expect(readTriageOutcome({ implemented: ['', 3, '  '] })).toEqual(none);
-  });
-});
-
-describe('insightsTriageStep.apply', () => {
-  const insight = { id: 'i-1', sourceStep: 's', title: 'T', location: '', description: '' };
-  const ctx = { logger: { info: () => {} } } as unknown as StepContext;
-  const detected = { worktreePath: '', sandboxWorktreePath: '', spec: '', insights: [insight] };
-
-  it('does not report a pick as implemented when the agent made no change', async () => {
-    const out = await insightsTriageStep.apply(ctx, {
-      detected,
-      formValues: { selectedInsights: ['i-1'] },
-      llmOutput: { implemented: [], notes: 'already done' },
-      iteration: 0,
-      previousIterations: [],
-    });
-    expect(out).toMatchObject({ selected: [insight], implemented: false, notes: 'already done' });
-  });
-
-  it('reports implemented with the changes the agent listed', async () => {
-    const out = await insightsTriageStep.apply(ctx, {
-      detected,
-      formValues: { selectedInsights: ['i-1'] },
-      llmOutput: { implemented: ['Did T'], notes: '' },
-      iteration: 0,
-      previousIterations: [],
-    });
-    expect(out).toMatchObject({ implemented: true, changes: ['Did T'] });
   });
 });
 

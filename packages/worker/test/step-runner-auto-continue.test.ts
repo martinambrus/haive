@@ -1562,6 +1562,60 @@ describe('contract checks preserve pass ownership and continuation semantics', (
   });
 });
 
+describe('mining dependency guard', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it.each(['0', '1'])('refuses ordinary mining before selection with bypass=%s', async (bypass) => {
+    vi.stubEnv('HAIVE_TEST_BYPASS_LLM', bypass);
+    const state = freshState();
+    const select = vi.fn(async () => []);
+    const def = {
+      ...makeStep({}),
+      agentMining: { requiredCapabilities: [], selectAgents: select },
+    };
+    const result = await run(state, def);
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toBe(
+      'agent mining requires CLI invocation but no providers or deps supplied',
+    );
+    expect(select).not.toHaveBeenCalled();
+  });
+  it.each(['0', '1'])(
+    'refuses a selected insight before any journal intent with bypass=%s',
+    async (bypass) => {
+      vi.stubEnv('HAIVE_TEST_BYPASS_LLM', bypass);
+      const state = freshState();
+      state.taskStepRow.stepId = '08e-insights-triage';
+      const select = vi.fn(insightsTriageStep.agentMining!.selectAgents);
+      const def = {
+        ...insightsTriageStep,
+        shouldRun: undefined,
+        detect: async () => ({
+          insights: [{ id: 'one', title: 'One', location: 'a.ts', sourceStep: 'review' }],
+        }),
+        agentMining: { ...insightsTriageStep.agentMining!, selectAgents: select },
+      } as StepDefinition;
+      const db = makeMockDb(state);
+      const insert = vi.spyOn(db, 'insert');
+      const result = await advanceStep({
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        stepDef: def,
+        formValues: { selectedInsights: ['one'] },
+      });
+      expect(result.status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toBe(
+        'agent mining requires CLI invocation but no providers or deps supplied',
+      );
+      expect(select).not.toHaveBeenCalled();
+      expect(insert.mock.calls.some(([table]) => tableNameOf(table) === 'task_events')).toBe(false);
+    },
+  );
+});
+
 describe('manual insight choices under auto-continue', () => {
   it.each([undefined, { selectedInsights: [] }])(
     'parks with choices and legacy preset %j, then accepts a deliberate empty submit',
@@ -1573,7 +1627,7 @@ describe('manual insight choices under auto-continue', () => {
         autoContinue: true,
         preAnswers: preset ? { '08e-insights-triage': preset } : {},
       };
-      const prompt = vi.fn(insightsTriageStep.llm!.buildPrompt);
+      const select = vi.fn(insightsTriageStep.agentMining!.selectAgents);
       const def = {
         ...insightsTriageStep,
         shouldRun: undefined,
@@ -1590,15 +1644,17 @@ describe('manual insight choices under auto-continue', () => {
             },
           ],
         }),
-        llm: { ...insightsTriageStep.llm!, buildPrompt: prompt },
+        agentMining: { ...insightsTriageStep.agentMining!, selectAgents: select },
       } as StepDefinition;
       const first = await run(state, def);
       expect(first.status).toBe('waiting_form');
       expect(state.taskStepRow.formValues).toBeNull();
-      expect(prompt).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
       expect(state.invocation).toBeUndefined();
       expect((await run(state, def, { selectedInsights: [] })).status).toBe('done');
-      expect(prompt).not.toHaveBeenCalled();
+      expect(select).toHaveBeenCalled();
+      for (const r of select.mock.results) expect(await r.value).toEqual([]);
+      expect(state.invocation).toBeUndefined();
     },
   );
 });
