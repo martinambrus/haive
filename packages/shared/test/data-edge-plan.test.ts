@@ -27,6 +27,33 @@ describe('v3 immutable per-consumer data plan', () => {
       producerStepId: checked,
     });
   });
+  it('keeps the fingerprint stable when keys are reversed at every nesting level', () => {
+    const reverseKeys = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(reverseKeys);
+      if (value && typeof value === 'object')
+        return Object.fromEntries(
+          Object.entries(value)
+            .reverse()
+            .map(([key, child]) => [key, reverseKeys(child)]),
+        );
+      return value;
+    };
+    const p = plan();
+    const reversed = reverseKeys(p) as typeof p;
+    expect(Object.keys(reversed)).toEqual(Object.keys(p).reverse());
+    expect(Object.keys(reversed.candidates[0]!.nodes[1]!.inputs[0]!)).toEqual(
+      Object.keys(p.candidates[0]!.nodes[1]!.inputs[0]!).reverse(),
+    );
+    expect(Object.keys(reversed.candidates[0]!.bindings['1:draft']!.contract)).toEqual(
+      Object.keys(p.candidates[0]!.bindings['1:draft']!.contract).reverse(),
+    );
+    expect(parseDataEdgePlan(reversed)).toEqual(p);
+    expect(
+      buildDataEdgePlan('static', [
+        { executionPath: null, nodes: reverseKeys(nodes()) as ReturnType<typeof nodes> },
+      ]).fingerprint,
+    ).toBe(p.fingerprint);
+  });
   it('refuses missing/malformed pins and never chooses a candidate on behalf of triage', () => {
     const p = plan();
     delete p.candidates[0]!.bindings['1:draft'];
