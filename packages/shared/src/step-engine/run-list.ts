@@ -1,4 +1,8 @@
-import { derivedCandidateIds, parseDerivedRunPlan } from '../modularity/derived-task-types.js';
+import {
+  DerivedRunPlanError,
+  parseDerivedRunPlan,
+  type DerivedRunPlan,
+} from '../modularity/derived-task-types.js';
 import { EXECUTION_PATHS, type ExecutionPath } from '../schemas/tasks.js';
 import { orderWorkflowRunList } from './execution-paths.js';
 
@@ -23,12 +27,15 @@ export function taskRunListIds(
   },
   listByWorkflow: (type: string) => readonly string[],
   containerTool?: string | null,
+  /** Reuse only a plan already decoded for this task by the caller. */
+  parsedPlan?: DerivedRunPlan,
 ): string[] {
   if (task.runListStrategy === 'derived' || task.derivedRunPlan != null) {
-    const plan = parseDerivedRunPlan(task.derivedRunPlan);
-    return task.executionPath === null
-      ? [...plan.commonPrefix]
-      : derivedCandidateIds(plan, task.executionPath);
+    const plan = parsedPlan ?? parseDerivedRunPlan(task.derivedRunPlan);
+    if (task.executionPath === null) return [...plan.commonPrefix];
+    const candidate = plan.candidates.find((c) => c.executionPath === task.executionPath);
+    if (!candidate) throw new DerivedRunPlanError();
+    return [...candidate.stepIds];
   }
   if (task.runListStrategy === 'run_app_modes') {
     const runtime =

@@ -9,7 +9,23 @@ import {
 import type { ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepDefinition } from './step-definition.js';
 
-type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces'>;
+type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces'> &
+  Partial<
+    Pick<
+      StepDefinition,
+      'metadata' | 'fixLoop' | 'restartLoop' | 'reviseLoop' | 'loop' | 'fixLoopOnError'
+    >
+  >;
+
+export function hasConflictingReplacementHooks(step: Declaration): boolean {
+  return !!(
+    step.fixLoop ||
+    step.restartLoop ||
+    step.reviseLoop ||
+    step.loop ||
+    step.fixLoopOnError
+  );
+}
 
 /** Boot validation of executable declarations; no module-defined validators. */
 export function assertStepOutputDeclaration(step: Declaration): void {
@@ -17,6 +33,11 @@ export function assertStepOutputDeclaration(step: Declaration): void {
     throw new Error('step-output-contract-unknown');
   }
   if (step.replaces === undefined) return;
+  if (
+    step.replaces.length &&
+    (hasConflictingReplacementHooks(step) || step.metadata?.allowSkip === true)
+  )
+    throw new Error('step-output-role-policy-incompatible');
   if (!Array.isArray(step.replaces) || new Set(step.replaces).size !== step.replaces.length) {
     throw new Error('step-output-role-invalid');
   }
@@ -62,8 +83,8 @@ export class StepOutputContractInvalidError extends Error {
 
 /** Called only after a successful apply return. Keep the ORIGINAL output on every write.
  * A declaration of replaces is capability, not proof that this run occupies a role.
- * Admission is still refused, so only direct controls pass replacedRole until PR4 wires
- * pinned role occupancy. Built-in producers always warn and persist on schema drift. */
+ * The runner supplies only pinned role occupancy. Built-in producers always warn and
+ * persist on schema drift. */
 export function validateSuccessfulStepOutput(
   step: StepDefinition,
   output: unknown,
@@ -74,7 +95,6 @@ export function validateSuccessfulStepOutput(
   const builtin = step.metadata.id === '08c-code-review' || step.metadata.id === '08c2-code-audit';
   const replacement = !builtin && replacedRole !== undefined;
   if (replacement) {
-    assertStepOutputDeclaration(step);
     if (
       !step.replaces?.includes(replacedRole) ||
       !stepOutputContractsEqual(ref, stepRoleOutputContract(replacedRole))

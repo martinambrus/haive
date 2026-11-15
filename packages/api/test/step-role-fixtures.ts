@@ -12,6 +12,16 @@ export function rolePlan(version: 1 | 2 = 1): DerivedRunPlanV1 | DerivedRunPlanV
     executionPath,
     stepIds: [...prefix, REVIEW, AUDIT],
   }));
+  const producer = {
+    stepId: PRODUCER,
+    label: 'Review',
+    group: 'review',
+    dispatchesCli: true,
+    requires: [],
+    provides: ['review'],
+    replaces: [REVIEW],
+    outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+  };
   return {
     version,
     base: {
@@ -25,16 +35,17 @@ export function rolePlan(version: 1 | 2 = 1): DerivedRunPlanV1 | DerivedRunPlanV
     commonPrefix: prefix,
     warnings: [],
     composableEntries: [
-      {
-        stepId: PRODUCER,
-        label: 'Review',
-        group: 'review',
-        dispatchesCli: true,
-        requires: [],
-        provides: ['review'],
-        replaces: [REVIEW],
-        outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
-      },
+      producer,
+      ...(version === 2
+        ? [...prefix, REVIEW, AUDIT].map((stepId) => ({
+            stepId,
+            label: stepId,
+            group: 'test',
+            dispatchesCli: false,
+            requires: [],
+            provides: stepId === REVIEW ? ['review'] : [],
+          }))
+        : []),
     ],
     candidates: baseCandidates.map((c) => ({
       ...c,
@@ -48,6 +59,7 @@ export function rolePlan(version: 1 | 2 = 1): DerivedRunPlanV1 | DerivedRunPlanV
       })),
       ...(version === 2
         ? {
+            effectiveEntries: [producer],
             roleBindings: {
               [REVIEW]: { stepId: PRODUCER, outputContract: CODE_REVIEW_OUTPUT_CONTRACT },
             },

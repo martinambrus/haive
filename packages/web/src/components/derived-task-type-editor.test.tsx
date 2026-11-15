@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { CODE_REVIEW_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { derivedFixture } from '@/lib/derived-test-fixture';
@@ -117,6 +118,56 @@ afterEach(() => {
 });
 
 describe('derived editor', () => {
+  it('offers Replace, explains its scope and displays both contract references', () => {
+    const entries = new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry]));
+    const declaration = {
+      ...fixture.catalog.steps[0]!.entry,
+      outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+    };
+    entries.set(STEP_ROLES.codeReview, { ...declaration, stepId: STEP_ROLES.codeReview });
+    entries.set('module.example.review', {
+      ...declaration,
+      stepId: 'module.example.review',
+      replaces: [STEP_ROLES.codeReview],
+    });
+    const evaluation = evaluateDerivedEditor({
+      catalog: fixture.catalog,
+      baseSlug: 'workflow',
+      changes: [],
+      typeSlug: 'mine',
+      requiresRepository: true,
+      promptSteps: {},
+      loopLimits: {},
+      preAnswerDefaults: {},
+    });
+    render(
+      <DerivedTaskTypeChanges
+        changes={[{ replace: STEP_ROLES.codeReview, with: 'module.example.review' }]}
+        evaluation={evaluation}
+        diagnostics={null}
+        serverIssues={[]}
+        error={null}
+        disabled={false}
+        editable
+        revision={0}
+        entries={entries}
+        requiresRepository
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole('option', {
+        name: 'Replace — Only steps declaring this role and its output contract can replace it',
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Expected: haive.code-review@1. Actual: haive.code-review@1/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/implementation, gates and the triage prefix are protected/),
+    ).toBeTruthy();
+  });
+
   it('bounds new operations using an injected small limit', () => {
     expect(MAX_DERIVED_CHANGES).toBe(64);
     const evaluation = evaluateDerivedEditor({

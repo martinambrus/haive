@@ -1,9 +1,27 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
-import { parseStepId, parseDerivedRunPlan, type PromptStepEntry } from '@haive/shared/modularity';
+import {
+  parseStepId,
+  parseDerivedRunPlan,
+  type PromptStepEntry,
+  type DerivedRunPlan,
+} from '@haive/shared/modularity';
 import { taskRunListIds, type RunListStrategy } from '@haive/shared/run-list';
-import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
+import {
+  readStepRole,
+  STEP_ROLES,
+  stepOutputContractsEqual,
+  type StepRoleId,
+  type StepOutputContractRef,
+} from '@haive/shared/step-outputs';
+import { hasConflictingReplacementHooks } from '../step-engine/step-output-contract.js';
+import {
+  stepRegistry,
+  UnresolvedStepError,
+  PinnedStepSupportError,
+  type StepRegistry,
+} from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
@@ -54,7 +72,10 @@ const SYNTHESISED_STEP_LIMIT = 256;
 const synthesisedSteps = new Map<string, StepDefinition>();
 
 type TaskStepScope = Partial<
-  Pick<ResolvedTaskContext, 'taskId' | 'customSteps' | 'runListSnapshot'>
+  Pick<
+    ResolvedTaskContext,
+    'taskId' | 'customSteps' | 'runListSnapshot' | 'derivedRunPlan' | 'executionPath'
+  >
 >;
 
 /** The step a task runs under an id. A core or module id comes from the registry; a `custom.*` id is
@@ -63,8 +84,42 @@ export function resolveTaskStep(
   ctx: TaskStepScope,
   stepId: string,
   registry: Pick<StepRegistry, 'get'> = stepRegistry,
+  parsedPlan?: DerivedRunPlan,
 ): StepDefinition | undefined {
-  if (parseStepId(stepId)?.kind !== 'custom') return registry.get(stepId);
+  if (parseStepId(stepId)?.kind !== 'custom') {
+    const def = registry.get(stepId);
+    if (ctx.derivedRunPlan == null) return def;
+    const plan = parsedPlan ?? parseDerivedRunPlan(ctx.derivedRunPlan);
+    if (plan.version !== 2) return def;
+    if (ctx.executionPath == null) return def;
+    const role = Object.values(STEP_ROLES).find((role) =>
+      readStepRole(
+        ctx,
+        role,
+        (binding) =>
+          binding.state === 'active' && binding.stepId === stepId && binding.stepId !== role,
+        plan,
+      ),
+    );
+    if (!role) return def;
+    const binding = readStepRole(ctx, role, (binding) => binding, plan);
+    const host = assertPinnedProducerSupport(stepId, role, binding.outputContract!, registry);
+    // Only routing/skip policy crosses the binding: no seats, dispatch preferences or grants.
+    return {
+      ...def!,
+      fixLoop: host.fixLoop,
+      restartLoop: undefined,
+      reviseLoop: undefined,
+      loop: undefined,
+      fixLoopOnError: undefined,
+      shouldRun:
+        role === STEP_ROLES.codeAudit
+          ? async (context) =>
+              (await host.shouldRun!(context)) &&
+              (!def!.shouldRun || (await def!.shouldRun(context)))
+          : host.shouldRun,
+    };
+  }
   const entry = ctx.customSteps?.[stepId];
   if (!entry) return undefined;
   const key = ctx.taskId === undefined ? null : `${ctx.taskId}|${stepId}`;
@@ -81,12 +136,52 @@ export function resolveTaskStep(
   return def;
 }
 
+function assertPinnedProducerSupport(
+  stepId: string,
+  role: StepRoleId,
+  ref: StepOutputContractRef,
+  registry: Pick<StepRegistry, 'get'>,
+): StepDefinition {
+  const def = registry.get(stepId);
+  const host = registry.get(role);
+  if (
+    !def ||
+    !host ||
+    !stepOutputContractsEqual(host.outputContract, ref) ||
+    !def.replaces?.includes(role) ||
+    !stepOutputContractsEqual(def.outputContract, ref) ||
+    hasConflictingReplacementHooks(def) ||
+    hasConflictingReplacementHooks({ ...host, fixLoop: undefined }) ||
+    (role === STEP_ROLES.codeReview ? !host.fixLoop : !!host.fixLoop || !host.shouldRun)
+  )
+    throw new PinnedStepSupportError(stepId);
+  return host;
+}
+
+/** Check executable support for every pinned promise, including candidates before triage.
+ * This checks declarations; actual role reads still use readStepRole. */
+export function assertPinnedCandidateSupport(
+  candidate: {
+    roleBindings: Partial<
+      Record<StepRoleId, { stepId: string; outputContract: StepOutputContractRef }>
+    >;
+  },
+  registry: Pick<StepRegistry, 'get'> = stepRegistry,
+): void {
+  for (const role of Object.values(STEP_ROLES)) {
+    const binding = candidate.roleBindings[role];
+    if (binding)
+      assertPinnedProducerSupport(binding.stepId, role, binding.outputContract, registry);
+  }
+}
+
 export function requireTaskStep(
   ctx: TaskStepScope,
   stepId: string,
   registry: Pick<StepRegistry, 'get'> = stepRegistry,
+  parsedPlan?: DerivedRunPlan,
 ): StepDefinition {
-  const def = resolveTaskStep(ctx, stepId, registry);
+  const def = resolveTaskStep(ctx, stepId, registry, parsedPlan);
   if (!def) throw new UnresolvedStepError([stepId]);
   return def;
 }
@@ -117,7 +212,17 @@ export async function buildRunList(
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).
   if (ctx.runListStrategy === 'derived' || ctx.derivedRunPlan != null) {
-    return taskRunListIds(ctx, () => []).map((id) => requireTaskStep(ctx, id));
+    const plan = parseDerivedRunPlan(ctx.derivedRunPlan);
+    if (plan.version === 2) {
+      for (const candidate of plan.candidates.filter(
+        (c) => ctx.executionPath == null || c.executionPath === ctx.executionPath,
+      )) {
+        assertPinnedCandidateSupport(candidate, stepRegistry);
+      }
+    }
+    return taskRunListIds(ctx, () => [], undefined, plan).map((id) =>
+      requireTaskStep(ctx, id, stepRegistry, plan),
+    );
   }
   if (ctx.runListStrategy === 'run_app_modes') return buildRunAppRunList(ctx, db);
   if (ctx.runListStrategy === 'workflow_paths') {

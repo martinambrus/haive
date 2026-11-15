@@ -649,19 +649,19 @@ and declares `outputContract: {id: 'haive.code-review', version: 1}` on both the
 and its composable manifest entry. Boot rejects unknown references and disagreement.
 
 `replaces` declares capability for the two review roles only, with the matching host
-reference. It does not grant replacement admission: active replacements remain refused
-until role readers and pinned role routing ship. Existing catalog `entry` JSON holds
+reference. It declares replacement capability; admission separately checks every candidate, exact contract equality, explicit role tokens, policy, producer uniqueness and final composition. Only the canonical review and audit roles are replaceable, in one hop. Existing catalog `entry` JSON holds
 these serializable declarations; no SQL migration is needed.
 
-The same portable entry exports `readStepRole` and the DTO role projector. A future v2 task
+The same portable entry exports `readStepRole` and the DTO role projector. A v2 task
 binds a role to its physical producer and exact contract on each candidate; readers use that
 pin, never live module metadata or a review-looking output. Module lifecycle changes and
 catalog edits do not remap a task. Worker output reads, house-rule stamps, learning and prompt
 guidance preserve physical invocation/event/source identity. Both task API surfaces project
 `outputRoles` after checking ownership; browser code receives no full plan.
 
-This reader prerequisite only decodes v2. Creation still emits v1 and refuses replacements;
-activation of admission and pinned host finalization belongs to the next prerequisite.
+Creation writes v2 only when a candidate applies a replacement, and pins effective requirements and bindings at INSERT. The host supplies the canonical review fix evaluator or report-only audit policy (including broad-audit skip), never its CLI seats or dispatch grants. Replacement-capable definitions cannot declare conflicting fix/restart/revise/local/error-loop hooks or `metadata.allowSkip: true`; a review replacement may declare the host loop target without its own executable hook. Missing executable contract/policy support makes a task dead as `pinned-step-support-unavailable`; lifecycle actions never recompute its binding. Builtin output mismatches warn; only bound replacement mismatches fail `step-output-contract-invalid`.
+
+Rollback stops new replacement creation and keeps v2-capable readers and workers for resumable v2 tasks. Never downgrade those pins.
 
 ### Fan-out seats
 

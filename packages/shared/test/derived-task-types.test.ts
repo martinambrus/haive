@@ -198,12 +198,12 @@ describe('derived overlay evaluation', () => {
       const result = evaluate([{ replace: 'a', with: payload }]);
       expect(statuses(result)).toEqual(['refused']);
       expect(result.issues).toHaveLength(2);
-      expect(result.issues.every((i) => i.kind === 'replacement-contract-unavailable')).toBe(true);
+      expect(result.issues.every((i) => i.kind === 'replacement-target-forbidden')).toBe(true);
       expect(result.candidates[0]!.stepIds).toEqual(baseCandidates[0]!.stepIds);
     }
   });
 
-  it('still refuses replacement when both producers name the exact host contract', () => {
+  it('applies replacement when both producers name the exact host contract', () => {
     const role = '08c-code-review';
     const replacement = 'module.fx.review';
     const declarations = [
@@ -220,8 +220,8 @@ describe('derived overlay evaluation', () => {
       catalog: new Map([...entries, ...declarations].map((e) => [e.stepId, e])),
       installedStepIds: new Set([...installedStepIds, role, replacement]),
     });
-    expect(result.issues.map((i) => i.kind)).toEqual(['replacement-contract-unavailable']);
-    expect(result.candidates[0]?.stepIds).toEqual([...prefix, role]);
+    expect(result.issues).toEqual([]);
+    expect(result.candidates[0]?.stepIds).toEqual([...prefix, replacement]);
   });
 
   it('warns explicitly when a replacement is absent from a candidate path', () => {
@@ -235,7 +235,7 @@ describe('derived overlay evaluation', () => {
       },
     ]);
     expect(result.issues).toContainEqual(
-      expect.objectContaining({ kind: 'replacement-contract-unavailable' }),
+      expect.objectContaining({ kind: 'replacement-target-forbidden' }),
     );
     expect(evaluate([{ remove: 'b' }]).warnings).toEqual([]);
   });
@@ -248,7 +248,7 @@ describe('derived overlay evaluation', () => {
     ]);
     expect(statuses(result)).toEqual(['refused', 'refused', 'stale-target']);
     expect(statuses(result, 1)).toEqual(['path-absent', 'path-absent', 'stale-target']);
-    expect(result.issues.map((i) => i.kind)).toEqual(['replacement-contract-unavailable']);
+    expect(result.issues.map((i) => i.kind)).toEqual(['replacement-target-forbidden']);
     expect(result.candidates[0]!.stepIds).toEqual(baseCandidates[0]!.stepIds);
   });
 

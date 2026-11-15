@@ -746,7 +746,7 @@ restored by reverting code.
 
 A task is **dead** when its current step requires an uninstalled integration provider, or its data
 names a step this install no longer registers: a module was removed, or a step its run list names
-went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
+went away (`UnresolvedStepError`). A third cause is a registered producer that cannot execute its pinned output contract or host role policy (`pinned-step-support-unavailable`). Dead is neither failed nor completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
 (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and otherwise tears nothing down, so
 a revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
@@ -754,12 +754,12 @@ a revive finds the task as it was. The api refuses every advancing action on a d
 
 **What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the orphaned jobs are handed
 back and before orphaned steps are recovered; it checks every live task that has a run-list snapshot and marks one that
-names a missing step. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
+names a missing step or lacks executable support for a pinned contract or host role policy. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
 snapshot (the dynamic types) is only ever marked at run time.
 
 **What revives it.** Required integrations of the current step are re-resolved as well: a required
 `provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check
-inside its transaction, including for direct callers; a provider restored but deactivated can revive
+inside its transaction, including for direct callers. `reviveDeadTask` also rechecks pinned producer contract and host role policy support inside that transaction; a registered but incompatible producer keeps the task dead, with no remap. A provider restored but deactivated can revive
 into the integration park. This uses only resolver state, never dead-reason copy or token refresh
 (see [Integrations](integrations.md#dispatch)). The same boot pass revives a dead task once what it
 was missing resolves again: a snapshot task when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current

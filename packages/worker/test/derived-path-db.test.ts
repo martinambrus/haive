@@ -1,3 +1,6 @@
+import { rolePlan, REVIEW, AUDIT, PRODUCER } from './replacement-fixtures.js';
+import { CODE_REVIEW_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -217,6 +220,56 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
         ),
       );
 
+  const installV2 = async () => {
+    const plan = rolePlan(2);
+    const r = registry();
+    const def = (id: string): StepDefinition => ({
+      metadata: {
+        id,
+        title: id,
+        description: '',
+        workflowType: 'workflow',
+        index: 9,
+        requiresCli: false,
+      },
+      apply: async () => ({}),
+    });
+    r.register({
+      ...def(REVIEW),
+      outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+      fixLoop: { evaluate: () => null },
+    });
+    r.register(def(AUDIT));
+    r.register({
+      ...def(PRODUCER),
+      outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+      replaces: [REVIEW],
+    });
+    await db
+      .update(schema.tasks)
+      .set({ derivedRunPlan: plan, runListSnapshot: [...plan.candidates[0]!.stepIds] })
+      .where(eq(schema.tasks.id, taskId));
+    return { plan, r };
+  };
+  it('selects only pinned v2 candidates, replays unchanged and names lost executable support', async () => {
+    const { plan, r } = await installV2();
+    await pinDerivedWorkflowPath(ctx(), 'quick_bugfix', false, r);
+    const selected = await task();
+    expect(selected.derivedRunPlan).toEqual(plan);
+    expect(selected.runListSnapshot).toContain(PRODUCER);
+    expect(selected.runListSnapshot).not.toContain(REVIEW);
+    await pinDerivedWorkflowPath(ctx(), 'quick_bugfix', true, r);
+    expect(await events()).toHaveLength(1);
+    expect((await task()).derivedRunPlan).toEqual(plan);
+    r.override({ ...r.get(PRODUCER)!, outputContract: undefined, replaces: undefined });
+    await expect(pinDerivedWorkflowPath(ctx(), 'quick_bugfix', true, r)).rejects.toMatchObject({
+      code: 'pinned-step-support-unavailable',
+    });
+    expect(deadTaskResolution({ ...selected, type: 'derived-test' }, 'derived', r)).toMatchObject({
+      supportReason: expect.stringContaining('pinned-step-support-unavailable'),
+    });
+    expect((await task()).derivedRunPlan).toEqual(plan);
+  });
   it.each(EXECUTION_PATHS)(
     'selects %s once and replays after a crash without consulting live definitions',
     async (path) => {
@@ -304,6 +357,7 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
     expect(await events()).toHaveLength(0);
   });
   it('rolls back selection and defaults if its application event cannot be written', async () => {
+    const { plan, r } = await installV2();
     await db.execute(
       sql`CREATE FUNCTION derived_event_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type = 'task.derived_path_pinned' THEN RAISE EXCEPTION 'event refused'; END IF; RETURN NEW; END $$`,
     );
@@ -311,15 +365,14 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
       sql`CREATE TRIGGER derived_event_failure BEFORE INSERT ON task_events FOR EACH ROW EXECUTE FUNCTION derived_event_failure()`,
     );
     try {
-      await expect(
-        pinDerivedWorkflowPath(ctx(), 'quick_bugfix', true, registry()),
-      ).rejects.toThrow();
+      await expect(pinDerivedWorkflowPath(ctx(), 'quick_bugfix', true, r)).rejects.toThrow();
       expect(await task()).toMatchObject({
         executionPath: null,
-        runListSnapshot: [...prefix, 'full'],
+        runListSnapshot: [...plan.candidates[0]!.stepIds],
         preAnswers: { quick: { answer: true }, full: { answer: false } },
       });
       expect(await events()).toHaveLength(0);
+      expect((await task()).derivedRunPlan).toEqual(plan);
     } finally {
       await db.execute(sql`DROP TRIGGER derived_event_failure ON task_events`);
       await db.execute(sql`DROP FUNCTION derived_event_failure()`);

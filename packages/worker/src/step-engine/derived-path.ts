@@ -4,6 +4,7 @@ import type { ExecutionPath } from '@haive/shared';
 import {
   DerivedRunPlanError,
   derivedCandidateIds,
+  derivedCandidateEntries,
   parseDerivedRunPlan,
   validateComposition,
 } from '@haive/shared/modularity';
@@ -73,7 +74,12 @@ export async function pinDerivedWorkflowPath(
       task.executionPath === null &&
       validateComposition(
         stepIds,
-        new Map(plan.composableEntries.map((entry) => [entry.stepId, entry])),
+        new Map(
+          derivedCandidateEntries(
+            plan,
+            plan.candidates.find((c) => c.executionPath === path)!,
+          ).map((entry) => [entry.stepId, entry]),
+        ),
         { requiresRepository: plan.requiresRepository },
       ).length > 0
     )
@@ -83,8 +89,10 @@ export async function pinDerivedWorkflowPath(
       taskId: task.id,
       runListSnapshot: stepIds,
       customSteps: parseCustomSteps(task.customSteps),
+      derivedRunPlan: plan,
+      executionPath: path,
     };
-    const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry));
+    const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry, plan));
     if (missing.length) throw new UnresolvedStepError(missing);
     if (task.executionPath !== null) {
       return { path, broadAudit: task.broadAudit }; // A crash after this commit reuses the exact pin and event.

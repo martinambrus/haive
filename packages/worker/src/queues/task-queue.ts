@@ -164,7 +164,7 @@ import {
   taskTypeRuntimeFor,
   type ResolvedTaskContext,
 } from './run-list.js';
-import { UnresolvedStepError } from '../step-engine/registry.js';
+import { PinnedStepSupportError, UnresolvedStepError } from '../step-engine/registry.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
@@ -3042,11 +3042,16 @@ async function handleStartTask(
   } catch (err) {
     if (!(err instanceof UnresolvedStepError)) throw err;
     // Before the claim, so a redelivered START on a task already running must not touch it.
-    const marked = await markTaskDead(db, ctx.taskId, deadReasonFor(err.ids), {
-      epoch: ctx.orchestrationEpoch,
-      unresolved: err.ids,
-      statuses: STARTABLE_TASK_STATUSES,
-    });
+    const marked = await markTaskDead(
+      db,
+      ctx.taskId,
+      err instanceof PinnedStepSupportError ? err.message : deadReasonFor(err.ids),
+      {
+        epoch: ctx.orchestrationEpoch,
+        unresolved: err.ids,
+        statuses: STARTABLE_TASK_STATUSES,
+      },
+    );
     if (marked) await killCliSandboxesForTask(ctx.taskId);
     if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
     return;
@@ -4945,12 +4950,17 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       if (!unclaimed || epoch !== undefined) {
         if (err instanceof UnresolvedStepError && epoch !== undefined) {
           const { stepId, round } = job.data as TaskJobPayload;
-          const dead = await markTaskDeadFromJob(db, taskId, deadReasonFor(err.ids), {
-            epoch,
-            unresolved: err.ids,
-            stepId,
-            round,
-          }).then(
+          const dead = await markTaskDeadFromJob(
+            db,
+            taskId,
+            err instanceof PinnedStepSupportError ? err.message : deadReasonFor(err.ids),
+            {
+              epoch,
+              unresolved: err.ids,
+              stepId,
+              round,
+            },
+          ).then(
             () => true,
             (deadErr) => {
               logger.warn({ err: deadErr, taskId }, 'markTaskDead during catch failed');

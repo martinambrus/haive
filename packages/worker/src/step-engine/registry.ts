@@ -11,6 +11,16 @@ export class UnresolvedStepError extends Error {
   }
 }
 
+/** The physical producer is installed, but cannot execute its immutable pinned promise. */
+export class PinnedStepSupportError extends UnresolvedStepError {
+  readonly code = 'pinned-step-support-unavailable';
+  constructor(id: string) {
+    super([id]);
+    this.name = 'PinnedStepSupportError';
+    this.message = `pinned-step-support-unavailable: ${id} cannot execute its pinned output contract or host role policy. Restore compatible executable support; the task will not be remapped.`;
+  }
+}
+
 export class StepRegistry {
   private byId = new Map<string, StepDefinition>();
   private byWorkflow = new Map<string, StepDefinition[]>();

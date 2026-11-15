@@ -42,6 +42,12 @@ type RefusalReason =
   | 'target-removed-by-change'
   | 'missing-installed-step'
   | 'replacement-contract-unavailable'
+  | 'replacement-target-forbidden'
+  | 'replacement-not-composable'
+  | 'replacement-not-declared'
+  | 'replacement-contract-mismatch'
+  | 'replacement-policy-incompatible'
+  | 'replacement-role-ambiguous'
   | 'protected-prefix-edit';
 
 export interface DerivedChangeOutcome {
@@ -68,6 +74,10 @@ export type DerivedOverlayIssue =
       stepId: string;
       operationIndex?: number;
       index?: number;
+      target?: string;
+      payload?: string;
+      expectedContract?: StepOutputContractRef | null;
+      actualContract?: StepOutputContractRef | null;
     }
   | { kind: 'invalid-composition'; executionPath: Path; issue: CompositionIssue }
   | { kind: 'invalid-prompt-step'; executionPath: Path; issue: PromptStepIssue };
@@ -75,6 +85,8 @@ export type DerivedOverlayIssue =
 export interface DerivedEvaluatedCandidate extends DerivedBaseCandidate {
   outcomes: DerivedChangeOutcome[];
   compositionIssues: CompositionIssue[];
+  roleBindings?: DerivedRoleBindings;
+  effectiveEntries?: ComposableStepEntry[];
 }
 
 export interface DerivedOverlayEvaluation {
@@ -140,9 +152,30 @@ function payloadOf(change: DerivedChange): string | undefined {
   return 'replace' in change ? change.with : 'insertAfter' in change ? change.step : undefined;
 }
 
-/** Pure v1 workflow overlay evaluation. Callers supply ALL base candidates built by
+/** Host policy is additive except for loop/closing policy, which the role owns.
+ * Provided tokens must be declared by the actual producer, never manufactured here. */
+export function effectiveReplacementEntry(
+  entry: ComposableStepEntry,
+  role: ComposableStepEntry,
+): ComposableStepEntry {
+  return {
+    ...entry,
+    requires: [
+      ...entry.requires,
+      ...role.requires.filter((r) => !entry.requires.some((e) => e.needs === r.needs)),
+    ],
+    precedes: [...new Set([...(entry.precedes ?? []), ...(role.precedes ?? [])])],
+    entails: [...new Set([...(entry.entails ?? []), ...(role.entails ?? [])])],
+    entailsWhen: [...(entry.entailsWhen ?? []), ...(role.entailsWhen ?? [])],
+    removes: [...new Set([...(entry.removes ?? []), ...(role.removes ?? [])])],
+    loopTargetStepId: role.loopTargetStepId,
+    closes: role.closes,
+  };
+}
+
+/** Pure workflow overlay evaluation. Callers supply ALL base candidates built by
  * workflowBaseCandidates, including null/pre-triage. Operations address actual IDs:
- * removed targets are tombstones, never aliases. No replacement capability is enabled. */
+ * removed targets are tombstones, never aliases. */
 export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayEvaluation {
   const { baseCandidates, changes, catalog, installedStepIds } = input;
   const issues: DerivedOverlayIssue[] = [];
@@ -154,6 +187,8 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
     stepIds: [...base.stepIds],
     outcomes: [] as DerivedChangeOutcome[],
     removed: new Set<string>(),
+    roleBindings: {} as DerivedRoleBindings,
+    effective: new Map(catalog),
     skippedProducers: new Map<string, DerivedChangeOutcome>(),
   }));
 
@@ -165,7 +200,23 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
       const index = stepIds.indexOf(target);
       let outcome: DerivedChangeOutcome;
       const refuse = (kind: RefusalReason, stepId = target): DerivedChangeOutcome => {
-        issues.push({ kind, executionPath, operationIndex, stepId });
+        const replacement = 'replace' in change;
+        issues.push({
+          kind,
+          executionPath,
+          operationIndex,
+          stepId,
+          ...(replacement
+            ? {
+                target,
+                payload,
+                expectedContract: Object.values(STEP_ROLES).includes(target as StepRoleId)
+                  ? stepRoleOutputContract(target as StepRoleId)
+                  : null,
+                actualContract: catalog.get(payload!)?.outputContract ?? null,
+              }
+            : {}),
+        });
         return { operationIndex, change, outcome: 'refused', reason: kind };
       };
       if (index < 0) {
@@ -198,17 +249,58 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
         (payload !== undefined && DERIVED_WORKFLOW_PREFIX.includes(payload))
       ) {
         outcome = refuse('protected-prefix-edit');
-        // Every active replace is unavailable, even when another rule also refuses it.
-        if ('replace' in change) refuse('replacement-contract-unavailable');
+        if ('replace' in change) refuse('replacement-target-forbidden');
       } else if ('replace' in change) {
-        outcome = refuse('replacement-contract-unavailable');
-        if (!installedStepIds.has(change.with)) refuse('missing-installed-step', change.with);
+        const role = target as StepRoleId;
+        const expected = Object.values(STEP_ROLES).includes(role)
+          ? stepRoleOutputContract(role)
+          : null;
+        const host = catalog.get(target);
+        const entry = catalog.get(change.with);
+        if (!expected) outcome = refuse('replacement-target-forbidden');
+        else if (!installedStepIds.has(change.with))
+          outcome = refuse('missing-installed-step', change.with);
+        else if (!host?.outputContract || !stepOutputContractsEqual(expected, host.outputContract))
+          outcome = refuse('replacement-contract-unavailable');
+        else if (!entry) outcome = refuse('replacement-not-composable');
+        else if (!entry.replaces?.includes(role)) outcome = refuse('replacement-not-declared');
+        else if (!stepOutputContractsEqual(expected, entry.outputContract))
+          outcome = refuse('replacement-contract-mismatch');
+        else if (
+          host.provides.some(
+            (token) => !entry.provides.includes(token) || entry.removes?.includes(token),
+          ) ||
+          (entry.closes ?? false) !== (host.closes ?? false) ||
+          (entry.loopTargetStepId !== undefined && entry.loopTargetStepId !== host.loopTargetStepId)
+        )
+          outcome = refuse('replacement-policy-incompatible');
+        else if (
+          stepIds.includes(change.with) ||
+          Object.values(STEP_ROLES).includes(change.with as StepRoleId) ||
+          Object.values(state.roleBindings).some((b) => b?.stepId === change.with)
+        )
+          outcome = refuse('replacement-role-ambiguous');
+        else {
+          stepIds.splice(index, 1, change.with);
+          state.removed.add(target);
+          introduced.add(change.with);
+          state.skippedProducers.delete(change.with);
+          state.roleBindings[role] = { stepId: change.with, outputContract: expected };
+          state.effective.set(change.with, effectiveReplacementEntry(entry, host));
+          outcome = { operationIndex, change, outcome: 'applied', reason: 'change-applied' };
+        }
       } else if (payload !== undefined && !installedStepIds.has(payload)) {
         outcome = refuse('missing-installed-step', payload);
       } else {
         if ('remove' in change) {
           stepIds.splice(index, 1);
           state.removed.add(target);
+          for (const role of Object.values(STEP_ROLES)) {
+            if (state.roleBindings[role]?.stepId === target) {
+              delete state.roleBindings[role];
+              state.effective.set(target, catalog.get(target)!);
+            }
+          }
         } else {
           stepIds.splice(index + 1, 0, change.step);
           state.removed.delete(change.step);
@@ -240,7 +332,27 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
     }
   });
 
-  const candidates = states.map(({ executionPath, stepIds, outcomes }) => {
+  const hasReplacement = states.some((state) =>
+    state.outcomes.some((o) => 'replace' in o.change && o.outcome === 'applied'),
+  );
+  const candidates = states.map(({ executionPath, stepIds, outcomes, roleBindings, effective }) => {
+    for (const role of Object.values(STEP_ROLES)) {
+      if (roleBindings[role] && stepIds.includes(role)) {
+        const operationIndex = outcomes.findLast(
+          (o) => 'insertAfter' in o.change && o.change.step === role && o.outcome === 'applied',
+        )!.operationIndex;
+        issues.push({
+          kind: 'replacement-role-ambiguous',
+          executionPath,
+          stepId: role,
+          operationIndex,
+          target: role,
+          payload: roleBindings[role]!.stepId,
+          expectedContract: stepRoleOutputContract(role),
+          actualContract: roleBindings[role]!.outputContract,
+        });
+      }
+    }
     if (!DERIVED_WORKFLOW_PREFIX.every((id, index) => stepIds[index] === id)) {
       issues.push({ kind: 'protected-prefix-edit', executionPath, stepId: TRIAGE_STEP_ID });
     }
@@ -252,7 +364,7 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
       if (!installedStepIds.has(stepId))
         issues.push({ kind: 'missing-installed-step', executionPath, stepId, index });
     });
-    const compositionIssues = validateComposition(stepIds, catalog, {
+    const compositionIssues = validateComposition(stepIds, effective, {
       requiresRepository: input.requiresRepository,
     });
     for (const issue of compositionIssues)
@@ -266,14 +378,27 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
           requiresRepository: input.requiresRepository ?? true,
         },
         entries,
-        { composable: catalog },
+        { composable: effective },
         integrationCategoryIds,
       )) {
         if (issue.kind !== 'prompt-step-orphan')
           issues.push({ kind: 'invalid-prompt-step', executionPath, issue });
       }
     }
-    return { executionPath, stepIds, outcomes, compositionIssues };
+    return {
+      executionPath,
+      stepIds,
+      outcomes,
+      compositionIssues,
+      ...(hasReplacement
+        ? {
+            roleBindings,
+            effectiveEntries: Object.values(roleBindings).map((binding) =>
+              effective.get(binding!.stepId)!,
+            ),
+          }
+        : {}),
+    };
   });
   if (input.promptSteps) {
     const { typeSlug, entries, integrationCategoryIds } = input.promptSteps;
@@ -321,6 +446,12 @@ const outcomeSchema = z
       'target-removed-by-change',
       'missing-installed-step',
       'replacement-contract-unavailable',
+      'replacement-target-forbidden',
+      'replacement-not-composable',
+      'replacement-not-declared',
+      'replacement-contract-mismatch',
+      'replacement-policy-incompatible',
+      'replacement-role-ambiguous',
       'protected-prefix-edit',
     ]),
     causedByOperation: z.number().int().nonnegative().optional(),
@@ -382,6 +513,7 @@ const v2PlanSchema = planSchema.extend({
       candidateSchema.extend({
         outcomes: z.array(outcomeSchema),
         compositionIssues: z.array(z.never()),
+        effectiveEntries: z.array(composableStepEntrySchema),
         roleBindings: z
           .object({
             [STEP_ROLES.codeReview]: producerSchema.optional(),
@@ -392,6 +524,16 @@ const v2PlanSchema = planSchema.extend({
     )
     .length(4),
 });
+
+/** Read frozen candidate declarations, accepting both full legacy arrays and sparse overrides. */
+export function derivedCandidateEntries(
+  plan: Pick<DerivedRunPlan, 'composableEntries'>,
+  candidate: Pick<DerivedEvaluatedCandidate, 'stepIds' | 'effectiveEntries'>,
+): ComposableStepEntry[] {
+  const entries = new Map(plan.composableEntries.map((e) => [e.stepId, e]));
+  for (const entry of candidate.effectiveEntries ?? []) entries.set(entry.stepId, entry);
+  return candidate.stepIds.flatMap((id) => (entries.has(id) ? [entries.get(id)!] : []));
+}
 
 /** Replay only the PINNED operations/outcomes. No current catalog or composition rules.
  * This verifies physical positions, one-hop bindings and removals without enabling admission. */
@@ -459,6 +601,33 @@ function validV2Bindings(plan: DerivedRunPlanV2): boolean {
       if (roles.some((role) => bindings[role] && ids.includes(role))) return false;
     }
     if (JSON.stringify(ids) !== JSON.stringify(candidate.stepIds)) return false;
+    if (candidate.effectiveEntries) {
+      const overrides = candidate.effectiveEntries;
+      if (
+        new Set(overrides.map((e) => e.stepId)).size !== overrides.length ||
+        overrides.some((e) => !candidate.stepIds.includes(e.stepId))
+      )
+        return false;
+      const effective = new Map(derivedCandidateEntries(plan, candidate).map((e) => [e.stepId, e]));
+      if (effective.size !== candidate.stepIds.length) return false;
+      for (const role of roles) {
+        const binding = bindings[role];
+        if (!binding) continue;
+        const entry = effective.get(binding.stepId);
+        const host = entries.get(role);
+        if (
+          !entry ||
+          !host ||
+          !entry.replaces?.includes(role) ||
+          !stepOutputContractsEqual(entry.outputContract, binding.outputContract) ||
+          host.provides.some((t) => !entry.provides.includes(t) || entry.removes?.includes(t)) ||
+          host.requires.some((r) => !entry.requires.some((e) => e.needs === r.needs)) ||
+          (entry.closes ?? false) !== (host.closes ?? false) ||
+          entry.loopTargetStepId !== host.loopTargetStepId
+        )
+          return false;
+      }
+    }
     const producers = new Set<string>();
     for (const role of roles) {
       const expected = bindings[role];

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  derived: false,
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
 }));
 
@@ -18,9 +19,25 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/task-type-definition.js')>()),
-  definitionForCreate: async () => ({ runListSnapshot: null }),
+  definitionForCreate: async () => {
+    if (!h.derived) return { runListSnapshot: null };
+    const { definition, base, catalog, payload } = replacementAdmissionFixture();
+    const result = inspectDerivedDefinition(
+      { ...definition, changes: [...definition.changes, { remove: payload }] },
+      base,
+      catalog,
+    );
+    if (!result.plan) throw new DerivedTaskAdmissionError(result.issues);
+    return {
+      runListSnapshot: [...result.plan.candidates[0]!.stepIds],
+      derivedRunPlan: result.plan,
+    };
+  },
 }));
 
+import { replacementAdmissionFixture } from './derived-admission-fixtures.js';
+import { inspectDerivedDefinition } from '@haive/shared/modularity-server';
+import { DerivedTaskAdmissionError } from '../src/lib/derived-errors.js';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -38,6 +55,7 @@ app.onError(errorHandler);
 vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
+  h.derived = false;
   h.add.mockReset();
   h.add.mockResolvedValue(undefined);
 });
@@ -50,6 +68,8 @@ function setup() {
     mergeDirClaims: schema.mergeDirClaims,
     taskAttachments: schema.taskAttachments,
     taskEvents: schema.taskEvents,
+    auditEvents: schema.auditEvents,
+    stepCatalog: schema.stepCatalog,
     repositories: schema.repositories,
     taskDatabaseStates: schema.taskDatabaseStates,
     repositoryDatabaseStates: schema.repositoryDatabaseStates,
@@ -80,6 +100,19 @@ const starts = () =>
   h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.START).map(([, data]) => data);
 
 describe('POST /tasks', () => {
+  it('refuses replace-then-remove before a task, event, audit or START is written', async () => {
+    const t = setup();
+    h.derived = true;
+    const res = await create();
+    for (const table of [schema.tasks, schema.taskEvents, schema.auditEvents])
+      expect(t.fake.rows(table)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      code: 'derived_admission_refused',
+      issues: [{ kind: 'invalid-derived-run-plan' }],
+    });
+  });
   it.each([true, false])('records the picked count only for deferStart=%s', async (deferStart) => {
     const t = setup();
     const res = await post('/', {

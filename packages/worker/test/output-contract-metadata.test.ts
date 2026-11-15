@@ -53,6 +53,25 @@ function moduleEntry(
   };
 }
 describe('contract declaration and catalog metadata', () => {
+  it('loads a replacement with the host loop target and no executable loop hook', () => {
+    const def = { ...step(), outputContract: review, replaces: ['08c-code-review'] as const };
+    const entry = {
+      ...manifestEntry(),
+      outputContract: review,
+      replaces: ['08c-code-review'],
+      provides: ['review'],
+      loopTargetStepId: '07-phase-2-implement',
+    };
+    expect(
+      registerModuleSteps(new StepRegistry(), [moduleEntry(entry, def)])[0]?.composable[0],
+    ).toMatchObject({ loopTargetStepId: '07-phase-2-implement' });
+    expect(() =>
+      registerModuleSteps(new StepRegistry(), [
+        moduleEntry({ ...entry, loopTargetStepId: 'other' }, def),
+      ]),
+    ).toThrow('loops back to 07-phase-2-implement');
+  });
+
   it('serializes the exact executable/core/module references into existing catalog entries', async () => {
     const registry = new StepRegistry();
     registry.register(codeReviewStep);
