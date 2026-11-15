@@ -1366,5 +1366,13 @@
     "value": "08c-code-review",
     "count": 1,
     "reason": "Conditional execution policy for the physical core review step on quick_bugfix; replacement host policy calls this too."
+  },
+  {
+    "file": "packages/api/src/lib/task-type-definition.ts",
+    "symbol": "describeIssue",
+    "context": "ReturnStatement",
+    "value": "08e-insights-triage requires earlier 08-phase-5-verify and 08c-code-review (or its pinned replacement) for insight continuations",
+    "count": 1,
+    "reason": "Admission error copy names the canonical review requirement and explicitly permits its pinned replacement; it does not read output by physical id."
   }
 ]
