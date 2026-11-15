@@ -293,3 +293,54 @@ describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox g
     }
   });
 });
+
+describe('P5a snapshot execution admission', () => {
+  it('NULL/NULL retains the normal live-checkout mount', async () => {
+    const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
+    stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
+    await executeByKind(
+      db,
+      { ...payloadFor('agent_mining'), snapshotRef: null, baseSnapshotRef: null },
+      {} as never,
+      {},
+    );
+    expect(stubs.runInSandbox).toHaveBeenCalled();
+    expect(stubs.runInSandbox.mock.calls[0]?.[1].extraMounts).toContainEqual(repoMount);
+  });
+
+  it.each(KINDS)('refuses a pinned %s before any database or mount access', async (kind) => {
+    const snapshotRef = {
+      version: 1,
+      userId: '11111111-1111-4111-8111-111111111111',
+      repositoryId: '22222222-2222-4222-8222-222222222222',
+      taskId: '33333333-3333-4333-8333-333333333333',
+      commitOid: 'a'.repeat(40),
+      treeOid: 'b'.repeat(40),
+      inventoryId: '44444444-4444-4444-8444-444444444444',
+      inventorySha256: 'c'.repeat(64),
+    };
+    await expect(
+      executeByKind(
+        {} as never,
+        { ...payloadFor(kind), snapshotRef } as CliExecJobPayload,
+        {} as never,
+        {},
+      ),
+    ).rejects.toThrow('Committed snapshot execution is not enabled');
+    expect(stubs.runInSandbox).not.toHaveBeenCalled();
+  });
+  it.each([{ snapshotRef: {} }, { baseSnapshotRef: {} }])(
+    'refuses malformed refs before live checkout resolution: %j',
+    async (refs) => {
+      await expect(
+        executeByKind(
+          {} as never,
+          { ...payloadFor('agent_mining'), ...refs } as CliExecJobPayload,
+          {} as never,
+          {},
+        ),
+      ).rejects.toThrow('Invalid committed snapshot');
+      expect(stubs.runInSandbox).not.toHaveBeenCalled();
+    },
+  );
+});

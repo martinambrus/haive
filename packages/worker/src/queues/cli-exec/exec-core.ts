@@ -8,6 +8,7 @@ import {
   CONFIG_KEYS,
   STEER_IN_CHANNEL_PREFIX,
   configService,
+  parseCommittedSnapshotRefs,
   type CleanTranscript,
   type CliExecInvocationKind,
   type CliExecJobPayload,
@@ -378,6 +379,12 @@ export async function executeByKind(
   deps: CliExecDeps,
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
+  // Fail before resolving a repository mount or touching its writable boundaries. P5a only
+  // persists/replays identities; a non-null pin must never run against the live checkout.
+  const refs = parseCommittedSnapshotRefs(payload);
+  if (refs.snapshotRef !== null) {
+    throw new Error('Committed snapshot execution is not enabled');
+  }
   // Resolve and persist the ACTUAL hard budget when this queued job starts. Keeping it on the
   // invocation makes the live terminal truthful across retry escalation and provider-specific
   // floors; reading the step definition later would only reveal the current setting. The other

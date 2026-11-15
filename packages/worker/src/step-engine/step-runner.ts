@@ -46,6 +46,7 @@ import {
   isOllamaCloudModel,
   logger,
   parseTimeoutLadder,
+  parseCommittedSnapshotRefs,
   resolveTaskCliProviderId,
   validateFormValues,
 } from '@haive/shared';
@@ -1979,7 +1980,10 @@ type MiningRetryTargets = Map<
  *  `AgentMiningDispatch`. */
 type RunnerMiningDispatch = AgentMiningDispatch & { replayVerbatim?: true };
 
-type DispatchRequirements = Pick<AgentMiningDispatch, 'roleKey' | 'capabilities' | 'preferVision'>;
+type DispatchRequirements = Pick<
+  AgentMiningDispatch,
+  'roleKey' | 'capabilities' | 'preferVision' | 'snapshotRef' | 'baseSnapshotRef'
+>;
 
 /** Every mining-row column but `dispatch_prompt`. The fan-out barrier and the retry path read
  *  every row of a step on every advance, and that column holds a whole prompt per row, so they
@@ -1994,7 +1998,7 @@ type MiningRow = Omit<typeof schema.taskStepAgentMinings.$inferSelect, 'dispatch
  *  column stays unset, which resolves as a dispatch that never set it; a capability that is no
  *  longer a `StepCapability` is dropped. */
 function recordedRequirements(row: MiningRow | undefined): DispatchRequirements {
-  const out: DispatchRequirements = {};
+  const out: DispatchRequirements = { ...parseCommittedSnapshotRefs(row ?? {}) };
   if (row?.roleKey != null) out.roleKey = row.roleKey;
   if (row?.capabilities != null) out.capabilities = row.capabilities.filter(isStepCapability);
   if (row?.preferVision != null) out.preferVision = row.preferVision;
@@ -2011,6 +2015,7 @@ const isStepCapability = (value: string): value is StepCapability =>
  *  augmented twice later. */
 function dispatchRequirements(dispatch: RunnerMiningDispatch) {
   return {
+    ...parseCommittedSnapshotRefs(dispatch),
     roleKey: dispatch.roleKey ?? null,
     capabilities: dispatch.capabilities ?? null,
     preferVision: dispatch.preferVision ?? null,
@@ -2422,6 +2427,8 @@ async function dispatchMiningAgents(
         timeoutMs: budget.timeoutMs,
         toolProfile: spec.toolProfile,
         agentMiningId: target.id,
+        snapshotRef: requirements.snapshotRef,
+        baseSnapshotRef: requirements.baseSnapshotRef,
         softTimeout: spec.softTimeout === true,
       });
       linking = null;
@@ -2646,7 +2653,8 @@ async function dispatchReservedAgents(
     };
     const fresh = offered.get(row.agentId);
     if (fresh) {
-      dispatches.push(fresh);
+      // A new offer may refresh the prompt/persona, never an existing reservation's pin.
+      dispatches.push({ ...fresh, ...parseCommittedSnapshotRefs(row) });
       targets.set(row.agentId, target);
       continue;
     }
@@ -4615,6 +4623,7 @@ async function retryMiningAgents(
     return NOTHING_SENT;
   }
 
+  const rowByAgentId = new Map(wantedRows.map((row) => [row.agentId, row]));
   const dispatches: RunnerMiningDispatch[] = (
     await stepDef.agentMining!.selectAgents({
       ctx,
@@ -4622,7 +4631,13 @@ async function retryMiningAgents(
       formValues: formValues ?? {},
       llmOutput,
     })
-  ).filter((d) => targets.has(d.agentId));
+  )
+    .filter((d) => targets.has(d.agentId))
+    .map((d) => ({
+      ...d,
+      // Rerolls (including human reruns) belong to the recorded generation.
+      ...parseCommittedSnapshotRefs(rowByAgentId.get(d.agentId) ?? {}),
+    }));
 
   // Agents `selectAgents` cannot re-offer, recovered from what their rows recorded.
   //
@@ -4676,7 +4691,6 @@ async function retryMiningAgents(
               ),
             );
     const promptById = new Map(priorPrompts.map((r) => [r.id, r.prompt]));
-    const rowByAgentId = new Map(wantedRows.map((r) => [r.agentId, r]));
     const neverDispatched: string[] = [];
     const skippedPastedPersona: string[] = [];
     for (const [agentId, t] of unoffered) {
