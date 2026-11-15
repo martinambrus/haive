@@ -75,11 +75,11 @@ describe('FormRenderer with a hidden textarea', () => {
   });
 });
 
-it('never offers the insight auto-action checkbox, including with a remembered true', () => {
-  const field = autoActOnInsightsField(true);
-  expect(field).toMatchObject({ type: 'checkbox', default: false });
-  expect(render({ title: 'Run configuration', fields: [field] })).not.toContain(
-    'Automatically apply',
-  );
-  expect(render({ title: 'Run configuration', fields: [field] })).not.toContain('type="checkbox"');
+it.each([false, true])('offers insight auto-action with remembered default %s', (remembered) => {
+  const field = autoActOnInsightsField(remembered);
+  expect(field).toMatchObject({ type: 'checkbox', default: remembered });
+  const html = render({ title: 'Run configuration', fields: [field] });
+  expect(html).toContain('Automatically apply');
+  expect(html).toContain('type="checkbox"');
+  expect(html.includes('checked=""')).toBe(remembered);
 });
