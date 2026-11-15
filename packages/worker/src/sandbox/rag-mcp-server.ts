@@ -73,10 +73,11 @@ async function ragSearch(args) {
   }
   const data = await resp.json().catch(() => ({}));
   const hits = Array.isArray(data?.hits) ? data.hits : [];
+  const note = typeof data?.note === 'string' ? data.note + '\n\n' : '';
   if (hits.length === 0) {
-    return { isError: false, text: 'No RAG hits — ground directly with ' + GROUNDING_TOOLS + '.' };
+    return { isError: false, text: note + 'No RAG hits — ground directly with ' + GROUNDING_TOOLS + '.' };
   }
-  return { isError: false, text: formatRagHits(hits) };
+  return { isError: false, text: note + formatRagHits(hits) };
 }
 
 async function handle(msg) {

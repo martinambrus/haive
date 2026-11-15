@@ -124,11 +124,13 @@ import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import type { GlobalKbContext } from '@haive/shared/global-kb';
 import { signTaskToken } from '@haive/shared/task-token';
 import { ragRoutes, executeRagSearch } from '../src/routes/rag.js';
+import { customMcpRoutes } from '../src/routes/custom-mcp.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const app = new Hono<AppEnv>();
 app.route('/rag', ragRoutes);
+app.route('/custom-mcp', customMcpRoutes);
 app.onError(errorHandler);
 
 it('reports a refused stored RAG parameter with actionable, secret-free copy', async () => {
@@ -141,14 +143,102 @@ it('reports a refused stored RAG parameter with actionable, secret-free copy', a
   });
 });
 
-it('reports a refused stored global KB parameter instead of silently returning local hits', async () => {
+const REFUSAL_NOTE =
+  'Global KB unavailable; returning per-repo results only. PostgreSQL connection parameter "sslkey" is not allowed. Ask an admin to replace the connection string in Settings > Global KB without this parameter.';
+
+it('keeps per-repo hits and discloses a refused global DSN on rag_search', async () => {
   h.realStore = true;
-  h.connectionString = `postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslkey=`;
-  await expect(executeRagSearch('task-1', 'query')).rejects.toMatchObject({
-    code: 'user_postgres_dsn_refused',
-    parameter: 'sslkey',
+  const password = randomBytes(12).toString('hex');
+  h.connectionString = `postgres://user:${password}@db.invalid/store?sslkey=%2Fprivate%2Ffile`;
+  const res = await app.request('/rag/search', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${signTaskToken({ aud: 'rag', taskId: 'task-1' }, SECRET)}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ query: 'query' }),
   });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body).toEqual({
+    hits: [expect.objectContaining({ sourcePath: 'src/session.ts', scope: 'local' })],
+    note: REFUSAL_NOTE,
+  });
+  expect(JSON.stringify(body)).not.toContain(password);
+  expect(JSON.stringify(body)).not.toContain('/private/file');
 });
+
+it.each(['all', 'global'] as const)(
+  'discloses a refused global DSN through a custom rag-query tool with scope %s',
+  async (scope) => {
+    h.realStore = true;
+    h.connectionString = `postgres://user:${randomBytes(12).toString('hex')}@db.invalid/store?sslkey=`;
+    const tool = {
+      name: 'lookup',
+      description: 'Search',
+      action: 'rag-query',
+      scope,
+      topK: 8,
+      maxResponseBytes: 4096,
+    };
+    const invocation = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      endedAt: null,
+      supersededAt: null,
+      stepId: 'custom.test.alpha',
+      requiresRepository: true,
+      customSteps: {
+        'custom.test.alpha': {
+          slug: 'alpha',
+          title: 'Search',
+          template: 'Search',
+          capabilities: [],
+          tools: [tool],
+          timeoutMs: 60000,
+        },
+      },
+    };
+    const finishes: unknown[] = [];
+    const db = h.db as Record<string, unknown>;
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => chain,
+      limit: async () => [invocation],
+    };
+    db.select = () => chain;
+    db.transaction = async (run: (tx: unknown) => Promise<unknown>) =>
+      run({
+        execute: async () => {},
+        select: () => ({ from: () => ({ where: async () => [{ n: 0 }] }) }),
+        insert: () => ({ values: () => ({ returning: async () => [{ id: 'call-1' }] }) }),
+      });
+    db.update = () => ({
+      set: (row: unknown) => ({
+        where: async () => {
+          finishes.push(row);
+        },
+      }),
+    });
+    const res = await app.request('/custom-mcp/call', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${signTaskToken({ aud: 'custom-mcp', taskId: 'task-1', taskStepId: 'step-1', cliInvocationId: 'invocation-1' }, SECRET)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ tool: 'lookup', arguments: { query: 'query' } }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.text).toContain(REFUSAL_NOTE);
+    if (scope === 'all') expect(body.text).toContain('src/session.ts');
+    else expect(body.text).toContain('No results.');
+    expect(finishes).toEqual([expect.objectContaining({ outcome: 'ok', reason: null })]);
+  },
+);
 
 const hit = (sourcePath: string, sourceType: string, rrf: number): Hit => ({
   sourcePath,
