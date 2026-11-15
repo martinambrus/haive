@@ -38,8 +38,8 @@ describe('pinned role consumers', () => {
   it('resolves both prompt guidance paths and keeps the physical source', () => {
     const defects = parsePromptDefects(
       [
-        { stepId: PRODUCER, raw },
         { stepId: REVIEW, raw },
+        { stepId: PRODUCER, raw },
       ],
       pin,
     );
