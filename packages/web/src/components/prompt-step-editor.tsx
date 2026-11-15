@@ -20,6 +20,7 @@ import {
   type IntegrationCategoryOption,
 } from '@/components/prompt-step-integrations';
 import { PromptStepTools } from '@/components/prompt-step-tools';
+import { PromptStepRoles } from '@/components/prompt-step-roles';
 
 const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
   tool_use: 'Can use tools',
@@ -28,7 +29,7 @@ const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
 };
 
 const tokenHelp = (withFields: boolean) =>
-  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{agent:<id>}}\` \`{{integration:<id>.account}}\`. A \`{{step:<id>}}\` token must be alone on its line.`;
+  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{role:<input>}}\` \`{{agent:<id>}}\` \`{{integration:<id>.account}}\`. A \`{{step:<id>}}\` or \`{{role:<input>}}\` token must be alone on its line.`;
 
 const NO_ISSUES: readonly PromptStepIssue[] = [];
 
@@ -100,6 +101,7 @@ export function PromptStepEditor({
           className="text-xs text-neutral-500"
         />
       </div>
+      <PromptStepRoles entry={entry} disabled={disabled} onChange={onChange} />
       <fieldset className="flex flex-wrap gap-x-4 gap-y-1">
         <legend className="mb-1 text-xs text-neutral-400">Capabilities</legend>
         {PROMPT_STEP_CAPABILITIES.map((capability) => (

@@ -70,6 +70,21 @@ const validDraft = (over: Record<string, unknown> = {}) => ({
 });
 const invalidDraft = () => validDraft({ stepIds: [STEP, 'no-such-step'] });
 
+it('teaches role inputs, exact structured replies and role quotation authority in creator prompts', async () => {
+  const prompt = await typeDraftStep.llm!.buildPrompt({ detected: detected(), formValues: {} });
+  for (const text of [
+    '{{role:<input>}}',
+    'consumesRoles',
+    'providesRoles',
+    'outputMode',
+    '"structured"',
+    'Inline and nested tokens are refused',
+    '"quotable":false',
+    'provides data roles',
+  ])
+    expect(prompt).toContain(text);
+});
+
 function detected(over: Partial<TypeDraftDetect> = {}): TypeDraftDetect {
   return {
     steps,

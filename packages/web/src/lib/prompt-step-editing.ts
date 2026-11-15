@@ -235,7 +235,10 @@ function sameEntry(a: StoredPromptStep, b: StoredPromptStep): boolean {
     sameList(a.capabilities, b.capabilities) &&
     JSON.stringify(a.paramFormSchema ?? null) === JSON.stringify(b.paramFormSchema ?? null) &&
     JSON.stringify(a.tools ?? []) === JSON.stringify(b.tools ?? []) &&
-    JSON.stringify(a.integrations ?? []) === JSON.stringify(b.integrations ?? [])
+    JSON.stringify(a.integrations ?? []) === JSON.stringify(b.integrations ?? []) &&
+    a.outputMode === b.outputMode &&
+    JSON.stringify(a.consumesRoles ?? []) === JSON.stringify(b.consumesRoles ?? []) &&
+    JSON.stringify(a.providesRoles ?? []) === JSON.stringify(b.providesRoles ?? [])
   );
 }
 

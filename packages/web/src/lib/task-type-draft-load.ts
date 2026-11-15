@@ -2,6 +2,7 @@ import {
   parseStepId,
   PROMPT_STEP_DRAFTABLE_KEYS,
   rewriteStepTokens,
+  promptRolePortDeclarationsSchema,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
@@ -28,6 +29,13 @@ const FITS: Record<DraftableKey, (value: unknown) => boolean> = {
   template: isText,
   capabilities: isTexts,
   timeoutMs: (value) => typeof value === 'number',
+  consumesRoles: (value) =>
+    Array.isArray(value) &&
+    promptRolePortDeclarationsSchema.shape.consumesRoles.safeParse(value).success,
+  providesRoles: (value) =>
+    Array.isArray(value) &&
+    promptRolePortDeclarationsSchema.shape.providesRoles.safeParse(value).success,
+  outputMode: (value) => value === 'structured',
 };
 
 function draftedStep(
@@ -47,7 +55,8 @@ function draftedStep(
   for (const key of PROMPT_STEP_DRAFTABLE_KEYS) {
     if (FITS[key](raw[key])) picked[key] = raw[key];
   }
-  return { ...base, ...picked } as PromptStepEntry;
+  const { consumesRoles: _inputs, providesRoles: _outputs, outputMode: _mode, ...kept } = base;
+  return { ...kept, ...picked } as PromptStepEntry;
 }
 
 /** A saved type keeps its slug, so the steps of a draft that renamed it are named under the saved one. */

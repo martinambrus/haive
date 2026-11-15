@@ -369,6 +369,18 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${token} names a step whose output can carry a person's words; only a step whose output an agent wrote can be quoted.`;
     case 'step-token-not-own-line':
       return `${token} must be alone on its line.`;
+    case 'role-token-not-own-line':
+      return `${token} is a role quote and must be alone on its line.`;
+    case 'role-not-declared':
+      return `${token} names an input this step does not declare.`;
+    case 'role-token-not-quotable':
+      return `${token} names a role without an agent-only quote projection; human or mixed output needs a host adapter.`;
+    case 'role-declaration-invalid':
+      return 'Role declarations need exact registered contracts and unique input names.';
+    case 'role-output-mode-required':
+      return 'Providing a role requires structured output mode.';
+    case 'role-output-required':
+      return 'Structured output mode requires exactly one provided role.';
     case 'tool-no-longer-valid':
       return issue.raw
         ? `${tool} no longer passes its checks; fix it or remove it.`
