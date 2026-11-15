@@ -1925,6 +1925,41 @@ for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
   );
 }
 
+for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
+  it.each([false, true])(
+    `DAGP-F8 section C clears the coder streak on a valid ${outcome} fix result (refused: %s)`,
+    async (refused) => {
+      const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+      const streak = {
+        kind: 'dag_auxiliary_faults',
+        role: 'coder',
+        level: 0,
+        providerId: 'provider',
+        invocationId: 'earlier-fault',
+        count: 1,
+      };
+      h.plan.escalationLog = [streak];
+      h.invocations.push(
+        auxiliaryFault('fix', {
+          exitCode: refused ? 1 : 0,
+          errorMessage: refused ? PROVIDER_FATAL_HEADLINES.content_filter : null,
+          parsedOutput: { issue_id: 'A', outcome, files_modified: ['a.ts'] },
+        }),
+      );
+      h.runs.push({
+        id: 'fix-run',
+        dagIssueId: 'A',
+        role: 'coder',
+        cliInvocationId: 'fix',
+        consumedAt: null,
+      });
+      await h.run();
+      // A refusal is no usable reply: it neither counts nor clears.
+      expect(h.plan.escalationLog ?? []).toEqual(refused ? [streak] : []);
+    },
+  );
+}
+
 for (const role of ['reviewer', 'coder', 'issue_advisor', 'replanner'] as const) {
   it(`DAGP-F6 ${role} skips the streak transaction when no entry exists`, async () => {
     const h = auxiliaryHarness(role);

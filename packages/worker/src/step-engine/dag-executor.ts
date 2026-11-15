@@ -3431,6 +3431,15 @@ export async function resolveDagPhase(
         const refused =
           inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         if (refused) result.outcome = 'failed_unrecoverable';
+        // A valid structured reply is a usable decision whatever its outcome. A failed issue
+        // never reaches ingestReviewRun's clear, so clear the coder streak here.
+        if (validFixResult && !refused)
+          await updateAuxiliaryFault(
+            { db, current, level: curLevel, stepDef },
+            'coder',
+            inv,
+            false,
+          );
         let exhausted: string | null = null;
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
