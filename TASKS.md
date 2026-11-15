@@ -690,7 +690,7 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191, #1208 and #1211 (+32)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191, #1208 and #1211 (+35)
 
 status: parked (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); items 10 and 11 resolved 2026-11-15 in #1195; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
@@ -728,6 +728,9 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 30. Contract reference formatting is duplicated in two places (DP4R review-2 B-6, low).
 31. Parse-count test title overclaims what it pins (DP4R review-3 L1, coverage); `llm.skipIf` kept by design (L2); one dead guard remains (L3).
 32. (related first-party, PRE-EXISTING, low; from the port canvas review) `POST /admin/task-types/preview` and create accept unbounded `stepIds` (`shared/src/modularity/task-types.ts` ~:186 has no `.max`); the ports route now caps drafts at `MAX_PORT_DRAFT_STEPS` (256). Apply the same named bound to preview and create.
+33. (port canvas review) the ports draft route (`api/src/routes/task-types.ts` ~:290-295) leaves the draft slug, prompt `title` and `promptSteps` count unbounded since it tolerates save-only errors (the save path bounds the title by `PROMPT_STEP_TITLE_MAX_LENGTH`). Admin-only, echoed as a graph label. Add `.max(PROMPT_STEP_TITLE_MAX_LENGTH)` and a record cap. REGRESSION (marginal), low.
+34. (port canvas review) `await c.req.json()` on a non-JSON body throws `SyntaxError`, which `error-handler.ts` maps to 500 (task-types routes ~:336, :447, :575). PRE-EXISTING, low. Map bad JSON to 400 in one place.
+35. (port canvas review) derived draft projection yields no candidates when the base is missing or `requiresRepository` differs from the base (`shared/src/modularity-server/derived-task-types.ts` ~:49-66), so the canvas shows "No port graph" for that unfinished draft. PRE-EXISTING, low.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+13)
 
