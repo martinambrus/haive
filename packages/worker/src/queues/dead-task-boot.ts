@@ -453,31 +453,32 @@ async function failMalformedPin(db: Database, c: Candidate, error: unknown): Pro
     });
     return true;
   });
-  if (changed) {
+  if (changed)
     log.error({ err: error, taskId: c.id }, 'task failed permanently: malformed execution pin');
-    await db.transaction((tx) =>
-      supersedeDeadTaskRuns(
-        tx,
-        and(
-          eq(schema.cliInvocations.taskId, c.id),
-          inArray(
-            schema.cliInvocations.taskId,
-            tx
-              .select({ id: schema.tasks.id })
-              .from(schema.tasks)
-              .where(
-                and(
-                  eq(schema.tasks.id, c.id),
-                  eq(schema.tasks.status, 'failed'),
-                  eq(schema.tasks.orchestrationEpoch, c.epoch + 1),
-                ),
+  // Run cleanup holds no task-row lock: Retry takes runs before steps and the task.
+  // A failed cleanup is retried by boot and the revival sweep even after deadAt was cleared.
+  await db.transaction((tx) =>
+    supersedeDeadTaskRuns(
+      tx,
+      and(
+        eq(schema.cliInvocations.taskId, c.id),
+        inArray(
+          schema.cliInvocations.taskId,
+          tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(
+              and(
+                eq(schema.tasks.id, c.id),
+                eq(schema.tasks.status, 'failed'),
+                eq(schema.tasks.orchestrationEpoch, changed ? c.epoch + 1 : c.epoch),
               ),
-          ),
+            ),
         ),
       ),
-    );
-    await resyncAfterTaskEnd(db, c.id);
-  }
+    ),
+  );
+  await resyncAfterTaskEnd(db, c.id);
   return true;
 }
 
@@ -489,9 +490,29 @@ export async function reviveDeadTasks(
   let revived = 0;
   let held = 0;
   let failed = 0;
-  for (const c of await readCandidates(db, isNotNull(schema.tasks.deadAt))) {
+  for (const c of await readCandidates(
+    db,
+    or(
+      isNotNull(schema.tasks.deadAt),
+      and(
+        eq(schema.tasks.status, 'failed'),
+        inArray(
+          schema.tasks.id,
+          db
+            .select({ taskId: schema.cliInvocations.taskId })
+            .from(schema.cliInvocations)
+            .where(
+              and(
+                isNull(schema.cliInvocations.endedAt),
+                isNull(schema.cliInvocations.supersededAt),
+              ),
+            ),
+        ),
+      ),
+    ),
+  )) {
     try {
-      if (!(await judgeCandidate(db, c)).resolves) continue;
+      if (!(await judgeCandidate(db, c)).resolves || c.deadAt === null) continue;
       const outcome = await reviveDeadTask(db, c, deps);
       if (outcome === 'held') held += 1;
       else if (outcome) revived += 1;

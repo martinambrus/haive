@@ -285,12 +285,16 @@ async function runCliExecJob(
       requestUsage: unknownRequestUsage('recovered-completion'),
     };
   }
-  // The dead mark supersedes every open run; one dispatched or requeued after it ends here.
-  if (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed') {
+  // A permanent pin failure clears deadAt before its retryable run cleanup. Neither
+  // a dead nor a failed task may start a queued invocation in that gap.
+  if (
+    row.task.status === 'failed' ||
+    (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed')
+  ) {
     await db.transaction((tx) => supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.id, row.id)));
     log.info(
       { invocationId: payload.invocationId, taskId: row.taskId },
-      'cli invocation of a dead task ended without running',
+      'cli invocation of a dead or failed task ended without running',
     );
     return;
   }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { StepDefinition } from '@haive/shared/step';
@@ -64,7 +64,7 @@ it.each(['module.ports.check', 'custom.ports.check', 'core-check'])(
         apply,
       };
       const result = await advanceStep({
-        db: fake.db,
+        db: fake.db as unknown as Database,
         taskId,
         userId,
         repoPath: '/tmp',
