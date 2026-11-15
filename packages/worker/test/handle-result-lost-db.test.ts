@@ -1,3 +1,4 @@
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { readValidationSnapshot } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -6,10 +7,11 @@ import path from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { logger, type WorkflowType } from '@haive/shared';
+import { logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
   handleResult,
+  processTaskJob,
   markTaskCancelled,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
@@ -941,6 +943,89 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       { status: 'done', row, output: row.output },
     );
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 1 });
+  });
+
+  it('a missing insight destination fails the handoff step and leaves it retryable', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override(stub(stepId, 9));
+    const runListSnapshot = ['08-phase-5-verify', stepId, '10-gate-3-commit'];
+    const taskId = await makeTask({ currentStepId: stepId, runListSnapshot });
+    const row = await makeRow(taskId, { stepId, status: 'done' });
+    const continuation = {
+      version: 1,
+      kind: 'insight_revise',
+      batchId: 'batch',
+      sourceStepRow: row.id,
+      generation: 0,
+      round: 1,
+    } as const;
+    await handleResult(db, ctxFor(taskId, { currentStepId: stepId, runListSnapshot }), stepId, {
+      status: 'revise',
+      row,
+      sourceStepId: stepId,
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'failed',
+      errorMessage: expect.stringContaining('run list'),
+    });
+    expect((await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status).toBe(
+      'failed',
+    );
+    expect(h.adds).toEqual([]);
+    expect(await resetStepAndDownstream(db, taskId, stepId, 0, E)).toMatchObject({
+      newEpoch: E + 1,
+    });
+    expect(await rowOf(row.id)).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+  });
+
+  it('a refused insight selection fails its existing preflight row before any editor dispatch', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override(stub(stepId, 9));
+    const runListSnapshot = ['08-phase-5-verify', stepId];
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({
+        slug: TYPE,
+        displayName: TYPE,
+        runListStrategy: 'static',
+        source: 'admin',
+        stepIds: runListSnapshot,
+      })
+      .onConflictDoNothing();
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'preflight', source: 'local_path', localPath: '/tmp' })
+      .returning();
+    const taskId = await makeTask({
+      type: TYPE,
+      repositoryId: repo!.id,
+      currentStepId: stepId,
+      runListSnapshot,
+    });
+    const row = await makeRow(taskId, {
+      stepId,
+      status: 'waiting_form',
+      formValues: { selectedInsights: ['one'] },
+    });
+    try {
+      await processTaskJob({
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId, userId, stepId, round: 0, epoch: E },
+        opts: {},
+        attemptsMade: 0,
+      } as unknown as Parameters<typeof processTaskJob>[0]);
+      expect(await rowOf(row.id)).toMatchObject({
+        status: 'failed',
+        errorMessage: expect.stringContaining('run list'),
+      });
+      expect(h.adds).toEqual([]);
+    } finally {
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    }
   });
 
   it('refuses an unreadable final change rather than assuming 08b made no edits', async () => {

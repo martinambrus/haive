@@ -15,6 +15,15 @@ import type { ResolvedTaskContext } from './run-list.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import { validationSuccessor, VALIDATION_RECHECK_EVENT } from './validation-recheck.js';
 
+export class InsightRunListError extends Error {
+  constructor() {
+    super(
+      'Insight continuation requires verification, code review and insight triage in the run list. Repair the task type and Retry this step.',
+    );
+    this.name = 'InsightRunListError';
+  }
+}
+
 /** Check all destinations before a reset. An old/custom pin must never run off-list. */
 export function assertInsightRunList(
   steps: readonly StepDefinition[],
@@ -24,10 +33,7 @@ export function assertInsightRunList(
   const verify = ids.indexOf(INSIGHT_VERIFY);
   const checkpoint = ids.indexOf('08e-insights-triage');
   const review = steps.findIndex((s) => s.metadata.id === reviewStepId);
-  if (verify < 0 || review <= verify || checkpoint <= review)
-    throw new Error(
-      'Insight continuation requires verification, code review and insight triage in the run list.',
-    );
+  if (verify < 0 || review <= verify || checkpoint <= review) throw new InsightRunListError();
 }
 
 /** Resolve the review through the immutable pin; a standalone declaration cannot impersonate it. */

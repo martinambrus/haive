@@ -1,6 +1,10 @@
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { isConditionalInsightStep } from './run-list.js';
-import { assertInsightTaskSteps, handoffInsightContinuation } from './insight-continuation.js';
+import {
+  InsightRunListError,
+  assertInsightTaskSteps,
+  handoffInsightContinuation,
+} from './insight-continuation.js';
 import {
   validationSuccessor,
   ValidationSnapshotError,
@@ -2100,6 +2104,7 @@ const LOST_HANDOFF_READS_ROW = {
   revalidation_target: true,
   successor_task: false,
   validation_snapshot: true,
+  insight_run_list: true,
 } as const;
 
 type LostHandoffSite = keyof typeof LOST_HANDOFF_READS_ROW;
@@ -2179,6 +2184,55 @@ async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<b
     columns: { orchestrationEpoch: true },
   });
   return task !== undefined && task.orchestrationEpoch !== ctx.orchestrationEpoch;
+}
+
+/** Refusals belong to the source row so Retry targets the failed step. */
+async function failStepTransition(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  row: typeof schema.taskSteps.$inferSelect,
+  message: string,
+): Promise<boolean> {
+  try {
+    await db.transaction(async (tx) => {
+      const [failed] = await tx
+        .update(schema.taskSteps)
+        .set({
+          status: 'failed',
+          errorMessage: message,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+          integrationWait: null,
+          ...CLEAR_STEP_USAGE_STAMP,
+        })
+        .where(
+          and(
+            eq(schema.taskSteps.id, row.id),
+            eq(schema.taskSteps.status, row.status),
+            eq(schema.taskSteps.rerunGeneration, row.rerunGeneration),
+          ),
+        )
+        .returning({ id: schema.taskSteps.id });
+      if (!failed) throw new ParkOvertaken();
+      const held = await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(
+          and(
+            taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }),
+            eq(schema.tasks.userId, ctx.userId),
+            isNull(schema.tasks.deadAt),
+          ),
+        )
+        .for('share');
+      if (held.length === 0) throw new ParkOvertaken();
+    });
+  } catch (err) {
+    if (!(err instanceof ParkOvertaken)) throw err;
+    return false;
+  }
+  await finishFailedStep(db, ctx, row.stepId, row, message, OPEN_TASK_STATUSES);
+  return true;
 }
 
 export async function handleResult(
@@ -2297,38 +2351,8 @@ export async function handleResult(
         if (!(err instanceof ValidationSnapshotError)) throw err;
         // Snapshot failure belongs to this step's hand-off, so Retry can rerun it.
         // As with every failed step, finishFailedStep also fails and settles its task.
-        try {
-          await db.transaction(async (tx) => {
-            const [failed] = await tx
-              .update(schema.taskSteps)
-              .set({
-                status: 'failed',
-                errorMessage: err.message,
-                endedAt: new Date(),
-                updatedAt: new Date(),
-                ...CLEAR_STEP_USAGE_STAMP,
-              })
-              .where(
-                and(
-                  eq(schema.taskSteps.id, result.row.id),
-                  eq(schema.taskSteps.status, result.status),
-                ),
-              )
-              .returning({ id: schema.taskSteps.id });
-            if (!failed) throw new ParkOvertaken();
-            const held = await tx
-              .select({ id: schema.tasks.id })
-              .from(schema.tasks)
-              .where(taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }))
-              .for('share');
-            if (held.length === 0) throw new ParkOvertaken();
-          });
-        } catch (writeErr) {
-          if (!(writeErr instanceof ParkOvertaken)) throw writeErr;
+        if (!(await failStepTransition(db, ctx, result.row, err.message)))
           await logLost('validation_snapshot');
-          return;
-        }
-        await finishFailedStep(db, ctx, stepId, result.row, err.message, OPEN_TASK_STATUSES);
         return;
       }
       if (successor.evaluateFixLoop) {
@@ -2708,13 +2732,21 @@ export async function handleResult(
     }
     case 'revise': {
       if (result.continuation) {
-        const route = await handoffInsightContinuation(
-          db,
-          ctx,
-          result.row,
-          result.continuation,
-          await buildRunList(ctx, db),
-        );
+        let route;
+        try {
+          route = await handoffInsightContinuation(
+            db,
+            ctx,
+            result.row,
+            result.continuation,
+            await buildRunList(ctx, db),
+          );
+        } catch (err) {
+          if (!(err instanceof InsightRunListError)) throw err;
+          if (!(await failStepTransition(db, ctx, result.row, err.message)))
+            await logLost('insight_run_list');
+          return;
+        }
         if (!route) {
           await logLost('revalidation_target');
           return;
@@ -3541,7 +3573,16 @@ async function handleAdvanceStep(
     Array.isArray(formValues?.selectedInsights) &&
     formValues.selectedInsights.length > 0
   ) {
-    assertInsightTaskSteps(ctx, runList);
+    try {
+      assertInsightTaskSteps(ctx, runList);
+    } catch (err) {
+      if (!(err instanceof InsightRunListError)) throw err;
+      const row =
+        existing ??
+        (await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined));
+      await failStepTransition(db, ctx, row, err.message);
+      return;
+    }
   }
 
   // Pause gate (per-task Pause button, or the admin global switch). Held at the STEP BOUNDARY:
