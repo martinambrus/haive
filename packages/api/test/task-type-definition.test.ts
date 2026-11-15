@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { waitForPgLock } from './fixtures/wait-for-pg-lock.js';
 import { eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -542,16 +543,12 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
         .where(eq(schema.modules.moduleId, 'prt3'));
     });
     try {
-      let waiting = false;
-      for (let i = 0; i < 200; i++) {
+      const waiting = await waitForPgLock(async () => {
         const rows = await db.execute(
           sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND strpos(query,'modules')>0`,
         );
-        if (rows.length) {
-          waiting = true;
-          break;
-        }
-      }
+        return rows.length > 0;
+      });
       expect(waiting).toBe(true);
     } finally {
       release();
@@ -608,19 +605,17 @@ describe.skipIf(!url)('catalog locks belong to INSERT admission only', () => {
         stepIndex,
       })),
     );
-    await db
-      .insert(schema.taskTypeDefinitions)
-      .values([
-        row(slugs[0]!, { source: 'admin', stepIds: ids }),
-        row('workflow', { source: 'builtin', runListStrategy: 'workflow_paths', stepIds: null }),
-        row(slugs[1]!, {
-          source: 'admin',
-          runListStrategy: 'derived',
-          stepIds: null,
-          baseSlug: 'workflow',
-          changes: [],
-        }),
-      ]);
+    await db.insert(schema.taskTypeDefinitions).values([
+      row(slugs[0]!, { source: 'admin', stepIds: ids }),
+      row('workflow', { source: 'builtin', runListStrategy: 'workflow_paths', stepIds: null }),
+      row(slugs[1]!, {
+        source: 'admin',
+        runListStrategy: 'derived',
+        stepIds: null,
+        baseSlug: 'workflow',
+        changes: [],
+      }),
+    ]);
   });
   afterAll(async () => {
     await db
