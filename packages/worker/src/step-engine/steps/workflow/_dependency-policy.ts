@@ -1,6 +1,11 @@
 import path from 'node:path';
-import { readTextNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
-import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
+import {
+  readTextNoFollow,
+  lstatNoFollow,
+  isResourceLimitError,
+  RESOURCE_LIMITS,
+} from '@haive/shared/fs-safe';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -9,6 +14,7 @@ import { parsePorcelainZ } from './_commit-diff.js';
 /** Unknown ownership is report-only just like upstream source; it never means owned. */
 export type UpstreamKind = 'infrastructure' | 'dependency' | 'unknown';
 export interface DependencyPolicy {
+  withheldPaths?: string[];
   baselineRef?: string;
   workspaceRoots?: string[];
   drupal: boolean;
@@ -121,23 +127,43 @@ export function findingUpstream(f: {
   return f.upstream === undefined ? upstreamKind(f.path ?? f.file) : f.upstream;
 }
 
+function preserveResourceError(result: GitRunResult, propagate = false): void {
+  if (propagate && isResourceLimitError({ code: result.noExit }))
+    throw Object.assign(new Error('Git could not start due to a resource limit.'), {
+      code: result.noExit,
+    });
+}
+
 /** show/cat-file use the same failure status for absent entries and unreadable blobs.
  * Only a separate quiet presence probe answering 1 establishes absence. */
 async function readBaseline(
   workspace: string,
   refPath: string,
   existenceOnly = false,
+  signal?: AbortSignal,
+  propagateResourceErrors = false,
 ): Promise<string | null> {
   const result = await gitRun(
     workspace,
-    existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath],
+    ['--no-optional-locks', ...(existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath])],
+    undefined,
+    { signal },
   );
+  preserveResourceError(result, propagateResourceErrors);
   if (result.code === 0) return result.stdout;
   const description = existenceOnly ? `the Drupal 7 marker ${refPath}` : refPath;
   if (gitGaveNoAnswer(result)) {
     throw new Error(`Cannot read ${description} at the repository baseline: git gave no answer.`);
   }
-  const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath]);
+  const presence = await gitRun(
+    workspace,
+    ['--no-optional-locks', 'rev-parse', '-q', '--verify', refPath],
+    undefined,
+    {
+      signal,
+    },
+  );
+  preserveResourceError(presence, propagateResourceErrors);
   if (presence.code === 1) return null;
   throw new Error(`Cannot read ${description} at the repository baseline: git read failed.`);
 }
@@ -146,23 +172,66 @@ async function readBaseline(
 export async function loadDependencyPolicy(
   ctx: StepContext,
   workspace: string,
+  options: {
+    maxRound?: number;
+    signal?: AbortSignal;
+    denyContent?: (path: string) => boolean;
+    propagateResourceErrors?: boolean;
+    gitCwd?: string;
+  } = {},
 ): Promise<DependencyPolicy> {
-  const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+  const previous = await loadPreviousStepOutput(
+    ctx.db,
+    ctx.taskId,
+    '01-worktree-setup',
+    options.maxRound,
+  );
   const worktree = previous?.output as {
     baseBranch?: string;
     sandboxWorktreePath?: string;
   } | null;
   const baseBranch = worktree?.baseBranch;
+  const gitCwd = options.gitCwd ?? workspace;
   const base = baseBranch
-    ? await gitRun(workspace, ['merge-base', 'HEAD', baseBranch])
-    : await gitRun(workspace, ['rev-parse', '--verify', 'HEAD']);
+    ? await gitRun(gitCwd, ['--no-optional-locks', 'merge-base', 'HEAD', baseBranch], undefined, {
+        signal: options.signal,
+      })
+    : await gitRun(gitCwd, ['--no-optional-locks', 'rev-parse', '--verify', 'HEAD'], undefined, {
+        signal: options.signal,
+      });
+  preserveResourceError(base, options.propagateResourceErrors);
   if (base.code !== 0) {
     throw new Error('Cannot establish the repository baseline for dependency ownership.');
   }
-  const ownership = await readBaseline(workspace, `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`);
-  const baselineComposer = await readBaseline(workspace, `${base.stdout.trim()}:composer.json`);
+  const withheldPaths = [OWNERSHIP_POLICY_PATH, 'composer.json'].filter((p) =>
+    options.denyContent?.(p),
+  );
+  const ownership = withheldPaths.includes(OWNERSHIP_POLICY_PATH)
+    ? null
+    : await readBaseline(
+        gitCwd,
+        `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
+        false,
+        options.signal,
+        options.propagateResourceErrors,
+      );
+  const baselineComposer = withheldPaths.includes('composer.json')
+    ? null
+    : await readBaseline(
+        gitCwd,
+        `${base.stdout.trim()}:composer.json`,
+        false,
+        options.signal,
+        options.propagateResourceErrors,
+      );
   const { anchor, prefix } = workspaceAnchor(workspace);
-  const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
+  const composer = withheldPaths.includes('composer.json')
+    ? null
+    : await readTextNoFollow(
+        anchor,
+        `${prefix}composer.json`,
+        options.propagateResourceErrors ? { rethrow: RESOURCE_LIMITS } : undefined,
+      );
   let drupal = false;
   const roots = [...DEFAULT_ROOTS];
   // Removing the framework from the working manifest cannot remove its protection.
@@ -193,14 +262,32 @@ export async function loadDependencyPolicy(
   const drupal7Roots: string[] = [];
   for (const root of new Set(roots)) {
     const marker = `${root ? `${root}/` : ''}includes/bootstrap.inc`;
-    const baselineDrupal7 = await readBaseline(workspace, `${base.stdout.trim()}:${marker}`, true);
-    if (baselineDrupal7 !== null || (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null) {
+    if (options.denyContent?.(marker)) {
+      withheldPaths.push(marker);
+      continue;
+    }
+    const baselineDrupal7 = await readBaseline(
+      gitCwd,
+      `${base.stdout.trim()}:${marker}`,
+      true,
+      options.signal,
+      options.propagateResourceErrors,
+    );
+    if (
+      baselineDrupal7 !== null ||
+      (await lstatNoFollow(
+        anchor,
+        `${prefix}${marker}`,
+        options.propagateResourceErrors ? { rethrow: RESOURCE_LIMITS } : undefined,
+      )) !== null
+    ) {
       drupal7Roots.push(root);
     }
   }
   const drupal7 = drupal7Roots.length > 0;
   drupal ||= drupal7;
   return {
+    ...(withheldPaths.length ? { withheldPaths } : {}),
     baselineRef: base.stdout.trim(),
     workspaceRoots: [workspace, worktree?.sandboxWorktreePath, ctx.sandboxWorkdir]
       .filter((root): root is string => !!root)

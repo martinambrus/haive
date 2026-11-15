@@ -449,20 +449,23 @@ describe('dependency ownership', () => {
     const root = await repository();
     await file(root, 'composer.json', '{}');
     await file(root, 'core/lib/Framework.php', 'rewritten\n');
-    restoreGit = (await killGit(['show'], { contains: 'composer.json' })).restore;
+    restoreGit = (await killGit(['--no-optional-locks', 'show'], { contains: 'composer.json' }))
+      .restore;
     await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow('composer.json');
     await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('composer.json');
   });
 
   it('throws when the baseline ownership read gave no answer', async () => {
     const root = await repository(['web/modules/custom/company']);
-    restoreGit = (await killGit(['show'], { contains: 'dependency-ownership.json' })).restore;
+    restoreGit = (
+      await killGit(['--no-optional-locks', 'show'], { contains: 'dependency-ownership.json' })
+    ).restore;
     await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('ownership');
   });
 
   it('throws when the baseline Drupal 7 marker read gave no answer', async () => {
     const root = await repository();
-    restoreGit = (await killGit(['cat-file', '-e'])).restore;
+    restoreGit = (await killGit(['--no-optional-locks', 'cat-file', '-e'])).restore;
     await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('Drupal 7');
   });
 

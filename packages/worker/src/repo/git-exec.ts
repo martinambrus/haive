@@ -275,6 +275,7 @@ export async function gitRun(
 }
 
 export interface GitExecOptions {
+  signal?: AbortSignal;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   maxBuffer?: number;

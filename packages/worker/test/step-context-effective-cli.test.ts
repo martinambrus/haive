@@ -14,6 +14,15 @@ const providers = [
 ];
 
 describe('the CLI a step context carries for a task', () => {
+  it('supplies exactly the three host capabilities on a production context', async () => {
+    const ctx = await realStepContext({ cliProviderId: null });
+    expect(Object.keys(ctx.host ?? {}).sort()).toEqual([
+      'collectImplementationFiles',
+      'loadPreviousStepOutput',
+      'readReviewDiff',
+    ]);
+  });
+
   it('is the oldest enabled provider for a task with none', async () => {
     const ctx = await realStepContext({ cliProviderId: null, providers });
     expect(ctx.cliProviderId).toBe(P_OLDEST);

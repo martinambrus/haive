@@ -64,10 +64,13 @@ export function secretMaskDeniesPath(policy: SecretMaskPolicy, rel: string): boo
 }
 
 /** Compile once when applying one effective policy to multiple repository paths. */
-export function compileSecretMaskPolicy(policy: SecretMaskPolicy): (rel: string) => boolean {
+export function compileSecretMaskPolicy(
+  policy: SecretMaskPolicy,
+  options: { nocase?: boolean } = {},
+): (rel: string) => boolean {
   const { match, ignore } = partitionLikeTinyglobby(policy.globs.deny, policy.globs.ignore);
-  const denied = picomatch(match, { dot: true });
-  const ignored = picomatch(ignore, { dot: true });
+  const denied = picomatch(match, { dot: true, nocase: options.nocase });
+  const ignored = picomatch(ignore, { dot: true, nocase: options.nocase });
   return (rel) => {
     const normalised = normaliseRel(rel);
     if (!normalised || policy.tracked?.has(normalised)) return false;
