@@ -14,3 +14,18 @@ export const wrongApply = {
     return { report: 42 };
   },
 } satisfies StepDefinition<{ path: string }, { report: string }>;
+
+import type { CodeAuditOutput, StepOutputContractRef } from '@haive/shared/step';
+// @ts-expect-error Modules receive no mutable host validator.
+import { codeAuditOutputSchema } from '@haive/shared/step-outputs';
+// @ts-expect-error Only the registered version is an SDK reference.
+const badVersion: StepOutputContractRef = { id: 'haive.code-audit', version: 2 };
+const auditStep = {
+  ...steps[0],
+  outputContract: { id: 'haive.code-audit', version: 1 },
+  // @ts-expect-error The declared contract output cannot be an arbitrary report.
+  async apply() {
+    return { report: 'wrong' };
+  },
+} satisfies StepDefinition<{ path: string }, CodeAuditOutput>;
+void [codeAuditOutputSchema, badVersion, auditStep];
