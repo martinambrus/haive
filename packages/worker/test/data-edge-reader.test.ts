@@ -1,6 +1,8 @@
+import { eq } from 'drizzle-orm';
 import { StepRegistry } from '../src/step-engine/registry.js';
 import { deadTaskResolution } from '../src/queues/dead-task-boot.js';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared/logger';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -132,3 +134,59 @@ it('an explicitly absent optional input never reads the canonical decoy', async 
   fake.patch(schema.tasks, taskId, { dataEdgePlan: pin });
   expect(await readRole(ctx, 'draft')).toMatchObject({ state: 'absent', producer: null });
 });
+
+// A release can add inputs or consumers after this immutable task pin was written.
+it.each(['input', 'consumer'] as const)(
+  'reads canonically when a valid v3 plan predates the %s declaration',
+  async (missing) => {
+    const { ctx, fake, taskId, put } = fixture();
+    const nodes = dataPortNodes([draft, consumer]);
+    const pin = buildDataEdgePlan('static', [
+      {
+        executionPath: null,
+        nodes: missing === 'consumer' ? [nodes[0]!] : nodes.map((n) => ({ ...n, inputs: [] })),
+      },
+    ]);
+    const log = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    try {
+      for (const [status, output] of [
+        ['done', { spec: 'canonical future' }],
+        ['pending', { spec: 'canonical retained' }],
+        ['done', { findings: ['historical finding'] }],
+      ] as const) {
+        put(draft, 3, output, status);
+        for (const input of ['draft', SPEC_ROLES.draft] as const) {
+          fake.patch(schema.tasks, taskId, { dataEdgePlan: null });
+          const canonical = await readRole(ctx, input);
+          fake.patch(schema.tasks, taskId, { dataEdgePlan: pin });
+          log.mockClear();
+          expect(await readRole(ctx, input)).toEqual(canonical);
+          expect(log).toHaveBeenCalledExactlyOnceWith(
+            { taskId, consumer, input: 'draft' },
+            'data input absent from v3 pin; reading canonically',
+          );
+        }
+        await fake.db.delete(schema.taskSteps).where(
+          // Remove this variant so newest-round selection cannot tie.
+          eq(schema.taskSteps.round, 3),
+        );
+      }
+      await fake.db.delete(schema.taskSteps).where(eq(schema.taskSteps.stepId, draft));
+      fake.patch(schema.tasks, taskId, { dataEdgePlan: null });
+      const absent = await readRole(ctx, 'draft');
+      fake.patch(schema.tasks, taskId, { dataEdgePlan: pin });
+      expect(await readRole(ctx, 'draft')).toEqual(absent);
+      expect(absent.state).toBe('absent');
+    } finally {
+      log.mockRestore();
+    }
+  },
+);
+it.each([{}, { version: 2 }, { version: 4 }])(
+  'never falls back for malformed or wrong-version pins %j',
+  async (pin) => {
+    const { ctx, fake, taskId } = fixture();
+    fake.patch(schema.tasks, taskId, { dataEdgePlan: pin });
+    await expect(readRole(ctx, 'draft')).rejects.toThrow('invalid-data-edge-plan');
+  },
+);

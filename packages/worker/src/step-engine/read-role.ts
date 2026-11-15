@@ -1,5 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import {
   resolveDataInput,
   parseDataEdgePlan,
@@ -84,7 +85,6 @@ export async function readRole(
   let required = false;
   let inputName: string = role;
   if (task?.dataEdgePlan != null) {
-    pinned = true;
     const consumer =
       ctx.taskStepId &&
       (await ctx.db.query.taskSteps.findFirst({
@@ -102,26 +102,45 @@ export async function readRole(
     const candidate = selectDataEdgeCandidate(task, plan);
     if (plan.selection === 'derived' && task.executionPath == null)
       return { state: 'unselected', role, contract, producer: null };
-    const inputs =
-      candidate.nodes
-        .find((n) => n.id === consumer.stepId)
-        ?.inputs.filter((i) => i.role === role) ?? [];
-    const portName = namedInput ? input : inputs.length === 1 ? inputs[0]!.id : undefined;
-    if (!portName) throw new DataEdgePlanError('unknown consumer input');
-    inputName = portName;
-    const resolved = resolveDataInput(task, consumer.stepId, portName, plan);
-    if (resolved.state === 'unselected')
-      return { state: 'unselected', role, contract, producer: null };
-    if (
-      resolved.declaration.role !== role ||
-      resolved.declaration.contract.id !== contract.id ||
-      resolved.declaration.contract.version !== contract.version
-    )
-      throw new DataEdgePlanError(`${consumer.stepId}.${portName}: pinned contract unavailable`);
-    if (resolved.state === 'absent') return { state: 'absent', role, contract, producer: null };
-    required = !resolved.declaration.optional;
-    producerStepId = resolved.binding.producerStepId;
-    ceiling = Math.min(maxRound ?? ctx.round, ctx.round);
+    const node = candidate.nodes.find((n) => n.id === consumer.stepId);
+    const inputs = node?.inputs.filter((i) => i.role === role) ?? [];
+    if (!namedInput && inputs.length > 1) throw new DataEdgePlanError('ambiguous consumer input');
+    const portName = namedInput ? input : inputs[0]?.id;
+    const declaration = node?.inputs.find((i) => i.id === portName);
+    if (!declaration) {
+      // This input did not exist when the task was admitted. No binding is being
+      // remapped: use exactly the no-v3 read, including its legacy round semantics.
+      logger.debug(
+        {
+          taskId: ctx.taskId,
+          consumer: consumer.stepId,
+          input: namedInput
+            ? input
+            : Object.keys(SPEC_ROLES).find(
+                (key) => SPEC_ROLES[key as keyof typeof SPEC_ROLES] === role,
+              )!,
+        },
+        'data input absent from v3 pin; reading canonically',
+      );
+    } else {
+      pinned = true;
+      inputName = declaration.id;
+      const resolved = resolveDataInput(task, consumer.stepId, declaration.id, plan);
+      if (resolved.state === 'unselected')
+        return { state: 'unselected', role, contract, producer: null };
+      if (
+        resolved.declaration.role !== role ||
+        resolved.declaration.contract.id !== contract.id ||
+        resolved.declaration.contract.version !== contract.version
+      )
+        throw new DataEdgePlanError(
+          `${consumer.stepId}.${declaration.id}: pinned contract unavailable`,
+        );
+      if (resolved.state === 'absent') return { state: 'absent', role, contract, producer: null };
+      required = !resolved.declaration.optional;
+      producerStepId = resolved.binding.producerStepId;
+      ceiling = Math.min(maxRound ?? ctx.round, ctx.round);
+    }
   }
   const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, producerStepId, ceiling);
   if (required && (!row || row.status !== 'done'))
