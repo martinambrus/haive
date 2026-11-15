@@ -41,6 +41,7 @@ export async function validationSuccessor(
   round: number,
   steps: readonly StepDefinition[],
   output: unknown,
+  resumeAt?: string,
 ): Promise<ValidationSuccessor> {
   const ids = steps.map((s) => s.metadata.id);
   const index = ids.indexOf(stepId);
@@ -50,7 +51,7 @@ export async function validationSuccessor(
   if (validateIndex < 0 || index < validateIndex || (commitIndex >= 0 && index >= commitIndex)) {
     return ordinary;
   }
-  let resumeStepId = ordinary.next?.metadata.id ?? null;
+  let resumeStepId = resumeAt ?? ordinary.next?.metadata.id ?? null;
   let before: ValidationSnapshot | null | undefined;
   if (stepId === VALIDATE) {
     const event =

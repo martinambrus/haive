@@ -222,3 +222,23 @@ describe('finishedStepResult', () => {
     });
   });
 });
+
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
+it('replays the same versioned insight revise verdict from a done row', async () => {
+  const continuation = {
+    version: 1,
+    kind: 'insight_revise',
+    batchId: 'batch',
+    sourceStepRow: 'row-1',
+    generation: 0,
+    round: 1,
+  };
+  const r = row({ stepId: '08e-insights-triage', output: { continuation } });
+  expect(await finishedStepResult(fakeDb(false), 't', insightsTriageStep, r)).toEqual({
+    status: 'revise',
+    row: r,
+    sourceStepId: '08e-insights-triage',
+    targetStepId: '08-phase-5-verify',
+    continuation,
+  });
+});

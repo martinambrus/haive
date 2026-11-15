@@ -1,3 +1,4 @@
+import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
@@ -88,7 +89,7 @@ export function resolveTaskStep(
   parsedPlan?: DerivedRunPlan,
 ): StepDefinition | undefined {
   if (parseStepId(stepId)?.kind !== 'custom') {
-    const def = registry.get(stepId);
+    const def = conditionalInsightStep(ctx, registry.get(stepId));
     if (ctx.derivedRunPlan == null) return def;
     const plan = parsedPlan ?? parseDerivedRunPlan(ctx.derivedRunPlan);
     if (plan.version !== 2) return def;
@@ -118,7 +119,7 @@ export function resolveTaskStep(
           ? async (context) =>
               (await host.shouldRun!(context)) &&
               (!def!.shouldRun || (await def!.shouldRun(context)))
-          : host.shouldRun,
+          : conditionalInsightStep(ctx, host)?.shouldRun,
     };
   }
   const entry = ctx.customSteps?.[stepId];
@@ -135,6 +136,32 @@ export function resolveTaskStep(
     synthesisedSteps.set(key, def);
   }
   return def;
+}
+
+export function isConditionalInsightStep(ctx: TaskStepScope, id: string): boolean {
+  return (
+    (id === '08c-code-review' && ctx.executionPath === 'quick_bugfix') ||
+    (id === '08e-insights-triage' &&
+      (ctx.executionPath === 'quick_bugfix' || ctx.executionPath === 'plan_tasklist'))
+  );
+}
+
+/** New reachability is inert on paths that previously omitted these steps. */
+function conditionalInsightStep(
+  ctx: TaskStepScope,
+  def: StepDefinition | undefined,
+): StepDefinition | undefined {
+  if (!def) return def;
+  const id = def.metadata.id;
+  if (!isConditionalInsightStep(ctx, id)) return def;
+  return {
+    ...def,
+    async shouldRun(context) {
+      const active = await activeInsightContinuation(context.db, context.taskId, context.round);
+      context.throwIfCancelled();
+      return !!active && (!def.shouldRun || (await def.shouldRun(context)));
+    },
+  };
 }
 
 function assertPinnedProducerSupport(
@@ -229,7 +256,7 @@ export async function buildRunList(
   if (ctx.runListStrategy === 'workflow_paths') {
     return taskRunListIds(ctx, (type) =>
       stepRegistry.listByWorkflow(type).map((step) => step.metadata.id),
-    ).map((id) => stepRegistry.require(id));
+    ).map((id) => requireTaskStep(ctx, id));
   }
   const { steps, unresolved } = resolveRunList(ctx);
   if (unresolved.length > 0) throw new UnresolvedStepError(unresolved);

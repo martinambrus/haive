@@ -1,3 +1,6 @@
+import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
+import { isConditionalInsightStep } from './run-list.js';
+import { assertInsightTaskSteps, handoffInsightContinuation } from './insight-continuation.js';
 import {
   validationSuccessor,
   ValidationSnapshotError,
@@ -2704,6 +2707,28 @@ export async function handleResult(
       return;
     }
     case 'revise': {
+      if (result.continuation) {
+        const route = await handoffInsightContinuation(
+          db,
+          ctx,
+          result.row,
+          result.continuation,
+          await buildRunList(ctx, db),
+        );
+        if (!route) {
+          await logLost('revalidation_target');
+          return;
+        }
+        ctx.orchestrationEpoch = route.epoch;
+        await enqueueAdvance(
+          ctx.taskId,
+          ctx.userId,
+          route.next.metadata.id,
+          route.round,
+          route.epoch,
+        );
+        return;
+      }
       // A review step asked to revise an EARLIER generator step instead of failing
       // (e.g. gate-1 reject → re-plan 04, 03c reject → re-mine 03b). No cap, because the
       // loop is human-gated (the review form re-parks every cycle). The target reads its
@@ -3510,6 +3535,14 @@ async function handleAdvanceStep(
   // Stamp the step's position in the run list as run_seq (the run-order display key).
   const runList = await buildRunList(ctx, db);
   const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
+  // Refuse an old/custom pin before allowing its human selection to dispatch an editor.
+  if (
+    payload.stepId === '08e-insights-triage' &&
+    Array.isArray(formValues?.selectedInsights) &&
+    formValues.selectedInsights.length > 0
+  ) {
+    assertInsightTaskSteps(ctx, runList);
+  }
 
   // Pause gate (per-task Pause button, or the admin global switch). Held at the STEP BOUNDARY:
   // it fires only for an advance that would START new work — no row yet, or a row still
@@ -3526,7 +3559,12 @@ async function handleAdvanceStep(
   // terminal/epoch/other-active/duplicate guards — a stale or duplicate advance must still be
   // dropped rather than converted into a second park loop.
   const fresh = existing == null || existing.status === 'pending';
-  const pause = fresh ? await resolvePause(db, ctx.taskId) : null;
+  // A newly reachable dormant tail is a skip, so it must not introduce a pause/provider hold.
+  const dormantInsight =
+    fresh &&
+    isConditionalInsightStep(ctx, payload.stepId) &&
+    !(await activeInsightContinuation(db, ctx.taskId, round));
+  const pause = fresh && !dormantInsight ? await resolvePause(db, ctx.taskId) : null;
   if (
     !pause &&
     existing?.status === 'pending' &&
@@ -3559,7 +3597,7 @@ async function handleAdvanceStep(
     return;
   }
   const providerWait =
-    pause || schemaWait !== null || !fresh
+    pause || schemaWait !== null || !fresh || dormantInsight
       ? null
       : await providerHoldFor(db, ctx, stepDef, round, runIdx);
   const hold = pause

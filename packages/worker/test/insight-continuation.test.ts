@@ -1,0 +1,146 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { Database } from '@haive/database';
+import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import {
+  continuationForOutcome,
+  activeInsightContinuation,
+} from '../src/step-engine/steps/workflow/_insight-continuation.js';
+import type { InsightBatchRecord } from '../src/step-engine/steps/workflow/_insight-batch.js';
+import { resolveTaskStep } from '../src/queues/run-list.js';
+import { assertInsightRunList } from '../src/queues/insight-continuation.js';
+import { keepForPath } from '../src/orchestrator/execution-paths.js';
+const route = {
+  version: 1,
+  kind: 'insight_revise',
+  batchId: 'batch',
+  sourceStepRow: 'source',
+  generation: 2,
+  round: 3,
+} as const;
+const outcome = (result: string) =>
+  ({
+    version: 1,
+    stage: 'outcome',
+    batchId: 'batch',
+    sourceStepRowId: 'source',
+    generation: 2,
+    selected: [{ id: 'one' }],
+    items: [{ id: 'one', outcome: result, changes: ['change'] }],
+  }) as InsightBatchRecord;
+const database = (
+  options: { generation?: number; checkpoint?: string; version?: number; events?: boolean } = {},
+) =>
+  ({
+    query: {
+      taskEvents: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue(
+            options.events === false
+              ? []
+              : [{ payload: { continuation: { ...route, version: options.version ?? 1 } } }],
+          ),
+      },
+      taskSteps: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce({ rerunGeneration: options.generation ?? 2 })
+          .mockResolvedValue({ status: options.checkpoint ?? 'pending' }),
+      },
+    },
+  }) as unknown as Database;
+describe('insight continuation identity and reachability', () => {
+  it('only an applied stored outcome creates a continuation', () => {
+    expect(continuationForOutcome(outcome('applied'), 2)).toEqual(route);
+    for (const result of ['already_handled', 'not_applied', 'unconfirmed'])
+      expect(continuationForOutcome(outcome(result), 2)).toBeUndefined();
+    expect(continuationForOutcome({ ...outcome('applied'), selected: [] }, 2)).toBeUndefined();
+    expect(continuationForOutcome({ ...outcome('applied'), stage: 'intent' }, 2)).toBeUndefined();
+  });
+  it('refuses unknown event versions explicitly', async () => {
+    await expect(activeInsightContinuation(database({ version: 2 }), 'task', 3)).rejects.toThrow(
+      /Unsupported insight continuation/,
+    );
+  });
+  it('source Retry invalidates the older continuation', async () => {
+    expect(await activeInsightContinuation(database({ generation: 3 }), 'task', 3)).toBeNull();
+  });
+  it.each(['pending', 'running', 'waiting_form', 'failed'])(
+    'downstream Retry/Resume keeps the route while checkpoint is %s',
+    async (checkpoint) => {
+      expect(await activeInsightContinuation(database({ checkpoint }), 'task', 4)).toEqual(route);
+    },
+  );
+  it.each(['done', 'skipped'])('settles at a %s checkpoint', async (checkpoint) => {
+    expect(await activeInsightContinuation(database({ checkpoint }), 'task', 3)).toBeNull();
+  });
+  it('does not activate a future route in an older round', async () => {
+    expect(await activeInsightContinuation(database(), 'task', 2)).toBeNull();
+  });
+  it.each(['quick_bugfix', 'plan_tasklist'] as const)(
+    '%s retains normal execution while conditionally adding the missing tail',
+    async (executionPath) => {
+      for (const id of ['08c-code-review', '08e-insights-triage']) {
+        expect(keepForPath(id, executionPath)).toBe(true);
+        const original = vi.fn().mockResolvedValue(true);
+        const def = { metadata: { id }, shouldRun: original } as unknown as StepDefinition;
+        const step = resolveTaskStep({ executionPath }, id, { get: () => def })!;
+        const conditional = id === '08e-insights-triage' || executionPath === 'quick_bugfix';
+        const ctx = {
+          db: database({ events: false }),
+          taskId: 'task',
+          round: 3,
+          throwIfCancelled() {},
+        } as StepContext;
+        expect(await step.shouldRun!(ctx)).toBe(!conditional);
+        expect(original).toHaveBeenCalledTimes(conditional ? 0 : 1);
+        original.mockClear();
+        expect(await step.shouldRun!({ ...ctx, db: database() })).toBe(true);
+        expect(original).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+  it('preflights the complete verify/review/checkpoint path', () => {
+    const steps = ['08-phase-5-verify', '08c-code-review', '08e-insights-triage'].map((id) => ({
+      metadata: { id },
+    })) as StepDefinition[];
+    expect(() => assertInsightRunList(steps)).not.toThrow();
+    for (let index = 0; index < steps.length; index++)
+      expect(() => assertInsightRunList(steps.filter((_, i) => i !== index))).toThrow(/run list/);
+    expect(() => assertInsightRunList([steps[1]!, steps[0]!, steps[2]!])).toThrow(/run list/);
+  });
+});
+
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
+it('the manual checkpoint has no second selection or editor, even with an old preset', async () => {
+  const detected = {
+    worktreePath: '/repo',
+    sandboxWorktreePath: '/ws',
+    spec: '',
+    insights: [],
+    insightCheckpoint: route,
+  };
+  const form = await insightsTriageStep.form!({} as never, detected, null);
+  expect(form).toMatchObject({ fields: [], autoSubmit: true });
+  const args = { detected, formValues: { selectedInsights: ['old-selection'] }, llmOutput: null };
+  expect(await insightsTriageStep.agentMining!.selectAgents({ ...args, ctx: {} as never })).toEqual(
+    [],
+  );
+  const output = await insightsTriageStep.apply({ throwIfCancelled() {} } as never, args as never);
+  expect(output).toMatchObject({ selected: [], implemented: false });
+  expect(insightsTriageStep.reviseLoop!.evaluate(output)).toBeNull();
+});
+
+it('enters the durable checkpoint before loading a new inventory or building an editor prompt', async () => {
+  const ctx = {
+    db: database(),
+    taskId: 'task',
+    round: 3,
+    workspacePath: '/repo',
+    sandboxWorkdir: '/ws',
+    throwIfCancelled() {},
+  } as StepContext;
+  expect(await insightsTriageStep.shouldRun!(ctx)).toBe(true);
+  const detected = await insightsTriageStep.detect!({ ...ctx, db: database() });
+  expect(detected).toMatchObject({ insightCheckpoint: route, insights: [] });
+});

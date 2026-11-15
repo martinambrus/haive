@@ -88,3 +88,62 @@ describe('validation successor runtime hand-off', () => {
     },
   );
 });
+
+describe('insight validation composition', () => {
+  it.each([true, false])(
+    'moved=%s returns through verification, never past the editor',
+    async (moved) => {
+      const steps = [
+        step(RECONCILE),
+        step(VALIDATE),
+        step('08-phase-5-verify'),
+        step('08c-code-review'),
+        { ...step('08e-insights-triage'), editsCodeOrTests: true },
+        step('10-gate-3-commit'),
+      ];
+      const db = {
+        query: {
+          taskSteps: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ output: { validationSnapshot: { 'a.ts': 'before' } } }),
+          },
+        },
+      } as unknown as Database;
+      h.snapshot.mockResolvedValue({ 'a.ts': moved ? 'after' : 'before' });
+      const route = await validationSuccessor(
+        db,
+        ctx,
+        '08e-insights-triage',
+        4,
+        steps,
+        {},
+        '08-phase-5-verify',
+      );
+      expect(route).toEqual(
+        moved
+          ? {
+              next: steps[0],
+              round: 5,
+              recheck: {
+                sourceStepId: '08e-insights-triage',
+                resumeStepId: '08-phase-5-verify',
+                affectedFiles: ['a.ts'],
+              },
+            }
+          : { next: steps[5], round: 4 },
+      );
+      if (moved) {
+        const resumedDb = {
+          query: {
+            taskEvents: { findFirst: vi.fn().mockResolvedValue({ payload: route.recheck }) },
+          },
+        } as unknown as Database;
+        expect(await validationSuccessor(resumedDb, ctx, VALIDATE, 5, steps, {})).toEqual({
+          next: steps[2],
+          round: 5,
+        });
+      }
+    },
+  );
+});

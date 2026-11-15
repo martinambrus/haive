@@ -516,6 +516,42 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     return { dir, row, ctx, taskId, hand, setup };
   };
 
+  it('insight rounds leave the fix allowance intact; a real fix inside them still spends it', async () => {
+    const taskId = await makeTask({ maxFixRounds: 1, currentRound: 5 });
+    const source = await makeRow(taskId, { round: 5, status: 'done' });
+    for (let round = 1; round <= 5; round++)
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        taskStepId: source.id,
+        eventType: 'insight.continuation',
+        payload: {
+          continuation: {
+            version: 1,
+            kind: 'insight_revise',
+            batchId: `batch-${round}`,
+            sourceStepRow: source.id,
+            generation: 0,
+            round,
+          },
+        },
+      });
+    const ctx = ctxFor(taskId, { currentRound: 5 });
+    await handleResult(db, ctx, S, loopBack()(source));
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: FIX_TARGET, round: 6 });
+    expect((await eventTypes(taskId)).filter((t) => t === 'fix_loop.started')).toHaveLength(1);
+    const next = await makeRow(taskId, { round: 6, status: 'done' });
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: S, currentRound: 6 })
+      .where(eq(schema.tasks.id, taskId));
+    h.adds.length = 0;
+    await handleResult(db, { ...ctx, currentRound: 6 }, S, loopBack()(next));
+    expect(h.adds).toEqual([]);
+    expect(await rowOf(next.id)).toMatchObject({ status: 'waiting_form' });
+    expect((await eventTypes(taskId)).filter((t) => t === 'fix_loop.started')).toHaveLength(1);
+    expect(await eventTypes(taskId)).toContain('fix_loop.escalated');
+  });
+
   it('skips revalidation when 08b made no edits', async () => {
     const w = await lateFixer();
     await w.hand();

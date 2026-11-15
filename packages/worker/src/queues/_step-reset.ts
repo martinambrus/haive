@@ -45,6 +45,7 @@ export async function resetStepAndDownstream(
   round: number,
   expectedEpoch?: number,
   recovery = false,
+  heldStepIds: readonly string[] = [],
 ): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
@@ -122,7 +123,7 @@ export async function resetStepAndDownstream(
       // The rows the loop writes, in id order: the loop takes them in the order of an unordered read,
       // while the api's writers (a Stop, a repository delete) take theirs by id. After the sweeps,
       // since a pass holds a run and then wants its step row.
-      await lockStepRows(tx, inArray(schema.taskSteps.id, allStepIds));
+      await lockStepRows(tx, inArray(schema.taskSteps.id, [...allStepIds, ...heldStepIds]));
       // Held by this tx now, so this read is current. The reads above predate the lock: a fold from
       // them would overwrite what a peer added to carried_* or idle_ms before the lock was granted.
       const held = await tx

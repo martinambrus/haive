@@ -736,7 +736,9 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  finalize the step normally. Used by 03c-business-requirements-review (reject →
    *  re-mine 03b). */
   reviseLoop?: {
-    evaluate(applyOutput: TApply): { targetStepId: string } | null;
+    evaluate(
+      applyOutput: TApply,
+    ): { targetStepId: string; continuation?: InsightReviseContinuation } | null;
   };
   /** Human-gated restart-from-implementation: when this step's apply output requests a
    *  restart (e.g. the gate-2 developer reject after browser verification), the runner
@@ -802,4 +804,14 @@ export interface StepHostServices {
     worktreePath: string,
   ): Promise<import('./review-types.js').ImplementationFileSet>;
   readReviewDiff(options: ReviewDiffOptions): Promise<ReviewDiff>;
+}
+
+/** Durable return to verification after an insight editor; round is the fresh check round. */
+export interface InsightReviseContinuation {
+  version: 1;
+  kind: 'insight_revise';
+  batchId: string;
+  sourceStepRow: string;
+  generation: number;
+  round: number;
 }

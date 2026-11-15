@@ -25,7 +25,8 @@ describe('keepForPath', () => {
     expect(keepForPath('08-phase-5-verify', 'quick_bugfix')).toBe(true);
     expect(keepForPath('04-phase-0b-pre-planning', 'quick_bugfix')).toBe(false);
     expect(keepForPath('05-phase-0b5-spec-quality', 'quick_bugfix')).toBe(false);
-    expect(keepForPath('08c-code-review', 'quick_bugfix')).toBe(false);
+    expect(keepForPath('08c-code-review', 'quick_bugfix')).toBe(true);
+    expect(keepForPath('08e-insights-triage', 'quick_bugfix')).toBe(true);
     expect(keepForPath('08d-adversarial-qa', 'quick_bugfix')).toBe(false);
     expect(keepForPath('06b-sprint-planning', 'quick_bugfix')).toBe(false);
   });

@@ -52,6 +52,9 @@ const SPINE: readonly string[] = [
   '07b-phase-4-validate',
   '08b-test-management',
   '08-phase-5-verify',
+  // Conditional on an active insight continuation on the shorter paths.
+  '08c-code-review',
+  '08e-insights-triage',
   '10-gate-3-commit',
   '11b1-rag-source-selection',
   '11a-gate-4-push',
@@ -122,6 +125,7 @@ export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '09-gate-2-verify-approval': '07-phase-2-implement', // restartLoop
   '06-gate-1-spec-approval': '04-phase-0b-pre-planning', // reviseLoop
   '03c-business-requirements-review': '03b-business-requirements', // reviseLoop
+  '08e-insights-triage': '08-phase-5-verify', // reviseLoop
   '11-phase-8-learning': '11-phase-8-learning', // reviseLoop (self-target: refine drafts)
 };
 
