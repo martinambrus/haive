@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { MiningWaveError } from '../../step-definition.js';
 import * as auto from './_insight-auto.js';
+import { insightsTriageStep } from './08e-insights-triage.js';
 import * as batches from './_insight-batch.js';
 import * as dependency from './_dependency-policy.js';
 import {
@@ -277,6 +278,120 @@ describe('automatic insight stages', () => {
       expect(auto.claimAutoRound).not.toHaveBeenCalled();
     },
   );
+  it('a justified decline in round 1 permits a fresh consequential item to be classified and applied in round 2', async () => {
+    history.results = [
+      {
+        version: 1,
+        batchId,
+        sourceStepRowId: 'row',
+        generation: 0,
+        complete: true,
+        items: [
+          {
+            id: one.id,
+            identity: one.identity,
+            class: 'consequential',
+            kind: 'correctness',
+            eligible: true,
+            outcome: 'unconfirmed',
+            reason: 'repair',
+          },
+        ],
+        invocationIds: [],
+      },
+    ];
+    vi.mocked(batches.loadInsightBatchRecords).mockResolvedValue([
+      { stage: 'intent', batchId, selected: [one] },
+      {
+        stage: 'outcome',
+        batchId,
+        selected: [one],
+        items: [{ id: one.id, outcome: 'not_applied', changes: [], reason: 'Already correct' }],
+      },
+    ] as never);
+    const nextCtx = { ...ctx, taskStepId: 'row-2', round: 2, logger: { info() {} } } as StepContext;
+    const fresh = { ...one, id: 'fresh', identity: 'src/a.ts::fresh', title: 'Fresh' };
+    const nextId = batches.insightBatchId('row-2', 0);
+    const detected = await detectAutoInsights(nextCtx, [one, fresh], '/repo');
+    expect(detected).toMatchObject({
+      mode: 'classify',
+      candidates: [fresh],
+      stopReason: 'classifying',
+    });
+    const nextClaim = {
+      ...claim,
+      batchId: nextId,
+      sourceStepRowId: 'row-2',
+      ordinal: 2,
+      insights: [fresh],
+    };
+    vi.mocked(auto.claimAutoRound).mockImplementationOnce(async () => {
+      history.claims.push(nextClaim);
+      return nextClaim;
+    });
+    expect(await startAutoClassification(nextCtx, detected)).toMatchObject([{ roleKey: 'triage' }]);
+    // The location is safe and owned; probe policy is independent of the classifier's prose.
+    detected.dependencyPolicy = state().dependencyPolicy;
+    const intent = {
+      version: 1,
+      batchId: nextId,
+      sourceStepRowId: 'row-2',
+      generation: 0,
+      mode: 'auto_08e',
+      stage: 'intent',
+      selected: [fresh],
+      items: [],
+      notes: '',
+    };
+    vi.spyOn(batches, 'ensureInsightIntent').mockResolvedValue(intent as never);
+    vi.spyOn(batches, 'appendInsightBatch').mockImplementation(
+      async (_ctx, record) => record as never,
+    );
+    const out = await insightsTriageStep.apply(nextCtx, {
+      detected: {
+        worktreePath: '/repo',
+        sandboxWorktreePath: '/ws',
+        spec: '',
+        insights: [one, fresh],
+        auto: detected,
+      },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      agentMiningResults: [
+        {
+          ...result(1, {
+            version: 1,
+            batchId: nextId,
+            items: [
+              { id: fresh.id, class: 'consequential', kind: 'correctness', reason: 'repair' },
+            ],
+          }),
+          agentId: auto.classifierId(nextId, 1),
+        },
+        {
+          ...result(1, {
+            version: 1,
+            batchId: nextId,
+            notes: '',
+            items: [{ id: fresh.id, outcome: 'applied', changes: ['Fixed'], reason: 'Repaired' }],
+          }),
+          agentId: `implementer-${nextId}`,
+        },
+      ],
+    });
+    expect(out).toMatchObject({
+      selected: [fresh],
+      implemented: true,
+      automatic: { stopReason: 'no_new_consequential' },
+    });
+    const manual = await detectAutoInsights({ ...ctx, rerunGeneration: 1 }, [one], '/repo');
+    expect(manual).toMatchObject({
+      mode: 'manual',
+      candidates: [one],
+      stopReason: 'no_new_consequential',
+    });
+  });
   it('an interrupted writer requires a human before further new automatic work', async () => {
     vi.mocked(batches.loadInsightBatchRecords).mockResolvedValue([
       { stage: 'intent', batchId: 'old', selected: [one] } as never,

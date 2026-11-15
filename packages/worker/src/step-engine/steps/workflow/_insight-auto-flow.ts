@@ -74,11 +74,18 @@ export async function detectAutoInsights(
       .filter((r) => r.stage === 'outcome')
       .flatMap((r) =>
         r.items
-          .filter((i) => i.outcome === 'unconfirmed' || i.outcome === 'not_applied')
+          .filter((i) => i.outcome === 'unconfirmed')
           .map((i) => r.selected.find((s) => s.id === i.id)?.identity),
       )
       .filter((i): i is string => !!i),
   );
+  const declined = journal
+    .filter((r) => r.stage === 'outcome')
+    .flatMap((r) =>
+      r.items
+        .filter((i) => i.outcome === 'not_applied')
+        .flatMap((i) => r.selected.filter((s) => s.id === i.id).map((s) => s.identity)),
+    );
   const priorUnknown =
     unconfirmed.size > 0 ||
     journal.some(
@@ -126,7 +133,7 @@ export async function detectAutoInsights(
     decisions
       .filter((i) => i.class === 'unclassified' || (i.class === 'consequential' && !i.eligible))
       .map((i) => i.identity)
-      .concat([...unconfirmed], [...pendingWriter]),
+      .concat([...unconfirmed], [...pendingWriter], declined),
   );
   if (
     mode !== 'classify' &&
