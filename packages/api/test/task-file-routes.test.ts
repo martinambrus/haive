@@ -141,6 +141,28 @@ describe('task file read routes', () => {
     },
   );
 
+  it.each(['/files/raw', '/files/content'])(
+    'serves malformed gate JSON as a valid withheld artifact at %s',
+    async (route) => {
+      const secret = randomBytes(24).toString('hex');
+      const target = path.join(worktree, '.haive', 'learning-knowledge-diff.json');
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, `{"files":[{"newContent":${JSON.stringify(`TOKEN="${secret}"`)}`);
+      const res = await get(route, { path: target });
+      expect(res.status).toBe(200);
+      const artifact = route.endsWith('raw')
+        ? await res.json()
+        : JSON.parse(((await res.json()) as { content: string }).content);
+      expect(artifact).toMatchObject({
+        headSha: null,
+        fileCount: 1,
+        truncated: false,
+        files: [{ unreadable: true, unreadableReason: 'content withheld by secret policy.' }],
+      });
+      expect(JSON.stringify(artifact)).not.toContain(secret);
+    },
+  );
+
   describe('GET /files', () => {
     it('lists the workspace, with a link as neither file nor directory', async () => {
       const res = await get('/files');

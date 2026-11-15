@@ -61,6 +61,24 @@ export function redactCommitDiffFile(file: CommitDiffFile): CommitDiffFile {
   return { ...readonly, oldContent, newContent, contentWithheld: true };
 }
 
+const WITHHELD_ARTIFACT = JSON.stringify({
+  headSha: null,
+  fileCount: 1,
+  truncated: false,
+  files: [
+    {
+      path: 'withheld',
+      status: 'modified',
+      binary: false,
+      truncated: false,
+      unreadable: true,
+      unreadableReason: CREDENTIAL_WITHHELD,
+      oldContent: '',
+      newContent: '',
+    },
+  ],
+} satisfies CommitDiffArtifact);
+
 /** Recheck legacy artifacts at serve time. Invalid/partial JSON never falls back to raw
  * content, which could contain escaped credentials the text scanner cannot recognise. */
 export function redactCommitDiffJson(text: string): string {
@@ -69,21 +87,36 @@ export function redactCommitDiffJson(text: string): string {
     if (
       !artifact ||
       typeof artifact !== 'object' ||
+      !('headSha' in artifact) ||
+      (artifact.headSha !== null && typeof artifact.headSha !== 'string') ||
+      !('fileCount' in artifact) ||
+      typeof artifact.fileCount !== 'number' ||
+      !Number.isSafeInteger(artifact.fileCount) ||
+      artifact.fileCount < 0 ||
+      !('truncated' in artifact) ||
+      typeof artifact.truncated !== 'boolean' ||
       !('files' in artifact) ||
       !Array.isArray(artifact.files)
     )
-      return CREDENTIAL_WITHHELD;
+      return WITHHELD_ARTIFACT;
     let changed = false;
     for (const [index, file] of artifact.files.entries()) {
-      if (!file || typeof file !== 'object') return CREDENTIAL_WITHHELD;
-      if (typeof file.oldContent !== 'string' || typeof file.newContent !== 'string')
-        return CREDENTIAL_WITHHELD;
+      if (!file || typeof file !== 'object') return WITHHELD_ARTIFACT;
+      if (
+        typeof file.path !== 'string' ||
+        !['added', 'modified', 'deleted', 'renamed'].includes(file.status) ||
+        typeof file.binary !== 'boolean' ||
+        typeof file.truncated !== 'boolean' ||
+        typeof file.oldContent !== 'string' ||
+        typeof file.newContent !== 'string'
+      )
+        return WITHHELD_ARTIFACT;
       const safe = redactCommitDiffFile(file);
       changed ||= safe !== file;
       artifact.files[index] = safe;
     }
     return changed ? JSON.stringify(artifact) : text;
   } catch {
-    return CREDENTIAL_WITHHELD;
+    return WITHHELD_ARTIFACT;
   }
 }

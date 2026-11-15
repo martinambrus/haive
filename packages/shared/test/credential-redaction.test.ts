@@ -29,11 +29,14 @@ describe('committed-secret rules at evidence sinks', () => {
   });
   it('withholds the private key body as well as its nominated marker', () => {
     const body = randomBytes(64).toString('base64');
-    const text = `before\n-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----\nafter\n`;
+    const label = ['PRIVATE', 'KEY'].join(' ');
+    const begin = ['-----BEGIN', label + '-----'].join(' ');
+    const end = ['-----END', label + '-----'].join(' ');
+    const text = `before\n${begin}\n${body}\n${end}\nafter\n`;
     expect(redactCredentialText(text)).toBe(
       `before\n${CREDENTIAL_WITHHELD}\n${CREDENTIAL_WITHHELD}\n${CREDENTIAL_WITHHELD}\nafter\n`,
     );
-    expect(redactCredentialText(`before\n-----BEGIN PRIVATE KEY-----\n${body}`)).toBe(
+    expect(redactCredentialText(`before\n${begin}\n${body}`)).toBe(
       `before\n${CREDENTIAL_WITHHELD}\n${CREDENTIAL_WITHHELD}`,
     );
   });
@@ -46,8 +49,29 @@ describe('committed-secret rules at evidence sinks', () => {
     const text = 'token = process.env.TOKEN;\r\nconst a = 1;\npassword="placeholder"\r\n';
     expect(redactCredentialText(text)).toBe(text);
   });
-  it('refuses malformed artifacts instead of scanning escaped partial JSON', () => {
-    expect(redactCommitDiffJson('{"files":[')).toBe(CREDENTIAL_WITHHELD);
-    expect(redactCommitDiffJson('{"files":[{}]}')).toBe(CREDENTIAL_WITHHELD);
+  it.each([
+    '{"files":[',
+    '{"files":[{}]}',
+    '{"files":[]}',
+    '{"headSha":null,"fileCount":1,"truncated":false,"files":[{"oldContent":"","newContent":""}]}',
+  ])('returns a renderable withheld artifact for malformed or partial JSON: %s', (text) => {
+    const safe = JSON.parse(redactCommitDiffJson(text));
+    expect(safe).toMatchObject({
+      headSha: null,
+      fileCount: 1,
+      truncated: false,
+      files: [
+        {
+          path: 'withheld',
+          status: 'modified',
+          binary: false,
+          truncated: false,
+          unreadable: true,
+          unreadableReason: CREDENTIAL_WITHHELD,
+          oldContent: '',
+          newContent: '',
+        },
+      ],
+    });
   });
 });

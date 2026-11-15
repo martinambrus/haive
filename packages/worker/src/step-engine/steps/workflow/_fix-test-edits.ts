@@ -1,3 +1,4 @@
+import { CREDENTIAL_WITHHELD } from '@haive/shared/credential-scan';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
 import { readdirSizesNoFollow, openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
@@ -374,7 +375,7 @@ export function compareTestImages(
         : null;
     const patch = unavailable
       ? unavailable.status === 'content withheld'
-        ? 'content withheld by secret policy.'
+        ? CREDENTIAL_WITHHELD
         : unavailable.status === 'refused'
           ? 'Test path refused; content not captured.'
           : 'content not retained (size, storage budget, restart, expiry or a protected test path change in this task); hashes and manifest retained.'

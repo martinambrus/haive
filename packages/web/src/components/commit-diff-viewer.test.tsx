@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { api } from '@/lib/api-client';
-import type { CommitDiffFile, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
+import {
+  redactCommitDiffJson,
+  type CommitDiffFile,
+  type CommitDiffStatus,
+} from '@haive/shared/commit-diff-artifact';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CommitDiffViewer } from './commit-diff-viewer';
 import { createRenderer, findAll, fire, textOf, type Renderer } from '../../test/render-tree';
@@ -173,6 +177,14 @@ describe('the diff viewer names a link and shows what it points at', () => {
 });
 
 describe('knowledge preview redaction', () => {
+  it('renders a malformed artifact as withheld instead of a JSON parse failure', async () => {
+    const artifact = JSON.parse(redactCommitDiffJson('{"files":['));
+    const view = await mount(artifact.files);
+    const text = textOf(view.tree());
+    expect(text).toContain('content withheld by secret policy.');
+    expect(text).not.toContain('Could not load changes');
+  });
+
   it('never fetches live unredacted bytes for a withheld artifact entry', async () => {
     vi.mocked(api.get).mockClear();
     const view = await mount([
