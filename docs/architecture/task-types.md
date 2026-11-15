@@ -42,7 +42,7 @@ static step IDs at creation; built-in dynamic strategies and legacy/unseeded tas
 existing null semantics. Derived tasks pin the full/null candidate initially and the chosen
 candidate at first triage. That derived-only, fenced selection is the sole snapshot UPDATE
 exception. `custom_steps` pins raw prompt definitions used by the snapshot (candidate union for
-derived tasks); `derived_run_plan` pins the derived execution plan (new creation still writes v1).
+derived tasks); `derived_run_plan` pins the derived execution plan (v2 when any candidate applies a replacement, otherwise v1).
 Both remain INSERT-only. Definition edits and Retry never recompute existing task pins. `dead_at` /
 `dead_reason` mark a dead task.
 
@@ -331,8 +331,7 @@ before summary extraction, loop hooks, routing and output writes. It persists th
 return value. Built-in mismatches log a pino warning containing the contract and bounded
 issue paths, never values, and keep the existing live-task behavior. Only a producer occupying
 a replaced role through a pinned host binding may fail `step-output-contract-invalid`;
-that failure never routes through `fixLoopOnError`. The hard-failure helper is directly tested
-but no replacement is admitted in this prerequisite.
+that failure never routes through `fixLoopOnError`. The runner resolves replacement occupancy through the immutable task pin before applying that hard-failure policy.
 
 A continuation throw, parked form or skipped step has no new successful output to validate.
 The current shouldRun skip writes status and end time without writing output. Recovered done
@@ -350,12 +349,11 @@ a removed role is absent. Neither state borrows another candidate. Required miss
 invalid paths and mismatched snapshots refuse with `invalid-derived-run-plan`, never a live-catalog
 or output-shape fallback.
 
-The strict dual decoder accepts unchanged v1 and a future v2 pin. V2 adds candidate-local
+The strict dual decoder accepts unchanged v1 and contracted v2 pins. V2 adds candidate-local
 `roleBindings: { [role]: { stepId, outputContract } }`; the existing `composableEntries` pin holds
-effective declarations and exact host contract references. The decoder replays pinned applied
+raw declarations and exact host contract references. Candidate-local `effectiveEntries` store only effective replacement declarations; `derivedCandidateEntries` combines them with unchanged pinned declarations. The reader also accepts older full candidate arrays. Each bound entry is checked structurally for the host provided tokens, required-token superset, loop target and closing policy; it is never merged again with today’s code. The decoder replays pinned applied
 outcomes to verify surviving physical positions, one-hop contracts, binding removal, unique
-producers and canonical-role ambiguity. It does not re-run today's composition rules. Nothing
-creates v2 in this prerequisite; active replacement admission remains refused.
+producers and canonical-role ambiguity. It does not re-run today's composition rules. Admission emits v2 only when at least one candidate applies a replacement; existing v1 pins are never rewritten.
 
 The worker's previous-output loader accepts an explicit `{ role }` selector; string callers remain
 physical. It returns actual row identity/status and the newest round, even when reset, with an
@@ -384,8 +382,7 @@ source; ignored external-module files are not enumerated by git. The ungated sca
 seconds to the shared test job and has an explicit 20-second cold-run timeout. It changes neither
 the gated-file count nor the configured CI time budgets.
 
-Rollback before v2 creation is application-code revert in reverse commit order. Once later work
-admits v2 tasks, retain these readers for every task that could resume.
+Rollback stops new replacement creation and retains v2-capable readers and workers for every resumable v2 task. Never downgrade pins to v1 or revert runtime support underneath those tasks.
 
 ## Derived overlays (PR4 of 4)
 
@@ -406,9 +403,8 @@ bound; small injected bounds exist for controls only. Operations apply sequentia
 - A consumed target is `target-removed-by-change`, a hard issue. Removed IDs never alias replacements.
   Earlier inserted steps may anchor later changes; a skipped producer propagates its reason and root
   operation index through chains. Repeated inserts put the later insertion nearest the anchor.
-- Every active replacement is `replacement-contract-unavailable` until prerequisite 4 supplies output
-  contracts and role readers. A stale or off-path replacement still has an explicit skipped outcome
-  in save/preview diagnostics. Token compatibility does not authorize replacement.
+- Active replacements are one-hop and limited to code review and broad code audit. An installed composable payload must explicitly declare `replaces`, name the exact host contract id/version, explicitly provide every role token, preserve host policy and remain the unique producer. All candidates must compose. Applied replacements splice the physical ID at the target position and consume the canonical anchor. A stale or off-path replacement still has an explicit skipped outcome. Implementation, gates and the prefix are forbidden replacement targets.
+- Replacement diagnostics name path, operation, target, payload and expected/actual contract references: `replacement-target-forbidden`, `replacement-not-composable`, `replacement-not-declared`, `replacement-contract-mismatch`, `replacement-policy-incompatible`, `replacement-role-ambiguous` and retained `replacement-contract-unavailable`.
 - Missing active payloads, duplicate final IDs and every `validateComposition` issue refuse the
   overlay. Prompt quotes are checked per candidate; orphan prompt definitions against the union.
   No additional server rule forbids removing an implementation step or gate: composition decides.
@@ -428,7 +424,7 @@ ID sorting is insufficient. Unsynced catalogs, NULL indices, duplicate IDs and a
 are named admission issues. Catalog/registry parity controls include every ordered candidate.
 
 Task creation reads overlay/base `FOR SHARE` and referenced modules `FOR KEY SHARE` in the INSERT
-transaction, evaluates all complete candidates and applies existing module/switch policy. Invalidity
+transaction, evaluates all complete candidates and applies existing module/switch policy. `inspectDerivedDefinition` parses the proposed pin before any write and reports `invalid-derived-run-plan` if replay fails. Authoring answers 400 and task admission answers 409; a replace-then-remove whose payload declaration is no longer retained is refused here. Invalidity
 returns 409 with structured path/operation issues and no task, event or job. Existing preflight versus
 locked trait checks still refuse changed root/database/repository policy. No connection is held over
 queue IO. Module-state checks include active attempted payloads even when installed-step
@@ -436,18 +432,20 @@ validation refuses their insertion, so a removed module is named before a compos
 Stale/off-path skipped operations and payloads behind skipped producer chains do not introduce
 module dependencies.
 
-At INSERT, `derived_run_plan` v1 stores base identity/strategy, overlay revision/changes, ordered base
+At INSERT, `derived_run_plan` stores base identity/strategy, overlay revision/changes, ordered base
 candidates and catalog fingerprint, composable declarations, all final candidates/outcomes, common
-prefix and warnings. The fingerprint covers actual order/declarations, not workflow's null-list
+prefix and warnings. Applied replacements additionally pin v2 contract refs, candidate bindings and effective declarations under the same definition/base/catalog/module locks. For v2 the fingerprint covers actual order/declarations/bindings; v1 retains the byte-identical catalog-only fingerprint. Neither uses workflow's null-list
 `content_hash`. `run_list_snapshot` initially holds the full/null candidate; `custom_steps` pins raw
 prompt definitions used by any candidate. Traits, canary, module admission, integration admission and
 saved-step CLI previews use the candidate union before selection. Integration previews identify steps
 that may run after path selection. Dispatch still resolves each required account.
 
+`assertStepOutputDeclaration` refuses `replaces` together with `metadata.allowSkip: true` at registration or override, preventing a failed review replacement from being skipped past gate 2. A bound replacement receives the host role requirements, ordering, entailments, loop target and closing policy; its own declared tokens must satisfy them. Runtime review uses the canonical finding-based fix evaluator, audit stays report-only and retains its broad-audit skip. Replacement-capable executables cannot supply conflicting loop/error hooks. No binding inherits host CLI seats, dispatch preferences or grants.
+
 **First triage.** Only the common prefix executes before selection. The derived-only selection
 transaction locks the owned step before the task, checks current step/round, epoch, live status and
 selection state, then validates the chosen candidate against pinned declarations and resolves its IDs.
-Missing executable code marks the task dead by name. It atomically stores path, broad-audit choice,
+Missing executable code marks the task dead by name. Missing support for a pinned contract or role policy is `pinned-step-support-unavailable` at triage, START, advance and boot recovery; it never remaps a producer. It atomically stores path, broad-audit choice,
 chosen snapshot and event; an event failure rolls back selection. This is the sole UPDATE exception
 for `run_list_snapshot`, only on an unselected derived workflow. `derived_run_plan` and `custom_steps`
 remain INSERT-only. Same-choice replay is idempotent. A different choice is `derived_path_pinned`:
@@ -491,7 +489,7 @@ The creator protocol and panel remain static-only; existing static editor/draft 
 **Editor.** Built-in list/detail actions use catalog eligibility: “Duplicate and customize” opens the
 existing create editor with a blank slug, copied display metadata, the base slug and no changes,
 without writing. An empty base query opens the static editor. Ineligible actions show the catalog's
-precise reason. FormRenderer authors ordered operations live, including incomplete/invalid rows,
+precise reason. The Operation dropdown renders “Replace — Only steps declaring this role and its output contract can replace it” as its option label; the replacement row shows expected and actual contract references and the protected-target reasons. FormRenderer authors ordered operations live, including incomplete/invalid rows,
 without a separate per-operation submit action; the composer reuses its palette, prompt
 editor, loop limits and integration overview beside a read-only path preview. There is no editable
 flattened base list. Shared evaluation runs on edits; server preview is debounced 350 ms and aborts
