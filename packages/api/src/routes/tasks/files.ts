@@ -52,10 +52,16 @@ const readTaskFile = (anchor: string, rel: string, maxBytes: number) =>
   readFileNoFollow(anchor, rel, { maxBytes, strict: true }).catch(containmentHttpError);
 
 // The gate viewer uses /files/raw, while the Editor can also read /files/content.
-const isGate3Diff = (target: string) =>
-  basename(target) === 'gate3-diff.json' && basename(dirname(target)) === '.haive';
+const GATE_DIFF_ARTIFACT_NAMES = new Set([
+  'gate3-diff.json',
+  'learning-knowledge-diff.json',
+  'kb-commit-diff.json',
+  'external-kb-diff.json',
+]);
+const isGateDiff = (target: string) =>
+  GATE_DIFF_ARTIFACT_NAMES.has(basename(target)) && basename(dirname(target)) === '.haive';
 // JSON escaping can expand the builder's 16 MiB content budget sixfold.
-const MAX_GATE3_ARTIFACT_BYTES = 128 * 1024 * 1024;
+const MAX_GATE_ARTIFACT_BYTES = 128 * 1024 * 1024;
 
 export const fileRoutes = new Hono<AppEnv>();
 
@@ -145,7 +151,7 @@ fileRoutes.get('/:id/files/content', async (c) => {
   }
 
   const text = buf.toString('utf8');
-  const content = isGate3Diff(target) ? redactCommitDiffJson(text) : text;
+  const content = isGateDiff(target) ? redactCommitDiffJson(text) : text;
   return c.json({
     path: target,
     size: st.size,
@@ -169,8 +175,8 @@ fileRoutes.get('/:id/files/raw', async (c) => {
   if (!requested) throw new HttpError(400, 'Missing path query parameter');
   const rel = workspaceRel(anchor, root, requested);
 
-  if (isGate3Diff(resolve(anchor, rel))) {
-    const read = await readTaskFile(anchor, rel, MAX_GATE3_ARTIFACT_BYTES);
+  if (isGateDiff(resolve(anchor, rel))) {
+    const read = await readTaskFile(anchor, rel, MAX_GATE_ARTIFACT_BYTES);
     if (!read) throw new HttpError(404, 'File not found');
     if (read.truncated) throw new HttpError(413, 'Commit diff artifact is too large');
     c.header('Cache-Control', 'no-store');

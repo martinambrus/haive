@@ -32,6 +32,8 @@ export interface CommitDiffFile {
    *  for a draft the step has not written yet — the viewer does not care which,
    *  it just PUTs the path back. */
   editPath?: string;
+  /** Display content was withheld; it must never seed a file edit. */
+  contentWithheld?: boolean;
 }
 
 export interface CommitDiffArtifact {
@@ -41,6 +43,22 @@ export interface CommitDiffArtifact {
   /** File list was capped at MAX_FILES. */
   truncated: boolean;
   files: CommitDiffFile[];
+}
+
+/** Shared by every gate builder and the serve-time legacy recheck. A redacted
+ * display is read-only: saving it would replace real file bytes with the marker. */
+export function redactCommitDiffFile(file: CommitDiffFile): CommitDiffFile {
+  const oldContent = redactCredentialText(file.oldContent);
+  const newContent = redactCredentialText(file.newContent);
+  const withheld =
+    file.contentWithheld ||
+    oldContent !== file.oldContent ||
+    newContent !== file.newContent ||
+    oldContent.includes(CREDENTIAL_WITHHELD) ||
+    newContent.includes(CREDENTIAL_WITHHELD);
+  if (!withheld) return file;
+  const { editPath: _editPath, ...readonly } = file;
+  return { ...readonly, oldContent, newContent, contentWithheld: true };
 }
 
 /** Recheck legacy artifacts at serve time. Invalid/partial JSON never falls back to raw
@@ -56,14 +74,13 @@ export function redactCommitDiffJson(text: string): string {
     )
       return CREDENTIAL_WITHHELD;
     let changed = false;
-    for (const file of artifact.files) {
+    for (const [index, file] of artifact.files.entries()) {
       if (!file || typeof file !== 'object') return CREDENTIAL_WITHHELD;
-      for (const key of ['oldContent', 'newContent'] as const) {
-        if (typeof file[key] !== 'string') return CREDENTIAL_WITHHELD;
-        const safe = redactCredentialText(file[key]);
-        changed ||= safe !== file[key];
-        file[key] = safe;
-      }
+      if (typeof file.oldContent !== 'string' || typeof file.newContent !== 'string')
+        return CREDENTIAL_WITHHELD;
+      const safe = redactCommitDiffFile(file);
+      changed ||= safe !== file;
+      artifact.files[index] = safe;
     }
     return changed ? JSON.stringify(artifact) : text;
   } catch {

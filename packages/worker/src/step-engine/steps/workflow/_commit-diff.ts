@@ -1,4 +1,4 @@
-import { redactCredentialText } from '@haive/shared/credential-scan';
+import { redactCommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import path from 'node:path';
 import type {
   CommitDiffArtifact,
@@ -268,14 +268,14 @@ export async function buildFileEntry(
     status,
     binary,
     truncated,
-    oldContent: redactCredentialText(oldContent),
-    newContent: redactCredentialText(newContent),
+    oldContent,
+    newContent,
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
   if (unreadable) file.unreadable = true;
   if (unreadableReason) file.unreadableReason = unreadableReason;
   if (link) file.link = link;
-  return file;
+  return redactCommitDiffFile(file);
 }
 
 /** Builds the gate-3 commit-diff artifact for the worktree and writes it to

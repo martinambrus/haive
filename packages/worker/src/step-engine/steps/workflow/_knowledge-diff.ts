@@ -1,7 +1,11 @@
 import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
-import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
+import {
+  redactCommitDiffFile,
+  type CommitDiffArtifact,
+  type CommitDiffFile,
+} from '@haive/shared/commit-diff-artifact';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
   type GitRun,
@@ -88,14 +92,15 @@ export async function buildKnowledgeDiffArtifact(
       !file.binary &&
       !file.truncated &&
       !file.unreadable &&
-      !file.link
+      !file.link &&
+      !file.contentWithheld
     ) {
       file.editPath = path.join(workspacePath, file.path);
     }
     kbFiles.push(file);
   }
 
-  const files = [...kbFiles, ...extraFiles];
+  const files = [...kbFiles, ...extraFiles].map(redactCommitDiffFile);
   const artifact: CommitDiffArtifact = {
     headSha,
     fileCount: entries.length + extraFiles.length,
