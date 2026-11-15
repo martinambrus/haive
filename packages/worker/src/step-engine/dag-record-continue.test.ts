@@ -1587,15 +1587,15 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
 for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
   const faults =
     role === 'issue_advisor' || role === 'replanner'
-      ? ['environment', 'interrupted', 'malformed']
-      : ['environment', 'interrupted'];
+      ? ['environment', 'timeout', 'malformed']
+      : ['environment', 'timeout'];
   it.each(faults)(`DAGP-2 ${role} bounds consecutive %s faults across Retry`, async (fault) => {
     const h = auxiliaryHarness(role);
     const signal =
       fault === 'malformed'
         ? { exitCode: 0, errorMessage: null, rawOutput: 'bad decision' }
-        : fault === 'interrupted'
-          ? { exitCode: 137, errorMessage: null }
+        : fault === 'timeout'
+          ? { exitCode: 137, errorMessage: 'CLI process exceeded its time budget' }
           : {};
     const first = auxiliaryFault('first', signal);
     await expect(h.fold(first)).rejects.toThrow(/DAG required/);
@@ -1737,6 +1737,57 @@ it.each([
     expect(h.invocations[0]!.consumedAt).toBeUndefined();
     expect(h.rows[0]!.outcome).toBe('running');
     expect(h.enqueued).toEqual([]);
-    expect(h.plan.escalationLog).toEqual([expect.objectContaining({ role: 'coder', count: 1 })]);
+    expect(h.plan.escalationLog ?? []).toEqual(
+      signal.exitCode === 137 ? [] : [expect.objectContaining({ role: 'coder', count: 1 })],
+    );
   },
 );
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it.each([
+    {
+      exitCode: null,
+      errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+    },
+    { exitCode: 137, errorMessage: null },
+    { exitCode: 143, errorMessage: 'cancelled' },
+  ])(`DAGP-F1 ${role} interruptions never increment or block dispatch: %j`, async (signal) => {
+    const h = auxiliaryHarness(role);
+    for (const id of ['first', 'second', 'third']) {
+      await expect(h.fold(auxiliaryFault(id, signal))).rejects.toThrow(
+        /interrupted.*Retry to recover/,
+      );
+    }
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+    expect(h.rows[0]!.infraRetries).toBe(0);
+    expect(h.enqueued).toEqual([]);
+    // Retry supersedes old invocations. Re-entry must still be able to dispatch this CLI.
+    for (const inv of h.invocations) inv.supersededAt = new Date();
+    if (role === 'reviewer') {
+      h.runs.splice(0); // A fresh review; retained-run Retry is exercised separately under F3.
+      await h.run();
+    } else if (role === 'coder') {
+      await ingestReviewRun(
+        h.args() as never,
+        h.rows[0] as never,
+        { id: 'review', role: 'reviewer' } as never,
+        auxiliaryFault('review', {
+          exitCode: 0,
+          errorMessage: null,
+          parsedOutput: {
+            verdict: 'fix_required',
+            criteria_results: [],
+            issues: [{ severity: 'high', file: 'a.ts', description: 'repair cache' }],
+          },
+        }) as never,
+      );
+    } else {
+      h.plan.replannerInvocationId = null;
+      h.runs.splice(0);
+      if (role === 'replanner') h.rows[0]!.lastAdvisorAction = 'ESCALATE_TO_REPLAN';
+      await h.escalate();
+    }
+    expect(h.enqueued).toHaveLength(1);
+  });
+}

@@ -2023,7 +2023,13 @@ async function checkAuxiliaryEnvironment(
   try {
     assertEscalationEnvironment(inv, ra.stepDef);
   } catch (error) {
-    if (isProviderOutage(inv.errorMessage)) throw error;
+    // A restart, cancel or signal kill is retryable infrastructure, not a CLI fault.
+    // Timeouts are deterministic here: repeating the same budget needs a CLI change.
+    if (
+      isProviderOutage(inv.errorMessage) ||
+      (!dagEnvironmentHaltReason({ errorMessage: inv.errorMessage }) && !isCliTimeoutFailure(inv))
+    )
+      throw error;
     await throwAuxiliaryFault(ra, role, inv, error);
   }
 }
