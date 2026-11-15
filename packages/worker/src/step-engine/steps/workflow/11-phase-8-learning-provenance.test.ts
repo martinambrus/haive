@@ -13,6 +13,7 @@ import {
   learningIndex,
   planLearningReconciliation,
   readExistingLearnings,
+  readLearningDeletions,
   stageLearningDrafts,
 } from './11-phase-8-learning.js';
 import { extractMarkdownSections, chunkSection } from '../onboarding/_rag-chunkers.js';
@@ -213,6 +214,38 @@ describe('provenance preserves write and review semantics', () => {
     );
     expect(await readExistingLearnings(worktree)).toEqual(first);
     expect(first.find((item) => item.id === 'rule-2')!.body).toContain('Human correction');
+  });
+
+  it('recovers deletion from disk without exposing intent as a learning', async () => {
+    worktree = await mkdtemp(path.join(tmpdir(), 'learning-provenance-'));
+    await applyLearningOps(worktree, planLearningReconciliation([entry()], []), undefined, origin);
+    const writer = { ...update, operationId: 'a'.repeat(64) };
+    const proposal = [
+      { ...entry('Correction src/a.ts:9.'), op: 'update' as const, targetId: 'rule' },
+      { ...entry(), op: 'delete' as const, targetId: 'rule' },
+    ];
+    await applyLearningOps(
+      worktree,
+      planLearningReconciliation(
+        proposal,
+        await readExistingLearnings(worktree),
+        undefined,
+        undefined,
+        writer,
+      ),
+      undefined,
+      writer,
+    );
+    expect(await readExistingLearnings(worktree)).toEqual([]);
+    const deletions = await readLearningDeletions(worktree, writer.operationId);
+    expect(deletions).toHaveLength(1);
+    expect(deletions[0]!.target.body).toContain('Correction src/a.ts:9.');
+    const plan = planLearningReconciliation(proposal, [], undefined, undefined, writer, deletions);
+    expect(plan.map((op) => op.replayed)).toEqual([true, true]);
+    await applyLearningOps(worktree, plan, undefined, writer);
+    expect(await readExistingLearnings(worktree)).toEqual([]);
+    expect(learningIndex(await readExistingLearnings(worktree)).entries).toEqual([]);
+    expect(await readLearningDeletions(worktree, 'b'.repeat(64))).toEqual([]);
   });
 
   it('chains every update of the same target within one apply', async () => {

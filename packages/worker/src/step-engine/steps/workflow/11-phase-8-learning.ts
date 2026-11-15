@@ -17,6 +17,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { z } from 'zod';
 import { normalizeGlobalKbDescription } from '@haive/shared/global-kb';
 import {
   INVESTIGATIONS_DIR,
@@ -654,6 +655,38 @@ interface PlannedLearningOp {
   replayed?: boolean;
 }
 
+/** Write-ahead deletion intent stays outside both learning readers and staged drafts.
+ * An intent proves the target's earlier ops completed, but not that unlink completed. */
+const LEARNING_DELETIONS_DIR = '.haive/learning-deletions';
+const learningDeletionSchema = z.object({
+  version: z.literal(1),
+  operationId: z.string().regex(/^[a-f0-9]{64}:[a-f0-9]{64}$/),
+  target: z.object({ id: z.string(), title: z.string(), body: z.string() }),
+});
+type LearningDeletion = z.infer<typeof learningDeletionSchema>;
+
+export async function readLearningDeletions(
+  worktree: string,
+  applyId: string,
+): Promise<LearningDeletion[]> {
+  if (!/^[a-f0-9]{64}$/.test(applyId)) throw new Error('Invalid learning apply identity');
+  const wa = workspaceAnchor(worktree);
+  const rel = `${wa.prefix}${LEARNING_DELETIONS_DIR}/${applyId}`;
+  const files = await readdirNoFollow(wa.anchor, rel);
+  const out: LearningDeletion[] = [];
+  for (const file of files ?? []) {
+    if (!file.isFile() || !/^[a-f0-9]{64}\.json$/.test(file.name)) continue;
+    const body = await readTextNoFollow(wa.anchor, `${rel}/${file.name}`);
+    if (body === null) continue;
+    // A damaged record must stop apply rather than silently resurrect a deleted target.
+    const record = learningDeletionSchema.parse(JSON.parse(body));
+    if (record.operationId !== `${applyId}:${file.name.slice(0, -5)}`)
+      throw new Error('Mismatched learning deletion identity');
+    out.push(record);
+  }
+  return out;
+}
+
 /** Read the existing learnings so the agent can reconcile against them and the
  *  diff/apply can update/delete by id. Missing dir -> []. */
 export async function readExistingLearnings(worktree: string): Promise<ExistingLearning[]> {
@@ -802,6 +835,7 @@ export function planLearningReconciliation(
   logger?: StepContext['logger'],
   counts?: LearningOutcome['learnings']['downgraded'],
   writer?: LearningStamp,
+  deletions: readonly LearningDeletion[] = [],
 ): PlannedLearningOp[] {
   // Keep the apply key visible so target planning can exclude this apply's inserts,
   // including entries dropped on the original pass. Still reserve every on-disk id.
@@ -826,6 +860,18 @@ export function planLearningReconciliation(
     }
     byId.set(item.id, item);
   }
+  const onDiskTargets = new Set(byId.keys());
+  const deletionByOperation = new Map(deletions.map((d) => [d.operationId, d]));
+  const activeDeletions = new Set<string>();
+  for (const [index, e] of entries.entries()) {
+    if (e.op !== 'delete' || !writer?.operationId) continue;
+    const operationId = `${writer.operationId}:${operationHashes[index]}`;
+    const deletion = deletionByOperation.get(operationId);
+    if (!deletion || deletion.target.id !== e.targetId) continue;
+    activeDeletions.add(operationId);
+    // Recover pre-apply membership even after unlink removed the last provenance.
+    if (!onDiskTargets.has(deletion.target.id)) byId.set(deletion.target.id, deletion.target);
+  }
   const plan: PlannedLearningOp[] = [];
   for (const [index, e] of entries.entries()) {
     const operationHash = operationHashes[index];
@@ -843,6 +889,7 @@ export function planLearningReconciliation(
         title: target.title,
         newBody: '',
         oldBody: target.body,
+        ...(operationId ? { operationId } : {}),
       });
       continue;
     }
@@ -887,6 +934,12 @@ export function planLearningReconciliation(
   const completedThrough = new Map<string, number>();
   for (const [index, p] of plan.entries()) {
     if (!p.operationId) continue;
+    if (p.op === 'delete' && activeDeletions.has(p.operationId)) {
+      // An absent target proves unlink finished. Otherwise retry unlink, while skipping
+      // only its earlier ops: a crash can land between the intent write and unlink.
+      const through = existing.some((item) => item.id === p.id) ? index - 1 : index;
+      completedThrough.set(p.id, Math.max(completedThrough.get(p.id) ?? -1, through));
+    }
     const record = parseLearningRecord(p.oldBody).provenance;
     const matchesOperation = (id: string | undefined) =>
       id === p.operationId ||
@@ -1071,6 +1124,21 @@ export async function applyLearningOps(
     if (counts) counts.attempted[p.op]++;
     try {
       if (p.op === 'delete') {
+        if (p.operationId) {
+          const record = learningDeletionSchema.parse({
+            version: 1,
+            operationId: p.operationId,
+            target: { id: p.id, title: p.title, body: appliedBodies.get(p.id) ?? p.oldBody },
+          });
+          const [applyId, entryId] = record.operationId.split(':');
+          // Publish intent BEFORE unlink; telemetry runs later and is best-effort.
+          await writeFileNoFollow(
+            wa.anchor,
+            `${wa.prefix}${LEARNING_DELETIONS_DIR}/${applyId}/${entryId}.json`,
+            JSON.stringify(record),
+            { createParents: true, durable: true },
+          );
+        }
         await removeNoFollow(wa.anchor, `${wa.prefix}${rel}`);
         deleted.push(rel);
       } else {
@@ -1846,12 +1914,15 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       // The reviewer's staged edits win over the agent's drafts, and an emptied draft
       // drops that entry — the gate's inline editor is the same decision as unticking
       // a checkbox, just finer-grained.
+      const writer = learningWriter(ctx, args.llmInvocationId);
+      const deletions = await readLearningDeletions(worktreePath, writer.operationId!);
       const reconciled = planLearningReconciliation(
         entries,
         existingLearnings,
         ctx.logger,
         outcome.learnings.downgraded,
-        learningWriter(ctx, args.llmInvocationId),
+        writer,
+        deletions,
       );
       outcome.learnings.planned = countLearningOps(reconciled);
       const plan = await applyStagedLearningEdits(
