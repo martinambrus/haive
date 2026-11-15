@@ -434,3 +434,23 @@ it.each([
   expect(gate3CommitStep.reviseLoop!.evaluate(out)).toBeNull();
   expect(run).toHaveBeenCalled();
 });
+
+it('detect loads the final gate3 page at offset 30 and counts every off-page occurrence', async () => {
+  const inventory = Array.from({ length: 31 }, (_, n) => item(`item-${n}`));
+  vi.mocked(loader.loadUnactedInsights).mockResolvedValue({ insights: inventory, omitted: 0 });
+  vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
+  vi.spyOn(gitWorkspace, 'requireUsableGit').mockResolvedValue(false);
+  vi.spyOn(pages, 'insightPageOffset').mockResolvedValue(30);
+  vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(false);
+  vi.spyOn(auto, 'loadAutoHistory').mockResolvedValue({ claims: [], results: [] });
+  vi.spyOn(batches, 'loadInsightBatchRecords').mockResolvedValue([]);
+  vi.spyOn(captures, 'loadFixTestRecords').mockResolvedValue([]);
+  vi.spyOn(sites, 'loadTaskSimilarSites').mockResolvedValue({ sites: [], omitted: 0 });
+  vi.spyOn(rules, 'loadGateHouseRules').mockResolvedValue(null);
+  const d = await gate3CommitStep.detect!(ctx);
+  expect(d.insightChoices?.map((i) => i.id)).toEqual(['item-30']);
+  expect(d).toMatchObject({ insightPage: 30, insightTotal: 31, outOfScopeInsightsOmitted: 30 });
+  const form = await gate3CommitStep.form!(ctx, d, null);
+  expect(form!.fields.find((f) => f.id === 'insightPage')).toMatchObject({ default: '30' });
+  expect(JSON.stringify(form)).toContain('30 more not shown on this page');
+});
