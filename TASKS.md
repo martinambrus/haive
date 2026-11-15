@@ -690,7 +690,7 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190 and #1191 (+20)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191 and #1208 (+25)
 
 status: parked (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); items 10 and 11 resolved 2026-11-15 in #1195; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
@@ -716,6 +716,11 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 18. (#1191) Removing a base step when the change list is already at its cap silently does nothing. PRE-EXISTING. LOW, parked.
 19. (#1191) The server preview only runs once the slug is valid, and the editor does not say so; live validation still runs. Browser check 2026-11-14. LOW, parked.
 20. (#1195 review) `web/src/components/cli-provider-form.tsx` ~:715 would render "0 tasks could not be checked" for `incomplete: true` with an empty `invalidTasks`; unreachable today (the api sets `incomplete` only with entries). Cosmetic.
+21. (#1208) The web history labels a step as an audit by `stepId.includes('audit')` (`web/src/lib/task-history.ts` ~:126) rather than by its projected output role; a replacement audit step with another id is labelled wrong. LOW, PRE-EXISTING pattern.
+22. (#1208) The "derived definition requires a pinned plan" lookup exists twice, in `api/src/lib/step-output-roles.ts` and the worker reader path; they can drift. LOW.
+23. (#1208) Role pin reads (`loadRoleTaskPin`) are not cached per request or per step; gate 2 and the digest read the task row more than once. LOW, perf.
+24. (#1208) The step-role fixtures are triplicated across shared, api and worker tests (`step-role-fixtures.ts`). LOW, hygiene.
+25. (#1208) The whole-repository role scan reads every candidate file sequentially (~4 s alone, past 20 s on a loaded CI runner, now bounded at 60 s); a substring pre-check or git pathspec would cut it. LOW.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+13)
 
