@@ -260,10 +260,8 @@ export async function startAutoClassification(
       items: unclassified(state.candidates, false),
       invocationIds: [],
     });
-    throw new ReopenStepFormError(
-      'Classification input exceeds its budget. Select improvements manually.',
-      { notice: true },
-    );
+    // The apply phase owns form reopening; selectAgents only records the fallback.
+    return [];
   }
 }
 export async function finishAutoClassification(

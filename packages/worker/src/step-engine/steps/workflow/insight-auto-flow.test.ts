@@ -445,13 +445,14 @@ describe('automatic insight stages', () => {
   });
   it('a smaller start-time input budget reoffers manually before claiming a round', async () => {
     history.claims = [];
-    await expect(startAutoClassification(ctx, state(), { inputChars: 10 })).rejects.toMatchObject({
-      name: 'ReopenStepFormError',
-    });
+    expect(await startAutoClassification(ctx, state(), { inputChars: 10 })).toEqual([]);
     expect(auto.claimAutoRound).not.toHaveBeenCalled();
     expect(history.results).toMatchObject([
       { complete: false, items: [{ id: one.id, class: 'unclassified' }] },
     ]);
+    await expect(finishAutoClassification(ctx, state(), [], false)).rejects.toMatchObject({
+      name: 'ReopenStepFormError',
+    });
   });
   it('input coverage over an injected budget falls back whole, without spending a classifier round', async () => {
     history.claims = [];
