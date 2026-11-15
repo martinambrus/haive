@@ -92,6 +92,9 @@ describe('ungated step-role reader ratchet', () => {
     );
     for (const file of [
       'packages/web/src/a.tsx',
+      'packages/worker/scripts/a.ts',
+      'packages/database/src/a.ts',
+      'packages/web-kit/src/a.ts',
       'modules/example/src/a.ts',
       'scripts/a.mjs',
       'external-modules/example/src/a.ts',

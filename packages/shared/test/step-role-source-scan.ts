@@ -16,7 +16,7 @@ const roles = ['08c-code-review', '08c2-code-audit'];
 export function isRoleReaderSource(file: string): boolean {
   if (!/\.(?:[cm]?[jt]s|tsx|jsx)$/.test(file)) return false;
   if (
-    !/^(?:packages\/(?:shared|worker|api|web)\/src\/|(?:modules|external-modules)\/[^/]+\/(?:src\/)?|scripts\/)/.test(
+    !/^(?:packages\/(?:(?:shared|worker|api|web|database|web-kit)\/src\/|worker\/scripts\/)|(?:modules|external-modules)\/[^/]+\/(?:src\/)?|scripts\/)/.test(
       file,
     )
   )
