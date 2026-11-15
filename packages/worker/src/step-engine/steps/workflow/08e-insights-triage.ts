@@ -202,7 +202,14 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
     }));
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
-    let outcome = readTriageOutcome(null, batchId, []);
+    let outcome: InsightOutcome = {
+      version: 1,
+      batchId,
+      items: [],
+      implemented: false,
+      changes: [],
+      notes: '',
+    };
     if (selected.length > 0) {
       const intent = await ensureInsightIntent(ctx, selected);
       const records = await loadInsightBatchRecords(ctx.db, ctx.taskId);

@@ -4083,6 +4083,25 @@ describe('08e implementer dispatch and recovery', () => {
     expect(enqueued[0]!.agentMiningId).toBe(`mining-implementer-${batchId}`);
     expect(state.inserts.filter((i) => i.table === 'task_step_agent_minings')).toEqual([]);
   });
+  it('empty selection finishes without editor dependencies', async () => {
+    const state = stateFor();
+    state.taskStepRow.formValues = { selectedInsights: [] };
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: insightsTriageStep,
+    });
+    expect(result.status).toBe('done');
+    expect(result.row.output).toMatchObject({ items: [], implemented: false, notes: '' });
+    expect(
+      state.inserts.filter((i) => ['cli_invocations', 'task_step_agent_minings'].includes(i.table)),
+    ).toEqual([]);
+    expect(insightJournal.ensureInsightIntent).not.toHaveBeenCalled();
+  });
   it('empty selection finishes with no editor', async () => {
     const state = stateFor();
     state.taskStepRow.formValues = { selectedInsights: [] };

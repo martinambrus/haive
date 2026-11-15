@@ -1892,6 +1892,30 @@ async function resolveAgentMiningPhase(
   }
 
   if (stepDef.metadata.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+    if (!params.providers || !params.deps) {
+      // An empty manual selection needs no editor dependencies. Other mining steps
+      // retain their existing missing-dependency guard before selectAgents can act.
+      if (stepDef.metadata.id === INSIGHT_STEP) {
+        const empty = await spec.selectAgents({
+          ctx,
+          detected,
+          formValues: formValues ?? {},
+          llmOutput,
+        });
+        ctx.throwIfCancelled();
+        if (empty.length === 0) return { resolved: true, results: [], newResults: [], current };
+      }
+      const failed = await updateRow(db, current.id, {
+        status: 'failed',
+        errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
+        endedAt: new Date(),
+      });
+      return {
+        resolved: false,
+        result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
+      };
+    }
+
     const dispatches = await spec.selectAgents({
       ctx,
       detected,
@@ -1920,18 +1944,6 @@ async function resolveAgentMiningPhase(
   if (dispatches.length === 0) {
     ctx.logger.warn('agent mining selectAgents returned empty list, skipping mining');
     return { resolved: true, results: [], newResults: [], current };
-  }
-
-  if (!params.providers || !params.deps) {
-    const failed = await updateRow(db, current.id, {
-      status: 'failed',
-      errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
-      endedAt: new Date(),
-    });
-    return {
-      resolved: false,
-      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
-    };
   }
 
   const { sent: dispatched, lost } = await dispatchMiningAgents(
