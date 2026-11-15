@@ -100,7 +100,7 @@ export function DerivedTaskTypeChanges({
       <h3 className="text-sm font-semibold text-neutral-100">Changes</h3>
       <InlineMarkdown
         className="text-sm text-neutral-300"
-        body="Changes apply in order to each base path. Edit target IDs explicitly; a missing target is never renamed automatically. Replacements require an output contract and are currently unavailable on active targets."
+        body="Changes apply in order to each base path. Edit target IDs explicitly; a missing target is never renamed automatically. Only steps declaring this role and its output contract can replace it. Only code review and broad code audit support replacement; implementation, gates and the triage prefix are protected."
       />
       {changes.map((change, index) => {
         const operation =
@@ -123,7 +123,12 @@ export function DerivedTaskTypeChanges({
               options: [
                 { value: 'remove', label: 'Remove' },
                 { value: 'insertAfter', label: 'Insert after' },
-                { value: 'replace', label: 'Replace (output contract unavailable)' },
+                {
+                  value: 'replace',
+                  label: 'Replace',
+                  description:
+                    'Only steps declaring this role and its output contract can replace it',
+                },
               ],
             },
             { id: `target-${index}`, type: 'text', label: 'Target step', required: true },
@@ -169,6 +174,12 @@ export function DerivedTaskTypeChanges({
               />
             ) : (
               <InlineMarkdown body={`Change ${index + 1}: ${JSON.stringify(change)}`} />
+            )}
+            {operation === 'replace' && (
+              <InlineMarkdown
+                body={`Expected: ${entries.get(target)?.outputContract ? `${entries.get(target)!.outputContract!.id}@${entries.get(target)!.outputContract!.version}` : 'none'}. Actual: ${entries.get(payload)?.outputContract ? `${entries.get(payload)!.outputContract!.id}@${entries.get(payload)!.outputContract!.version}` : 'none'}.`}
+                className="text-sm text-neutral-300"
+              />
             )}
             {editable && (
               <div className="mt-2 flex gap-2">

@@ -23,8 +23,16 @@ export function describeDerivedProblem(issue: { kind: string; [key: string]: unk
   const messages: Record<string, string> = {
     'invalid-derived-changes':
       'Complete every change with valid step IDs (up to 128 characters), with at most 64 changes.',
-    'replacement-contract-unavailable':
-      'Replacement requires an output contract and is currently unavailable.',
+    'replacement-contract-unavailable': 'The role has no available host output contract.',
+    'replacement-target-forbidden':
+      'Only code review and broad code audit can be replaced. Implementation, gates and the triage prefix are protected replacement targets.',
+    'replacement-not-declared':
+      'This step does not declare this role in its replacement capabilities.',
+    'replacement-contract-mismatch':
+      'This step must declare the exact host contract and version for this role.',
+    'replacement-policy-incompatible': 'This step must preserve the role tokens and host policy.',
+    'replacement-role-ambiguous':
+      'Each role must have a unique producer; remove the competing step.',
     'target-removed-by-change':
       'An earlier change consumed this target. Use the explicit new step as the anchor.',
     'missing-installed-step': 'This step is not installed.',
@@ -37,5 +45,14 @@ export function describeDerivedProblem(issue: { kind: string; [key: string]: unk
     'base-lists-unavailable': 'The ordered base paths are unavailable.',
     'ineligible-derived-base': 'This base cannot be customized.',
   };
-  return `${context ? `${context}: ` : ''}${messages[issue.kind] ?? 'This path needs attention.'} (${issue.kind})`;
+  const ref = (value: unknown) => {
+    if (value && typeof value === 'object' && 'id' in value && 'version' in value)
+      return `${String(value.id)}@${String(value.version)}`;
+    return 'none';
+  };
+  const contracts =
+    'expectedContract' in issue || 'actualContract' in issue
+      ? ` Target: ${String(issue.target ?? issue.stepId ?? '')}. New step: ${String(issue.payload ?? '')}. Expected: ${ref(issue.expectedContract)}. Actual: ${ref(issue.actualContract)}.`
+      : '';
+  return `${context ? `${context}: ` : ''}${messages[issue.kind] ?? 'This path needs attention.'}${contracts} (${issue.kind})`;
 }
