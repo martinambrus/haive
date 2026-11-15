@@ -137,6 +137,11 @@ from there, never from the agent-written concerns) with no advisor, replanner or
 same prompt is refused again. An apply that asks to re-roll a refused mining agent gets none
 (`isProviderRefusal` in `retryMiningAgents`); only a person's Retry sends it again.
 
+08e is the provider-outage exception on Resume: the first outage fails the step and arms the
+allowance watch under the existing outage policy. On manual or automatic Resume, a failed
+writer folds through its normal apply and outcome journal as unconfirmed, without another
+writer in that generation. Committed-snapshot failures retain their barrier refusal.
+
 **Manual insight application uses the `implementer` mining seat.** 08e keeps its ordinary
 successor and has no revise continuation in this phase. The seat uses the existing task,
 step, saved-seat and default-provider resolution and declares file-writing capabilities,
