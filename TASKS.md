@@ -905,6 +905,25 @@ Reviews in `.claude/tmp/codex-run/RPR-S/` (review-1.md, review-2.md).
 4. The fence-versus-removal test relies on completion order rather than an injected barrier (`worker/test/scratch-workspace.test.ts` ~:485).
 5. The owner and epoch admission rechecks have no dedicated controls (only status is exercised).
 
+### T683 · FNF[committed-snapshot] · committed snapshot mount lows, after #1210 (+6)
+
+status: parked: diminishing returns (2026-11-15, owner rule: trivial lows park; resume on a user report, a measured failure, a production snapshot issuer or a related change) · kind: fix · found: #1210 reviews · priority: P4
+
+Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.md).
+
+1. The transient-fault classifier (`worker/src/repo/committed-snapshot.ts` ~:55-75) wraps issue and resolve, which touch no database: a git-child `EPIPE`/`ECONNRESET` is rethrown raw without the `SNAPSHOT_INVALID:` text, so the barrier misses it, and the class depends on which event wins a race. It also misses postgres.js `CONNECT_TIMEOUT` and SQLSTATEs 53300, 40001, 40P01, 57014. Fix: classify only around the two `db.query` lookups, drop process codes, add `CONNECT_TIMEOUT`, one control each. REGRESSION, low.
+2. `runTool` rejects at once on spawn error, abort or stdin error, so `withObjects` closes the `.git` and owner fds while `use` may still run one fs-safe call on `/proc/self/fd/<n>` (`committed-snapshot.ts` ~:167-226, `tool-spawn.ts` ~:102-126). Fix: await the `use` promise's settlement before closing handles. REGRESSION, low.
+3. The dispatcher-level clamp (`orchestrator/dispatcher.ts` ~:355-362) has no control: the mining-retry test mocks the resolver to null. Fix: one dispatcher test with a pinned view and no `toolProfile`, asserting `mcpSurface.ragOnly`. Test gap.
+4. `scripts/test/ci-gated-list.test.mjs` ~:200-209 hardcodes `SNAPSHOT_SANDBOX_TEST_IMAGE` instead of deriving it from the test's guard via `gatedEnvironment`; a renamed guard leaves the CI step green and the control skipped. Also the `module-source-pin` exemption still says "smokes" though it runs in `compose-boot` (PRE-EXISTING wording).
+5. The `dispatch failed before the agent was queued:` prefix is written in `step-runner.ts` ~:2508 and matched in `committed-snapshot.ts` ~:44 as two literals; a shared constant would make the pair explicit (the writer test pins it today).
+6. No production snapshot issuer exists yet, and each issue creates a new inventory and tree that stays until the task scratch is reaped (`committed-snapshot.ts` ~:437, `scratch-workspace.ts` ~:140); re-issuing on a re-offer can leave unused artifacts, and a crash mid-rebuild leaves a `stage-*`/`incomplete-*` directory until then. Decide reuse/collection when the issuer lands.
+
+### T684 · Agent isolation for committed-snapshot dispatch (owner decision)
+
+status: open: needs owner decision · kind: design · found: #1210 review-1b (B6) · priority: P3
+
+A mining agent dispatched against a committed snapshot runs with per-call agent isolation off (`worker/src/orchestrator/dispatcher.ts` ~:447). The snapshot is read-only and host-owned, and the agent's tool profile is clamped to `rag_only`, so the live checkout is not reachable; isolation would additionally give each call an empty agent directory and a pasted persona (see agent-isolation.md). Question: keep it off for snapshots (simpler, persona read once under the scratch lock), or apply the same `agentIsolationApplies` rule as live dispatch? No production issuer exists yet, so nothing runs this path today.
+
 ### T670 · FNF[fix-test-evidence] · repair test-edit evidence follow-ups, after #1171 (+18)
 
 status: parked (items 1 and 3 resolved 2026-11-15 in #1204; item 9 was already shipped in #1171 (`**/.auth/**` default deny), pinned by a control in #1204; the rest parked: diminishing returns) (OWNER DECISION 2026-11-14: one rule for both sinks: run the committed-secret scanner over stored test-edit content and the gate-3 diff viewer, redact matches with a withheld marker; add `.auth/**` to the default deny globs; queued overnight with items 3 and 9; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1171 reviews 2026-11-14 · priority: P3
