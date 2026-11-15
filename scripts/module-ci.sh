@@ -35,7 +35,8 @@ NODE
 
 source="modules/$module_id"
 target="external-modules/$module_id"
-[[ -z $(git ls-files -- "$source" "$target") ]] || fail 'module-id collides with tracked haive files'
+tracked=$(git ls-files -- "$source" "$target") || fail 'could not inspect tracked module paths'
+[[ -z $tracked ]] || fail 'module-id collides with tracked haive files'
 # checkout initially places the caller under modules/, but #1179's dev path is external-modules/.
 if [[ -d $source && ! -L $source && ! -e $target ]]; then
   mkdir -p external-modules
@@ -44,7 +45,9 @@ fi
 [[ -d $target && ! -L $target && ! -e $source ]] || fail 'expected one module checkout under modules/<id> or external-modules/<id>'
 
 check_clean() {
-  [[ -z $(git status --porcelain --untracked-files=all) ]] || fail 'haive tree is dirty; inspect git status --porcelain'
+  local status
+  status=$(git status --porcelain --untracked-files=all) || fail 'could not inspect haive tree'
+  [[ -z $status ]] || fail 'haive tree is dirty; inspect git status --porcelain'
 }
 check_clean
 # Even a failed module command must not hide a tracked-tree mutation.

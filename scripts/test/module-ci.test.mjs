@@ -122,6 +122,17 @@ process.exit(result.status ?? 1);
     run('bash', ['scripts/module-ci.sh', 'ci-stub', 'ci-control', '--check'], { env }).status,
     0,
   );
+  // A Git error must not masquerade as an empty, clean status.
+  const git = run('sh', ['-c', 'command -v git']).stdout.trim();
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\nif [ "$1" = status ]; then exit 1; fi\nexec "${git}" "$@"\n`,
+  );
+  chmodSync(join(bin, 'git'), 0o755);
+  const unreadable = invoke();
+  assert.notEqual(unreadable.status, 0);
+  assert.match(unreadable.stderr, /could not inspect haive tree/);
+  rmSync(join(bin, 'git'));
   // Structural old-ref regression: the ignored external tree is required by #1179.
   put('.gitignore', 'node_modules/\ndist/\n');
   assert.equal(run('git', ['add', '.gitignore']).status, 0);
