@@ -70,3 +70,21 @@ it('wires module roles uniquely, refuses ambiguity and pins an explicit per-cons
     buildDataEdgePlan('static', [{ executionPath: null, nodes: make(['module.ports.use']) }]),
   ).toThrow('spec: dangling');
 });
+
+it.each(['providesRoles', 'consumesRoles'] as const)(
+  'refuses host-policy review roles in module %s',
+  (field) => {
+    const declaration = {
+      role: '08c-code-review',
+      contract: STEP_ROLE_REGISTRY['08c-code-review'].contract,
+      ...(field === 'consumesRoles' ? { input: 'review', optional: false } : {}),
+    };
+    expect(
+      moduleManifestSchema.safeParse(
+        manifest({
+          composableSteps: [{ ...entry('check'), [field]: [declaration] }],
+        }),
+      ).success,
+    ).toBe(false);
+  },
+);

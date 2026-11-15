@@ -22,13 +22,20 @@ const exact = (v: z.infer<typeof roleContract>) => {
     entry && entry.contract.id === v.contract.id && entry.contract.version === v.contract.version
   );
 };
-export const providesRoleSchema = roleContract.refine(exact, 'role contract mismatch');
+const dataOnly = (v: z.infer<typeof roleContract>) => {
+  const entry = STEP_ROLE_REGISTRY[v.role];
+  return entry && !('hostPolicy' in entry);
+};
+export const providesRoleSchema = roleContract
+  .refine(exact, 'role contract mismatch')
+  .refine(dataOnly, 'host-policy role is not a module data port');
 export const consumesRoleSchema = roleContract
   .extend({
     input: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
     optional: z.boolean(),
   })
-  .refine(exact, 'role contract mismatch');
+  .refine(exact, 'role contract mismatch')
+  .refine(dataOnly, 'host-policy role is not a module data port');
 export const rolePortDeclarationsSchema = z.object({
   providesRoles: z
     .array(providesRoleSchema)

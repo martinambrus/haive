@@ -270,3 +270,23 @@ it.each(['absent', 'unselected', 'invalid'] as const)(
     expect(result).not.toHaveProperty('legacyOutput');
   },
 );
+
+it('requires host-policy executable support even with a matching data-role declaration', () => {
+  const review = '08c-code-review';
+  const ref = STEP_ROLE_REGISTRY[review].contract;
+  const nodes = dataPortNodes([review, '09-gate-2-verify-approval']);
+  nodes[0]!.id = 'module.ports.review';
+  const plan = buildDataEdgePlan('static', [{ executionPath: null, nodes }]);
+  const get = () => ({ providesRoles: [{ role: review, contract: ref }] }) as never;
+  expect(() => assertDataEdgeSupport({ dataEdgePlan: plan }, { get })).toThrow(
+    'pinned-step-support-unavailable',
+  );
+  expect(() =>
+    assertDataEdgeSupport(
+      { dataEdgePlan: plan },
+      {
+        get: () => ({ outputContract: ref }) as never,
+      },
+    ),
+  ).not.toThrow();
+});

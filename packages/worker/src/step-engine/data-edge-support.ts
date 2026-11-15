@@ -29,13 +29,6 @@ export function assertDataEdgeSupport(
         role.contract.version !== b.contract.version
       )
         throw new PinnedStepSupportError(b.producerStepId);
-      const provided = def.providesRoles?.find((p) => p.role === b.role);
-      if (
-        provided &&
-        provided.contract.id === b.contract.id &&
-        provided.contract.version === b.contract.version
-      )
-        continue;
       if ('hostPolicy' in role) {
         if (
           def.outputContract?.id !== b.contract.id ||
@@ -43,6 +36,13 @@ export function assertDataEdgeSupport(
         )
           throw new PinnedStepSupportError(b.producerStepId);
       } else {
+        const provided = def.providesRoles?.find((p) => p.role === b.role);
+        if (
+          provided &&
+          provided.contract.id === b.contract.id &&
+          provided.contract.version === b.contract.version
+        )
+          continue;
         const declaration =
           CORE_COMPOSABLE_STEPS.find((e) => e.stepId === b.producerStepId)?.providesRoles?.find(
             (p) => p.role === b.role,
