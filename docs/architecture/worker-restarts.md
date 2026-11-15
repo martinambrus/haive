@@ -865,15 +865,23 @@ Rollback first stops new continuations, then keeps a capable worker until every 
 continuation settles. Retain the journal and continuation JSON; reverting workers under a
 live continuation is unsafe even though this change needs no schema migration.
 
-The first 08e row at or after a continuation's starting round settles its checkpoint:
-`done` or `skipped` closes it, a pending/retried row keeps it open, and no row also keeps it
-open. A later gate-2 rejection cannot reopen an earlier settled continuation merely by
-creating a new pending triage row; that later visit offers new insights through the normal
-manual form. A fix round reached before any checkpoint still belongs to the open route.
+Checkpoint completion records the exact step row, round and generation in the required
+`insight.continuation` handoff payload, in the same owned transaction as the done write.
+The owned row's `done` or `skipped` status closes the route; Retry of that row keeps it open,
+even after its generation advances. If verification Retry leaves an older checkpoint pending
+and then starts a fix round, completing the new round's checkpoint transfers ownership to
+that row. The abandoned older row cannot keep the route open. Handoffs without a checkpoint
+reference retain the earliest-row rule until a checkpoint publishes its ownership.
+A later gate-2 rejection offers new insights through the normal manual form rather than
+reopening an earlier settled continuation by creating another pending triage row.
+A worker predating checkpoint ownership must not resume a task whose handoff carries that
+reference: its earliest-row reader can reopen an abandoned pending row even after the owned
+checkpoint settled. Retain capable workers until those tasks cannot resume.
 
 Missing ordered destinations at selection preflight or handoff fail the source step with
 explicit Retry guidance, using the ordinary failed-step settlement (which also fails its
-task). A final `ValidationSnapshotError` is handled on that same source step with the
+task). The writer guard also checks resolved form answers after preset/auto-submit expansion,
+including the direct START path, before any editor selection or CLI invocation. A final `ValidationSnapshotError` is handled on that same source step with the
 ordinary snapshot message. Both retain a row that Retry can reset; overtaken fences write
 nothing. Neither path resets downstream rows or dispatches an editor after refusal.
 
