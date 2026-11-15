@@ -47,7 +47,7 @@ export function runTool(
   cmd: string,
   args: readonly string[],
   opts: RunToolOptions = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: string; stdoutBytes: Buffer; stderr: string; exitCode: number }> {
   const asRoot = process.getuid?.() === 0;
   const okExits = opts.okExits ?? [0];
   return new Promise((resolve, reject) => {
@@ -100,7 +100,8 @@ export function runTool(
       if (settled) return;
       if (code !== null && okExits.includes(code)) {
         settled = true;
-        resolve({ stdout: Buffer.concat(stdout).toString('utf8'), stderr, exitCode: code });
+        const stdoutBytes = Buffer.concat(stdout);
+        resolve({ stdout: stdoutBytes.toString('utf8'), stdoutBytes, stderr, exitCode: code });
         return;
       }
       fail(new Error(`${cmd} failed (exit ${code ?? 'killed'}): ${stderr.trim()}`));
