@@ -1053,7 +1053,7 @@ streamed with complete counts: a per-file cap alone does not bound a whole repos
 - Per-seat CLI selection, which each dimension becomes: `STEP_MINING_SEATS` in
   `packages/shared/src/step-engine/types.ts`, `AgentMiningDispatch.roleKey` in
   `step-engine/step-definition.ts`
-- Refusal classification, the three sites the first new core change edits, and the retry veto:
+- Refusal classification, its three shipped sites, and the retry veto:
   `queues/cli-exec/failure-class.ts`, the mining barrier in `step-engine/step-runner.ts`,
   `pickFatalProviderError` in `step-engine/dag-executor.ts`, `classifyDagIssueFailure` and the
   `DAG_INFRA_EXHAUSTED_MARKER` precedent in `step-engine/dag-failure-class.ts`, the

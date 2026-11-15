@@ -386,7 +386,8 @@ export const tasks = pgTable(
     cliChoiceRecorded: boolean('cli_choice_recorded').notNull().default(false),
     summaryCliChoiceRecorded: boolean('summary_cli_choice_recorded').notNull().default(false),
     /** "Run configuration" answers applied to later steps' forms.
-     *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply();
+     *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply() (a module
+     *  step may merge its own keys, see docs/architecture/modules.md);
      *  null until a task's run-config step records them. */
     preAnswers: jsonb('pre_answers').$type<Record<string, Record<string, unknown>>>(),
     /** Fix-loop: the round new step rows are materialized at (0 = original pass);

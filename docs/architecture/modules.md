@@ -604,9 +604,8 @@ Preserve [review-row history](review-findings.md): never write `fixed` or the su
 `recurred` disposition, and never infer repair from absence, selection or a model's change
 report. Keep disposition updates scoped to the task and current round and guarded on `open`,
 so a refutation or human waiver keeps its verdict. A later scan records its own rows rather
-than rewriting earlier tasks or rounds. Core `recordReviewFindings` is best-effort: a report
-must also read the reviewer's step output and retain a finding with unknown disposition when
-its telemetry row is missing. A module using rows as required state must make persistence and
+than rewriting earlier tasks or rounds. Core `recordReviewFindings` is best-effort, and a manual Retry nulls step output, so
+neither is a durable record a report can rely on. A module using rows as required state must make persistence and
 replay part of its own step contract rather than assume the telemetry writer guarantees them.
 
 ### Output contracts
