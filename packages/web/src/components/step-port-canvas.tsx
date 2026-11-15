@@ -89,9 +89,11 @@ const nodeTypes = { ports: PortsNode };
 export default function StepPortCanvas({
   graph,
   onReorder,
+  compact = false,
 }: {
   graph: StepPortGraph;
   onReorder?: (from: number, to: number) => void;
+  compact?: boolean;
 }) {
   const [selected, setSelected] = useState<{ index: number; port: string } | null>(null);
   const layout: GraphNode[] = useMemo(
@@ -129,7 +131,10 @@ export default function StepPortCanvas({
         className="mb-2 text-xs text-neutral-400"
         body={`${onReorder ? 'Drag a step vertically to change its order. ' : 'Read-only step order. '}Select a port to highlight its edges. Use List for keyboard access.`}
       />
-      <div className="h-[650px] rounded border border-neutral-700" aria-label="Step port canvas">
+      <div
+        className={`${compact ? 'h-[320px]' : 'h-[650px]'} rounded border border-neutral-700`}
+        aria-label="Step port canvas"
+      >
         <ReactFlow
           nodes={nodes}
           onNodesChange={(changes) =>
