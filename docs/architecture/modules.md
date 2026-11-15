@@ -594,6 +594,13 @@ to one line and clips it to 200 characters. The stored entries keep their origin
 `i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
 also clips for older parked snapshots. Unlimited inventory is not an unlimited prompt budget; report
 consumers must page or stream large results rather than put them in every task poll.
+Automatic 08e persists at most `INSIGHTS_AT_GATE` (30) inventory entries, candidates, decisions
+and claim entries, with omitted counts in its form and summary. When its stored copy was cut,
+it reloads the complete cohort and host policy before classification; it always reloads the
+complete inventory before checking outstanding decisions. A bounded output keeps whole-batch
+outcome totals (`itemCounts`) beside its item page, so the history line counts every item. Claims and classification/batch journal records stay complete in Postgres;
+`GET /tasks/:id/events` pages their insight arrays with omitted counts, and
+`?insightOffset=30` reads the next page (optionally combined with `type`).
 
 `InsightLoadOptions`, `InsightLoadResult`, `LoadedInsight` and `InsightSourceRef` are exported
 only through `@haive/shared/step`. A loaded record's stable versioned occurrence `id` hashes its

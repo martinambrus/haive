@@ -515,14 +515,18 @@ Before completing an automatic visit without a continuation, 08e refreshes the u
 and uses the same manual-identity rule as detection. Earlier-cohort decisions and declined or
 unconfirmed writer items stay selectable; minor/nit classifications remain report-only.
 A manual submission completes without reopening again, including an empty selection.
+In automatic mode, a manual fallback offers at most 30 decisions and states how many
+were omitted. Those items stay in the unacted inventory. When a page creates a check
+continuation, its checkpoint revisits any remaining page; an ordinary manual checkpoint
+with no omitted decisions still completes without another selection.
 A claim of application is not a claim that checks passed.
 
 The insight handoff invokes the same validation snapshot decision as other late editors. A
 moved tree starts fresh 07c/07b rows with `resumeStepId = 08-phase-5-verify`; an unchanged
 tree starts fresh 08 directly. The configured forward tail includes a fresh code review and
-returns to an owned 08e checkpoint. After a manual batch that checkpoint does not ask
-for a second selection; an automatic batch refreshes the inventory for its next bounded
-cohort. Both publish checkpoint ownership in the required continuation event. Every existing
+returns to an owned 08e checkpoint. After a manual batch with no omitted decisions that
+checkpoint does not ask for a second selection; an automatic batch refreshes the inventory for
+its next bounded cohort. Both publish checkpoint ownership in the required continuation event. Every existing
 downstream row in the target round is invalidated, even when Retry changes a previous direct-verify route into a validation route whose target
 has no row yet. Runtime recheck bounds and return-address handling remain unchanged.
 
