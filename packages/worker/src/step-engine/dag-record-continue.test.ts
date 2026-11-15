@@ -21,6 +21,8 @@ import {
 import { StepSupersededError } from './step-ownership.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { gitRun } from '../repo/git-exec.js';
+import { recordLedgerEntry } from './task-ledger.js';
+import * as implementationChanges from './steps/workflow/_impl-changes.js';
 import {
   openMerge,
   abortOtherMerge,
@@ -79,7 +81,7 @@ vi.mock('./steps/workflow/_spec-artifact.js', async (original) => ({
 }));
 vi.mock('./task-ledger.js', () => ({
   augmentPromptWithLedger: async (_db: unknown, _task: unknown, p: string) => p,
-  recordLedgerEntry: async () => {},
+  recordLedgerEntry: vi.fn(),
 }));
 vi.mock('./terseness-context.js', () => ({ augmentPromptWithTerseness: async (p: string) => p }));
 vi.mock('./attachments-context.js', () => ({ augmentPromptWithAttachments: async () => '' }));
@@ -1591,6 +1593,213 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
 });
 
 for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it(`DGL-6 ${role} preserves persistent MCP interruption details without counting faults`, async () => {
+    const h = auxiliaryHarness(role);
+    const errorMessage = 'MCP server failed to start: catalog connection refused';
+    for (const id of ['mcp-first', 'mcp-second', 'mcp-third']) {
+      await expect(h.fold(auxiliaryFault(id, { errorMessage }))).rejects.toThrow(errorMessage);
+      expect(h.runs.at(-1)!.consumedAt).toBeNull();
+      expect(h.invocations.at(-1)!.consumedAt).toBeUndefined();
+    }
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    expect(h.rows[0]!.advisorInvocations).toBe(0);
+    expect(h.plan.replannerInvocations).toBe(0);
+    expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+    expect(h.rows[0]!.infraRetries).toBe(0);
+    expect(h.enqueued).toEqual([]);
+  });
+}
+
+for (const policy of ['fail-step', 'record-and-continue'] as const) {
+  it.each(['no-verdict', 'stalled'])(
+    `DGL-5 ${policy} does not prepare a reviewer when no dispatch is due: %s`,
+    async (kind) => {
+      const h = auxiliaryHarness('reviewer');
+      h.stepDef.dagExecute.failurePolicy = policy;
+      vi.mocked(resolveTaskDispatch).mockResolvedValue({
+        mode: 'skip',
+        reason: 'disabled',
+      } as never);
+      const measure = vi
+        .spyOn(implementationChanges, 'collectChangeSet')
+        .mockResolvedValue(null as never);
+      try {
+        if (kind === 'stalled') {
+          h.rows[0]!.reviewInfraRetries = 2;
+          h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+          await resolveReviewPhase(h.args() as never);
+        } else {
+          await h.fold(
+            auxiliaryFault('no-verdict', {
+              exitCode: 0,
+              errorMessage: null,
+              rawOutput: 'not a verdict',
+            }),
+          );
+        }
+        expect(h.rows[0]!.resolution).toBe('failed_unrecoverable');
+        expect(h.rows[0]!.errorMessage).toContain(
+          kind === 'stalled' ? 'review stalled' : 'no valid reviewer verdict',
+        );
+        expect(resolveTaskDispatch).not.toHaveBeenCalled();
+        expect(measure).not.toHaveBeenCalled();
+        expect(h.enqueued).toEqual([]);
+      } finally {
+        measure.mockRestore();
+      }
+    },
+  );
+
+  it.each(['free', 'truncated', 'stalled'])(
+    `DGL-5 ${policy} measures and prepares a reviewer dispatch once: %s`,
+    async (kind) => {
+      const h = auxiliaryHarness('reviewer');
+      h.stepDef.dagExecute.failurePolicy = policy;
+      const measure = vi
+        .spyOn(implementationChanges, 'collectChangeSet')
+        .mockResolvedValue(null as never);
+      try {
+        if (kind === 'stalled') {
+          h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+          await resolveReviewPhase(h.args() as never);
+        } else {
+          await h.fold(
+            auxiliaryFault('retry', {
+              exitCode: 137,
+              errorMessage: kind === 'truncated' ? OUTPUT_TRUNCATION_HEADLINE : null,
+              supersededAt: kind === 'free' ? new Date() : null,
+            }),
+          );
+        }
+        expect(measure).toHaveBeenCalledTimes(1);
+        expect(resolveTaskDispatch).toHaveBeenCalledTimes(1);
+        expect(h.enqueued).toHaveLength(1);
+      } finally {
+        measure.mockRestore();
+      }
+    },
+  );
+}
+
+it.each(['free', 'truncated', 'stalled'])(
+  'DGL-5 a required reviewer provider remains a hard retryable fault: %s',
+  async (kind) => {
+    const h = auxiliaryHarness('reviewer');
+    vi.mocked(resolveTaskDispatch).mockResolvedValue({ mode: 'skip', reason: 'disabled' } as never);
+    let fold;
+    if (kind === 'stalled') {
+      h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+      fold = () => resolveReviewPhase(h.args() as never);
+    } else {
+      fold = () =>
+        h.fold(
+          auxiliaryFault('retry', {
+            exitCode: 137,
+            errorMessage: kind === 'truncated' ? OUTPUT_TRUNCATION_HEADLINE : null,
+            supersededAt: kind === 'free' ? new Date() : null,
+          }),
+        );
+    }
+    const consumedAt = h.runs[0]?.consumedAt;
+    await expect(fold()).rejects.toThrow(
+      /no cli provider available for required DAG reviewer: disabled/,
+    );
+    expect(h.runs[0]!.consumedAt).toEqual(kind === 'stalled' ? consumedAt : null);
+    expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+    expect(h.rows[0]!.resolution).toBeNull();
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    expect(h.enqueued).toEqual([]);
+  },
+);
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it(`DGL-4 ${role} rejects a truncated structured result followed by a kill`, async () => {
+    const h = auxiliaryHarness(role);
+    const output =
+      role === 'issue_advisor'
+        ? { action: 'ESCALATE_TO_REPLAN', reasoning: 'needs planning' }
+        : role === 'replanner'
+          ? { action: 'CONTINUE', reasoning: 'proceed' }
+          : role === 'reviewer'
+            ? { verdict: 'approve', criteria_results: [], issues: [] }
+            : { issue_id: 'A', outcome: 'completed', files_modified: ['a.ts'] };
+    // The closing object bracket was never printed. Do not repair a killed partial reply.
+    const inv = auxiliaryFault('partial-then-kill', {
+      exitCode: 137,
+      errorMessage: null,
+      parsedOutput: null,
+      rawOutput: '```json\n' + JSON.stringify(output).slice(0, -1),
+    });
+    const streak = {
+      kind: 'dag_auxiliary_faults',
+      role,
+      level: 0,
+      providerId: 'provider',
+      invocationId: 'earlier-fault',
+      count: 1,
+    };
+    h.plan.escalationLog = [streak];
+    await expect(h.fold(inv)).rejects.toThrow(/interrupted.*Retry to recover/);
+    expect(h.runs[0]!.consumedAt).toBeNull();
+    expect(inv.consumedAt).toBeUndefined();
+    expect(h.plan.escalationLog).toEqual([streak]);
+    expect(h.rows[0]!.advisorInvocations).toBe(0);
+    expect(h.plan.replannerInvocations).toBe(0);
+    expect(h.rows[0]!.resolution).toBe(
+      role === 'issue_advisor' || role === 'replanner' ? 'failed_unrecoverable' : null,
+    );
+    expect(h.enqueued).toEqual([]);
+    expect(h.checkpoints).toEqual([]);
+  });
+}
+
+it('DGL-4 section C also rejects a truncated fix-coder result followed by a kill', async () => {
+  const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+  h.invocations.push(
+    auxiliaryFault('fix', {
+      exitCode: 137,
+      errorMessage: null,
+      parsedOutput: null,
+      rawOutput: '```json\n{"issue_id":"A","outcome":"completed","files_modified":[',
+    }),
+  );
+  h.runs.push({
+    id: 'fix-run',
+    dagIssueId: 'A',
+    role: 'coder',
+    cliInvocationId: 'fix',
+    consumedAt: null,
+  });
+  await expect(h.run()).rejects.toThrow(/interrupted.*Retry to recover/);
+  expect(h.rows[0]!.outcome).toBe('running');
+  expect(h.invocations[0]!.consumedAt).toBeUndefined();
+  expect(h.plan.escalationLog ?? []).toEqual([]);
+  expect(h.enqueued).toEqual([]);
+});
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it.each([false, true])(
+    `DGL-3 ${role} content refusal neither counts nor clears (prior fault: %s)`,
+    async (priorFault) => {
+      const h = auxiliaryHarness(role);
+      if (priorFault) await expect(h.fold(auxiliaryFault('first'))).rejects.toThrow(/DAG required/);
+      const streak = structuredClone(h.plan.escalationLog ?? []);
+      await h.fold(
+        auxiliaryFault('refusal', { errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }),
+      );
+      expect(h.plan.escalationLog ?? []).toEqual(streak);
+      expect(h.rows[0]!.resolution).toBe('failed_unrecoverable');
+      expect(h.enqueued).toEqual([]);
+      // A later fault must extend the old streak, rather than start over after a refusal.
+      await expect(h.fold(auxiliaryFault('after-refusal'))).rejects.toThrow(
+        priorFault ? /switch the step's CLI/ : /DAG required agent failed/,
+      );
+      expect(h.plan.escalationLog).toEqual([
+        expect.objectContaining({ role, count: priorFault ? 2 : 1 }),
+      ]);
+    },
+  );
+
   const faults =
     role === 'issue_advisor' || role === 'replanner'
       ? ['environment', 'timeout', 'malformed']
@@ -1630,6 +1839,21 @@ for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const)
     expect(h.plan.escalationLog ?? []).toEqual([]);
   });
 }
+
+it('DGL-1 a refused replanner consumes its invocation before writing issues, matching Retry', async () => {
+  const h = auxiliaryHarness('replanner');
+  await h.fold(
+    auxiliaryFault('refused', { errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }),
+  );
+  const invocationWrite = h.operations.findIndex(
+    (o) => o.kind === 'write' && o.table === schema.cliInvocations,
+  );
+  const issueWrite = h.operations.findIndex(
+    (o) => o.kind === 'write' && o.table === schema.taskDagIssues,
+  );
+  expect(invocationWrite).toBeGreaterThanOrEqual(0);
+  expect(issueWrite).toBeGreaterThan(invocationWrite);
+});
 
 it('DAGP-2 a refused replanner records affected issues and never resends', async () => {
   const h = auxiliaryHarness('replanner');
@@ -1893,6 +2117,33 @@ for (const role of ['reviewer', 'coder'] as const) {
     else expect(h.enqueued).toHaveLength(1); // Re-review the fix, rather than reject its output.
   });
 }
+
+it('DGL-2 a content-refused section C fix coder records the host refusal note in its ledger', async () => {
+  const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+  h.invocations.push(
+    auxiliaryFault('fix', {
+      errorMessage: PROVIDER_FATAL_HEADLINES.content_filter,
+      parsedOutput: {
+        issue_id: 'A',
+        outcome: 'completed',
+        concerns: 'Coder claims all is well',
+        files_modified: ['a.ts'],
+      },
+    }),
+  );
+  h.runs.push({ id: 'fix-run', dagIssueId: 'A', role: 'coder', cliInvocationId: 'fix' });
+  await h.run();
+  expect(h.rows[0]!.outcome).toBe('failed_unrecoverable');
+  expect(h.rows[0]!.errorMessage).toBe(PROVIDER_FATAL_HEADLINES.content_filter);
+  expect(h.rows[0]!.concerns).toContain('coder was refused by the provider');
+  expect(recordLedgerEntry).toHaveBeenCalledWith(
+    h.db,
+    'task',
+    'step',
+    expect.objectContaining({ text: expect.stringContaining('coder was refused by the provider') }),
+  );
+  expect(h.enqueued).toEqual([]);
+});
 
 for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
   it.each([

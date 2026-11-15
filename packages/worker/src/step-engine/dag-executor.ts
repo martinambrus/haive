@@ -18,6 +18,7 @@ import {
   unregisteredGitlinksMessage,
 } from './steps/workflow/_gitlink-registration.js';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
@@ -1656,15 +1657,28 @@ export async function ingestReviewRun(
     }
     return;
   }
-  const reviewPreparation =
+  const reviewerFailure =
     recordsFailures(ra.stepDef) && run.role === 'reviewer' && !verdict
+      ? classifyDagIssueFailure(inv)
+      : null;
+  // Preflight only a branch that will dispatch, before consuming the retained run or
+  // charging recovery. Missing/blocked required providers must remain hard faults.
+  const retryReviewer =
+    (reviewerFailure === 'truncated' && truncationRetryable(inv)) ||
+    (reviewerFailure === 'transient' &&
+      (runNeverAnswered(inv) || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES));
+  const reviewPrompt = retryReviewer
+    ? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue))
+    : undefined;
+  const reviewPreparation =
+    reviewPrompt !== undefined
       ? await prepareReviewAgent(
           ra,
           issue,
           'reviewer',
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt,
           ['tool_use'],
-          classifyDagIssueFailure(inv) === 'truncated' && truncationRetryable(inv),
+          reviewerFailure === 'truncated',
         )
       : undefined;
   await consume();
@@ -1687,7 +1701,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           true,
@@ -1716,7 +1730,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           false,
@@ -1882,16 +1896,14 @@ export async function resolveReviewPhase(
       // phase crash-resumable: re-spawn a fresh reviewer, bounded by the reviewer's OWN
       // transient budget; once it is spent, resolve failed_unrecoverable so the escalation
       // path (advisor) decides instead of the level wedging.
-      const preparation = recordsFailures(ra.stepDef)
-        ? await prepareReviewAgent(
-            ra,
-            issue,
-            'reviewer',
-            reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
-            ['tool_use'],
-          )
-        : undefined;
       if (issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
+        const prompt = recordsFailures(ra.stepDef)
+          ? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue))
+          : undefined;
+        const preparation =
+          prompt !== undefined
+            ? await prepareReviewAgent(ra, issue, 'reviewer', prompt, ['tool_use'])
+            : undefined;
         await ra.db
           .update(schema.taskDagIssues)
           .set({ reviewInfraRetries: issue.reviewInfraRetries + 1, updatedAt: new Date() })
@@ -1901,7 +1913,7 @@ export async function resolveReviewPhase(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          prompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           false,
@@ -2105,8 +2117,9 @@ function assertEscalationEnvironment(
     throw new Error(`DAG required agent failed: ${fault ?? inv.errorMessage}`);
   }
   if (classifyDagIssueFailure(inv) === 'transient') {
+    const detail = inv.errorMessage ? `: ${safeErrorMessage(inv.errorMessage)}` : '';
     throw new Error(
-      `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'}); Retry to recover`,
+      `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'})${detail}; Retry to recover`,
     );
   }
 }
@@ -2430,7 +2443,6 @@ export async function ingestAdvisor(
   // Opt-in records the refusal without relaying the refused assignment to another agent.
   // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
   if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
-    await updateAuxiliaryFault(ea, 'issue_advisor', inv, false);
     await consumeRun();
     await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
     return 'escalate';
@@ -2712,7 +2724,9 @@ async function ingestReplanner(
     return ea.db.transaction(async (tx) => {
       const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
       // All issue/run writes precede the step lock, matching Retry's lock order.
-      await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
+      // A content refusal is not a usable decision and neither counts nor clears a streak.
+      if (!isProviderRefusal(inv.errorMessage))
+        await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
       await assertOwnsStep(tx, ea.current.id);
       return action;
     });
@@ -2729,15 +2743,16 @@ async function applyReplannerDecision(
   const out: ReplannerOutput = refused
     ? { action: 'ABORT', reasoning: inv.errorMessage!, skip_downstream: [], new_levels: [] }
     : parseReplanner(inv, recordsFailures(ea.stepDef));
-  if (refused) {
-    for (const issue of failed) {
-      await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
-    }
-  }
   await ea.db
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
     .where(eq(schema.cliInvocations.id, inv.id));
+  if (refused) {
+    // Retry supersedes invocations before resetting issues; keep the same lock order.
+    for (const issue of failed) {
+      await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
+    }
+  }
   await ea.db
     .update(schema.taskDagPlans)
     .set({
@@ -3404,6 +3419,8 @@ export async function resolveDagPhase(
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
+        const refused =
+          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         let validFixResult = false;
         // Advisor-started fix coders first re-enter here while their issue is running.
         // Check them before section C's ordinary coder redispatch can consume the fault.
@@ -3419,7 +3436,7 @@ export async function resolveDagPhase(
               ),
             )
             .limit(1);
-          validFixResult = !!fixRun && result.parsed;
+          validFixResult = !!fixRun && result.parsed && !refused;
           if (fixRun && !result.parsed)
             await checkAuxiliaryEnvironment(
               { db, current, level: curLevel, stepDef },
@@ -3428,8 +3445,6 @@ export async function resolveDagPhase(
             );
         }
         // A refusal fails the issue whatever partial result the coder printed before it.
-        const refused =
-          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         if (refused) result.outcome = 'failed_unrecoverable';
         // A valid structured reply is a usable decision whatever its outcome. A failed issue
         // never reaches ingestReviewRun's clear, so clear the coder streak here.
