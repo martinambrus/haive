@@ -336,14 +336,6 @@
     "reason": "Resolve the review output through the role-aware loader, preserving actual invocation stamps."
   },
   {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "guidanceTargetStep",
-    "context": "readStepRole",
-    "value": "@roles",
-    "count": 1,
-    "reason": "Shared role resolver selects guidance target membership; reports keep physical IDs."
-  },
-  {
     "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
     "symbol": "extractFindings",
     "context": "EqualsEqualsEqualsToken",
@@ -382,5 +374,21 @@
     "value": "./08c2-code-audit.js",
     "count": 1,
     "reason": "Registration import of the executable core implementation."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "guidanceTargetStep",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver selects guidance target membership; reports keep physical IDs."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "parsePromptDefects.reviewId",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver selects guidance target membership; reports keep physical IDs."
   }
 ]
