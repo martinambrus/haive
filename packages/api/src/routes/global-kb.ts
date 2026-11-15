@@ -819,9 +819,13 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
           TASK_START_LOCK_TIMEOUT_MS,
         );
       }
-      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
-        generic: false,
-      });
+      const { runListSnapshot, customSteps, dataEdgePlan } = await definitionForCreate(
+        tx,
+        'kb_author',
+        {
+          generic: false,
+        },
+      );
       await tx.insert(schema.tasks).values({
         id: taskId,
         userId,
@@ -850,6 +854,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         },
         autoContinue: true,
         runListSnapshot,
+        dataEdgePlan,
         customSteps,
         status: 'created',
       });

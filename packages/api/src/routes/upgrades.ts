@@ -1199,9 +1199,13 @@ upgradeRoutes.post('/:id/rollback-upgrade', requireNewWorkAllowed, async (c) => 
         );
       }
       const priorUpgrade = found.id;
-      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'onboarding_upgrade', {
-        generic: false,
-      });
+      const { runListSnapshot, customSteps, dataEdgePlan } = await definitionForCreate(
+        tx,
+        'onboarding_upgrade',
+        {
+          generic: false,
+        },
+      );
       const [row] = await tx
         .insert(schema.tasks)
         .values({
@@ -1212,6 +1216,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', requireNewWorkAllowed, async (c) => 
           repositoryId,
           metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
           runListSnapshot,
+          dataEdgePlan,
           customSteps,
           status: 'created',
         })

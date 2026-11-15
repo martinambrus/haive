@@ -1,4 +1,3 @@
-import { SPEC_ROLES } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -612,7 +611,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   },
 
   async detect(ctx: StepContext): Promise<SpecQualityDetect> {
-    const output = legacyRoleOutput(await readRole(ctx, SPEC_ROLES.draft));
+    const output = legacyRoleOutput(await readRole(ctx, 'draft'));
     const spec = output.spec ?? '';
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),

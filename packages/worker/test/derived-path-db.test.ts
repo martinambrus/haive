@@ -1,9 +1,11 @@
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
 import { rolePlan, REVIEW, AUDIT, PRODUCER } from './replacement-fixtures.js';
 import { CODE_REVIEW_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { EXECUTION_PATHS } from '@haive/shared';
 import { parseDerivedRunPlan, type DerivedRunPlan } from '@haive/shared/modularity';
@@ -163,7 +165,21 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
     await db.delete(schema.users).where(eq(schema.users.id, userId));
     await db.$client.end({ timeout: 5 });
   });
+  let frozenDataPin: unknown;
+  afterEach(async () => {
+    if (taskId && frozenDataPin)
+      expect(
+        (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.dataEdgePlan,
+      ).toEqual(frozenDataPin);
+  });
   beforeEach(async () => {
+    frozenDataPin = buildDataEdgePlan(
+      'derived',
+      pin().candidates.map((c) => ({
+        executionPath: c.executionPath,
+        nodes: dataPortNodes(c.stepIds),
+      })),
+    );
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     h.adds = [];
     const [task] = await db
@@ -178,6 +194,7 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
         currentRound: 0,
         orchestrationEpoch: 3,
         derivedRunPlan: pin(),
+        dataEdgePlan: frozenDataPin,
         runListSnapshot: [...prefix, 'full'],
         preAnswers: { quick: { answer: true }, full: { answer: false } },
         stepLoopLimits: { quick: 2, full: 4 },
@@ -222,6 +239,13 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
 
   const installV2 = async () => {
     const plan = rolePlan(2);
+    frozenDataPin = buildDataEdgePlan(
+      'derived',
+      plan.candidates.map((c) => ({
+        executionPath: c.executionPath,
+        nodes: dataPortNodes(c.stepIds, c.roleBindings),
+      })),
+    );
     const r = registry();
     const def = (id: string): StepDefinition => ({
       metadata: {
@@ -247,7 +271,11 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
     });
     await db
       .update(schema.tasks)
-      .set({ derivedRunPlan: plan, runListSnapshot: [...plan.candidates[0]!.stepIds] })
+      .set({
+        derivedRunPlan: plan,
+        dataEdgePlan: frozenDataPin,
+        runListSnapshot: [...plan.candidates[0]!.stepIds],
+      })
       .where(eq(schema.tasks.id, taskId));
     return { plan, r };
   };

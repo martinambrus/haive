@@ -1,10 +1,14 @@
+import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
+import { readRole } from '../src/step-engine/read-role.js';
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   TASK_START_LOCK_TIMEOUT_MS,
   NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
@@ -153,13 +157,18 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   let db: Database;
   let userId: string;
 
+  const frozenPins = new Map<string, unknown>();
   const make = async (over: Partial<typeof schema.tasks.$inferInsert> = {}): Promise<string> => {
+    const pin = buildDataEdgePlan('static', [
+      { executionPath: null, nodes: dataPortNodes(over.runListSnapshot ?? [A, B]) },
+    ]);
     const [task] = await db
       .insert(schema.tasks)
       .values({
         userId,
         type: TYPE,
         title: 'dead task boot',
+        dataEdgePlan: pin,
         metadata: { anchorRepositoryId: null },
         status: 'running',
         orchestrationEpoch: 3,
@@ -169,6 +178,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         ...over,
       })
       .returning({ id: schema.tasks.id });
+    frozenPins.set(task!.id, pin);
     return task!.id;
   };
   const makeDead = (over: Partial<typeof schema.tasks.$inferInsert> = {}) =>
@@ -427,6 +437,13 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     });
   });
 
+  afterEach(async () => {
+    for (const [id, pin] of frozenPins) {
+      const t = await task(id);
+      if (t) expect(t.dataEdgePlan).toEqual(pin);
+    }
+    frozenPins.clear();
+  });
   beforeEach(async () => {
     h.adds.length = 0;
     h.kills.length = 0;
@@ -443,6 +460,66 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     await db.$client.end({ timeout: 5 });
   });
+
+  it.each(['boot recovery', 'dead revival', 'duplicate advance'] as const)(
+    'keeps the v3 producer and round ceiling through %s',
+    async (action) => {
+      const draft = STEP_ROLE_REGISTRY[SPEC_ROLES.draft].legacyStepId;
+      const consumer = STEP_ROLE_REGISTRY[SPEC_ROLES.checked].legacyStepId;
+      for (const id of [draft, consumer])
+        stepRegistry.override({
+          metadata: {
+            id,
+            title: id,
+            description: '',
+            workflowType: TYPE,
+            index: 1,
+            requiresCli: false,
+          },
+          apply: async () => ({}),
+        });
+      const ids = [draft, consumer, ...(action === 'duplicate advance' ? [B] : [])];
+      const pin = buildDataEdgePlan('static', [{ executionPath: null, nodes: dataPortNodes(ids) }]);
+      const id = await make({
+        runListSnapshot: ids,
+        dataEdgePlan: pin,
+        currentStepId: consumer,
+        ...(action === 'dead revival'
+          ? { deadAt: DEAD_AT, deadReason: 'temporarily unavailable' }
+          : {}),
+      });
+      const step = await row(
+        id,
+        consumer,
+        action === 'duplicate advance' ? 'done' : 'waiting_cli',
+        { output: {}, endedAt: new Date() },
+      );
+      await row(id, draft, 'done', { round: 0, output: { spec: 'pinned current round' } });
+      await row(id, draft, 'done', { round: 2, output: { spec: 'future decoy' } });
+      if (action !== 'duplicate advance') await run(id, step.id, { startedAt: DEAD_AT });
+      if (action === 'duplicate advance') {
+        const pickup = ctxFor(id, ids, { currentStepId: consumer, dataEdgePlan: pin });
+        const result = { status: 'done' as const, row: step, output: {} };
+        await handleResult(db, pickup, consumer, result);
+        await handleResult(db, pickup, consumer, result);
+        expect((await task(id)).currentStepId).toBe(B);
+      } else if (action === 'dead revival')
+        expect(await reviveDeadTask(db, await view(id), recorder().deps)).toBe('advance');
+      else
+        await reconcileOrphanedSteps(db, {
+          enqueueAdvance: async () => undefined,
+          queuedInvocationIds: async () => new Set<string>(),
+        });
+      expect((await task(id)).dataEdgePlan).toEqual(pin);
+      expect(
+        await readRole({ db, taskId: id, taskStepId: step.id, round: 0 }, SPEC_ROLES.draft),
+      ).toMatchObject({
+        state: 'ready',
+        producer: { stepId: draft, round: 0 },
+        data: { spec: 'pinned current round' },
+      });
+    },
+  );
 
   describe('a dead task whose run list resolves again', () => {
     const CASES = [

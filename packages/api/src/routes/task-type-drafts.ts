@@ -86,9 +86,13 @@ taskTypeDraftRoutes.post('/', async (c) => {
   // The opening message is written before the start is queued: the step reads it on its first detect.
   const { taskId, queued, event } = await db.transaction(async (tx) => {
     await admitNewWork(tx);
-    const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'type_draft', {
-      generic: false,
-    });
+    const { runListSnapshot, customSteps, dataEdgePlan } = await definitionForCreate(
+      tx,
+      'type_draft',
+      {
+        generic: false,
+      },
+    );
     const [task] = await tx
       .insert(schema.tasks)
       .values({
@@ -106,6 +110,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
         },
         autoContinue: true,
         runListSnapshot,
+        dataEdgePlan,
         customSteps,
         status: 'created',
       })

@@ -334,7 +334,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const specBody =
       resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
     const iterations = (
-      stages.checked.state === 'absent' ? [] : stages.checked.iterations
+      stages.checked.producer === null ? [] : stages.checked.iterations
     ) as IterationEntry[];
     const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
     const [task] = await ctx.db

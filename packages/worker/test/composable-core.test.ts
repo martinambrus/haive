@@ -1,3 +1,7 @@
+import { dataPortNodes } from '@haive/shared/step-ports';
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { builtinTaskTypeRows } from '../src/step-engine/task-type-seed.js';
+import { workflowBaseCandidates } from '@haive/shared/run-list';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { EXECUTION_PATHS } from '@haive/shared';
 import { taskRunListIds } from '@haive/shared/run-list';
@@ -17,6 +21,37 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
+
+  it('auto-wires every shipped static type and workflow candidate without ambiguity', () => {
+    const steps = (type: string) => stepRegistry.listByWorkflow(type).map((s) => s.metadata.id);
+    for (const type of builtinTaskTypeRows(stepRegistry)) {
+      if (type.runListStrategy === 'static')
+        expect(() =>
+          buildDataEdgePlan('static', [
+            { executionPath: null, nodes: dataPortNodes(type.stepIds!) },
+          ]),
+        ).not.toThrow();
+    }
+    const paths = workflowBaseCandidates(steps, { includeConditionalInsightSteps: true });
+    for (const c of paths)
+      expect(c.stepIds).toEqual(
+        taskRunListIds(
+          {
+            workflowType: 'workflow',
+            runListStrategy: 'workflow_paths',
+            runListSnapshot: null,
+            executionPath: c.executionPath,
+          },
+          steps,
+        ),
+      );
+    expect(() =>
+      buildDataEdgePlan(
+        'workflow',
+        paths.map((c) => ({ ...c, nodes: dataPortNodes(c.stepIds) })),
+      ),
+    ).not.toThrow();
+  });
 
   it('holds the 58 curated steps and passes the assert on the real registry', () => {
     expect(CORE_COMPOSABLE_STEPS).toHaveLength(58);

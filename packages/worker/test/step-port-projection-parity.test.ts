@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { expect, it } from 'vitest';
-import { projectStepPorts } from '@haive/shared/step-ports';
+import { projectStepPorts, dataPortNodes } from '@haive/shared/step-ports';
 import { SPEC_ROLES, STEP_ROLES } from '@haive/shared/step-outputs';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 
@@ -34,7 +34,7 @@ const nodes = () => projectStepPorts(ids).nodes;
 it('mirrors every core spec input and output declaration including its exact contract', () => {
   const specRoles = new Set<string>(Object.values(SPEC_ROLES));
   for (const entry of CORE_COMPOSABLE_STEPS) {
-    const node = projectStepPorts([entry.stepId]).nodes[0]!;
+    const node = dataPortNodes([entry.stepId])[0]!;
     const inputs = node.inputs
       .filter((input) => !input.adapter && specRoles.has(input.role))
       .map(({ id, role, contract, optional }) => ({ input: id, role, contract, optional }));

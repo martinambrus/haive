@@ -1,0 +1,103 @@
+import {
+  SPEC_ROLES,
+  STEP_ROLES,
+  STEP_ROLE_REGISTRY,
+  type StepRoleId,
+  type StepOutputContractRef,
+} from './output-contracts.js';
+import type { PortNode, StepPort } from './step-ports.js';
+
+export interface DataInput {
+  input: string;
+  role: StepRoleId;
+  contract: StepOutputContractRef;
+  optional: boolean;
+}
+const input = (name: string, role: StepRoleId): DataInput =>
+  Object.freeze({
+    input: name,
+    role,
+    contract: STEP_ROLE_REGISTRY[role].contract,
+    optional: true,
+  });
+const stages = Object.freeze([
+  input('resolved', SPEC_ROLES.resolved),
+  input('checked', SPEC_ROLES.checked),
+  input('draft', SPEC_ROLES.draft),
+]);
+/** One vocabulary for core declarations, admission and the host stage adapters.
+ * Each stage is pinned separately: optional runtime fallback is the host's decision. */
+export const SPEC_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
+  '05-phase-0b5-spec-quality': Object.freeze([input('draft', SPEC_ROLES.draft)]),
+  '05a-resolve-spec-warnings': Object.freeze([
+    input('checked', SPEC_ROLES.checked),
+    input('draft', SPEC_ROLES.draft),
+  ]),
+  '06-gate-1-spec-approval': stages,
+  ...Object.fromEntries(
+    [
+      '06-run-config',
+      '06b-sprint-planning',
+      '07-phase-2-implement',
+      '07a-code-simplify',
+      '07b-phase-4-validate',
+      '08a-browser-verify',
+      '08b-test-management',
+      STEP_ROLES.codeReview,
+      STEP_ROLES.codeAudit,
+      '08d-adversarial-qa',
+      '08e-insights-triage',
+      '11f-plan-reconcile',
+    ].map((id) => [id, stages]),
+  ),
+});
+const reviewInputs = Object.freeze([input('review', STEP_ROLES.codeReview)]);
+export const CORE_DATA_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
+  ...SPEC_INPUTS,
+  '09-gate-2-verify-approval': Object.freeze([
+    ...reviewInputs,
+    input('audit', STEP_ROLES.codeAudit),
+  ]),
+  '11-phase-8-learning': reviewInputs,
+});
+export type DataRoleBindings = Readonly<
+  Record<string, { stepId: string; outputContract: { id: string; version: number } }>
+>;
+const port = (role: StepRoleId, id: string, optional: boolean): StepPort => ({
+  id,
+  role,
+  contract: { ...STEP_ROLE_REGISTRY[role].contract },
+  authorship: STEP_ROLE_REGISTRY[role].authorship,
+  optional,
+});
+/** PR3 supports host declarations only. A module inherits spec inputs solely when occupying
+ * an already admitted v2 host-policy seat; it cannot declare a new data role. */
+export function dataPortNodes(
+  stepIds: readonly string[],
+  roleBindings: DataRoleBindings = {},
+): PortNode[] {
+  return stepIds.map((id) => {
+    const occupied = Object.keys(roleBindings).find((role) => roleBindings[role]!.stepId === id);
+    const declarations = CORE_DATA_INPUTS[occupied ?? id] ?? [];
+    const outputs = Object.values(STEP_ROLE_REGISTRY)
+      .filter((entry) => {
+        const bound = roleBindings[entry.id];
+        return (
+          (bound?.stepId ?? entry.legacyStepId) === id &&
+          (!bound ||
+            (bound.outputContract.id === entry.contract.id &&
+              bound.outputContract.version === entry.contract.version))
+        );
+      })
+      .map((entry) => port(entry.id, entry.id, false));
+    return {
+      id,
+      label: id,
+      outputs,
+      inputs: declarations.map((d) => ({
+        ...port(d.role, d.input, d.optional),
+        contract: { ...d.contract },
+      })),
+    };
+  });
+}

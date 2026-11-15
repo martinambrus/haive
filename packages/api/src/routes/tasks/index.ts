@@ -327,7 +327,7 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where,
     // A task's pinned prompt steps can run to many KiB; no list reader needs them.
-    columns: { customSteps: false, derivedRunPlan: false },
+    columns: { customSteps: false, derivedRunPlan: false, dataEdgePlan: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -775,6 +775,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        dataEdgePlan: locked.dataEdgePlan ?? null,
         derivedRunPlan: locked.derivedRunPlan
           ? {
               ...locked.derivedRunPlan,
@@ -1146,6 +1147,7 @@ taskRoutes.get('/:id/ports', async (c) => {
       type: true,
       runListSnapshot: true,
       derivedRunPlan: true,
+      dataEdgePlan: true,
       executionPath: true,
     },
   });
@@ -1247,7 +1249,7 @@ taskRoutes.get('/:id', async (c) => {
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // Pins feed flags and warnings, but the page never reads their full bodies.
   const warnings = task.derivedRunPlan != null ? derivedTaskWarnings(task.derivedRunPlan) : null;
-  const { customSteps: _pinned, derivedRunPlan: _plan, ...taskFields } = task;
+  const { customSteps: _pinned, derivedRunPlan: _plan, dataEdgePlan: _edges, ...taskFields } = task;
   const providerRows =
     task.cliProviderId === null
       ? await db

@@ -121,6 +121,7 @@ export function derivedBaseEligibility(base: {
 /** Always use the existing selector: duplicating its path or prelude rules would drift. */
 export function workflowBaseCandidates(
   listByWorkflow: (type: string) => readonly string[],
+  opts: { includeConditionalInsightSteps?: boolean } = {},
 ): DerivedBaseCandidate[] {
   return [null, ...EXECUTION_PATHS].map((executionPath) => ({
     executionPath,
@@ -132,7 +133,9 @@ export function workflowBaseCandidates(
         executionPath,
       },
       listByWorkflow,
-    ).filter((id) => !isPathAddedInsightStep(executionPath, id)),
+    ).filter(
+      (id) => opts.includeConditionalInsightSteps || !isPathAddedInsightStep(executionPath, id),
+    ),
   }));
 }
 
@@ -141,6 +144,7 @@ export function workflowBaseCandidates(
  * than choosing an order that could differ from registration's stable tie order. */
 export function catalogWorkflowBaseCandidates(
   rows: readonly OrderedStepCatalogRow[],
+  opts: { includeConditionalInsightSteps?: boolean } = {},
 ): DerivedBaseCandidate[] {
   const ids = new Set<string>();
   const workflows = new Map<string, OrderedStepCatalogRow[]>();
@@ -162,7 +166,7 @@ export function catalogWorkflowBaseCandidates(
       }
     }
   }
-  return workflowBaseCandidates((type) => workflows.get(type)?.map((s) => s.stepId) ?? []);
+  return workflowBaseCandidates((type) => workflows.get(type)?.map((s) => s.stepId) ?? [], opts);
 }
 
 export interface BaseCandidateParityIssue {

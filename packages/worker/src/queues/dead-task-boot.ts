@@ -1,3 +1,4 @@
+import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import { parseDerivedRunPlan, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
@@ -94,6 +95,7 @@ export function deadTaskResolution(
     runListSnapshot: string[] | null;
     customSteps: unknown;
     derivedRunPlan?: unknown;
+    dataEdgePlan?: unknown;
     executionPath?: string | null;
     /** The step ids its last task.dead event named. */
     deathNamed?: readonly string[];
@@ -101,6 +103,12 @@ export function deadTaskResolution(
   strategy: ResolvedTaskContext['runListStrategy'],
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
+  try {
+    assertDataEdgeSupport(task, registry);
+  } catch (error) {
+    if (!(error instanceof PinnedStepSupportError)) throw error;
+    return { unresolved: [...error.ids], outsideList: null, supportReason: error.message };
+  }
   if (strategy === 'derived') parseDerivedRunPlan(task.derivedRunPlan);
   if (task.derivedRunPlan != null) {
     const plan = parseDerivedRunPlan(task.derivedRunPlan);
@@ -212,8 +220,9 @@ export async function reviveDeadTask(
     const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
     if (
       !current ||
-      (current.derivedRunPlan != null &&
-        deadTaskResolution(current, 'derived').supportReason !== undefined) ||
+      ((current.derivedRunPlan != null || current.dataEdgePlan != null) &&
+        deadTaskResolution(current, current.derivedRunPlan != null ? 'derived' : 'static')
+          .supportReason !== undefined) ||
       (await currentIntegrationMissing(tx, current))
     )
       return null;
@@ -330,6 +339,7 @@ const readCandidates = (db: Database | DbTx, extra: SQL | undefined) =>
       currentRound: schema.tasks.currentRound,
       runListSnapshot: schema.tasks.runListSnapshot,
       derivedRunPlan: schema.tasks.derivedRunPlan,
+      dataEdgePlan: schema.tasks.dataEdgePlan,
       executionPath: schema.tasks.executionPath,
       customSteps: schema.tasks.customSteps,
       deadAt: schema.tasks.deadAt,

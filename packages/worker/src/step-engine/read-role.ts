@@ -1,5 +1,14 @@
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import {
+  resolveDataInput,
+  parseDataEdgePlan,
+  selectDataEdgeCandidate,
+  DataEdgePlanError,
+} from '@haive/shared/data-edge-plan';
 import {
   STEP_ROLE_REGISTRY,
+  SPEC_ROLES,
   projectRoleOutput,
   safeParseStepOutput,
   type SpecRoleId,
@@ -19,7 +28,7 @@ type Producer<R extends SpecRoleId> = {
 };
 export type RoleRead<R extends SpecRoleId> =
   | {
-      state: 'absent';
+      state: 'absent' | 'unselected';
       role: R;
       contract: (typeof STEP_ROLE_REGISTRY)[R]['contract'];
       producer: null;
@@ -28,35 +37,119 @@ export type RoleRead<R extends SpecRoleId> =
   | (Producer<R> & { state: 'invalid'; issuePaths: readonly string[] })
   | (Producer<R> & { state: 'ready'; data: RoleOutput<R> });
 
-/** Canonical resolution ONLY. Preserve L selection: newest round, no status predicate,
- * no implicit round ceiling. A passed ceiling is forwarded exactly. PR3's v3 per-input
- * pins will change selection for NEW tasks only; v1/v2 tasks keep this compatibility path. */
-export async function readRole<R extends SpecRoleId>(
-  ctx: Pick<StepContext, 'db' | 'taskId'>,
-  role: R,
+/** V3 reads the immutable consumer input at the current round ceiling. Without v3,
+ * preserve canonical identity, tolerant historical output and the explicit ceiling. */
+type ReadContext = Pick<StepContext, 'db' | 'taskId'> &
+  Partial<Pick<StepContext, 'taskStepId' | 'round'>>;
+export function readRole(
+  ctx: ReadContext,
+  input: 'draft',
   maxRound?: number,
-): Promise<RoleRead<R>> {
+): Promise<RoleRead<typeof SPEC_ROLES.draft>>;
+export function readRole(
+  ctx: ReadContext,
+  input: 'checked',
+  maxRound?: number,
+): Promise<RoleRead<typeof SPEC_ROLES.checked>>;
+export function readRole(
+  ctx: ReadContext,
+  input: 'resolved',
+  maxRound?: number,
+): Promise<RoleRead<typeof SPEC_ROLES.resolved>>;
+export function readRole<R extends SpecRoleId>(
+  ctx: ReadContext,
+  input: R,
+  maxRound?: number,
+): Promise<RoleRead<R>>;
+export async function readRole(
+  ctx: ReadContext,
+  input: SpecRoleId | keyof typeof SPEC_ROLES,
+  maxRound?: number,
+): Promise<RoleRead<SpecRoleId>> {
+  const namedInput = Object.hasOwn(SPEC_ROLES, input);
+  const role = namedInput ? SPEC_ROLES[input as keyof typeof SPEC_ROLES] : (input as SpecRoleId);
   const entry = STEP_ROLE_REGISTRY[role];
-  if (!entry || 'hostPolicy' in entry)
+  if (!Object.hasOwn(STEP_ROLE_REGISTRY, role))
+    throw new Error(`readRole cannot resolve unregistered role ${role}`);
+  if ('hostPolicy' in entry)
     throw new Error('readRole cannot resolve host-policy roles without per-input pins');
-  const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, entry.legacyStepId, maxRound);
   const contract = entry.contract;
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { dataEdgePlan: true, executionPath: true, runListSnapshot: true },
+  });
+  let producerStepId: string = entry.legacyStepId;
+  let ceiling = maxRound;
+  let pinned = false;
+  let required = false;
+  let inputName: string = role;
+  if (task?.dataEdgePlan != null) {
+    pinned = true;
+    const consumer =
+      ctx.taskStepId &&
+      (await ctx.db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.id, ctx.taskStepId),
+          eq(schema.taskSteps.taskId, ctx.taskId),
+        ),
+        columns: { stepId: true, round: true },
+      }));
+    if (!consumer || ctx.round == null || consumer.round !== ctx.round)
+      throw new DataEdgePlanError('consumer row/round mismatch');
+    // Resolve the input name from the PIN, not today's declaration. The role overload is
+    // retained for PR1 callers; host adapters use explicit per-input names.
+    const plan = parseDataEdgePlan(task.dataEdgePlan);
+    const candidate = selectDataEdgeCandidate(task, plan);
+    if (plan.selection === 'derived' && task.executionPath == null)
+      return { state: 'unselected', role, contract, producer: null };
+    const inputs =
+      candidate.nodes
+        .find((n) => n.id === consumer.stepId)
+        ?.inputs.filter((i) => i.role === role) ?? [];
+    const portName = namedInput ? input : inputs.length === 1 ? inputs[0]!.id : undefined;
+    if (!portName) throw new DataEdgePlanError('unknown consumer input');
+    inputName = portName;
+    const resolved = resolveDataInput(task, consumer.stepId, portName, plan);
+    if (resolved.state === 'unselected')
+      return { state: 'unselected', role, contract, producer: null };
+    if (
+      resolved.declaration.role !== role ||
+      resolved.declaration.contract.id !== contract.id ||
+      resolved.declaration.contract.version !== contract.version
+    )
+      throw new DataEdgePlanError(`${consumer.stepId}.${portName}: pinned contract unavailable`);
+    if (resolved.state === 'absent') return { state: 'absent', role, contract, producer: null };
+    required = !resolved.declaration.optional;
+    producerStepId = resolved.binding.producerStepId;
+    ceiling = Math.min(maxRound ?? ctx.round, ctx.round);
+  }
+  const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, producerStepId, ceiling);
+  if (required && (!row || row.status !== 'done'))
+    throw new DataEdgePlanError(`${inputName}: required input not ready`);
   if (!row) return { state: 'absent', role, contract, producer: null };
   const common = {
     role,
     contract,
     producer: { rowId: row.id, stepId: row.stepId, round: row.round, status: row.status },
     iterations: row.iterations,
-    legacyOutput: projectRoleOutput(role, row.output),
+    legacyOutput: pinned ? null : projectRoleOutput(role, row.output),
   };
   if (row.status !== 'done') return { ...common, state: 'not-ready' };
   const result = safeParseStepOutput(contract, row.output);
-  if (!result.success) return { ...common, state: 'invalid', issuePaths: result.issuePaths };
-  return { ...common, state: 'ready', data: projectRoleOutput(role, result.data) as RoleOutput<R> };
+  if (!result.success) {
+    if (required) throw new DataEdgePlanError(`${inputName}: required input invalid`);
+    return { ...common, state: 'invalid', issuePaths: result.issuePaths };
+  }
+  return {
+    ...common,
+    state: 'ready',
+    legacyOutput: projectRoleOutput(role, result.data),
+    data: projectRoleOutput(role, result.data) as RoleOutput<SpecRoleId>,
+  };
 }
 
 /** PR1 host adapters preserve tolerant old-row reads, including absent spec fields and
  * non-done rows with retained output. Validation is diagnostic, never a new routing gate. */
 export function legacyRoleOutput<R extends SpecRoleId>(read: RoleRead<R>): Partial<RoleOutput<R>> {
-  return read.state === 'absent' ? {} : (read.legacyOutput ?? {});
+  return read.producer === null ? {} : (read.legacyOutput ?? {});
 }

@@ -146,3 +146,25 @@ it('uses persisted history titles for canvas nodes', async () => {
   const body = (await response.json()) as StepPortProjection;
   expect(body.candidates[0]!.graph.nodes[0]!.label).toBe('Historical spec title');
 });
+
+it('projects the v3 pinned producer and declarations without reconstructing from live tables', async () => {
+  const { buildDataEdgePlan } = await import('@haive/shared/data-edge-plan');
+  const { dataPortNodes } = await import('@haive/shared/step-ports');
+  const nodes = dataPortNodes(['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality']);
+  nodes[0]!.id = 'pinned-spec';
+  const plan = buildDataEdgePlan('static', [{ executionPath: null, nodes }]);
+  const fake = setup({ dataEdgePlan: plan, runListSnapshot: nodes.map((n) => n.id) });
+  const response = await app.request(`/tasks/${TASK}/ports`);
+  expect(response.status).toBe(200);
+  const graph = ((await response.json()) as StepPortProjection).candidates[0]!.graph;
+  expect(graph.edges[0]).toMatchObject({
+    source: 'pinned-spec',
+    target: nodes[1]!.id,
+    sourceIndex: 0,
+    targetIndex: 1,
+  });
+  expect(JSON.stringify(graph)).not.toContain('fingerprint');
+  delete plan.candidates[0]!.bindings['1:draft'];
+  fake.patch(schema.tasks, TASK, { dataEdgePlan: plan });
+  expect((await app.request(`/tasks/${TASK}/ports`)).status).toBe(409);
+});

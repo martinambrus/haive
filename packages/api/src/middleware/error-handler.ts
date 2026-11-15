@@ -1,3 +1,4 @@
+import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { DerivedRunPlanError } from '@haive/shared/modularity';
 import { DerivedTaskAdmissionError } from '../lib/derived-errors.js';
 import { DerivedCatalogBusyError, ModuleAdmissionError } from '@haive/shared/modularity-server';
@@ -22,7 +23,7 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       { error: err.message, code: err.code, moduleId: err.moduleId },
       err.code === 'module-busy' ? 503 : 409,
     );
-  if (err instanceof DerivedRunPlanError)
+  if (err instanceof DerivedRunPlanError || err instanceof DataEdgePlanError)
     return c.json({ error: err.message, code: err.code }, 409);
   if (err instanceof DerivedTaskAdmissionError || err instanceof DerivedCatalogBusyError)
     return c.json({ error: err.message, code: err.code, issues: err.issues }, 409);

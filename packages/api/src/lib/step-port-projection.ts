@@ -1,3 +1,5 @@
+import { parseDataEdgePlan, selectDataEdgeCandidate } from '@haive/shared/data-edge-plan';
+import { validatePortEdges } from '@haive/shared/step-ports';
 import { projectStepPorts } from '@haive/shared/step-ports';
 import { parseDerivedRunPlan } from '@haive/shared/modularity';
 import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
@@ -23,6 +25,25 @@ export function projectTaskPorts(
   steps: readonly { stepId: string; title?: string | null }[],
 ) {
   const labels = new Map(steps.map((step) => [step.stepId, step.title ?? step.stepId]));
+  if (task.dataEdgePlan != null) {
+    const plan = parseDataEdgePlan(task.dataEdgePlan);
+    const candidate = selectDataEdgeCandidate({ ...task, dataEdgePlan: task.dataEdgePlan }, plan);
+    const bindings = Object.fromEntries(
+      Object.entries(candidate.bindings).flatMap(([key, b]) => (b ? [[key, b.producerIndex]] : [])),
+    );
+    return {
+      candidatesOnly: plan.selection === 'derived' && task.executionPath == null,
+      candidates: [
+        {
+          executionPath: candidate.executionPath,
+          graph: validatePortEdges(
+            candidate.nodes.map((n) => ({ ...n, label: labels.get(n.id) ?? n.label })),
+            bindings,
+          ),
+        },
+      ],
+    };
+  }
   if (task.derivedRunPlan != null || task.runListStrategy === 'derived') {
     const plan = parseDerivedRunPlan(task.derivedRunPlan);
     // Reuse the strict pin reader's selected-path/snapshot consistency fence.

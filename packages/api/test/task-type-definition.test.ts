@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { eq, inArray, like } from 'drizzle-orm';
+import { eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { promptStepId } from '@haive/shared/modularity';
@@ -364,5 +364,203 @@ describe('restoresDatabase', () => {
       restoresDatabase(listing('module:fx', { runListStrategy: 'workflow_paths', stepIds: null })),
     ).toBe(false);
     expect(restoresDatabase(listing('module:fx', { stepIds: [QUIET] }))).toBe(false);
+  });
+});
+
+// These controls use the real locked admission helper and INSERT transaction. No dev queues.
+describe.skipIf(!url)('v3 per-consumer locked admission', () => {
+  let db: Database;
+  let userId: string;
+  const slugs = ['prt3-static', 'prt3-module', 'prt3-limit'];
+  const ids = ['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality', '07-phase-2-implement'];
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    const [u] = await db
+      .insert(schema.users)
+      .values({
+        emailEncrypted: 'prt3@example.invalid',
+        emailBlindIndex: 'prt3-v3-user',
+        passwordHash: 'test',
+        status: 'active',
+      })
+      .returning();
+    userId = u!.id;
+    await db.insert(schema.modules).values({
+      moduleId: 'prt3',
+      packageName: '@haive/module-prt3',
+      name: 'PRT3',
+      installedVersion: '1.0.0',
+    });
+    await db
+      .insert(schema.stepCatalog)
+      .values(ids.map((id) => catalogRow(id)))
+      .onConflictDoNothing();
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values([
+        row(slugs[0]!, { source: 'admin', stepIds: ids }),
+        row(slugs[1]!, { source: 'module:prt3', stepIds: ids }),
+        row(slugs[2]!, { source: 'admin', stepIds: [] }),
+      ]);
+  });
+  afterAll(async () => {
+    await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'prt3'));
+    await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, [...ids, CANARY]));
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await db.$client.end({ timeout: 5 });
+  });
+  const insert = async (slug: string) =>
+    db.transaction(async (tx) => {
+      const admitted = await definitionForCreate(tx, slug, { generic: true, locked: true });
+      const [task] = await tx
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: slug,
+          title: 'v3',
+          runListSnapshot: admitted.runListSnapshot,
+          dataEdgePlan: admitted.dataEdgePlan,
+        })
+        .returning();
+      return task!;
+    });
+  it('gives static admin and module-seed tasks the same exact immutable edges', async () => {
+    const admin = await insert(slugs[0]!);
+    const module = await insert(slugs[1]!);
+    expect(admin.dataEdgePlan).toMatchObject({
+      version: 3,
+      candidates: [
+        {
+          bindings: {
+            '1:draft': {
+              producerIndex: 0,
+              producerStepId: ids[0],
+              contract: { id: 'haive.spec.draft', version: 1 },
+            },
+            '2:resolved': null,
+          },
+        },
+      ],
+    });
+    expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
+  });
+  it('uses the definition and catalog at INSERT, not the preflight copy', async () => {
+    const before = await definitionForCreate(db, slugs[0]!, { generic: true });
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: [ids[2]!] })
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[0]!));
+    // A catalog edit also crosses the preflight/INSERT boundary: a new CLI means a canary.
+    await db.insert(schema.stepCatalog).values(catalogRow(CANARY)).onConflictDoNothing();
+    await db
+      .update(schema.stepCatalog)
+      .set({ dispatchesCli: true })
+      .where(eq(schema.stepCatalog.stepId, ids[2]!));
+    try {
+      const task = await insert(slugs[0]!);
+      expect(task.runListSnapshot).toEqual([CANARY, ids[2]]);
+      expect(task.dataEdgePlan).not.toEqual(before.dataEdgePlan);
+      expect(task.dataEdgePlan).toMatchObject({
+        candidates: [
+          {
+            nodes: [{ id: CANARY }, { id: ids[2] }],
+            bindings: { '1:draft': null, '1:checked': null, '1:resolved': null },
+          },
+        ],
+      });
+    } finally {
+      await db
+        .update(schema.stepCatalog)
+        .set({ dispatchesCli: false })
+        .where(eq(schema.stepCatalog.stepId, ids[2]!));
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ stepIds: ids })
+        .where(eq(schema.taskTypeDefinitions.slug, slugs[0]!));
+    }
+  });
+  it('holds module deactivation until the admitted task and its plan have committed', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const creating = db.transaction(async (tx) => {
+      const admitted = await definitionForCreate(tx, slugs[1]!, { generic: true, locked: true });
+      locked();
+      await gate;
+      await tx.insert(schema.tasks).values({
+        userId,
+        type: slugs[1]!,
+        title: 'race',
+        runListSnapshot: admitted.runListSnapshot,
+        dataEdgePlan: admitted.dataEdgePlan,
+      });
+    });
+    await acquired;
+    const deactivating = db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.modules)
+        .where(eq(schema.modules.moduleId, 'prt3'))
+        .for('update');
+      const tasks = await tx.select().from(schema.tasks).where(eq(schema.tasks.type, slugs[1]!));
+      expect(tasks.some((t) => t.title === 'race' && t.dataEdgePlan != null)).toBe(true);
+      await tx
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'prt3'));
+    });
+    try {
+      let waiting = false;
+      for (let i = 0; i < 200; i++) {
+        const rows = await db.execute(
+          sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND strpos(query,'modules')>0`,
+        );
+        if (rows.length) {
+          waiting = true;
+          break;
+        }
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      release();
+      await creating;
+      await deactivating;
+    }
+    await expect(insert(slugs[1]!)).rejects.toMatchObject({ status: 409 });
+  });
+  it('refuses over-limit admission before writes, with no task, event or queued work', async () => {
+    const { MAX_DATA_EDGE_STEPS } = await import('@haive/shared/data-edge-plan');
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: Array.from({ length: MAX_DATA_EDGE_STEPS + 1 }, (_, i) => `s-${i}`) })
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[2]!));
+    const tasks = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.userId, userId));
+    const events = await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents);
+    let enqueues = 0;
+    await expect(
+      insert(slugs[2]!).then(() => {
+        enqueues++;
+      }),
+    ).rejects.toMatchObject({ status: 409, code: 'invalid-data-edge-plan' });
+    expect(
+      await db
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.userId, userId)),
+    ).toEqual(tasks);
+    expect(await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents)).toEqual(events);
+    expect(enqueues).toBe(0);
   });
 });

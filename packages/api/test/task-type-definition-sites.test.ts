@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
       ({
         runListSnapshot: ['00-x', '01-y'],
         customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       }) as unknown,
   ),
 }));
@@ -116,6 +117,7 @@ describe('POST /tasks pins the run list', () => {
         type,
         runListSnapshot: SNAPSHOT,
         customSteps: PINNED,
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       });
     },
   );
@@ -167,7 +169,11 @@ describe('the rollback pins the run list', () => {
     expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'onboarding_upgrade', {
       generic: false,
     });
-    expect(created()[0]).toMatchObject({ runListSnapshot: SNAPSHOT, customSteps: PINNED });
+    expect(created()[0]).toMatchObject({
+      runListSnapshot: SNAPSHOT,
+      customSteps: PINNED,
+      dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
+    });
   });
 });
 
@@ -193,6 +199,7 @@ describe('spawnPlanTask pins the run list', () => {
         type,
         runListSnapshot: SNAPSHOT,
         customSteps: PINNED,
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       });
     },
   );

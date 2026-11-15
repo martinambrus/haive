@@ -1,5 +1,7 @@
+import { SPEC_INPUTS } from '@haive/shared/step-ports';
 import {
   SPEC_ROLES,
+  STEP_ROLE_REGISTRY,
   SPEC_DRAFT_OUTPUT_CONTRACT,
   SPEC_CHECKED_OUTPUT_CONTRACT,
   SPEC_RESOLVED_OUTPUT_CONTRACT,
@@ -379,14 +381,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '05-phase-0b5-spec-quality',
-    consumesRoles: [
-      {
-        input: 'draft',
-        role: SPEC_ROLES.draft,
-        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
-        optional: true,
-      },
-    ],
     providesRoles: [{ role: SPEC_ROLES.checked, contract: SPEC_CHECKED_OUTPUT_CONTRACT }],
     label: 'Phase 0b.5: Spec quality review',
     group: 'spec',
@@ -398,20 +392,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '05a-resolve-spec-warnings',
-    consumesRoles: [
-      {
-        input: 'checked',
-        role: SPEC_ROLES.checked,
-        contract: SPEC_CHECKED_OUTPUT_CONTRACT,
-        optional: true,
-      },
-      {
-        input: 'draft',
-        role: SPEC_ROLES.draft,
-        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
-        optional: true,
-      },
-    ],
     providesRoles: [{ role: SPEC_ROLES.resolved, contract: SPEC_RESOLVED_OUTPUT_CONTRACT }],
     label: 'Resolve spec warnings',
     group: 'spec',
@@ -426,26 +406,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '06-gate-1-spec-approval',
-    consumesRoles: [
-      {
-        input: 'resolved',
-        role: SPEC_ROLES.resolved,
-        contract: SPEC_RESOLVED_OUTPUT_CONTRACT,
-        optional: true,
-      },
-      {
-        input: 'checked',
-        role: SPEC_ROLES.checked,
-        contract: SPEC_CHECKED_OUTPUT_CONTRACT,
-        optional: true,
-      },
-      {
-        input: 'draft',
-        role: SPEC_ROLES.draft,
-        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
-        optional: true,
-      },
-    ],
     label: 'Gate 1: Spec approval',
     group: 'spec',
     dispatchesCli: false,
@@ -849,12 +809,16 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     requires: [{ needs: 'pr', reason: 'Waits on the pull request opened by cleanup.' }],
     provides: [],
   },
-];
+].map((entry) => ({
+  ...entry,
+  ...(SPEC_INPUTS[entry.stepId] ? { consumesRoles: SPEC_INPUTS[entry.stepId] } : {}),
+})) as readonly CoreComposableStepEntry[];
 
 export function assertCoreComposableCatalog(
   registry: StepRegistry,
   entries: readonly ComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
 ): void {
+  assertSpecPortDeclarations(entries as readonly CoreComposableStepEntry[]);
   const ids = new Set(entries.map((e) => e.stepId));
   const provided = new Set(entries.flatMap((e) => e.provides));
   for (const entry of entries) {
@@ -896,4 +860,28 @@ export function assertCoreComposableCatalog(
       );
     }
   }
+}
+
+/** Fail boot if a provider disappeared or input names/optionality drifted. */
+export function assertSpecPortDeclarations(
+  entries: readonly CoreComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
+): void {
+  for (const role of Object.values(SPEC_ROLES)) {
+    const providers = entries.flatMap((e) =>
+      (e.providesRoles ?? []).filter((p) => p.role === role).map((p) => ({ entry: e, port: p })),
+    );
+    const expected = STEP_ROLE_REGISTRY[role];
+    if (
+      providers.length !== 1 ||
+      providers[0]!.entry.stepId !== expected.legacyStepId ||
+      JSON.stringify(providers[0]!.port.contract) !== JSON.stringify(expected.contract)
+    )
+      throw new Error(`spec-port-provider-invalid: ${role}`);
+  }
+  for (const e of entries) {
+    if (JSON.stringify(e.consumesRoles ?? []) !== JSON.stringify(SPEC_INPUTS[e.stepId] ?? []))
+      throw new Error(`spec-port-input-invalid: ${e.stepId}`);
+  }
+  for (const id of Object.keys(SPEC_INPUTS))
+    if (!entries.some((e) => e.stepId === id)) throw new Error(`spec-port-consumer-missing: ${id}`);
 }

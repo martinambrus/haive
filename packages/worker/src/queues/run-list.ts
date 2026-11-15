@@ -1,3 +1,4 @@
+import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import { isPathAddedInsightStep } from '@haive/shared/execution-paths';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { eq } from 'drizzle-orm';
@@ -61,6 +62,7 @@ export interface ResolvedTaskContext {
   completedAt: Date | null;
   runListStrategy: RunListStrategy;
   derivedRunPlan?: unknown;
+  dataEdgePlan?: unknown;
   runListSnapshot: string[] | null;
   /** The prompt steps this task pinned at create, by step id (tasks.custom_steps, invalid entries dropped). */
   customSteps?: Record<string, PromptStepEntry>;
@@ -244,6 +246,7 @@ export async function buildRunList(
   ctx: ResolvedTaskContext,
   db: Database,
 ): Promise<StepDefinition[]> {
+  assertDataEdgeSupport(ctx, stepRegistry);
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).
   if (ctx.runListStrategy === 'derived' || ctx.derivedRunPlan != null) {

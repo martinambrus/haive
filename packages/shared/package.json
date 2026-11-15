@@ -259,6 +259,10 @@
       "types": "./dist/credential-scan.d.ts",
       "import": "./dist/credential-scan.js"
     },
+    "./data-edge-plan": {
+      "types": "./dist/step-engine/data-edge-plan.d.ts",
+      "import": "./dist/step-engine/data-edge-plan.js"
+    },
     "./step-ports": {
       "types": "./dist/step-engine/step-ports.d.ts",
       "import": "./dist/step-engine/step-ports.js"

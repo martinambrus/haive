@@ -64,23 +64,22 @@ const defRow = (slug: string, source: string) => ({
 
 const acme = { moduleId: 'acme', name: 'Acme', missingAt: null, deactivatedAt: null };
 
-const handle = (rows: unknown[], modules: unknown[] = [acme]) =>
-  ({
-    execute: () => {
-      throw new Error('Static definition control must not execute catalog locks');
-    },
-    transaction: () => {
-      throw new Error('Static definition control must not open a derived read transaction');
-    },
+// Static and derived admission both hold their catalog snapshot through INSERT.
+const handle = (rows: unknown[], modules: unknown[] = [acme]) => {
+  const tx = {
+    execute: async () => [{ timeout: '0' }],
+    transaction: async (run: (t: unknown) => unknown) => run(tx),
     select: () => ({
       from: (table: unknown) =>
         table === schema.stepCatalog
-          ? Promise.resolve([])
+          ? { orderBy: () => ({ for: async () => [] }) }
           : table === schema.modules
             ? { where: () => ({ for: async () => modules }) }
             : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
     }),
-  }) as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
+  };
+  return tx as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
+};
 
 async function refusal(promise: Promise<unknown>): Promise<HttpError> {
   const err = await promise.then(

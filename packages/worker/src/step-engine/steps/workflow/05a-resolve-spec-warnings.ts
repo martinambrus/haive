@@ -1,4 +1,3 @@
-import { SPEC_ROLES } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
@@ -74,7 +73,7 @@ function formatFinding(f: QualityFinding): string {
 }
 
 async function loadQuality(ctx: StepContext): Promise<SpecQualityOutput> {
-  return legacyRoleOutput(await readRole(ctx, SPEC_ROLES.checked));
+  return legacyRoleOutput(await readRole(ctx, 'checked'));
 }
 
 /** Findings from the broad spec auditor (04a). Merged with the narrow 05 findings
@@ -103,7 +102,7 @@ function specGuardFindings(spec: string): QualityFinding[] {
 
 /** Fallback spec body when 05 did not run (e.g. plan_tasklist): the 04 draft. */
 async function loadDraftSpec(ctx: StepContext): Promise<string> {
-  const out = legacyRoleOutput(await readRole(ctx, SPEC_ROLES.draft));
+  const out = legacyRoleOutput(await readRole(ctx, 'draft'));
   return out.spec ?? out.summary ?? '';
 }
 
