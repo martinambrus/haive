@@ -678,6 +678,70 @@ before constructing the prompt or reserving a run. RAG finalization uses this
 when a parked PR's current history has no classifiable evidence; its initial
 `skipIf` must still allow refresh because reopening can have added queries.
 
+## Task scratch cleanup
+
+`cleanupTaskScratchWorkspace` (`repo/scratch-workspace.ts`) removes only
+`<storage>/<userId>/_scratch/<taskId>`, for repository-backed and repo-less tasks alike.
+A task must still be completed or cancelled and have no pause marker. Terminal
+status decides even when `dead_at` is still set, following `isTaskDead`
+(`api/src/lib/task-dead.ts`): a dead task has `dead_at` set and is neither cancelled
+nor completed. Cancelling a dead task need not clear that timestamp. Failed,
+running, structurally dead and paused tasks keep their recovery files. No repository,
+worktree or volume is removed by this reaper.
+
+Every invocation whose `ended_at` and `superseded_at` are both NULL holds scratch,
+including queued summaries and scans. A superseded invocation does not hold it,
+but a created/running/restarting CLI sandbox still does. Both
+`cleanupTaskScratchWorkspace` and boot's missing-task branch use cancellation's
+`listCliSandboxesForTask` prerequisite: a failed listing or any
+remaining sandbox defers removal. Completion reaps after its fallible bookkeeping;
+cancellation keeps its existing teardown prerequisite. Every CLI job, including
+failure and finalized redelivery, retries scratch cleanup in its finalizer. Boot's
+`sweepOrphanScratchWorkspaces` finishes a reap a worker exit interrupted.
+
+`withTaskScratchWorkspace` serializes materialization, acquisition and reaping per
+task in this worker process. The callers that take the section are
+`ensureTaskScratchWorkspace`, `cleanupTaskScratchWorkspace`, and the missing-task
+branch of `sweepOrphanScratchWorkspaces`. The task-context resolver in
+`queues/task-queue.ts` and the two mount resolvers in `queues/cli-exec/resolvers.ts`
+acquire scratch through the fenced ensure. That ensure holds it through creation;
+the reaper takes it through removal and rechecks task settlement, owner, epoch and
+live invocations after waiting and probing Docker. A Retry/continuation cannot
+create or acquire the tree while removal holds the section, and can recreate it
+after removal releases it. Snapshot materializers and readers must use this same
+section for the entire materialization/read, not just path lookup. An invocation
+must be recorded before acquiring/mounting scratch; its live row protects the
+mount after acquisition returns. A reader without an invocation must retain the
+section until it is done. The section is not reentrant: do not call the public
+ensure inside it.
+
+The repo-less Editor existence checks in `sandbox/ide-runner.ts` (the
+`taskScratchPath` stat) and `api/src/routes/tasks/_helpers.ts` (the
+`directoryExists` check) are unfenced read-only stats. They neither materialize
+scratch nor hold the section for the Editor's later use. These checks are not
+protected readers under the snapshot-reader rule above.
+
+This is an in-process fence under the **one worker per install** assumption (the
+fixed worker `container_name`), like the step-advance holds above. Multiple worker
+processes or snapshot acquisition in another process would require a shared fence
+before being supported; the callback section alone is not a distributed lease.
+
+Boot accepts UUID task-directory names and real directory entries only. An entry
+for a task owned by another user never triggers cleanup of that owner's tree.
+Missing-task cleanup is a separate boot-only scope: it rechecks absence under the
+section, requires the same clean sandbox listing, and removes only the enumerated
+user's canonical directory. The clean-listing requirement is stricter than the
+base missing-task branch: orphans survive a boot with Docker down until the next
+boot, and a remaining live CLI sandbox also retains them. A row appearing before
+the absence recheck retains the directory too. Owner directories are opened without
+following links, and held while fs-safe walks the scratch path; links in any component cannot
+redirect removal into another task's tree.
+
+Rollback restores the narrower repository-task eligibility and accepts leaked
+scratch. Keep failed-task retention and the safety fences. No schema change is
+needed, and scratch already removed from completed/cancelled tasks cannot be
+restored by reverting code.
+
 ## Dead tasks
 
 A task is **dead** when its current step requires an uninstalled integration provider, or its data
