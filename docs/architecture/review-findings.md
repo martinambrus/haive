@@ -22,3 +22,23 @@ The key is `(reviewerId, normalised path)` — deliberately NOT `fingerprint`. M
 
 The canonical `findingFingerprint` implementation lives in
 `packages/shared/src/step/review.ts`, re-exported by the worker's `_review-findings.ts`.
+
+## Manual insight application journal
+
+`insight.batch` task events are required state, separate from review telemetry. Protocol
+and envelope version 1 record `manual_08e` intent, reservation, invocation and outcome stages.
+The intent names the source step row, explicit rerun generation, stable occurrence ids and
+loader identities, and starts every selected item as unconfirmed. Each stage is deduplicated
+by batch/stage/generation while holding the owned source-row lock and the task owner/epoch
+fence; dead and terminal task states refuse writes. Pause lets the in-flight batch finish. A failed required write prevents
+dispatch. Reservation references share the mining insert transaction.
+
+The editor reports exactly the selected id set, with `applied`, `already_handled` or
+`not_applied`, change descriptions and a reason. Applied requires a nonempty change list.
+Malformed replies and legacy scalar reports remain unconfirmed per item; the editor is never
+automatically rerolled. Write and replay paths refuse unknown or unreadable stored records.
+The acted-insight projection skips those records with a payload-free warning, leaving the
+items unacted so they are offered again. Selecting such an item still fails at the strict
+intent write while the unreadable record remains; only an empty submit passes. Reports describe agent
+claims, never verified repairs, and never write `review_findings` dispositions. The journal
+survives output-clearing Retry; an intent without a settled report remains unconfirmed.

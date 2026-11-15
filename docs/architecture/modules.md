@@ -579,14 +579,15 @@ output, it requires no surviving worktree. The task-wide inventory includes supe
 history and DAG-withheld findings; invocation references retain invocation id, task-step id,
 physical step id, round and superseded flag, and withheld references retain issue id, step id
 and original severity. References are attached only by the inventory loader; the parser defaults
-to omitting them, so 08e detect and apply snapshots retain their original shape.
+to omitting them. New 08e snapshots use loader records with stable occurrence ids, identity
+and provenance. Persisted legacy snapshots retain their original positional ids.
 
 No limit means unlimited; picked items are excluded unless `includePicked: true`. A limit must be
 a finite, safe, non-negative integer. The host adapter validates synchronously before hostCall
 or any identity read; the loader validates before source reads too. Zero returns
 nothing and counts every eligible record as omitted. Pick filtering precedes the limit, and
 `omitted` counts only eligible records that the limit cut. Full title, location and description
-stay in `LoadedInsight`; gate callers explicitly request 30. Before persistence, the shared gate
+stay in `LoadedInsight`; 08e and gate callers explicitly request 30. Before persistence, the shared gate
 projection keeps only `{id, sourceStep, title, location, description}`, collapses every field
 to one line and clips it to 200 characters. The stored entries keep their original positional
 `i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
@@ -600,8 +601,14 @@ matching retain the legacy full `title::location` key, including its delimiter a
 normalization on full fields, so line-shift aliases share an identity but keep distinct
 occurrence ids and legacy selection/count semantics. 08e's existing positional `i-N` selections
 continue to resolve against their persisted detect snapshot, not a new loader result.
-`picked` means selected in an 08e output, never verified as repaired; malformed legacy selections
-are ignored. Fix-loop diagnosis remains deferred to the deep-analysis consumer.
+`picked` preserves selected-in-output semantics for legacy 08e rows; malformed legacy selections
+are ignored. For protocol-v1 manual batches it means an `applied` or `already_handled` agent
+report in the durable task-event journal, projected across occurrence aliases by loader
+identity. `not_applied` and `unconfirmed` stay selectable even after selection and Retry.
+A v1 output selection alone never excludes an item. Neither legacy picks nor new agent reports
+prove a verified repair. The acted-insight projection skips unreadable or unknown-version
+journal records with a payload-free warning and re-offers those items. Write and replay paths
+continue to refuse them. Fix-loop diagnosis remains deferred to the deep-analysis consumer.
 
 ### Core-row writes
 
