@@ -696,6 +696,34 @@ does not create a runtime data edge. The graph adds no manifest ports, SDK servi
 prompt token or new replacement role; existing catalog entry and plan vocabularies
 remain unchanged.
 
+### Execution declarations (P6; unavailable at runtime)
+
+A module's static task-type seed may carry the strict version-1
+`executionContract` described in [Task types](task-types.md#pinned-execution-declarations-p6-admission-only).
+Its predicate ids use `module.<id>.<local>` and must belong to the seeding
+module. The module-id portion uses the shared `MODULE_ID_PATTERN` rule,
+including digit-leading ids and the 23-character bound. On a trusted `StepDefinition`, optional `guardPredicates` maps local
+predicate ids to `{argsSchema, evaluate}`. Boot namespaces and registers those
+callbacks, refuses duplicates or missing executable/schema functions, and
+validates stored JSON args against the registered schema. P6 never calls
+`evaluate`, records a skip or writes `guard_state`; evaluation, settled producer
+identity and crash-safe decision ownership belong to P7. Do not serialize JS,
+SQL, expressions, schemas or callbacks into the seed.
+
+An executable fix consumer declares `fixConsumer: {version: 1}` on its
+`StepDefinition` and matching composable manifest entry. Boot rejects missing,
+forged or mismatched capability metadata; the existing catalog entry JSON
+carries the validated version for API admission. This capability grants no
+output-contract replacement or host role policy. P8 must implement diagnosis,
+repair evidence, target CLI parity and the existing reset/epoch protocol before
+any task can select it for execution.
+
+The module-owned declaration participates in source-guarded upsert, no-op
+comparison and content hashing. A declaration with guards or a selected fix
+target can be stored as a validated seed but cannot create or start a task in
+P6. No admin authoring UI is added. Absence keeps the old NULL behavior; an
+explicit empty declaration can be pinned. Preserve every task pin on rollback.
+
 ### Fan-out seats
 
 A module may declare optional `miningSeats` in its manifest, keyed by local exported

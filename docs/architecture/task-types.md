@@ -475,6 +475,65 @@ Rollback stops new v3 admission and retains capable readers/workers until no v3 
 can resume. Leave the nullable column and applied migration; never regenerate,
 downgrade or backfill pins. Stopping admission currently requires a code deploy.
 
+## Pinned execution declarations (P6; admission only)
+
+Migration 0245 appends nullable `execution_contract jsonb` LAST on
+`task_type_definitions` and `tasks`, and nullable `guard_state jsonb` LAST on
+`task_steps`. Database types are `unknown`; the shared strict version-1 decoder
+owns their interpretation. No default, backfill, guard-state writer or guard
+runtime ships in P6.
+
+A static module seed may declare `executionContract: {version: 1, guardedSpans,
+fixTarget?}`. A span is `{id, firstStepId, lastStepId, predicateId, args,
+requiresSpan?}`. Endpoints must be real, ordered run-list members; spans cannot
+overlap or nest. `requiresSpan` names a strictly earlier span by run-list order,
+so unknown, later, self and cyclic references are refused. Its runtime promise
+for P7 is that the dependent span skips whenever the required span skipped,
+regardless of the dependent predicate. Disjoint spans sharing a predicate id
+share one task decision and must carry identical JSON args.
+
+Trusted executable predicates come from the module's step code, with an args
+schema; stored ids or source strings grant no executable authority. Composition
+projects every feasible predicate combination through the existing token,
+ordering, entailment, loop-target and closing checks. A skipped producer cannot
+supply a later mandatory requirement. The walk permits at most eight independent
+predicate decisions (injectable in tests), with at most 32 spans in the DTO.
+Empty execution paths remain invalid. `requiresSpan` excludes merged-without-
+planned; it does not excuse the feasible planned-without-merged cleanup's missing
+`commit`. The scan seed and P7 scenario controls still need the owner's cleanup
+contract decision. P6 adds no waiver, conditional requirement or cleanup step.
+
+An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
+capable run-list target on every path where an emitter runs. For validation,
+core emitters aimed at 07 resolve through that selected target. A prompt step,
+off-list id, non-capable executable or wrong capability version is refused.
+This declares no output replacement role or host policy. The existing live
+`fix_loop` runtime, target-specific CLI readers and diagnosis services remain
+unchanged until P8.
+
+The seeder owns execution declarations with its existing source-guarded upsert,
+no-op test and hash; absent contracts preserve the previous hash bytes. All five
+task creators copy the locked definition's execution contract beside
+`data_edge_plan` in the same INSERT transaction. Task pins are never rewritten
+by definition edits, Retry, Resume, boot or revival. Existing definitions and
+tasks retain NULL semantics. An explicit empty contract is inert and pinnable.
+
+P6 refuses any guarded span or selected fix target at create, API START and
+worker START/advance with `invalid-execution-contract` and “not yet supported by
+this worker”. A rejected create or API START writes no task state, event or job.
+A worker START or ADVANCE refusal instead marks the existing task dead under
+its held epoch, keeps its status and immutable pin, and records one `task.dead`
+event with the named reason. Duplicate delivery and the stalled sweep leave
+that dead task alone. Boot marks unsupported snapshot-task pins dead; revival
+refuses while support is still missing (see [Worker restarts](worker-restarts.md#dead-tasks)).
+Main task responses omit the full contract. Admin create/PATCH and creator
+drafts expose no contract authoring.
+
+Rollback stops creation of contract-bearing types and retains nullable columns,
+the applied migration and every immutable pin. Never erase or remap a pin to
+make rollback appear safe; once P7/P8 admit active pins, retain capable workers
+for every resumable task.
+
 ## Derived overlays (PR4 of 4)
 
 Derived types are admin-authored overlays of the built-in workflow. The API and worker support
