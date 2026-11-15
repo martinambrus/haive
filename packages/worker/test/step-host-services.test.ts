@@ -6,6 +6,8 @@ import { TaskCancelledError, type StepContext } from '@haive/shared/step';
 import { createStepHostServices } from '../src/step-engine/step-host-services.js';
 import { loadPreviousStepOutput } from '../src/step-engine/steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
+import { gitExec } from '../src/repo/git-exec.js';
+vi.mock('../src/repo/git-exec.js', () => ({ gitExec: vi.fn(), gitRun: vi.fn() }));
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: vi.fn(),
 }));
@@ -176,3 +178,23 @@ it('scrubs collector scanError before returning it to a module without mutating 
   expect(JSON.stringify(result)).not.toContain('/host/private/tree');
   expect(scan.scanError).toBe('Cannot scan /host/private/tree (EACCES)');
 });
+
+it.each(['EMFILE', 'ENFILE'])(
+  'propagates git spawn %s through the actual host collector',
+  async (code) => {
+    vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+      detect: null,
+      output: { baseBranch: 'base', filesTouched: ['a'] },
+      iterations: [],
+    });
+    const actual = await vi.importActual<
+      typeof import('../src/step-engine/steps/workflow/_impl-changes.js')
+    >('../src/step-engine/steps/workflow/_impl-changes.js');
+    vi.mocked(collectImplementationFiles).mockImplementationOnce(actual.collectImplementationFiles);
+    const error = Object.assign(new Error('spawn git failed'), { code });
+    vi.mocked(gitExec).mockRejectedValue(error);
+    await expect(
+      createStepHostServices(ctx).collectImplementationFiles('/repo/.haive/worktrees/task'),
+    ).rejects.toBe(error);
+  },
+);

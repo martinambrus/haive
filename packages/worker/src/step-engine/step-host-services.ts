@@ -101,6 +101,7 @@ export function createStepHostServices(context: StepContext): StepHostServices {
           const scope = await collectImplementationFiles(ctx, resolved, {
             maxRound: ctx.round,
             signal: ctx.signal,
+            propagateResourceErrors: true,
             gitCwd: held ? `/proc/self/fd/${held.fd}` : resolved,
           });
           return {
