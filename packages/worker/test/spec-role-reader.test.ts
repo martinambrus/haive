@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as specAdapters from '../src/step-engine/steps/workflow/_spec-artifact.js';
+import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
+import { testManagementStep } from '../src/step-engine/steps/workflow/08b-test-management.js';
+import { configService } from '@haive/shared';
 import { randomUUID } from 'node:crypto';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { composableStepEntrySchema, validatePromptStep } from '@haive/shared/modularity';
@@ -29,6 +33,24 @@ vi.mock('../src/step-engine/review-dimension-context.js', () => ({
   resolveTaskReviewDimensions: async () => ({ enabled: [] }),
   dimensionScopeLines: () => [],
 }));
+vi.mock('../src/step-engine/steps/workflow/_impl-changes.js', async (original) => ({
+  ...(await original<object>()),
+  collectImplementationFiles: async () => ({ files: [], total: 0, truncated: false }),
+}));
+vi.mock('../src/step-engine/steps/workflow/_plan-impact.js', async (original) => ({
+  ...(await original<object>()),
+  loadPlanImpactContext: async () => null,
+}));
+vi.mock('../src/step-engine/workspace-probe.js', () => ({ hasWorkspaceEntry: async () => false }));
+vi.mock('../src/step-engine/steps/env-replicate/_shared.js', async (original) => ({
+  ...(await original<object>()),
+  getTaskEnvTemplate: async () => null,
+}));
+vi.mock('../src/step-engine/steps/workflow/_task-meta.js', async (original) => ({
+  ...(await original<object>()),
+  resolveDdevWorkspace: async () => null,
+  loadDeclaredVerifyCommands: async () => null,
+}));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<object>()),
   writeFileNoFollow: vi.fn(),
@@ -48,6 +70,7 @@ function fixture() {
     db: fake.db as unknown as Database,
     taskId,
     repoPath: '/unused',
+    workspacePath: '/unused',
     sandboxWorkdir: '/workspace',
     logger: { warn: vi.fn() },
   } as unknown as StepContext;
@@ -327,3 +350,39 @@ it('catalog serialization never persists spec output contracts or activates runn
     serialized.every((e) => !e.outputContract || !e.outputContract.id.startsWith('haive.spec.')),
   ).toBe(true);
 });
+
+describe('remaining spec consumers use the shared adapters', () => {
+  const readStages = vi.spyOn(specAdapters, 'readSpecStages');
+  const approvedSpec = vi.spyOn(specAdapters, 'resolveApprovedSpec');
+  it.each(cases)('run config: $name', async ({ draft, checked, resolved }) => {
+    const { ctx, put } = fixture();
+    if (draft) put(SPEC_ROLES.draft, draft);
+    if (checked) put(SPEC_ROLES.checked, checked);
+    if (resolved) put(SPEC_ROLES.resolved, resolved);
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    readStages.mockClear();
+    const out = await runConfigStep.detect!(ctx);
+    expect(out.specBody).toBe(await oldGateSpec(ctx));
+    expect(readStages).toHaveBeenCalledWith(ctx);
+  });
+  it.each(cases)('test management: $name', async ({ draft, checked, resolved }) => {
+    const { ctx, put } = fixture();
+    if (draft) put(SPEC_ROLES.draft, draft);
+    if (checked) put(SPEC_ROLES.checked, checked);
+    if (resolved) put(SPEC_ROLES.resolved, resolved);
+    approvedSpec.mockClear();
+    const out = await testManagementStep.detect!(ctx);
+    expect(out.spec).toBe(await oldSpec(ctx));
+    expect(approvedSpec).toHaveBeenCalledWith(ctx);
+  });
+});
+// Base 06-run-config detect read/formula at 253f30214; independent physical selectors.
+async function oldGateSpec(ctx: StepContext) {
+  const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
+  const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
+  const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
+  const planOutput = (plan?.output as { spec?: string; summary?: string } | null) ?? {};
+  const qualityOutput = (quality?.output as { spec?: string } | null) ?? {};
+  const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
+  return resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
+}
