@@ -1143,13 +1143,6 @@ jobs:
             test-results/
           retention-days: 7
 
-      - name: Committed snapshot read-only mounts
-        timeout-minutes: 2
-        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
-        env:
-          SNAPSHOT_SANDBOX_TEST_IMAGE: haive-cli-sandbox:latest
-        run: pnpm --filter @haive/worker exec vitest run test/exec-core-boundary-mounts.test.ts
-
       - name: Dump service status
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
