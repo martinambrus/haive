@@ -94,7 +94,14 @@ const enrich = () =>
 describe('POST /enrich pins the kb_author step list', () => {
   it('writes the helper snapshot into the task row', async () => {
     expect((await enrich()).status).toBe(201);
-    expect(h.definition).toHaveBeenCalledWith(fake.db, 'kb_author', { generic: false });
+    expect(h.definition).toHaveBeenNthCalledWith(1, fake.db, 'kb_author', {
+      generic: false,
+      locked: false,
+    });
+    expect(h.definition).toHaveBeenNthCalledWith(2, expect.anything(), 'kb_author', {
+      generic: false,
+      locked: true,
+    });
     expect(fake.rows(schema.tasks)[0]).toMatchObject({
       runListSnapshot: ['01-enrich'],
       customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },

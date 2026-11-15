@@ -330,6 +330,7 @@ async function resolveTaskContext(
     completedAt: task.completedAt ?? null,
     ...(await taskTypeRuntimeFor(db, task.type, task.derivedRunPlan)),
     derivedRunPlan: task.derivedRunPlan,
+    dataEdgePlan: task.dataEdgePlan,
     runListSnapshot: task.runListSnapshot ?? null,
     customSteps: parseCustomSteps(task.customSteps),
     deadAt: task.deadAt ?? null,

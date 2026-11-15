@@ -168,7 +168,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
   });
 
   const insertTask = async (type: string = TYPE, status: string = 'running') => {
-    const def = await definitionForCreate(db, type, { generic: true });
+    const def = await definitionForCreate(db, type, { locked: false, generic: true });
     const [task] = await db
       .insert(schema.tasks)
       .values({
@@ -206,7 +206,9 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       stepIds: ['tcs-a'],
       source: 'admin',
     });
-    expect(await definitionForCreate(db, 'tcs-plain', { generic: true })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'tcs-plain', { locked: false, generic: true }),
+    ).toMatchObject({
       customSteps: null,
     });
   });

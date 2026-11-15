@@ -112,6 +112,7 @@ export function StepPortView({
             <div hidden={!graph}>
               <StepPortCanvas
                 graph={graph ?? retainedGraph}
+                compact={keepListVisible}
                 onReorder={disabled || !graph ? undefined : onReorder}
               />
             </div>

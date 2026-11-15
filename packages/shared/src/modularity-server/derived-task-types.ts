@@ -204,13 +204,21 @@ export async function readDerivedDefinition(
   handle: Pick<Database, 'select' | 'execute'>,
   definition: Definition,
   integrationCategoryIds?: ReadonlySet<string>,
-  opts: { lockTimeoutMs?: number } = {},
+  opts: { lockTimeoutMs?: number; lock?: boolean } = {},
 ) {
-  const [base] = await handle
+  const read = handle
     .select()
     .from(schema.taskTypeDefinitions)
-    .where(eq(schema.taskTypeDefinitions.slug, definition.baseSlug ?? ''))
-    .for('share');
+    .where(eq(schema.taskTypeDefinitions.slug, definition.baseSlug ?? ''));
+  const [base] = await (opts.lock === false ? read : read.for('share'));
+  if (opts.lock === false) {
+    const catalog = await readStepCatalog(handle, { ordered: true });
+    return {
+      ...inspectDerivedDefinition(definition, base, catalog, integrationCategoryIds),
+      catalog,
+      base,
+    };
+  }
   const [setting] = await handle.execute<{ timeout: string }>(
     sql`SELECT current_setting('lock_timeout') AS timeout`,
   );

@@ -36,15 +36,16 @@ it('appends nullable definition columns with named checks and a restrictive self
 
 it('appends the nullable task plan after every existing task column', () => {
   const table = getTableConfig(schema.tasks);
-  expect(table.columns.slice(-3).map((column) => [column.name, column.notNull])).toEqual([
+  expect(table.columns.slice(-4).map((column) => [column.name, column.notNull])).toEqual([
     ['pr_remote_url', false],
     ['derived_run_plan', false],
     ['auto_act_on_insights', true],
+    ['data_edge_plan', false],
   ]);
 });
 
-it('defaults insight auto-action off and appends it last', () => {
-  const column = getTableConfig(schema.tasks).columns.at(-1)!;
+it('defaults insight auto-action off and keeps it after the derived run plan', () => {
+  const column = getTableConfig(schema.tasks).columns.at(-2)!;
   expect(column.name).toBe('auto_act_on_insights');
   expect(column.default).toBe(false);
   expect(column.getSQLType()).toBe('boolean');

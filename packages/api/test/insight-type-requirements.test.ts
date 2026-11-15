@@ -46,7 +46,7 @@ it('names the earlier verification and review required by a stored insight type'
   const error = await definitionForCreate(
     fake.db as unknown as Parameters<typeof definitionForCreate>[0],
     'insights',
-    { generic: false },
+    { locked: false, generic: false },
   ).catch((error: unknown) => error);
   expect(error).toMatchObject({
     status: 409,

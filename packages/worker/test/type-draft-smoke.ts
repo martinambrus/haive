@@ -305,7 +305,7 @@ async function main(): Promise<void> {
       definitionForCreate: (
         handle: unknown,
         slug: string,
-        opts: { generic: boolean },
+        opts: { generic: boolean; locked: boolean },
       ) => Promise<{
         runListSnapshot: string[] | null;
         customSteps: unknown;
@@ -313,9 +313,12 @@ async function main(): Promise<void> {
         repoOptional: boolean;
       }>;
     };
-    const created = await apiDefinitions.definitionForCreate(db, 'type_draft', { generic: false });
+    const created = await apiDefinitions.definitionForCreate(db, 'type_draft', {
+      locked: false,
+      generic: false,
+    });
     const refused = await apiDefinitions
-      .definitionForCreate(db, 'type_draft', { generic: true })
+      .definitionForCreate(db, 'type_draft', { locked: false, generic: true })
       .then(() => null)
       .catch((err: unknown) => err as { status?: number });
     check(

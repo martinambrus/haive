@@ -485,6 +485,8 @@ export const tasks = pgTable(
     derivedRunPlan: jsonb('derived_run_plan').$type<unknown>(),
     /** Owner-authorized insight switch. Survives step output resets. Migration 0243. */
     autoActOnInsights: boolean('auto_act_on_insights').notNull().default(false),
+    /** Immutable v3 consumer/input edges. Null keeps canonical legacy reads; never backfilled. */
+    dataEdgePlan: jsonb('data_edge_plan').$type<unknown>(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),

@@ -149,6 +149,7 @@ const catalogRow = (stepId: string, dispatchesCli = false) => ({
   source: 'core',
   title: stepId,
   workflowType: 'workflow',
+  stepIndex: STEP_IDS.indexOf(stepId),
   dispatchesCli,
   allowSkip: false,
   providerSensitive: false,
@@ -390,13 +391,17 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         typeRow('onboarding', ['cp-plain'], { source: 'builtin', requiresRepository: false }),
       );
     expect((await post({ type: 'onboarding' })).status).toBe(201);
-    expect(await definitionForCreate(db, 'kb_author', { generic: false })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'kb_author', { locked: false, generic: false }),
+    ).toMatchObject({
       requiresRepository: false,
     });
     await db
       .insert(schema.taskTypeDefinitions)
       .values(typeRow('kb_author', ['cp-plain'], { source: 'builtin', requiresRepository: false }));
-    expect(await definitionForCreate(db, 'kb_author', { generic: false })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'kb_author', { locked: false, generic: false }),
+    ).toMatchObject({
       requiresRepository: false,
       repoOptional: true,
     });

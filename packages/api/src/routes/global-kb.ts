@@ -776,7 +776,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   await loadUsableProvider(db, userId, data.cliProviderId);
 
   // Refused here, a disabled type writes no skeleton; the task's transaction reads it again.
-  await definitionForCreate(db, 'kb_author', { generic: false });
+  await definitionForCreate(db, 'kb_author', { locked: false, generic: false });
 
   const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
@@ -819,9 +819,14 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
           TASK_START_LOCK_TIMEOUT_MS,
         );
       }
-      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
-        generic: false,
-      });
+      const { runListSnapshot, customSteps, dataEdgePlan } = await definitionForCreate(
+        tx,
+        'kb_author',
+        {
+          generic: false,
+          locked: true,
+        },
+      );
       await tx.insert(schema.tasks).values({
         id: taskId,
         userId,
@@ -850,6 +855,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         },
         autoContinue: true,
         runListSnapshot,
+        dataEdgePlan,
         customSteps,
         status: 'created',
       });

@@ -1537,7 +1537,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         { kind: 'catalog-step-index-missing', stepId: '01-worktree-setup' },
       ]),
     });
-    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).rejects.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'tt-derived', { locked: false, generic: true }),
+    ).rejects.toMatchObject({
       code: 'derived_admission_refused',
       issues: expect.arrayContaining([
         { kind: 'catalog-step-index-missing', stepId: '01-worktree-setup' },
@@ -1548,7 +1550,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     await derivedCatalog();
     const draft = derivedDraft([{ remove: 'retired-step' }]);
     expect((await send('POST', '/admin/task-types', draft)).status).toBe(201);
-    const pin = await definitionForCreate(db, 'tt-derived', { generic: true });
+    const pin = await definitionForCreate(db, 'tt-derived', { locked: false, generic: true });
     const [task] = await db
       .insert(schema.tasks)
       .values({
@@ -1599,7 +1601,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       preAnswerDefaults: { '06-run-config': { simplifyCode: false } },
     };
     expect((await send('POST', '/admin/task-types', draft)).status).toBe(201);
-    const pinned = await definitionForCreate(db, 'tt-derived', { generic: true });
+    const pinned = await definitionForCreate(db, 'tt-derived', { locked: false, generic: true });
     expect(pinned.derivedRunPlan?.candidates).toHaveLength(4);
     expect(pinned.customSteps).toEqual({ 'custom.tt-derived.note': rawPrompt });
     expect(pinned.takesRootLock).toBe(true);
@@ -1622,7 +1624,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         )
       ).status,
     ).toBe(201);
-    const pin = await definitionForCreate(db, 'tt-derived', { generic: true });
+    const pin = await definitionForCreate(db, 'tt-derived', { locked: false, generic: true });
     const [user] = await db
       .select()
       .from(schema.users)
@@ -1649,7 +1651,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       .update(schema.modules)
       .set({ deactivatedAt: new Date() })
       .where(eq(schema.modules.moduleId, 'acme'));
-    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).rejects.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'tt-derived', { locked: false, generic: true }),
+    ).rejects.toMatchObject({
       code: 'module-deactivated',
     });
   });
@@ -1787,7 +1791,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
           )
         ).status,
       ).toBe(201);
-      const old = await definitionForCreate(db, 'tt-derived', { generic: true });
+      const old = await definitionForCreate(db, 'tt-derived', { locked: false, generic: true });
       expect(old.derivedRunPlan?.version).toBe(version);
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -1810,7 +1814,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         });
       });
       await locked;
-      const creating = definitionForCreate(db, 'tt-derived', { generic: true });
+      const creating = db.transaction((tx) =>
+        definitionForCreate(tx, 'tt-derived', { generic: true, locked: true }),
+      );
       try {
         await waitForLock('LOCK TABLE');
       } finally {
@@ -2039,7 +2045,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
     await db.delete(schema.stepCatalog);
     h.flags.set(CUSTOM_KEY, false);
-    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).rejects.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'tt-derived', { locked: false, generic: true }),
+    ).rejects.toMatchObject({
       status: 403,
       message: 'Custom task types are disabled on this install',
     });
@@ -2047,7 +2055,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       .update(schema.taskTypeDefinitions)
       .set({ enabled: false })
       .where(eq(schema.taskTypeDefinitions.slug, 'tt-derived'));
-    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).rejects.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'tt-derived', { locked: false, generic: true }),
+    ).rejects.toMatchObject({
       status: 403,
       message: 'Task type tt-derived is disabled',
     });
@@ -2277,7 +2287,10 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     async (kind) => {
       await derivedCatalog();
       expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
-      const definition = await definitionForCreate(db, 'tt-derived', { generic: true });
+      const definition = await definitionForCreate(db, 'tt-derived', {
+        locked: false,
+        generic: true,
+      });
       const plan = {
         ...definition.derivedRunPlan!,
         integrationAdmissions: [{ categoryId: 'forge', moduleId: 'acme' }],
@@ -2376,7 +2389,10 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
   it('refuses Skip before selection and rejects changing a selected path in the submit transaction', async () => {
     await derivedCatalog();
     expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
-    const definition = await definitionForCreate(db, 'tt-derived', { generic: true });
+    const definition = await definitionForCreate(db, 'tt-derived', {
+      locked: false,
+      generic: true,
+    });
     const [task] = await db
       .insert(schema.tasks)
       .values({
@@ -2615,7 +2631,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         expect.objectContaining({ slug: 'tt-derived', available: true }),
       ]),
     });
-    await expect(definitionForCreate(db, 'tt-derived', { generic: true })).resolves.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'tt-derived', { locked: false, generic: true }),
+    ).resolves.toMatchObject({
       candidateStepIds: expect.not.arrayContaining(['module.acme.check']),
     });
     // The missing core producer is refused. Its absent output never becomes a legal anchor for a module payload.

@@ -1,3 +1,4 @@
+import { assertDataEdgeSupport } from './data-edge-support.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { ExecutionPath } from '@haive/shared';
@@ -92,6 +93,7 @@ export async function pinDerivedWorkflowPath(
       derivedRunPlan: plan,
       executionPath: path,
     };
+    assertDataEdgeSupport({ ...task, executionPath: path, runListSnapshot: stepIds }, registry);
     const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry, plan));
     if (missing.length) throw new UnresolvedStepError(missing);
     if (task.executionPath !== null) {

@@ -1,3 +1,5 @@
+export * from './core-data-ports.js';
+import { SPEC_INPUTS } from './core-data-ports.js';
 import { SPEC_ROLES, STEP_ROLES, STEP_ROLE_REGISTRY, type StepRoleId } from './output-contracts.js';
 
 /** Display metadata only. No schemas, policy hooks, output values or private module fields. */
@@ -116,18 +118,6 @@ const port = (role: StepRoleId, id: string = role): StepPort => ({
 /** Projection of existing core reads. Kept OUT of catalog entry/pin schemas: those remain v1/v2.
  * Spec declarations mirror composable-core; the adapter sites call _spec-artifact today.
  * This table does not declare SDK/module inputs or grant any runtime capability. */
-const specInputs: Readonly<Record<string, readonly [string, StepRoleId][]>> = {
-  '05-phase-0b5-spec-quality': [['draft', SPEC_ROLES.draft]],
-  '05a-resolve-spec-warnings': [
-    ['checked', SPEC_ROLES.checked],
-    ['draft', SPEC_ROLES.draft],
-  ],
-  '06-gate-1-spec-approval': [
-    ['resolved', SPEC_ROLES.resolved],
-    ['checked', SPEC_ROLES.checked],
-    ['draft', SPEC_ROLES.draft],
-  ],
-};
 const effectiveSpecConsumers: ReadonlySet<string> = new Set([
   '06-run-config',
   '06b-sprint-planning',
@@ -176,7 +166,9 @@ export function projectStepPorts(
       )
         outputs.push({ ...port(role), optional: false });
     }
-    const inputs = (specInputs[id] ?? []).map(([input, role]) => port(role, input));
+    const inputs = effectiveSpecConsumers.has(id)
+      ? []
+      : (SPEC_INPUTS[id] ?? []).map((d) => ({ ...port(d.role, d.input), optional: d.optional }));
     if (effectiveSpecConsumers.has(id))
       inputs.push({
         ...port(SPEC_ROLES.resolved, 'effective-spec'),

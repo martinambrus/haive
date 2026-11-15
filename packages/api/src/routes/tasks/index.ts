@@ -327,7 +327,7 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where,
     // A task's pinned prompt steps can run to many KiB; no list reader needs them.
-    columns: { customSteps: false, derivedRunPlan: false },
+    columns: { customSteps: false, derivedRunPlan: false, dataEdgePlan: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -564,7 +564,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     await loadUsableProvider(db, userId, body.summaryCliProviderId, 'summaryCliProviderId');
   }
 
-  const definition = await definitionForCreate(db, body.type, { generic: true });
+  const definition = await definitionForCreate(db, body.type, { locked: false, generic: true });
   if (definition.requiresRepository && !body.repositoryId) {
     throw new HttpError(400, `${body.type} tasks require a repositoryId`);
   }
@@ -775,6 +775,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        dataEdgePlan: locked.dataEdgePlan ?? null,
         derivedRunPlan: locked.derivedRunPlan
           ? {
               ...locked.derivedRunPlan,
@@ -904,9 +905,10 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (queued) await enqueueStart(task.id, userId);
 
+  const { dataEdgePlan: _dataEdgePlan, ...responseTask } = queued ?? task;
   return c.json(
     {
-      task: queued ?? task,
+      task: responseTask,
       ...(task.derivedRunPlan != null
         ? { warnings: derivedTaskWarnings(task.derivedRunPlan) }
         : {}),
@@ -939,7 +941,7 @@ taskRoutes.get('/integration-preview', async (c) => {
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
-  const definition = await definitionForCreate(db, query.type, { generic: true });
+  const definition = await definitionForCreate(db, query.type, { locked: false, generic: true });
   return c.json(
     await taskIntegrationPreview(db, {
       userId,
@@ -1146,6 +1148,7 @@ taskRoutes.get('/:id/ports', async (c) => {
       type: true,
       runListSnapshot: true,
       derivedRunPlan: true,
+      dataEdgePlan: true,
       executionPath: true,
     },
   });
@@ -1247,7 +1250,7 @@ taskRoutes.get('/:id', async (c) => {
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // Pins feed flags and warnings, but the page never reads their full bodies.
   const warnings = task.derivedRunPlan != null ? derivedTaskWarnings(task.derivedRunPlan) : null;
-  const { customSteps: _pinned, derivedRunPlan: _plan, ...taskFields } = task;
+  const { customSteps: _pinned, derivedRunPlan: _plan, dataEdgePlan: _edges, ...taskFields } = task;
   const providerRows =
     task.cliProviderId === null
       ? await db
@@ -1399,7 +1402,8 @@ taskRoutes.patch('/:id', async (c) => {
     }
   }
 
-  return c.json({ task: updated[0] });
+  const responseTask = updated[0] && (({ dataEdgePlan: _dataEdgePlan, ...row }) => row)(updated[0]);
+  return c.json({ task: responseTask });
 });
 
 taskRoutes.post('/:id/action', async (c) => {

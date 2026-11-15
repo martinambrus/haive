@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Column, getTableColumns, getTableName, is, Param, SQL, StringChunk } from 'drizzle-orm';
-import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, PgJsonb, PgUUID, PgTable } from 'drizzle-orm/pg-core';
 
 /**
  * An in-memory stand-in for the drizzle handle, for TESTS of code that reads and writes a handful
@@ -177,7 +177,7 @@ export interface FakeDbHandle<Q extends string = string> {
   insert(table: PgTable): { values(values: FakeRow | FakeRow[]): Insert };
   update(table: PgTable): { set(values: FakeRow): { where(cond: unknown): Lazy<FakeRow[]> } };
   delete(table: PgTable): { where(cond: unknown): Lazy<FakeRow[]> };
-  execute(query: unknown): Promise<void>;
+  execute(query: unknown): Promise<void | FakeRow[]>;
   transaction<R>(fn: (tx: FakeDbHandle<Q>) => Promise<R>): Promise<R>;
 }
 
@@ -820,10 +820,35 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           ),
       }),
       /** Only the lock statements and a read's statement timeout, inside a transaction. */
-      execute: async (query: unknown): Promise<void> => {
+      execute: async (query: unknown): Promise<void | FakeRow[]> => {
         undoLog(ctx);
         const chunks = is(query, SQL) ? query.queryChunks : [];
         const first = text(chunks[0]) ?? '';
+        // V3 admission's catalog-lock section. Real contention is covered on Postgres;
+        // the fake accepts only this statement vocabulary inside a transaction.
+        if (
+          ctx !== null &&
+          chunks.length === 1 &&
+          first === "SELECT current_setting('lock_timeout') AS timeout"
+        )
+          return [{ timeout: '0' }];
+        if (
+          ctx !== null &&
+          chunks.length === 3 &&
+          first === "SELECT set_config('lock_timeout', " &&
+          typeof chunks[1] === 'string' &&
+          text(chunks[2]) === ', true)'
+        )
+          return;
+        if (
+          ctx !== null &&
+          chunks.length === 3 &&
+          first === 'LOCK TABLE ' &&
+          is(chunks[1], PgTable) &&
+          getTableName(chunks[1]) === 'step_catalog' &&
+          text(chunks[2]) === ' IN SHARE MODE'
+        )
+          return;
         if (
           ctx !== null &&
           chunks.length === 1 &&

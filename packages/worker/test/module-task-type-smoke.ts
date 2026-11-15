@@ -199,13 +199,13 @@ async function main(): Promise<void> {
       definitionForCreate: (
         handle: unknown,
         slug: string,
-        opts: { generic: boolean },
+        opts: { generic: boolean; locked: boolean },
       ) => Promise<CreateDefinition>;
     };
 
     await configService.set(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, 'false');
     const refused = await apiDefinitions
-      .definitionForCreate(db, SLUG, { generic: true })
+      .definitionForCreate(db, SLUG, { locked: false, generic: true })
       .then(() => null)
       .catch((err: unknown) => err as { status?: number; message?: string });
     check(
@@ -215,7 +215,10 @@ async function main(): Promise<void> {
     );
 
     await configService.set(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, 'true');
-    const def = await apiDefinitions.definitionForCreate(db, SLUG, { generic: true });
+    const def = await apiDefinitions.definitionForCreate(db, SLUG, {
+      locked: false,
+      generic: true,
+    });
     check(
       'with the switch on, the create path snapshots the seed step list',
       JSON.stringify(def.runListSnapshot) === JSON.stringify([STEP_ID]) && def.repoOptional,

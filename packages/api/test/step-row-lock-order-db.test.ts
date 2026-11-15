@@ -1,5 +1,7 @@
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
   hasPgCode,
@@ -166,6 +168,14 @@ describe.skipIf(!url)(
       repositoryId = repository!.id;
     });
 
+    const frozenPins = new Map<string, unknown>();
+    afterEach(async () => {
+      for (const [id, pin] of frozenPins)
+        expect(
+          (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) }))?.dataEdgePlan,
+        ).toEqual(pin);
+      frozenPins.clear();
+    });
     beforeEach(async () => {
       h.queued = [];
       h.thrown = undefined;
@@ -182,6 +192,10 @@ describe.skipIf(!url)(
       status: TaskStatus,
       over: Partial<typeof schema.tasks.$inferInsert> = {},
     ) => {
+      const nodes = dataPortNodes(['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality']);
+      nodes[0]!.id = B.stepId;
+      nodes[1]!.id = A.stepId;
+      const pin = buildDataEdgePlan('static', [{ executionPath: null, nodes }]);
       const [task] = await db
         .insert(schema.tasks)
         .values({
@@ -189,11 +203,13 @@ describe.skipIf(!url)(
           repositoryId,
           type: 'workflow',
           title: 'step row lock order',
+          dataEdgePlan: pin,
           status,
           orchestrationEpoch: 3,
           ...over,
         })
         .returning({ id: schema.tasks.id });
+      frozenPins.set(task!.id, pin);
       return task!.id;
     };
 

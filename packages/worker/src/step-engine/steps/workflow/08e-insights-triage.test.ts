@@ -30,7 +30,7 @@ function tableDb(outputs: { stepId: string; raw: string }[], verdicts: unknown[]
     limit: () => chain,
     then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
   });
-  return { select: () => chain } as never;
+  return { select: () => chain, query: { tasks: { findFirst: async () => null } } } as never;
 }
 
 describe('parseInsights', () => {

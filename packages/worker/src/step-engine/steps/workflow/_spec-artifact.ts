@@ -56,9 +56,9 @@ export const EFFECTIVE_SPEC_INPUTS = Object.freeze([
 ] as const);
 export async function readSpecStages(ctx: StepContext) {
   const [resolved, checked, draft] = await Promise.all([
-    readRole(ctx, SPEC_ROLES.resolved),
-    readRole(ctx, SPEC_ROLES.checked),
-    readRole(ctx, SPEC_ROLES.draft),
+    readRole(ctx, 'resolved'),
+    readRole(ctx, 'checked'),
+    readRole(ctx, 'draft'),
   ]);
   return { resolved, checked, draft };
 }

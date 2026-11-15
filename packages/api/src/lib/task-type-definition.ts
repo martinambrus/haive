@@ -1,6 +1,14 @@
+import {
+  buildDataEdgePlan,
+  DataEdgePlanError,
+  MAX_DATA_EDGE_STEPS,
+  type DataEdgePlan,
+} from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
+import { catalogWorkflowBaseCandidates } from '@haive/shared/run-list';
 import { DerivedTaskAdmissionError, insightRequirementMessage } from './derived-errors.js';
-import { eq, inArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { eq, inArray, sql } from 'drizzle-orm';
+import { schema, isLockNotAvailable, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
   REPO_OPTIONAL_BUILTIN_TASK_TYPES,
@@ -47,6 +55,8 @@ export function restoresDatabase(def: {
   );
 }
 
+export const DATA_EDGE_CATALOG_LOCK_TIMEOUT_MS = 5000;
+
 const SAVED_DATABASE_BUILTINS = ['workflow', 'run_app'];
 
 /** Whether a task of this type may be created from a saved database. */
@@ -57,6 +67,7 @@ export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   derivedRunPlan?: DerivedRunPlan | null;
+  dataEdgePlan?: DataEdgePlan | null;
   candidateStepIds?: string[];
   warnings?: unknown[];
   /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
@@ -99,6 +110,7 @@ function describeIssue(issue: CompositionIssue): string {
 export async function readModuleStates(
   handle: Pick<Database, 'select'>,
   only?: readonly string[],
+  lock = true,
 ): Promise<Map<string, TaskTypeModuleState>> {
   if (only?.length === 0) return new Map();
   const read = handle
@@ -110,10 +122,9 @@ export async function readModuleStates(
       drainingAt: schema.modules.drainingAt,
     })
     .from(schema.modules);
-  const rows =
-    only === undefined
-      ? await read
-      : await read.where(inArray(schema.modules.moduleId, [...only])).for('key share');
+  const selected =
+    only === undefined ? read : read.where(inArray(schema.modules.moduleId, [...only]));
+  const rows = await (lock && only !== undefined ? selected.for('key share') : selected);
   return new Map(
     rows.map((row) => [
       row.moduleId,
@@ -131,17 +142,17 @@ const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
   modules.map((m) => (m.name === null ? m.id : `${m.name} (${m.id})`)).join(', ');
 
 export async function definitionForCreate(
-  handle: Pick<Database, 'select' | 'execute' | 'transaction'>,
+  handle: Pick<Database, 'select' | 'execute'>,
   slug: string,
-  opts: { generic: boolean; locked?: boolean },
+  opts: { generic: boolean; locked: boolean; catalogLockTimeoutMs?: number },
 ): Promise<TaskTypeDefinitionForCreate> {
-  // FOR SHARE holds the row until the caller's insert commits, so a concurrent delete waits and then sees the task.
-  const [def] = await handle
+  // Only INSERT admission holds locks; previews and preflights are ordinary reads.
+  const read = handle
     .select()
     .from(schema.taskTypeDefinitions)
     .where(eq(schema.taskTypeDefinitions.slug, slug))
-    .limit(1)
-    .for('share');
+    .limit(1);
+  const [def] = await (opts.locked ? read.for('share') : read);
   if (!def) {
     // The worker seeds the built-ins at boot; until it has, a built-in keeps today's live run list.
     if (!BUILTIN_TASK_TYPES.has(slug)) throw new HttpError(404, `Unknown task type ${slug}`);
@@ -161,19 +172,45 @@ export async function definitionForCreate(
     )
       throw new HttpError(403, 'Custom task types are disabled on this install');
   }
-  if (def.runListStrategy === 'derived' && !opts.locked)
-    return handle.transaction((tx) => definitionForCreate(tx, slug, { ...opts, locked: true }));
+  if (def.stepIds && def.stepIds.length > MAX_DATA_EDGE_STEPS)
+    throw new HttpError(
+      409,
+      'invalid-data-edge-plan: step-count exceeds admission limit',
+      'invalid-data-edge-plan',
+    );
+  // A table SHARE lock also excludes boot inserts/deletes, not merely edits to existing rows.
+  // Bound the wait, restoring the caller's timeout before other admission locks.
+  if (opts.locked && def.runListStrategy !== 'derived') {
+    const [setting] = await handle.execute<{ timeout: string }>(
+      sql`SELECT current_setting('lock_timeout') AS timeout`,
+    );
+    const timeoutMs = Math.max(
+      1,
+      Math.trunc(opts.catalogLockTimeoutMs ?? DATA_EDGE_CATALOG_LOCK_TIMEOUT_MS),
+    );
+    await handle.execute(sql`SELECT set_config('lock_timeout', ${String(timeoutMs) + 'ms'}, true)`);
+    try {
+      await handle.execute(sql`LOCK TABLE ${schema.stepCatalog} IN SHARE MODE`);
+    } catch (error) {
+      if (isLockNotAvailable(error))
+        throw new HttpError(409, 'Step catalog is busy; try again', 'data-edge-catalog-busy');
+      throw error;
+    }
+    await handle.execute(sql`SELECT set_config('lock_timeout', ${setting?.timeout ?? '0'}, true)`);
+  }
   const derived =
-    def.runListStrategy === 'derived' ? await readDerivedDefinition(handle, def) : null;
+    def.runListStrategy === 'derived'
+      ? await readDerivedDefinition(handle, def, undefined, { lock: opts.locked === true })
+      : null;
   const membership = derived?.stepIds ?? def.stepIds;
   const modules = await readModuleStates(
     handle,
     moduleIdsOfTaskType({ ...def, stepIds: derived?.dependencyStepIds ?? membership }),
+    opts.locked === true,
   );
   const storedCatalog =
-    (def.runListStrategy === 'static' || def.runListStrategy === 'derived') && def.stepIds !== null
-      ? await readStepCatalog(handle)
-      : null;
+    derived?.catalog ??
+    (await readStepCatalog(handle, { ordered: true, lock: opts.locked === true }));
   const catalog = storedCatalog?.synced ? mergePromptStepCatalog(storedCatalog, def) : null;
   const availability = resolveTaskTypeAvailability({
     definition: def,
@@ -273,7 +310,48 @@ export async function definitionForCreate(
     // As stored: the parsed copy drops a tool that no longer parses, which a task must still name.
     if (has(id)) customSteps[id] = def.promptSteps[key];
   }
+  let dataEdgePlan: DataEdgePlan | null = null;
+  try {
+    if (derived?.plan) {
+      dataEdgePlan = buildDataEdgePlan(
+        'derived',
+        derived.plan.candidates.map((c) => ({
+          executionPath: c.executionPath,
+          nodes: dataPortNodes(c.stepIds, c.roleBindings),
+        })),
+      );
+    } else if (snapshot !== null) {
+      dataEdgePlan = buildDataEdgePlan('static', [
+        { executionPath: null, nodes: dataPortNodes(snapshot) },
+      ]);
+    } else if (def.runListStrategy === 'workflow_paths' && storedCatalog.synced) {
+      let candidates: ReturnType<typeof catalogWorkflowBaseCandidates>;
+      try {
+        candidates = catalogWorkflowBaseCandidates(
+          storedCatalog.orderedRows as {
+            stepId: string;
+            workflowType: string;
+            stepIndex: number;
+          }[],
+          { includeConditionalInsightSteps: true },
+        );
+      } catch {
+        throw new HttpError(409, 'The step catalog order is invalid', 'catalog-order-invalid');
+      }
+      dataEdgePlan = buildDataEdgePlan(
+        'workflow',
+        candidates.map((c) => ({
+          executionPath: c.executionPath,
+          nodes: dataPortNodes(c.stepIds),
+        })),
+      );
+    }
+  } catch (error) {
+    if (error instanceof DataEdgePlanError) throw new HttpError(409, error.message, error.code);
+    throw error;
+  }
   return {
+    dataEdgePlan,
     runListSnapshot: snapshot === null ? null : [...snapshot],
     ...(derived
       ? {

@@ -12,6 +12,7 @@ import {
 export { STEP_ROLES } from './output-contracts.js';
 
 export interface RoleTaskPin {
+  dataEdgePlan?: unknown;
   derivedRunPlan?: unknown;
   executionPath?: string | null;
   runListSnapshot?: readonly string[] | null;

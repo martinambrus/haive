@@ -64,23 +64,24 @@ const defRow = (slug: string, source: string) => ({
 
 const acme = { moduleId: 'acme', name: 'Acme', missingAt: null, deactivatedAt: null };
 
-const handle = (rows: unknown[], modules: unknown[] = [acme]) =>
-  ({
-    execute: () => {
-      throw new Error('Static definition control must not execute catalog locks');
-    },
-    transaction: () => {
-      throw new Error('Static definition control must not open a derived read transaction');
-    },
+// Model both ordinary preview reads and the optional INSERT-admission row lock.
+const handle = (rows: unknown[], modules: unknown[] = [acme]) => {
+  const result = (values: unknown[]) =>
+    Object.assign(Promise.resolve(values), { for: async () => values });
+  const tx = {
+    execute: async () => [{ timeout: '0' }],
+    transaction: async (run: (t: unknown) => unknown) => run(tx),
     select: () => ({
       from: (table: unknown) =>
         table === schema.stepCatalog
-          ? Promise.resolve([])
+          ? { orderBy: () => result([]) }
           : table === schema.modules
-            ? { where: () => ({ for: async () => modules }) }
-            : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
+            ? { where: () => result(modules) }
+            : { where: () => ({ limit: () => result(rows) }) },
     }),
-  }) as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
+  };
+  return tx as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
+};
 
 async function refusal(promise: Promise<unknown>): Promise<HttpError> {
   const err = await promise.then(
@@ -100,7 +101,10 @@ beforeEach(() => {
 
 describe('definitionForCreate and the task type switches', () => {
   const create = (source: string) =>
-    definitionForCreate(handle([defRow('x-type', source)]), 'x-type', { generic: false });
+    definitionForCreate(handle([defRow('x-type', source)]), 'x-type', {
+      locked: false,
+      generic: false,
+    });
 
   it('refuses an admin-authored type while its switch is off, and allows it when on', async () => {
     const err = await refusal(create('admin'));
@@ -135,6 +139,7 @@ describe('definitionForCreate and the task type switches', () => {
   describe('a module the type uses', () => {
     const create = (modules: unknown[]) =>
       definitionForCreate(handle([defRow('x-type', 'module:acme')], modules), 'x-type', {
+        locked: false,
         generic: false,
       });
 
@@ -171,7 +176,7 @@ describe('definitionForCreate and the task type switches', () => {
   it('never touches a built-in, with a row or without', async () => {
     await expect(create('builtin')).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
     await expect(
-      definitionForCreate(handle([]), 'plan_merge', { generic: false }),
+      definitionForCreate(handle([]), 'plan_merge', { locked: false, generic: false }),
     ).resolves.toMatchObject({ runListSnapshot: null });
   });
 });

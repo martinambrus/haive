@@ -29,7 +29,7 @@ export async function syncStepCatalog(
       if (entry) assertMatchingOutputDeclaration(def, entry);
       const composableRow = {
         composable: composables.has(meta.id),
-        // Core data-port declarations stay in memory until per-input pins ship.
+        // Core data ports live in the host table and separate v3 task pins.
         // Persist exactly the existing entry vocabulary understood by older readers.
         entry: entry ? composableStepEntrySchema.parse(entry) : null,
       };

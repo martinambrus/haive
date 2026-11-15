@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
       ({
         runListSnapshot: ['00-x', '01-y'],
         customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       }) as unknown,
   ),
 }));
@@ -110,12 +111,21 @@ describe('POST /tasks pins the run list', () => {
         repositoryId: REPO,
       });
       expect(res.status).toBe(201);
-      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: true });
+      expect(((await res.json()) as { task: unknown }).task).not.toHaveProperty('dataEdgePlan');
+      expect(h.definition).toHaveBeenNthCalledWith(1, expect.anything(), type, {
+        generic: true,
+        locked: false,
+      });
+      expect(h.definition).toHaveBeenNthCalledWith(2, expect.anything(), type, {
+        generic: true,
+        locked: true,
+      });
       expect(created()).toHaveLength(1);
       expect(created()[0]).toMatchObject({
         type,
         runListSnapshot: SNAPSHOT,
         customSteps: PINNED,
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       });
     },
   );
@@ -166,8 +176,13 @@ describe('the rollback pins the run list', () => {
     expect(res.status).toBe(201);
     expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'onboarding_upgrade', {
       generic: false,
+      locked: true,
     });
-    expect(created()[0]).toMatchObject({ runListSnapshot: SNAPSHOT, customSteps: PINNED });
+    expect(created()[0]).toMatchObject({
+      runListSnapshot: SNAPSHOT,
+      customSteps: PINNED,
+      dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
+    });
   });
 });
 
@@ -188,11 +203,15 @@ describe('spawnPlanTask pins the run list', () => {
           enqueue: false,
         }),
       );
-      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: false });
+      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, {
+        generic: false,
+        locked: true,
+      });
       expect(fake.rows(schema.tasks)[0]).toMatchObject({
         type,
         runListSnapshot: SNAPSHOT,
         customSteps: PINNED,
+        dataEdgePlan: { version: 3, fingerprint: 'locked-pin' },
       });
     },
   );
@@ -233,7 +252,10 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
     const fake = draftWorld();
     const res = await post('/admin/task-type-drafts', { message: 'a TODO audit' });
     expect(res.status).toBe(201);
-    expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'type_draft', { generic: false });
+    expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'type_draft', {
+      generic: false,
+      locked: true,
+    });
     expect(fake.rows(schema.tasks)).toMatchObject([
       { type: 'type_draft', runListSnapshot: SNAPSHOT, customSteps: PINNED },
     ]);
@@ -247,5 +269,30 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
     expect(fake.rows(schema.tasks)).toHaveLength(0);
     expect(fake.rows(schema.taskEvents)).toHaveLength(0);
     expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+it('PATCH /tasks/:id omits dataEdgePlan while retaining the stored immutable pin', async () => {
+  const { fake, created } = world();
+  const res = await post('/tasks', {
+    type: 'workflow',
+    title: 'before',
+    description: 'do it',
+    repositoryId: REPO,
+  });
+  expect(res.status).toBe(201);
+  const task = created()[0]!;
+  const updated = await app.request(`/tasks/${task.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'after' }),
+  });
+  expect(updated.status).toBe(200);
+  const body = (await updated.json()) as { task: Record<string, unknown> };
+  expect(body.task).toMatchObject({ id: task.id, title: 'after' });
+  expect(body.task).not.toHaveProperty('dataEdgePlan');
+  expect(fake.rows(schema.tasks).find((r) => r.id === task.id)!.dataEdgePlan).toEqual({
+    version: 3,
+    fingerprint: 'locked-pin',
   });
 });

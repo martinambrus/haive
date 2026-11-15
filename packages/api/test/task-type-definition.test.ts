@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import { eq, inArray, like } from 'drizzle-orm';
+import { waitForPgLock } from './fixtures/wait-for-pg-lock.js';
+import { eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { promptStepId } from '@haive/shared/modularity';
@@ -114,47 +115,65 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
   });
 
   it('copies the step list of a static type', async () => {
-    expect(await definitionForCreate(db, 'ttd-static', { generic: true })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-static', { locked: false, generic: true }),
+    ).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
 
   it('pins nothing for a dynamic type', async () => {
-    expect(await definitionForCreate(db, 'ttd-dynamic', { generic: true })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-dynamic', { locked: false, generic: true }),
+    ).toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('refuses an unseeded built-in on the generic route unless it is a generic type', async () => {
-    const err = await refusal(definitionForCreate(db, 'plan_merge', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'plan_merge', { locked: false, generic: true }),
+    );
     expect([err.status, err.message]).toEqual([403, 'Task type plan_merge cannot be created here']);
-    await expect(definitionForCreate(db, 'onboarding', { generic: true })).resolves.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'onboarding', { locked: false, generic: true }),
+    ).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('lets a built-in type through with no snapshot before the worker has seeded it', async () => {
-    await expect(definitionForCreate(db, 'plan_merge', { generic: false })).resolves.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'plan_merge', { locked: false, generic: false }),
+    ).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('is a 404 for an unknown type', async () => {
-    const err = await refusal(definitionForCreate(db, 'ttd-missing', { generic: false }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-missing', { locked: false, generic: false }),
+    );
     expect([err.status, err.message]).toEqual([404, 'Unknown task type ttd-missing']);
   });
 
   it('is a 403 for a disabled type, generic or not', async () => {
     for (const generic of [true, false]) {
-      const err = await refusal(definitionForCreate(db, 'ttd-disabled', { generic }));
+      const err = await refusal(
+        definitionForCreate(db, 'ttd-disabled', { locked: false, generic }),
+      );
       expect([err.status, err.message]).toEqual([403, 'Task type ttd-disabled is disabled']);
     }
   });
 
   it('refuses a type that is not selectable only on the generic path', async () => {
-    const err = await refusal(definitionForCreate(db, 'ttd-hidden', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-hidden', { locked: false, generic: true }),
+    );
     expect([err.status, err.message]).toEqual([403, 'Task type ttd-hidden cannot be created here']);
-    expect(await definitionForCreate(db, 'ttd-hidden', { generic: false })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-hidden', { locked: false, generic: false }),
+    ).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
@@ -163,7 +182,9 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     await expect(
       db.transaction(async (tx) => {
         await tx.insert(schema.taskTypeDefinitions).values(row('ttd-in-tx'));
-        expect(await definitionForCreate(tx, 'ttd-in-tx', { generic: true })).toMatchObject({
+        expect(
+          await definitionForCreate(tx, 'ttd-in-tx', { locked: true, generic: true }),
+        ).toMatchObject({
           runListSnapshot: STEPS,
         });
         const outside = await db
@@ -174,7 +195,9 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         throw new Error('rollback');
       }),
     ).rejects.toThrow('rollback');
-    const err = await refusal(definitionForCreate(db, 'ttd-in-tx', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-in-tx', { locked: false, generic: true }),
+    );
     expect(err.status).toBe(404);
   });
 
@@ -203,11 +226,15 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         'utf8',
       );
       try {
-        await expect(definitionForCreate(db, slug, { generic: true })).rejects.toMatchObject({
+        await expect(
+          definitionForCreate(db, slug, { locked: false, generic: true }),
+        ).rejects.toMatchObject({
           status: 409,
         });
         await db.$client.unsafe(migration);
-        await expect(definitionForCreate(db, slug, { generic: true })).resolves.toMatchObject({
+        await expect(
+          definitionForCreate(db, slug, { locked: false, generic: true }),
+        ).resolves.toMatchObject({
           runListSnapshot: [c, b, QUIET],
         });
         const once = await db.query.taskTypeDefinitions.findFirst({
@@ -263,7 +290,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
     describe.each(SOURCES)('$source row', ({ tag, traits }) => {
       const create = (name: string) =>
-        definitionForCreate(db, traitSlug(tag, name), { generic: true });
+        definitionForCreate(db, traitSlug(tag, name), { locked: false, generic: true });
 
       it('puts the model-health step first only when a step dispatches a CLI', async () => {
         expect((await create('agent')).runListSnapshot).toEqual(
@@ -331,14 +358,14 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
     it('keeps them on an admin type, whose steps ask for the model-health step', async () => {
       const id = promptStepId('ttd-t-ps-adm', PROMPT.slug);
-      const def = await definitionForCreate(db, 'ttd-t-ps-adm', { generic: true });
+      const def = await definitionForCreate(db, 'ttd-t-ps-adm', { locked: false, generic: true });
       expect(def.customSteps).toEqual({ [id]: PROMPT });
       expect(def.runListSnapshot).toEqual([CANARY, QUIET, id]);
     });
 
     it('gives a module type none, whatever its row stores', async () => {
       const id = promptStepId('ttd-t-ps-mod', PROMPT.slug);
-      const def = await definitionForCreate(db, 'ttd-t-ps-mod', { generic: true });
+      const def = await definitionForCreate(db, 'ttd-t-ps-mod', { locked: false, generic: true });
       expect(def.customSteps).toBeNull();
       expect(def.runListSnapshot).toEqual([QUIET, id]);
     });
@@ -364,5 +391,329 @@ describe('restoresDatabase', () => {
       restoresDatabase(listing('module:fx', { runListStrategy: 'workflow_paths', stepIds: null })),
     ).toBe(false);
     expect(restoresDatabase(listing('module:fx', { stepIds: [QUIET] }))).toBe(false);
+  });
+});
+
+// These controls use the real locked admission helper and INSERT transaction. No dev queues.
+describe.skipIf(!url)('v3 per-consumer locked admission', () => {
+  let db: Database;
+  let userId: string;
+  const slugs = ['prt3-static', 'prt3-module', 'prt3-limit'];
+  const ids = ['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality', '07-phase-2-implement'];
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    const [u] = await db
+      .insert(schema.users)
+      .values({
+        emailEncrypted: 'prt3@example.invalid',
+        emailBlindIndex: 'prt3-v3-user',
+        passwordHash: 'test',
+        status: 'active',
+      })
+      .returning();
+    userId = u!.id;
+    await db.insert(schema.modules).values({
+      moduleId: 'prt3',
+      packageName: '@haive/module-prt3',
+      name: 'PRT3',
+      installedVersion: '1.0.0',
+    });
+    await db
+      .insert(schema.stepCatalog)
+      .values(ids.map((id) => catalogRow(id)))
+      .onConflictDoNothing();
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values([
+        row(slugs[0]!, { source: 'admin', stepIds: ids }),
+        row(slugs[1]!, { source: 'module:prt3', stepIds: ids }),
+        row(slugs[2]!, { source: 'admin', stepIds: [] }),
+      ]);
+  });
+  afterAll(async () => {
+    await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'prt3'));
+    await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, [...ids, CANARY]));
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await db.$client.end({ timeout: 5 });
+  });
+  const insert = async (slug: string) =>
+    db.transaction(async (tx) => {
+      const admitted = await definitionForCreate(tx, slug, { generic: true, locked: true });
+      const [task] = await tx
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: slug,
+          title: 'v3',
+          runListSnapshot: admitted.runListSnapshot,
+          dataEdgePlan: admitted.dataEdgePlan,
+        })
+        .returning();
+      return task!;
+    });
+  it('maps ambiguous builtin workflow catalog order to a coded 409', async () => {
+    await expect(
+      db.transaction(async (tx) => {
+        // Keep the rest of the fixture catalog out of this two-row ambiguity.
+        await tx.update(schema.stepCatalog).set({ workflowType: 'module.prt3' });
+        await tx.insert(schema.stepCatalog).values([
+          { ...catalogRow('prt3-tied-a'), stepIndex: 7 },
+          { ...catalogRow('prt3-tied-b'), stepIndex: 7 },
+        ]);
+        await tx.insert(schema.taskTypeDefinitions).values(
+          row('workflow', {
+            source: 'builtin',
+            runListStrategy: 'workflow_paths',
+            stepIds: null,
+          }),
+        );
+        await expect(
+          definitionForCreate(tx, 'workflow', { generic: true, locked: true }),
+        ).rejects.toMatchObject({ status: 409, code: 'catalog-order-invalid' });
+        throw new Error('fixture rollback');
+      }),
+    ).rejects.toThrow('fixture rollback');
+  });
+  it('gives static admin and module-seed tasks the same exact immutable edges', async () => {
+    const admin = await insert(slugs[0]!);
+    const module = await insert(slugs[1]!);
+    expect(admin.dataEdgePlan).toMatchObject({
+      version: 3,
+      candidates: [
+        {
+          bindings: {
+            '1:draft': {
+              producerIndex: 0,
+              producerStepId: ids[0],
+              contract: { id: 'haive.spec.draft', version: 1 },
+            },
+            '2:resolved': null,
+          },
+        },
+      ],
+    });
+    expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
+  });
+  it('uses the definition and catalog at INSERT, not the preflight copy', async () => {
+    const before = await definitionForCreate(db, slugs[0]!, { locked: false, generic: true });
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: [ids[2]!] })
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[0]!));
+    // A catalog edit also crosses the preflight/INSERT boundary: a new CLI means a canary.
+    await db.insert(schema.stepCatalog).values(catalogRow(CANARY)).onConflictDoNothing();
+    await db
+      .update(schema.stepCatalog)
+      .set({ dispatchesCli: true })
+      .where(eq(schema.stepCatalog.stepId, ids[2]!));
+    try {
+      const task = await insert(slugs[0]!);
+      expect(task.runListSnapshot).toEqual([CANARY, ids[2]]);
+      expect(task.dataEdgePlan).not.toEqual(before.dataEdgePlan);
+      expect(task.dataEdgePlan).toMatchObject({
+        candidates: [
+          {
+            nodes: [{ id: CANARY }, { id: ids[2] }],
+            bindings: { '1:draft': null, '1:checked': null, '1:resolved': null },
+          },
+        ],
+      });
+    } finally {
+      await db
+        .update(schema.stepCatalog)
+        .set({ dispatchesCli: false })
+        .where(eq(schema.stepCatalog.stepId, ids[2]!));
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ stepIds: ids })
+        .where(eq(schema.taskTypeDefinitions.slug, slugs[0]!));
+    }
+  });
+  it('holds module deactivation until the admitted task and its plan have committed', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const creating = db.transaction(async (tx) => {
+      const admitted = await definitionForCreate(tx, slugs[1]!, { generic: true, locked: true });
+      locked();
+      await gate;
+      await tx.insert(schema.tasks).values({
+        userId,
+        type: slugs[1]!,
+        title: 'race',
+        runListSnapshot: admitted.runListSnapshot,
+        dataEdgePlan: admitted.dataEdgePlan,
+      });
+    });
+    await acquired;
+    const deactivating = db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.modules)
+        .where(eq(schema.modules.moduleId, 'prt3'))
+        .for('update');
+      const tasks = await tx.select().from(schema.tasks).where(eq(schema.tasks.type, slugs[1]!));
+      expect(tasks.some((t) => t.title === 'race' && t.dataEdgePlan != null)).toBe(true);
+      await tx
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'prt3'));
+    });
+    try {
+      const waiting = await waitForPgLock(async () => {
+        const rows = await db.execute(
+          sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND strpos(query,'modules')>0`,
+        );
+        return rows.length > 0;
+      });
+      expect(waiting).toBe(true);
+    } finally {
+      release();
+      await creating;
+      await deactivating;
+    }
+    await expect(insert(slugs[1]!)).rejects.toMatchObject({ status: 409 });
+  });
+  it('refuses over-limit admission before writes, with no task, event or queued work', async () => {
+    const { MAX_DATA_EDGE_STEPS } = await import('@haive/shared/data-edge-plan');
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: Array.from({ length: MAX_DATA_EDGE_STEPS + 1 }, (_, i) => `s-${i}`) })
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[2]!));
+    const tasks = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.userId, userId));
+    const events = await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents);
+    let enqueues = 0;
+    await expect(
+      insert(slugs[2]!).then(() => {
+        enqueues++;
+      }),
+    ).rejects.toMatchObject({ status: 409, code: 'invalid-data-edge-plan' });
+    expect(
+      await db
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.userId, userId)),
+    ).toEqual(tasks);
+    expect(await db.select({ id: schema.taskEvents.id }).from(schema.taskEvents)).toEqual(events);
+    expect(enqueues).toBe(0);
+  });
+});
+
+// Real MVCC and lock interaction: a boot catalog writer must not block previews.
+describe.skipIf(!url)('catalog locks belong to INSERT admission only', () => {
+  let db: Database;
+  const slugs = ['prt3-preview', 'prt3-preview-derived', 'workflow'];
+  const ids = [
+    '00-model-health-workflow',
+    '00a-sync-base',
+    '00-triage',
+    '04-phase-0b-pre-planning',
+    '05-phase-0b5-spec-quality',
+  ];
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    await db.delete(schema.stepCatalog);
+    await db.insert(schema.stepCatalog).values(
+      ids.map((id, stepIndex) => ({
+        ...catalogRow(id),
+        stepIndex,
+      })),
+    );
+    await db.insert(schema.taskTypeDefinitions).values([
+      row(slugs[0]!, { source: 'admin', stepIds: ids }),
+      row('workflow', { source: 'builtin', runListStrategy: 'workflow_paths', stepIds: null }),
+      row(slugs[1]!, {
+        source: 'admin',
+        runListStrategy: 'derived',
+        stepIds: null,
+        baseSlug: 'workflow',
+        changes: [],
+      }),
+    ]);
+  });
+  afterAll(async () => {
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[1]!));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+    await db.delete(schema.stepCatalog);
+    await db.$client.end({ timeout: 5 });
+  });
+  it.each(slugs)(
+    'previews %s normally while another transaction holds catalog write locks',
+    async (slug) => {
+      const expected = await definitionForCreate(db, slug, { locked: false, generic: true });
+      let acquired!: () => void;
+      let release!: () => void;
+      const locked = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const writer = db.transaction(async (tx) => {
+        await tx.execute(sql`LOCK TABLE ${schema.stepCatalog} IN ROW EXCLUSIVE MODE`);
+        await tx
+          .select()
+          .from(schema.stepCatalog)
+          .where(eq(schema.stepCatalog.stepId, ids[0]!))
+          .for('update');
+        acquired();
+        await gate;
+      });
+      await locked;
+      try {
+        await expect(
+          definitionForCreate(db, slug, { locked: false, generic: true, catalogLockTimeoutMs: 30 }),
+        ).resolves.toEqual(expected);
+      } finally {
+        release();
+        await writer;
+      }
+    },
+  );
+  it('still refuses a busy catalog on explicit INSERT admission', async () => {
+    let acquired!: () => void;
+    let release!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writer = db.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE ${schema.stepCatalog} IN ROW EXCLUSIVE MODE`);
+      acquired();
+      await gate;
+    });
+    await locked;
+    try {
+      await expect(
+        db.transaction((tx) =>
+          definitionForCreate(tx, slugs[0]!, {
+            generic: true,
+            locked: true,
+            catalogLockTimeoutMs: 30,
+          }),
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'data-edge-catalog-busy' });
+    } finally {
+      release();
+      await writer;
+    }
   });
 });
