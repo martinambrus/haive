@@ -8,6 +8,18 @@ them. They now wait `pending` with no invocation, and the barrier sends them fro
 prompt without charging an attempt (`dispatchReservedAgents`). A reserved row whose prompt has
 aged out of retention is failed rather than waited on.
 
+Mining rows also retain host-issued `snapshot_ref` and optional `base_snapshot_ref` identities.
+Both are strict version-1 descriptors: owner/task/repository IDs, pinned commit and tree OIDs,
+and an inventory ID and SHA-256 digest; they contain no host path or agent-controlled policy.
+The shared parser rejects unknown fields, malformed identities and an unpaired or foreign-scope
+base. Parsing proves shape only; the future host consumer must verify ownership and content.
+Every reservation, link, refusal and queue payload carries both refs. Unsent reservation recovery,
+wave recovery and rerolls preserve the row's refs even if `selectAgents` now offers different
+ones. NULL/NULL retains the live-checkout contract. Malformed stored refs fail visibly.
+This storage is inert: execution refuses any non-null ref before resolving a repository mount,
+until an owned snapshot consumer is implemented. It must never fall back to the live checkout.
+Rollback keeps the nullable columns and reverts unused application code. That is safe only while every mining row and queued job holds NULL refs. Once one holds a ref, an older worker would ignore it and mount the live checkout, and dropping the columns would lose the pin. A module dispatch may already set a ref; execution refuses it until snapshot mounts ship.
+
 **Every write that links or fails a row is a compare-and-swap on the state read**
 (`sameMiningState`: id, status, invocation link). Two passes over one step, such as a duplicate
 advance or a completion racing a retry, used to both re-roll an agent, each superseding the
