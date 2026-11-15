@@ -1827,23 +1827,25 @@ describe('houseRulesHoldApprove', () => {
 });
 
 describe('pinned replacement rule evidence', () => {
+  // A conforming code-review output, so only the row status decides what the reader sees.
+  const output = {
+    reviewed: true,
+    peer: { verdict: 'APPROVE', findings: [], positives: [] },
+    security: { verdict: 'SAFE', findings: [] },
+    extraLenses: [],
+    blocking: false,
+    reviewIncomplete: false,
+    advisoryVerdict: false,
+    coverage: null,
+    refutedCount: 0,
+    counts: { peer: 0, securityCriticalHigh: 0 },
+    recurringNote: '',
+    peerInvocationId: OTHER,
+  };
+
   it('reads the actual producer invocation and never grants enforcement from an absent stamp', async () => {
     const w = world();
     w.fake.patch(schema.tasks, TASK, rolePin());
-    const output = {
-      reviewed: true,
-      peer: { verdict: 'APPROVE', findings: [], positives: [] },
-      security: { verdict: 'SAFE', findings: [] },
-      extraLenses: [],
-      blocking: false,
-      reviewIncomplete: false,
-      advisoryVerdict: false,
-      coverage: null,
-      refutedCount: 0,
-      counts: { peer: 0, securityCriticalHigh: 0 },
-      recurringNote: '',
-      peerInvocationId: OTHER,
-    };
     w.fake.insert(schema.taskSteps, {
       taskId: TASK,
       stepId: PRODUCER,
@@ -1864,18 +1866,15 @@ describe('pinned replacement rule evidence', () => {
   });
 
   it('reads no rules from a replacement producer row that did not finish', async () => {
-    for (const status of ['skipped', 'pending', 'failed']) {
+    for (const status of ['done', 'skipped', 'pending', 'failed']) {
       const w = world();
       w.fake.patch(schema.tasks, TASK, rolePin());
-      w.fake.insert(schema.taskSteps, {
-        taskId: TASK,
-        stepId: PRODUCER,
-        round: 1,
-        status,
-        output: { peerInvocationId: OTHER },
-      });
+      w.fake.insert(schema.taskSteps, { taskId: TASK, stepId: PRODUCER, round: 1, status, output });
       w.invocation(OTHER, stamp({ entries: [entry(RULE_A, 'Unfinished producer rule', ALWAYS)] }));
-      expect(await loadGateHouseRules(w.db, TASK, { withCodeReview: true })).toBeNull();
+      const rules = await loadGateHouseRules(w.db, TASK, { withCodeReview: true });
+      // The same output yields the rule only from a finished row.
+      if (status === 'done') expect(rules?.entries).toHaveLength(1);
+      else expect(rules).toBeNull();
     }
   });
 });
