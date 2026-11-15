@@ -1787,7 +1787,8 @@ async function resolveAgentMiningPhase(
     // mining agents are short and dispatched together, so the doomed calls a sibling kill would
     // save are already spent by the time any row lands here, whereas a coder fan-out runs for
     // half an hour. Scans every row, not just the newest, because a sibling can finish AFTER
-    // the one that hit the wall.
+    // the one that hit the wall. Only unconsumed rows can newly fail a barrier: apply has
+    // already folded consumed failures into its durable outcome before continuing or reopening.
     // A content-filter refusal is that one agent's failure and degrades like any other.
     if (stepDef.metadata.id === INSIGHT_STEP) {
       for (const row of existing) {
@@ -1797,6 +1798,7 @@ async function resolveAgentMiningPhase(
     }
     const fatalAgent = existing.find(
       (r) =>
+        r.consumedAt == null &&
         r.status === 'failed' &&
         !(stepDef.metadata.id === INSIGHT_STEP && classifierPolicy(r.agentId)) &&
         // The first 08e outage fails visibly and arms the allowance watch. On either Resume

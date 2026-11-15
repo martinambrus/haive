@@ -1,5 +1,8 @@
 import * as dispatchEngine from '../src/orchestrator/dispatcher.js';
 import * as insightAuto from '../src/step-engine/steps/workflow/_insight-auto.js';
+import * as insightLoader from '../src/step-engine/steps/workflow/_insight-loader.js';
+import * as previousStep from '../src/step-engine/steps/onboarding/_helpers.js';
+import * as specArtifact from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import {
   CommittedSnapshotError,
   isCommittedSnapshotFailure,
@@ -344,7 +347,13 @@ function makeMockDb(state: MockState): Database {
               (state.miningUpdateLog ??= []).push({ set: v, where });
               if (state.persistMiningRows)
                 for (const row of state.miningRows)
-                  if (conditionValues(where).includes(row.id)) Object.assign(row, v);
+                  if (
+                    conditionValues(where).includes(row.id) ||
+                    (v.consumedAt instanceof Date &&
+                      conditionValues(where).includes(row.agentId) &&
+                      conditionValues(where).includes(row.cliInvocationId))
+                  )
+                    Object.assign(row, v);
               state.afterMiningWrite?.(v);
             }
           };
@@ -4028,6 +4037,133 @@ describe('08e implementer dispatch and recovery', () => {
     expect(enqueued).toEqual([]);
     expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toEqual([]);
   });
+  it.each(['empty', 'selection', 'new outage'] as const)(
+    'auto ON Resume reopens, then %s submission ignores the consumed outage writer',
+    async (submission) => {
+      const outage = `${PROVIDER_FATAL_HEADLINES.rate_limit}: old 429`;
+      const writer = miningRow(`implementer-${batchId}`, 1, {
+        status: 'failed',
+        errorMessage: outage,
+        rawOutput: null,
+        consumedAt: null,
+        userRetryRequestedAt: new Date(),
+      });
+      const state = stateFor([writer]);
+      state.persistMiningRows = true;
+      const claim: insightAuto.AutoClaim = {
+        version: 1,
+        batchId,
+        sourceStepRowId: 'ts-1',
+        generation: 0,
+        ordinal: 1,
+        insights: selected,
+      };
+      const classification: insightAuto.AutoClassification = {
+        version: 1,
+        batchId,
+        sourceStepRowId: 'ts-1',
+        generation: 0,
+        complete: true,
+        invocationIds: [],
+        items: [
+          {
+            id: selected[0]!.id,
+            identity: selected[0]!.identity,
+            class: 'consequential',
+            kind: 'correctness',
+            eligible: true,
+            outcome: 'needs_decision',
+            reason: 'Repair',
+          },
+        ],
+      };
+      vi.spyOn(insightAuto, 'insightAutoEnabled').mockResolvedValue(true);
+      vi.spyOn(insightAuto, 'loadAutoHistory').mockResolvedValue({
+        claims: [claim],
+        results: [classification],
+      });
+      vi.spyOn(insightLoader, 'loadUnactedInsights').mockResolvedValue({
+        insights: selected,
+        omitted: 0,
+      } as Awaited<ReturnType<typeof insightLoader.loadUnactedInsights>>);
+      vi.spyOn(previousStep, 'loadPreviousStepOutput').mockResolvedValue(null);
+      vi.spyOn(specArtifact, 'resolveSpecView').mockResolvedValue({ text: 'Task scope' } as never);
+      vi.spyOn(specArtifact, 'hydrateNoSpecBrief').mockResolvedValue(undefined);
+      Object.assign(state.taskStepRow.detectOutput as object, {
+        auto: {
+          version: 1,
+          mode: 'classify',
+          candidates: selected,
+          roundsStarted: 1,
+          decisions: classification.items,
+          stopReason: 'classifying',
+          claim,
+        },
+      });
+      const db = makeMockDb(state);
+      const enqueued: CliExecJobPayload[] = [];
+      const reopened = await run(db, insightsTriageStep, enqueued);
+      expect(reopened.status).toBe('waiting_form');
+      expect(state.taskStepRow.rerunGeneration).toBe(1);
+      expect(state.taskStepRow.detectOutput).toMatchObject({
+        auto: { mode: 'manual', candidates: selected },
+      });
+      expect(writer).toMatchObject({
+        status: 'failed',
+        errorMessage: outage,
+        consumedAt: expect.any(Date),
+        userRetryRequestedAt: null,
+      });
+      expect(records.find((r) => r.stage === 'outcome')).toMatchObject({
+        batchId,
+        generation: 0,
+        items: [{ outcome: 'unconfirmed' }],
+      });
+      expect(enqueued).toEqual([]);
+
+      const submitted = await advanceStep({
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: insightsTriageStep,
+        providers: [makeProvider()],
+        formValues: { selectedInsights: submission === 'empty' ? [] : [selected[0]!.id] },
+        deps: {
+          enqueueCliInvocation: async (payload) => {
+            if (payload.kind === 'agent_mining') enqueued.push(payload);
+          },
+        },
+      });
+      expect(submitted.status).toBe(submission === 'empty' ? 'done' : 'waiting_cli');
+      if (submission === 'empty') {
+        expect(enqueued).toEqual([]);
+        return;
+      }
+      const nextBatch = insightJournal.insightBatchId('ts-1', 1);
+      expect(enqueued).toHaveLength(1);
+      const nextWriter = state.miningRows.find((r) => r.agentId === `implementer-${nextBatch}`)!;
+      expect(nextWriter.consumedAt).toBeNull();
+      const freshOutage = `${PROVIDER_FATAL_HEADLINES.server_error}: new 503`;
+      Object.assign(nextWriter, {
+        status: submission === 'new outage' ? 'failed' : 'done',
+        errorMessage: submission === 'new outage' ? freshOutage : null,
+        rawOutput: JSON.stringify({
+          version: 1,
+          batchId: nextBatch,
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: 'Later' }],
+          notes: '',
+        }),
+      });
+      const finished = await run(db, insightsTriageStep, enqueued);
+      expect(finished.status).toBe(submission === 'new outage' ? 'failed' : 'done');
+      if (finished.status === 'failed') expect(finished.error).toBe(freshOutage);
+      expect(enqueued).toHaveLength(1);
+      expect(writer.consumedAt).toBeInstanceOf(Date);
+    },
+  );
   it.each(['manual Resume', 'automatic Resume'])(
     'settles a provider-outage writer through apply after %s, and permits a new generation on Retry',
     async (entry) => {
