@@ -1417,6 +1417,8 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   '08c2-code-audit': { implementationFiles: CHANGE_SET },
   '08d-adversarial-qa': { implementationFiles: CHANGE_SET },
   '08e-insights-triage': {
+    // Select the editor arm: an unknown proxy field is truthy and would select the checkpoint.
+    insightCheckpoint: null,
     insights: [
       {
         id: 'insight-v1-one',
