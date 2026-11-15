@@ -2711,8 +2711,13 @@ function makeSpawnDb(reviewerRuns: unknown[] = []) {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     // The ownership probe a run is recorded under: these cases never lose the row.
     select: () => ({
-      from: () => ({
-        where: () => ({ for: async () => [{ id: 'step1' }], orderBy: async () => reviewerRuns }),
+      from: (table: unknown) => ({
+        where: () => ({
+          for: async () => [{ id: 'step1' }],
+          orderBy: async () => reviewerRuns,
+          then: (resolve: (rows: unknown[]) => void) =>
+            resolve(table === schema.taskDagIssues ? [] : reviewerRuns),
+        }),
       }),
     }),
     query: {
@@ -4254,18 +4259,21 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         ]);
       });
 
-      it('fails the issue when no provider can take the re-dispatch', async () => {
+      it('halts on a missing required provider instead of recording an issue failure', async () => {
         vi.mocked(resolveTaskDispatch).mockImplementationOnce(
           async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
         );
-        const { issueUpdates, h } = await ingestCoder('running', killedOnce, {
+        const { outcome, issueUpdates, h } = await ingestCoder('running', killedOnce, {
           agentRuns: [fixRun],
           issue: advisorRetry,
         });
         expect(h.invocationInserts).toHaveLength(0);
-        expect(issueUpdates).toEqual([
-          expect.objectContaining({ outcome: 'failed_unrecoverable' }),
-        ]);
+        expect('error' in outcome && outcome.error).toEqual(
+          expect.objectContaining({
+            message: expect.stringContaining('no cli provider available'),
+          }),
+        );
+        expect(issueUpdates).toEqual([]);
       });
     });
 
