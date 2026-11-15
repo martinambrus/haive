@@ -54,21 +54,26 @@ export const EFFECTIVE_SPEC_INPUTS = Object.freeze([
   SPEC_ROLES.checked,
   SPEC_ROLES.draft,
 ] as const);
-export async function readSpecStages(ctx: StepContext, maxRound?: number) {
+export async function readSpecStages(ctx: StepContext) {
   const [resolved, checked, draft] = await Promise.all([
-    readRole(ctx, EFFECTIVE_SPEC_INPUTS[0], maxRound),
-    readRole(ctx, EFFECTIVE_SPEC_INPUTS[1], maxRound),
-    readRole(ctx, EFFECTIVE_SPEC_INPUTS[2], maxRound),
+    readRole(ctx, SPEC_ROLES.resolved),
+    readRole(ctx, SPEC_ROLES.checked),
+    readRole(ctx, SPEC_ROLES.draft),
   ]);
   return { resolved, checked, draft };
 }
 export function effectiveSpec(stages: Awaited<ReturnType<typeof readSpecStages>>): string {
-  return (
-    (legacyRoleOutput(stages.resolved).spec ??
-      legacyRoleOutput(stages.checked).spec ??
-      legacyRoleOutput(stages.draft).spec) ||
-    ''
-  );
+  const byRole = {
+    [SPEC_ROLES.resolved]: stages.resolved,
+    [SPEC_ROLES.checked]: stages.checked,
+    [SPEC_ROLES.draft]: stages.draft,
+  };
+  for (const role of EFFECTIVE_SPEC_INPUTS) {
+    const spec = legacyRoleOutput(byRole[role]).spec;
+    // The first non-nullish body wins, INCLUDING an intentional empty string.
+    if (spec != null) return spec || '';
+  }
+  return '';
 }
 
 /** The task worktree on the WORKER filesystem. Null when the task has no worktree

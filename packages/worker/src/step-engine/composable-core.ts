@@ -384,7 +384,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
         input: 'draft',
         role: SPEC_ROLES.draft,
         contract: SPEC_DRAFT_OUTPUT_CONTRACT,
-        optional: false,
+        optional: true,
       },
     ],
     providesRoles: [{ role: SPEC_ROLES.checked, contract: SPEC_CHECKED_OUTPUT_CONTRACT }],

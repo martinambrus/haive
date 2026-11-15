@@ -205,8 +205,13 @@ describe('effective spec equivalence', () => {
     put(SPEC_ROLES.resolved, null, 2, 'pending');
     expect(await resolveApprovedSpec(ctx)).toBe('checked');
     expect(await resolveApprovedSpec(ctx)).toBe(await oldSpec(ctx));
-    expect(effectiveSpec(await readSpecStages(ctx, 1))).toBe('resolved');
-    expect(effectiveSpec(await readSpecStages(ctx, 1))).toBe(await oldSpec(ctx, 1));
+    const stages = {
+      resolved: await readRole(ctx, SPEC_ROLES.resolved, 1),
+      checked: await readRole(ctx, SPEC_ROLES.checked, 1),
+      draft: await readRole(ctx, SPEC_ROLES.draft, 1),
+    };
+    expect(effectiveSpec(stages)).toBe('resolved');
+    expect(effectiveSpec(stages)).toBe(await oldSpec(ctx, 1));
   });
   it('uses the draft when a persisted 05 row is skipped with no output', async () => {
     const { ctx, put } = fixture();
