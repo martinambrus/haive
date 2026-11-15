@@ -661,7 +661,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T681 · Insight loop: act on consequential insights during the task, and pick insights at gate 3
 
-status: in progress (plan approved 2026-11-15, docs/plans/insight-loop.md, five PRs: PR1 shared loader DONE #1209 7c10887b1; PR2 switch DONE #1212 863a369bf (hidden, inert until PR4); PR3 split into 3a journal + 3b routing, 3a DONE #1213 7f87aa3b4, 3b in build; PR4-PR5 next) (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
+status: in progress (plan approved 2026-11-15, docs/plans/insight-loop.md, five PRs: PR1 shared loader DONE #1209 7c10887b1; PR2 switch DONE #1212 863a369bf (hidden, inert until PR4); PR3 split into 3a journal + 3b routing, 3a DONE #1213 7f87aa3b4, 3b DONE #1215 9fe71a666; PR4 reviewed, PR next; PR5 after) (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
 
 Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INSTRUCTION`); DAG reviewers' withheld findings join them (`loadInsightOutputs`). Step `08e-insights-triage` shows them once as a multi-select and one agent applies the picks; gates 2 and 3 list the unpicked rest as plain text (`_gate-insights.ts`; gate 3 says "needs a follow-up task"). An `Insight` has no severity, and nothing loops.
 
@@ -669,6 +669,21 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 2. Switch ON: each 08e round runs a separate triage agent that classifies every new insight (consequential vs minor/nit, with kind and reason; security, data loss and regression are always consequential), auto-selects the consequential ones, applies them, re-runs 08 verify and 08c review, and returns to 08e. Stops when a round finds no new consequential insight or after 3 rounds. Identity across rounds via `findingIdentity`. Minor items and nits are never acted on and are listed in the end summary with their class.
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
+
+### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+8)
+
+status: open (lows; bundle with the next insight-loop change or park) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
+
+Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
+
+1. PRE-EXISTING: the recovery copy for a static task's immutable run-list snapshot (`worker/src/queues/insight-continuation.ts` ~:21) should recommend creating a new task, since Retry cannot change the snapshot.
+2. NIT, PRE-EXISTING: redundant conditional wrapper at `worker/src/queues/run-list.ts` ~:128.
+3. LOW: an owned checkpoint at a later round than the evaluating round reads as settled. Retry of an earlier round's verification after the route settled then offers manual triage, where the old earliest-row rule ran an empty checkpoint (`_insight-continuation.ts` ~:82-92). Accept it, or treat `owned.round > round` like the range fallback.
+4. NIT: `checkpoint.generation` is written into the continuation payload and never read.
+5. NIT: duplicated stepId and selection test in `handleAdvanceStep` (`task-queue.ts` ~:3590), already inside `assertInsightSelection`.
+6. LOW, theoretical: `requires[].after` compares the LATEST token provider, while the runtime checks specific step ids. They diverge only if a module step also provides `verification` or `review` (`shared/src/modularity/composition.ts` ~:62, :81-85). None does. Key on the earliest provider if a module ever does.
+7. LOW, cosmetic: for `need-out-of-order` the composer shows "Provided by: <review step>" for a step already in the list (`web/src/lib/composition-messages.ts` ~:113-117). Return no providers for that kind.
+8. LOW, coverage: no test creates a task from a STORED static type with review before verification (`task-type-definition.ts` ~:91-96, :235-241); the path was read and returns 409.
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
