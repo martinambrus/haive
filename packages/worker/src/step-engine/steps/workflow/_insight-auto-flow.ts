@@ -12,7 +12,7 @@ import {
   ReopenStepFormError,
   PromptBudgetExceededError,
 } from '../../step-definition.js';
-import type { InsightItemOutcome } from './_insight-batch.js';
+import type { InsightBatchRecord, InsightItemOutcome } from './_insight-batch.js';
 import { insightBatchId, loadInsightBatchRecords } from './_insight-batch.js';
 import { loadDependencyPolicy, type DependencyPolicy } from './_dependency-policy.js';
 import {
@@ -60,18 +60,12 @@ const unclassified = (insights: LoadedInsight[], cap: boolean): AutoDecision[] =
       ? 'Discovered after the last automatic round.'
       : 'Classification incomplete; select manually.',
   }));
-export async function detectAutoInsights(
-  ctx: StepContext,
-  insights: LoadedInsight[],
-  workspace: string,
-  limits: InsightAutoLimits = {},
-): Promise<AutoDetect> {
-  const history = await loadAutoHistory(ctx.db, ctx.taskId);
-  const journal = await loadInsightBatchRecords(ctx.db, ctx.taskId);
-  ctx.throwIfCancelled();
-  const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
-  const ownClaim = history.claims.find((c) => c.batchId === batchId);
-  const ownResult = history.results.find((c) => c.batchId === batchId);
+/** The same outstanding human decisions gate both detection and automatic completion. */
+export function autoManualState(
+  history: Awaited<ReturnType<typeof loadAutoHistory>>,
+  journal: InsightBatchRecord[],
+  batchId: string,
+) {
   const decisions = history.results.flatMap((r) => r.items);
   const unconfirmed = new Set(
     journal
@@ -98,11 +92,6 @@ export async function detectAutoInsights(
         r.batchId !== batchId &&
         !journal.some((o) => o.batchId === r.batchId && o.stage === 'outcome'),
     );
-  const seen = new Set([
-    ...history.claims.flatMap((c) => c.insights.map((i) => i.identity)),
-    ...decisions.map((i) => i.identity),
-    ...journal.flatMap((r) => r.selected.map((i) => i.identity)),
-  ]);
   // A spent classifier opportunity is not a writer selection. Retry must reoffer
   // identities left between claim, result and the durable writer intent.
   const selectedIdentities = new Set(journal.flatMap((r) => r.selected.map((i) => i.identity)));
@@ -116,6 +105,38 @@ export async function detectAutoInsights(
       ...decisions.filter((i) => i.class === 'consequential' && i.eligible).map((i) => i.identity),
     ].filter((identity) => !selectedIdentities.has(identity)),
   );
+  // Unclassified and ineligible consequential items remain human decisions. Minor/nit items are listed only.
+  const manualIdentities = new Set(
+    decisions
+      .filter((i) => i.class === 'unclassified' || (i.class === 'consequential' && !i.eligible))
+      .map((i) => i.identity)
+      .concat([...unconfirmed], [...pendingWriter], declined),
+  );
+  return { priorUnknown, pendingWriter, manualIdentities };
+}
+export async function detectAutoInsights(
+  ctx: StepContext,
+  insights: LoadedInsight[],
+  workspace: string,
+  limits: InsightAutoLimits = {},
+): Promise<AutoDetect> {
+  const history = await loadAutoHistory(ctx.db, ctx.taskId);
+  const journal = await loadInsightBatchRecords(ctx.db, ctx.taskId);
+  ctx.throwIfCancelled();
+  const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
+  const ownClaim = history.claims.find((c) => c.batchId === batchId);
+  const ownResult = history.results.find((c) => c.batchId === batchId);
+  const decisions = history.results.flatMap((r) => r.items);
+  const { priorUnknown, pendingWriter, manualIdentities } = autoManualState(
+    history,
+    journal,
+    batchId,
+  );
+  const seen = new Set([
+    ...history.claims.flatMap((c) => c.insights.map((i) => i.identity)),
+    ...decisions.map((i) => i.identity),
+    ...journal.flatMap((r) => r.selected.map((i) => i.identity)),
+  ]);
   const candidates = ownClaim && !ownResult ? ownClaim.insights : autoCandidates(insights, seen);
   const cap = history.claims.length >= (limits.rounds ?? INSIGHT_AUTO_ROUNDS) && !ownClaim;
   let mode: AutoDetect['mode'] =
@@ -132,13 +153,6 @@ export async function detectAutoInsights(
     mode = 'manual';
     stopReason = 'pending_writer';
   }
-  // Unclassified and ineligible consequential items remain human decisions. Minor/nit items are listed only.
-  const manualIdentities = new Set(
-    decisions
-      .filter((i) => i.class === 'unclassified' || (i.class === 'consequential' && !i.eligible))
-      .map((i) => i.identity)
-      .concat([...unconfirmed], [...pendingWriter], declined),
-  );
   if (
     mode !== 'classify' &&
     ((cap && candidates.length) ||

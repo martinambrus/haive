@@ -1211,6 +1211,30 @@ const copiedForms = (state: MockState) =>
       output: patch.output,
     })),
   );
+it.each([false, true])(
+  'reopened form newAttempt=%s preserves or advances the durable generation before detect',
+  async (newAttempt) => {
+    const state = freshState();
+    state.taskStepRow.rerunGeneration = 4;
+    const generations: number[] = [];
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.detect = async (ctx) => {
+      generations.push(ctx.rerunGeneration!);
+      return { generation: ctx.rerunGeneration };
+    };
+    def.apply = async () => {
+      throw new ReopenStepFormError('Another decision', { newAttempt });
+    };
+    expect((await run(state, def, {})).status).toBe('waiting_form');
+    const expected = newAttempt ? 5 : 4;
+    expect(generations).toEqual([4, expected]);
+    expect(state.taskStepRow).toMatchObject({
+      rerunGeneration: expected,
+      detectOutput: { generation: expected },
+      formValues: null,
+    });
+  },
+);
 it.each(['', null, undefined])(
   'normalizes the final default-expanded submitted gate answer: case %#',
   async (remoteUrl) => {

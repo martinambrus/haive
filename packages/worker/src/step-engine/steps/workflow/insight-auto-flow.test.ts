@@ -2,11 +2,14 @@ import * as secretPolicy from '../../../queues/cli-exec/secret-mask.js';
 import * as safeFs from '@haive/shared/fs-safe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
-import { MiningWaveError } from '../../step-definition.js';
+import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import * as auto from './_insight-auto.js';
 import { insightsTriageStep } from './08e-insights-triage.js';
 import * as batches from './_insight-batch.js';
 import * as dependency from './_dependency-policy.js';
+import * as loader from './_insight-loader.js';
+import * as previous from '../onboarding/_helpers.js';
+import * as specs from './_spec-artifact.js';
 import {
   autoInsightReport,
   automaticSelection,
@@ -391,6 +394,250 @@ describe('automatic insight stages', () => {
       candidates: [one],
       stopReason: 'no_new_consequential',
     });
+  });
+  describe('completion preserves outstanding human decisions', () => {
+    const fresh = { ...one, id: 'fresh', identity: 'src/a.ts::fresh', title: 'Fresh' };
+    const blocked = {
+      ...one,
+      id: 'blocked',
+      identity: 'vendor/lib.ts::blocked',
+      title: 'Blocked',
+      location: 'vendor/lib.ts',
+    };
+    let journal: batches.InsightBatchRecord[];
+    let inventory: (typeof one)[];
+    const flowCtx = {
+      ...ctx,
+      round: 0,
+      workspacePath: '/repo',
+      sandboxWorkdir: '/ws',
+      logger: { info() {} } as never,
+    } as StepContext;
+    const applyArgs = (
+      detected: Awaited<ReturnType<NonNullable<typeof insightsTriageStep.detect>>>,
+      agentMiningResults: AgentMiningResult[] = [],
+      selectedInsights: string[] = [],
+    ) => ({
+      detected,
+      formValues: { selectedInsights },
+      iteration: 0,
+      previousIterations: [],
+      agentMiningResults,
+    });
+    beforeEach(() => {
+      flowCtx.rerunGeneration = 0;
+      history.claims = [];
+      journal = [];
+      inventory = [one, fresh];
+      vi.mocked(batches.loadInsightBatchRecords).mockImplementation(async () => journal);
+      vi.spyOn(loader, 'loadUnactedInsights').mockImplementation(async () => ({
+        insights: inventory,
+        omitted: 0,
+      }));
+      vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(true);
+      vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
+      vi.spyOn(specs, 'resolveSpecView').mockResolvedValue({ text: '' } as never);
+      vi.spyOn(specs, 'hydrateNoSpecBrief').mockResolvedValue(undefined);
+      vi.spyOn(secretPolicy, 'taskSecretMaskPolicy').mockResolvedValue({
+        globs: { deny: [], ignore: [] },
+      });
+      vi.spyOn(safeFs, 'lstatNoFollow').mockResolvedValue({ kind: 'file' } as never);
+      vi.mocked(auto.claimAutoRound).mockImplementation(async (_ctx, insights) => {
+        const admitted = { ...claim, insights };
+        history.claims.push(admitted);
+        return admitted;
+      });
+      vi.spyOn(batches, 'ensureInsightIntent').mockImplementation(async (_ctx, selected, mode) => {
+        const intent: batches.InsightBatchRecord = {
+          version: 1,
+          protocolVersion: 1,
+          batchId: batches.insightBatchId(_ctx.taskStepId, _ctx.rerunGeneration ?? 0),
+          sourceStepRowId: 'row',
+          generation: _ctx.rerunGeneration ?? 0,
+          mode: mode ?? 'manual_08e',
+          stage: 'intent',
+          selected,
+          items: [],
+          notes: '',
+          miningId: null,
+          invocationId: null,
+        };
+        const saved = journal.find((r) => r.batchId === intent.batchId && r.stage === 'intent');
+        if (saved && JSON.stringify(saved.selected) !== JSON.stringify(selected))
+          throw new Error(
+            'This insight batch already has a different selection. Retry to start a new batch.',
+          );
+        if (saved) return saved;
+        journal.push(intent);
+        return intent;
+      });
+      vi.spyOn(batches, 'appendInsightBatch').mockImplementation(async (_ctx, record) => {
+        const saved = journal.find((r) => r.batchId === record.batchId && r.stage === record.stage);
+        if (saved) return saved;
+        journal.push(record);
+        return record;
+      });
+    });
+    function earlier(kind: 'consequential' | 'minor' | 'nit') {
+      history.results.push({
+        version: 1,
+        batchId: 'earlier',
+        sourceStepRowId: 'earlier',
+        generation: 0,
+        complete: true,
+        invocationIds: [],
+        items: [
+          {
+            id: one.id,
+            identity: one.identity,
+            class: kind,
+            kind: 'cosmetic',
+            eligible: false,
+            outcome: kind === 'consequential' ? 'needs_decision' : 'left_minor',
+            reason: 'Requires an ownership decision',
+          },
+        ],
+      });
+    }
+    async function classify(items: { id: string; class: string; kind: string; reason: string }[]) {
+      const detected = await insightsTriageStep.detect!(flowCtx);
+      expect(detected.auto).toMatchObject({ mode: 'classify' });
+      expect(insightsTriageStep.form!(flowCtx, detected, null)).toMatchObject({
+        autoSubmit: true,
+        fields: [],
+      });
+      await insightsTriageStep.agentMining!.selectAgents({
+        ctx: flowCtx,
+        detected,
+        formValues: {},
+        llmOutput: null,
+      });
+      return { detected, classification: result(1, { version: 1, batchId, items }) };
+    }
+    async function manualSubmit(expected: (typeof one)[], selectedInsights: string[] = []) {
+      // This is the actual detect/form pair used by the runner's reopen path, on the same row.
+      const reopened = await insightsTriageStep.detect!(flowCtx);
+      expect(reopened.auto).toMatchObject({ mode: 'manual', candidates: expected });
+      const form = insightsTriageStep.form!(flowCtx, reopened, null)!;
+      expect(form.autoSubmit).not.toBe(true);
+      expect(form.fields[0]).toMatchObject({
+        id: 'selectedInsights',
+        options: expected.map((i) => expect.objectContaining({ value: i.id })),
+      });
+      const dispatched = await insightsTriageStep.agentMining!.selectAgents({
+        ctx: flowCtx,
+        detected: reopened,
+        formValues: { selectedInsights },
+        llmOutput: null,
+      });
+      expect(dispatched).toHaveLength(selectedInsights.length ? 1 : 0);
+      const manualBatchId = batches.insightBatchId(
+        flowCtx.taskStepId,
+        flowCtx.rerunGeneration ?? 0,
+      );
+      const writer: AgentMiningResult[] = selectedInsights.length
+        ? [
+            {
+              ...result(1, {
+                version: 1,
+                batchId: manualBatchId,
+                items: selectedInsights.map((id) => ({
+                  id,
+                  outcome: 'not_applied',
+                  changes: [],
+                  reason: 'Leave this for later',
+                })),
+                notes: '',
+              }),
+              agentId: `implementer-${manualBatchId}`,
+            },
+          ]
+        : [];
+      const completed = await insightsTriageStep.apply(
+        flowCtx,
+        applyArgs(reopened, writer, selectedInsights),
+      );
+      expect(completed.continuation).toBeUndefined();
+      expect(completed.implemented).toBe(false);
+      return completed;
+    }
+    it('control 1: earlier ineligible consequential + new minor-only cohort reopens; empty submit completes', async () => {
+      earlier('consequential');
+      const { detected, classification } = await classify([
+        { id: fresh.id, class: 'minor', kind: 'cosmetic', reason: 'Style only' },
+      ]);
+      expect(detected.auto!.candidates).toEqual([fresh]);
+      await expect(
+        insightsTriageStep.apply(flowCtx, applyArgs(detected, [classification])),
+      ).rejects.toMatchObject({ name: 'ReopenStepFormError', notice: true });
+      expect(auto.saveAutoClassification).toHaveBeenCalledOnce();
+      const completed = await manualSubmit([one]);
+      expect(completed.selected).toEqual([]);
+      expect(auto.claimAutoRound).toHaveBeenCalledOnce();
+    });
+    it.each(['not_applied', 'unconfirmed'] as const)(
+      'control 2: mixed cohort with writer %s reopens declined and ineligible items; manual submit completes',
+      async (outcome) => {
+        inventory = [fresh, blocked];
+        const { detected, classification } = await classify([
+          { id: fresh.id, class: 'consequential', kind: 'correctness', reason: 'Repair' },
+          { id: blocked.id, class: 'consequential', kind: 'correctness', reason: 'Ownership' },
+        ]);
+        // The host's policy, not the model's claim, excludes the dependency path.
+        detected.auto!.dependencyPolicy = {
+          drupal: false,
+          drupalRoots: [],
+          ownedPaths: [],
+        };
+        const writer = {
+          ...result(
+            1,
+            outcome === 'unconfirmed'
+              ? 'invalid report'
+              : {
+                  version: 1,
+                  batchId,
+                  items: [{ id: fresh.id, outcome, changes: [], reason: 'Already correct' }],
+                  notes: '',
+                },
+          ),
+          agentId: `implementer-${batchId}`,
+        };
+        const reopened = await insightsTriageStep
+          .apply(flowCtx, applyArgs(detected, [classification, writer]))
+          .catch((err) => err);
+        expect(reopened).toBeInstanceOf(ReopenStepFormError);
+        // The runner advances this in the same transaction as consuming the old writer rows.
+        if (reopened.newAttempt) flowCtx.rerunGeneration! += 1;
+        expect(journal.find((r) => r.stage === 'outcome')!.items).toMatchObject([
+          { id: fresh.id, outcome },
+        ]);
+        await manualSubmit([fresh, blocked], [blocked.id]);
+        expect(auto.claimAutoRound).toHaveBeenCalledOnce();
+      },
+    );
+    it.each(['applied', 'minor', 'nit'] as const)(
+      'control 3: earlier %s items do not reopen after a new minor cohort',
+      async (kind) => {
+        earlier(kind === 'applied' ? 'consequential' : kind);
+        if (kind === 'applied') inventory = [fresh]; // The shared loader removes acted identities.
+        const { detected, classification } = await classify([
+          { id: fresh.id, class: 'minor', kind: 'cosmetic', reason: 'Style only' },
+        ]);
+        const completed = await insightsTriageStep.apply(
+          flowCtx,
+          applyArgs(detected, [classification]),
+        );
+        expect(completed).toMatchObject({ selected: [], implemented: false });
+        expect(completed.continuation).toBeUndefined();
+        const next = await insightsTriageStep.detect!(flowCtx);
+        expect(next.auto!.mode).toBe('settled');
+        expect(insightsTriageStep.form!(flowCtx, next, null)).toMatchObject({
+          autoSubmit: true,
+          fields: [],
+        });
+      },
+    );
   });
   it('an interrupted writer requires a human before further new automatic work', async () => {
     vi.mocked(batches.loadInsightBatchRecords).mockResolvedValue([

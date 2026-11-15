@@ -1,10 +1,11 @@
 import { autoInsightReport, assertAutoVersion } from './_insight-auto-flow.js';
-import { insightAutoEnabled } from './_insight-auto.js';
+import { insightAutoEnabled, loadAutoHistory } from './_insight-auto.js';
 import {
   detectAutoInsights,
   startAutoClassification,
   finishAutoClassification,
   automaticSelection,
+  autoManualState,
   type AutoDetect,
 } from './_insight-auto-flow.js';
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
@@ -330,14 +331,6 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       ];
       d.auto.stopReason = 'no_new_consequential';
       selected = automaticSelection(classified.claim, classified.result);
-      if (
-        !selected.length &&
-        classified.result.items.some((i) => i.class === 'consequential' && !i.eligible)
-      )
-        throw new ReopenStepFormError(
-          'Some improvements need an ownership or location decision. Select manually.',
-          { notice: true },
-        );
     }
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
     let continuation: InsightReviseContinuation | undefined;
@@ -408,6 +401,23 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         implemented: saved.items.some((i) => i.outcome === 'applied'),
         changes: saved.items.filter((i) => i.outcome === 'applied').flatMap((i) => i.changes),
       };
+    }
+    // A continuation will revisit the inventory after checks. Otherwise every outstanding
+    // human decision must be offered now. A manual submission is final, even when empty.
+    if (d.auto && d.auto.mode !== 'manual' && !continuation) {
+      const insights = await collectInsights(ctx, true);
+      const history = await loadAutoHistory(ctx.db, ctx.taskId);
+      const journal = await loadInsightBatchRecords(ctx.db, ctx.taskId);
+      ctx.throwIfCancelled();
+      const { manualIdentities } = autoManualState(history, journal, batchId);
+      if (insights.some((i) => manualIdentities.has(i.identity)))
+        throw new ReopenStepFormError(
+          'Some improvements still need a human decision. Select manually.',
+          {
+            notice: true,
+            newAttempt: journal.some((r) => r.batchId === batchId && r.stage === 'intent'),
+          },
+        );
     }
     ctx.throwIfCancelled();
     ctx.logger.info(

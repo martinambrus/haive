@@ -18,7 +18,12 @@ import {
   type ParkedOrphan,
   type ReconcileDeps,
 } from '../src/queues/task-queue.js';
-import type { AgentMiningResult } from '../src/step-engine/step-definition.js';
+import {
+  appendInsightBatch,
+  ensureInsightIntent,
+  loadInsightBatchRecords,
+} from '../src/step-engine/steps/workflow/_insight-batch.js';
+import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import { holdReopenedForm } from '../src/step-engine/step-runner.js';
 
@@ -758,15 +763,15 @@ describe.skipIf(!url)(
 
     // ReopenStepForm: the reopened form's hold and the consumed agent rows.
 
-    it(
-      'W2: holdReopenedForm waits for the agent rows without holding the step row, so a Retry that locks an agent row and then the step row does not deadlock it',
-      async () => {
+    it.each([undefined, 1])(
+      'W2: new generation %s: holdReopenedForm waits for the agent rows without holding the step row, so a Retry that locks an agent row and then the step row does not deadlock it',
+      async (nextGeneration) => {
         const taskId = await seedTask('running');
         await seedStep(taskId, S, 'running', { ...OPEN_FORM, pauseFormOnRetry: false });
         await seedMining();
 
         const run = await interleave(
-          () => holdReopenedForm(db, S.id, [reopenedAgent()], AT),
+          () => holdReopenedForm(db, S.id, [reopenedAgent()], AT, nextGeneration),
           miningThenStepPeer,
           [S.id],
         );
@@ -778,28 +783,89 @@ describe.skipIf(!url)(
           formSchema: null,
           formValues: null,
           pauseFormOnRetry: true,
+          rerunGeneration: nextGeneration ?? 0,
         });
         expect((await miningOf(M)).consumedAt, 'consumed_at of the agent row').toEqual(AT);
       },
       TEST_TIMEOUT,
     );
 
-    it('W2b: a pass that no longer owns the step row is refused, and the agent rows stay unconsumed', async () => {
+    it.each([undefined, 1])(
+      'W2b: new generation %s: a pass that no longer owns the step row is refused, and the agent rows stay unconsumed',
+      async (nextGeneration) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, S, 'pending', { ...OPEN_FORM, pauseFormOnRetry: false });
+        await seedMining();
+        const before = { step: await rowOf(S.id), mining: await miningOf(M) };
+
+        const refused = await settle(
+          holdReopenedForm(db, S.id, [reopenedAgent()], AT, nextGeneration),
+        );
+
+        expect(refused.ok, 'holdReopenedForm resolved for a pass that does not own the row').toBe(
+          false,
+        );
+        expect(refused.ok ? undefined : refused.error).toBeInstanceOf(StepSupersededError);
+        expect(await rowOf(S.id), 'the step row the Retry reset').toEqual(before.step);
+        const mining = await miningOf(M);
+        expect(mining.consumedAt, 'consumed_at of the agent row').toBeNull();
+        expect(mining, 'the agent row').toEqual(before.mining);
+      },
+    );
+
+    it('W2c: a reopened insight batch accepts a different manual selection and retains the prior outcome', async () => {
       const taskId = await seedTask('running');
-      await seedStep(taskId, S, 'pending', { ...OPEN_FORM, pauseFormOnRetry: false });
+      await seedStep(taskId, S, 'running', OPEN_FORM);
       await seedMining();
-      const before = { step: await rowOf(S.id), mining: await miningOf(M) };
-
-      const refused = await settle(holdReopenedForm(db, S.id, [reopenedAgent()], AT));
-
-      expect(refused.ok, 'holdReopenedForm resolved for a pass that does not own the row').toBe(
-        false,
-      );
-      expect(refused.ok ? undefined : refused.error).toBeInstanceOf(StepSupersededError);
-      expect(await rowOf(S.id), 'the step row the Retry reset').toEqual(before.step);
-      const mining = await miningOf(M);
-      expect(mining.consumedAt, 'consumed_at of the agent row').toBeNull();
-      expect(mining, 'the agent row').toEqual(before.mining);
+      const ctx = {
+        db,
+        taskId,
+        taskStepId: S.id,
+        userId,
+        epoch: EPOCH,
+        rerunGeneration: 0,
+        throwIfCancelled() {},
+      } as StepContext;
+      const one = {
+        id: 'one',
+        identity: 'a.ts::one',
+        legacyId: 'i-1',
+        picked: false,
+        sourceStep: 'review',
+        title: 'One',
+        location: 'a.ts',
+        description: 'Repair',
+      };
+      const two = { ...one, id: 'two', identity: 'b.ts::two', title: 'Two', location: 'b.ts' };
+      const automatic = await ensureInsightIntent(ctx, [one], 'auto_08e');
+      await appendInsightBatch(ctx, {
+        ...automatic,
+        stage: 'outcome',
+        items: [
+          {
+            id: one.id,
+            outcome: 'not_applied',
+            changes: [],
+            reason: 'Requires a decision',
+          },
+        ],
+      });
+      await holdReopenedForm(db, S.id, [reopenedAgent()], AT, 1);
+      ctx.rerunGeneration = 1;
+      const manual = await ensureInsightIntent(ctx, [two]);
+      expect(manual).toMatchObject({
+        mode: 'manual_08e',
+        generation: 1,
+        selected: [{ id: two.id }],
+      });
+      expect(manual.batchId).not.toBe(automatic.batchId);
+      expect(await ensureInsightIntent(ctx, [two])).toEqual(manual);
+      const records = await loadInsightBatchRecords(db, taskId);
+      expect(records).toHaveLength(3);
+      expect(
+        records.find((r) => r.batchId === automatic.batchId && r.stage === 'outcome')!.items,
+      ).toMatchObject([{ id: one.id, outcome: 'not_applied' }]);
+      expect((await miningOf(M)).consumedAt).toEqual(AT);
     });
 
     // T459 item 4(a): the CANCEL job's step sweep, one autocommit UPDATE in scan order.

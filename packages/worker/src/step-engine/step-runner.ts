@@ -2227,10 +2227,12 @@ export async function holdReopenedForm(
   taskStepId: string,
   folded: readonly AgentMiningResult[] | undefined,
   at: Date,
+  nextGeneration?: number,
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await consumeFoldedMiningRows(tx, taskStepId, folded, at);
     await updateOwnedStep(tx, taskStepId, {
+      ...(nextGeneration == null ? {} : { rerunGeneration: nextGeneration }),
       detectOutput: null,
       formSchema: null,
       formValues: null,
@@ -3884,7 +3886,20 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           // below re-detects and stops at the form rather than re-sending the answered items. Only
           // while the pass owns the row, so a Retry's reset keeps its own hold and the agent rows are
           // left as the reset left them.
-          await holdReopenedForm(db, current.id, applyArgs.agentMiningResults, new Date());
+          const nextGeneration = applyErr.newAttempt
+            ? (current.rerunGeneration ?? 0) + 1
+            : undefined;
+          await holdReopenedForm(
+            db,
+            current.id,
+            applyArgs.agentMiningResults,
+            new Date(),
+            nextGeneration,
+          );
+          if (nextGeneration != null) {
+            current = { ...current, rerunGeneration: nextGeneration };
+            ctx.rerunGeneration = nextGeneration;
+          }
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);

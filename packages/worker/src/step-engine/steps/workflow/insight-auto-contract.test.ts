@@ -1,4 +1,5 @@
 import * as autoPolicy from './_insight-auto.js';
+import * as batches from './_insight-batch.js';
 import * as autoFlow from './_insight-auto-flow.js';
 import * as loader from './_insight-loader.js';
 import * as previous from '../onboarding/_helpers.js';
@@ -54,7 +55,16 @@ it('minor/nit settle without selecting a stale manual pre-answer or touching dis
       ],
     },
   };
-  const ctx = { throwIfCancelled() {}, logger: { info() {} } } as never;
+  vi.spyOn(autoPolicy, 'loadAutoHistory').mockResolvedValue({ claims: [], results: [] });
+  vi.spyOn(batches, 'loadInsightBatchRecords').mockResolvedValue([]);
+  vi.spyOn(loader, 'loadUnactedInsights').mockResolvedValue({ insights: [insight], omitted: 0 });
+  const ctx = {
+    db: {},
+    taskId: 'task',
+    taskStepId: 'row',
+    throwIfCancelled() {},
+    logger: { info() {} },
+  } as never;
   expect(
     await insightsTriageStep.agentMining!.selectAgents({
       ctx,
