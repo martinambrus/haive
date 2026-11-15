@@ -66,13 +66,6 @@ function asArray(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
 }
 
-function asRecords(v: unknown): Record<string, unknown>[] {
-  return asArray(v).filter(
-    (item): item is Record<string, unknown> =>
-      item !== null && typeof item === 'object' && !Array.isArray(item),
-  );
-}
-
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
@@ -97,7 +90,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
   } else if (stepId === STEP_ROLES.codeReview) {
     // `refuted` findings are skipped throughout: a refuter disproved them against the
     // code, so they are not evidence of anything the next task should learn from.
-    for (const it of asRecords((o.peer as Record<string, unknown> | undefined)?.findings)) {
+    for (const it of asArray((o.peer as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       if (i.refuted === true) continue;
       out.push({
@@ -108,7 +101,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '08c-peer',
       });
     }
-    for (const it of asRecords((o.security as Record<string, unknown> | undefined)?.findings)) {
+    for (const it of asArray((o.security as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       if (i.refuted === true) continue;
       // Normalized here too, not only at parse: this also reads rows written before
@@ -122,9 +115,9 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '08c-security',
       });
     }
-    for (const lens of asRecords(o.extraLenses)) {
+    for (const lens of asArray(o.extraLenses)) {
       const l = lens as Record<string, unknown>;
-      for (const it of asRecords(l.findings)) {
+      for (const it of asArray(l.findings)) {
         const i = it as Record<string, unknown>;
         if (i.refuted === true) continue;
         out.push({

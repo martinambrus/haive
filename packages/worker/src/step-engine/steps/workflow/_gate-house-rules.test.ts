@@ -1844,7 +1844,13 @@ describe('pinned replacement rule evidence', () => {
       recurringNote: '',
       peerInvocationId: OTHER,
     };
-    w.fake.insert(schema.taskSteps, { taskId: TASK, stepId: PRODUCER, round: 1, output });
+    w.fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: PRODUCER,
+      round: 1,
+      status: 'done',
+      output,
+    });
     expect(await loadGateHouseRules(w.db, TASK, { withCodeReview: true })).toBeNull();
     w.invocation(
       OTHER,
@@ -1855,5 +1861,21 @@ describe('pinned replacement rule evidence', () => {
     expect(rules?.entries[0]?.title).toBe('Rule from the actual invocation');
     // Gate 3's gate-2-less fallback remains the validator alone.
     expect(await loadGateHouseRules(w.db, TASK)).toBeNull();
+  });
+
+  it('reads no rules from a replacement producer row that did not finish', async () => {
+    for (const status of ['skipped', 'pending', 'failed']) {
+      const w = world();
+      w.fake.patch(schema.tasks, TASK, rolePin());
+      w.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: PRODUCER,
+        round: 1,
+        status,
+        output: { peerInvocationId: OTHER },
+      });
+      w.invocation(OTHER, stamp({ entries: [entry(RULE_A, 'Unfinished producer rule', ALWAYS)] }));
+      expect(await loadGateHouseRules(w.db, TASK, { withCodeReview: true })).toBeNull();
+    }
   });
 });
