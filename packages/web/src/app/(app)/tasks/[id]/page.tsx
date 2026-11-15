@@ -42,6 +42,7 @@ import { Badge, Button, Card, Input } from '@/components/ui';
 import { CliPickerGrid } from '@/components/cli-picker-grid';
 import { ActionMenu } from '@/components/action-menu';
 import { DdevRebuildDialog, canRebuildDdev } from '@/components/ddev-rebuild-dialog';
+import { StepPortView } from '@/components/step-port-view';
 import { TaskHistoryBell, TaskHistoryPanel, useTaskHistory } from '@/components/task-history';
 import { activityEvents } from '@/lib/activity-events';
 import {
@@ -2256,91 +2257,100 @@ export default function TaskDetailPage() {
           {steps.length === 0 && !taskFinished && (
             <div className="text-sm text-neutral-500">{noStepsMessage(task)}</div>
           )}
-          {steps.map((step) => {
-            // Re-entry rounds: the same stepId recurs once per round (round 0 = the
-            // original pass). Mark the start of each round > 0 group with a kind-aware
-            // header (spec revision vs fix loop) computed in roundLabels.byStepId.
-            const loopHeader = roundLabels.byStepId.get(step.id) ?? null;
-            // Steps below the frontier get reset + re-run on any at-or-before retry, so
-            // they hide their own action buttons (see frontierKey).
-            const isDownstreamOfActive = frontierKey != null && isAfterFrontier(step, frontierKey);
-            // The mirror: a step the run has already moved PAST. It keeps Retry (which resets
-            // it and everything after it, so the task ends up on one coherent frontier) but
-            // must not offer Resume — resume flips this row back to `running` without standing
-            // down the row the task is actually on, leaving two live steps for the
-            // other-step-active guard to refuse. Reachable in the wild because a fan-out step
-            // DEGRADES to `done` when a terminal dies, so the task advances past a step that
-            // still has something worth re-running.
-            const isPastStep = frontierKey != null && isBeforeFrontier(step, frontierKey);
-            return (
-              <div key={step.id} data-step-id={step.id} className="scroll-mt-16">
-                {loopHeader && (
-                  <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
-                    <span className="h-px flex-1 bg-amber-400/20" />
-                    {loopHeader}
-                    <span className="h-px flex-1 bg-amber-400/20" />
-                  </div>
-                )}
-                {/* currentStep: the step the run is parked on — auto-continue is
+          <StepPortView
+            request={{
+              path: `/tasks/${id}/ports`,
+              revision: `${task.executionPath}:${steps.map((step) => step.stepId).join()}`,
+            }}
+            executionPath={task.executionPath}
+          >
+            {steps.map((step) => {
+              // Re-entry rounds: the same stepId recurs once per round (round 0 = the
+              // original pass). Mark the start of each round > 0 group with a kind-aware
+              // header (spec revision vs fix loop) computed in roundLabels.byStepId.
+              const loopHeader = roundLabels.byStepId.get(step.id) ?? null;
+              // Steps below the frontier get reset + re-run on any at-or-before retry, so
+              // they hide their own action buttons (see frontierKey).
+              const isDownstreamOfActive =
+                frontierKey != null && isAfterFrontier(step, frontierKey);
+              // The mirror: a step the run has already moved PAST. It keeps Retry (which resets
+              // it and everything after it, so the task ends up on one coherent frontier) but
+              // must not offer Resume — resume flips this row back to `running` without standing
+              // down the row the task is actually on, leaving two live steps for the
+              // other-step-active guard to refuse. Reachable in the wild because a fan-out step
+              // DEGRADES to `done` when a terminal dies, so the task advances past a step that
+              // still has something worth re-running.
+              const isPastStep = frontierKey != null && isBeforeFrontier(step, frontierKey);
+              return (
+                <div key={step.id} data-step-id={step.id} className="scroll-mt-16">
+                  {loopHeader && (
+                    <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
+                      <span className="h-px flex-1 bg-amber-400/20" />
+                      {loopHeader}
+                      <span className="h-px flex-1 bg-amber-400/20" />
+                    </div>
+                  )}
+                  {/* currentStep: the step the run is parked on — auto-continue is
                   only offered there; passed steps can't be auto-continued. */}
-                <StepCard
-                  step={step}
-                  isDownstreamOfActive={isDownstreamOfActive}
-                  isPastStep={isPastStep}
-                  taskId={task.id}
-                  taskStatus={task.status}
-                  taskDead={taskDead}
-                  pauseLocked={task.pauseLocked === true}
-                  taskCompletedAt={taskStoppedAt(task)}
-                  taskRepositoryId={task.repositoryId}
-                  userActiveDisplayMs={
-                    (userActive.activeStepId === step.id
-                      ? userActive.displayMs
-                      : step.userActiveMs) + step.carriedUserActiveMs
-                  }
-                  submitting={submitting === step.stepId}
-                  submitError={submitErrorFor(submitError, step.stepId)}
-                  onSubmit={(values) => submitStep(step, values)}
-                  actionBusy={stepActionBusy === step.stepId}
-                  actionError={
-                    stepActionError?.stepId === step.stepId ? stepActionError.message : null
-                  }
-                  onAction={(action, opts) => runStepAction(step, action, opts)}
-                  onRetryStep={async (sid) => {
-                    const target = steps.find((s) => s.stepId === sid);
-                    if (target) await runStepAction(target, 'retry');
-                  }}
-                  canStop={taskCanStop(task, {
-                    stepRunning: step.status === 'running' || step.status === 'waiting_cli',
-                    currentStepStatus: step.id === pointedStep?.id ? step.status : null,
-                  })}
-                  onStop={() => void stopActiveCli()}
-                  onCliLogin={() => openCliLoginForStep(step)}
-                  providers={providers}
-                  taskCliProviderId={task.cliProviderId ?? null}
-                  fallbackProviderId={taskEffectiveCliProviderId}
-                  cliBusy={stepProviderBusy === step.stepId}
-                  cliError={
-                    stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
-                  }
-                  onChangeCli={(cliProviderId, role, effortLevel, remember) =>
-                    changeStepProvider(
-                      step.stepId,
-                      cliProviderId,
-                      role,
-                      step.round,
-                      effortLevel,
-                      remember,
-                    )
-                  }
-                  autoContinue={task.autoContinue}
-                  autoContinueBusy={autoContinueBusy}
-                  showAutoContinue={step.id === currentStep?.id}
-                  onToggleAutoContinue={() => void toggleAutoContinue()}
-                />
-              </div>
-            );
-          })}
+                  <StepCard
+                    step={step}
+                    isDownstreamOfActive={isDownstreamOfActive}
+                    isPastStep={isPastStep}
+                    taskId={task.id}
+                    taskStatus={task.status}
+                    taskDead={taskDead}
+                    pauseLocked={task.pauseLocked === true}
+                    taskCompletedAt={taskStoppedAt(task)}
+                    taskRepositoryId={task.repositoryId}
+                    userActiveDisplayMs={
+                      (userActive.activeStepId === step.id
+                        ? userActive.displayMs
+                        : step.userActiveMs) + step.carriedUserActiveMs
+                    }
+                    submitting={submitting === step.stepId}
+                    submitError={submitErrorFor(submitError, step.stepId)}
+                    onSubmit={(values) => submitStep(step, values)}
+                    actionBusy={stepActionBusy === step.stepId}
+                    actionError={
+                      stepActionError?.stepId === step.stepId ? stepActionError.message : null
+                    }
+                    onAction={(action, opts) => runStepAction(step, action, opts)}
+                    onRetryStep={async (sid) => {
+                      const target = steps.find((s) => s.stepId === sid);
+                      if (target) await runStepAction(target, 'retry');
+                    }}
+                    canStop={taskCanStop(task, {
+                      stepRunning: step.status === 'running' || step.status === 'waiting_cli',
+                      currentStepStatus: step.id === pointedStep?.id ? step.status : null,
+                    })}
+                    onStop={() => void stopActiveCli()}
+                    onCliLogin={() => openCliLoginForStep(step)}
+                    providers={providers}
+                    taskCliProviderId={task.cliProviderId ?? null}
+                    fallbackProviderId={taskEffectiveCliProviderId}
+                    cliBusy={stepProviderBusy === step.stepId}
+                    cliError={
+                      stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
+                    }
+                    onChangeCli={(cliProviderId, role, effortLevel, remember) =>
+                      changeStepProvider(
+                        step.stepId,
+                        cliProviderId,
+                        role,
+                        step.round,
+                        effortLevel,
+                        remember,
+                      )
+                    }
+                    autoContinue={task.autoContinue}
+                    autoContinueBusy={autoContinueBusy}
+                    showAutoContinue={step.id === currentStep?.id}
+                    onToggleAutoContinue={() => void toggleAutoContinue()}
+                  />
+                </div>
+              );
+            })}
+          </StepPortView>
           <TaskTotalTime
             task={task}
             testChecks={testChecks}
