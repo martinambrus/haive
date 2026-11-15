@@ -2742,9 +2742,12 @@ export async function handleResult(
             await buildRunList(ctx, db),
           );
         } catch (err) {
-          if (!(err instanceof InsightRunListError)) throw err;
+          if (!(err instanceof InsightRunListError) && !(err instanceof ValidationSnapshotError))
+            throw err;
           if (!(await failStepTransition(db, ctx, result.row, err.message)))
-            await logLost('insight_run_list');
+            await logLost(
+              err instanceof ValidationSnapshotError ? 'validation_snapshot' : 'insight_run_list',
+            );
           return;
         }
         if (!route) {

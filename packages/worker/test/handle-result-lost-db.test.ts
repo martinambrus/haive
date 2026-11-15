@@ -1,3 +1,10 @@
+import * as validationSnapshots from '../src/step-engine/steps/workflow/_validation-snapshot.js';
+import { ValidationSnapshotError } from '../src/queues/validation-recheck.js';
+import {
+  ensureInsightIntent,
+  appendInsightBatch,
+} from '../src/step-engine/steps/workflow/_insight-batch.js';
+import { continuationForOutcome } from '../src/step-engine/steps/workflow/_insight-continuation.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { readValidationSnapshot } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 import { execFileSync } from 'node:child_process';
@@ -1026,6 +1033,77 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
       await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
     }
+  });
+
+  it('an unreadable insight handoff snapshot fails the source step with ordinary Retry guidance', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override({ ...stub(stepId, 9), editsCodeOrTests: true });
+    stepRegistry.override(stub('08c-code-review', 8));
+    const runListSnapshot = [
+      '07b-phase-4-validate',
+      '08-phase-5-verify',
+      '08c-code-review',
+      stepId,
+      '10-gate-3-commit',
+    ];
+    const taskId = await makeTask({ currentStepId: stepId, runListSnapshot });
+    const row = await makeRow(taskId, { stepId, status: 'running' });
+    const stepCtx = {
+      db,
+      taskId,
+      taskStepId: row.id,
+      userId,
+      epoch: E,
+      round: 0,
+      rerunGeneration: 0,
+      throwIfCancelled() {},
+    } as unknown as import('../src/step-engine/step-definition.js').StepContext;
+    const intent = await ensureInsightIntent(stepCtx, [
+      {
+        id: 'one',
+        legacyId: 'i-1',
+        identity: 'a.ts::one',
+        title: 'One',
+        location: 'a.ts',
+        description: 'Detail',
+        sourceStep: 'review',
+        picked: false,
+      },
+    ]);
+    const outcome = await appendInsightBatch(stepCtx, {
+      ...intent,
+      stage: 'outcome',
+      items: intent.items.map((i) => ({ ...i, outcome: 'applied', changes: ['Changed a.ts'] })),
+    });
+    const continuation = continuationForOutcome(outcome, 0)!;
+    const [source] = await db
+      .update(schema.taskSteps)
+      .set({ status: 'done', output: { continuation } })
+      .where(eq(schema.taskSteps.id, row.id))
+      .returning();
+    await makeRow(taskId, {
+      stepId: '07b-phase-4-validate',
+      status: 'done',
+      output: { validationSnapshot: { 'a.ts': 'before' } },
+    });
+    vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null);
+    await handleResult(db, ctxFor(taskId, { currentStepId: stepId, runListSnapshot }), stepId, {
+      status: 'revise',
+      row: source!,
+      sourceStepId: stepId,
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'failed',
+      errorMessage: new ValidationSnapshotError().message,
+    });
+    expect((await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status).toBe(
+      'failed',
+    );
+    expect(h.adds).toEqual([]);
+    expect(await eventTypes(taskId)).not.toContain('insight.continuation');
+    expect(await eventTypes(taskId)).not.toContain('validation.recheck_requested');
   });
 
   it('refuses an unreadable final change rather than assuming 08b made no edits', async () => {
