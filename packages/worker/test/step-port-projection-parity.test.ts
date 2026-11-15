@@ -94,7 +94,7 @@ it('covers actual effective-spec adapter importers, including the run-config sta
 });
 
 it('pins review consumers to the direct gate reader and the house-rules/history adapters', () => {
-  const consumers = ['09-gate-2-verify-approval', '10-gate-3-commit', '11-phase-8-learning'];
+  const consumers = ['09-gate-2-verify-approval', '11-phase-8-learning'];
   expect(
     nodes()
       .filter((node) => node.inputs.some((input) => input.role === STEP_ROLES.codeReview))
@@ -127,6 +127,30 @@ it('pins review consumers to the direct gate reader and the house-rules/history 
       names: expect.arrayContaining(['buildTaskHistoryDigest']),
     }),
   );
+  // Prompt guidance classifies raw CLI replies by role identity, not contracted step output.
+  // _fix-loop likewise classifies historical event identities. Neither is a data-port input.
+  expect(imports('11e-prompt-guidance.ts')).toContainEqual(
+    expect.objectContaining({
+      module: './_prompt-defect.js',
+      names: expect.arrayContaining(['parsePromptDefects', 'guidanceTargetStep']),
+    }),
+  );
+  const gate3 = readFileSync(new URL('10-gate-3-commit.ts', workflow), 'utf8');
+  expect(gate3).not.toContain('withCodeReview: true');
+  expect(readFileSync(new URL('_gate-house-rules.ts', workflow), 'utf8')).toContain(
+    'withCodeReview = false',
+  );
+  expect(
+    stepSources.filter((name) =>
+      imports(name).some(
+        (item) =>
+          item.module === './_prompt-defect.js' &&
+          item.names.some((symbol) =>
+            ['parsePromptDefects', 'guidanceTargetStep'].includes(symbol),
+          ),
+      ),
+    ),
+  ).toEqual(['11e-prompt-guidance.ts']);
   // A new caller of either adapter must be classified before updating the projection.
   for (const module of ['./_gate-house-rules.js', './_task-history-digest.js']) {
     const callers = stepSources.filter((name) =>

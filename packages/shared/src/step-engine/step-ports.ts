@@ -144,7 +144,6 @@ const effectiveSpecConsumers: ReadonlySet<string> = new Set([
 ]);
 const reviewConsumers: ReadonlySet<string> = new Set([
   '09-gate-2-verify-approval',
-  '10-gate-3-commit',
   '11-phase-8-learning',
 ]);
 
