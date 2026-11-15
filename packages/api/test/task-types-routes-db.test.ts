@@ -1,3 +1,4 @@
+import { CODE_REVIEW_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
 import { randomUUID } from 'node:crypto';
 import { asc, eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1430,7 +1431,8 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     baseSlug: 'workflow',
     changes,
   });
-  const derivedCatalog = async () => {
+  const replacementChanges = () => [{ replace: STEP_ROLES.codeReview, with: 'module.acme.check' }];
+  const derivedCatalog = async (contracted = false) => {
     const ids = [
       '00-model-health-workflow',
       '00a-sync-base',
@@ -1438,16 +1440,40 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       '01-worktree-setup',
       '06-run-config',
       '08a-browser-verify',
+      ...(contracted ? [STEP_ROLES.codeReview] : []),
       '10-gate-3-commit',
     ];
     await db.delete(schema.stepCatalog);
     await db.insert(schema.stepCatalog).values([
       ...ids.map((id, stepIndex) => ({
-        ...catalogRow(id, true, entry(id, { agentAuthoredOutput: true })),
+        ...catalogRow(
+          id,
+          true,
+          entry(id, {
+            agentAuthoredOutput: true,
+            ...(contracted && id === STEP_ROLES.codeReview
+              ? { outputContract: CODE_REVIEW_OUTPUT_CONTRACT, provides: ['review'] }
+              : {}),
+          }),
+        ),
         stepIndex,
       })),
       {
-        ...catalogRow('module.acme.check', true, entry('module.acme.check'), 'module:acme'),
+        ...catalogRow(
+          'module.acme.check',
+          true,
+          entry(
+            'module.acme.check',
+            contracted
+              ? {
+                  outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+                  replaces: [STEP_ROLES.codeReview],
+                  provides: ['review'],
+                }
+              : {},
+          ),
+          'module:acme',
+        ),
         workflowType: 'extra',
         stepIndex: 1,
       },
@@ -1459,6 +1485,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       installedVersion: '1',
     });
     h.flags.set(CUSTOM_KEY, true);
+    if (contracted) h.flags.set(MODULE_KEY, true);
   };
   it('previews and creates overlays, preserving deduped stale warnings and named replacement issues', async () => {
     await derivedCatalog();
@@ -1492,7 +1519,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({
       issues: expect.arrayContaining([
-        expect.objectContaining({ kind: 'replacement-contract-unavailable' }),
+        expect.objectContaining({ kind: 'replacement-target-forbidden' }),
       ]),
     });
   });
@@ -1748,9 +1775,12 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     throw new Error('Expected a blocked SQL statement: ' + fragment);
   };
   it('serializes catalog upgrades with admission and pins the complete committed generation', async () => {
-    await derivedCatalog();
-    expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
+    await derivedCatalog(true);
+    expect(
+      (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+    ).toBe(201);
     const old = await definitionForCreate(db, 'tt-derived', { generic: true });
+    expect(old.derivedRunPlan?.version).toBe(2);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -1785,11 +1815,76 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       old.derivedRunPlan?.base.catalogFingerprint,
     );
   });
+
+  it.each(['base', 'module'] as const)(
+    'holds the replacement %s lock through v2 INSERT',
+    async (kind) => {
+      await derivedCatalog(true);
+      expect(
+        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+      ).toBe(201);
+      let acquired!: () => void;
+      let release!: () => void;
+      const locked = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const creating = db.transaction(async (tx) => {
+        const definition = await definitionForCreate(tx, 'tt-derived', {
+          generic: true,
+          locked: true,
+        });
+        acquired();
+        await gate;
+        await tx
+          .insert(schema.tasks)
+          .values({
+            userId: ACTOR,
+            type: 'tt-derived',
+            title: 'locked replacement',
+            runListSnapshot: definition.runListSnapshot,
+            derivedRunPlan: definition.derivedRunPlan,
+          });
+      });
+      await locked;
+      const writer = db.transaction(async (tx) => {
+        if (kind === 'base')
+          await tx
+            .select()
+            .from(schema.taskTypeDefinitions)
+            .where(eq(schema.taskTypeDefinitions.slug, 'workflow'))
+            .for('update');
+        else
+          await tx
+            .select()
+            .from(schema.modules)
+            .where(eq(schema.modules.moduleId, 'acme'))
+            .for('update');
+        return tx.select().from(schema.tasks).where(moduleTaskDependency('acme'));
+      });
+      try {
+        await waitForLock(kind === 'base' ? 'task_type_definitions' : 'modules');
+      } finally {
+        release();
+      }
+      await creating;
+      expect(await writer).toEqual([
+        expect.objectContaining({
+          type: 'tt-derived',
+          derivedRunPlan: expect.objectContaining({ version: 2 }),
+        }),
+      ]);
+    },
+  );
   it.each(['PATCH', 'DELETE'])(
     'holds the derived definition through task INSERT against a concurrent %s',
     async (method) => {
-      await derivedCatalog();
-      expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
+      await derivedCatalog(true);
+      expect(
+        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+      ).toBe(201);
       const [user] = await db
         .select()
         .from(schema.users)
@@ -1836,6 +1931,19 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         .select()
         .from(schema.tasks)
         .where(eq(schema.tasks.type, 'tt-derived'));
+      expect(stored?.derivedRunPlan).toMatchObject({
+        version: 2,
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            roleBindings: {
+              [STEP_ROLES.codeReview]: {
+                stepId: 'module.acme.check',
+                outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+              },
+            },
+          }),
+        ]),
+      });
       expect(stored?.runListSnapshot).toEqual(snapshot);
       expect(stored?.runListSnapshot).toContain('08a-browser-verify');
     },
@@ -1854,7 +1962,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect(await response.json()).toMatchObject({
       code: 'derived_admission_refused',
       issues: expect.arrayContaining([
-        expect.objectContaining({ kind: 'replacement-contract-unavailable' }),
+        expect.objectContaining({ kind: 'replacement-target-forbidden' }),
       ]),
     });
     expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-derived'))).toEqual(
@@ -1864,7 +1972,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     expect(h.add).not.toHaveBeenCalled();
   });
   it('rolls back derived create and PATCH when the transaction-required audit fails', async () => {
-    await derivedCatalog();
+    await derivedCatalog(true);
     await db.execute(
       sql`CREATE FUNCTION derived_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action IN ('task_type.create', 'task_type.update') THEN RAISE EXCEPTION 'audit refused'; END IF; RETURN NEW; END $$`,
     );
@@ -1872,10 +1980,14 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       sql`CREATE TRIGGER derived_audit_failure BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION derived_audit_failure()`,
     );
     try {
-      expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(500);
+      expect(
+        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+      ).toBe(500);
       expect(await row('tt-derived')).toBeUndefined();
       await db.execute(sql`ALTER TABLE audit_events DISABLE TRIGGER derived_audit_failure`);
-      expect((await send('POST', '/admin/task-types', derivedDraft())).status).toBe(201);
+      expect(
+        (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+      ).toBe(201);
       await db.execute(sql`ALTER TABLE audit_events ENABLE TRIGGER derived_audit_failure`);
       expect(
         (
@@ -1884,7 +1996,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
           })
         ).status,
       ).toBe(500);
-      expect((await row('tt-derived'))?.changes).toEqual([]);
+      expect((await row('tt-derived'))?.changes).toEqual(replacementChanges());
     } finally {
       await db.execute(sql`DROP TRIGGER derived_audit_failure ON audit_events`);
       await db.execute(sql`DROP FUNCTION derived_audit_failure()`);
@@ -1909,6 +2021,83 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     });
   });
 
+  it('writes v2 on task POST, preserves it through Stop/Retry/Resume and rolls back a refused creation event', async () => {
+    await derivedCatalog(true);
+    expect(
+      (await send('POST', '/admin/task-types/preview', derivedDraft(replacementChanges()))).status,
+    ).toBe(200);
+    expect(
+      (await send('POST', '/admin/task-types', derivedDraft(replacementChanges()))).status,
+    ).toBe(201);
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId: ACTOR,
+        name: 'replacement-create',
+        source: 'local_path',
+        localPath: '/tmp',
+        storagePath: '/tmp',
+        status: 'ready',
+      })
+      .returning();
+    const request = () =>
+      send('POST', '/tasks', { type: 'tt-derived', title: 'replacement', repositoryId: repo!.id });
+    try {
+      const response = await request();
+      expect(response.status).toBe(201);
+      const body = (await response.json()) as { task: { id: string } };
+      const stored = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, body.task.id) });
+      expect(stored?.derivedRunPlan).toMatchObject({
+        version: 2,
+        overlay: { changes: replacementChanges() },
+      });
+      const pinned = stored!.derivedRunPlan;
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ changes: [] })
+        .where(eq(schema.taskTypeDefinitions.slug, 'tt-derived'));
+      await db
+        .update(schema.tasks)
+        .set({ status: 'running', currentStepId: '00-triage' })
+        .where(eq(schema.tasks.id, body.task.id));
+      await db.insert(schema.taskSteps).values({
+        taskId: body.task.id,
+        stepId: '00-triage',
+        stepIndex: 2,
+        title: 'Triage',
+        status: 'running',
+        round: 0,
+      });
+      const stopped = await send('POST', `/tasks/${body.task.id}/cancel-active-cli`, {});
+      expect(stopped.status).toBe(200);
+      const retried = await send('POST', `/tasks/${body.task.id}/action`, { action: 'retry' });
+      expect(retried.status).toBe(200);
+      await send('POST', `/tasks/${body.task.id}/action`, { action: 'pause' });
+      const resumed = await send('POST', `/tasks/${body.task.id}/action`, { action: 'resume' });
+      expect(resumed.status).toBe(200);
+      expect(
+        (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, body.task.id) }))
+          ?.derivedRunPlan,
+      ).toEqual(pinned);
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, body.task.id));
+      await db.execute(
+        sql`CREATE FUNCTION replacement_create_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type = 'task.created' THEN RAISE EXCEPTION 'event refused'; END IF; RETURN NEW; END $$`,
+      );
+      await db.execute(
+        sql`CREATE TRIGGER replacement_create_failure BEFORE INSERT ON task_events FOR EACH ROW EXECUTE FUNCTION replacement_create_failure()`,
+      );
+      h.add.mockClear();
+      expect((await request()).status).toBe(500);
+      expect(
+        await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-derived')),
+      ).toEqual([]);
+      expect(h.add).not.toHaveBeenCalled();
+    } finally {
+      await db.execute(sql`DROP TRIGGER IF EXISTS replacement_create_failure ON task_events`);
+      await db.execute(sql`DROP FUNCTION IF EXISTS replacement_create_failure()`);
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+    }
+  });
   it('admits a derived task through POST, prunes obsolete defaults and pins historical diagnostics at INSERT', async () => {
     await derivedCatalog();
     expect(
