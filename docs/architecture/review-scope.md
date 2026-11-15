@@ -194,7 +194,11 @@ insight nobody picked at 08e in its own row after the similar-sites row (`_gate-
 gate 3 shows it when no gate-2 decision exists. 08e's picks are subtracted by title and location
 across every round, since its `i-N` ids are positions. The row is display copy under the same rules
 as similar sites: each field collapsed to one line of at most 200 chars and escaped, the list cut
-at 30 with the rest counted, and nothing of it entering a prompt.
+at 30 with the rest counted, and nothing of it entering a prompt. Both gates project the
+loader inventory before persisting detect output: only the five legacy fields (`id`,
+`sourceStep`, `title`, `location`, `description`) are stored, each collapsed and clipped to
+200 chars. Positional ids retain their pre-filter positions. Inventory identity, pick state
+and source references stay out of the gate snapshot; the formatter clips again for older rows.
 
 ## Test edits measured during repair
 
