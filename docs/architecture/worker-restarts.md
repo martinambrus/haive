@@ -828,11 +828,63 @@ Unfenced reports must be whole, strictly valid JSON objects; fenced reports are 
 strictly, with no repair or substitution of earlier examples.
 
 Outcome publication is required and replayed from the journal after a lost done write.
-The normal done-row replay keeps the ordinary successor. Retry clears output and mining
+A done-row replay keeps the ordinary successor unless its stored outcome carries an insight
+revise continuation. Retry clears output and mining
 rows and advances generation as before, while retaining journal history and every prior
 uncertain attempt. Stop, dead and Cancel refuse the journal's owned task fence. Pause lets
 the in-flight batch finish, including all journal stages; it holds the next fresh step and defers a queued invocation at pickup.
 Rollback first disables new batches and settles active mining writers with capable workers;
 keep journal JSON. Old workers ignore these additive events and cannot reconcile an
-active batch safely. No schema migration is needed. Future continuation and validation
-composition must retain these source/generation identities and ownership fences.
+active batch safely. No schema migration is needed. The continuation and validation
+composition below retain
+these source/generation identities and ownership fences.
+
+## Insight revise handoff
+
+The 08e applied outcome computes and persists `{version:1, kind:'insight_revise', batchId,
+sourceStepRow, generation, round}` in output and the routing verdict. `round` is the fresh
+check round, one greater than the source row. Its done write uses the journal's source-row,
+owner, generation and task-epoch fence. Unknown continuation versions are explicitly refused.
+A done-row replay reconstructs this verdict without another application.
+
+The handoff validates the pinned verify/review/checkpoint destinations, reads the final tree
+outside locks, then resets stale downstream rows, records the required `insight.continuation`
+event (payload `continuation` plus physical `targetStepId`), records any validation return
+address and moves the pointer in one transaction. Resets take runs before steps and include
+the source in the id-ordered step lock batch; the task remains last. Required write failure
+rolls back resets, epoch, events and pointer. Duplicate advances cannot claim a second route.
+Lost enqueue after commit is recovered by the ordinary pointer-based stalled/boot redrive.
+
+An explicit source Retry advances its generation, invalidating the older route while retaining
+all journal history. Downstream Retry keeps the active route and fresh checks; completing
+the 08e checkpoint settles it. Recovery's epoch takeover preserves generation and batch.
+Stop, Cancel, dead, owner loss and an overtaking epoch refuse publication and handoff. Pause
+allows the owned in-flight publication and handoff, holding the next fresh step instead.
+
+Rollback first stops new continuations, then keeps a capable worker until every live v1
+continuation settles. Retain the journal and continuation JSON; reverting workers under a
+live continuation is unsafe even though this change needs no schema migration.
+
+Checkpoint completion records the exact step row, round and generation in the required
+`insight.continuation` handoff payload, in the same owned transaction as the done write.
+The owned row's `done` or `skipped` status closes the route; Retry of that row keeps it open,
+even after its generation advances. If verification Retry leaves an older checkpoint pending
+and then starts a fix round, completing the new round's checkpoint transfers ownership to
+that row. The abandoned older row cannot keep the route open. Handoffs without a checkpoint
+reference retain the earliest-row rule until a checkpoint publishes its ownership.
+A later gate-2 rejection offers new insights through the normal manual form rather than
+reopening an earlier settled continuation by creating another pending triage row.
+A worker predating checkpoint ownership must not resume a task whose handoff carries that
+reference: its earliest-row reader can reopen an abandoned pending row even after the owned
+checkpoint settled. Retain capable workers until those tasks cannot resume.
+
+Missing ordered destinations at selection preflight or handoff fail the source step with
+explicit Retry guidance, using the ordinary failed-step settlement (which also fails its
+task). The writer guard also checks resolved form answers after preset/auto-submit expansion,
+including the direct START path, before any editor selection or CLI invocation. A final `ValidationSnapshotError` is handled on that same source step with the
+ordinary snapshot message. Both retain a row that Retry can reset; overtaken fences write
+nothing. Neither path resets downstream rows or dispatches an editor after refusal.
+
+Each committed insight handoff records one `step.revise` with the continuation marker in
+the same transaction as the continuation and pointer. Duplicate delivery records neither
+event again; a failed event write rolls the entire handoff back.

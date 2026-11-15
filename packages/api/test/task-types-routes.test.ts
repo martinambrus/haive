@@ -474,3 +474,53 @@ it.each(
     expect(h.write).not.toHaveBeenCalled();
   },
 );
+
+it('refuses saving insight triage when the review provider precedes verification', async () => {
+  h.role = 'admin';
+  const entries = [
+    { stepId: 'verify', provides: ['verification'], requires: [] },
+    { stepId: 'review', provides: ['review'], requires: [] },
+    {
+      stepId: 'checkpoint',
+      provides: [],
+      requires: [
+        {
+          needs: 'review',
+          after: 'verification',
+          reason: 'Verify before code review for insight continuation.',
+        },
+      ],
+    },
+  ];
+  h.catalog = entries.map((entry) => ({
+    stepId: entry.stepId,
+    source: 'core',
+    title: entry.stepId,
+    composable: true,
+    dispatchesCli: false,
+    entry: { label: entry.stepId, group: 'check', dispatchesCli: false, ...entry },
+  }));
+  const fake = createFakeDb({
+    taskTypeDefinitions: schema.taskTypeDefinitions,
+    stepCatalog: schema.stepCatalog,
+    modules: schema.modules,
+    auditEvents: schema.auditEvents,
+  });
+  for (const row of h.catalog) fake.insert(schema.stepCatalog, row as Record<string, unknown>);
+  h.db = fake.db;
+  const response = await send('POST', '/admin/task-types', {
+    slug: 'insight-order',
+    displayName: 'Insight order',
+    requiresRepository: true,
+    stepIds: ['review', 'verify', 'checkpoint'],
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    error: 'Invalid step composition',
+    issues: [
+      { kind: 'need-out-of-order', stepId: 'checkpoint', needs: 'review', after: 'verification' },
+    ],
+  });
+  expect(fake.rows(schema.taskTypeDefinitions)).toEqual([]);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});

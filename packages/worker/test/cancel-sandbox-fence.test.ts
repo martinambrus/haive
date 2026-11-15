@@ -1,3 +1,13 @@
+import { handoffInsightContinuation } from '../src/queues/insight-continuation.js';
+import {
+  activeInsightContinuation,
+  publishInsightStep,
+  continuationForOutcome,
+} from '../src/step-engine/steps/workflow/_insight-continuation.js';
+import * as specArtifacts from '../src/step-engine/steps/workflow/_spec-artifact.js';
+import * as validationSnapshots from '../src/step-engine/steps/workflow/_validation-snapshot.js';
+import { advanceStep, finishedStepResult } from '../src/step-engine/step-runner.js';
+import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { lockOwnedStep } from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -32,6 +42,13 @@ import {
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
 import { gitExec } from '../src/repo/git-exec.js';
 import { captureTestImage } from '../src/step-engine/steps/workflow/_fix-test-edits.js';
+
+// Real checkpoint completion takes the mining barrier, whose browser cleanup must stay off Docker.
+vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  closeExtraBrowserTabs: async () => null,
+  restoreBrowserWindow: async () => null,
+}));
 
 const url = process.env.CANCEL_FENCE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/cancel_fence_test'))
@@ -920,6 +937,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       userId,
       epoch: 0,
       rerunGeneration: 0,
+      round: 0,
       throwIfCancelled() {},
     } as unknown as StepContext;
   }
@@ -1137,8 +1155,536 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     const replay = await insightsTriageStep.apply(ctx, { ...args, agentMiningResults: [] });
     expect(first).toEqual(replay);
     expect(first.implemented).toBe(true);
+    expect(first.continuation).toMatchObject({
+      sourceStepRow: ctx.taskStepId,
+      generation: 0,
+      round: 1,
+    });
     expect(
       (await loadInsightBatchRecords(db, ctx.taskId)).filter((r) => r.stage === 'outcome'),
     ).toHaveLength(1);
+  });
+  const routeSteps = [
+    '07c-ddev-reconcile',
+    '07b-phase-4-validate',
+    '08-phase-5-verify',
+    '08c-code-review',
+    '08e-insights-triage',
+    '10-gate-3-commit',
+  ].map((id, index) => ({
+    metadata: { id, index, workflowType: 'workflow' },
+    editsCodeOrTests: id === '08e-insights-triage',
+  })) as import('../src/step-engine/step-definition.js').StepDefinition[];
+  async function seedRoute(stale = false) {
+    const stepCtx = await seed();
+    const intent = await ensureInsightIntent(stepCtx, selected);
+    const outcome = await appendInsightBatch(stepCtx, {
+      ...intent,
+      stage: 'outcome',
+      items: intent.items.map((i) => ({ ...i, outcome: 'applied', changes: ['Edited a.ts'] })),
+    });
+    const continuation = continuationForOutcome(outcome, 0)!;
+    const [source] = await db
+      .update(schema.taskSteps)
+      .set({ status: 'done', output: { continuation } })
+      .where(eq(schema.taskSteps.id, stepCtx.taskStepId))
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: source!.stepId, currentRound: 0 })
+      .where(eq(schema.tasks.id, stepCtx.taskId));
+    if (stale)
+      for (const def of routeSteps.slice(2))
+        await db.insert(schema.taskSteps).values({
+          taskId: stepCtx.taskId,
+          stepId: def.metadata.id,
+          stepIndex: def.metadata.index,
+          runSeq: def.metadata.index,
+          title: def.metadata.id,
+          status: 'done',
+          round: 1,
+          output: { stale: true },
+        });
+    const ctx = { taskId: stepCtx.taskId, userId, orchestrationEpoch: 0 } as ResolvedTaskContext;
+    return { ctx, source: source!, continuation };
+  }
+  const routeEvents = (taskId: string) =>
+    db.query.taskEvents.findMany({
+      where: and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, 'insight.continuation'),
+      ),
+    });
+  it('recovers a lost done-row handoff, deduplicates delivery and resets stale check rows atomically', async () => {
+    const { ctx, source, continuation } = await seedRoute(true);
+    const verdict = await finishedStepResult(db, ctx.taskId, insightsTriageStep, source);
+    expect(verdict).toMatchObject({ status: 'revise', continuation });
+    const routes = await Promise.all([
+      handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+      handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+    ]);
+    expect(routes.filter(Boolean)).toHaveLength(1);
+    expect(await routeEvents(ctx.taskId)).toHaveLength(1);
+    const rows = await db.query.taskSteps.findMany({
+      where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
+    });
+    expect(
+      rows.every((r) => r.status === 'pending' && r.output === null && r.rerunGeneration === 1),
+    ).toBe(true);
+    const events = await db.query.taskEvents.findMany({
+      where: eq(schema.taskEvents.taskId, ctx.taskId),
+    });
+    expect(events.some((e) => e.eventType === 'fix_loop.started')).toBe(false);
+    expect(events.filter((e) => e.eventType === 'step.revise')).toMatchObject([
+      {
+        taskStepId: source.id,
+        payload: {
+          continuation,
+          sourceStepId: source.stepId,
+          targetStepId: '08-phase-5-verify',
+          round: 1,
+        },
+      },
+    ]);
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
+  });
+  it.each(['done', 'skipped', 'pending', 'failed', null] as const)(
+    'uses the earliest checkpoint (%s) even after a later round row exists',
+    async (status) => {
+      const { ctx, source, continuation } = await seedRoute();
+      await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+      if (status)
+        await db.insert(schema.taskSteps).values({
+          taskId: ctx.taskId,
+          stepId: source.stepId,
+          stepIndex: 8.95,
+          title: 'Checkpoint',
+          status,
+          round: 1,
+        });
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: source.stepId,
+        stepIndex: 8.95,
+        title: 'Later manual triage',
+        status: 'pending',
+        round: 2,
+      });
+      expect(await activeInsightContinuation(db, ctx.taskId, 2)).toEqual(
+        status === 'done' || status === 'skipped' ? null : continuation,
+      );
+      if (status === 'done') {
+        // The gate-2 rejection forks a later implementation round after the checkpoint settled.
+        await db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          eventType: 'fix_loop.requested',
+          payload: { sourceStepId: '09-gate-2-verify-approval', round: 2, diagnosis: 'Revise' },
+        });
+        await db.insert(schema.cliInvocations).values({
+          taskId: ctx.taskId,
+          taskStepId: source.id,
+          mode: 'cli',
+          prompt: 'review',
+          rawOutput: '## INSIGHTS\n- INSIGHT: New optional improvement | new.ts | Detail',
+        });
+        const spec = vi
+          .spyOn(specArtifacts, 'resolveSpecView')
+          .mockResolvedValue({ text: '' } as never);
+        try {
+          const stepCtx = {
+            db,
+            taskId: ctx.taskId,
+            round: 2,
+            workspacePath: '/repo',
+            sandboxWorkdir: '/ws',
+            throwIfCancelled() {},
+          } as StepContext;
+          expect(await insightsTriageStep.shouldRun!(stepCtx)).toBe(true);
+          const detected = await insightsTriageStep.detect!(stepCtx);
+          expect(detected.insightCheckpoint).toBeUndefined();
+          const form = await insightsTriageStep.form!(stepCtx, detected, null);
+          expect(form!.autoSubmit).not.toBe(true);
+          expect(form!.fields).toMatchObject([
+            { id: 'selectedInsights', options: [{ label: 'New optional improvement (new.ts)' }] },
+          ]);
+        } finally {
+          spec.mockRestore();
+        }
+      }
+    },
+  );
+  it('settles the owned checkpoint after verification Retry abandons an earlier pending checkpoint', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+    const [verify] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: '08-phase-5-verify',
+        stepIndex: 8,
+        runSeq: 2,
+        title: 'Verify',
+        status: 'done',
+        round: 1,
+      })
+      .returning();
+    const settleCheckpoint = async (round: number, epoch: number) => {
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        stepDef: insightsTriageStep,
+        repoPath: '/repo',
+        workspacePath: '/repo',
+        cliProviderId: null,
+        round,
+        epoch,
+        runSeq: 4,
+        moduleDeactivation: null,
+      });
+      expect(result.status).toBe('done');
+      expect(result.row.output).toMatchObject({ batchId: continuation.batchId, items: [] });
+      return result.row;
+    };
+    await settleCheckpoint(1, 0);
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toBeNull();
+    // Retry verification while gate 2 waits: the checkpoint reopens in the same round.
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: '09-gate-2-verify-approval' })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    expect(await resetStepAndDownstream(db, ctx.taskId, verify!.stepId, 1, 0)).toMatchObject({
+      newEpoch: 1,
+    });
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
+    // Verification starts a fix round. Its forward walk never revisits round 1.
+    await db.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      eventType: 'fix_loop.started',
+      payload: { sourceStepId: verify!.stepId, round: 2 },
+    });
+    const owned = await settleCheckpoint(2, 1);
+    expect(
+      await db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, ctx.taskId),
+          eq(schema.taskSteps.stepId, source.stepId),
+          eq(schema.taskSteps.round, 1),
+        ),
+      }),
+    ).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+    expect(await activeInsightContinuation(db, ctx.taskId, 2)).toBeNull();
+    // A later gate-2 reject must offer new insights, not another empty checkpoint.
+    await db.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      eventType: 'fix_loop.requested',
+      payload: { sourceStepId: '09-gate-2-verify-approval', round: 3 },
+    });
+    await db.insert(schema.cliInvocations).values({
+      taskId: ctx.taskId,
+      taskStepId: source.id,
+      mode: 'cli',
+      prompt: 'review',
+      rawOutput: '## INSIGHTS\n- INSIGHT: Fresh improvement | fresh.ts | Detail',
+    });
+    const spec = vi
+      .spyOn(specArtifacts, 'resolveSpecView')
+      .mockResolvedValue({ text: '' } as never);
+    try {
+      const laterCtx = { db, taskId: ctx.taskId, round: 3, throwIfCancelled() {} } as StepContext;
+      const detected = await insightsTriageStep.detect!(laterCtx);
+      expect(detected.insightCheckpoint).toBeUndefined();
+      expect(insightsTriageStep.form!(laterCtx, detected, null)).toMatchObject({
+        fields: [{ id: 'selectedInsights', options: [{ label: 'Fresh improvement (fresh.ts)' }] }],
+      });
+    } finally {
+      spec.mockRestore();
+    }
+    // Retry of the actual owned checkpoint still reopens that continuation.
+    expect(await resetStepAndDownstream(db, ctx.taskId, owned.stepId, 2, 1)).toMatchObject({
+      newEpoch: 2,
+    });
+    expect(await activeInsightContinuation(db, ctx.taskId, 2)).toEqual(continuation);
+  });
+  it('rolls checkpoint publication back if its required ownership write fails', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+    const [checkpoint] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: source.stepId,
+        stepIndex: 8.95,
+        title: 'Checkpoint',
+        status: 'running',
+        round: 1,
+      })
+      .returning();
+    await db.execute(
+      sql.raw(`ALTER TABLE task_events ADD CONSTRAINT insight_checkpoint_test
+      CHECK (task_id <> '${ctx.taskId}'::uuid OR NOT (payload ? 'checkpoint'))`),
+    );
+    try {
+      await expect(
+        publishInsightStep(
+          {
+            db,
+            taskId: ctx.taskId,
+            taskStepId: checkpoint!.id,
+            userId,
+            epoch: 0,
+            rerunGeneration: 0,
+            throwIfCancelled() {},
+          } as StepContext,
+          { status: 'done', output: { insightCheckpoint: continuation } },
+        ),
+      ).rejects.toThrow();
+      expect(
+        await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, checkpoint!.id) }),
+      ).toMatchObject({ status: 'running', output: null });
+      expect((await routeEvents(ctx.taskId))[0]?.payload).not.toHaveProperty('checkpoint');
+    } finally {
+      await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_checkpoint_test`);
+    }
+  });
+  it('boot epoch recovery preserves the batch, and downstream Retry retains the active route', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    expect(
+      await handoffInsightContinuation(
+        db,
+        { ...ctx, orchestrationEpoch: 1 },
+        source,
+        continuation,
+        routeSteps,
+      ),
+    ).toMatchObject({ round: 1, epoch: 1 });
+    const [verify] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: '08-phase-5-verify',
+        stepIndex: 8,
+        title: 'Verify',
+        status: 'failed',
+        round: 1,
+      })
+      .returning();
+    expect(await resetStepAndDownstream(db, ctx.taskId, verify!.stepId, 1, 1)).toMatchObject({
+      newEpoch: 2,
+    });
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
+  });
+  it.each(['insight.continuation', 'step.revise'])(
+    '%s event-write failure rolls back the pointer, reset, and epoch bump',
+    async (eventType) => {
+      const { ctx, source, continuation } = await seedRoute(true);
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE task_events ADD CONSTRAINT insight_route_test CHECK (task_id <> '${ctx.taskId}'::uuid OR event_type <> '${eventType}')`,
+        ),
+      );
+      try {
+        await expect(
+          handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+        ).rejects.toMatchObject({ cause: { code: '23514' } });
+        expect(
+          await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
+        ).toMatchObject({ orchestrationEpoch: 0, currentRound: 0, currentStepId: source.stepId });
+        expect(
+          (
+            await db.query.taskSteps.findMany({
+              where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
+            })
+          ).every((r) => r.status === 'done' && r.rerunGeneration === 0),
+        ).toBe(true);
+        expect(await routeEvents(ctx.taskId)).toHaveLength(0);
+        expect(
+          await db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.eventType, 'step.revise'),
+            ),
+          }),
+        ).toHaveLength(0);
+      } finally {
+        await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_route_test`);
+      }
+      expect(
+        await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+      ).not.toBeNull();
+    },
+  );
+  it.each(['Stop', 'dead', 'Cancel', 'epoch', 'owner', 'Retry'])(
+    'refuses %s arriving during snapshot await without a route or stale-row reset',
+    async (kind) => {
+      const { ctx, source, continuation } = await seedRoute(true);
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: '07b-phase-4-validate',
+        stepIndex: 7.9,
+        title: 'Validate',
+        status: 'done',
+        round: 0,
+        output: { validationSnapshot: { 'a.ts': 'before' } },
+      });
+      const snapshot = vi
+        .spyOn(validationSnapshots, 'readValidationSnapshot')
+        .mockImplementationOnce(async () => {
+          if (kind === 'Retry')
+            await db
+              .update(schema.taskSteps)
+              .set({ rerunGeneration: 1, status: 'pending', output: null })
+              .where(eq(schema.taskSteps.id, source.id));
+          else if (kind === 'owner') ctx.userId = randomUUID();
+          else
+            await db
+              .update(schema.tasks)
+              .set(
+                kind === 'Stop'
+                  ? { status: 'failed' }
+                  : kind === 'Cancel'
+                    ? { status: 'cancelled' }
+                    : kind === 'dead'
+                      ? { deadAt: new Date() }
+                      : kind === 'epoch'
+                        ? { orchestrationEpoch: 1 }
+                        : { userId: randomUUID() },
+              )
+              .where(eq(schema.tasks.id, ctx.taskId));
+          return { 'a.ts': 'before' };
+        });
+      try {
+        expect(
+          await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+        ).toBeNull();
+        expect(await routeEvents(ctx.taskId)).toHaveLength(0);
+        expect(
+          (
+            await db.query.taskSteps.findMany({
+              where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
+            })
+          ).every((r) => r.status === 'done'),
+        ).toBe(true);
+      } finally {
+        snapshot.mockRestore();
+      }
+    },
+  );
+  it('pause allows the owned handoff; new work still meets the ordinary fresh-step pause gate', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await db
+      .update(schema.tasks)
+      .set({ pausedAt: new Date() })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    expect(
+      await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+    ).not.toBeNull();
+    expect(
+      await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
+    ).toMatchObject({ currentStepId: '08-phase-5-verify' });
+  });
+  it('a moved tree records validation first and its verification return address', async () => {
+    const { ctx, source, continuation } = await seedRoute(true);
+    await db.insert(schema.taskSteps).values({
+      taskId: ctx.taskId,
+      stepId: '07b-phase-4-validate',
+      stepIndex: 7.9,
+      title: 'Validate',
+      status: 'done',
+      round: 0,
+      output: { validationSnapshot: { 'a.ts': 'before' } },
+    });
+    const snapshot = vi
+      .spyOn(validationSnapshots, 'readValidationSnapshot')
+      .mockResolvedValue({ 'a.ts': 'after' });
+    try {
+      expect(
+        await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+      ).toMatchObject({ next: { metadata: { id: '07c-ddev-reconcile' } }, round: 1 });
+      const stale = await db.query.taskSteps.findMany({
+        where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
+      });
+      expect(stale.every((row) => row.status === 'pending' && row.output === null)).toBe(true);
+      expect(
+        await db.query.taskEvents.findFirst({
+          where: and(
+            eq(schema.taskEvents.taskId, ctx.taskId),
+            eq(schema.taskEvents.eventType, 'validation.recheck_requested'),
+          ),
+        }),
+      ).toMatchObject({ payload: { resumeStepId: '08-phase-5-verify', round: 1 } });
+    } finally {
+      snapshot.mockRestore();
+    }
+  });
+  it('missing review destination refuses before any reset', async () => {
+    const { ctx, source, continuation } = await seedRoute(true);
+    await expect(
+      handoffInsightContinuation(
+        db,
+        ctx,
+        source,
+        continuation,
+        routeSteps.filter((s) => s.metadata.id !== '08c-code-review'),
+      ),
+    ).rejects.toThrow(/run list/);
+    expect(await routeEvents(ctx.taskId)).toHaveLength(0);
+    expect(
+      (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }))
+        ?.orchestrationEpoch,
+    ).toBe(0);
+  });
+  it.each(['Stop', 'dead', 'Cancel', 'epoch', 'owner', 'Retry'])(
+    'the done publication refuses %s at the same fence as the journal',
+    async (kind) => {
+      const ctx = await seed();
+      if (kind === 'Retry')
+        await db
+          .update(schema.taskSteps)
+          .set({ rerunGeneration: 1 })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      else if (kind === 'owner') ctx.userId = randomUUID();
+      else
+        await db
+          .update(schema.tasks)
+          .set(
+            kind === 'Stop'
+              ? { status: 'failed' }
+              : kind === 'Cancel'
+                ? { status: 'cancelled' }
+                : kind === 'dead'
+                  ? { deadAt: new Date() }
+                  : { orchestrationEpoch: 1 },
+          )
+          .where(eq(schema.tasks.id, ctx.taskId));
+      await expect(
+        publishInsightStep(ctx, { status: 'done', output: { continuation: {} } }),
+      ).rejects.toMatchObject({ name: 'StepSupersededError' });
+      expect(
+        await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) }),
+      ).toMatchObject({ status: 'running', output: null });
+    },
+  );
+  it('done publication retains generation under pause and persists the exact verdict', async () => {
+    const ctx = await seed();
+    await db
+      .update(schema.tasks)
+      .set({ pausedAt: new Date() })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    const continuation = {
+      version: 1,
+      kind: 'insight_revise',
+      batchId: 'batch',
+      sourceStepRow: ctx.taskStepId,
+      generation: 0,
+      round: 1,
+    };
+    expect(
+      await publishInsightStep(ctx, { status: 'done', output: { continuation } }),
+    ).toMatchObject({ status: 'done', rerunGeneration: 0, output: { continuation } });
   });
 });

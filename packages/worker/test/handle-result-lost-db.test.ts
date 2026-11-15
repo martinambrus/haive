@@ -1,3 +1,11 @@
+import * as validationSnapshots from '../src/step-engine/steps/workflow/_validation-snapshot.js';
+import { ValidationSnapshotError } from '../src/queues/validation-recheck.js';
+import {
+  ensureInsightIntent,
+  appendInsightBatch,
+} from '../src/step-engine/steps/workflow/_insight-batch.js';
+import { continuationForOutcome } from '../src/step-engine/steps/workflow/_insight-continuation.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { readValidationSnapshot } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -6,10 +14,11 @@ import path from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { logger, type WorkflowType } from '@haive/shared';
+import { logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
   handleResult,
+  processTaskJob,
   markTaskCancelled,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
@@ -516,6 +525,42 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     return { dir, row, ctx, taskId, hand, setup };
   };
 
+  it('insight rounds leave the fix allowance intact; a real fix inside them still spends it', async () => {
+    const taskId = await makeTask({ maxFixRounds: 1, currentRound: 5 });
+    const source = await makeRow(taskId, { round: 5, status: 'done' });
+    for (let round = 1; round <= 5; round++)
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        taskStepId: source.id,
+        eventType: 'insight.continuation',
+        payload: {
+          continuation: {
+            version: 1,
+            kind: 'insight_revise',
+            batchId: `batch-${round}`,
+            sourceStepRow: source.id,
+            generation: 0,
+            round,
+          },
+        },
+      });
+    const ctx = ctxFor(taskId, { currentRound: 5 });
+    await handleResult(db, ctx, S, loopBack()(source));
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: FIX_TARGET, round: 6 });
+    expect((await eventTypes(taskId)).filter((t) => t === 'fix_loop.started')).toHaveLength(1);
+    const next = await makeRow(taskId, { round: 6, status: 'done' });
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: S, currentRound: 6 })
+      .where(eq(schema.tasks.id, taskId));
+    h.adds.length = 0;
+    await handleResult(db, { ...ctx, currentRound: 6 }, S, loopBack()(next));
+    expect(h.adds).toEqual([]);
+    expect(await rowOf(next.id)).toMatchObject({ status: 'waiting_form' });
+    expect((await eventTypes(taskId)).filter((t) => t === 'fix_loop.started')).toHaveLength(1);
+    expect(await eventTypes(taskId)).toContain('fix_loop.escalated');
+  });
+
   it('skips revalidation when 08b made no edits', async () => {
     const w = await lateFixer();
     await w.hand();
@@ -905,6 +950,257 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       { status: 'done', row, output: row.output },
     );
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 1 });
+  });
+
+  it('a missing insight destination fails the handoff step and leaves it retryable', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override(stub(stepId, 9));
+    const runListSnapshot = ['08-phase-5-verify', stepId, '10-gate-3-commit'];
+    const taskId = await makeTask({ currentStepId: stepId, runListSnapshot });
+    const row = await makeRow(taskId, { stepId, status: 'done' });
+    const continuation = {
+      version: 1,
+      kind: 'insight_revise',
+      batchId: 'batch',
+      sourceStepRow: row.id,
+      generation: 0,
+      round: 1,
+    } as const;
+    await handleResult(db, ctxFor(taskId, { currentStepId: stepId, runListSnapshot }), stepId, {
+      status: 'revise',
+      row,
+      sourceStepId: stepId,
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'failed',
+      errorMessage: expect.stringContaining('run list'),
+    });
+    expect((await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status).toBe(
+      'failed',
+    );
+    expect(h.adds).toEqual([]);
+    expect(await resetStepAndDownstream(db, taskId, stepId, 0, E)).toMatchObject({
+      newEpoch: E + 1,
+    });
+    expect(await rowOf(row.id)).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+  });
+
+  it('a refused insight selection fails its existing preflight row before any editor dispatch', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override(stub(stepId, 9));
+    const runListSnapshot = ['08-phase-5-verify', stepId];
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({
+        slug: TYPE,
+        displayName: TYPE,
+        runListStrategy: 'static',
+        source: 'admin',
+        stepIds: runListSnapshot,
+      })
+      .onConflictDoNothing();
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'preflight', source: 'local_path', localPath: '/tmp' })
+      .returning();
+    const taskId = await makeTask({
+      type: TYPE,
+      repositoryId: repo!.id,
+      currentStepId: stepId,
+      runListSnapshot,
+    });
+    const row = await makeRow(taskId, {
+      stepId,
+      status: 'waiting_form',
+      formValues: { selectedInsights: ['one'] },
+    });
+    try {
+      await processTaskJob({
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId, userId, stepId, round: 0, epoch: E },
+        opts: {},
+        attemptsMade: 0,
+      } as unknown as Parameters<typeof processTaskJob>[0]);
+      expect(await rowOf(row.id)).toMatchObject({
+        status: 'failed',
+        errorMessage: expect.stringContaining('run list'),
+      });
+      expect(h.adds).toEqual([]);
+    } finally {
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    }
+  });
+
+  it.each([TASK_JOB_NAMES.ADVANCE_STEP, TASK_JOB_NAMES.START])(
+    'refuses a first-entry insight preset before writer selection or any CLI invocation via %s',
+    async (jobName) => {
+      const stepId = '08e-insights-triage';
+      let writerSelections = 0;
+      const selectAgents = async () => {
+        writerSelections++;
+        return [];
+      };
+      const apply = vi.fn(async () => ({}));
+      stepRegistry.override({
+        ...stub(stepId, 9),
+        form: () => ({
+          title: 'Insights',
+          fields: [
+            {
+              type: 'multi-select',
+              id: 'selectedInsights',
+              label: 'Select',
+              options: [{ value: 'one', label: 'One' }],
+            },
+          ],
+        }),
+        agentMining: { requiredCapabilities: ['tool_use', 'file_write'], selectAgents },
+        apply,
+      });
+      const runListSnapshot =
+        jobName === TASK_JOB_NAMES.START ? [stepId] : ['08-phase-5-verify', stepId];
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: TYPE,
+          displayName: TYPE,
+          runListStrategy: 'static',
+          source: 'admin',
+          stepIds: runListSnapshot,
+        })
+        .onConflictDoNothing();
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({ userId, name: 'preset preflight', source: 'local_path', localPath: '/tmp' })
+        .returning();
+      const taskId = await makeTask({
+        type: TYPE,
+        status: jobName === TASK_JOB_NAMES.START ? 'queued' : 'running',
+        repositoryId: repo!.id,
+        currentStepId: stepId,
+        runListSnapshot,
+        autoContinue: true,
+        preAnswers: { [stepId]: { selectedInsights: ['one'] } },
+      });
+      try {
+        // Neither the job nor a step row supplies the selection; advanceStep must resolve the preset.
+        await processTaskJob({
+          name: jobName,
+          data: { taskId, userId, stepId, round: 0, epoch: E },
+          opts: {},
+          attemptsMade: 0,
+        } as unknown as Parameters<typeof processTaskJob>[0]);
+        expect(writerSelections).toBe(0);
+        expect(apply).not.toHaveBeenCalled();
+        const row = await db.query.taskSteps.findFirst({
+          where: and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, stepId)),
+        });
+        expect(row).toMatchObject({
+          status: 'failed',
+          errorMessage: expect.stringContaining('run list'),
+        });
+        expect(
+          (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status,
+        ).toBe('failed');
+        expect(
+          await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskId, taskId),
+          }),
+        ).toEqual([]);
+        expect(
+          await db.query.taskStepAgentMinings.findMany({
+            where: eq(schema.taskStepAgentMinings.taskStepId, row!.id),
+          }),
+        ).toEqual([]);
+        expect(await eventTypes(taskId)).not.toContain('insight.batch');
+        expect(h.adds).toEqual([]);
+        expect(await resetStepAndDownstream(db, taskId, stepId, 0, E)).toMatchObject({
+          newEpoch: E + 1,
+        });
+        expect(await rowOf(row!.id)).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+        await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, TYPE));
+      }
+    },
+  );
+
+  it('an unreadable insight handoff snapshot fails the source step with ordinary Retry guidance', async () => {
+    const stepId = '08e-insights-triage';
+    stepRegistry.override({ ...stub(stepId, 9), editsCodeOrTests: true });
+    stepRegistry.override(stub('08c-code-review', 8));
+    const runListSnapshot = [
+      '07b-phase-4-validate',
+      '08-phase-5-verify',
+      '08c-code-review',
+      stepId,
+      '10-gate-3-commit',
+    ];
+    const taskId = await makeTask({ currentStepId: stepId, runListSnapshot });
+    const row = await makeRow(taskId, { stepId, status: 'running' });
+    const stepCtx = {
+      db,
+      taskId,
+      taskStepId: row.id,
+      userId,
+      epoch: E,
+      round: 0,
+      rerunGeneration: 0,
+      throwIfCancelled() {},
+    } as unknown as import('../src/step-engine/step-definition.js').StepContext;
+    const intent = await ensureInsightIntent(stepCtx, [
+      {
+        id: 'one',
+        legacyId: 'i-1',
+        identity: 'a.ts::one',
+        title: 'One',
+        location: 'a.ts',
+        description: 'Detail',
+        sourceStep: 'review',
+        picked: false,
+      },
+    ]);
+    const outcome = await appendInsightBatch(stepCtx, {
+      ...intent,
+      stage: 'outcome',
+      items: intent.items.map((i) => ({ ...i, outcome: 'applied', changes: ['Changed a.ts'] })),
+    });
+    const continuation = continuationForOutcome(outcome, 0)!;
+    const [source] = await db
+      .update(schema.taskSteps)
+      .set({ status: 'done', output: { continuation } })
+      .where(eq(schema.taskSteps.id, row.id))
+      .returning();
+    await makeRow(taskId, {
+      stepId: '07b-phase-4-validate',
+      status: 'done',
+      output: { validationSnapshot: { 'a.ts': 'before' } },
+    });
+    vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null);
+    await handleResult(db, ctxFor(taskId, { currentStepId: stepId, runListSnapshot }), stepId, {
+      status: 'revise',
+      row: source!,
+      sourceStepId: stepId,
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+    expect(await rowOf(row.id)).toMatchObject({
+      status: 'failed',
+      errorMessage: new ValidationSnapshotError().message,
+    });
+    expect((await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status).toBe(
+      'failed',
+    );
+    expect(h.adds).toEqual([]);
+    expect(await eventTypes(taskId)).not.toContain('insight.continuation');
+    expect(await eventTypes(taskId)).not.toContain('validation.recheck_requested');
   });
 
   it('refuses an unreadable final change rather than assuming 08b made no edits', async () => {

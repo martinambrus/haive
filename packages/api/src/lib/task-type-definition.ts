@@ -1,4 +1,4 @@
-import { DerivedTaskAdmissionError } from './derived-errors.js';
+import { DerivedTaskAdmissionError, insightRequirementMessage } from './derived-errors.js';
 import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -89,7 +89,10 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
 });
 
 function describeIssue(issue: CompositionIssue): string {
-  return 'stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind;
+  return (
+    insightRequirementMessage(issue) ??
+    ('stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind)
+  );
 }
 
 // FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
@@ -233,7 +236,7 @@ export async function definitionForCreate(
         if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
-          `Task type ${slug} has an invalid step composition: ${(availability.issues ?? []).map(describeIssue).join(', ')}`,
+          `Task type ${slug} has an invalid step composition: ${[...new Set((availability.issues ?? []).map(describeIssue))].join(', ')}`,
           availability.reason,
         );
       default: {

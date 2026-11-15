@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   composableStepEntrySchema,
+  moduleManifestSchema,
   validateComposition,
   type ComposableStepEntry,
 } from '../src/modularity/index.js';
@@ -312,4 +313,66 @@ describe('validateComposition repository token', () => {
     );
     expect(validateComposition(['make-worktree', 'again'], c)).toEqual([]);
   });
+});
+
+describe('ordered token requirements', () => {
+  const orderedCatalog = catalogOf(
+    entry('verify', { provides: ['verification'] }),
+    entry('review', { provides: ['review'] }),
+    composableStepEntrySchema.parse({
+      ...entry('checkpoint'),
+      requires: [
+        { needs: 'review', after: 'verification', reason: 'Review must check the verified work.' },
+      ],
+    }),
+  );
+
+  it('refuses a needed provider before the prerequisite provider', () => {
+    expect(validateComposition(['review', 'verify', 'checkpoint'], orderedCatalog)).toEqual([
+      {
+        kind: 'need-out-of-order',
+        index: 2,
+        stepId: 'checkpoint',
+        needs: 'review',
+        after: 'verification',
+        reason: 'Review must check the verified work.',
+      },
+    ]);
+  });
+  it('accepts the ordered providers and leaves lists without the consumer unrestricted', () => {
+    expect(validateComposition(['verify', 'review', 'checkpoint'], orderedCatalog)).toEqual([]);
+    expect(validateComposition(['review', 'verify'], orderedCatalog)).toEqual([]);
+  });
+  it('requires the ordering prerequisite to be present', () => {
+    expect(validateComposition(['review', 'checkpoint'], orderedCatalog)).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', stepId: 'checkpoint', needs: 'verification' }),
+    );
+  });
+  it('does not accept two tokens produced by the same step as strictly ordered', () => {
+    const both = entry('both', { provides: ['verification', 'review'] });
+    expect(
+      validateComposition(
+        ['both', 'checkpoint'],
+        catalogOf(both, orderedCatalog.get('checkpoint')!),
+      ),
+    ).toContainEqual(expect.objectContaining({ kind: 'need-out-of-order' }));
+  });
+});
+
+it('preserves ordered needs on module manifests without granting another replacement role', () => {
+  const requirement = { needs: 'review', after: 'verification', reason: 'Check in order.' };
+  const value = {
+    id: 'example',
+    name: 'Example',
+    version: '1',
+    schemaVersion: 1,
+    composableSteps: [{ ...entry('check'), requires: [requirement] }],
+  };
+  expect(moduleManifestSchema.parse(value).composableSteps![0]!.requires).toEqual([requirement]);
+  expect(
+    moduleManifestSchema.safeParse({
+      ...value,
+      composableSteps: [{ ...value.composableSteps[0], replaces: ['08e-insights-triage'] }],
+    }).success,
+  ).toBe(false);
 });

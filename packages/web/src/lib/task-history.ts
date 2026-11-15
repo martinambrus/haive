@@ -270,6 +270,7 @@ function outcome(
   }
   if (step.stepId === '08e-insights-triage') {
     if (output.version === 1 && Array.isArray(output.items)) {
+      if (output.items.length === 0) return null;
       const items = output.items.map(row);
       const count = (state: string) => items.filter((i) => i.outcome === state).length;
       return {

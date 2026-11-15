@@ -690,7 +690,16 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     label: 'Triage insights',
     group: 'check',
     dispatchesCli: true,
-    requires: [needWorktree],
+    requires: [
+      needWorktree,
+      { needs: 'verification', reason: 'Revises through verification.' },
+      {
+        needs: 'review',
+        after: 'verification',
+        reason: 'Insight continuations verify before code review.',
+      },
+    ],
+    loopTargetStepId: '08-phase-5-verify',
     provides: ['insights-triaged'],
     removes: ['clean-tree'],
     // Runs AFTER reviews in the shipped order; selected insights can still edit code.

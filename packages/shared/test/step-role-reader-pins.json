@@ -1334,5 +1334,53 @@
     "value": "@roles",
     "count": 1,
     "reason": "Read-only port graph projection of canonical spec adapters and decoded v2 review/audit bindings; no output read, schema, policy or pin change."
+  },
+  {
+    "file": "packages/worker/src/queues/insight-continuation.ts",
+    "symbol": "assertInsightRunList",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Default canonical review destination for pure continuation run-list preflight."
+  },
+  {
+    "file": "packages/worker/src/queues/insight-continuation.ts",
+    "symbol": "assertInsightTaskSteps.review",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Resolve the review destination through the immutable role binding before an insight editor or handoff."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "SPINE",
+    "context": "ArrayLiteralExpression",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Physical core step gains conditional reachability on the quick path; pinned role reads remain separate."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "isPathAddedInsightStep",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Path membership policy names the physical built-in review added only to quick; derived bases exclude it while pinned replacements retain their own policy."
+  },
+  {
+    "file": "packages/api/src/lib/derived-errors.ts",
+    "symbol": "insightRequirementMessage",
+    "context": "ReturnStatement",
+    "value": "08e-insights-triage requires earlier 08-phase-5-verify and 08c-code-review (or its pinned replacement) for insight continuations",
+    "count": 1,
+    "reason": "Admission error copy names the canonical review requirement and explicitly permits its pinned replacement; it does not read output by physical id."
+  },
+  {
+    "file": "packages/api/src/lib/derived-errors.ts",
+    "symbol": "insightRequirementMessage",
+    "context": "ReturnStatement",
+    "value": "08e-insights-triage requires 08-phase-5-verify before 08c-code-review (or its pinned replacement) for insight continuations",
+    "count": 1,
+    "reason": "Admission error copy explains verification-before-review ordering and permits the pinned review replacement; it does not read output by physical id."
   }
 ]

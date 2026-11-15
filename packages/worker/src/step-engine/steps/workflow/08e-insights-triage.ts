@@ -1,4 +1,4 @@
-import type { LoadedInsight, Insight } from '@haive/shared/step';
+import type { LoadedInsight, Insight, InsightReviseContinuation } from '@haive/shared/step';
 export type { Insight } from '@haive/shared/step';
 export { INSIGHTS_INSTRUCTION } from '@haive/shared/step/prompts';
 import type { FormSchema } from '@haive/shared';
@@ -21,6 +21,11 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from '../_untrusted-repo.js';
+import {
+  activeInsightContinuation,
+  continuationForOutcome,
+  readInsightContinuation,
+} from './_insight-continuation.js';
 import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
@@ -37,12 +42,15 @@ interface TriageDetect {
   sandboxWorktreePath: string;
   spec: string;
   insights: (Insight & Partial<LoadedInsight>)[];
+  insightCheckpoint?: InsightReviseContinuation;
 }
 
 interface TriageApply extends InsightOutcome {
   insightsFound: number;
   selected: LoadedInsight[];
   skipped: number;
+  continuation?: InsightReviseContinuation;
+  insightCheckpoint?: InsightReviseContinuation;
 }
 
 // Old scalar reports can never establish an outcome for an individual selection.
@@ -123,11 +131,26 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
+    if (ctx.round > 0 && (await activeInsightContinuation(ctx.db, ctx.taskId, ctx.round))) {
+      ctx.throwIfCancelled();
+      return true;
+    }
     const insights = await collectInsights(ctx);
     return insights.length > 0;
   },
 
   async detect(ctx: StepContext): Promise<TriageDetect> {
+    const checkpoint =
+      ctx.round > 0 ? await activeInsightContinuation(ctx.db, ctx.taskId, ctx.round) : null;
+    ctx.throwIfCancelled();
+    if (checkpoint)
+      return {
+        worktreePath: ctx.workspacePath,
+        sandboxWorktreePath: ctx.sandboxWorkdir,
+        spec: '',
+        insights: [],
+        insightCheckpoint: checkpoint,
+      };
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const wt = worktree?.output as { worktreePath?: string; sandboxWorktreePath?: string } | null;
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
@@ -144,6 +167,8 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   },
 
   form(_ctx, detected): FormSchema {
+    if (detected.insightCheckpoint)
+      return { title: 'Insight checks complete', fields: [], autoSubmit: true };
     return {
       title: 'Insight triage',
       description: [
@@ -175,6 +200,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     timeoutMs: 30 * 60 * 1000,
     async selectAgents({ ctx, detected, formValues }) {
       const d = detected as TriageDetect;
+      if (d.insightCheckpoint) return [];
       const selected = selectOfferedInsights(d.insights, formValues).map((i) => ({
         ...i,
         identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
@@ -197,11 +223,25 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   async apply(ctx, args): Promise<TriageApply> {
     const d = args.detected;
     ctx.throwIfCancelled();
+    if (d.insightCheckpoint)
+      return {
+        version: 1,
+        batchId: d.insightCheckpoint.batchId,
+        insightsFound: 0,
+        selected: [],
+        skipped: 0,
+        items: [],
+        implemented: false,
+        changes: [],
+        notes: 'Insight check round completed.',
+        insightCheckpoint: d.insightCheckpoint,
+      };
     const selected = selectOfferedInsights(d.insights, args.formValues).map((i) => ({
       ...i,
       identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
     }));
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
+    let continuation: InsightReviseContinuation | undefined;
     let outcome: InsightOutcome = {
       version: 1,
       batchId,
@@ -239,6 +279,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         miningId:
           records.find((r) => r.batchId === batchId && r.stage === 'invocation')?.miningId ?? null,
       });
+      continuation = continuationForOutcome(saved, ctx.round);
       outcome = {
         ...outcome,
         items: saved.items,
@@ -257,6 +298,16 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       selected,
       skipped: d.insights.length - selected.length,
       ...outcome,
+      ...(continuation ? { continuation } : {}),
     };
+  },
+  reviseLoop: {
+    evaluate(output) {
+      if (!output?.continuation) return null;
+      return {
+        targetStepId: '08-phase-5-verify',
+        continuation: readInsightContinuation(output.continuation),
+      };
+    },
   },
 };

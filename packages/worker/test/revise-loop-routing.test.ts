@@ -44,3 +44,34 @@ describe('reviseLoop routing: self-loop (in-place) vs fork (new round)', () => {
     });
   }
 });
+
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
+const continuation = {
+  version: 1,
+  kind: 'insight_revise',
+  batchId: 'batch',
+  sourceStepRow: 'source',
+  generation: 0,
+  round: 1,
+};
+describe('manual insight revise routing', () => {
+  it('routes a journal-confirmed applied batch to verification with its continuation', () => {
+    expect(insightsTriageStep.reviseLoop?.evaluate({ continuation } as never)).toEqual({
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+  });
+  it.each([undefined, { implemented: true }, { items: [] }])(
+    'keeps ordinary routing without a continuation: %j',
+    (output) => {
+      expect(insightsTriageStep.reviseLoop?.evaluate(output as never)).toBeNull();
+    },
+  );
+  it('refuses an unknown stored continuation version', () => {
+    expect(() =>
+      insightsTriageStep.reviseLoop?.evaluate({
+        continuation: { ...continuation, version: 2 },
+      } as never),
+    ).toThrow(/Unsupported insight continuation/);
+  });
+});

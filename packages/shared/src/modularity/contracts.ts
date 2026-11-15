@@ -180,7 +180,14 @@ export const composableStepEntrySchema = z
     label: z.string().min(1),
     group: z.string().min(1),
     dispatchesCli: z.boolean(),
-    requires: z.array(z.object({ needs: z.string(), reason: z.string() })),
+    requires: z.array(
+      z.object({
+        needs: z.string(),
+        reason: z.string(),
+        // The currently available provider of `needs` must strictly follow that of `after`.
+        after: z.string().optional(),
+      }),
+    ),
     provides: z.array(z.string()),
     paramFormSchema: formSchemaSchema.optional(),
     loopBudgetEditable: z.boolean().optional(),

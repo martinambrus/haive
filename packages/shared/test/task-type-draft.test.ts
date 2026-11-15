@@ -38,6 +38,10 @@ const catalog = catalogOf(
     provides: ['y'],
     loopBudgetEditable: true,
   }),
+  entry('ta-after', { provides: ['after'] }),
+  entry('ta-ordered', {
+    requires: [{ needs: 'x', after: 'after', reason: 'x must follow after' }],
+  }),
   entry('ta-c', { requires: [{ needs: 'zzz', reason: 'needs zzz' }] }),
   entry('ta-repo', { requires: [{ needs: 'repository', reason: 'needs the repository' }] }),
   entry('ta-early', { precedes: ['x'] }),
@@ -209,6 +213,9 @@ const KINDS: Record<KindOf, Reach> = {
   },
   'unknown-step': { reaches: () => draftOf({ stepIds: ['ta-nope', CUSTOM_ID] }) },
   'unmet-need': { reaches: () => draftOf({ stepIds: ['ta-c', CUSTOM_ID] }) },
+  'need-out-of-order': {
+    reaches: () => draftOf({ stepIds: ['ta-a', 'ta-after', 'ta-ordered', CUSTOM_ID] }),
+  },
   'too-late': { reaches: () => draftOf({ stepIds: ['ta-a', 'ta-early', CUSTOM_ID] }) },
   unfulfilled: { reaches: () => draftOf({ stepIds: ['ta-entails', CUSTOM_ID] }) },
   'missing-loop-target': { reaches: () => draftOf({ stepIds: ['ta-loops', CUSTOM_ID] }) },
@@ -429,6 +436,7 @@ describe('validateTaskTypeDraft', () => {
       'empty',
       'unknown-step',
       'unmet-need',
+      'need-out-of-order',
       'too-late',
       'unfulfilled',
       'missing-loop-target',

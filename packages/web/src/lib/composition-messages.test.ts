@@ -165,6 +165,14 @@ describe('describeIssue', () => {
 
   it('every kind validateComposition can emit has a message that is not the raw kind', () => {
     const samples: CompositionIssue[] = [
+      {
+        kind: 'need-out-of-order',
+        index: 2,
+        stepId: 'checkpoint',
+        needs: 'review',
+        after: 'verification',
+        reason: 'Verify before review.',
+      },
       ...validateComposition([], catalog),
       ...validateComposition(['nope'], catalog),
       ...validateComposition(['05-phase-0b5-spec-quality', '05-phase-0b5-spec-quality'], catalog),
@@ -182,6 +190,7 @@ describe('describeIssue', () => {
         'unknown-step',
         'duplicate-step',
         'unmet-need',
+        'need-out-of-order',
         'too-late',
         'unfulfilled',
         'missing-loop-target',
@@ -644,4 +653,19 @@ describe('promptStepIssuesOf', () => {
       ['too-many-tools', ''],
     ]);
   });
+});
+
+it('keeps ordered-need issues from the server and explains how to repair the order', () => {
+  const issue: CompositionIssue = {
+    kind: 'need-out-of-order',
+    index: 2,
+    stepId: 'checkpoint',
+    needs: 'review',
+    after: 'verification',
+    reason: 'Verify before review.',
+  };
+  expect(splitServerIssues([issue]).composition).toEqual([issue]);
+  expect(describeIssue(issue, ctx([])).message).toBe(
+    'Needs review after verification: Verify before review.',
+  );
 });

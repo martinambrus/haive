@@ -7,6 +7,14 @@ import {
 export type CompositionIssue =
   | { kind: 'unknown-step'; index: number; stepId: string }
   | { kind: 'unmet-need'; index: number; stepId: string; needs: string; reason: string }
+  | {
+      kind: 'need-out-of-order';
+      index: number;
+      stepId: string;
+      needs: string;
+      after: string;
+      reason: string;
+    }
   | { kind: 'too-late'; index: number; stepId: string; token: string }
   | { kind: 'unfulfilled'; index: number; stepId: string; token: string }
   | { kind: 'missing-loop-target'; index: number; stepId: string; target: string }
@@ -22,7 +30,7 @@ export function validateComposition(
   if (stepIds.length === 0) return [{ kind: 'empty' }];
   const issues: CompositionIssue[] = [];
   const initial = opts.requiresRepository === false ? [] : [REPOSITORY_TOKEN];
-  const provided = new Set<string>(initial);
+  const provided = new Map<string, number>(initial.map((token) => [token, -1]));
   const everProvided = new Set<string>(initial);
   const seen = new Map<string, number>();
   let closing: { stepId: string; index: number } | undefined;
@@ -43,8 +51,18 @@ export function validateComposition(
     for (const token of entry.precedes ?? []) {
       if (everProvided.has(token)) issues.push({ kind: 'too-late', index, stepId, token });
     }
-    for (const { needs, reason } of entry.requires) {
+    for (const { needs, reason, after } of entry.requires) {
       if (!provided.has(needs)) issues.push({ kind: 'unmet-need', index, stepId, needs, reason });
+      if (after !== undefined) {
+        const prerequisite = provided.get(after);
+        const provider = provided.get(needs);
+        if (prerequisite === undefined) {
+          if (!entry.requires.some((r) => r.needs === after))
+            issues.push({ kind: 'unmet-need', index, stepId, needs: after, reason });
+        } else if (provider !== undefined && provider <= prerequisite) {
+          issues.push({ kind: 'need-out-of-order', index, stepId, needs, after, reason });
+        }
+      }
     }
     if (entry.loopTargetStepId !== undefined && !seen.has(entry.loopTargetStepId)) {
       issues.push({
@@ -62,7 +80,7 @@ export function validateComposition(
     }
     for (const token of entry.provides) {
       if (IMPLICIT_COMPOSITION_TOKENS.has(token)) continue;
-      provided.add(token);
+      provided.set(token, index);
       everProvided.add(token);
     }
     for (const token of entry.removes ?? []) provided.delete(token);

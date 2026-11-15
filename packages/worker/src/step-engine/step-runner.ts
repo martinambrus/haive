@@ -1,3 +1,5 @@
+import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
+import type { InsightReviseContinuation } from '@haive/shared/step';
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
 import {
   resolveTaskCommittedSnapshots,
@@ -386,6 +388,9 @@ export interface AdvanceStepParams {
    *  then falls back to created_at ordering until a boot backfill fills it in). */
   runSeq?: number;
   formValues?: FormValues;
+  /** Caller guard after saved, submitted and auto-submitted answers have resolved,
+   * before any post-form CLI work or apply side effects. */
+  validateResolvedForm?: (values: FormValues | null) => void;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
@@ -411,7 +416,13 @@ export type AdvanceStepResult =
        *  human-driven restart, e.g. gate-2 developer reject). Omitted = capped. */
       uncapped?: boolean;
     }
-  | { status: 'revise'; row: TaskStepRow; targetStepId: string; sourceStepId: string }
+  | {
+      status: 'revise';
+      row: TaskStepRow;
+      targetStepId: string;
+      sourceStepId: string;
+      continuation?: InsightReviseContinuation;
+    }
   | { status: 'failed'; row: TaskStepRow; error: string }
   /** A Retry or Skip took the row over while this pass ran; the pass wrote no outcome. */
   | { status: 'superseded'; row: TaskStepRow }
@@ -2905,7 +2916,7 @@ export type FinishedRoutingVerdict =
       uncapped?: boolean;
       unfencedLegacy?: boolean;
     }
-  | { kind: 'revise'; targetStepId: string };
+  | { kind: 'revise'; targetStepId: string; continuation?: InsightReviseContinuation };
 
 /** The loop_back/revise verdict for this output: fixLoop unless suppressed, then restartLoop,
  *  then reviseLoop — or null when none fires. */
@@ -2938,7 +2949,7 @@ export async function finishedRoutingVerdict(
   }
   if (stepDef.reviseLoop) {
     const target = stepDef.reviseLoop.evaluate(output);
-    if (target) return { kind: 'revise', targetStepId: target.targetStepId };
+    if (target) return { kind: 'revise', ...target };
   }
   return null;
 }
@@ -2957,7 +2968,13 @@ export async function finishedStepResult(
   }
   const verdict = await finishedRoutingVerdict(db, taskId, stepDef, row.output);
   if (verdict?.kind === 'revise') {
-    return { status: 'revise', row, targetStepId: verdict.targetStepId, sourceStepId };
+    return {
+      status: 'revise',
+      row,
+      targetStepId: verdict.targetStepId,
+      sourceStepId,
+      ...(verdict.continuation ? { continuation: verdict.continuation } : {}),
+    };
   }
   if (verdict?.kind === 'loop_back') {
     return {
@@ -3597,6 +3614,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    params.validateResolvedForm?.(formValues);
+
     // --- AI-fix phase (retry_ai recovery) ---
     // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
     // re-run apply against the fixed workspace. The DAG executor is exempt: it
@@ -4108,9 +4127,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // The row is still done; handleResult turns loop_back into a new round at implement and
     // revise into a reset of its target.
+    const finalize = (patch: UpdatePatch) =>
+      meta.id === INSIGHT_STEP &&
+      ((output as { continuation?: unknown } | null)?.continuation ||
+        (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
+        ? publishInsightStep(ctx, patch)
+        : updateRow(db, current.id, patch);
     const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
     if (verdict) {
-      const finished = await updateRow(db, current.id, {
+      const finished = await finalize({
         status: 'done',
         output,
         summary: curatedSummary,
@@ -4131,6 +4156,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           row: finished,
           targetStepId: verdict.targetStepId,
           sourceStepId: meta.id,
+          ...(verdict.continuation ? { continuation: verdict.continuation } : {}),
         };
       }
       ctx.logger.info(
@@ -4156,7 +4182,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // advance. Long deterministic steps (RAG sync) also poll the signal internally;
     // this closes the return-race generically for every step.
     throwIfCancelled();
-    const done = await updateRow(db, current.id, {
+    const done = await finalize({
       status: 'done',
       output,
       summary: curatedSummary,

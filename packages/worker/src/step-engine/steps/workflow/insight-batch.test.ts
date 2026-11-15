@@ -12,7 +12,7 @@ const report = () => ({
 });
 const read = (raw: unknown) => readTriageOutcome(raw, batchId, ids);
 describe('manual insight batch contract', () => {
-  it('dispatches a mining implementer seat, without changing routing', () => {
+  it('dispatches a mining implementer seat, with independent revise routing', () => {
     expect(insightsTriageStep.llm).toBeUndefined();
     expect(insightsTriageStep.agentMining).toMatchObject({
       requiredCapabilities: ['tool_use', 'file_write'],
@@ -23,7 +23,7 @@ describe('manual insight batch contract', () => {
       { id: 'implementer', label: 'Implementer' },
     ]);
     expect(HOUSE_RULE_ROLES['08e-insights-triage']?.implementer).toBe('write');
-    expect(insightsTriageStep.reviseLoop).toBeUndefined();
+    expect(insightsTriageStep.reviseLoop).toBeDefined();
     expect(insightsTriageStep.fixLoop).toBeUndefined();
   });
   it('attributes exactly the selected set', () => {

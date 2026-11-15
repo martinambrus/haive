@@ -408,3 +408,13 @@ event types read by the reducer, exported from the reducer's own event sets as
 a 200-task batch retained 3,949 of 5,919 events and executed in 4.551 ms); events
 are not window-filtered. Null renders as a dash, never zero. Fixed category colours are
 contrast-checked against `#0a0a0a`; report text is neutral-400 or lighter, including the share legend.
+
+## Insight continuation revisions
+
+Insight continuations count as revisions. The handoff atomically records `step.revise`
+with its versioned continuation marker. The reliability endpoint counts this event along
+with ordinary revises (`modules/statistics/src/routes.ts`); omitting it undercounted reruns.
+The form-wait reducer (`shared/src/stats/time-cost.ts`) also treats it as a reset, invalidating
+open waits across the handoff instead of pairing them with a later attempt. Step Work and
+agent time still come from stored timing and invocation spans, independently of the event.
+Insight revises remain outside the implementation fix cap and never write `fix_loop.started`.

@@ -2424,3 +2424,19 @@ describe('a fix round whose target is not in the task run list', () => {
     });
   });
 });
+
+import * as runLists from '../src/queues/run-list.js';
+it('a dormant conditional insight tail skips new-work holds before the ordinary runner decides its skip', async () => {
+  h.state.readsAnswer = true;
+  h.state.pausedAt = new Date();
+  vi.spyOn(runLists, 'isConditionalInsightStep').mockReturnValue(true);
+  const job = {
+    name: TASK_JOB_NAMES.ADVANCE_STEP,
+    data: { taskId: 'task-1', userId: 'user-1', stepId: 'epoch-job-step', round: 0, epoch: 5 },
+    timestamp: Date.now(),
+  } as unknown as Job;
+  await processTaskJob(job, 'tok');
+  expect(vi.mocked(advanceStep)).toHaveBeenCalledOnce();
+  expect(h.state.add).not.toHaveBeenCalled();
+  expect(h.state.stepPatches.some((p) => p.waitingStartedAt != null)).toBe(false);
+});

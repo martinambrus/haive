@@ -4,7 +4,7 @@ import {
   type DerivedRunPlan,
 } from '../modularity/derived-task-types.js';
 import { EXECUTION_PATHS, type ExecutionPath } from '../schemas/tasks.js';
-import { orderWorkflowRunList } from './execution-paths.js';
+import { isPathAddedInsightStep, orderWorkflowRunList } from './execution-paths.js';
 
 export type RunListStrategy = 'static' | 'workflow_paths' | 'run_app_modes' | 'derived';
 
@@ -132,7 +132,7 @@ export function workflowBaseCandidates(
         executionPath,
       },
       listByWorkflow,
-    ),
+    ).filter((id) => !isPathAddedInsightStep(executionPath, id)),
   }));
 }
 

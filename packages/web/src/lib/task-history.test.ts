@@ -519,6 +519,20 @@ describe('implementation overview', () => {
     expect(result.message).toBe('Application outcomes were not confirmed per insight.');
     expect(result.tone).toBe('warning');
   });
+  it.each([0, 1])(
+    'omits an empty insight checkpoint even with %s historical CLI runs',
+    (cliInvocationCount) => {
+      expect(
+        buildTaskHistory([
+          step({
+            stepId: '08e-insights-triage',
+            cliInvocationCount,
+            output: { version: 1, items: [], selected: [], implemented: false },
+          }),
+        ]),
+      ).toEqual([]);
+    },
+  );
   it('reports partial insight outcomes without claiming every selection was implemented', () => {
     const result = entry({
       stepId: '08e-insights-triage',
