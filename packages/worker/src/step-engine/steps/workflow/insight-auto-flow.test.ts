@@ -10,6 +10,7 @@ import * as dependency from './_dependency-policy.js';
 import * as loader from './_insight-loader.js';
 import * as previous from '../onboarding/_helpers.js';
 import * as specs from './_spec-artifact.js';
+import * as continuations from './_insight-continuation.js';
 import {
   autoInsightReport,
   automaticSelection,
@@ -561,6 +562,253 @@ describe('automatic insight stages', () => {
       expect(completed.implemented).toBe(false);
       return completed;
     }
+    // One more than the production page; short entries stay within the classifier budget.
+    const cohort = () =>
+      Array.from({ length: 31 }, (_, n) => ({
+        ...one,
+        id: `page-${n}`,
+        identity: `src/a.ts::page-${n}`,
+        title: `Page ${n}`,
+      }));
+    it('poll bound: persists a bounded view but classifies the whole budgeted cohort', async () => {
+      inventory = cohort();
+      const detected = await insightsTriageStep.detect!(flowCtx);
+      expect(detected.insights).toHaveLength(30);
+      expect(detected.auto!.candidates).toHaveLength(30);
+      expect(insightsTriageStep.form!(flowCtx, detected, null)!.infoSections![0]!.body).toContain(
+        '1 more not shown',
+      );
+      // Simulate the runner persisting and reading detect_output between phases.
+      const saved = JSON.parse(JSON.stringify(detected));
+      const dispatch = await insightsTriageStep.agentMining!.selectAgents({
+        ctx: flowCtx,
+        detected: saved,
+        formValues: {},
+        llmOutput: null,
+      });
+      expect(auto.claimAutoRound).toHaveBeenLastCalledWith(flowCtx, inventory, expect.anything());
+      expect(dispatch[0]!.prompt).toContain('page-30');
+      const completed = await insightsTriageStep.apply(
+        flowCtx,
+        applyArgs(saved, [
+          result(1, {
+            version: 1,
+            batchId,
+            items: inventory.map((i) => ({
+              id: i.id,
+              class: 'minor',
+              kind: 'cosmetic',
+              reason: 'Style',
+            })),
+          }),
+        ]),
+      );
+      expect(history.results[0]!.items).toHaveLength(31);
+      expect(completed.findingsSummary!.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(
+        30,
+      );
+      expect(completed.findingsSummary).toContain('1 more not shown');
+      expect(saved.auto.decisions.length).toBeLessThanOrEqual(30);
+      const replay = await insightsTriageStep.detect!(flowCtx);
+      expect(replay.auto!.claim!.insights).toHaveLength(30);
+      expect(replay.auto!.decisions).toHaveLength(30);
+    });
+    it('poll bound: an outstanding decision beyond the report page still reopens and is offered first', async () => {
+      earlier('consequential');
+      inventory = [...cohort().slice(0, 30), one];
+      const { detected, classification } = await classify(
+        inventory.slice(0, 30).map((i) => ({
+          id: i.id,
+          class: 'minor',
+          kind: 'cosmetic',
+          reason: 'Style',
+        })),
+      );
+      expect(detected.insights.some((i) => i.id === one.id)).toBe(false);
+      await expect(
+        insightsTriageStep.apply(flowCtx, applyArgs(detected, [classification])),
+      ).rejects.toMatchObject({ name: 'ReopenStepFormError', newAttempt: false });
+      const next = await insightsTriageStep.detect!(flowCtx);
+      expect(next.auto!.candidates).toEqual([one]);
+      expect(insightsTriageStep.form!(flowCtx, next, null)!.fields[0]).toMatchObject({
+        options: [expect.objectContaining({ value: one.id })],
+      });
+    });
+    it('poll bound: automatic writer keeps the full batch and bounds returned outcome copies', async () => {
+      inventory = cohort();
+      const { detected, classification } = await classify(
+        inventory.map((i) => ({
+          id: i.id,
+          class: 'consequential',
+          kind: 'correctness',
+          reason: 'Repair',
+        })),
+      );
+      const output = await insightsTriageStep.apply(
+        flowCtx,
+        applyArgs(detected, [
+          classification,
+          {
+            ...result(1, {
+              version: 1,
+              batchId,
+              notes: '',
+              items: inventory.map((i) => ({
+                id: i.id,
+                outcome: 'applied',
+                changes: ['Fixed'],
+                reason: 'Done',
+              })),
+            }),
+            agentId: `implementer-${batchId}`,
+          },
+        ]),
+      );
+      expect(journal.find((r) => r.stage === 'outcome')!.selected).toHaveLength(31);
+      expect(journal.find((r) => r.stage === 'outcome')!.items).toHaveLength(31);
+      expect(output.selected).toHaveLength(30);
+      expect(output.items).toHaveLength(30);
+      expect(output.changes).toHaveLength(30);
+      expect(output).toMatchObject({
+        selectedOmitted: 1,
+        itemsOmitted: 1,
+        changesOmitted: 1,
+        insightsFound: 31,
+        skipped: 0,
+        automatic: { classified: 31 },
+      });
+      expect(output.continuation!.batchId).toBe(batchId);
+    });
+    it.each(['over budget', 'outstanding decision'] as const)(
+      'poll bound: %s offers successive bounded manual pages without losing inventory',
+      async (path) => {
+        inventory = cohort();
+        if (path === 'over budget') {
+          inventory = inventory.map((i) => ({ ...i, description: 'detail'.repeat(200) }));
+        } else {
+          vi.mocked(safeFs.lstatNoFollow).mockResolvedValue({ kind: 'symlink' } as never);
+          const { classification, detected } = await classify(
+            inventory.map((i) => ({
+              id: i.id,
+              class: 'consequential',
+              kind: 'correctness',
+              reason: 'Ownership',
+            })),
+          );
+          detected.auto!.dependencyPolicy = undefined;
+          await expect(
+            insightsTriageStep.apply(flowCtx, applyArgs(detected, [classification])),
+          ).rejects.toBeInstanceOf(ReopenStepFormError);
+        }
+        const first = await insightsTriageStep.detect!(flowCtx);
+        expect(first.auto!.mode).toBe('manual');
+        expect(first.insights).toHaveLength(30);
+        expect(first.auto!.candidates).toEqual(inventory.slice(0, 30));
+        expect(first.auto!.decisions).toHaveLength(30);
+        const form = insightsTriageStep.form!(flowCtx, first, null)!;
+        expect(form.fields[0]).toMatchObject({
+          options: inventory.slice(0, 30).map((i) => expect.objectContaining({ value: i.id })),
+        });
+        expect(form.description).toContain('1 more not shown');
+        const selected = first.auto!.candidates;
+        await insightsTriageStep.agentMining!.selectAgents({
+          ctx: flowCtx,
+          detected: first,
+          formValues: { selectedInsights: selected.map((i) => i.id) },
+          llmOutput: null,
+        });
+        const output = await insightsTriageStep.apply(
+          flowCtx,
+          applyArgs(
+            first,
+            [
+              {
+                ...result(1, {
+                  version: 1,
+                  batchId,
+                  notes: '',
+                  items: selected.map((i) => ({
+                    id: i.id,
+                    outcome: 'applied',
+                    changes: ['Fixed'],
+                    reason: 'Done',
+                  })),
+                }),
+                agentId: `implementer-${batchId}`,
+              },
+            ],
+            selected.map((i) => i.id),
+          ),
+        );
+        expect(output.implemented).toBe(true);
+        expect(output.findingsSummary).toContain('1 more not shown');
+        // The loader's unacted projection removes only journal-reported applied identities.
+        const applied = new Set(
+          journal
+            .filter((r) => r.stage === 'outcome')
+            .flatMap((r) =>
+              r.items
+                .filter((i) => i.outcome === 'applied')
+                .map((i) => r.selected.find((s) => s.id === i.id)!.identity),
+            ),
+        );
+        inventory = inventory.filter((i) => !applied.has(i.identity));
+        expect(inventory).toHaveLength(1);
+        flowCtx.taskStepId = 'next-page';
+        const oldDb = flowCtx.db;
+        flowCtx.round = 1;
+        vi.spyOn(continuations, 'activeInsightContinuation').mockResolvedValue(
+          output.continuation!,
+        );
+        flowCtx.db = {
+          query: { taskSteps: { findFirst: async () => ({ detectOutput: first }) } },
+        } as never;
+        try {
+          const next = await insightsTriageStep.detect!(flowCtx);
+          expect(next.auto!.mode).toBe('manual');
+          expect(next.auto!.candidates).toEqual(inventory);
+          expect(insightsTriageStep.form!(flowCtx, next, null)!.fields[0]).toMatchObject({
+            options: [expect.objectContaining({ value: 'page-30' })],
+          });
+        } finally {
+          flowCtx.taskStepId = 'row';
+          flowCtx.round = 0;
+          flowCtx.db = oldDb;
+        }
+      },
+    );
+    it.each([false, true])(
+      'poll bound: under-bound mode auto=%s remains byte-identical',
+      async (enabled) => {
+        vi.mocked(auto.insightAutoEnabled).mockResolvedValue(enabled);
+        const detected = await insightsTriageStep.detect!(flowCtx);
+        const form = insightsTriageStep.form!(flowCtx, detected, null);
+        // Baseline golden bytes are captured before production changes.
+        let results: AgentMiningResult[] = [];
+        if (enabled) {
+          await insightsTriageStep.agentMining!.selectAgents({
+            ctx: flowCtx,
+            detected,
+            formValues: {},
+            llmOutput: null,
+          });
+          results = [
+            result(1, {
+              version: 1,
+              batchId,
+              items: inventory.map((i) => ({
+                id: i.id,
+                class: 'minor',
+                kind: 'cosmetic',
+                reason: 'Style',
+              })),
+            }),
+          ];
+        }
+        const output = await insightsTriageStep.apply(flowCtx, applyArgs(detected, results));
+        expect(JSON.stringify({ detected, form, output })).toMatchSnapshot();
+      },
+    );
     it('control 1: earlier ineligible consequential + new minor-only cohort reopens; empty submit completes', async () => {
       earlier('consequential');
       const { detected, classification } = await classify([

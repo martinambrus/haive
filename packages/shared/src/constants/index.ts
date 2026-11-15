@@ -12,6 +12,9 @@ export * from './secret-env.js';
 
 export const APP_NAME = 'Haive';
 
+/** Shared manual insight page bound, including copies returned by task polls. */
+export const INSIGHTS_AT_GATE = 30;
+
 /**
  * What an UNSTAMPED build reports: a source checkout, a locally built image, anything CI did not
  * stamp.

@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { insightEventPage } from './_insight-event-page.js';
 import { projectTaskPorts } from '../../lib/step-port-projection.js';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { derivedTaskWarnings } from '@haive/shared/modularity';
@@ -1932,8 +1934,15 @@ taskRoutes.get('/:id/events', async (c) => {
   // `?type=` narrows to one event type. The Activity tab wants everything; a caller
   // restoring one widget's history (the terminal's steer list) wants a handful, and a
   // long task carries hundreds of events it would otherwise download to discard.
-  // Several types may be asked for at once, comma-separated.
+  // Several types may be asked for at once, comma-separated. Insight journal arrays
+  // are bounded display copies; ?insightOffset=30 reads their next page.
   const types = c.req.query('type')?.split(',').filter(Boolean);
+  const insightOffset = z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .parse(c.req.query('insightOffset') ?? 0);
   const events = await db
     .select()
     .from(schema.taskEvents)
@@ -1943,7 +1952,12 @@ taskRoutes.get('/:id/events', async (c) => {
         : eq(schema.taskEvents.taskId, id),
     )
     .orderBy(asc(schema.taskEvents.createdAt));
-  return c.json({ events });
+  return c.json({
+    events: events.map((event) => ({
+      ...event,
+      payload: insightEventPage(event.eventType, event.payload, insightOffset),
+    })),
+  });
 });
 
 // Step submit/action/skip + per-step CLI routes. Mounted at '/' so the

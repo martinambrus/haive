@@ -35,8 +35,11 @@ export interface AutoDetect {
   version: 1;
   mode: 'classify' | 'manual' | 'settled';
   candidates: LoadedInsight[];
+  /** Display snapshot only; reload the full cohort before classification. */
+  candidatesOmitted?: number;
   roundsStarted: number;
   decisions: AutoDecision[];
+  decisionsTotal?: number;
   stopReason:
     | 'no_new_consequential'
     | 'incomplete'

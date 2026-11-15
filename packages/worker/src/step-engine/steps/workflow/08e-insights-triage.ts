@@ -1,3 +1,5 @@
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import { autoInsightReport, assertAutoVersion } from './_insight-auto-flow.js';
 import { insightAutoEnabled, loadAutoHistory } from './_insight-auto.js';
 import {
@@ -12,7 +14,7 @@ import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import type { LoadedInsight, Insight, InsightReviseContinuation } from '@haive/shared/step';
 export type { Insight } from '@haive/shared/step';
 export { INSIGHTS_INSTRUCTION } from '@haive/shared/step/prompts';
-import type { FormSchema } from '@haive/shared';
+import { INSIGHTS_AT_GATE, type FormSchema } from '@haive/shared';
 import { findingIdentity, loadUnactedInsights } from './_insight-loader.js';
 import {
   appendInsightBatch,
@@ -53,6 +55,7 @@ interface TriageDetect {
   spec: string;
   insights: (Insight & Partial<LoadedInsight>)[];
   insightCheckpoint?: InsightReviseContinuation;
+  insightsOmitted?: number;
   auto?: AutoDetect;
 }
 
@@ -76,9 +79,67 @@ export function readTriageOutcome(
 }
 
 async function collectInsights(ctx: StepContext, automatic = false): Promise<LoadedInsight[]> {
-  const result = await loadUnactedInsights(ctx.db, ctx.taskId, automatic ? {} : { limit: 30 });
+  const result = await loadUnactedInsights(
+    ctx.db,
+    ctx.taskId,
+    automatic ? {} : { limit: INSIGHTS_AT_GATE },
+  );
   ctx.throwIfCancelled();
   return result.insights;
+}
+
+/** Only this view is persisted. Claims/results remain complete in their durable journal. */
+function insightDisplay(
+  insights: LoadedInsight[],
+  auto: AutoDetect,
+  limit = INSIGHTS_AT_GATE,
+): { insights: LoadedInsight[]; auto: AutoDetect; insightsOmitted?: number } {
+  // Small snapshots retain their original order and shape.
+  if (
+    insights.length <= limit &&
+    auto.candidates.length <= limit &&
+    auto.decisions.length <= limit &&
+    (auto.claim?.insights.length ?? 0) <= limit
+  )
+    return { insights, auto };
+  const page = (auto.mode === 'manual' ? auto.candidates : insights).slice(0, limit);
+  const omitted = insights.length - page.length;
+  const candidatesOmitted = Math.max(0, auto.candidates.length - limit);
+  return {
+    insights: page,
+    ...(omitted > 0 ? { insightsOmitted: omitted } : {}),
+    auto: {
+      ...auto,
+      decisionsTotal: auto.decisions.length,
+      candidates: auto.candidates.slice(0, limit),
+      ...(candidatesOmitted > 0 ? { candidatesOmitted } : {}),
+      decisions: auto.decisions
+        .filter((d) => page.some((i) => i.identity === d.identity || i.id === d.id))
+        .slice(0, limit),
+      ...(auto.claim
+        ? { claim: { ...auto.claim, insights: auto.claim.insights.slice(0, limit) } }
+        : {}),
+      ...(auto.unsafeIds ? { unsafeIds: auto.unsafeIds.slice(0, limit) } : {}),
+    },
+  };
+}
+function insightReport(d: TriageDetect, items: InsightOutcome['items'] = []) {
+  return [
+    autoInsightReport(d.insights, d.auto!.decisions, items),
+    ...(d.insightsOmitted
+      ? [
+          '',
+          `${d.insightsOmitted} more not shown. Unacted improvements remain available on the next visit.`,
+        ]
+      : []),
+  ].join('\n');
+}
+async function classificationState(ctx: StepContext, d: TriageDetect): Promise<AutoDetect> {
+  // A bounded display page is never a classifier input. Recompute from the journal's
+  // pinned claim (when present) and current inventory, including full host safety probes.
+  return d.auto!.candidatesOmitted
+    ? detectAutoInsights(ctx, await collectInsights(ctx, true), d.worktreePath)
+    : d.auto!;
 }
 
 export function buildInsightPrompt(d: TriageDetect, chosen: Insight[], batchId: string): string {
@@ -169,7 +230,21 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         (r) => r.batchId === checkpoint.batchId && r.stage === 'outcome',
       )?.mode !== 'auto_08e';
     ctx.throwIfCancelled();
-    if (checkpoint && (!automatic || manualCheckpoint))
+    // A manual page with omitted decisions must revisit them after its checks. Normal
+    // manual checkpoints (and OFF mode) still complete without another selection.
+    const source =
+      manualCheckpoint && checkpoint
+        ? await ctx.db.query.taskSteps.findFirst({
+            where: and(
+              eq(schema.taskSteps.id, checkpoint.sourceStepRow),
+              eq(schema.taskSteps.taskId, ctx.taskId),
+            ),
+            columns: { detectOutput: true },
+          })
+        : null;
+    ctx.throwIfCancelled();
+    const remainingPage = (source?.detectOutput as TriageDetect | null)?.auto?.candidatesOmitted;
+    if (checkpoint && (!automatic || (manualCheckpoint && !remainingPage)))
       return {
         worktreePath: ctx.workspacePath,
         sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -186,14 +261,18 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const worktreePath = automatic ? ctx.workspacePath : (wt?.worktreePath ?? ctx.workspacePath);
     const insights = await collectInsights(ctx, automatic);
     const auto = automatic ? await detectAutoInsights(ctx, insights, worktreePath) : undefined;
+    const display = auto
+      ? insightDisplay(insights, auto)
+      : { insights, auto: undefined, insightsOmitted: undefined };
     return {
-      ...(auto ? { auto } : {}),
+      ...(display.auto ? { auto: display.auto } : {}),
+      ...(display.insightsOmitted ? { insightsOmitted: display.insightsOmitted } : {}),
       ...(checkpoint ? { insightCheckpoint: checkpoint } : {}),
       worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
-      insights,
+      insights: display.insights,
     };
   },
 
@@ -209,7 +288,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         infoSections: [
           {
             title: 'Insight classifications',
-            body: autoInsightReport(detected.insights, detected.auto.decisions),
+            body: insightReport(detected),
             defaultOpen: true,
           },
         ],
@@ -222,7 +301,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
             infoSections: [
               {
                 title: 'Insight classifications',
-                body: autoInsightReport(detected.insights, detected.auto.decisions),
+                body: insightReport(detected),
                 defaultOpen: true,
               },
             ],
@@ -232,6 +311,11 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         `Agents surfaced ${detected.insights.length} optional improvement(s) during this run.`,
         'Select any to implement now (leave all unchecked to skip). Selected items are applied by',
         'one agent and re-verified at the next gate.',
+        ...(detected.auto?.candidatesOmitted
+          ? [
+              `${detected.auto.candidatesOmitted} more not shown. Unacted improvements remain available on the next visit.`,
+            ]
+          : []),
       ].join('\n'),
       fields: [
         {
@@ -258,7 +342,8 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     async selectAgents({ ctx, detected, formValues }) {
       const d = detected as TriageDetect;
       assertAutoVersion(d.auto);
-      if (d.auto?.mode === 'classify') return startAutoClassification(ctx, d.auto);
+      if (d.auto?.mode === 'classify')
+        return startAutoClassification(ctx, await classificationState(ctx, d));
       if (d.auto?.mode === 'settled') return [];
       if (d.insightCheckpoint && !d.auto) return [];
       const selected = selectOfferedInsights(
@@ -314,7 +399,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     if (d.auto?.mode === 'classify') {
       const classified = await finishAutoClassification(
         ctx,
-        d.auto,
+        await classificationState(ctx, d),
         args.agentMiningResults ?? [],
         args.miningWaveExhausted === true,
       );
@@ -329,6 +414,21 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         ),
         ...classified.result.items,
       ];
+      if (
+        d.insightsOmitted ||
+        d.auto.candidatesOmitted ||
+        d.auto.decisionsTotal != null ||
+        d.auto.decisions.length > INSIGHTS_AT_GATE
+      ) {
+        d.auto.decisionsTotal = (await loadAutoHistory(ctx.db, ctx.taskId)).results.reduce(
+          (n, r) => n + r.items.length,
+          0,
+        );
+        ctx.throwIfCancelled();
+        d.auto.decisions = d.auto.decisions
+          .filter((c) => d.insights.some((i) => i.identity === c.identity || i.id === c.id))
+          .slice(0, INSIGHTS_AT_GATE);
+      }
       d.auto.stopReason = 'no_new_consequential';
       selected = automaticSelection(classified.claim, classified.result);
     }
@@ -421,26 +521,40 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     }
     ctx.throwIfCancelled();
     ctx.logger.info(
-      { found: d.insights.length, selected: selected.length, implemented: outcome.implemented },
+      {
+        found: d.insights.length + (d.insightsOmitted ?? 0),
+        selected: selected.length,
+        implemented: outcome.implemented,
+      },
       'insight triage complete',
     );
     return {
       ...(d.auto
         ? {
-            findingsSummary: autoInsightReport(d.insights, d.auto.decisions, outcome.items),
+            findingsSummary: insightReport(d, outcome.items),
             automatic: {
               version: 1 as const,
               roundsStarted:
                 d.auto.roundsStarted + (d.auto.claim ? 0 : d.auto.mode === 'classify' ? 1 : 0),
               stopReason: d.auto.stopReason,
-              classified: d.auto.decisions.length,
+              classified: d.auto.decisionsTotal ?? d.auto.decisions.length,
             },
           }
         : {}),
-      insightsFound: d.insights.length,
+      insightsFound: d.insights.length + (d.insightsOmitted ?? 0),
       selected,
-      skipped: d.insights.length - selected.length,
+      skipped: d.insights.length + (d.insightsOmitted ?? 0) - selected.length,
       ...outcome,
+      ...(d.auto && selected.length > INSIGHTS_AT_GATE
+        ? {
+            selected: selected.slice(0, INSIGHTS_AT_GATE),
+            selectedOmitted: selected.length - INSIGHTS_AT_GATE,
+            items: outcome.items.slice(0, INSIGHTS_AT_GATE),
+            itemsOmitted: Math.max(0, outcome.items.length - INSIGHTS_AT_GATE),
+            changes: outcome.changes.slice(0, INSIGHTS_AT_GATE),
+            changesOmitted: Math.max(0, outcome.changes.length - INSIGHTS_AT_GATE),
+          }
+        : {}),
       ...(continuation ? { continuation } : {}),
       ...(d.insightCheckpoint ? { insightCheckpoint: d.insightCheckpoint } : {}),
     };
