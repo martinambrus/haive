@@ -202,7 +202,7 @@ recommendation results alone. A submit that omits the new field remains valid an
 choices park even with auto-continue on. This includes in-flight tasks whose pre-answers
 already hold that legacy empty preset. A type's deliberate `{selectedInsights: []}` 08e
 preset has the same shape and is ignored too. Saved answers and a deliberate empty submit still
-pass, and manual entry dispatches no classifier. Existing parked schemas need no data
+pass, and manual entry builds no prompt and starts no CLI invocation. Existing parked schemas need no data
 migration. Rollback reverts application code and retains the default-false column; never
 edit or remove an applied migration.
 
