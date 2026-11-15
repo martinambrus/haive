@@ -323,11 +323,11 @@ as content not retained, never replaced by a later file. Settled changed-content
 both manifests remain durable. An interrupted or ownership-lost pass is not captured. Missing or undecodable manifests
 also read as not captured, without preventing other passes from loading.
 
-Both event writes lock invocation, owned step and task in that order, then storage admission
+Live capture event writes lock invocation, owned step and task in that order, then storage admission
 where needed; repository reads and policy resolution happen outside those transactions.
 Lookups start at the invocation primary key and always constrain events by task. A replay
 rechecks its event under the invocation lock. A begin that lost ownership records not captured;
-a finish that lost ownership publishes no complete after record. Required event/blob write
+a finish that lost ownership publishes only an unavailable, task-tainting after reference. Required event/blob write
 failures prevent dispatch/settlement rather than becoming best-effort.
 
 `_test-paths.ts` covers JS/TS, PHP, Python, Go `_test.go`, Ruby `_spec.rb` and `spec/`,
@@ -377,3 +377,40 @@ compile once per capture, finish or load; only changed paths are evaluated durin
 The minute sweep's independent expiry pass removes up to 100 live contents older than
 30 days per tick through the partial index, leaving hashes and expiry stamps; missing,
 budgeted or expired content is explicitly hash-only. See [Worker restarts](worker-restarts.md).
+
+Before a changed-content blob write, the committed-secret scanner redacts every
+nominated line, independent of filename, policy allow-list or masking toggle.
+Private-key bodies are withheld through the matching END marker or EOF. The same
+scanner runs before hydrating legacy blob content for display. Non-secret text bytes at
+write remain untouched. Binary repair content (NUL or invalid UTF-8) is replaced
+in full with the withholding marker at write and read, never retained raw; its original measured hash remains. Stored content hashes continue
+identifying the ORIGINAL measured file, not its redacted display: different edits must not alias when their
+credential lines redact alike. Original hashes remain a possible offline guess
+target; changing that identity scheme is separate work.
+
+An unsettled pass that can no longer finish is unavailable evidence and taints later
+content retention. Before another capture or an evidence read, reconciliation finds
+before references without after references. An ended timestamp alone proves only
+that the CLI stopped, not that its capture is abandoned: in the normal DAG review
+loop, beginning issue X's next coder can precede issue Z's ended coder being ingested.
+An ended pass still owning its step and task epoch stays open for its normal finish,
+retains legitimate changed content, and does not taint the task.
+
+Reconciliation closes only terminal invocations that were superseded or lost their
+step/task ownership (a pending, skipped or failed step, a failed/cancelled/completed
+task, or a changed orchestration epoch), writing a `not captured` after reference
+with `protectedChanged: true`. A finish that loses ownership uses the same fallback.
+This is required during ordinary Stop/Retry flow as well as after a crash: it still
+works when Stop/Retry prevents the runner from selecting the invocation again or
+worker memory was lost. It takes the invocation lock, then checks an unsuperseded
+pass's step and task under the same ownership locks as finish, rechecks for an
+existing after event, writes no task/step state, and never reads the reused workspace.
+Active invocations are left open. Closure is idempotent and required write failures
+propagate.
+
+A live capture whose after endpoint is incomplete also taints the task, even when
+no protected endpoint can be identified from its partial manifest.
+
+No backfill rewrites legacy blob rows or already-built form snapshots. Live legacy
+blob reads are rechecked, including the whole-blob binary/NUL rule; stored old content
+remains until normal expiry or eviction under the existing 30-day retention policy.

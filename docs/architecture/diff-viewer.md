@@ -84,3 +84,12 @@ whitespace, Unicode and marker grouping. `commit-diff-viewer.test.tsx` draws the
 the DOM-less test renderer for the unreadable and link states. `tests/e2e/tasks/commit-diff.spec.ts`
 exercises the real task page with a completed fixture and a mocked artifact: both views, marker
 navigation, scroll synchronisation, fullscreen, file switching and narrow-screen containment.
+
+All four commit/knowledge artifact names share credential redaction at build and
+serve time, including synthesized learning extras. A `contentWithheld` entry is
+read-only and its `editPath` is removed so the viewer cannot replace a safe preview
+with unredacted live content or save the marker over actual file bytes. For a still
+editable file, the viewer also rechecks fetched live text: credentials introduced
+after the snapshot disable editing and leave the safe artifact preview visible.
+Malformed or partial artifacts render a valid withheld entry with the policy marker,
+not a JSON parse error. See [Workflow commits](workflow-commits.md).
