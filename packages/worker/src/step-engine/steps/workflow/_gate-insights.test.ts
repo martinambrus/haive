@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import gateFixture from '../../../../test/fixtures/insight-gate-base.json' with { type: 'json' };
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
+import { loadInsightBatchRecords } from './_insight-batch.js';
 import {
   INSIGHTS_AT_GATE,
   gateInsights,
@@ -440,13 +442,27 @@ describe('journal-backed acted insights', () => {
       expect((await loadUnactedInsights(db, 't1')).insights).toHaveLength(3);
     },
   );
-  it('refuses unknown stored protocol versions', async () => {
-    const db = tableDb(
-      [{ stepId: 'review', raw }],
-      [],
-      [],
-      [{ ...record('unconfirmed'), protocolVersion: 2 }],
-    );
-    await expect(loadUnactedInsights(db, 't1')).rejects.toThrow(/Unsupported/);
-  });
+  it.each([
+    { ...record('applied'), protocolVersion: 2 },
+    { ...record('applied'), notes: { secret: 'payload-must-not-be-logged' } },
+  ])(
+    're-offers insights for unreadable journal records without leaking payloads',
+    async (payload) => {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      try {
+        const db = tableDb([{ stepId: 'review', raw }], [], [], [payload]);
+        const out = await loadUnactedInsights(db, 't1');
+        expect(out.insights).toHaveLength(3);
+        expect(out.insights.every((i) => !i.picked)).toBe(true);
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn).toHaveBeenCalledWith(
+          { taskId: 't1' },
+          'Skipping unreadable insight batch in acted projection; items remain unacted',
+        );
+        await expect(loadInsightBatchRecords(db, 't1')).rejects.toThrow();
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
 });

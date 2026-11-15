@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import type { Insight, LoadedInsight } from '@haive/shared/step';
 import type { StepContext } from '../../step-definition.js';
 import { lockOwnedStep, StepSupersededError } from '../../step-ownership.js';
@@ -169,6 +170,7 @@ export function readInsightBatchRecord(payload: unknown): InsightBatchRecord {
 export async function loadInsightBatchRecords(
   db: Database,
   taskId: string,
+  options: { skipUnreadable?: boolean } = {},
 ): Promise<InsightBatchRecord[]> {
   const rows = await db
     .select({ payload: schema.taskEvents.payload })
@@ -179,7 +181,21 @@ export async function loadInsightBatchRecords(
         eq(schema.taskEvents.eventType, INSIGHT_BATCH_EVENT),
       ),
     );
-  return rows.map((row) => readInsightBatchRecord(row.payload));
+  const records: InsightBatchRecord[] = [];
+  for (const row of rows) {
+    try {
+      records.push(readInsightBatchRecord(row.payload));
+    } catch (err) {
+      if (!options.skipUnreadable) throw err;
+      // The projection may re-offer an item; writes and recovery must still refuse it.
+      // Do not log parse errors: validation diagnostics can contain agent-authored text.
+      logger.warn(
+        { taskId },
+        'Skipping unreadable insight batch in acted projection; items remain unacted',
+      );
+    }
+  }
+  return records;
 }
 
 /** Required state: lock the source row before checking for a duplicate, then hold the task

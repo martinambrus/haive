@@ -209,7 +209,7 @@ export async function loadUnactedInsights(
     .where(
       and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '08e-insights-triage')),
     );
-  const journal = await loadInsightBatchRecords(db, taskId);
+  const journal = await loadInsightBatchRecords(db, taskId, { skipUnreadable: true });
   const acted = new Set<string>();
   for (const record of journal) {
     if (record.stage !== 'outcome') continue;
