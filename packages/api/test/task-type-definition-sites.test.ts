@@ -111,6 +111,7 @@ describe('POST /tasks pins the run list', () => {
         repositoryId: REPO,
       });
       expect(res.status).toBe(201);
+      expect(((await res.json()) as { task: unknown }).task).not.toHaveProperty('dataEdgePlan');
       expect(h.definition).toHaveBeenNthCalledWith(1, expect.anything(), type, { generic: true });
       expect(h.definition).toHaveBeenNthCalledWith(2, expect.anything(), type, {
         generic: true,
@@ -265,5 +266,30 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
     expect(fake.rows(schema.tasks)).toHaveLength(0);
     expect(fake.rows(schema.taskEvents)).toHaveLength(0);
     expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+it('PATCH /tasks/:id omits dataEdgePlan while retaining the stored immutable pin', async () => {
+  const { fake, created } = world();
+  const res = await post('/tasks', {
+    type: 'workflow',
+    title: 'before',
+    description: 'do it',
+    repositoryId: REPO,
+  });
+  expect(res.status).toBe(201);
+  const task = created()[0]!;
+  const updated = await app.request(`/tasks/${task.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'after' }),
+  });
+  expect(updated.status).toBe(200);
+  const body = (await updated.json()) as { task: Record<string, unknown> };
+  expect(body.task).toMatchObject({ id: task.id, title: 'after' });
+  expect(body.task).not.toHaveProperty('dataEdgePlan');
+  expect(fake.rows(schema.tasks).find((r) => r.id === task.id)!.dataEdgePlan).toEqual({
+    version: 3,
+    fingerprint: 'locked-pin',
   });
 });

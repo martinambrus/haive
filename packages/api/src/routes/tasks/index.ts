@@ -905,9 +905,10 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (queued) await enqueueStart(task.id, userId);
 
+  const { dataEdgePlan: _dataEdgePlan, ...responseTask } = queued ?? task;
   return c.json(
     {
-      task: queued ?? task,
+      task: responseTask,
       ...(task.derivedRunPlan != null
         ? { warnings: derivedTaskWarnings(task.derivedRunPlan) }
         : {}),
@@ -1401,7 +1402,8 @@ taskRoutes.patch('/:id', async (c) => {
     }
   }
 
-  return c.json({ task: updated[0] });
+  const responseTask = updated[0] && (({ dataEdgePlan: _dataEdgePlan, ...row }) => row)(updated[0]);
+  return c.json({ task: responseTask });
 });
 
 taskRoutes.post('/:id/action', async (c) => {

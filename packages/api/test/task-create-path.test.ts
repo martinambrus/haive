@@ -149,6 +149,7 @@ const catalogRow = (stepId: string, dispatchesCli = false) => ({
   source: 'core',
   title: stepId,
   workflowType: 'workflow',
+  stepIndex: STEP_IDS.indexOf(stepId),
   dispatchesCli,
   allowSkip: false,
   providerSensitive: false,

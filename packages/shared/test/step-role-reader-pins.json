@@ -1566,5 +1566,21 @@
     "value": "@role-alias:entry",
     "count": 1,
     "reason": "Core reader resolves a named spec input from the immutable v3 consumer pin, with canonical identity for legacy tasks."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.input",
+    "context": "Object.keys",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Names the canonical input in payload-free fallback diagnostics for a declaration absent from an otherwise valid v3 pin; producer selection remains canonical."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.input",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Names the canonical input in payload-free fallback diagnostics for a declaration absent from an otherwise valid v3 pin; producer selection remains canonical."
   }
 ]

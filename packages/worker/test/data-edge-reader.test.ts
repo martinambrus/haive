@@ -155,12 +155,15 @@ it.each(['input', 'consumer'] as const)(
         ['done', { findings: ['historical finding'] }],
       ] as const) {
         put(draft, 3, output, status);
-        for (const input of ['draft', SPEC_ROLES.draft] as const) {
+        for (const readInput of [
+          () => readRole(ctx, 'draft'),
+          () => readRole(ctx, SPEC_ROLES.draft),
+        ]) {
           fake.patch(schema.tasks, taskId, { dataEdgePlan: null });
-          const canonical = await readRole(ctx, input);
+          const canonical = await readInput();
           fake.patch(schema.tasks, taskId, { dataEdgePlan: pin });
           log.mockClear();
-          expect(await readRole(ctx, input)).toEqual(canonical);
+          expect(await readInput()).toEqual(canonical);
           expect(log).toHaveBeenCalledExactlyOnceWith(
             { taskId, consumer, input: 'draft' },
             'data input absent from v3 pin; reading canonically',

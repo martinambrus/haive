@@ -1810,7 +1810,9 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         });
       });
       await locked;
-      const creating = definitionForCreate(db, 'tt-derived', { generic: true });
+      const creating = db.transaction((tx) =>
+        definitionForCreate(tx, 'tt-derived', { generic: true, locked: true }),
+      );
       try {
         await waitForLock('LOCK TABLE');
       } finally {

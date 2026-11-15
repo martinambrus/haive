@@ -64,18 +64,20 @@ const defRow = (slug: string, source: string) => ({
 
 const acme = { moduleId: 'acme', name: 'Acme', missingAt: null, deactivatedAt: null };
 
-// Static and derived admission both hold their catalog snapshot through INSERT.
+// Model both ordinary preview reads and the optional INSERT-admission row lock.
 const handle = (rows: unknown[], modules: unknown[] = [acme]) => {
+  const result = (values: unknown[]) =>
+    Object.assign(Promise.resolve(values), { for: async () => values });
   const tx = {
     execute: async () => [{ timeout: '0' }],
     transaction: async (run: (t: unknown) => unknown) => run(tx),
     select: () => ({
       from: (table: unknown) =>
         table === schema.stepCatalog
-          ? { orderBy: () => ({ for: async () => [] }) }
+          ? { orderBy: () => result([]) }
           : table === schema.modules
-            ? { where: () => ({ for: async () => modules }) }
-            : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
+            ? { where: () => result(modules) }
+            : { where: () => ({ limit: () => result(rows) }) },
     }),
   };
   return tx as unknown as Pick<Database, 'select' | 'execute' | 'transaction'>;
