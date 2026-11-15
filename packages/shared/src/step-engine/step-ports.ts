@@ -12,6 +12,8 @@ export interface StepPort {
   alternatives?: readonly { role: string; contract: { id: string; version: number } }[];
 }
 export interface StepPortProjection {
+  /** An unselected task shows candidate metadata, never pinned bindings. */
+  candidatesOnly?: boolean;
   candidates: { executionPath: string | null; graph: StepPortGraph }[];
 }
 export interface PortNode {

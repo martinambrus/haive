@@ -50,9 +50,10 @@ export function StepPortView({
     return () => controller.abort();
   }, [canvas, key]);
   const candidates = result?.key === key ? result.data.candidates : [];
-  const graph =
-    candidates.find((candidate) => candidate.executionPath === (executionPath ?? null))?.graph ??
-    candidates[0]?.graph;
+  const loaded = result?.key === key;
+  const graph = candidates.find(
+    (candidate) => candidate.executionPath === (executionPath ?? null),
+  )?.graph;
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex gap-2" role="group" aria-label="Step view">
@@ -80,7 +81,12 @@ export function StepPortView({
           {error && <FormError message={error} />}
           {!error && !graph && (
             <p role="status" className="text-sm text-neutral-400">
-              Loading ports…
+              {loaded ? 'No port graph is available for the selected path.' : 'Loading ports…'}
+            </p>
+          )}
+          {loaded && result.data.candidatesOnly && (
+            <p role="status" className="text-sm text-neutral-400">
+              Path not selected. Candidate ports only; bindings are not pinned.
             </p>
           )}
           {graph && <StepPortCanvas graph={graph} onReorder={disabled ? undefined : onReorder} />}

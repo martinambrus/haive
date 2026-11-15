@@ -110,3 +110,23 @@ describe('owner-scoped task port graph', () => {
     expect(graph.nodes.some((n: { id: string }) => n.id === STEP_ROLES.codeReview)).toBe(false);
   });
 });
+
+it('shows only the unselected candidate without replacement bindings', async () => {
+  const fixture = replacementAdmissionFixture();
+  const diagnostics = inspectDerivedDefinition(fixture.definition, fixture.base, fixture.catalog);
+  const candidate = diagnostics.plan!.candidates.find((c) => c.executionPath === null)!;
+  setup({
+    type: 'derived-test',
+    derivedRunPlan: diagnostics.plan,
+    executionPath: null,
+    runListSnapshot: candidate.stepIds,
+  });
+  const response = await app.request(`/tasks/${TASK}/ports`);
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as StepPortProjection;
+  expect(body.candidates).toHaveLength(1);
+  expect(body.candidates[0]!.executionPath).toBeNull();
+  expect(body.candidates[0]!.graph.nodes.find((n) => n.id === fixture.payload)!.outputs).toEqual(
+    [],
+  );
+});

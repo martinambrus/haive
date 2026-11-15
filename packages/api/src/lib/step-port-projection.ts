@@ -29,16 +29,14 @@ export function projectTaskPorts(
     for (const role of Object.values(STEP_ROLES))
       readStepRole(task, role, (binding) => binding, plan);
     return {
+      candidatesOnly: task.executionPath == null,
       candidates: plan.candidates
-        .filter(
-          (candidate) =>
-            task.executionPath == null || candidate.executionPath === task.executionPath,
-        )
+        .filter((candidate) => candidate.executionPath === (task.executionPath ?? null))
         .map((candidate) => ({
           executionPath: candidate.executionPath,
           graph: projectStepPorts(candidate.stepIds, {
             labels,
-            roleBindings: candidate.roleBindings,
+            roleBindings: task.executionPath == null ? undefined : candidate.roleBindings,
           }),
         })),
     };

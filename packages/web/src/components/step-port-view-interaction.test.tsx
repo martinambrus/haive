@@ -57,3 +57,18 @@ describe('port view toggle and request freshness', () => {
     expect(textOf(view.tree())).not.toContain('new graph');
   });
 });
+
+it('shows an explicit state when the selected path is absent instead of borrowing another graph', async () => {
+  h.get.mockResolvedValue(graph('wrong path'));
+  const view = createRenderer(() => (
+    <StepPortView request={{ path: '/tasks/t/ports' }} executionPath="quick_bugfix">
+      <div>List</div>
+    </StepPortView>
+  ));
+  fire.click(buttons(view.tree(), /^canvas$/)[0]!);
+  view.draw();
+  await Promise.resolve();
+  view.draw();
+  expect(textOf(view.tree())).toContain('No port graph is available for the selected path.');
+  expect(textOf(view.tree())).not.toContain('wrong path');
+});
