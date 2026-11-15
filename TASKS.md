@@ -690,7 +690,7 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191 and #1208 (+25)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191, #1208 and #1211 (+31)
 
 status: parked (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); items 10 and 11 resolved 2026-11-15 in #1195; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
@@ -721,6 +721,12 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 23. (#1208) Role pin reads (`loadRoleTaskPin`) are not cached per request or per step; gate 2 and the digest read the task row more than once. LOW, perf.
 24. (#1208) The step-role fixtures are triplicated across shared, api and worker tests (`step-role-fixtures.ts`). LOW, hygiene.
 25. (#1208) The whole-repository role scan reads every candidate file sequentially (~4 s alone, past 20 s on a loaded CI runner, now bounded at 60 s); a substring pre-check or git pathspec would cut it. LOW.
+26. Decoder skip guard after #1211: the derived-plan decoder's skip guard has no direct control (DP4R review-2, low).
+27. Refusal message wording for an unsupported pinned producer is generic (DP4R review-2, low).
+28. Extra plan parses partially fixed at task-queue.ts ~:979; `derivedCandidateIds` still parses the plan again (DP4R review-2/review-3 L1, low).
+29. The role source scan walks the tree three times; fold into one pass (DP4R review-2 B-5, low).
+30. Contract reference formatting is duplicated in two places (DP4R review-2 B-6, low).
+31. Parse-count test title overclaims what it pins (DP4R review-3 L1, coverage); `llm.skipIf` kept by design (L2); one dead guard remains (L3).
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+13)
 
@@ -929,7 +935,7 @@ Plan: `docs/plans/typed-step-ports.md` (archived when PR1 starts; session copy `
 
 ### T684 · Agent isolation for committed-snapshot dispatch (owner decision)
 
-status: open: needs owner decision · kind: design · found: #1210 review-1b (B6) · priority: P3
+status: decided 2026-11-15 (owner): apply the same `agentIsolationApplies` rule as live dispatch; ship it with the first snapshot-ref issuer, not before (needs tmpfs masks over agent dirs inside the read-only snapshot mount, checked against the snapshot integrity checks; xhigh review) · kind: design · found: #1210 review-1b (B6) · priority: P3
 
 A mining agent dispatched against a committed snapshot runs with per-call agent isolation off (`worker/src/orchestrator/dispatcher.ts` ~:447). The snapshot is read-only and host-owned, and the agent's tool profile is clamped to `rag_only`, so the live checkout is not reachable; isolation would additionally give each call an empty agent directory and a pasted persona (see agent-isolation.md). Question: keep it off for snapshots (simpler, persona read once under the scratch lock), or apply the same `agentIsolationApplies` rule as live dispatch? No production issuer exists yet, so nothing runs this path today.
 
@@ -2263,6 +2269,7 @@ All low unless marked.
 
 ## Done
 
+- Contracted review and audit replacements for derived task types (#1211, 2332a1ba0): a module step declaring `replaces` + a matching output contract can fill the review or audit role in a derived type; v2 plan pins `roleBindings`; host keeps fix/skip policy; bound replacement output validated, failures disclosed incomplete. Lows to T679.
 - Committed snapshot mounts (#1210, 103075277): mining agents with a snapshot ref run against an immutable host-owned view verified before reservation and before execution (one held-fd `git cat-file --batch-command` child, shallow clones supported, alternates/links/gitlinks/`.git`/extra files refused, exact 0444/0555 modes, inventory cap shared by issue and resolve); budget starts after the scratch lock; snapshot agents get `rag_only`, no git MCP, no LSP; transient DB faults rethrown; failures fail the step. Every ref is NULL in production until an issuer lands. Lows T683; isolation decision T684.
 - Insight auto-action switch (#1212, 863a369bf): `tasks.auto_act_on_insights` (migration 0243, default false) written by 06; remembered only from the owner's last completed task on the same repository and type; hidden and inert (`INSIGHT_AUTO_ACTION_AVAILABLE` false, answers clamp to false, only an explicit type preset records true); parked 06 forms upgraded idempotently; 06 no longer writes the empty 08e pre-answer, so insight choices park under auto-continue. T681 PR2. PR4 must replace the already-persisted hidden field when the switch becomes available; `loadLastCompletedFormValues` (step-runner ~:244) still orders NULL `completed_at` first (PRE-EXISTING, minor).
 - Shared insight loader (#1209, 7c10887b1): `_insight-loader.ts` owns the parser and source loader; `loadUnactedInsights` (unlimited by default, picked filtered before the limit, exact omissions, `findingIdentity` before clipping, stable occurrence ids, additive `sourceRefs`); both gates persist through one bounded projection byte-identical to base; task-bound host service `ctx.host.loadUnactedInsights`. T681 PR1 and DPA P2.
