@@ -446,12 +446,14 @@ describe('a cli run completion', () => {
       const { db, writes } = fakeDb({ finalized: mode === 'redelivery' });
       if (mode === 'failure') stubs.executeByKind.mockRejectedValue(new Error('scan failed'));
       else stubs.executeByKind.mockResolvedValue(ok);
+      let endedBeforeCleanup = false;
       stubs.cleanupScratch.mockImplementation(async () => {
-        if (mode !== 'redelivery') expect(runWrites(writes).some((w) => w.set.endedAt)).toBe(true);
+        endedBeforeCleanup = runWrites(writes).some((w) => w.set.endedAt);
         return false;
       });
       await handleCliExecJob(db, { ...base, kind: 'cli', taskStepId: null }).catch(() => undefined);
       expect(stubs.cleanupScratch).toHaveBeenCalledWith(db, base.taskId);
+      if (mode !== 'redelivery') expect(endedBeforeCleanup).toBe(true);
     },
   );
 
