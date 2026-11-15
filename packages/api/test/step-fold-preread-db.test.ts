@@ -1,6 +1,7 @@
 import { eq, sql, type SQL } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import type { StepDefinition } from '@haive/shared/step';
 
 const url = process.env.STEP_FOLD_PREREAD_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/step_fold_preread_test'))
@@ -32,6 +33,20 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
+// The cross-service submission control drives the real worker without Redis or Docker.
+vi.mock('../../worker/src/redis.js', async (original) => ({
+  ...(await original<object>()),
+  getBullRedis: () => ({}),
+}));
+vi.mock('bullmq', async (original) => ({
+  ...(await original<object>()),
+  Queue: class {
+    async add() {
+      return { id: 'test' };
+    }
+    async close() {}
+  },
+}));
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (id: string) => {
     h.kills.push(id);
@@ -467,6 +482,112 @@ describe.skipIf(!url)(
         seeded + (window.after - parkedAt.getTime()),
       );
     };
+
+    it(
+      'INS5 owner approve then reject during one apply accepts only the first decision',
+      async () => {
+        // Runtime import keeps worker source outside the API TypeScript root, as in park-fold-db.
+        const workerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
+          .pathname;
+        const { advanceStep } = await import(workerPath);
+        const gateId = '09-gate-2-verify-approval';
+        const taskId = await seedTask('running', { currentStepId: gateId, currentRound: 0 });
+        const row = await seedStep(taskId, { stepId: gateId, status: 'pending', detectOutput: {} });
+        await db
+          .insert(schema.taskEvents)
+          .values({
+            taskId,
+            taskStepId: row.id,
+            eventType: 'insight.check',
+            payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+          });
+        let entered!: () => void;
+        const inApply = new Promise<void>((resolve) => (entered = resolve));
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const apply = vi.fn(
+          async (_ctx: unknown, args: { formValues: Record<string, unknown> | null }) => {
+            entered();
+            await held;
+            return { decision: args.formValues!.decision };
+          },
+        );
+        const step: StepDefinition = {
+          metadata: {
+            id: gateId,
+            index: 9,
+            workflowType: 'workflow',
+            title: 'Gate 2',
+            description: '',
+            requiresCli: false,
+          },
+          form: () => ({
+            title: 'Gate 2',
+            fields: [
+              {
+                id: 'decision',
+                type: 'radio',
+                label: 'Decision',
+                required: true,
+                default: 'reject',
+                options: [
+                  { value: 'approve', label: 'Approve' },
+                  { value: 'reject', label: 'Reject' },
+                ],
+              },
+            ],
+          }),
+          apply,
+        };
+        const params = {
+          db,
+          taskId,
+          userId: USER,
+          repoPath: '/unused',
+          workspacePath: '/unused',
+          cliProviderId: null,
+          stepDef: step,
+          epoch: 3,
+          round: 0,
+          moduleDeactivation: null,
+        };
+        expect((await advanceStep(params)).status).toBe('waiting_form');
+        expect(
+          await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+            values: { decision: 'approve' },
+          }),
+        ).toMatchObject({ status: 200 });
+        const advancing = advanceStep({ ...params, formValues: { decision: 'reject' } });
+        try {
+          await inApply;
+          await expect(
+            post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+              values: { decision: 'reject' },
+            }),
+          ).rejects.toMatchObject({ status: 409, code: 'step_form_not_waiting' });
+        } finally {
+          release();
+          await advancing;
+        }
+        expect(await advancing).toMatchObject({ status: 'done', output: { decision: 'approve' } });
+        const saved = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, row.id),
+        });
+        expect(saved!.formValues).toMatchObject({ decision: 'approve' });
+        const events = await db.query.taskEvents.findMany({
+          where: eq(schema.taskEvents.taskId, taskId),
+        });
+        expect(events.filter((e) => e.eventType === 'step.form_submitted')).toMatchObject([
+          { payload: { userId: USER, generation: 0, decision: 'approve' } },
+        ]);
+        expect(
+          events.filter((e) => e.eventType === 'insight.check').map((e) => e.payload!.kind),
+        ).toEqual(['verify_failed', 'gate2_approved']);
+        expect(apply).toHaveBeenCalledOnce();
+        expect(h.jobs).toHaveLength(1);
+      },
+      TEST_TIMEOUT,
+    );
 
     it(
       'H1: the form submit adds the wait to the idle_ms a peer left, not to the one it read first',

@@ -3724,6 +3724,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
     // Values carried by the job can then only be a submit redelivered after it was applied.
     const continuing = row.status === 'waiting_cli' && current.formValues != null;
+    // A fresh latched answer is saved by the submit route, rather than trusted from
+    // the job. Close its form before apply just as the ordinary submitted path does.
+    if (insightHumanSubmission && !continuing) {
+      current = await updateRow(db, current.id, { status: 'running' });
+    }
     if (persistedSchema && submitted && !continuing) {
       const expanded = validateFormValues(persistedSchema, submitted);
       const validation = expanded.success
