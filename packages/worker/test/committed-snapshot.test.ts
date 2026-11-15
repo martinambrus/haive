@@ -1,4 +1,4 @@
-import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readFileNoFollow } from '@haive/shared/fs-safe';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { logger } from '@haive/shared/logger';
 import { runTool } from '../src/repo/tool-spawn.js';
@@ -37,6 +37,7 @@ vi.mock('../src/repo/tool-spawn.js', async (original) => ({
 
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<object>()),
+  lstatNoFollow: vi.fn((await original<typeof import('@haive/shared/fs-safe')>()).lstatNoFollow),
   readFileNoFollow: vi.fn(
     (await original<typeof import('@haive/shared/fs-safe')>()).readFileNoFollow,
   ),
@@ -59,6 +60,7 @@ beforeAll(async () => {
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'Test');
   await writeFile(join(repo, 'history'), 'first');
+  await chmod(join(repo, 'history'), 0o755);
   git('add', '.');
   git('commit', '-qm', 'first');
   await writeFile(join(repo, '.env'), secret);
@@ -414,6 +416,40 @@ describe('owned committed snapshot', () => {
     await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
       'SNAPSHOT_INVALID',
     );
+  });
+  it.each([
+    ['.env', 0o400],
+    ['.env', 0o666],
+    ['history', 0o511],
+    ['history', 0o777],
+  ] as const)('refuses changed tracked-file permissions %s %s', async (name, mode) => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const tree = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!.target
+      .workerRoot;
+    expect((await stat(join(tree, name))).mode & 0o777).toBe(name === '.env' ? 0o444 : 0o555);
+    await chmod(join(tree, name), mode);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+  });
+  it('refuses mode 0000 even when the host can still read the tracked bytes', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const actual =
+      await vi.importActual<typeof import('@haive/shared/fs-safe')>('@haive/shared/fs-safe');
+    // Root can read a mode-0000 file. Inject just its stat bits so this control also runs as non-root.
+    vi.mocked(lstatNoFollow).mockImplementation(async (anchor, rel, opts) => {
+      const info = await actual.lstatNoFollow(anchor, rel, opts);
+      return info && rel.endsWith('/tree/.env')
+        ? { ...info, stats: { ...info.stats, mode: info.stats.mode & ~0o777 } }
+        : info;
+    });
+    try {
+      await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+        'SNAPSHOT_INVALID',
+      );
+    } finally {
+      vi.mocked(lstatNoFollow).mockImplementation(actual.lstatNoFollow);
+    }
   });
   it.runIf(process.getuid?.() === 0)('refuses a foreign tree uid', async () => {
     const ref = await issueCommittedSnapshot(commitOid, options());

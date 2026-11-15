@@ -381,14 +381,14 @@ async function materialize(
       if (bytes > b.limits.maxBytes) throw new CommittedSnapshotError();
       const name = rel.slice(tree.length + 1),
         expected = tracked.get(name);
-      if (!expected) throw new CommittedSnapshotError();
+      if (!expected || (info.stats.mode & 0o7777) !== (expected.mode === '100755' ? 0o555 : 0o444))
+        throw new CommittedSnapshotError();
       const read = await readFileNoFollow(anchor, rel, { strict: true, maxBytes: expected.size });
       if (
         !read ||
         read.truncated ||
         read.data.length !== expected.size ||
-        objectHash('blob', read.data, expected.oid.length) !== expected.oid ||
-        (info.stats.mode & 0o111) !== (expected.mode === '100755' ? 0o111 : 0)
+        objectHash('blob', read.data, expected.oid.length) !== expected.oid
       )
         throw new CommittedSnapshotError();
       seen.add(name);
