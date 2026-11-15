@@ -29,3 +29,12 @@ const auditStep = {
   },
 } satisfies StepDefinition<{ path: string }, CodeAuditOutput>;
 void [codeAuditOutputSchema, badVersion, auditStep];
+
+export function invalidInsightOverrides(host: import('@haive/shared/step').StepHostServices) {
+  // @ts-expect-error The insight capability is task-bound.
+  void host.loadUnactedInsights({ taskId: 'foreign' });
+  // @ts-expect-error The insight capability is owner-bound.
+  void host.loadUnactedInsights({ userId: 'foreign' });
+  // @ts-expect-error Insight reads do not accept filesystem paths.
+  void host.loadUnactedInsights({ worktreePath: '/foreign' });
+}

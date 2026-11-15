@@ -15,6 +15,7 @@ import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
 import { loadTaskWorktreeDecision, decidedWorktreePath } from '../repo/task-worktree.js';
 import { checkHostCancellation, hostCall } from './host-call.js';
 import { readReviewDiff } from './review-diff.js';
+import { loadUnactedInsights } from './steps/workflow/_insight-loader.js';
 
 export class StepHostBindingError extends Error {
   constructor(reason: string) {
@@ -88,6 +89,14 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     }
   }
   return {
+    loadUnactedInsights(options) {
+      // Capture only supported options before awaiting; callers cannot retarget this capability.
+      const captured = { limit: options?.limit, includePicked: options?.includePicked };
+      return hostCall(ctx, async () => {
+        await verifyIdentity();
+        return loadUnactedInsights(ctx.db, ctx.taskId, captured);
+      });
+    },
     loadPreviousStepOutput(stepId) {
       return hostCall(ctx, async () => {
         await verifyIdentity();

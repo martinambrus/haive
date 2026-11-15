@@ -54,7 +54,7 @@ import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.
 import type { FileCoverage } from './_impl-changes.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
-import { insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import { INSIGHTS_AT_GATE, insightsRow, loadUnactedInsights } from './_gate-insights.js';
 import {
   REREAD_FAILED,
   houseRulesHoldApprove,
@@ -920,7 +920,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ? screenshotsManifest
       : null;
     const similar = await loadTaskSimilarSites(ctx.db, ctx.taskId);
-    const insights = await loadUnactedInsights(ctx.db, ctx.taskId);
+    const insights = await loadUnactedInsights(ctx.db, ctx.taskId, { limit: INSIGHTS_AT_GATE });
     const houseRules = await loadGateHouseRules(ctx.db, ctx.taskId, {
       withCodeReview: true,
       currentFingerprint: () => taskChangeFingerprint(ctx),

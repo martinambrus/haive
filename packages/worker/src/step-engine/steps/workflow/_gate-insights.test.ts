@@ -104,6 +104,7 @@ describe('loadUnactedInsights', () => {
   });
 
   it('caps the list and counts what the cap cuts', async () => {
+    expect(INSIGHTS_AT_GATE).toBe(30);
     const lines = Array.from(
       { length: INSIGHTS_AT_GATE + 5 },
       (_, n) => `- INSIGHT: Idea ${n} | f${n}.ts:1`,
@@ -140,9 +141,14 @@ describe('loadUnactedInsights', () => {
       ['D', false],
     ]);
     expect(out.omitted).toBe(1);
+    expect(await loadUnactedInsights(db, 't1', { limit: 2, includePicked: false })).toEqual(out);
     const all = await loadUnactedInsights(db, 't1', { includePicked: true });
     expect(all.insights.map((i) => i.picked)).toEqual([true, true, false, false, false]);
     expect(all.omitted).toBe(0);
+    expect(await loadUnactedInsights(db, 't1', { limit: 0, includePicked: true })).toEqual({
+      insights: [],
+      omitted: 5,
+    });
     const capped = await loadUnactedInsights(db, 't1', { includePicked: true, limit: 2 });
     expect(capped.insights.map((i) => i.title)).toEqual(['A', 'B']);
     expect(capped.omitted).toBe(3);

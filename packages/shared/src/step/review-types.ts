@@ -44,4 +44,43 @@ export interface Insight {
   title: string;
   location: string;
   description: string;
+  /** Physical sources, absent on legacy persisted snapshots. */
+  sourceRefs?: InsightSourceRef[];
+}
+
+export type InsightSourceRef =
+  | {
+      kind: 'invocation';
+      invocationId: string;
+      taskStepId: string;
+      stepId: string;
+      round: number;
+      superseded: boolean;
+    }
+  | {
+      kind: 'dag_withheld';
+      issueId: string;
+      stepId: '06c-dag-execute';
+      severity: 'high' | 'medium' | 'low' | null;
+    };
+
+export interface InsightLoadOptions {
+  /** Absent means unlimited. Must be a finite, safe, non-negative integer. */
+  limit?: number;
+  /** Include previously selected items, labelled picked; selection does not prove repair. */
+  includePicked?: boolean;
+}
+
+export interface LoadedInsight extends Insight {
+  /** Stable versioned hash of the complete case-insensitive title/location key. */
+  id: string;
+  /** findingIdentity over the full location/title, before presentation clipping. */
+  identity: string;
+  picked: boolean;
+}
+
+export interface InsightLoadResult {
+  insights: LoadedInsight[];
+  /** Eligible records cut by limit, after deliberately excluded picks are removed. */
+  omitted: number;
 }

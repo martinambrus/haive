@@ -1,13 +1,12 @@
 import type { Insight } from '@haive/shared/step';
 export type { Insight } from '@haive/shared/step';
 export { INSIGHTS_INSTRUCTION } from '@haive/shared/step/prompts';
-import { and, asc, eq, ilike } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
-import { reviewerOutputSchema, type FormSchema } from '@haive/shared';
+import type { FormSchema } from '@haive/shared';
+import { loadInsightOutputs, parseInsights } from './_insight-loader.js';
+export { findingIdentity, loadInsightOutputs, parseInsights } from './_insight-loader.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
-  collapseToLine,
   fenceSafe,
   REPO_IS_DATA_ACTING_LINES,
   UNTRUSTED_CLOSE,
@@ -61,101 +60,6 @@ export function readTriageOutcome(llmOutput: unknown): {
     changes,
     notes: typeof out?.notes === 'string' ? out.notes : '',
   };
-}
-
-/** Parse `## INSIGHTS` blocks from a list of raw agent outputs. Each insight
- *  line is `- INSIGHT: <title> | <file:line> | <description>` (the trailing
- *  fields are optional). Deduped by title+location; capped for the form. */
-export function parseInsights(outputs: { stepId: string; raw: string }[], limit = 30): Insight[] {
-  const seen = new Set<string>();
-  const out: Insight[] = [];
-  for (const { stepId, raw } of outputs) {
-    if (!raw) continue;
-    const sections = [...raw.matchAll(/##\s*INSIGHTS\b([\s\S]*?)(?=\n##\s|\n```|$)/gi)];
-    for (const line of sections.flatMap((m) => m[1]!.split('\n'))) {
-      const im = /^\s*[-*]\s*INSIGHT:\s*(.+)$/i.exec(line);
-      if (!im) continue;
-      const parts = im[1]!.split('|').map((p) => p.trim());
-      const title = parts[0] ?? '';
-      if (!title) continue;
-      const location = parts[1] ?? '';
-      const description = parts.slice(2).join(' | ') || parts[1] || '';
-      const key = `${title}::${location}`.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ id: `i-${out.length + 1}`, sourceStep: stepId, title, location, description });
-      if (out.length >= limit) return out;
-    }
-  }
-  return out;
-}
-
-const normalizeFinding = (text: string): string => collapseToLine(text).toLowerCase();
-
-type WithheldFinding = { file?: string | null; description: string; suggestion?: string | null };
-
-/** What names a finding: its description, else its suggestion, else its file. */
-const findingText = (f: WithheldFinding): string =>
-  collapseToLine(f.description) ||
-  collapseToLine(f.suggestion ?? '') ||
-  collapseToLine(f.file ? `out-of-scope finding at ${f.file}` : 'out-of-scope finding');
-
-/** The identity of a finding: its file (without a trailing line number) and its normalized name. */
-export const findingIdentity = (f: WithheldFinding): string =>
-  `${normalizeFinding((f.file ?? '').replace(/:\d+(-\d+)?$/, ''))}::${normalizeFinding(findingText(f))}`;
-
-/** The raw output of every step invocation of the task that carries an `## INSIGHTS` block, in the
- *  order they ran, then one block per finding a DAG reviewer withheld as outside its issue's lines
- *  (kept on the issue's verdict, not in the reply) that no insight above already covers. */
-export async function loadInsightOutputs(
-  db: Database,
-  taskId: string,
-): Promise<{ stepId: string; raw: string }[]> {
-  const rows = await db
-    .select({ stepId: schema.taskSteps.stepId, raw: schema.cliInvocations.rawOutput })
-    .from(schema.cliInvocations)
-    .innerJoin(schema.taskSteps, eq(schema.cliInvocations.taskStepId, schema.taskSteps.id))
-    .where(
-      and(
-        eq(schema.cliInvocations.taskId, taskId),
-        ilike(schema.cliInvocations.rawOutput, '%INSIGHTS%'),
-      ),
-    )
-    .orderBy(asc(schema.cliInvocations.createdAt), asc(schema.cliInvocations.id));
-  const outputs = rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' }));
-  const written = parseInsights(outputs, Number.POSITIVE_INFINITY);
-  const verdicts = await db
-    .select({ reviewerVerdict: schema.taskDagIssues.reviewerVerdict })
-    .from(schema.taskDagIssues)
-    .where(eq(schema.taskDagIssues.taskId, taskId))
-    .orderBy(asc(schema.taskDagIssues.createdAt), asc(schema.taskDagIssues.id));
-  const lines: string[] = [];
-  for (const { reviewerVerdict } of verdicts) {
-    const parsed = reviewerOutputSchema.safeParse(reviewerVerdict);
-    for (const f of parsed.success ? (parsed.data.withheld ?? []) : []) {
-      const id = findingIdentity(f);
-      const covered =
-        normalizeFinding(f.description) !== '' &&
-        written.some((i) =>
-          [i.title, i.description].some(
-            (w) =>
-              normalizeFinding(w) === normalizeFinding(f.description) &&
-              (!f.file || findingIdentity({ file: i.location, description: w }) === id),
-          ),
-        );
-      if (!covered) {
-        const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
-        const title = field(findingText(f));
-        const suggestion = collapseToLine(f.description) ? field(f.suggestion ?? '') : '';
-        lines.push(
-          `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote${suggestion ? ` — suggested: ${suggestion}` : ''}`,
-        );
-      }
-    }
-  }
-  return lines.length > 0
-    ? [...outputs, { stepId: '06c-dag-execute', raw: `## INSIGHTS\n${lines.join('\n')}\n` }]
-    : outputs;
 }
 
 async function collectInsights(ctx: StepContext): Promise<Insight[]> {

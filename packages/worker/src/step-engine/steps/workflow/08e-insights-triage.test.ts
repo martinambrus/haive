@@ -7,6 +7,8 @@ import {
   parseInsights,
   readTriageOutcome,
 } from './08e-insights-triage.js';
+import * as loader from './_insight-loader.js';
+import { loadUnactedInsights } from './_gate-insights.js';
 import type { StepContext } from '../../step-definition.js';
 
 /** Answers by TABLE: the invocations' raw output, then the DAG issues' reviewer verdicts. */
@@ -32,6 +34,12 @@ function tableDb(outputs: { stepId: string; raw: string }[], verdicts: unknown[]
 }
 
 describe('parseInsights', () => {
+  it('re-exports the one canonical parser, source loader, identity and selection loader', () => {
+    expect(parseInsights).toBe(loader.parseInsights);
+    expect(loadInsightOutputs).toBe(loader.loadInsightOutputs);
+    expect(findingIdentity).toBe(loader.findingIdentity);
+    expect(loadUnactedInsights).toBe(loader.loadUnactedInsights);
+  });
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
     const raw =
       '```json\n{"summary":"x"}\n```\n\n## INSIGHTS\n- INSIGHT: Extract helper | src/a.ts:10 | dedupe the two loops\n- INSIGHT: Add index | db/schema.ts:5 | speeds the query\n';
@@ -165,7 +173,7 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
     const stepId = 'module.example.review';
     const raw = '## INSIGHTS\n- INSIGHT: Extract helper | util.ts:3 | dedupe\n';
     const outputs = await loadInsightOutputs(tableDb([{ stepId, raw }], []), 't1');
-    expect(outputs).toContainEqual({ stepId, raw });
+    expect(outputs).toContainEqual(expect.objectContaining({ stepId, raw }));
     expect(parseInsights(outputs)[0]?.sourceStep).toBe(stepId);
   });
 

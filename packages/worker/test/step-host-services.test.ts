@@ -305,7 +305,7 @@ it('cannot retarget insight reads by mutating context or smuggling identity/path
   await expect(host.loadUnactedInsights()).rejects.toMatchObject({ name: 'StepHostBindingError' });
 });
 
-it('refuses insight loading cancelled before identity or after source reads', async () => {
+it('refuses insight loading cancelled before identity reads', async () => {
   const f = insightContext();
   const host = createStepHostServices(f.context);
   controller.abort();
@@ -340,4 +340,17 @@ it('checks cancellation after identity reads before touching insight sources', a
     TaskCancelledError,
   );
   expect(f.select).not.toHaveBeenCalled();
+});
+
+it('refuses a result when cancellation arrives with the final insight read', async () => {
+  const f = insightContext();
+  let reads = 0;
+  f.chain.then = (resolve) => {
+    if (++reads === 3) controller.abort();
+    return Promise.resolve([]).then(resolve);
+  };
+  await expect(createStepHostServices(f.context).loadUnactedInsights()).rejects.toBeInstanceOf(
+    TaskCancelledError,
+  );
+  expect(reads).toBe(3);
 });
