@@ -929,7 +929,7 @@ Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.
 
 ### T685 · Typed step ports: roles in addition to step ids (series, approved)
 
-status: approved 2026-11-15; PR1 in review as #1214 · kind: feature · found: owner request 2026-11-15 · priority: P2
+status: in progress (approved 2026-11-15; PR1 DONE #1214 f6fc8fb0e; PR2 canvas in build) · kind: feature · found: owner request 2026-11-15 · priority: P2
 
 Plan: `docs/plans/typed-step-ports.md` (archived when PR1 starts; session copy `~/.claude/plans/tranquil-hugging-willow.md`). Analysis: `.claude/tmp/codex-run/ROLE-S/codex-1/design.md` + `edge-index.md`. Owner decisions 2026-11-15: ports carry data only (no loop/skip/gate/commit power); spec is a stage chain (04 draft, 05 checked, 05a resolved) plus an effective-spec host adapter; node canvas (`@xyflow/react`) from the first UI PR; spec chain is the first port. PRs: 1 registry + spec chain (xhigh); 2 read-only canvas (high; CSP check); 3 universal v3 per-consumer pins, nullable task column (xhigh; after INS3b); 4 module/SDK/prompt ports + canvas binding (xhigh); 5 discovery/requirements/implementation summary (high); 6 checks and advisory results (xhigh); 7 optional fan-in. Physical step-id reads stay for gate forms, worktree/runtime, receipts/side effects, replay, migrations, insight inventory.
 
