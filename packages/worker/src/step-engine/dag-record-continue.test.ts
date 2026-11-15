@@ -1592,6 +1592,24 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
   ...patch,
 });
 
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it(`DGL-6 ${role} preserves persistent MCP interruption details without counting faults`, async () => {
+    const h = auxiliaryHarness(role);
+    const errorMessage = 'MCP server failed to start: catalog connection refused';
+    for (const id of ['mcp-first', 'mcp-second', 'mcp-third']) {
+      await expect(h.fold(auxiliaryFault(id, { errorMessage }))).rejects.toThrow(errorMessage);
+      expect(h.runs.at(-1)!.consumedAt).toBeNull();
+      expect(h.invocations.at(-1)!.consumedAt).toBeUndefined();
+    }
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    expect(h.rows[0]!.advisorInvocations).toBe(0);
+    expect(h.plan.replannerInvocations).toBe(0);
+    expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+    expect(h.rows[0]!.infraRetries).toBe(0);
+    expect(h.enqueued).toEqual([]);
+  });
+}
+
 for (const policy of ['fail-step', 'record-and-continue'] as const) {
   it.each(['no-verdict', 'stalled'])(
     `DGL-5 ${policy} does not prepare a reviewer when no dispatch is due: %s`,

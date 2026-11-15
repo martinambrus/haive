@@ -18,6 +18,7 @@ import {
   unregisteredGitlinksMessage,
 } from './steps/workflow/_gitlink-registration.js';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
@@ -2116,8 +2117,9 @@ function assertEscalationEnvironment(
     throw new Error(`DAG required agent failed: ${fault ?? inv.errorMessage}`);
   }
   if (classifyDagIssueFailure(inv) === 'transient') {
+    const detail = inv.errorMessage ? `: ${safeErrorMessage(inv.errorMessage)}` : '';
     throw new Error(
-      `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'}); Retry to recover`,
+      `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'})${detail}; Retry to recover`,
     );
   }
 }
