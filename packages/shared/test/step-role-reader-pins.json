@@ -1710,5 +1710,69 @@
     "value": "@role-alias:entry",
     "count": 1,
     "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs.registered",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:registered",
+    "count": 1,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs.registered",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs",
+    "context": "ExclamationEqualsEqualsToken",
+    "value": "@role-alias:registered",
+    "count": 2,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "Object.hasOwn",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole.quoteEntry",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:quoteEntry",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole.quoteEntry",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@role-alias:quoteEntry",
+    "count": 2,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "InKeyword",
+    "value": "@role-alias:quoteEntry",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
   }
 ]

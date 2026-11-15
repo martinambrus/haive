@@ -182,6 +182,137 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     await db.insert(schema.tasks).values({ userId: user!.id, type, title: type });
   };
 
+  it.each(Object.values(SPEC_ROLES))(
+    '[PRT4B] refuses mixed %s tokens at save and stored-definition admission',
+    async (role) => {
+      h.flags.set(CUSTOM_KEY, true);
+      const slug = 'tt-role-human';
+      const use = {
+        slug: 'use',
+        title: 'Use',
+        template: '{{role:spec}}',
+        timeoutMs: 60000,
+        capabilities: [],
+        consumesRoles: [
+          { input: 'spec', role, contract: STEP_ROLE_REGISTRY[role].contract, optional: false },
+        ],
+      };
+      const body = valid(slug, { stepIds: [`custom.${slug}.use`], promptSteps: { use } });
+      const saved = await send('POST', '/admin/task-types', body);
+      expect(saved.status).toBe(400);
+      expect(JSON.stringify(await saved.json())).toContain('role-token-not-quotable');
+      expect(await row(slug)).toBeUndefined();
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug,
+        displayName: slug,
+        source: 'admin',
+        stepIds: body.stepIds,
+        promptSteps: { use },
+        requiresRepository: true,
+        runListStrategy: 'static',
+      });
+      await expect(
+        db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, slug))).toEqual([]);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it('[PRT4B] saves prompt ports and pins the same producer the authoring graph shows', async () => {
+    h.flags.set(CUSTOM_KEY, true);
+    const slug = 'tt-role-valid',
+      role = STEP_ROLES.codeAudit,
+      contract = STEP_ROLE_REGISTRY[role].contract;
+    const produce = {
+      slug: 'produce',
+      title: 'Produce',
+      template: 'Audit',
+      timeoutMs: 60000,
+      outputMode: 'structured',
+      providesRoles: [{ role, contract }],
+    };
+    const use = {
+      slug: 'use',
+      title: 'Use',
+      template: '{{role:report}}',
+      timeoutMs: 60000,
+      consumesRoles: [{ input: 'report', role, contract, optional: false }],
+    };
+    const ids = [`custom.${slug}.produce`, `custom.${slug}.use`];
+    const saved = await send(
+      'POST',
+      '/admin/task-types',
+      valid(slug, { stepIds: ids, requiresRepository: false, promptSteps: { produce, use } }),
+    );
+    expect(saved.status, JSON.stringify(await saved.clone().json())).toBe(201);
+    const admitted = await db.transaction((tx) =>
+      definitionForCreate(tx, slug, { locked: true, generic: true }),
+    );
+    const pin = admitted.dataEdgePlan!;
+    const candidate = pin.candidates[0]!;
+    const consumerIndex = candidate.nodes.findIndex((n) => n.id === ids[1]);
+    expect(candidate.bindings[`${consumerIndex}:report`]?.producerStepId).toBe(ids[0]);
+    expect(admitted.customSteps?.[ids[0]!]).toMatchObject({
+      outputMode: 'structured',
+      providesRoles: [{ role, contract }],
+    });
+    const graph = (await (await send('GET', `/admin/task-types/${slug}/ports`)).json()) as {
+      candidates: { graph: { edges: unknown[] } }[];
+    };
+    expect(graph.candidates[0]!.graph.edges).toContainEqual(
+      expect.objectContaining({ source: ids[0], target: ids[1], targetPort: 'report' }),
+    );
+    expect(
+      (await send('POST', '/tasks', { type: slug, title: 'Pinned prompt consumer' })).status,
+    ).toBe(201);
+    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.type, slug) });
+    const frozen = JSON.stringify(task!.dataEdgePlan);
+    const replacementId = `custom.${slug}.alternate`;
+    expect(
+      (
+        await send('PATCH', `/admin/task-types/${slug}`, {
+          stepIds: [ids[0], replacementId, ids[1]],
+          promptSteps: { produce, use, alternate: { ...produce, slug: 'alternate' } },
+          dataRoleBindings: [
+            {
+              executionPath: null,
+              consumerStepId: ids[1],
+              input: 'report',
+              producerStepId: replacementId,
+            },
+          ],
+        })
+      ).status,
+    ).toBe(200);
+    await db.insert(schema.taskSteps).values({
+      taskId: task!.id,
+      stepId: ids[1]!,
+      title: 'Use',
+      status: 'failed',
+      round: 0,
+      stepIndex: 2,
+      runSeq: 2,
+    });
+    await db
+      .update(schema.tasks)
+      .set({ status: 'failed', currentStepId: ids[1] })
+      .where(eq(schema.tasks.id, task!.id));
+    expect(
+      (
+        await send('POST', `/tasks/${task!.id}/steps/${ids[1]}/action`, {
+          action: 'retry',
+          round: 0,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      JSON.stringify(
+        (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task!.id) }))!.dataEdgePlan,
+      ),
+    ).toBe(frozen);
+  });
+
   beforeAll(async () => {
     db = createDatabase(url as string);
     h.db = db;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { STEP_ROLES, SPEC_ROLES, STEP_ROLE_REGISTRY } from '../src/step-engine/output-contracts.js';
 import {
   PROMPT_STEP_DRAFTABLE_KEYS,
   PROMPT_STEP_PROBLEM_KINDS,
@@ -118,6 +119,61 @@ type Reach =
 
 // Every kind the save path can answer is a key here: a kind added later without a row fails to compile.
 const KINDS: Record<KindOf, Reach> = {
+  'role-token-not-own-line': {
+    reaches: () =>
+      withStep({
+        template: 'inline {{role:report}}',
+        consumesRoles: [
+          {
+            input: 'report',
+            role: STEP_ROLES.codeAudit,
+            contract: STEP_ROLE_REGISTRY[STEP_ROLES.codeAudit].contract,
+            optional: false,
+          },
+        ],
+      }),
+  },
+  'role-not-declared': { reaches: () => withStep({ template: '{{role:report}}' }) },
+  'role-token-not-quotable': {
+    reaches: () =>
+      withStep({
+        template: '{{role:report}}',
+        consumesRoles: [
+          {
+            input: 'report',
+            role: SPEC_ROLES.draft,
+            contract: STEP_ROLE_REGISTRY[SPEC_ROLES.draft].contract,
+            optional: false,
+          },
+        ],
+      }),
+  },
+  'role-output-mode-required': {
+    reaches: () =>
+      withStep({
+        providesRoles: [
+          {
+            role: STEP_ROLES.codeAudit,
+            contract: STEP_ROLE_REGISTRY[STEP_ROLES.codeAudit].contract,
+          },
+        ],
+      }),
+  },
+  'role-output-required': { reaches: () => withStep({ outputMode: 'structured' }) },
+  'role-declaration-invalid': {
+    schemaPath: 'promptSteps.review.consumesRoles.0.contract',
+    refuses: () =>
+      withStep({
+        consumesRoles: [
+          {
+            input: 'report',
+            role: STEP_ROLES.codeAudit,
+            contract: { id: 'haive.code-audit', version: 2 },
+            optional: false,
+          },
+        ],
+      }),
+  },
   'prompt-step-missing': { reaches: () => draftOf({ promptSteps: {} }) },
   'prompt-step-orphan': { reaches: () => draftOf({ stepIds: ['ta-a', 'ta-b'] }) },
   'unknown-token': { reaches: () => withStep({ template: 'Say {{nope}}' }) },
@@ -282,6 +338,9 @@ describe('PROMPT_STEP_DRAFTABLE_KEYS', () => {
       'template',
       'capabilities',
       'timeoutMs',
+      'consumesRoles',
+      'providesRoles',
+      'outputMode',
     ]);
   });
 

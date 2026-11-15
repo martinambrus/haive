@@ -2,6 +2,7 @@ import { MODULE_ID_PATTERN_SOURCE } from './module-id.js';
 import { executionContractSchema, fixConsumerSchema } from './execution-contract.js';
 import {
   rolePortDeclarationsSchema,
+  promptRolePortDeclarationsSchema,
   dataRoleBindingsSchema,
 } from '../step-engine/role-port-declarations.js';
 import { z } from 'zod';
@@ -235,9 +236,12 @@ export const legacyComposableStepEntrySchema = z
     { message: 'an implicit composition token cannot be provided or removed by a step' },
   );
 /** V1/v2 plans keep the original schema and strip fields added for v3 data ports. */
-export const composableStepEntrySchema = legacyComposableStepEntrySchema.safeExtend(
-  rolePortDeclarationsSchema.shape,
-);
+export const composableStepEntrySchema = legacyComposableStepEntrySchema
+  .safeExtend(promptRolePortDeclarationsSchema.shape)
+  .refine(
+    (e) => isCustomStepId(e.stepId) || rolePortDeclarationsSchema.safeParse(e).success,
+    'invalid module data ports',
+  );
 export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;
 
 export const taskTypeDefinitionSeedSchema = z

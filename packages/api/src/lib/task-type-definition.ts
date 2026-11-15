@@ -22,6 +22,8 @@ import {
   mergePromptStepCatalog,
   moduleIdsOfTaskType,
   parsePromptSteps,
+  validatePromptStep,
+  parsePromptStepEntry,
   promptStepId,
   resolveTaskTypeAvailability,
   type ExecutionCompositionIssue,
@@ -291,6 +293,29 @@ export async function definitionForCreate(
     }
   }
   const notBuiltin = def.source !== 'builtin';
+  // Stored definitions may predate today's save rules. Role authority is checked at
+  // admission too, even without a synced catalog; tools retain their separate Start gate.
+  if (def.source === 'admin')
+    for (const raw of Object.values(def.promptSteps ?? {})) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const value = raw as Record<string, unknown>;
+      const hasPorts =
+        value.consumesRoles !== undefined ||
+        value.providesRoles !== undefined ||
+        value.outputMode !== undefined ||
+        (typeof value.template === 'string' && value.template.includes('{{role:'));
+      if (!hasPorts) continue;
+      const entry = parsePromptStepEntry(value);
+      if (!entry)
+        throw new HttpError(409, 'Invalid prompt role declaration', 'invalid-composition');
+      const problems = validatePromptStep(entry, {
+        typeSlug: def.slug,
+        requiresRepository: def.requiresRepository,
+        stepIdsBefore: [],
+      }).filter((p) => p.kind.startsWith('role-'));
+      if (problems.length)
+        throw new HttpError(409, problems.map((p) => p.message).join(' '), 'invalid-composition');
+    }
   // Prompt steps stay with admin rows; every other trait is shared by module and admin rows.
   const promptEntries =
     def.source === 'admin' ? Object.entries(parsePromptSteps(def.promptSteps)) : [];
@@ -348,7 +373,11 @@ export async function definitionForCreate(
         selection,
         candidates.map((c) => {
           try {
-            const nodes = dataPortNodes(c.stepIds, c.roleBindings, storedCatalog.composable);
+            const nodes = dataPortNodes(
+              c.stepIds,
+              c.roleBindings,
+              catalog?.composable ?? storedCatalog.composable,
+            );
             return {
               executionPath: c.executionPath,
               nodes,

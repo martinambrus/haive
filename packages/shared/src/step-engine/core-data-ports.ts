@@ -1,4 +1,8 @@
-import { rolePortDeclarationsSchema, type RolePortDeclarations } from './role-port-declarations.js';
+import {
+  rolePortDeclarationsSchema,
+  promptRolePortDeclarationsSchema,
+  type RolePortDeclarations,
+} from './role-port-declarations.js';
 import {
   SPEC_ROLES,
   STEP_ROLES,
@@ -80,7 +84,9 @@ export function dataPortNodes(
 ): PortNode[] {
   return stepIds.map((id) => {
     const occupied = Object.keys(roleBindings).find((role) => roleBindings[role]!.stepId === id);
-    const declared = rolePortDeclarationsSchema.parse(entries.get(id) ?? {});
+    const declared = (
+      id.startsWith('custom.') ? promptRolePortDeclarationsSchema : rolePortDeclarationsSchema
+    ).parse(entries.get(id) ?? {});
     for (const d of declared.consumesRoles ?? []) {
       const inherited = CORE_DATA_INPUTS[occupied ?? id]?.find((c) => c.input === d.input);
       if (

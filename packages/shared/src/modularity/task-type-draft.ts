@@ -1,5 +1,6 @@
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { isCustomStepId, type ComposableStepEntry } from './contracts.js';
+import { dataRoleDraftIssues } from '../step-engine/step-ports.js';
 import {
   derivePromptStepComposable,
   parsePromptStepEntry,
@@ -136,6 +137,9 @@ export const PROMPT_STEP_DRAFTABLE_KEYS = [
   'template',
   'capabilities',
   'timeoutMs',
+  'consumesRoles',
+  'providesRoles',
+  'outputMode',
 ] as const;
 
 const TASK_TYPE_DRAFT_KEYS: readonly string[] = [
@@ -267,6 +271,16 @@ export function validateTaskTypeDraft(
     requiresRepository: body.requiresRepository,
   });
   if (issues.length > 0) return { issues, warnings };
+  const edgeIssues = dataRoleDraftIssues(
+    [{ executionPath: null, stepIds: body.stepIds }],
+    composable,
+    body.dataRoleBindings,
+  );
+  if (edgeIssues.length)
+    return {
+      issues: edgeIssues.map((i) => ({ path: `${i.stepId}.${i.input}`, message: i.message })),
+      warnings,
+    };
   return { issues: validateTaskTypeDefaults(body, composable), warnings };
 }
 

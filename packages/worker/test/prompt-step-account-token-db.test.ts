@@ -3,7 +3,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { lockTaskIntegrations } from '@haive/shared/integrations';
-import { parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { parsePinnedCustomSteps, promptStepEntrySchema } from '@haive/shared/modularity';
+import { STEP_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { INTEGRATION_ACCOUNT_CHANGED_REASON } from '../src/step-engine/step-integrations.js';
@@ -89,6 +90,87 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
     const connectionId = label === null ? null : await seedConnection(db, w.userId, { label });
     return { ...w, connectionId, claude: await seedProvider(db, w.userId, 'claude-code') };
   }
+
+  it.each(['invalid', 'missing', 'valid'] as const)(
+    '[PRT4B] persists a structured %s reply without ever requesting an implementation repair',
+    async (kind) => {
+      const w = await world(null);
+      const role = STEP_ROLES.codeAudit,
+        contract = STEP_ROLE_REGISTRY[role].contract;
+      const entry = promptStepEntrySchema.parse({
+        slug: 'audit',
+        title: 'Audit',
+        template: 'Produce an audit',
+        timeoutMs: 60000,
+        outputMode: 'structured',
+        providesRoles: [{ role, contract }],
+      });
+      const def = buildPromptStep(STEP_ID, entry, 0);
+      // Even an error-loop hook must not turn a host contract failure into a code diagnosis.
+      const stepDef = { ...def, fixLoopOnError: true } as unknown as StepDefinition;
+      await db
+        .update(schema.tasks)
+        .set({ customSteps: { [STEP_ID]: entry } })
+        .where(eq(schema.tasks.id, w.taskId));
+      const [implementation] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: w.taskId,
+          stepId: '07-phase-2-implement',
+          title: 'Implement',
+          stepIndex: 0,
+          runSeq: 0,
+          round: 0,
+          status: 'done',
+          output: { kept: true },
+        })
+        .returning();
+      const run = () =>
+        advanceStep({
+          db,
+          taskId: w.taskId,
+          userId: w.userId,
+          repoPath: '/tmp',
+          workspacePath: '/tmp',
+          cliProviderId: w.claude.id,
+          stepDef,
+          providers: [w.claude],
+          deps: { enqueueCliInvocation: async (payload) => void enqueued.push(payload) },
+          runSeq: 1,
+          epoch: 0,
+          moduleDeactivation: null,
+        });
+      expect((await run()).status).toBe('waiting_cli');
+      const [invocation] = await runsOf(db, w.taskId);
+      const data = { audited: true, findings: [], coverage: null };
+      const rawOutput =
+        kind === 'valid' ? JSON.stringify({ contract, data }) : kind === 'missing' ? null : '{}';
+      await db
+        .update(schema.cliInvocations)
+        .set({
+          endedAt: new Date(),
+          startedAt: new Date(),
+          exitCode: 0,
+          rawOutput,
+          parsedOutput: { contract, data },
+        })
+        .where(eq(schema.cliInvocations.id, invocation!.id));
+      const result = await run();
+      expect(result.status).toBe(kind === 'valid' ? 'done' : 'failed');
+      if (kind !== 'valid') {
+        expect(result.row.errorMessage).toContain('haive.code-audit@1');
+        expect(result.row.output).toBeNull();
+      } else expect(result.row.output).toMatchObject({ roleOutput: { role, contract, data } });
+      expect(
+        await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, implementation!.id) }),
+      ).toMatchObject({ status: 'done', output: { kept: true } });
+      const events = await db
+        .select()
+        .from(schema.taskEvents)
+        .where(eq(schema.taskEvents.taskId, w.taskId));
+      expect(events.some((e) => e.eventType.startsWith('fix_loop.'))).toBe(false);
+    },
+  );
 
   /** The task's choice names the first account and the owner's preference the second, so dropping the choice moves the task to the second. */
   async function choiceWorld() {

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
 import { collapseToLine } from '../utils/collapse-line.js';
+import { promptRolePortDeclarationsSchema } from '../step-engine/role-port-declarations.js';
+import { isQuotableRole } from '../step-engine/output-contracts.js';
 import {
   INTEGRATION_ID_MAX_LENGTH,
   INTEGRATION_ID_PATTERN,
@@ -57,6 +59,9 @@ export const promptStepEntrySchema = z.object({
   integrations: z.array(integrationRequirementSchema).optional(),
   timeoutMs: z.number().int().min(PROMPT_STEP_TIMEOUT_MIN_MS).max(PROMPT_STEP_TIMEOUT_MAX_MS),
   agentPool: z.literal('*').optional(),
+  outputMode: z.literal('structured').optional(),
+  ...promptRolePortDeclarationsSchema.shape,
+  providesRoles: promptRolePortDeclarationsSchema.shape.providesRoles.unwrap().max(1).optional(),
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
 
@@ -151,7 +156,7 @@ interface TokenPosition {
 }
 
 type PromptTokenBody =
-  | { kind: 'field' | 'agent' | 'step' | 'integration'; id: string }
+  | { kind: 'field' | 'agent' | 'step' | 'role' | 'integration'; id: string }
   | { kind: 'task.title' | 'task.description' };
 
 export type PromptTemplateToken = TokenPosition & PromptTokenBody;
@@ -175,7 +180,8 @@ function classifyToken(body: string): PromptTokenBody | null {
   const head = body.slice(0, colon);
   const id = body.slice(colon + 1);
   if (head === 'field' && id !== '') return { kind: 'field', id };
-  if (head === 'agent' || head === 'step' || head === 'integration') return { kind: head, id };
+  if (head === 'agent' || head === 'step' || head === 'role' || head === 'integration')
+    return { kind: head, id };
   return null;
 }
 
@@ -232,13 +238,15 @@ export interface PromptTemplateValues {
   taskDescription: string;
   /** Each value arrives already fenced; it is inserted as it is. */
   steps: Readonly<Record<string, string>>;
+  /** Host-projected, capped and fenced role values. */
+  roles?: Readonly<Record<string, string>>;
   /** The account each requirement id stands for, as text; the renderer keeps it to one line. */
   integrations: Readonly<Record<string, string>>;
 }
 
 export class PromptTemplateRenderError extends Error {
   constructor(
-    readonly kind: 'step-token-not-own-line' | 'persona-id-invalid',
+    readonly kind: 'step-token-not-own-line' | 'role-token-not-own-line' | 'persona-id-invalid',
     readonly token: string,
   ) {
     super(`${kind}: ${token}`);
@@ -268,6 +276,8 @@ function tokenValue(token: PromptTemplateToken, values: PromptTemplateValues): s
       return values.taskDescription;
     case 'step':
       return own(values.steps, token.id);
+    case 'role':
+      return own(values.roles ?? {}, token.id);
     case 'integration': {
       const requirementId = accountRequirementId(token.id);
       return requirementId === null ? null : own(values.integrations, requirementId);
@@ -312,10 +322,16 @@ export function renderPromptTemplate(template: string, values: PromptTemplateVal
       out += token.raw;
       continue;
     }
-    if (token.kind === 'step' && !token.ownLine) {
-      throw new PromptTemplateRenderError('step-token-not-own-line', token.raw);
+    if ((token.kind === 'step' || token.kind === 'role') && !token.ownLine) {
+      throw new PromptTemplateRenderError(
+        token.kind === 'step' ? 'step-token-not-own-line' : 'role-token-not-own-line',
+        token.raw,
+      );
     }
-    const keepsLines = token.kind === 'step' || (token.ownLine && token.kind !== 'integration');
+    const keepsLines =
+      token.kind === 'step' ||
+      token.kind === 'role' ||
+      (token.ownLine && token.kind !== 'integration');
     const text = keepsLines ? value : collapseToLine(value);
     dynamic.push([out.length, out.length + text.length]);
     out += text;
@@ -338,6 +354,12 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-earlier',
   'step-token-not-quotable',
   'step-token-not-own-line',
+  'role-token-not-own-line',
+  'role-not-declared',
+  'role-token-not-quotable',
+  'role-declaration-invalid',
+  'role-output-mode-required',
+  'role-output-required',
   ...CUSTOM_TOOL_PROBLEM_KINDS,
   'tool-no-longer-valid',
   'too-many-integrations',
@@ -368,6 +390,9 @@ export type PromptStepValidationInput = Pick<
   invalidTools?: readonly string[];
   integrations?: readonly IntegrationRequirement[];
   invalidIntegrations?: readonly string[];
+  consumesRoles?: PromptStepEntry['consumesRoles'];
+  providesRoles?: PromptStepEntry['providesRoles'];
+  outputMode?: PromptStepEntry['outputMode'];
 };
 
 /** The width of every step_id column a custom step id is stored in (task_steps, task_step_cli_choices). */
@@ -496,6 +521,25 @@ export function validatePromptStep(
 
   const { tokens, unknown } = scanTemplate(entry.template);
   for (const u of unknown) add('unknown-token', u.message, u);
+  const ports = promptRolePortDeclarationsSchema.safeParse(entry);
+  if (!ports.success)
+    add(
+      'role-declaration-invalid',
+      'Role declarations must name an exact registered contract and unique input names.',
+    );
+  if (ports.success)
+    for (const input of ports.data.consumesRoles ?? []) {
+      if (!isQuotableRole(input.role))
+        add(
+          'role-token-not-quotable',
+          `Input ${input.input} names a human or mixed role without an agent-only quote projection.`,
+          { raw: `{{role:${input.input}}}`, start: 0 },
+        );
+    }
+  if ((entry.providesRoles?.length ?? 0) > 0 && entry.outputMode !== 'structured')
+    add('role-output-mode-required', 'Providing a role requires structured output mode.');
+  if (entry.outputMode === 'structured' && entry.providesRoles?.length !== 1)
+    add('role-output-required', 'Structured output mode requires exactly one provided role.');
 
   const declared = new Set(
     (entry.paramFormSchema?.fields ?? [])
@@ -568,6 +612,16 @@ export function validatePromptStep(
           add('step-token-not-own-line', `${token.raw} must be alone on its line.`, token);
         }
         break;
+      case 'role': {
+        const declaration = ports.success
+          ? ports.data.consumesRoles?.find((i) => i.input === token.id)
+          : undefined;
+        if (!declaration)
+          add('role-not-declared', `${token.raw} names an input the step does not declare.`, token);
+        if (!token.ownLine)
+          add('role-token-not-own-line', `${token.raw} must be alone on its line.`, token);
+        break;
+      }
       default:
         break;
     }
@@ -649,7 +703,14 @@ export function validatePromptStep(
 export function derivePromptStepComposable(
   entry: Pick<
     PromptStepEntry,
-    'slug' | 'title' | 'capabilities' | 'paramFormSchema' | 'integrations'
+    | 'slug'
+    | 'title'
+    | 'capabilities'
+    | 'paramFormSchema'
+    | 'integrations'
+    | 'consumesRoles'
+    | 'providesRoles'
+    | 'outputMode'
   >,
   typeSlug: string,
   requiresRepository: boolean,
@@ -668,6 +729,10 @@ export function derivePromptStepComposable(
     dispatchesCli: true,
     requires,
     provides: [],
+    ...(entry.consumesRoles ? { consumesRoles: entry.consumesRoles } : {}),
+    ...(entry.outputMode === 'structured' && entry.providesRoles
+      ? { providesRoles: entry.providesRoles }
+      : {}),
     ...(writesFiles ? { removes: ['clean-tree'] } : {}),
     ...(entry.paramFormSchema ? { paramFormSchema: entry.paramFormSchema } : {}),
     ...(entry.integrations && entry.integrations.length > 0
