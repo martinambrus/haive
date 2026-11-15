@@ -239,7 +239,7 @@ describe('repository task scratch lifecycle', () => {
     ...extra,
   });
   type Run = { summary?: boolean; startedAt?: Date; endedAt?: Date; supersededAt?: Date };
-  function database(current = task(), runs: Run[] = []) {
+  function database(current: ReturnType<typeof task> | undefined = task(), runs: Run[] = []) {
     return {
       query: {
         tasks: { findFirst: vi.fn(async () => current) },
@@ -356,6 +356,30 @@ describe('repository task scratch lifecycle', () => {
     await mod.sweepOrphanScratchWorkspaces(dbArg(database()));
     await expect(stat(scratch())).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it.each([null, ['still-running']])(
+    'boot retains missing-task scratch without a clean sandbox listing (%j)',
+    async (listing) => {
+      const db = database();
+      db.query.tasks.findFirst.mockResolvedValue(undefined);
+      sandbox.list.mockResolvedValue(listing);
+      await mod.sweepOrphanScratchWorkspaces(dbArg(db));
+      expect(sandbox.list).toHaveBeenCalledWith(TASK);
+      expect((await stat(scratch())).isDirectory()).toBe(true);
+    },
+  );
+
+  it.each(['u1', 'u-new-owner'])(
+    'boot retains missing-task scratch when a row appears with owner %s',
+    async (userId) => {
+      const db = database(task({ userId }));
+      db.query.tasks.findFirst.mockResolvedValueOnce(undefined);
+      await mod.sweepOrphanScratchWorkspaces(dbArg(db));
+      expect(sandbox.list).toHaveBeenCalledWith(TASK);
+      expect(db.query.tasks.findFirst).toHaveBeenCalledTimes(2);
+      expect((await stat(scratch())).isDirectory()).toBe(true);
+    },
+  );
 
   it.each([null, ['still-running']])('requires a clean sandbox listing (%j)', async (listing) => {
     sandbox.list.mockResolvedValue(listing);
