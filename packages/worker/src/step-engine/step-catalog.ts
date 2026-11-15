@@ -1,7 +1,11 @@
 import { assertMatchingOutputDeclaration } from './step-output-contract.js';
 import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { parseStepId, type ComposableStepEntry } from '@haive/shared/modularity';
+import {
+  composableStepEntrySchema,
+  parseStepId,
+  type ComposableStepEntry,
+} from '@haive/shared/modularity';
 import type { StepRegistry } from './registry.js';
 import { CORE_COMPOSABLE_STEPS } from './composable-core.js';
 import { dispatchesAnyCli, dispatchesCli } from './steps/index.js';
@@ -25,7 +29,9 @@ export async function syncStepCatalog(
       if (entry) assertMatchingOutputDeclaration(def, entry);
       const composableRow = {
         composable: composables.has(meta.id),
-        entry: entry ?? null,
+        // Core data-port declarations stay in memory until per-input pins ship.
+        // Persist exactly the existing entry vocabulary understood by older readers.
+        entry: entry ? composableStepEntrySchema.parse(entry) : null,
       };
       const row = {
         source: parsed?.kind === 'module' ? `module:${parsed.moduleId}` : 'core',
