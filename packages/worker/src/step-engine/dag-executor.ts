@@ -1328,28 +1328,15 @@ function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
   return !inv.truncationRetry;
 }
 
-/** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
- *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
- *  null when no provider would take it under fail-step; record-and-continue throws a
- *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
- *  (ingestAdvisor's fix coder) needs the id.
- *
- *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
- *  load-bearing rather than tidy: the moment the job is on the queue the run can start and
- *  resolveDagPhase can re-enter, so an issue claimed afterwards is briefly in whatever state
- *  the caller was trying to leave — which for the advisor's fix coder is exactly the
- *  `failed_unrecoverable` that section (D) re-stamps. */
-async function spawnReviewAgent(
+/** Resolve the actual provider and enforce its fault block before callers mutate retry state. */
+async function prepareReviewAgent(
   ra: ReviewArgs,
   issue: DagIssueRow,
   role: 'reviewer' | 'coder' | 'issue_advisor',
-  iteration: number,
   prompt: string,
   capabilities: StepCapability[],
-  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
   afterTruncation = false,
-  timeoutMs?: number,
-): Promise<string | null> {
+) {
   if (role === 'issue_advisor' && issueExcludedFromAdvice(issue)) {
     throw new Error('Refused or blocked DAG issue cannot be advised');
   }
@@ -1409,12 +1396,45 @@ async function spawnReviewAgent(
     }
     return null;
   }
+  await assertAuxiliaryDispatch(ra, role, plan.providerId);
+  return { plan, invocation: plan.invocation, worktreeRel, fullPrompt };
+}
+
+/** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
+ *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
+ *  null when no provider would take it under fail-step; record-and-continue throws a
+ *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
+ *  (ingestAdvisor's fix coder) needs the id.
+ *
+ *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
+ *  load-bearing rather than tidy: the moment the job is on the queue the run can start and
+ *  resolveDagPhase can re-enter, so an issue claimed afterwards is briefly in whatever state
+ *  the caller was trying to leave — which for the advisor's fix coder is exactly the
+ *  `failed_unrecoverable` that section (D) re-stamps. */
+async function spawnReviewAgent(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  role: 'reviewer' | 'coder' | 'issue_advisor',
+  iteration: number,
+  prompt: string,
+  capabilities: StepCapability[],
+  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
+  afterTruncation = false,
+  timeoutMs?: number,
+  preparation?: Awaited<ReturnType<typeof prepareReviewAgent>>,
+): Promise<string | null> {
+  const prepared =
+    preparation === undefined
+      ? await prepareReviewAgent(ra, issue, role, prompt, capabilities, afterTruncation)
+      : preparation;
+  if (!prepared) return null;
+  const { plan, invocation, worktreeRel, fullPrompt } = prepared;
   const { id: invId } = await insertOwnedRun(ra.db, ra.current.id, {
     taskId: ra.taskId,
     taskStepId: ra.current.id,
     cliProviderId: plan.providerId,
     effort: plan.effort ?? null,
-    assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+    assignedAgentIds: invocation.spec.assignedAgentIds ?? [],
     // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
     // concurrent invocations on the ONE 06c step, so it must be exempt from the
     // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
@@ -1469,14 +1489,14 @@ async function spawnReviewAgent(
     worktreeRel,
     cliProviderId: plan.providerId,
     kind: 'cli',
-    spec: plan.invocation.spec,
+    spec: invocation.spec,
     timeoutMs: timeoutMs ?? overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
   return invId;
 }
 
 async function setResolution(
-  db: Database,
+  db: ClaimDb,
   issue: DagIssueRow,
   resolution: 'approved' | 'failed_unrecoverable',
   errorMessage?: string,
@@ -1589,6 +1609,11 @@ export async function ingestReviewRun(
     return;
   }
 
+  // A structured result remains usable when the process is killed after printing it.
+  const verdict = run.role === 'reviewer' ? parseReviewerOutput(inv) : null;
+  if (!recordsFailures(ra.stepDef) || !(run.role === 'reviewer' ? verdict : fixed.parsed))
+    await checkAuxiliaryEnvironment(ra, run.role as AuxiliaryRole, inv);
+
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
   // A fix coder cut at the output limit is re-run once, smaller, before anything reviews its edits;
@@ -1631,10 +1656,20 @@ export async function ingestReviewRun(
     }
     return;
   }
+  const reviewPreparation =
+    recordsFailures(ra.stepDef) && run.role === 'reviewer' && !verdict
+      ? await prepareReviewAgent(
+          ra,
+          issue,
+          'reviewer',
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          ['tool_use'],
+          classifyDagIssueFailure(inv) === 'truncated' && truncationRetryable(inv),
+        )
+      : undefined;
   await consume();
 
   if (run.role === 'reviewer') {
-    const verdict = parseReviewerOutput(inv);
     if (!verdict) {
       // A killed/orphaned reviewer never produced a verdict — re-run it (bounded by the
       // reviewer's OWN transient budget, separate from the coder's), the same crash-resume
@@ -1656,6 +1691,8 @@ export async function ingestReviewRun(
           ['tool_use'],
           undefined,
           true,
+          undefined,
+          reviewPreparation,
         );
         if (!ok)
           await setResolution(
@@ -1681,6 +1718,10 @@ export async function ingestReviewRun(
           issue.innerIteration,
           reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
+          undefined,
+          false,
+          undefined,
+          reviewPreparation,
         );
         if (!ok)
           await setResolution(
@@ -1698,6 +1739,7 @@ export async function ingestReviewRun(
         `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
       );
     }
+    await updateAuxiliaryFault(ra, 'reviewer', inv, false);
     const previousVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     const withheld = unionWithheld(
       previousVerdict.success ? previousVerdict.data.withheld : undefined,
@@ -1780,6 +1822,7 @@ export async function ingestReviewRun(
       .where(eq(schema.taskDagIssues.id, issue.id));
   }
   if (fixed.parsed) {
+    await updateAuxiliaryFault(ra, 'coder', inv, false);
     await recordLedgerEntry(ra.db, ra.taskId, ra.current.id, {
       stepId: `06c-dag-execute/${issue.issueKey}`,
       round: ra.current.round,
@@ -1839,6 +1882,15 @@ export async function resolveReviewPhase(
       // phase crash-resumable: re-spawn a fresh reviewer, bounded by the reviewer's OWN
       // transient budget; once it is spent, resolve failed_unrecoverable so the escalation
       // path (advisor) decides instead of the level wedging.
+      const preparation = recordsFailures(ra.stepDef)
+        ? await prepareReviewAgent(
+            ra,
+            issue,
+            'reviewer',
+            reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+            ['tool_use'],
+          )
+        : undefined;
       if (issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
         await ra.db
           .update(schema.taskDagIssues)
@@ -1851,6 +1903,10 @@ export async function resolveReviewPhase(
           issue.innerIteration,
           reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
+          undefined,
+          false,
+          undefined,
+          preparation,
         );
         if (!ok)
           await setResolution(
@@ -1906,6 +1962,136 @@ const REPLAN_FAIL_RATIO = 0.8;
 
 interface EscalationArgs extends ReviewArgs {
   plan: DagPlanRow;
+}
+
+// Separate from legitimate advisor/replan budgets, and deliberately stored on the plan:
+// Retry clears issue budgets and level.mergeState, but retains escalationLog.
+const MAX_AUXILIARY_HARD_FAULTS = 2;
+type AuxiliaryRole = 'reviewer' | 'coder' | 'issue_advisor' | 'replanner';
+type AuxiliaryArgs = Pick<ReviewArgs, 'current' | 'level' | 'stepDef'> & { db: ClaimDb };
+interface AuxiliaryFaultStreak {
+  kind: 'dag_auxiliary_faults';
+  role: AuxiliaryRole;
+  level: number;
+  providerId: string | null;
+  invocationId: string;
+  count: number;
+}
+function auxiliaryStreak(log: unknown[], role: AuxiliaryRole, level: number) {
+  return log.find(
+    (entry): entry is AuxiliaryFaultStreak =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      'kind' in entry &&
+      entry.kind === 'dag_auxiliary_faults' &&
+      'role' in entry &&
+      entry.role === role &&
+      'level' in entry &&
+      entry.level === level,
+  );
+}
+function auxiliaryFaultLimit(role: AuxiliaryRole, level: number): Error {
+  return new Error(
+    `DAG required ${role} reached ${MAX_AUXILIARY_HARD_FAULTS} consecutive hard faults at level ${level}; switch the step's CLI before retrying`,
+  );
+}
+
+/** Lock the plan so concurrent role results cannot overwrite each other's streaks.
+ * Commit the evidence before the caller throws; redelivery of one invocation is free. */
+async function updateAuxiliaryFault(
+  ra: AuxiliaryArgs,
+  role: AuxiliaryRole,
+  inv: typeof schema.cliInvocations.$inferSelect,
+  failed: boolean,
+): Promise<number> {
+  if (!recordsFailures(ra.stepDef) || runNeverAnswered(inv) || isProviderOutage(inv.errorMessage))
+    return 0;
+  if (!failed) {
+    const plan = await ra.db.query.taskDagPlans.findFirst({
+      where: eq(schema.taskDagPlans.id, ra.level.dagPlanId),
+    });
+    if (!plan) throw new Error('DAG plan missing while recording auxiliary fault');
+    // A no-op clear linearizes at this read. A concurrent fault written afterwards
+    // remains a new streak. When an entry exists, re-read under the lock before writing.
+    if (!auxiliaryStreak(plan.escalationLog ?? [], role, ra.level.level)) return 0;
+  }
+  return ra.db.transaction(async (tx) => {
+    const [plan] = await tx
+      .select()
+      .from(schema.taskDagPlans)
+      .where(eq(schema.taskDagPlans.id, ra.level.dagPlanId))
+      .for('update');
+    if (!plan) throw new Error('DAG plan missing while recording auxiliary fault');
+    const log = plan.escalationLog ?? [];
+    const prior = auxiliaryStreak(log, role, ra.level.level);
+    if (!failed && !prior) return 0;
+    const providerId = inv.cliProviderId ?? null;
+    const count = failed
+      ? prior?.providerId === providerId
+        ? Math.min(MAX_AUXILIARY_HARD_FAULTS, prior.count + (prior.invocationId === inv.id ? 0 : 1))
+        : 1
+      : 0;
+    const next = log.filter((entry) => entry !== prior);
+    if (failed)
+      next.push({
+        kind: 'dag_auxiliary_faults',
+        role,
+        level: ra.level.level,
+        providerId,
+        invocationId: inv.id,
+        count,
+      } satisfies AuxiliaryFaultStreak);
+    await tx
+      .update(schema.taskDagPlans)
+      .set({ escalationLog: next, updatedAt: new Date() })
+      .where(eq(schema.taskDagPlans.id, plan.id));
+    await assertOwnsStep(tx, ra.current.id);
+    return count;
+  });
+}
+
+async function throwAuxiliaryFault(
+  ra: AuxiliaryArgs,
+  role: AuxiliaryRole,
+  inv: typeof schema.cliInvocations.$inferSelect,
+  error: unknown,
+): Promise<never> {
+  const count = await updateAuxiliaryFault(ra, role, inv, true);
+  if (count >= MAX_AUXILIARY_HARD_FAULTS) throw auxiliaryFaultLimit(role, ra.level.level);
+  throw error;
+}
+
+async function assertAuxiliaryDispatch(
+  ra: AuxiliaryArgs,
+  role: AuxiliaryRole,
+  providerId: string | null,
+) {
+  if (!recordsFailures(ra.stepDef)) return;
+  const plan = await ra.db.query.taskDagPlans.findFirst({
+    where: eq(schema.taskDagPlans.id, ra.level.dagPlanId),
+  });
+  const streak = auxiliaryStreak(plan?.escalationLog ?? [], role, ra.level.level);
+  if (streak && streak.count >= MAX_AUXILIARY_HARD_FAULTS && streak.providerId === providerId)
+    throw auxiliaryFaultLimit(role, ra.level.level);
+}
+
+async function checkAuxiliaryEnvironment(
+  ra: AuxiliaryArgs,
+  role: AuxiliaryRole,
+  inv: typeof schema.cliInvocations.$inferSelect,
+) {
+  try {
+    assertEscalationEnvironment(inv, ra.stepDef);
+  } catch (error) {
+    // A restart, cancel or signal kill is retryable infrastructure, not a CLI fault.
+    // Timeouts are deterministic here: repeating the same budget needs a CLI change.
+    if (
+      isProviderOutage(inv.errorMessage) ||
+      (!dagEnvironmentHaltReason({ errorMessage: inv.errorMessage }) && !isCliTimeoutFailure(inv))
+    )
+      throw error;
+    await throwAuxiliaryFault(ra, role, inv, error);
+  }
 }
 
 function assertEscalationEnvironment(
@@ -2206,7 +2392,7 @@ export async function ingestAdvisor(
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<'retry' | 'split' | 'accept' | 'escalate'> {
-  assertEscalationEnvironment(inv, ea.stepDef);
+  await checkAuxiliaryEnvironment(ea, 'issue_advisor', inv);
   const consumeRun = async () => {
     await ea.db
       .update(schema.dagAgentRuns)
@@ -2244,11 +2430,18 @@ export async function ingestAdvisor(
   // Opt-in records the refusal without relaying the refused assignment to another agent.
   // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
   if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
+    await updateAuxiliaryFault(ea, 'issue_advisor', inv, false);
     await consumeRun();
     await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
     return 'escalate';
   }
-  const out = parseAdvisor(inv, recordsFailures(ea.stepDef));
+  let out: AdvisorOutput;
+  try {
+    out = parseAdvisor(inv, recordsFailures(ea.stepDef));
+  } catch (error) {
+    return throwAuxiliaryFault(ea, 'issue_advisor', inv, error);
+  }
+  await updateAuxiliaryFault(ea, 'issue_advisor', inv, false);
   await consumeRun();
   await ea.db
     .update(schema.taskDagIssues)
@@ -2464,6 +2657,7 @@ async function spawnReplanner(
     }
     return false;
   }
+  await assertAuxiliaryDispatch(ea, 'replanner', plan.providerId);
   // The replanner is a per-step SINGLETON, so the one-live-per-step index rejects a second
   // concurrent dispatch (two advance jobs racing into the escalation phase). That rejection
   // is not an error: the winner already inserted its invocation AND stamped
@@ -2507,10 +2701,18 @@ async function ingestReplanner(
   inv: typeof schema.cliInvocations.$inferSelect,
   failed: DagIssueRow[],
 ): Promise<'continue' | 'abort'> {
-  assertEscalationEnvironment(inv, ea.stepDef);
   if (recordsFailures(ea.stepDef)) {
+    if (!isProviderRefusal(inv.errorMessage)) {
+      try {
+        parseReplanner(inv, true);
+      } catch (error) {
+        return throwAuxiliaryFault(ea, 'replanner', inv, error);
+      }
+    }
     return ea.db.transaction(async (tx) => {
       const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
+      // All issue/run writes precede the step lock, matching Retry's lock order.
+      await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
       await assertOwnsStep(tx, ea.current.id);
       return action;
     });
@@ -2523,7 +2725,15 @@ async function applyReplannerDecision(
   inv: typeof schema.cliInvocations.$inferSelect,
   failed: DagIssueRow[],
 ): Promise<'continue' | 'abort'> {
-  const out = parseReplanner(inv, recordsFailures(ea.stepDef));
+  const refused = recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage);
+  const out: ReplannerOutput = refused
+    ? { action: 'ABORT', reasoning: inv.errorMessage!, skip_downstream: [], new_levels: [] }
+    : parseReplanner(inv, recordsFailures(ea.stepDef));
+  if (refused) {
+    for (const issue of failed) {
+      await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
+    }
+  }
   await ea.db
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
@@ -2681,7 +2891,7 @@ export async function resolveEscalationPhase(
       return { status: 'waiting', row: ea.current };
     }
     if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
-    assertEscalationEnvironment(inv, ea.stepDef);
+    await checkAuxiliaryEnvironment(ea, 'replanner', inv);
     // A replanner that never answered, or was cut at the output limit (once), is not an attempt:
     // free the slot instead of parseReplanner's ABORT-on-no-output default.
     const truncatedOnce =
@@ -3194,16 +3404,48 @@ export async function resolveDagPhase(
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
+        let validFixResult = false;
+        // Advisor-started fix coders first re-enter here while their issue is running.
+        // Check them before section C's ordinary coder redispatch can consume the fault.
+        if (recordsFailures(stepDef)) {
+          const [fixRun] = await db
+            .select()
+            .from(schema.dagAgentRuns)
+            .where(
+              and(
+                eq(schema.dagAgentRuns.dagIssueId, issue.id),
+                eq(schema.dagAgentRuns.role, 'coder'),
+                eq(schema.dagAgentRuns.cliInvocationId, inv.id),
+              ),
+            )
+            .limit(1);
+          validFixResult = !!fixRun && result.parsed;
+          if (fixRun && !result.parsed)
+            await checkAuxiliaryEnvironment(
+              { db, current, level: curLevel, stepDef },
+              'coder',
+              inv,
+            );
+        }
         // A refusal fails the issue whatever partial result the coder printed before it.
         const refused =
           inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         if (refused) result.outcome = 'failed_unrecoverable';
+        // A valid structured reply is a usable decision whatever its outcome. A failed issue
+        // never reaches ingestReviewRun's clear, so clear the coder streak here.
+        if (validFixResult && !refused)
+          await updateAuxiliaryFault(
+            { db, current, level: curLevel, stepDef },
+            'coder',
+            inv,
+            false,
+          );
         let exhausted: string | null = null;
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
         // finished, so re-running it — bounded by the coder's own infra_retries — honours
         // the DAG's crash-resume contract instead of freezing the level on a transient event.
-        if (result.outcome === 'failed_unrecoverable') {
+        if (result.outcome === 'failed_unrecoverable' && !validFixResult) {
           const cls = classifyDagIssueFailure({
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,

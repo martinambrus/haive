@@ -4269,11 +4269,15 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
           vi.mocked(resolveTaskDispatch).mockImplementationOnce(
             async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
           );
-          const { outcome, issueUpdates, h } = await ingestCoder('running', killedOnce, {
-            agentRuns: [fixRun],
-            issue: advisorRetry,
-            failurePolicy,
-          });
+          const { outcome, issueUpdates, h } = await ingestCoder(
+            'running',
+            failurePolicy === 'record-and-continue' ? killedCoder : killedOnce,
+            {
+              agentRuns: [fixRun],
+              issue: advisorRetry,
+              failurePolicy,
+            },
+          );
           expect(h.invocationInserts).toHaveLength(0);
           if (failurePolicy === 'record-and-continue') {
             expect('error' in outcome && outcome.error).toEqual(
