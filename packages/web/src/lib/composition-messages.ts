@@ -110,6 +110,11 @@ export function describeIssue(issue: CompositionIssue, ctx: IssueContext): Issue
         message: `Needs ${issue.needs} first: ${sentence(issue.reason)}`,
         providedBy: providersOf(issue.needs, catalog, issue.stepId),
       };
+    case 'need-out-of-order':
+      return {
+        message: `Needs ${issue.needs} after ${issue.after}: ${sentence(issue.reason)}`,
+        providedBy: providersOf(issue.needs, catalog, issue.stepId),
+      };
     case 'too-late': {
       const earlier = ctx.stepIds
         .slice(0, issue.index)
@@ -185,6 +190,7 @@ const COMPOSITION_KINDS: ReadonlySet<string> = new Set<CompositionIssue['kind']>
   'empty',
   'unknown-step',
   'unmet-need',
+  'need-out-of-order',
   'too-late',
   'unfulfilled',
   'missing-loop-target',

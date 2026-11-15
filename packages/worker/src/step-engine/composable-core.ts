@@ -693,7 +693,11 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     requires: [
       needWorktree,
       { needs: 'verification', reason: 'Revises through verification.' },
-      { needs: 'review', reason: 'Revises through code review.' },
+      {
+        needs: 'review',
+        after: 'verification',
+        reason: 'Insight continuations verify before code review.',
+      },
     ],
     loopTargetStepId: '08-phase-5-verify',
     provides: ['insights-triaged'],

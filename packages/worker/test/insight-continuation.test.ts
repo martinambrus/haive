@@ -8,6 +8,8 @@ import {
 import type { InsightBatchRecord } from '../src/step-engine/steps/workflow/_insight-batch.js';
 import { resolveTaskStep } from '../src/queues/run-list.js';
 import { assertInsightRunList } from '../src/queues/insight-continuation.js';
+import { validateComposition, evaluateDerivedTaskType } from '@haive/shared/modularity';
+import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { keepForPath } from '../src/orchestrator/execution-paths.js';
 const route = {
   version: 1,
@@ -172,4 +174,54 @@ it('enters the durable checkpoint before loading a new inventory or building an 
   expect(await insightsTriageStep.shouldRun!(ctx)).toBe(true);
   const detected = await insightsTriageStep.detect!({ ...ctx, db: database() });
   expect(detected).toMatchObject({ insightCheckpoint: route, insights: [] });
+});
+
+describe('insight composition destination order', () => {
+  const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e]));
+  const head = ['01-worktree-setup', '07-phase-2-implement'];
+  const verify = '08-phase-5-verify';
+  const review = '08c-code-review';
+  const triage = '08e-insights-triage';
+  const reversed = [...head, review, verify, triage];
+  const ordered = [...head, verify, review, triage];
+
+  it('rejects the review-before-verify composition that runtime preflight refuses', () => {
+    const steps = reversed.map((id) => ({ metadata: { id } })) as StepDefinition[];
+    expect(() => assertInsightRunList(steps)).toThrow(/run list/);
+    expect(validateComposition(reversed, catalog)).toContainEqual(
+      expect.objectContaining({
+        kind: 'need-out-of-order',
+        stepId: triage,
+        needs: 'review',
+        after: 'verification',
+      }),
+    );
+  });
+
+  it('accepts verification before review and checkpoint, as runtime preflight does', () => {
+    expect(validateComposition(ordered, catalog)).toEqual([]);
+    expect(() =>
+      assertInsightRunList(ordered.map((id) => ({ metadata: { id } })) as StepDefinition[]),
+    ).not.toThrow();
+  });
+
+  it('keeps review before verification valid without insight triage', () => {
+    expect(validateComposition([...head, review, verify], catalog)).toEqual([]);
+  });
+
+  it('rejects the same order in a derived candidate and accepts the ordered candidate', () => {
+    const prefix = ['00-model-health-workflow', '00a-sync-base', '00-triage'];
+    const evaluate = (stepIds: string[]) =>
+      evaluateDerivedTaskType({
+        baseCandidates: [{ executionPath: null, stepIds: [...prefix, ...stepIds] }],
+        changes: [],
+        catalog,
+        installedStepIds: new Set(catalog.keys()),
+      });
+    expect(evaluate(reversed).candidates[0]!.compositionIssues).toContainEqual(
+      expect.objectContaining({ kind: 'need-out-of-order', stepId: triage }),
+    );
+    expect(evaluate(ordered).issues).toEqual([]);
+    expect(evaluate([...head, review, verify]).issues).toEqual([]);
+  });
 });

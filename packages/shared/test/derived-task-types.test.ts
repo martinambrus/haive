@@ -7,6 +7,7 @@ import {
   derivedChangesSchema,
   createDerivedChangesSchema,
   evaluateDerivedTaskType,
+  effectiveReplacementEntry,
   parsePromptSteps,
   type ComposableStepEntry,
   type DerivedChange,
@@ -617,4 +618,13 @@ describe('derived task pin readers', () => {
       expect.objectContaining({ code: 'invalid-derived-run-plan' }),
     );
   });
+});
+
+it('retains a host ordered need when a replacement declares the same unordered token', () => {
+  const hostNeed = { needs: 'review', after: 'verification', reason: 'Host ordering.' };
+  const effective = effectiveReplacementEntry(
+    entry('module.example.check', { requires: [{ needs: 'review', reason: 'Module need.' }] }),
+    entry('host', { requires: [hostNeed] }),
+  );
+  expect(effective.requires).toContainEqual(hostNeed);
 });

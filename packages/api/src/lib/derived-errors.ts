@@ -10,6 +10,8 @@ export function insightRequirementMessage(issue: unknown): string | null {
     !('kind' in issue)
   )
     return null;
+  if (issue.kind === 'need-out-of-order')
+    return '08e-insights-triage requires 08-phase-5-verify before 08c-code-review (or its pinned replacement) for insight continuations';
   if (
     issue.kind === 'missing-loop-target' ||
     (issue.kind === 'unmet-need' &&

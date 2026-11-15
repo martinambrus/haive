@@ -73,3 +73,21 @@ it('names the insight requirement in derived admission errors too', () => {
     'The derived task type cannot be admitted',
   );
 });
+
+it('explains verification-before-review when derived insight admission refuses the order', () => {
+  const error = new DerivedTaskAdmissionError([
+    {
+      kind: 'invalid-composition',
+      executionPath: 'full_workflow',
+      issue: {
+        kind: 'need-out-of-order',
+        stepId: '08e-insights-triage',
+        needs: 'review',
+        after: 'verification',
+      },
+    },
+  ]);
+  expect(error.message).toBe(
+    '08e-insights-triage requires 08-phase-5-verify before 08c-code-review (or its pinned replacement) for insight continuations',
+  );
+});

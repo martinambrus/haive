@@ -514,6 +514,14 @@ describe('describeDraftIssue', () => {
   const composition: CompositionIssue[] = [
     { kind: 'unknown-step', index: 1, stepId: 'zz' },
     { kind: 'unmet-need', index: 1, stepId: 'zz', needs: 'commit', reason: 'Needs a commit.' },
+    {
+      kind: 'need-out-of-order',
+      index: 1,
+      stepId: 'zz',
+      needs: 'review',
+      after: 'verification',
+      reason: 'Verify before review.',
+    },
     { kind: 'too-late', index: 1, stepId: 'zz', token: 'worktree' },
     { kind: 'unfulfilled', index: 1, stepId: 'zz', token: 'commit' },
     { kind: 'missing-loop-target', index: 1, stepId: 'zz', target: 'yy' },
@@ -582,6 +590,7 @@ describe('the prompt', () => {
     )!;
     expect(prompt).toContain(sample.entry.requires[0]!.needs);
     expect(prompt).toContain(sample.entry.requires[0]!.reason);
+    expect(prompt).toContain('needs `review` after `verification`');
     expect(prompt).toContain((sample.entry.precedes ?? [])[0]!);
     expect(steps.some((s) => s.entry.loopTargetStepId)).toBe(true);
     expect(prompt).toMatch(/loop budget editable/);

@@ -194,6 +194,8 @@ function issueText(issue: TaskTypeDraftIssue): string {
       return `\`${issue.stepId}\`${at(issue.index)} is neither a catalog step nor a prompt step of this type.`;
     case 'unmet-need':
       return `\`${issue.stepId}\`${at(issue.index)} needs \`${issue.needs}\`, which no earlier step provides: ${issue.reason}`;
+    case 'need-out-of-order':
+      return `\`${issue.stepId}\`${at(issue.index)} needs \`${issue.needs}\` AFTER \`${issue.after}\`: ${issue.reason}`;
     case 'too-late':
       return `\`${issue.stepId}\`${at(issue.index)} must come BEFORE any step that provides \`${issue.token}\`, and one already did.`;
     case 'unfulfilled':
@@ -247,7 +249,10 @@ function stepLines({ entry: e, description }: DraftCatalogStep): string[] {
   return [
     `- \`${e.stepId}\` — ${safeNote(e.label)}${e.dispatchesCli ? ' (runs an agent)' : ''}${e.agentAuthoredOutput ? ' (quotable)' : ''}`,
     ...(description ? [`    ${safeNote(description)}`] : []),
-    ...e.requires.map((r) => `    needs \`${r.needs}\` (${safeNote(r.reason)})`),
+    ...e.requires.map(
+      (r) =>
+        `    needs \`${r.needs}\`${r.after === undefined ? '' : ` after \`${r.after}\``} (${safeNote(r.reason)})`,
+    ),
     ...facts('provides', e.provides),
     ...facts('removes', e.removes),
     ...facts('must come before any step that provides', e.precedes),
@@ -391,6 +396,7 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     'walks `stepIds` in order and checks each catalog step against the facts at that point:',
     '- `needs X`: X must be provided by an EARLIER step. `repository` is provided from the start when',
     '  requiresRepository is true, and never otherwise.',
+    '- `needs X after Y`: both facts must be available, with the provider of X strictly AFTER the provider of Y.',
     '- `provides`: those facts are true from this step on. `removes`: they stop being true after it.',
     '- `must come before any step that provides X`: this step may not follow a step that provides X.',
     '- `a later step must provide X`: some step after this one has to provide X.',

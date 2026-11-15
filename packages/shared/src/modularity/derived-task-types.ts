@@ -162,7 +162,12 @@ export function effectiveReplacementEntry(
     ...entry,
     requires: [
       ...entry.requires,
-      ...role.requires.filter((r) => !entry.requires.some((e) => e.needs === r.needs)),
+      ...role.requires.filter(
+        (r) =>
+          !entry.requires.some(
+            (e) => e.needs === r.needs && (r.after === undefined || e.after === r.after),
+          ),
+      ),
     ],
     precedes: [...new Set([...(entry.precedes ?? []), ...(role.precedes ?? [])])],
     entails: [...new Set([...(entry.entails ?? []), ...(role.entails ?? [])])],
@@ -621,7 +626,12 @@ function validV2Bindings(plan: DerivedRunPlanV2): boolean {
           !entry.replaces?.includes(role) ||
           !stepOutputContractsEqual(entry.outputContract, binding.outputContract) ||
           host.provides.some((t) => !entry.provides.includes(t) || entry.removes?.includes(t)) ||
-          host.requires.some((r) => !entry.requires.some((e) => e.needs === r.needs)) ||
+          host.requires.some(
+            (r) =>
+              !entry.requires.some(
+                (e) => e.needs === r.needs && (r.after === undefined || e.after === r.after),
+              ),
+          ) ||
           (entry.closes ?? false) !== (host.closes ?? false) ||
           entry.loopTargetStepId !== host.loopTargetStepId
         )
