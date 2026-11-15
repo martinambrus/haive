@@ -1190,3 +1190,56 @@ for (const policy of [undefined, 'fail-step', 'record-and-continue']) {
     });
   }
 }
+
+it.each([undefined, 'fail-step'])(
+  'F4 default equivalence: refused advisor escalates under %s',
+  async (policy) => {
+    const h = fixture([issue('A', failure)], true);
+    h.stepDef.dagExecute.failurePolicy = policy as string;
+    h.invocations.push({
+      id: 'refused',
+      startedAt: new Date(),
+      endedAt: new Date(),
+      exitCode: 1,
+      errorMessage: PROVIDER_FATAL_HEADLINES.content_filter,
+    });
+    h.runs.push({
+      id: 'advice',
+      dagIssueId: 'A',
+      role: 'issue_advisor',
+      cliInvocationId: 'refused',
+      consumedAt: null,
+    });
+    expect((await h.run()).resolved).toBe(false);
+    expect(h.step.status).toBe('waiting_cli');
+    expect(h.rows[0]!.lastAdvisorAction).toBe('ESCALATE_TO_REPLAN');
+    expect(h.rows[0]!.errorMessage).toBeNull();
+    expect(h.rows[0]!.advisorInvocations).toBe(1);
+    expect(h.plan.replannerInvocationId).not.toBeNull();
+    expect(h.enqueued).toHaveLength(1);
+  },
+);
+
+it('F4 re-dispatches a superseded refused advisor under opt-in', async () => {
+  const h = fixture([issue('A', failure)], true);
+  h.invocations.push({
+    id: 'refused',
+    startedAt: new Date(),
+    endedAt: new Date(),
+    supersededAt: new Date(),
+    exitCode: 1,
+    errorMessage: PROVIDER_FATAL_HEADLINES.content_filter,
+  });
+  h.runs.push({
+    id: 'advice',
+    dagIssueId: 'A',
+    role: 'issue_advisor',
+    cliInvocationId: 'refused',
+    consumedAt: null,
+  });
+  expect((await h.escalate()).status).toBe('waiting');
+  expect(h.rows[0]!.advisorInvocations).toBe(0);
+  expect(h.rows[0]!.errorMessage).toBeNull();
+  expect(h.enqueued).toHaveLength(1);
+  expect(h.plan.replannerInvocationId).toBeNull();
+});

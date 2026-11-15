@@ -2205,10 +2205,6 @@ export async function ingestAdvisor(
       rawOutput: inv.rawOutput ?? null,
     })
     .where(eq(schema.dagAgentRuns.id, run.id));
-  if (isProviderRefusal(inv.errorMessage)) {
-    await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
-    return 'escalate';
-  }
   // An advisor that never answered, or was cut at the output limit (once), must not be charged an
   // attempt or read as ESCALATE_TO_REPLAN.
   const truncatedOnce =
@@ -2230,6 +2226,12 @@ export async function ingestAdvisor(
       return 'escalate';
     }
     return 'retry';
+  }
+  // Opt-in records the refusal without relaying the refused assignment to another agent.
+  // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
+  if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
+    await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
+    return 'escalate';
   }
   const out = parseAdvisor(inv);
   await ea.db
