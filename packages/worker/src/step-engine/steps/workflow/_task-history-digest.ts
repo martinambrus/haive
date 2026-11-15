@@ -84,7 +84,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
   const out: Finding[] = [];
 
   if (stepId === '07b-phase-4-validate') {
-    for (const it of asRecords(o.issues)) {
+    for (const it of asArray(o.issues)) {
       const i = it as Record<string, unknown>;
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
@@ -137,7 +137,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       }
     }
   } else if (stepId === '08d-adversarial-qa') {
-    for (const it of asRecords(o.findings)) {
+    for (const it of asArray(o.findings)) {
       const i = it as Record<string, unknown>;
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
@@ -164,7 +164,7 @@ function extractRuntimeErrors(stepId: string, output: unknown): string[] {
   } else if (stepId === '08a-browser-verify') {
     for (const e of asArray(o.consoleErrors).slice(0, 5)) out.push(`console: ${clip(str(e), 300)}`);
     for (const e of asArray(o.networkErrors).slice(0, 5)) out.push(`network: ${clip(str(e), 300)}`);
-    for (const f of asRecords(o.failures).slice(0, 5)) {
+    for (const f of asArray(o.failures).slice(0, 5)) {
       const ff = f as Record<string, unknown>;
       out.push(`browser-test: ${clip(str(ff.description), 300)}`);
     }
