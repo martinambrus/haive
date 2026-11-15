@@ -1,8 +1,80 @@
+type DsnSurface = 'input' | 'stored-rag' | 'stored-global-kb';
+
 type RefusedParameter = 'sslrootcert' | 'sslcert' | 'sslkey' | 'host';
 
+/** Reviewed against postgres.js 4.1.1's parsed options and consumed DSN selectors.
+ * Includes programmatic options so any parser expansion requires a security review;
+ * certificates disappear before sql.options is returned. The compatibility test
+ * compares this inventory with the installed parser, including those consumed keys. */
+export const USER_POSTGRES_DSN_KNOWN_OPTIONS = [
+  'backoff',
+  'cancel_timeout',
+  'channel_binding',
+  'connect_timeout',
+  'connection',
+  'database',
+  'debug',
+  'eager_types',
+  'fetch_types',
+  'host',
+  'idle_timeout',
+  'infer',
+  'keep_alive',
+  'max',
+  'max_lifetime',
+  'max_pipeline',
+  'min',
+  'no_subscribe',
+  'onclose',
+  'onnotice',
+  'onnotify',
+  'onparameter',
+  'onread',
+  'open',
+  'parameters',
+  'parsers',
+  'pass',
+  'passfile',
+  'path',
+  'port',
+  'prepare',
+  'publications',
+  'query_timeout',
+  'queue_timeout',
+  'resolve',
+  'scheduler',
+  'serializers',
+  'shared',
+  'shared_types',
+  'slot',
+  'socket',
+  'ssl',
+  'sslcert',
+  'sslkey',
+  'sslmode',
+  'sslnegotiation',
+  'sslrootcert',
+  'target_session_attrs',
+  'timers',
+  'transform',
+  'types',
+  'unref_sockets',
+  'user',
+] as const;
+
 export class UserPostgresDsnError extends Error {
-  constructor(readonly parameter: RefusedParameter) {
-    super(`PostgreSQL connection parameter "${parameter}" is not allowed`);
+  readonly code = 'user_postgres_dsn_refused';
+  constructor(
+    readonly parameter: RefusedParameter,
+    surface: DsnSurface = 'input',
+  ) {
+    const guidance =
+      surface === 'stored-rag'
+        ? 'Update the connection string in onboarding step 04 (Tooling and infrastructure) without this parameter.'
+        : surface === 'stored-global-kb'
+          ? 'Ask an admin to replace the saved connection string in Settings > Global KB without this parameter.'
+          : 'Remove the parameter and try again.';
+    super(`PostgreSQL connection parameter "${parameter}" is not allowed. ${guidance}`);
     this.name = 'UserPostgresDsnError';
   }
 }
@@ -11,7 +83,7 @@ export class UserPostgresDsnError extends Error {
  * strip parameters: that would silently change the requested TLS policy.
  * Keep this tail/authority split aligned with postgres.js parseUrl, which accepts
  * multi-host authorities and unescaped @ in passwords that WHATWG URL rejects. */
-export function assertUserPostgresDsn(dsn: string): void {
+export function assertUserPostgresDsn(dsn: string, surface: DsnSurface = 'input'): void {
   const rest = dsn.slice(dsn.indexOf('://') + 3);
   const end = rest.search(/[/?]/);
   const authority = end === -1 ? rest : rest.slice(0, end);
@@ -23,7 +95,7 @@ export function assertUserPostgresDsn(dsn: string): void {
   }
   for (const parameter of ['sslrootcert', 'sslcert', 'sslkey'] as const) {
     // Presence matters even for empty, duplicated, or "system" values.
-    if (tail.searchParams.has(parameter)) throw new UserPostgresDsnError(parameter);
+    if (tail.searchParams.has(parameter)) throw new UserPostgresDsnError(parameter, surface);
   }
   // The driver's query reduction keeps the last value. Query hosts are already
   // URL-decoded; authority hosts get one forgiving decode in parseUrl.
@@ -46,14 +118,14 @@ export function assertUserPostgresDsn(dsn: string): void {
       })
       .join(',');
   }
-  if (host.includes('/')) throw new UserPostgresDsnError('host');
+  if (host.includes('/')) throw new UserPostgresDsnError('host', surface);
 }
 
 /** Probe responses never carry driver messages: parser, TLS and server errors
  * can name local files even when no SQL parameters were bound. */
 export function userPostgresErrorMessage(err: unknown): string {
   if (err instanceof UserPostgresDsnError) {
-    return `PostgreSQL connection parameter "${err.parameter}" is not allowed`;
+    return err.message;
   }
   const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
   if (code === 'ECONNREFUSED') return 'PostgreSQL connection refused';

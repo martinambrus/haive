@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { randomBytes } from 'node:crypto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { RTK_ENABLED_UNIT, conflictSide } from '@haive/shared/project-state';
@@ -39,26 +40,41 @@ async function fixture() {
     incoming: conflictSide(false),
   });
   const noop = () => undefined;
+  const info = vi.fn();
   const ctx = {
     db: fake.db,
     repoPath: root,
     taskId: TASK,
     userId: USER,
     cliProviderId: null,
-    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    logger: { info, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
-  const apply = (rtkEnabled: boolean) =>
+  const apply = (rtkEnabled: boolean, ragConnectionString?: string) =>
     toolingInfrastructureStep.apply(ctx, {
       detected: { cliSupportsLsp: false, repoOwnedMcpServersFingerprint: 'none' },
-      formValues: { mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON, rtkEnabled },
+      formValues: {
+        mcpSettingsJson: DEFAULT_MCP_SETTINGS_JSON,
+        rtkEnabled,
+        ...(ragConnectionString ? { ragMode: 'external', ragConnectionString } : {}),
+      },
     } as never);
   const repo = () => fake.rows(schema.repositories)[0]!;
   const row = () => fake.rows(schema.projectStateConflicts)[0]!;
   const outbox = () => fake.rows(schema.projectStateOutbox);
-  return { apply, repo, row, outbox };
+  return { apply, repo, row, outbox, info };
 }
 
 describe('04 saving the RTK choice and a pending RTK question', () => {
+  it('saves a supported DSN without logging its credentials', async () => {
+    const f = await fixture();
+    const password = randomBytes(12).toString('hex');
+    const dsn = `postgres://user:${password}@db.invalid/store?sslmode=verify-full`;
+    await f.apply(true, dsn);
+    expect(f.repo().onboardingTooling).toMatchObject({ tooling: { ragConnectionString: dsn } });
+    expect(f.info).toHaveBeenCalled();
+    expect(JSON.stringify(f.info.mock.calls)).not.toContain(password);
+    expect(JSON.stringify(f.info.mock.calls)).not.toContain(dsn);
+  });
   it('switching RTK off closes the question as converged, by the task user', async () => {
     const f = await fixture();
 

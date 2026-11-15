@@ -39,7 +39,7 @@ it.each(['sslrootcert', 'sslcert', 'sslkey'])(
   async (parameter) => {
     for (const path of [existing, absent, 'system', '']) {
       const dsn = `postgres://user@db.invalid/store?${parameter}=${encodeURIComponent(path)}`;
-      for (const open of [
+      for (const [index, open] of [
         () => resolveRagConnection({ ...prefs, ragConnectionString: dsn }, {} as Database, 'test'),
         () =>
           resolveRagConnection(
@@ -49,7 +49,7 @@ it.each(['sslrootcert', 'sslcert', 'sslkey'])(
             { trustedTarget: true },
           ),
         () => resolveGlobalKbConnection({ ...settings, connectionString: dsn }, {} as Database),
-      ]) {
+      ].entries()) {
         const outcome = await open().then(
           async (conn) => {
             await conn?.close();
@@ -58,7 +58,8 @@ it.each(['sslrootcert', 'sslcert', 'sslkey'])(
           (err: unknown) => err,
         );
         expect(outcome).toMatchObject({
-          message: `PostgreSQL connection parameter "${parameter}" is not allowed`,
+          code: 'user_postgres_dsn_refused',
+          message: `PostgreSQL connection parameter "${parameter}" is not allowed. ${index === 2 ? 'Ask an admin to replace the saved connection string in Settings > Global KB without this parameter.' : 'Update the connection string in onboarding step 04 (Tooling and infrastructure) without this parameter.'}`,
         });
         expect(postgres).not.toHaveBeenCalled();
       }
@@ -113,4 +114,10 @@ it('preserves supported TLS, multi-host and userinfo parsing without treating or
     if (query.startsWith('?sslmode=')) expect(pg.options.ssl).toBe(query.slice(9));
     await pg.end({ timeout: 0 });
   }
+});
+
+it('uses input guidance for a DSN refused before save or test', () => {
+  expect(() => assertUserPostgresDsn('postgres://user@db.invalid/store?sslkey=')).toThrow(
+    'PostgreSQL connection parameter "sslkey" is not allowed. Remove the parameter and try again.',
+  );
 });

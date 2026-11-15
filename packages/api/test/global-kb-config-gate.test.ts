@@ -128,7 +128,7 @@ import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
-const STORED_STRING = 'postgres://kb:secret@central.example:5432/kb';
+const STORED_STRING = `postgres://kb:${randomBytes(12).toString('hex')}@central.example:5432/kb`;
 const SAVED = {
   enabled: true,
   digestEnabled: true,
@@ -165,6 +165,62 @@ const send = (method: string, url: string, body?: unknown) =>
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 const put = (body: unknown) => send('PUT', '/global-kb/config', body);
+
+it.each(['sslrootcert', 'sslcert', 'sslkey', 'host'])(
+  'refuses %s at save before any configuration or audit write',
+  async (parameter) => {
+    const password = randomBytes(12).toString('hex');
+    const connectionString = `postgres://user:${password}@db.invalid/store?${parameter}=%2Fprivate%2Ffile`;
+    const res = await put({ mode: 'external', connectionString });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      code: 'user_postgres_dsn_refused',
+      error: `PostgreSQL connection parameter "${parameter}" is not allowed. Remove the parameter and try again.`,
+    });
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+  },
+);
+it.each(['admin', 'user'])(
+  'names a refused saved DSN echoed by an %s editing another field',
+  async (role) => {
+    h.role = role;
+    const password = randomBytes(12).toString('hex');
+    const connectionString = `postgres://user:${password}@db.invalid/store?sslkey=%2Fprivate%2Ffile`;
+    h.settings = { ...SAVED, mode: 'external', connectionString };
+    const res = await put({ digestEnabled: false, connectionString });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({
+      code: 'user_postgres_dsn_refused',
+      error:
+        'PostgreSQL connection parameter "sslkey" is not allowed. Ask an admin to replace the saved connection string in Settings > Global KB without this parameter.',
+    });
+    expect(JSON.stringify(body)).not.toContain(password);
+    expect(JSON.stringify(body)).not.toContain('/private/file');
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+  },
+);
+
+it.each(['admin', 'user'])(
+  'allows an %s to edit other fields with the page’s blank DSN despite a refused saved DSN',
+  async (role) => {
+    h.role = role;
+    h.settings = {
+      ...SAVED,
+      mode: 'external',
+      connectionString: 'postgres://user@db.invalid/store?sslkey=',
+    };
+    const res = await put({ digestEnabled: false, connectionString: '' });
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']);
+    expect(h.setSecret).not.toHaveBeenCalled();
+  },
+);
+
 const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
 const auditDb = () => {
   const open = (rows: { table: unknown; row: unknown }[]): Record<string, unknown> => {

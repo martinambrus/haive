@@ -266,7 +266,7 @@ function resolveExternal(
   embeddingDimensions: number,
   opts: RagConnectOptions,
 ): RagConnection {
-  assertUserPostgresDsn(connectionString);
+  assertUserPostgresDsn(connectionString, 'stored-rag');
   const pg = postgres(connectionString, {
     ...poolOptions(opts),
     ...(opts.trustedTarget ? {} : { socket: guardedPgSocket }),

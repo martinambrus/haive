@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { isUndefinedTable, schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { UserPostgresDsnError } from '@haive/shared/egress';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
   RUNBOOK_BOOST_BUGFIX,
@@ -315,9 +316,10 @@ ragRoutes.post('/search', sandboxBodyLimit, async (c) => {
       ? Math.min(body.top_k, 50)
       : undefined;
 
-  const hits = await executeRagSearch(taskId, query, topK);
+  const availability: { note?: string } = {};
+  const hits = await executeRagSearch(taskId, query, topK, 'all', availability);
   await logRagQuery(getDb(), taskId, query, topK ?? null, hits);
-  return c.json({ hits });
+  return c.json({ hits, ...availability });
 });
 
 /** Used by agent calls and the user playground; playground runs never enter task telemetry. */
@@ -326,6 +328,7 @@ export async function executeRagSearch(
   query: string,
   topK?: number,
   scope: 'local' | 'global' | 'all' = 'all',
+  availability: { note?: string } = {},
 ): Promise<RagSearchHit[]> {
   const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
   const db = getDb();
@@ -395,6 +398,7 @@ export async function executeRagSearch(
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
     } catch (err) {
+      if (err instanceof UserPostgresDsnError) throw err;
       // The per-project RAG database is created lazily by resolveRagConnection, but
       // ai_rag_embeddings is only created by the onboarding step 10-rag-populate.
       // Agents run LLM steps well before that (06_5-agent-discovery), so a missing
@@ -472,6 +476,12 @@ export async function executeRagSearch(
       globalHits = result.scoped;
       globalBodies = result.bodies;
     } catch (err) {
+      availability.note = 'Global KB unavailable; returning per-repo results only.';
+      if (err instanceof UserPostgresDsnError) {
+        availability.note +=
+          ` PostgreSQL connection parameter "${err.parameter}" is not allowed. ` +
+          'Ask an admin to replace the connection string in Settings > Global KB without this parameter.';
+      }
       log.warn({ err, taskId }, 'global KB search failed; returning local-only');
       globalHits = [];
       globalBodies = new Map();

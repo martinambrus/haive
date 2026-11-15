@@ -1,4 +1,5 @@
 import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -439,6 +440,9 @@ export const toolingInfrastructureStep: StepDefinition<
 
   async apply(ctx, args) {
     const tooling: Record<string, unknown> = { ...args.formValues };
+    if (typeof tooling.ragConnectionString === 'string' && tooling.ragConnectionString) {
+      assertUserPostgresDsn(tooling.ragConnectionString);
+    }
     const currentCliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
     const cliSupportsLsp = currentCliMeta?.supportsLsp ?? args.detected.cliSupportsLsp ?? false;
     // A hidden field must not retain a stale selection from a prior CLI. The
@@ -521,7 +525,7 @@ export const toolingInfrastructureStep: StepDefinition<
       );
     }
 
-    ctx.logger.info({ tooling, rtkEnabled }, 'tooling preferences saved');
+    ctx.logger.info({ rtkEnabled }, 'tooling preferences saved');
     return { tooling };
   },
 };
