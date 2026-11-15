@@ -427,18 +427,45 @@ plus `total`. Split parents count in `split`, separately from their children's o
 and remain included in `total`. Counts come from persisted issue rows, never status
 copy or detect counts.
 
-Review, advisor and replanner budgets still run before final failure. A coder-refused
-issue is not relayed to a later advisor or replanner under either policy, including
-through another issue's graph, dependency levels or ledger context. Under opt-in, an
-advisor refusal is recorded without re-sending the assignment to a replanner. A required provider absent from configuration
-or refusing dispatch, an auxiliary execution-environment fault, an interrupted auxiliary
-run and an advisor or replanner reply with no valid structured decision are hard faults
-that fail the step for a Retry; they cannot be recorded as legitimate declined replans.
-A fault spends no advisor or replan budget, so Retry does not cure a deterministic one
-(for example a replanner prompt the provider always refuses): switch the step's CLI or
-fix the cause. An explicit structured ABORT
-remains recordable. Superseded, never-started and preempted auxiliary runs release their
-slots without spending an attempt, including when a superseded run retains fault text.
+Review, advisor and replanner decision budgets still run before final issue failure.
+A coder-refused issue is not relayed to a later advisor or replanner under either
+policy, including through another issue's graph, dependency levels or ledger context.
+Under opt-in, advisor and replanner content-filter refusals record the affected issues
+as refused without re-sending the assignment. A refused replanner prompt marks each
+of its affected failed issues refused, replacing that issue's previous error text;
+`dagOutcomes.refused` therefore includes these replanner refusals.
+
+Under opt-in, a required provider absent from configuration or refusing dispatch, an
+auxiliary execution-environment fault, an interrupted auxiliary run (for a reviewer or fix
+coder, only one without a valid result), and an advisor or replanner reply with no valid
+structured decision fail the step; they cannot be recorded as legitimate declined replans.
+These faults spend no advisor or replan decision budget. Interrupted reviewers fail
+immediately instead of using their charged `reviewInfraRetries` redispatches.
+Advisor-started fix coders likewise bypass their charged `infraRetries` redispatches and the
+automatic learned-timeout ladder (30, 60, 120 minutes); a CLI timeout also fails
+immediately. A fix coder that needs more time than its timeout finishes only through the
+step's timeout override. This preserves the visible opt-in halt and leaves recovery to
+Retry. A valid reviewer verdict or fix-coder result is used even if the process subsequently
+exits by signal or timeout; for those two roles, environment and interruption checks apply
+only when no valid result exists. An advisor or replanner is checked first, so a killed one
+fails the step even if it printed a decision. A content refusal retains its explicit refusal
+outcome even if partial structured output exists.
+
+The plan's existing `escalationLog` retains a hard-fault streak per auxiliary role and level
+across Retry. Only deterministic faults count: execution-environment faults, replies with no
+valid structured decision where a decision is required, and CLI timeouts. Two distinct
+counted faults on the same CLI stop further dispatch of that role on that CLI and tell the
+user to switch the step's CLI. Replaying the same invocation does not increase the streak; a
+valid usable reply clears it, and a different CLI starts a fresh streak. Worker-restart
+orphans, signal kills, cancellation, OOM and other non-timeout interruptions keep the
+first-time Retry message, never increment the streak and never create a dispatch block.
+Provider outages and free redispatches do not count. A blocked reviewer stays blocked across
+same-CLI Retries without consuming the retained run or spending its recovery budget; it
+cannot turn into a misleading review-stalled failure. Streaks also cover advisor-started fix
+coders returning through coder ingestion. An explicit structured ABORT remains recordable.
+Superseded, never-started and preempted auxiliary runs release their slots without spending
+an attempt, including when a superseded run retains fault text. One-time output-truncation
+redispatch remains available.
 
 The default policy keeps its existing soft failure/escalation paths for missing
 review-loop or replanner providers. An advisor with no usable decision (including an
