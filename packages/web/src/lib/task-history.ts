@@ -268,8 +268,22 @@ function outcome(
       list(output.testsDeleted).length;
     if (count) return { message: 'Tests updated; no run result was recorded.', tone: 'warning' };
   }
-  if (step.stepId === '08e-insights-triage' && output.implemented === true) {
-    return { message: 'The agent implemented the selected insights.', tone: 'neutral' };
+  if (step.stepId === '08e-insights-triage') {
+    if (output.version === 1 && Array.isArray(output.items)) {
+      const items = output.items.map(row);
+      const count = (state: string) => items.filter((i) => i.outcome === state).length;
+      return {
+        message: `Agent report: ${count('applied')} applied, ${count('already_handled')} already handled, ${count('not_applied')} not applied, ${count('unconfirmed')} unconfirmed.`,
+        tone: count('not_applied') || count('unconfirmed') ? 'warning' : 'neutral',
+      };
+    }
+    if (
+      list(output.selected).length ||
+      output.implemented === true ||
+      list(output.changes).length
+    ) {
+      return { message: 'Application outcomes were not confirmed per insight.', tone: 'warning' };
+    }
   }
   if (step.stepId === '07-phase-2-implement' || Array.isArray(output.filesTouched)) {
     const files = new Set(list(output.filesTouched).map(text).filter(Boolean)).size;

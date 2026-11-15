@@ -218,11 +218,13 @@ describe('houseRulesFor', () => {
     }
   });
 
-  it('shows no seat of another fan-out step anything, whatever it calls it', () => {
+  it('shows only the declared writer seats on other fan-outs', () => {
     for (const [stepId, seats] of Object.entries(STEP_MINING_SEATS)) {
       if (stepId === '08c-code-review') continue;
       for (const seat of ['default', 'peer-reviewer', ...seats.map((s) => s.id)]) {
-        expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toBeUndefined();
+        if (stepId === '08e-insights-triage' && ['default', 'implementer'].includes(seat)) {
+          expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toEqual({ mode: 'write' });
+        } else expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toBeUndefined();
       }
     }
     for (const stepId of [
