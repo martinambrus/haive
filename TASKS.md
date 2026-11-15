@@ -661,7 +661,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T681 · Insight loop: act on consequential insights during the task, and pick insights at gate 3
 
-status: open (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
+status: in progress (plan approved 2026-11-15, docs/plans/insight-loop.md, five PRs: PR1 shared loader DONE #1209 7c10887b1; PR2 switch #1212 in review; PR3-PR5 next) (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
 
 Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INSTRUCTION`); DAG reviewers' withheld findings join them (`loadInsightOutputs`). Step `08e-insights-triage` shows them once as a multi-select and one agent applies the picks; gates 2 and 3 list the unpicked rest as plain text (`_gate-insights.ts`; gate 3 says "needs a follow-up task"). An `Insight` has no severity, and nothing loops.
 
@@ -2254,6 +2254,7 @@ All low unless marked.
 
 ## Done
 
+- Shared insight loader (#1209, 7c10887b1): `_insight-loader.ts` owns the parser and source loader; `loadUnactedInsights` (unlimited by default, picked filtered before the limit, exact omissions, `findingIdentity` before clipping, stable occurrence ids, additive `sourceRefs`); both gates persist through one bounded projection byte-identical to base; task-bound host service `ctx.host.loadUnactedInsights`. T681 PR1 and DPA P2.
 - Credential redaction in repair evidence (#1204, 2d3e62822): stored test-edit content and every gate artifact that serves diff or file text (gate-3, run-app, learning incl. extra files, KB commit, external KB) run through the committed-secret scanner and are rechecked when served; NUL and invalid-UTF-8 blobs are withheld whole; a pass that can no longer finish taints the task while an ended pass whose owner can still finish keeps its evidence; one exported marker; a change hidden by redaction shows a notice. T670 items 1 and 3. Lows filed in T670. Deploy note: api and worker crashed on the new shared export before libs finished; `pnpm docker restart worker` and `api` fixed it.
 - Scratch reaper for repository-backed tasks (#1206, 2cd957697): completed or cancelled tasks (not paused; a stale `dead_at` no longer strands one) have their canonical scratch removed under a per-task in-process fence shared with acquisition and the boot sweep; any unended, unsuperseded invocation or a live CLI sandbox holds it; the missing-task boot branch needs a clean listing. Lows filed as T682.
 - Module core-row write rules (#1205, ec16f7281): modules.md "Core-row writes" (ctx.db authority, extension rows, pre_answers merge, no core tables, cross-database intents, owner-scoped routes, review history); single-writer claims in review-findings.md and schema comments now say "core"; stale deep-analysis plan passages corrected.
