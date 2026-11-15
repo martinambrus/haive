@@ -11,6 +11,7 @@ import {
   replannerPrompt,
   parseCoderResult,
   ingestReviewRun,
+  ingestAdvisor,
 } from './dag-executor.js';
 import {
   OUTPUT_TRUNCATION_HEADLINE,
@@ -240,7 +241,11 @@ function fixture(rows: Row[], review = false) {
             return c;
           },
           for: async () =>
-            ['pending', 'failed', 'skipped'].includes(step.status) ? [] : [{ id: 'step' }],
+            table === schema.taskSteps
+              ? ['pending', 'failed', 'skipped'].includes(step.status)
+                ? []
+                : [{ id: 'step' }]
+              : (tables.get(table) ?? []).filter((r) => matches(cond, r)).map((r) => ({ ...r })),
           then: (ok: any, no: any) =>
             Promise.resolve(
               (tables.get(table) ?? [])
@@ -1535,3 +1540,203 @@ for (const role of ['reviewer', 'coder'] as const) {
     },
   );
 }
+
+function auxiliaryHarness(role: 'issue_advisor' | 'replanner' | 'reviewer' | 'coder') {
+  const h = fixture([issue('A', role === 'reviewer' || role === 'coder' ? {} : failure)], true);
+  const args = () => ({
+    db: h.db,
+    current: h.step,
+    plan: { ...h.plan },
+    level: h.levels[0],
+    stepDef: h.stepDef,
+    specView: { text: '', condensed: false },
+    params: h.params,
+    providers: [],
+    deps: h.params.deps,
+    taskId: 'task',
+    attachmentsNotice: '',
+    issues: h.rows,
+  });
+  const fold = (inv: Row) => {
+    const run = { id: `run-${inv.id}`, dagIssueId: 'A', role, consumedAt: null };
+    h.runs.push(run);
+    h.invocations.push(inv);
+    if (role === 'replanner') {
+      h.plan.replannerInvocationId = inv.id;
+      return h.escalate();
+    }
+    return (role === 'issue_advisor' ? ingestAdvisor : ingestReviewRun)(
+      args() as never,
+      h.rows[0] as never,
+      run as never,
+      inv as never,
+    );
+  };
+  return { ...h, fold, args };
+}
+const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
+  id,
+  cliProviderId: 'provider',
+  startedAt: new Date(),
+  endedAt: new Date(),
+  exitCode: 1,
+  errorMessage: 'permission denied',
+  ...patch,
+});
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  const faults =
+    role === 'issue_advisor' || role === 'replanner'
+      ? ['environment', 'interrupted', 'malformed']
+      : ['environment', 'interrupted'];
+  it.each(faults)(`DAGP-2 ${role} bounds consecutive %s faults across Retry`, async (fault) => {
+    const h = auxiliaryHarness(role);
+    const signal =
+      fault === 'malformed'
+        ? { exitCode: 0, errorMessage: null, rawOutput: 'bad decision' }
+        : fault === 'interrupted'
+          ? { exitCode: 137, errorMessage: null }
+          : {};
+    const first = auxiliaryFault('first', signal);
+    await expect(h.fold(first)).rejects.toThrow(/DAG required/);
+    // Redelivery of this invocation must not spend the second fault.
+    await expect(h.fold(first)).rejects.toThrow(/DAG required/);
+    expect(h.plan.escalationLog).toEqual([expect.objectContaining({ role, level: 0, count: 1 })]);
+    // Retry supersedes old invocations, but preserves the plan log (unlike issue budgets).
+    first.supersededAt = new Date();
+    await expect(h.fold(auxiliaryFault('second', signal))).rejects.toThrow(
+      /switch the step's CLI/i,
+    );
+    expect(h.plan.escalationLog).toEqual([expect.objectContaining({ role, level: 0, count: 2 })]);
+    expect(h.rows[0]!.advisorInvocations).toBe(0);
+    expect(h.plan.replannerInvocations).toBe(0);
+    expect(h.checkpoints).toEqual([]);
+    expect(h.enqueued).toEqual([]);
+  });
+
+  it(`DAGP-2 ${role} does not charge provider outages`, async () => {
+    const h = auxiliaryHarness(role);
+    for (const id of ['outage-1', 'outage-2', 'outage-3']) {
+      await expect(
+        h.fold(auxiliaryFault(id, { errorMessage: PROVIDER_FATAL_HEADLINES.server_error })),
+      ).rejects.toThrow(/DAG required agent failed/);
+    }
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+  });
+}
+
+it('DAGP-2 a refused replanner records affected issues and never resends', async () => {
+  const h = auxiliaryHarness('replanner');
+  h.rows.push(issue('D', { resolution: 'approved' }));
+  expect(
+    await h.fold(
+      auxiliaryFault('refused', { errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }),
+    ),
+  ).toMatchObject({ status: 'ok' });
+  expect(h.plan.replannerInvocationId).toBeNull();
+  expect(h.invocations[0]!.consumedAt).toBeInstanceOf(Date);
+  expect(h.rows[0]!.errorMessage).toBe(PROVIDER_FATAL_HEADLINES.content_filter);
+  expect(h.rows[1]!.errorMessage).toBeNull();
+  expect((await h.run()).resolved).toBe(true);
+  expect((await h.run()).resolved).toBe(true);
+  expect(h.enqueued).toEqual([]);
+  expect((await loadDagOutcomeCounts(h.db, 'task')).refused).toBe(1);
+});
+
+for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it(`DAGP-2 ${role} clears its streak after a valid reply`, async () => {
+    const h = auxiliaryHarness(role);
+    await expect(h.fold(auxiliaryFault('first'))).rejects.toThrow(/DAG required/);
+    const parsedOutput =
+      role === 'issue_advisor'
+        ? { action: 'ESCALATE_TO_REPLAN', reasoning: 'needs planning' }
+        : role === 'replanner'
+          ? { action: 'CONTINUE', reasoning: 'proceed' }
+          : role === 'reviewer'
+            ? { verdict: 'approve', criteria_results: [], issues: [] }
+            : { issue_id: 'A', outcome: 'completed', files_modified: ['a.ts'] };
+    await h.fold(auxiliaryFault('valid', { exitCode: 0, errorMessage: null, parsedOutput }));
+    expect(h.plan.escalationLog).toEqual([]);
+    await expect(h.fold(auxiliaryFault('after-success'))).rejects.toThrow(/DAG required/);
+    expect(h.plan.escalationLog).toEqual([expect.objectContaining({ role, count: 1 })]);
+  });
+
+  it(`DAGP-2 ${role} blocks the same CLI at its bound and permits a different CLI`, async () => {
+    const h = auxiliaryHarness(role);
+    await expect(h.fold(auxiliaryFault('first'))).rejects.toThrow(/DAG required/);
+    await expect(h.fold(auxiliaryFault('second'))).rejects.toThrow(/switch the step's CLI/);
+    // Simulate Retry's removal/superseding of the old runs, retaining the plan log.
+    h.runs.splice(0);
+    h.plan.replannerInvocationId = null;
+    const spawn = () => {
+      if (role === 'coder') {
+        h.rows[0]!.stuckCount = 0;
+        return ingestReviewRun(
+          h.args() as never,
+          h.rows[0] as never,
+          { id: 'review-to-fix', role: 'reviewer' } as never,
+          auxiliaryFault('review-to-fix', {
+            exitCode: 0,
+            errorMessage: null,
+            parsedOutput: {
+              verdict: 'fix_required',
+              criteria_results: [],
+              issues: [{ severity: 'high', file: 'a.ts', description: 'fix the stale cache' }],
+            },
+          }) as never,
+        );
+      }
+      if (role === 'replanner') h.rows[0]!.lastAdvisorAction = 'ESCALATE_TO_REPLAN';
+      return role === 'reviewer' ? h.run() : h.escalate();
+    };
+    await expect(spawn()).rejects.toThrow(/switch the step's CLI/);
+    expect(h.enqueued).toEqual([]);
+    vi.mocked(resolveTaskDispatch).mockResolvedValue({
+      mode: 'cli',
+      providerId: 'replacement',
+      invocation: { kind: 'cli', spec: {} },
+    } as never);
+    // Retry resets the issue's review state too.
+    h.rows[0]!.resolution = role === 'reviewer' || role === 'coder' ? null : 'failed_unrecoverable';
+    await spawn();
+    expect(h.enqueued).toHaveLength(1);
+    // The new provider gets its own fault streak rather than inheriting the old bound.
+    await expect(
+      h.fold(auxiliaryFault('replacement-fault', { cliProviderId: 'replacement' })),
+    ).rejects.toThrow(/DAG required agent failed/);
+    expect(h.plan.escalationLog).toEqual([
+      expect.objectContaining({ role, count: 1, providerId: 'replacement' }),
+    ]);
+  });
+}
+
+it('DAGP-2 fault streak writes roll back after ownership is lost', async () => {
+  const h = auxiliaryHarness('issue_advisor');
+  h.step.status = 'pending';
+  await expect(h.fold(auxiliaryFault('lost'))).rejects.toThrow(StepSupersededError);
+  expect(h.plan.escalationLog ?? []).toEqual([]);
+});
+
+it.each([
+  { exitCode: 1, errorMessage: 'permission denied' },
+  { exitCode: 137, errorMessage: null },
+  { exitCode: 143, errorMessage: 'CLI process exceeded its time budget' },
+])(
+  'DAGP-2 an advisor-started fix coder is checked before section C redispatch: %j',
+  async (signal) => {
+    const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+    h.invocations.push(auxiliaryFault('fix', signal));
+    h.runs.push({
+      id: 'fix-run',
+      dagIssueId: 'A',
+      role: 'coder',
+      cliInvocationId: 'fix',
+      consumedAt: null,
+    });
+    await expect(h.run()).rejects.toThrow(/DAG required agent/);
+    expect(h.invocations[0]!.consumedAt).toBeUndefined();
+    expect(h.rows[0]!.outcome).toBe('running');
+    expect(h.enqueued).toEqual([]);
+    expect(h.plan.escalationLog).toEqual([expect.objectContaining({ role: 'coder', count: 1 })]);
+  },
+);
