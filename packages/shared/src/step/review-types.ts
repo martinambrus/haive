@@ -36,19 +36,7 @@ export interface ImplementationFileSet {
  *  because the set is persisted to `task_steps.output`, where a human reads it back. */
 export type ChangedLineNotes = Record<string, string>;
 
-/** What a step recorded about its own coverage, for a gate to read back out of
- *  `task_steps.output`. Separate from ImplementationFileSet because the gate needs
- *  the counts, never the file list. */
-export interface FileCoverage {
-  /** How many changed files the step's agents were actually given. */
-  listed: number;
-  /** How many there were. */
-  total: number;
-  /** listed < total: the step's verdict does not cover the whole change. */
-  truncated: boolean;
-  /** The scan of the change failed, so the list may lack files of it: the verdict does not cover those either. */
-  scanFailed?: true;
-}
+export type { FileCoverage } from '../step-engine/output-contracts.js';
 
 export interface Insight {
   id: string;

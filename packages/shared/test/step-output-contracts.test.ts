@@ -73,10 +73,18 @@ describe('host output contracts', () => {
     });
     expect(result.success).toBe(false);
     if (result.success) throw new Error('expected invalid');
-    expect(result.issuePaths.length).toBeLessThanOrEqual(8);
+    expect(result.issuePaths).toHaveLength(8);
     expect(result.issuePaths.every((p) => p.length <= 160)).toBe(true);
     expect(JSON.stringify(result)).not.toContain('PRIVATE');
     expect(result.issuePaths).toContain('audited');
+  });
+  it('accepts small diagnostic bounds for controls', () => {
+    const result = safeParseStepOutput(
+      audit,
+      { audited: 'PRIVATE', findings: 'PRIVATE', coverage: 'PRIVATE' },
+      { maxIssues: 2, maxPathChars: 3 },
+    );
+    expect(result).toEqual({ success: false, issuePaths: ['aud', 'fin'] });
   });
   it('keeps public inferred output types available to SDK consumers', () => {
     expectTypeOf<CodeAuditOutput>().toEqualTypeOf<contracts.CodeAuditOutput>();
@@ -84,5 +92,9 @@ describe('host output contracts', () => {
     expectTypeOf<FileCoverage>().toEqualTypeOf<contracts.FileCoverage>();
     const ref: StepOutputContractRef = review;
     expect(ref).toBe(review);
+    const reviewResult = safeParseStepOutput(review, null);
+    if (reviewResult.success) expectTypeOf(reviewResult.data).toEqualTypeOf<CodeReviewOutput>();
+    const auditResult = safeParseStepOutput(audit, null);
+    if (auditResult.success) expectTypeOf(auditResult.data).toEqualTypeOf<CodeAuditOutput>();
   });
 });

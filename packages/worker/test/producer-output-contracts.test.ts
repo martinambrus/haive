@@ -83,7 +83,7 @@ describe('contracts on actual producer apply returns', () => {
               snippet: 'code',
             },
           ],
-          ruleConflicts: [{ rule: 'A', reason: 'approved spec', file: 'src/a.ts' }],
+          rule_conflicts: [{ rule: 'A', reason: 'approved spec', file: 'src/a.ts' }],
         }),
         mining('security-code-reviewer', {
           verdict: 'NEEDS_FIXES',
@@ -110,7 +110,31 @@ describe('contracts on actual producer apply returns', () => {
     expect(value.counts.peer).toBe(1);
     expect(value.security.findings[0]?.in_scope).toEqual({ unknown: true });
     expect(value.ruleConflicts).toHaveLength(1);
+    expect(value.extraLenses).toHaveLength(1);
     expect(safeParseStepOutput(review, value)).toEqual({ success: true, data: value });
+    const extended = {
+      ...value,
+      extension: 'root',
+      peer: {
+        ...value.peer,
+        extension: 'peer',
+        findings: value.peer.findings.map((f) => ({ ...f, extension: 'finding' })),
+      },
+      security: {
+        ...value.security,
+        extension: 'security',
+        findings: value.security.findings.map((f) => ({
+          ...f,
+          line: '2-3',
+          extension: 'security finding',
+        })),
+      },
+      extraLenses: value.extraLenses.map((lens) => ({ ...lens, extension: 'lens' })),
+      coverage: { ...value.coverage!, extension: 'coverage' },
+      counts: { ...value.counts, extension: 'counts' },
+      ruleConflicts: value.ruleConflicts!.map((c) => ({ ...c, extension: 'conflict' })),
+    };
+    expect(safeParseStepOutput(review, extended)).toEqual({ success: true, data: extended });
   });
   it('validates the incomplete review fallback without turning it into success evidence', async () => {
     const value = await codeReviewStep.apply(ctx, {

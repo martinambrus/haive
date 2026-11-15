@@ -86,13 +86,15 @@ describe('step SDK entry isolation', () => {
     }
   });
 
-  it('keeps prompt runtime portable and review runtime limited to the designed crypto import', () => {
-    for (const name of ['./step/prompts', './step/review']) {
+  it('keeps output and prompt runtimes portable and review limited to crypto', () => {
+    for (const name of ['./step/prompts', './step/review', './step-outputs']) {
       const entry = path.resolve(ROOT, manifest.exports[name]!.import);
       const external = [...closureOf(entry, new Set(), true)].filter(
         (file) => !file.startsWith(path.join(ROOT, 'dist') + path.sep),
       );
-      expect(external, name).toEqual(name === './step/review' ? ['node:crypto'] : []);
+      expect(external, name).toEqual(
+        name === './step/review' ? ['node:crypto'] : name === './step-outputs' ? ['zod'] : [],
+      );
     }
   }, 30_000);
 

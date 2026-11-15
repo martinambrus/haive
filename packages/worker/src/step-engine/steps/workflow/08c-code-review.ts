@@ -1,3 +1,4 @@
+import { CODE_REVIEW_OUTPUT_CONTRACT, type CodeReviewOutput } from '@haive/shared/step-outputs';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import { fixTestReviewNotice } from './_fix-test-edits.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -56,7 +57,6 @@ import {
   collectImplementationFiles,
   fileCoverage,
   NO_CHANGE_SET_FALLBACK,
-  type FileCoverage,
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -137,82 +137,10 @@ async function readTolerant<T>(read: () => Promise<T>): Promise<T | undefined> {
   }
 }
 
-interface PeerFinding {
-  upstream?: UpstreamKind | null;
-  severity: ReviewSeverity;
-  path?: string;
-  lines?: string;
-  issue: string;
-  snippet?: string;
-  fix?: string;
-  /** The house rule this finding violates, as the peer reviewer referred to it. */
-  rule?: string;
-  /** Set by the refutation pass: a refuter disproved this finding with a cited
-   *  file:line. It stops blocking and stops reaching the implementer, but stays
-   *  visible at gate 2 as advisory. Never set by a reviewer. */
-  refuted?: boolean;
-}
-interface SecurityFinding {
-  upstream?: UpstreamKind | null;
-  severity: ReviewSeverity;
-  /** The reviewer's own placement of the finding relative to the change. Typed
-   *  `unknown`, and normalized by `isOutOfScope` rather than at the boundary, for the
-   *  same reason `severity` and `cwe` are coerced below: a reviewer answering `false`
-   *  instead of `"no"` must not fail the whole finding — and now that the field decides
-   *  whether a change is sent back to be reimplemented, it must not fail the whole
-   *  REVIEW either. Stored verbatim on the finding so `review_findings.raw` records
-   *  what the reviewer actually said. */
-  in_scope?: unknown;
-  path?: string;
-  line?: string | number;
-  cwe?: string;
-  issue: string;
-  snippet?: string;
-  attack?: string;
-  fix?: string;
-  refuted?: boolean;
-}
-
-interface ReviewLensResult {
-  id: string;
-  title: string;
-  verdict: string;
-  findings: PeerFinding[];
-}
-
-interface CodeReviewApply {
-  reviewed: boolean;
-  peer: { verdict: string; findings: PeerFinding[]; positives: string[] };
-  security: { verdict: string; findings: SecurityFinding[] };
-  /** Level-gated extra review lenses (operational, performance). Empty for none/poc. */
-  extraLenses: ReviewLensResult[];
-  blocking: boolean;
-  /** A reviewer RAN but its output stayed unreadable after its re-rolls were spent, so
-   *  part of the change went unreviewed. Distinct from `blocking`: the reviewer failed,
-   *  not the code, so it must not spend a fix round — but gate 2 must not report OK. */
-  reviewIncomplete: boolean;
-  /** A reviewer requested changes without a critical/high finding to point at. Does not
-   *  block (no fix round, nothing to refute), but holds gate 2 off its approve default. */
-  advisoryVerdict: boolean;
-  /** How much of the change the reviewers were actually given. `truncated` holds gate 2
-   *  off its approve default the same way `advisoryVerdict` does: the reviewers may have
-   *  approved everything they saw, and still not have seen the whole change. */
-  coverage: FileCoverage | null;
-  /** Blocking findings a refuter disproved. 0 when the pass is off or nothing blocked. */
-  refutedCount: number;
-  counts: { peer: number; securityCriticalHigh: number };
-  /** Complaints this task has already heard in earlier rounds, as a prose block for the
-   *  next fix round. Computed in apply() because fixLoop.evaluate is synchronous and has
-   *  no ctx, and empty on round 0 and whenever nothing repeats. */
-  recurringNote: string;
-  /** House rules the approved spec or a person requires breaking, as the peer reviewer reported
-   *  them. Never findings: no fix round is spent on them. Only when the peer's output parsed. */
-  ruleConflicts?: RuleConflict[];
-  /** The peer reviewer's cli_invocations row, which holds the stamp of the rules it was given. */
-  peerInvocationId?: string | null;
-  /** The change as the review left it; the gate reads a change that differs as PARTIAL. */
-  changeFingerprint?: string;
-}
+type PeerFinding = CodeReviewOutput['peer']['findings'][number];
+type SecurityFinding = CodeReviewOutput['security']['findings'][number];
+type ReviewLensResult = CodeReviewOutput['extraLenses'][number];
+type CodeReviewApply = CodeReviewOutput;
 
 // Severity is coerced, not enum-validated: a repo's checked-in reviewer persona may
 // still specify a pre-ladder vocabulary, and a strict enum would fail the whole
@@ -1108,6 +1036,7 @@ export function buildRecurringNote(
 }
 
 export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> = {
+  outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
   metadata: {
     id: '08c-code-review',
     workflowType: 'workflow',

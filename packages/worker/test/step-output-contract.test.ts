@@ -3,12 +3,12 @@ import {
   CODE_AUDIT_OUTPUT_CONTRACT as audit,
   CODE_REVIEW_OUTPUT_CONTRACT as review,
 } from '@haive/shared/step-outputs';
-import type { StepDefinition } from '@haive/shared/step';
+import type { StepDefinition, StepOutputContractRef } from '@haive/shared/step';
 import {
   validateSuccessfulStepOutput,
   StepOutputContractInvalidError,
 } from '../src/step-engine/step-output-contract.js';
-const def = (id: string, contract = audit): StepDefinition => ({
+const def = (id: string, contract: StepOutputContractRef = audit): StepDefinition => ({
   metadata: {
     id,
     title: id,

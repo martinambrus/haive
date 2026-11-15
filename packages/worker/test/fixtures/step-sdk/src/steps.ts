@@ -1,3 +1,5 @@
+import { CODE_AUDIT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import type { CodeAuditOutput } from '@haive/shared/step';
 import {
   AdvisedStepError,
   MiningRetryError,
@@ -92,3 +94,20 @@ export async function reviewWithHost(ctx: import('@haive/shared/step').StepConte
   });
   return { scope, review };
 }
+
+// A real compiled consumer of the host contract and its inferred SDK output type.
+export const contractedAudit = {
+  metadata: {
+    id: 'audit',
+    title: 'Audit',
+    description: 'Contract fixture',
+    index: 1,
+    workflowType: 'fixture',
+    requiresCli: false,
+  },
+  outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+  replaces: ['08c2-code-audit'],
+  async apply() {
+    return { audited: true, findings: [{ severity: 'low', issue: 'observation' }], coverage: null };
+  },
+} satisfies StepDefinition<unknown, CodeAuditOutput>;

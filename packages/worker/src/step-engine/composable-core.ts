@@ -1,4 +1,8 @@
 import {
+  CODE_REVIEW_OUTPUT_CONTRACT,
+  CODE_AUDIT_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
+import {
   composableStepEntrySchema,
   IMPLICIT_COMPOSITION_TOKENS,
   type ComposableStepEntry,
@@ -578,6 +582,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '08c-code-review',
+    outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
     agentAuthoredOutput: true,
     label: 'Phase 6: Code review',
     group: 'check',
@@ -589,6 +594,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '08c2-code-audit',
+    outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
     agentAuthoredOutput: true,
     label: 'Code audit (broad)',
     group: 'check',

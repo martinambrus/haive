@@ -1,3 +1,7 @@
+import {
+  validateSuccessfulStepOutput,
+  StepOutputContractInvalidError,
+} from './step-output-contract.js';
 import { UnresolvedStepError } from './registry.js';
 import { createStepHostServices } from './step-host-services.js';
 import {
@@ -3769,6 +3773,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // clear the flag. The pre-`done` check stays as the narrower backstop it always was.
     throwIfCancelled();
 
+    // Only new successful apply returns are validated. Throws and parks above, and
+    // terminal-row recovery, retain their existing semantics. Check ownership before
+    // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
+    if (stepDef.outputContract) {
+      await assertOwnsStep(db, current.id);
+      throwIfCancelled();
+      validateSuccessfulStepOutput(stepDef, output, ctx.logger);
+    }
+
     // Curated per-step recap for the "What the agent did" panel. LLM steps that
     // already emit a summary field get it for free here; steps that ran an agent
     // but emit no summary field are left null for the async LLM summarizer
@@ -3978,7 +3991,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
     // decides per error, so a step can loop back on the failures its implementer authored
     // and still hard-fail on the ones no amount of re-implementing would clear.
-    const routeErrorToFixLoop = routesErrorToFixLoop(stepDef, errorMessage);
+    const routeErrorToFixLoop =
+      !(err instanceof StepOutputContractInvalidError) &&
+      routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       const finished = await writeEnd({
         status: 'done',

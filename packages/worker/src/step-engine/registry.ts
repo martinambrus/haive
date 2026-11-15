@@ -1,3 +1,4 @@
+import { assertStepOutputDeclaration } from './step-output-contract.js';
 import type { StepDefinition } from './step-definition.js';
 
 /** A step id a task's data names that this install does not register: the task is dead, not failed. */
@@ -15,6 +16,7 @@ export class StepRegistry {
   private byWorkflow = new Map<string, StepDefinition[]>();
 
   register(def: StepDefinition): void {
+    assertStepOutputDeclaration(def);
     const meta = def.metadata;
     if (this.byId.has(meta.id)) {
       throw new Error(`Step ${meta.id} already registered`);
@@ -27,6 +29,7 @@ export class StepRegistry {
   }
 
   override(def: StepDefinition): void {
+    assertStepOutputDeclaration(def);
     const meta = def.metadata;
     this.byId.set(meta.id, def);
     const list = this.byWorkflow.get(meta.workflowType) ?? [];

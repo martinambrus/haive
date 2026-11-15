@@ -1,3 +1,4 @@
+import { CODE_REVIEW_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { describe, expect, it } from 'vitest';
 import {
   adminTaskTypeCreateSchema as customTaskTypeCreateSchema,
@@ -200,6 +201,27 @@ describe('derived overlay evaluation', () => {
       expect(result.issues.every((i) => i.kind === 'replacement-contract-unavailable')).toBe(true);
       expect(result.candidates[0]!.stepIds).toEqual(baseCandidates[0]!.stepIds);
     }
+  });
+
+  it('still refuses replacement when both producers name the exact host contract', () => {
+    const role = '08c-code-review';
+    const replacement = 'module.fx.review';
+    const declarations = [
+      entry(role, { outputContract: CODE_REVIEW_OUTPUT_CONTRACT, provides: ['review'] }),
+      entry(replacement, {
+        outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+        replaces: [role],
+        provides: ['review'],
+      }),
+    ];
+    const result = evaluateDerivedTaskType({
+      baseCandidates: [{ executionPath: null, stepIds: [...prefix, role] }],
+      changes: [{ replace: role, with: replacement }],
+      catalog: new Map([...entries, ...declarations].map((e) => [e.stepId, e])),
+      installedStepIds: new Set([...installedStepIds, role, replacement]),
+    });
+    expect(result.issues.map((i) => i.kind)).toEqual(['replacement-contract-unavailable']);
+    expect(result.candidates[0]?.stepIds).toEqual([...prefix, role]);
   });
 
   it('warns explicitly when a replacement is absent from a candidate path', () => {

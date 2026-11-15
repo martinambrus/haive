@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  parseStepOutputContractRef,
+  type StepOutputContractRef,
+} from '../step-engine/output-contracts.js';
 import { formSchemaSchema } from '../schemas/form.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 
@@ -183,6 +187,13 @@ export const composableStepEntrySchema = z
     loopTargetStepId: stepIdSchema.optional(),
     closes: z.boolean().optional(),
     agentAuthoredOutput: z.boolean().optional(),
+    outputContract: z
+      .custom<StepOutputContractRef>(
+        (value) => parseStepOutputContractRef(value) !== null,
+        'unknown host output contract',
+      )
+      .optional(),
+    replaces: z.array(z.enum(['08c-code-review', '08c2-code-audit'])).optional(),
     precedes: z.array(z.string()).optional(),
     removes: z.array(z.string()).optional(),
     entails: z.array(z.string()).optional(),

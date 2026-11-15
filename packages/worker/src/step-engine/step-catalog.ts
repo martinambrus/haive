@@ -1,3 +1,4 @@
+import { assertMatchingOutputDeclaration } from './step-output-contract.js';
 import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { parseStepId, type ComposableStepEntry } from '@haive/shared/modularity';
@@ -20,9 +21,11 @@ export async function syncStepCatalog(
       const meta = def.metadata;
       const parsed = parseStepId(meta.id);
       const composables = parsed?.kind === 'module' ? moduleComposables : coreComposables;
+      const entry = composables.get(meta.id);
+      if (entry) assertMatchingOutputDeclaration(def, entry);
       const composableRow = {
         composable: composables.has(meta.id),
-        entry: composables.get(meta.id) ?? null,
+        entry: entry ?? null,
       };
       const row = {
         source: parsed?.kind === 'module' ? `module:${parsed.moduleId}` : 'core',
