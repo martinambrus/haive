@@ -228,6 +228,12 @@ export function skillTargetRefusalNote(
   );
 }
 
+/** Read the newest physical row (optionally at or below maxRound).
+ * String selectors stay physical; role selectors resolve the immutable task pin.
+ * No producer or no row returns null for every selector, including contracted roles.
+ * A contracted row that is not done retains its identity/status but reads as absent output;
+ * only a done contracted row reports outputCompatible, false for non-conforming output.
+ * Core/uncontracted rows keep their historical tolerant output semantics. */
 export async function loadPreviousStepOutput(
   db: Database,
   taskId: string,
@@ -266,20 +272,7 @@ export async function loadPreviousStepOutput(
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const row = rows[0];
-  if (!row)
-    return binding?.outputContract
-      ? {
-          id: null,
-          stepId,
-          status: null,
-          round: null,
-          detect: null,
-          output: null,
-          iterations: [],
-          roleBinding: binding,
-          outputCompatible: false,
-        }
-      : null;
+  if (!row) return null;
   return {
     id: row.id,
     stepId: row.stepId,
@@ -288,13 +281,13 @@ export async function loadPreviousStepOutput(
     ...(binding
       ? {
           roleBinding: binding,
-          ...(binding.outputContract
+          ...(binding.outputContract && row.status === 'done'
             ? { outputCompatible: safeParseStepOutput(binding.outputContract, row.output).success }
             : {}),
         }
       : {}),
     detect: row.detectOutput,
-    output: row.output,
+    output: binding?.outputContract && row.status !== 'done' ? null : row.output,
     iterations: (row.iterations ?? []) as unknown[],
   };
 }

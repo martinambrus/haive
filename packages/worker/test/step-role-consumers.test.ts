@@ -95,6 +95,12 @@ describe('pinned role consumers', () => {
     expect(
       await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview }, 1),
     ).toMatchObject({ stepId: PRODUCER, status: 'done', round: 0, output: { earlier: true } });
+    expect(
+      await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview }),
+    ).not.toHaveProperty('outputCompatible');
+    expect(
+      await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview }, 1),
+    ).toHaveProperty('outputCompatible', false);
     // An explicitly physical read never aliases the old canonical producer.
     expect(await loadPreviousStepOutput(db, taskId, REVIEW)).toBeNull();
   });
@@ -103,9 +109,7 @@ describe('pinned role consumers', () => {
     const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
     fake.insert(schema.tasks, { id: taskId, ...pin });
     const db = fake.db as unknown as Database;
-    expect(await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview })).toMatchObject(
-      { id: null, stepId: PRODUCER, outputCompatible: false },
-    );
+    expect(await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview })).toBeNull();
     fake.patch(schema.tasks, taskId, { executionPath: null });
     expect(await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview })).toBeNull();
   });

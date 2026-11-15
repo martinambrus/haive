@@ -1614,93 +1614,137 @@ describe('gate-2 verification results read from 08', () => {
     m.changeFingerprint.mockReset().mockResolvedValue(null);
   });
 
-  it('detects both pinned physical producers through the actual loader', async () => {
-    const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
-    const pin = rolePin();
-    const plan = pin.derivedRunPlan as DerivedRunPlanV2;
-    const auditId = 'module.example.audit';
-    const change = { replace: AUDIT, with: auditId };
-    plan.overlay.changes.push(change);
-    plan.composableEntries.push({
-      stepId: auditId,
-      label: 'Audit',
-      group: 'review',
-      dispatchesCli: true,
-      requires: [],
-      provides: ['code-audit'],
-      replaces: [AUDIT],
-      outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
-    });
-    for (const c of plan.candidates) {
-      c.outcomes.push({ operationIndex: 1, change, outcome: 'applied', reason: 'change-applied' });
-      (c.stepIds as string[]).splice(c.stepIds.indexOf(AUDIT), 1, auditId);
-      c.roleBindings[AUDIT] = { stepId: auditId, outputContract: CODE_AUDIT_OUTPUT_CONTRACT };
-    }
-    const fake = createFakeDb({
-      tasks: schema.tasks,
-      taskSteps: schema.taskSteps,
-      reviewFindings: schema.reviewFindings,
-    });
-    fake.insert(schema.tasks, { id: taskId, ...pin });
-    fake.insert(schema.taskSteps, {
-      taskId,
-      stepId: PRODUCER,
-      round: 1,
-      status: 'done',
-      output: {
-        reviewed: true,
-        peer: {
-          verdict: 'REQUEST_CHANGES',
-          findings: [{ severity: 'high', issue: 'actual replacement finding', path: 'a.ts' }],
-          positives: [],
-        },
-        security: { verdict: 'SAFE', findings: [] },
-        extraLenses: [],
-        blocking: true,
-        reviewIncomplete: false,
-        advisoryVerdict: false,
-        coverage: null,
-        refutedCount: 0,
-        counts: { peer: 1, securityCriticalHigh: 0 },
-        recurringNote: '',
-      },
-    });
-    fake.insert(schema.taskSteps, {
-      taskId,
-      stepId: auditId,
-      round: 1,
-      status: 'done',
-      output: {
-        audited: true,
-        findings: [{ severity: 'low', issue: 'actual audit observation' }],
-        coverage: null,
-      },
-    });
-    const actual = await vi.importActual<typeof import('../onboarding/_helpers.js')>(
-      '../onboarding/_helpers.js',
-    );
-    m.loadPreviousStepOutput.mockImplementation((db, task, role) =>
-      actual.loadPreviousStepOutput(
-        db,
-        task,
-        role === '08c-code-review'
-          ? { role: '08c-code-review' }
-          : role === '08c2-code-audit'
-            ? { role: '08c2-code-audit' }
-            : role,
-      ),
-    );
-    const detected = await gate2VerifyApprovalStep.detect!({
-      taskId,
-      repoPath: '/repos/u/r',
-      logger: { info: vi.fn(), warn: vi.fn() },
-      db: fake.db,
-      round: 1,
-    } as never);
-    expect(detected.codeReview?.blocking).toBe(true);
-    expect(detected.codeReview?.peerFindings.join(' ')).toContain('actual replacement finding');
-    expect(detected.codeAudit?.findings.join(' ')).toContain('actual audit observation');
-  });
+  it.each(['done', 'skipped audit', 'reset review', 'no row'])(
+    'detects pinned physical producers through the actual loader: %s',
+    async (state) => {
+      const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
+      const pin = rolePin();
+      const plan = pin.derivedRunPlan as DerivedRunPlanV2;
+      const auditId = 'module.example.audit';
+      const change = { replace: AUDIT, with: auditId };
+      plan.overlay.changes.push(change);
+      plan.composableEntries.push({
+        stepId: auditId,
+        label: 'Audit',
+        group: 'review',
+        dispatchesCli: true,
+        requires: [],
+        provides: ['code-audit'],
+        replaces: [AUDIT],
+        outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+      });
+      for (const c of plan.candidates) {
+        c.outcomes.push({
+          operationIndex: 1,
+          change,
+          outcome: 'applied',
+          reason: 'change-applied',
+        });
+        (c.stepIds as string[]).splice(c.stepIds.indexOf(AUDIT), 1, auditId);
+        c.roleBindings[AUDIT] = { stepId: auditId, outputContract: CODE_AUDIT_OUTPUT_CONTRACT };
+      }
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskSteps: schema.taskSteps,
+        reviewFindings: schema.reviewFindings,
+      });
+      fake.insert(schema.tasks, { id: taskId, ...pin });
+      if (state !== 'no row')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: PRODUCER,
+          round: 1,
+          status: 'done',
+          output: {
+            reviewed: true,
+            peer: {
+              verdict: 'REQUEST_CHANGES',
+              findings: [{ severity: 'high', issue: 'actual replacement finding', path: 'a.ts' }],
+              positives: [],
+            },
+            security: { verdict: 'SAFE', findings: [] },
+            extraLenses: [],
+            blocking: true,
+            reviewIncomplete: false,
+            advisoryVerdict: false,
+            coverage: null,
+            refutedCount: 0,
+            counts: { peer: 1, securityCriticalHigh: 0 },
+            recurringNote: '',
+          },
+        });
+      if (state !== 'no row')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: auditId,
+          round: 1,
+          status: 'done',
+          output: {
+            audited: true,
+            findings: [{ severity: 'low', issue: 'actual audit observation' }],
+            coverage: null,
+          },
+        });
+      if (state === 'skipped audit')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: auditId,
+          round: 2,
+          status: 'skipped',
+          output: null,
+        });
+      if (state === 'reset review')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: PRODUCER,
+          round: 2,
+          status: 'pending',
+          output: null,
+        });
+      const actual = await vi.importActual<typeof import('../onboarding/_helpers.js')>(
+        '../onboarding/_helpers.js',
+      );
+      m.loadPreviousStepOutput.mockImplementation((db, task, role) =>
+        actual.loadPreviousStepOutput(
+          db,
+          task,
+          role === '08c-code-review'
+            ? { role: '08c-code-review' }
+            : role === '08c2-code-audit'
+              ? { role: '08c2-code-audit' }
+              : role,
+        ),
+      );
+      const detected = await gate2VerifyApprovalStep.detect!({
+        taskId,
+        repoPath: '/repos/u/r',
+        logger: { info: vi.fn(), warn: vi.fn() },
+        db: fake.db,
+        round: 1,
+      } as never);
+      if (state === 'reset review' || state === 'no row') expect(detected.codeReview).toBeNull();
+      else {
+        expect(detected.codeReview?.blocking).toBe(true);
+        expect(detected.codeReview?.peerFindings.join(' ')).toContain('actual replacement finding');
+      }
+      if (state === 'skipped audit' || state === 'no row') expect(detected.codeAudit).toBeNull();
+      else expect(detected.codeAudit?.findings.join(' ')).toContain('actual audit observation');
+      if (state !== 'done') {
+        // Isolate these rows' approval effect from the deliberately blocking review and absent 08.
+        const form = gate2VerifyApprovalStep.form!({} as never, {
+          ...detected,
+          allPassed: true,
+          verify: { test: passedRun, lint: passedRun, typecheck: passedRun },
+          codeReview: state === 'skipped audit' ? null : detected.codeReview,
+        })!;
+        expect(JSON.stringify(form.statusSummary)).not.toContain('INCOMPLETE');
+        expect(JSON.stringify(form.statusSummary)).not.toContain('unreviewed');
+        expect((form.fields.find((f) => f.id === 'decision') as { default?: string }).default).toBe(
+          'approve',
+        );
+      }
+    },
+  );
 
   it.each(['08c-code-review', '08c2-code-audit'])(
     'shows malformed replacement %s as incomplete without a default approval',
