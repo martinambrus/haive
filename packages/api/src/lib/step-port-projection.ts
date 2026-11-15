@@ -35,7 +35,9 @@ export function projectTaskPorts(
       candidatesOnly: plan.selection === 'derived' && task.executionPath == null,
       candidates: [
         {
-          executionPath: candidate.executionPath,
+          // A static pin has one path-less candidate; the canvas keys on the task's chosen path.
+          executionPath:
+            plan.selection === 'static' ? (task.executionPath ?? null) : candidate.executionPath,
           graph: validatePortEdges(
             candidate.nodes.map((n) => ({ ...n, label: labels.get(n.id) ?? n.label })),
             bindings,
