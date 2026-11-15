@@ -582,9 +582,9 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
-### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+17)
+### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+21)
 
-status: open (OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 and 1 only; context-tiered PR 3 still waits for the complete-coverage rate measured on dev runs; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change; earlier: OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+status: open (2026-11-15 #1198: items 11 and 14 resolved; items 1 and 10 verified already correct on base (advisory lock and guarded close exist; the collector keeps last usage per message, the 141 output tokens appear only on the result event); OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 and 1 only; context-tiered PR 3 still waits for the complete-coverage rate measured on dev runs; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change; earlier: OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
 1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
 2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
@@ -603,6 +603,10 @@ status: open (OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 
 15. #1173 Serialization does not stop an older fetched feed replacing newer data (model-prices.ts ~:334). PRE-EXISTING, minor.
 16. #1173 The unsupported-model list on the refresh card is unbounded (web latest-refresh.tsx ~:120). PRE-EXISTING, minor.
 17. #1173 Killed-run output undercount (item 10) is not quantified by the replay (~:266). Minor.
+18. (#1198 driver, Connected) PRE-EXISTING, consequential: a killed run's output tokens are unobservable when its retained assistant events report output 0 (`worker/src/queues/cli-exec/stream.ts` ~:405); only the missing result event carries them. Needs a source for output usage on a kill (or mark the run's output unknown rather than 0).
+19. (#1198 review) The manual `POST /prices` route (`api/src/routes/cli-pricing.ts`) takes no advisory lock, so a manual write can race a refresh on `cli_model_prices_live_idx`.
+20. (#1198 review) The browser and Ruby version refreshers swallow a failed error-record write without logging.
+21. (#1198 review) New refresh error entries reuse source names, so `refresh-failures.tsx` can show "price:database, price:database". Cosmetic, admin-only.
 
 ### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
@@ -708,7 +712,7 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 19. (#1191) The server preview only runs once the slug is valid, and the editor does not say so; live validation still runs. Browser check 2026-11-14. LOW, parked.
 20. (#1195 review) `web/src/components/cli-provider-form.tsx` ~:715 would render "0 tasks could not be checked" for `incomplete: true` with an empty `invalidTasks`; unreachable today (the api sets `incomplete` only with entries). Cosmetic.
 
-### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+7)
+### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+13)
 
 status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: #1184 reviews 2026-11-14 · priority: P4
 
@@ -721,6 +725,12 @@ Reviews in `.claude/tmp/codex-run/SDK-S/review-{1,2,3,4}.md` and `SD2-S/review-{
 5. `step-sdk-module.test.ts` throws each control class from module `apply` but has no `PromptBudgetExceededError` case (added to the entry by the #1183 rebase); identity is pinned, the throw path is not.
 6. `worker/src/step-engine/dag-executor.ts:1914-1927`: a leftover "moved to" comment block sits after a `/** */` doc that described the old fence definitions and now describes nothing. PRE-EXISTING. Delete both.
 7. No test pairs the worker's `isSingleLine && survivesFence` (`_untrusted-repo.ts:177-185`) against shared `isListableName`, and the guard test omits U+0000, U+001C-001E and U+007F. Equivalent by construction; add the pairing and those characters.
+8. (#1192) `review-diff.ts` file reads resolve by name, bracketed by a worktree dev+ino check; a swap and restore inside one bracket is not caught. Close with fd-anchored reads (fs-safe can anchor on `/proc/self/fd/N`, as `nested-repository.ts` does).
+9. (#1192) The standalone host collector's changed-line notes are not filtered by the deny policy (its contract does not promise withholding; decide).
+10. (#1192) Untracked nested-repository metadata is read before the deny checks; an embedded repository's HEAD change does not enter the review hashes.
+11. (#1192) The collector's pathspec argv is unbounded; a very large change can fail to spawn (E2BIG) and silently drop line notes.
+12. (#1192) Coverage: no test drives `denyContent`/`withheldPaths`→`partial` through `readReviewDiff`; descriptor throw/cancel close paths and the start-of-collection identity check have no failing control; `_impl-changes.ts` ~:414 `scan.nestedRepositories[p]` is unguarded (`constructor`).
+13. (#1192) Docs omit the `unreadable` disclosure and the maxBytes partial-coverage behaviour.
 
 ### T677 · FNF[composition-catalog] · composable workflow step catalog lows, after #1182 (+3)
 
@@ -893,7 +903,7 @@ Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-ana
 1. DONE 2026-11-14: private repositories `martinambrus/haive-module-translator` and `martinambrus/haive-module-deep-analysis` created (README only, default branch `main`).
 2. DONE 2026-11-14 #1179 (bd7217c8a). Core: a dev install of an external module (cloned into `modules/<id>/`, then `pnpm module add <id>`) leaves nothing in a haive commit. Today `modules/` is tracked and `pnpm module add` edits tracked `package.json` files and `pnpm-lock.yaml`. Design choice: ignore the folder and keep the dependency entries out of tracked files.
 3. DONE 2026-11-14 #1179: `scripts/check-public-modules.mjs` against root `public-modules.json` (install/runtime wiring only; prose and test fixtures exempt). Owed: the first Dependabot lockfile PR after #1179 keeps `pnpmfileChecksum` (a lock without it fails frozen installs).
-4. Module CI template: check out haive at a pinned release tag, place the module at `modules/<id>/`, build and test there (core packages are unpublished, `pnpm.overrides` pins them to `workspace:*`).
+4. DONE 2026-11-15 #1199: reusable `.github/workflows/module-ci.yml` + `scripts/module-ci.sh` + caller template `scripts/templates/module-repo-ci.yml`; v0.2.0 predates #1179, so callers pin a main SHA until the next tag. Open low: the clean-tree check cannot see changes to gitignored files. Was: Module CI template: check out haive at a pinned release tag, place the module at `modules/<id>/`, build and test there (core packages are unpublished, `pnpm.overrides` pins them to `workspace:*`).
 5. Release path check: a restricted `@haive-module/<id>` publish to GitHub Packages, the vendor channel build, and a git install source with a token, each exercised once end to end with a stub module.
 
 ### T663 · FNF[plan-canvas-smoke-lows] · plan-canvas smoke check lows, after #1161 (+4)
