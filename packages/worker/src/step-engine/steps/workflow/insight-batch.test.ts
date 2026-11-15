@@ -87,6 +87,25 @@ describe('manual insight batch contract', () => {
     }
     expect(insightsTriageStep.agentMining?.retry).toBeUndefined();
   });
+  it.each([
+    ['legacy scalar reply', { implemented: ['Edited file'], changes: ['x'] }],
+    ['fenced legacy reply', '```json\n{"implemented":true,"changes":["x"]}\n```'],
+    ['unrelated JSON fence', '```json\n{"name":"package","type":"module"}\n```'],
+  ])('warns that edits may exist for a %s', (_label, raw) => {
+    const out = read(raw);
+    const note = 'No valid per-item report; edits may exist. Inspect the workspace before Retry.';
+    expect(out.notes).toBe(note);
+    expect(out.items).toEqual(
+      ids.map((id) => ({ id, outcome: 'unconfirmed', changes: [], reason: note })),
+    );
+    expect(out.implemented).toBe(false);
+    expect(out.changes).toEqual([]);
+  });
+  it('keeps the version note for a report-shaped object with an unsupported version', () => {
+    expect(read({ version: 2 }).notes).toBe(
+      'Unsupported insight outcome protocol version; selected items are unconfirmed.',
+    );
+  });
 });
 
 import { selectOfferedInsights, readInsightBatchRecord, insightBatchId } from './_insight-batch.js';

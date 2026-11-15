@@ -62,7 +62,12 @@ export function readInsightOutcome(
   // Select the final report-shaped envelope BEFORE validation. An invalid final answer must
   // never fall back to an earlier example that happened to validate.
   const candidate =
-    raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+    raw &&
+    typeof raw === 'object' &&
+    !Array.isArray(raw) &&
+    ('batchId' in raw || 'items' in raw || 'version' in raw)
+      ? (raw as Record<string, unknown>)
+      : null;
   const parsed = reportSchema.safeParse(candidate);
   const valid =
     parsed.success &&
