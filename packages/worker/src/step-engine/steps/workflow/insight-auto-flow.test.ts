@@ -309,7 +309,7 @@ describe('automatic insight stages', () => {
         items: [{ id: one.id, outcome: 'not_applied', changes: [], reason: 'Already correct' }],
       },
     ] as never);
-    const nextCtx = { ...ctx, taskStepId: 'row-2', round: 2, logger: { info() {} } } as StepContext;
+    const nextCtx = { ...ctx, taskStepId: 'row-2', round: 2, logger: { info() {} } as never };
     const fresh = { ...one, id: 'fresh', identity: 'src/a.ts::fresh', title: 'Fresh' };
     const nextId = batches.insightBatchId('row-2', 0);
     const detected = await detectAutoInsights(nextCtx, [one, fresh], '/repo');
