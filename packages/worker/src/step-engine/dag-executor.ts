@@ -2598,10 +2598,20 @@ async function blockUnavailableDependencies(
       .map((i) => i.issueKey),
   );
   const blocked: { issue: DagIssueRow; by: string[] }[] = [];
+  const splitParents = new Map(
+    all.filter((i) => i.resolution === 'split').map((i) => [i.id, i.issueKey]),
+  );
   let changed = true;
   while (changed) {
     changed = false;
     for (const issue of all) {
+      // Dependents name the original issue key, while split children point to its row id.
+      // Propagate through split ancestors as well as ordinary dependency edges.
+      const parentKey = issue.parentIssueId ? splitParents.get(issue.parentIssueId) : undefined;
+      if (parentKey && unavailable.has(issue.issueKey) && !unavailable.has(parentKey)) {
+        unavailable.add(parentKey);
+        changed = true;
+      }
       if (
         issue.outcome !== 'pending' ||
         issue.cliInvocationId !== null ||

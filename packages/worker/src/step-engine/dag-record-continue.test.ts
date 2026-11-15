@@ -27,6 +27,7 @@ import {
   issueNoChange,
   issueBlocked,
   DAG_NO_CHANGE_MARKER,
+  DAG_FINAL_FAILURE_MARKER,
   DAG_BLOCKED_BY_MARKER,
   loadDagOutcomeCounts,
 } from './dag-outcomes.js';
@@ -1242,4 +1243,91 @@ it('F4 re-dispatches a superseded refused advisor under opt-in', async () => {
   expect(h.rows[0]!.errorMessage).toBeNull();
   expect(h.enqueued).toHaveLength(1);
   expect(h.plan.replannerInvocationId).toBeNull();
+});
+
+it.each([
+  ['failed', { ...failure, concerns: DAG_FINAL_FAILURE_MARKER }],
+  ['refused', { ...failure, errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }],
+  ['blocked', { ...failure, concerns: `${DAG_BLOCKED_BY_MARKER}["X"]` }],
+  ['skipped', { resolution: 'skipped' }],
+  ['no-change', { concerns: DAG_NO_CHANGE_MARKER, resolution: 'approved' }],
+  ['nested split', { ...failure, concerns: DAG_FINAL_FAILURE_MARKER }],
+])('F6 blocks split-parent dependents when a child is %s', async (kind, childPatch) => {
+  const h = fixture(
+    [
+      issue('A', { id: 'parent-id', ...failure, resolution: 'split' }),
+      issue('A-S1', {
+        id: 'child-id',
+        parentIssueId: 'parent-id',
+        ...(childPatch as Row),
+        ...(kind === 'nested split' ? { resolution: 'split', concerns: '' } : {}),
+      }),
+      ...(kind === 'nested split'
+        ? [
+            issue('A-S1-S1', {
+              parentIssueId: 'child-id',
+              ...failure,
+              concerns: DAG_FINAL_FAILURE_MARKER,
+            }),
+          ]
+        : []),
+      issue('A-S2', {
+        parentIssueId: 'parent-id',
+        resolution: 'approved',
+        mergeStatus: 'clean',
+        mergedAt: new Date(),
+      }),
+      issue('B', {
+        level: 1,
+        outcome: 'pending',
+        worktreePath: null,
+        branchName: null,
+        dependsOn: ['A'],
+      }),
+      issue('C', {
+        level: 2,
+        outcome: 'pending',
+        worktreePath: null,
+        branchName: null,
+        dependsOn: ['B'],
+      }),
+      issue('D', { level: 1, resolution: 'approved' }),
+    ],
+    true,
+  );
+  h.levels[0].checkpointedAt = new Date();
+  expect((await h.run()).resolved).toBe(true);
+  expect(
+    h.rows.filter((i) => ['B', 'C'].includes(i.issueKey)).every((i) => issueBlocked(i as never)),
+  ).toBe(true);
+  expect(h.rows.find((i) => i.issueKey === 'B')!.concerns).toBe(`${DAG_BLOCKED_BY_MARKER}["A"]`);
+  expect(h.rows[0]!.resolution).toBe('split');
+  expect(h.enqueued).toEqual([]);
+  expect(
+    vi
+      .mocked(gitRun)
+      .mock.calls.some(([, args]) => args.includes('add') && args.includes('worktree')),
+  ).toBe(false);
+  expect(vi.mocked(openMerge).mock.calls.map((c) => c[1])).toEqual(['feature--D']);
+});
+
+it('F6 keeps a split parent available when all children merged', async () => {
+  const h = fixture(
+    [
+      issue('A', { id: 'parent-id', ...failure, resolution: 'split' }),
+      issue('A-S1', {
+        parentIssueId: 'parent-id',
+        resolution: 'approved',
+        mergeStatus: 'clean',
+        mergedAt: new Date(),
+      }),
+      issue('B', { level: 1, outcome: 'pending', dependsOn: ['A'] }),
+    ],
+    true,
+  );
+  h.levels[0].checkpointedAt = new Date();
+  expect((await h.run()).resolved).toBe(false);
+  expect(h.rows[2]!.outcome).toBe('running');
+  expect(issueBlocked(h.rows[2] as never)).toBe(false);
+  expect(h.enqueued).toHaveLength(1);
 });
