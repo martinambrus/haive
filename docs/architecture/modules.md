@@ -590,6 +590,36 @@ reference. It does not grant replacement admission: active replacements remain r
 until role readers and pinned role routing ship. Existing catalog `entry` JSON holds
 these serializable declarations; no SQL migration is needed.
 
+### Fan-out seats
+
+A module may declare optional `miningSeats` in its manifest, keyed by local exported
+`agentMining` step id. For example, `miningSeats: { analyze: [{ id: 'security',
+label: 'Security' }] }` describes the seat of `module.<id>.analyze`; use that same
+seat id as the mining dispatch's `roleKey`. Derive the declaration and dispatch
+roster from the module's own dimension list so the two stay in sync.
+
+The shared manifest parser rejects namespaced or invalid step keys, duplicate
+seat ids, empty lists, blank labels and descriptor fields other than `id` and
+`label`. Seat ids are at most 32 characters, begin with a lowercase letter and
+contain lowercase letters, digits, underscores or hyphens, with colon-separated
+segments allowed. `default`, `fix:` slots and prototype names are reserved. The
+worker also refuses a declaration whose step is not exported or has no
+`agentMining`, and a seat id that equals one of that step's `cliRoles` ids, since
+seats and roles share the same preference rows. Local names always belong to the
+module, even when the same local name exists in core; they never replace a core
+step's seats.
+
+The API's `resolveMiningSeats` is the single union of core `STEP_MINING_SEATS` and
+validated installed module declarations. When any installed module declares seats it
+reads deactivation state on each call; otherwise it returns the core map without a
+query. It serves role-preference loading, task step annotations (including upcoming and
+New Task CLI lists) and current-step provider aggregation. Seats stay separate
+from `cliRoles`, whose length controls loop passes. Existing task choices and
+saved seat preferences keep their normal precedence and default-provider fallback.
+Deactivating or removing a module hides its seats without deleting those choices;
+reactivation restores them. There is no schema migration. Rollback removes the
+optional declaration and consumer together, leaving stored choices inert.
+
 ## Published-image installs
 
 An install that runs published images (`docker-compose.run.yml`, see

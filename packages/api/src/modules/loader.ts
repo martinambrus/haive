@@ -56,6 +56,7 @@ import {
   setModuleActive,
 } from './activation.js';
 import { moduleSourceRoutes } from './sources.js';
+import { registerModuleMiningSeats } from './mining-seats.js';
 import { setModuleExecutors } from './integration-executors.js';
 import { PurgeIncompleteError, purgeModule } from './purge.js';
 import { moduleIntegrationDependents, previewModuleIntegrations } from './purge-integrations.js';
@@ -190,6 +191,7 @@ export async function mountModules(
     });
   }
   registerModuleIntegrations(loaded);
+  registerModuleMiningSeats(loaded);
   setModuleExecutors(entries.map((entry) => entry.integrations));
 
   for (const [index, entry] of entries.entries()) {

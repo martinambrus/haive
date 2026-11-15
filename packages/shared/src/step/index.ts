@@ -239,7 +239,8 @@ export interface AgentMiningDispatch {
    *
    *  Resolved as the `role` in `resolvePreferredCli`, against the same
    *  `user_step_cli_role_preferences` rows the loop roles use, and enumerated per step
-   *  in `STEP_MINING_SEATS` (@haive/shared) so the UI can offer a picker.
+   *  in `STEP_MINING_SEATS` (@haive/shared), or a module manifest's `miningSeats`,
+   *  so the UI can offer a picker.
    *
    *  Distinct from `agentId`, which is often content-derived and unbounded — 08c's
    *  refuters are one agent PER FINDING, so the stable seat there is the refutation

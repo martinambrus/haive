@@ -127,6 +127,27 @@ export function registerModuleSteps(
       stepIds.push(id);
     }
 
+    for (const localId of Object.keys(manifest.miningSeats ?? {})) {
+      const def = localDefs.get(localId);
+      if (!def) {
+        throw new Error(
+          `Module ${moduleId} mining seats step "${localId}" is not one of its steps`,
+        );
+      }
+      if (!def.agentMining) {
+        throw new Error(
+          `Module ${moduleId} mining seats step "${localId}" must export agentMining`,
+        );
+      }
+      const roleIds = new Set((def.metadata.cliRoles ?? []).map((role) => role.id));
+      const shared = manifest.miningSeats![localId]!.find((seat) => roleIds.has(seat.id));
+      if (shared) {
+        throw new Error(
+          `Module ${moduleId} mining seats step "${localId}" reuses cliRoles id "${shared.id}"`,
+        );
+      }
+    }
+
     const composable = (manifest.composableSteps ?? []).map((composableEntry) => {
       const def = localDefs.get(composableEntry.stepId);
       if (!def) {
