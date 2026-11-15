@@ -1,4 +1,9 @@
-import { expect, it } from 'vitest';
+import * as autoPolicy from './_insight-auto.js';
+import * as autoFlow from './_insight-auto-flow.js';
+import * as loader from './_insight-loader.js';
+import * as previous from '../onboarding/_helpers.js';
+import * as specs from './_spec-artifact.js';
+import { afterEach, expect, it, vi } from 'vitest';
 import { insightsTriageStep } from './08e-insights-triage.js';
 const insight = {
   id: 'one',
@@ -134,4 +139,26 @@ it('OFF retains its exact unchecked manual form and zero-dispatch empty submit',
       llmOutput: null,
     }),
   ).toEqual([]);
+});
+
+afterEach(() => vi.restoreAllMocks());
+it('automatic ownership is checked on the actual writer workspace, even with an old setup output', async () => {
+  vi.spyOn(autoPolicy, 'insightAutoEnabled').mockResolvedValue(true);
+  vi.spyOn(loader, 'loadUnactedInsights').mockResolvedValue({ insights: [insight], omitted: 0 });
+  vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue({
+    output: { worktreePath: '/stale' },
+  } as never);
+  vi.spyOn(specs, 'resolveSpecView').mockResolvedValue({ text: 'context' } as never);
+  const detect = vi.spyOn(autoFlow, 'detectAutoInsights').mockResolvedValue(automatic);
+  const ctx = {
+    db: {},
+    round: 0,
+    taskId: 'task',
+    workspacePath: '/writer',
+    sandboxWorkdir: '/ws',
+    throwIfCancelled() {},
+  } as never;
+  const out = await insightsTriageStep.detect!(ctx);
+  expect(out.worktreePath).toBe('/writer');
+  expect(detect).toHaveBeenCalledWith(ctx, [insight], '/writer');
 });

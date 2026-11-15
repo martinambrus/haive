@@ -182,13 +182,12 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
     const spec = (await resolveSpecView(ctx)).text;
+    const worktreePath = automatic ? ctx.workspacePath : (wt?.worktreePath ?? ctx.workspacePath);
     const insights = await collectInsights(ctx, automatic);
-    const auto = automatic
-      ? await detectAutoInsights(ctx, insights, wt?.worktreePath ?? ctx.workspacePath)
-      : undefined;
+    const auto = automatic ? await detectAutoInsights(ctx, insights, worktreePath) : undefined;
     return {
       ...(auto ? { auto } : {}),
-      worktreePath: wt?.worktreePath ?? ctx.workspacePath,
+      worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
