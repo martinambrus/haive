@@ -579,32 +579,33 @@ for (const policy of ['fail-step', 'record-and-continue'] as const) {
       expect(openMerge).not.toHaveBeenCalled();
     },
   );
-  it.each(['issue_advisor', 'replanner', 'reviewer'])(
-    'hard configuration absence for %s under ' + policy,
-    async (role) => {
-      const h = fixture(
-        [
-          issue(
-            'A',
-            role === 'reviewer'
-              ? {}
-              : {
-                  ...failure,
-                  ...(role === 'replanner' ? { lastAdvisorAction: 'ESCALATE_TO_REPLAN' } : {}),
-                },
-          ),
-        ],
-        true,
-      );
-      h.stepDef.dagExecute.failurePolicy = policy;
-      vi.mocked(resolveTaskDispatch).mockResolvedValue({
-        mode: 'skip',
-        reason: 'disabled',
-      } as never);
-      await expect(h.run()).rejects.toThrow(/no cli provider available/i);
-      expect(h.checkpoints).toEqual([]);
-    },
-  );
+  if (policy === 'record-and-continue')
+    it.each(['issue_advisor', 'replanner', 'reviewer'])(
+      'hard configuration absence for %s under ' + policy,
+      async (role) => {
+        const h = fixture(
+          [
+            issue(
+              'A',
+              role === 'reviewer'
+                ? {}
+                : {
+                    ...failure,
+                    ...(role === 'replanner' ? { lastAdvisorAction: 'ESCALATE_TO_REPLAN' } : {}),
+                  },
+            ),
+          ],
+          true,
+        );
+        h.stepDef.dagExecute.failurePolicy = policy;
+        vi.mocked(resolveTaskDispatch).mockResolvedValue({
+          mode: 'skip',
+          reason: 'disabled',
+        } as never);
+        await expect(h.run()).rejects.toThrow(/no cli provider available/i);
+        expect(h.checkpoints).toEqual([]);
+      },
+    );
   it('hard merge refusal under ' + policy, async () => {
     const h = fixture([issue('D')]);
     h.stepDef.dagExecute.failurePolicy = policy;
@@ -1109,4 +1110,36 @@ for (const policy of ['fail-step', 'record-and-continue']) {
       },
     );
   }
+}
+
+for (const policy of [undefined, 'fail-step']) {
+  it.each(['reviewer', 'issue_advisor', 'replanner'])(
+    `F2 default equivalence: missing %s under ${policy}`,
+    async (role) => {
+      const h = fixture([issue('A', role === 'reviewer' ? {} : failure)], true);
+      h.stepDef.dagExecute.failurePolicy = policy as string;
+      if (role === 'replanner') h.rows[0]!.lastAdvisorAction = 'ESCALATE_TO_REPLAN';
+      // The selected role is absent; the next role remains available.
+      vi.mocked(resolveTaskDispatch).mockResolvedValueOnce({
+        mode: 'skip',
+        reason: 'disabled',
+      } as never);
+      const result = await h.run();
+      expect(result.resolved).toBe(false);
+      expect(h.rows[0]!.resolution).toBe('failed_unrecoverable');
+      expect(h.rows[0]!.concerns).toBe('');
+      expect(h.checkpoints).toEqual([]);
+      if (role === 'replanner') {
+        expect(h.step.status).toBe('failed');
+        expect(h.step.errorMessage).toBe(
+          'DAG escalation aborted at level 0: no replanner provider available (A)',
+        );
+        expect(h.enqueued).toEqual([]);
+      } else {
+        expect(h.step.status).toBe('waiting_cli');
+        expect(h.enqueued).toHaveLength(1);
+        expect(h.plan.replannerInvocationId !== null).toBe(role === 'issue_advisor');
+      }
+    },
+  );
 }

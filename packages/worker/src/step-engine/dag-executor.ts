@@ -1330,7 +1330,8 @@ function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
 
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
  *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
- *  null when no provider would take it — every caller's truthiness check reads the same
+ *  null when no provider would take it under fail-step; record-and-continue throws a
+ *  retryable configuration fault instead. Every caller's truthiness check reads the same
  *  either way, and the one caller that must ROUTE the run's result back to the issue
  *  (ingestAdvisor's fix coder) needs the id.
  *
@@ -1404,7 +1405,10 @@ async function spawnReviewAgent(
     },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-    throw new Error(`no cli provider available for required DAG ${role}: ${plan.reason}`);
+    if (recordsFailures(ra.stepDef)) {
+      throw new Error(`no cli provider available for required DAG ${role}: ${plan.reason}`);
+    }
+    return null;
   }
   const { id: invId } = await insertOwnedRun(ra.db, ra.current.id, {
     taskId: ra.taskId,
@@ -2434,7 +2438,10 @@ async function spawnReplanner(
     invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-    throw new Error(`no cli provider available for required DAG replanner: ${plan.reason}`);
+    if (recordsFailures(ea.stepDef)) {
+      throw new Error(`no cli provider available for required DAG replanner: ${plan.reason}`);
+    }
+    return false;
   }
   // The replanner is a per-step SINGLETON, so the one-live-per-step index rejects a second
   // concurrent dispatch (two advance jobs racing into the escalation phase). That rejection

@@ -4259,21 +4259,18 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         ]);
       });
 
-      it('halts on a missing required provider instead of recording an issue failure', async () => {
+      it('fails the issue when no provider can take the re-dispatch', async () => {
         vi.mocked(resolveTaskDispatch).mockImplementationOnce(
           async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
         );
-        const { outcome, issueUpdates, h } = await ingestCoder('running', killedOnce, {
+        const { issueUpdates, h } = await ingestCoder('running', killedOnce, {
           agentRuns: [fixRun],
           issue: advisorRetry,
         });
         expect(h.invocationInserts).toHaveLength(0);
-        expect('error' in outcome && outcome.error).toEqual(
-          expect.objectContaining({
-            message: expect.stringContaining('no cli provider available'),
-          }),
-        );
-        expect(issueUpdates).toEqual([]);
+        expect(issueUpdates).toEqual([
+          expect.objectContaining({ outcome: 'failed_unrecoverable' }),
+        ]);
       });
     });
 
