@@ -489,7 +489,8 @@ lookups still verify task, step and round, but do not require a surviving worktr
 DTO: `ready` carries canonical JSON `content`, UTF-8 `bytes`, SHA-256 `diffHash`, `scope` and a top-level `partial` marker;
 `too-large` and `unavailable` carry a reason, scope and `partial: true`. The payload includes the verified fork
 point, scope and partial-coverage disclosure, dependency ownership and review dimensions, the
-tracked diff, retained untracked text, and per-file content hashes, modes and binary/deletion notices.
+tracked diff, retained untracked text, and per-file content hashes, modes, indexed and checked-out
+gitlink targets, and binary/deletion notices.
 Its versioned bytes include the contents flag and a digest of omitted git changes; they are hashed exactly.
 With `includeFileContents: true`, full post-change text follows the diff within the same byte
 budget. Untracked text appears only in untrackedContents, including when the flag is true.
@@ -503,7 +504,8 @@ never enter content hunks. A partial result never establishes complete review co
 Each call resolves `taskSecretMaskPolicy` once, compiles the effective allow/extend/carve-out
 globs and refuses a missing or failed policy lookup, even when sandbox masking is disabled.
 Tracked matches are withheld too: their bytes are never read or hashed, their hunks leave the
-diff, and only path/size/mode and a withheld kind remain. Withholding is per denied path: no content open, read, hash or pathspec for that path;
+diff, and only path/size/mode and a withheld kind remain. Denied dependency metadata is not read;
+its paths appear in `dependencyPolicy.withheldPaths` and make coverage partial. Withholding is per denied path: no content open, read, hash or pathspec for that path;
 ordinary files retain their contents, hashes and hunks. Only a git-reported deletion of a denied
 path withholds the whole capture, since its bytes could have moved to an allowed destination; a
 denied name that is merely missing from a reported list is withheld on its own. Every path is
@@ -525,7 +527,10 @@ to fail and retry the step, never become unavailable or a missing entry. Missing
 bound directories raise StepHostBindingError rather than raw filesystem errors.
 
 Repository reads use held descriptors through `fs-safe`; git uses hardened host helpers
-with optional locks disabled for review diff, ls-files and merge-base reads.
+with optional locks disabled for review diff, ls-files and merge-base reads. Worktree-backed host
+calls hold the verified worktree descriptor until their operation settles and pass its
+`/proc/self/fd/<fd>` as git cwd, as the nested repository reader does: Node resolves cwd before exec.
+Repository-root mode uses the trusted repository anchor.
 Metadata queries have a fixed 16 MiB internal ceiling independent of maxBytes; overflow
 is unavailable, not too-large. Gitlink metadata queries use literal changed paths only,
 excluding denied paths. maxBytes bounds the change payload and hunk output.
