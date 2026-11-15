@@ -662,8 +662,9 @@ const learningDeletionSchema = z.object({
   version: z.literal(1),
   operationId: z.string().regex(/^[a-f0-9]{64}:[a-f0-9]{64}$/),
   target: z.object({
-    // slugify's alphabet, also allowing truncated trailing hyphens and collision suffixes.
-    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    // One file name inside the learnings dir. Not the slug alphabet: a pre-existing
+    // learning may be named anything (`Auth_Notes.md`) and must stay deletable.
+    id: z.string().refine((id) => id !== '' && id !== '.' && id !== '..' && !/[/\\\0]/.test(id)),
     title: z.string(),
     body: z.string(),
   }),

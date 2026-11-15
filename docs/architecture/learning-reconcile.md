@@ -116,8 +116,36 @@ Target decisions use the pre-apply set: files inserted by this same apply are ex
 update/delete lookup, while all on-disk filenames remain reserved for collision allocation.
 An unknown delete that was dropped on the first pass stays dropped on replay, and an unknown
 update stays an insert. This also holds for supersession expressed as delete plus insert.
-Deletion of a pre-existing target still leaves no durable identity: update then delete (or
-update then supersede) can resurrect that target on replay and needs separate deletion tracking.
+Before executing a planned delete, apply atomically publishes write-ahead intent under
+`.haive/learning-deletions/<apply hash>/<entry hash>.json`, using the same operation identity
+as learning provenance. The record retains the target id, title and last pre-unlink bytes so
+later updates can preserve their provenance chain. This recovery directory is outside
+learning readers, RAG sources, knowledge diffs, committed KB paths and staged drafts. The
+repository setup excludes `.haive/` through `.git/info/exclude`; ordinary staging honours that
+exclude. The directory is not deleted when drafts are regenerated and needs no database migration.
+
+Replay reads only its apply's directory and uses a record only when its exact delete entry
+and target still match. It restores pre-apply target membership and reserves the removed slug:
+updates cannot turn into resurrecting inserts, and a delete-plus-insert replacement keeps the
+collision suffix whose staged draft the reviewer edited or cleared. A deletion intent proves
+that earlier operations on its target finished. If the target is absent, unlink finished too;
+if it is still present, replay skips the earlier prefix and retries unlink. Later recorded
+updates can prove a longer completed prefix. Repeated replay therefore preserves files and
+bounded history even if no reconcile event was written.
+
+Intent is published before unlink because a crash between unlink and a later event or record
+would otherwise lose the only identity. A refused intent write prevents unlink. Recovery reads
+the directory and every hash-named record strictly, including symlinks: containment refusals,
+EACCES/EIO and resource errors propagate and fail apply; absence remains absence. Malformed
+records, a target id that is not a single file name (empty, `.`, `..`, or holding `/`, `\` or
+NUL) and mismatched operation identities also fail apply rather than silently restoring a
+deleted learning. Any other name is accepted, since a pre-existing learning may be named
+anything.
+Records remain until their workspace is removed; they are not pruned. When no worktree row
+exists, apply uses the repository workspace, so its `.haive/` records persist there.
+Existing deletions without a record cannot be reconstructed retroactively. Rollback reverts
+the code commits in reverse order; older code ignores the records, but pending/replayed applies
+then lose these deletion and staged-filename protections. Retain records if restoring the fix.
 
 A recorded update proves that target's preceding operations in the same proposal completed;
 replay skips that prefix, preserving bytes and history. The default atomic filesystem write
@@ -132,7 +160,7 @@ Hashes are SHA-256 over the heading and prose with reserved metadata removed, CR
 to LF, and exactly one final LF. Rendering and both sides of an update use that same
 normalisation, so the origin and successive update hashes form one chain. They identify
 content, not a signature against direct file changes. No new telemetry is added, and no body
-or transcript is copied into a new record. A file without supported provenance reads as
+or transcript is copied into a telemetry event. A file without supported provenance reads as
 `origin: "unknown"`; updating it keeps that unknown origin while recording the correction.
 Never infer an origin from a filename, commit date, task title or the task that first reads
 it. Malformed, duplicate, non-trailing or unsupported metadata is also unknown.
@@ -176,9 +204,16 @@ unknown legacy records, nested-marker stripping at depths 3 and 6, unchanged-upd
 CRLF hash continuity and stable parse/render. Worker `11-phase-8-learning-provenance.test.ts`
 pins actual file writes, staged edits, both reader exclusions, nested markers through preview
 and staged full-body replacement, unchanged indexed hashes, repeated-target updates and
-clearing prose with a footer left. The outcome tests cover 30 recoverable two-operation
+clearing prose with a footer left. The outcome tests cover all 32 two-operation
 sequences across insert/update/delete/supersession and new/pre-existing targets, identical insert
-ordinals, apply-prefix isolation and original unprefixed identities. The two pre-existing-target
-deletion failures above remain outside that passing matrix. The reconcile snapshot strips only
+ordinals, apply-prefix isolation and original unprefixed identities. Deletion controls cover
+crashes before and after unlink with telemetry refused, intent-write refusal, damaged records,
+task/step/round/invocation/proposal isolation, and staged replacement suffixes and cleared drafts
+through repeated replay. The provenance tests also recover deletion intent from real disk and
+verify that the normal learning reader and index remain empty after deletion. Real-filesystem
+`11-phase-8-learning-deletion-read.test.ts` controls run the step apply path against symlinked
+records, apply directories and `.haive`, an unreadable record (non-root only), and invalid stored
+target ids; recovery fails without resurrecting the learning. Generated collision suffixes and
+truncated trailing hyphens remain readable on replay. The reconcile snapshot strips only
 the separately tested footer from learning files; its original prompt/form/output/content snapshot remains
 unchanged.

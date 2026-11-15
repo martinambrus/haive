@@ -108,7 +108,7 @@ describe('deletion recovery refuses unreadable intent on the real filesystem', (
 });
 
 describe('deletion recovery validates stored target slugs', () => {
-  it.each(['nested/rule', '../rule', 'Rule', 'rule_name', '', '-rule'])(
+  it.each(['nested/rule', '../rule', '', '.', '..', 'a\\b', 'a\0b'])(
     'fails apply for the invalid stored id %j',
     async (id) => {
       const { apply, record } = await deletedLearning();
@@ -122,17 +122,21 @@ describe('deletion recovery validates stored target slugs', () => {
     },
   );
 
-  it.each(['rule-2', `${'a'.repeat(47)}-`, `${'a'.repeat(47)}--2`])(
-    'keeps accepting the generated slug %j on replay',
-    async (id) => {
-      const { apply, record } = await deletedLearning(id);
-      const intent = await readFile(record, 'utf8');
-      await expect(apply()).resolves.toMatchObject({
-        written: [`.haive-data/learnings/${id}.md`],
-        deleted: [`.haive-data/learnings/${id}.md`],
-      });
-      expect(await readFile(record, 'utf8')).toBe(intent);
-      expect(await readExistingLearnings(worktree)).toEqual([]);
-    },
-  );
+  it.each([
+    'rule-2',
+    `${'a'.repeat(47)}-`,
+    `${'a'.repeat(47)}--2`,
+    'Auth_Notes',
+    'BUSINESS_LOGIC',
+    '-rule',
+  ])('keeps accepting the learning id %j on replay', async (id) => {
+    const { apply, record } = await deletedLearning(id);
+    const intent = await readFile(record, 'utf8');
+    await expect(apply()).resolves.toMatchObject({
+      written: [`.haive-data/learnings/${id}.md`],
+      deleted: [`.haive-data/learnings/${id}.md`],
+    });
+    expect(await readFile(record, 'utf8')).toBe(intent);
+    expect(await readExistingLearnings(worktree)).toEqual([]);
+  });
 });
