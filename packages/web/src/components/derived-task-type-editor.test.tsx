@@ -19,11 +19,12 @@ const mocks = vi.hoisted(() => ({
   createTaskType: vi.fn(),
   updateTaskType: vi.fn(),
   push: vi.fn(),
+  post: vi.fn(),
 }));
 vi.mock('@/lib/api-client', async (original) => ({
   ...(await original<typeof import('@/lib/api-client')>()),
   ...mocks,
-  api: { get: vi.fn().mockResolvedValue({ customEnabled: true }) },
+  api: { get: vi.fn().mockResolvedValue({ customEnabled: true }), post: mocks.post },
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
@@ -37,6 +38,13 @@ vi.mock('@/lib/use-composer-integrations', () => ({
 vi.mock('./task-type-creator-panel', () => ({
   TaskTypeCreatorPanel: () => <div>Static creator</div>,
   forgetDraftConversation: vi.fn(),
+}));
+vi.mock('next/dynamic', () => ({
+  default:
+    () =>
+    ({ graph }: { graph: { nodes: { label: string }[] } }) => (
+      <div>{graph.nodes.map((n) => n.label).join(',')}</div>
+    ),
 }));
 const fixture = derivedFixture();
 const base = {
@@ -118,6 +126,26 @@ afterEach(() => {
 });
 
 describe('derived editor', () => {
+  it.each(['My Type', 'new', '-'])(
+    'projects a derived canvas while the slug is %s',
+    async (slug) => {
+      mocks.post.mockImplementation(async (_path: string, body: { slug: string }) => {
+        const { derivedTaskTypeCreateSchema } = await import('@haive/shared/modularity');
+        derivedTaskTypeCreateSchema.parse(body);
+        return {
+          candidates: [
+            { executionPath: null, graph: { nodes: [{ label: 'Projected graph' }], edges: [] } },
+          ],
+        };
+      });
+      await mount();
+      fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: slug } });
+      fireEvent.click(screen.getByRole('button', { name: 'Canvas', exact: true }));
+      await act(async () => {});
+      expect(screen.queryByText('Projected graph')).not.toBeNull();
+    },
+  );
+
   it('offers Replace, explains its scope and displays both contract references', () => {
     const entries = new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry]));
     const declaration = {

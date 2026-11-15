@@ -529,7 +529,7 @@ export function TaskTypeEditor({
               portRequest: {
                 path: '/admin/task-types/ports',
                 body: {
-                  slug: typeSlug || 'port-preview',
+                  slug: typeSlug && slugProblem(typeSlug) === null ? typeSlug : 'port-preview',
                   displayName: 'Port preview',
                   runListStrategy: 'derived',
                   baseSlug,
