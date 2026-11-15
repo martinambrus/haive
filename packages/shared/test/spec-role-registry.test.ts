@@ -134,7 +134,12 @@ it.each(
   if (boundary === 'v1') expect(() => parseDerivedRunPlan(v1)).toThrow();
   const v2 = rolePlan(2);
   if (v2.version !== 2) throw new Error('expected v2');
-  // Keep the valid replacement declarations; only change the contract at the decode gate.
-  v2.candidates[0]!.effectiveEntries![0]!.outputContract = declaration.outputContract;
+  // Override the UNBOUND audit entry, leaving the valid review replacement intact.
+  // Changing the bound review's contract would already fail the old binding invariants
+  // and would not prove that the effective-entry decode gate narrowed.
+  v2.candidates[0]!.effectiveEntries!.push({
+    ...v2.composableEntries.find((entry) => entry.stepId === AUDIT)!,
+    outputContract: declaration.outputContract,
+  });
   if (boundary === 'v2') expect(() => parseDerivedRunPlan(v2)).toThrow();
 });
