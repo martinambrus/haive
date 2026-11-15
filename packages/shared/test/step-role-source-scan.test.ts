@@ -48,6 +48,12 @@ describe('ungated step-role reader ratchet', () => {
       checkRoleReaderPins(roleReaderSites('packages/worker/src/negative.tsx', source), []).length,
     ).toBeGreaterThan(0);
   });
+  it('collapses indentation and line-break whitespace in call contexts', () => {
+    const file = 'packages/worker/src/negative.ts';
+    expect(roleReaderSites(file, "loader\n  .read('08c-code-review')")).toEqual(
+      roleReaderSites(file, "loader\n      .read('08c-code-review')"),
+    );
+  });
   it('rejects new reads inside a pinned symbol, changed counts and stale exemptions', () => {
     const file = 'packages/worker/src/negative.ts';
     const source = `function own() {write('08c-code-review')}`;

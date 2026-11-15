@@ -18,7 +18,7 @@
   {
     "file": "packages/shared/src/modularity/derived-task-types.ts",
     "symbol": "v2PlanSchema.candidates.roleBindings.[STEP_ROLES.codeReview]",
-    "context": "z\n          .object",
+    "context": "z .object",
     "value": "@roles",
     "count": 1,
     "reason": "Strict v2 pinned-binding consistency validation; no live definition lookup."
@@ -26,7 +26,7 @@
   {
     "file": "packages/shared/src/modularity/derived-task-types.ts",
     "symbol": "v2PlanSchema.candidates.roleBindings.[STEP_ROLES.codeAudit]",
-    "context": "z\n          .object",
+    "context": "z .object",
     "value": "@roles",
     "count": 1,
     "reason": "Strict v2 pinned-binding consistency validation; no live definition lookup."

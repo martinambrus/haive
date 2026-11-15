@@ -48,7 +48,8 @@ function symbol(node: ts.Node): string {
 }
 function context(node: ts.Node): string {
   for (let n = node.parent; n && !ts.isSourceFile(n); n = n.parent) {
-    if (ts.isCallExpression(n) || ts.isNewExpression(n)) return n.expression.getText();
+    if (ts.isCallExpression(n) || ts.isNewExpression(n))
+      return n.expression.getText().replace(/\s+/g, ' ').trim();
     if (ts.isBinaryExpression(n)) return ts.SyntaxKind[n.operatorToken.kind];
     if (ts.isImportDeclaration(n)) return 'import';
   }
