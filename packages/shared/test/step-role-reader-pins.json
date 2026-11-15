@@ -390,5 +390,37 @@
     "value": "@roles",
     "count": 1,
     "reason": "Shared role resolver selects guidance target membership; reports keep physical IDs."
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "evaluateDerivedTaskType.refuse.expectedContract",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Admission allowlist, diagnostics and pinned effective-policy verification; no stored-output reads"
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "evaluateDerivedTaskType.expected",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Admission allowlist, diagnostics and pinned effective-policy verification; no stored-output reads"
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "evaluateDerivedTaskType",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Admission allowlist, diagnostics and pinned effective-policy verification; no stored-output reads"
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "evaluateDerivedTaskType.candidates",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Admission allowlist, diagnostics and pinned effective-policy verification; no stored-output reads"
   }
 ]

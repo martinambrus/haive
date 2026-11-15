@@ -129,7 +129,7 @@ export const derivedOverlayCases: OverlayCase[] = [
     expected: {
       steps: unchanged,
       outcomes: [['refused'], ['refused']],
-      issueKinds: ['replacement-contract-unavailable'],
+      issueKinds: ['replacement-target-forbidden'],
       warningKinds: [],
     },
   },
