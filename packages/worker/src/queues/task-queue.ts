@@ -1,3 +1,4 @@
+import { ExecutionContractError } from '@haive/shared/modularity';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { isConditionalInsightStep } from './run-list.js';
 import {
@@ -331,6 +332,7 @@ async function resolveTaskContext(
     ...(await taskTypeRuntimeFor(db, task.type, task.derivedRunPlan)),
     derivedRunPlan: task.derivedRunPlan,
     dataEdgePlan: task.dataEdgePlan,
+    executionContract: task.executionContract,
     runListSnapshot: task.runListSnapshot ?? null,
     customSteps: parseCustomSteps(task.customSteps),
     deadAt: task.deadAt ?? null,
@@ -5066,6 +5068,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     }
   } catch (err) {
     if (
+      err instanceof ExecutionContractError ||
       err instanceof RagCleanupDeferredError ||
       err instanceof RevivalBusy ||
       err instanceof MaintenanceStateUnreadable

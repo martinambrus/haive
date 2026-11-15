@@ -6,10 +6,10 @@ import {
   type StepOutputContractRef,
   type LegacyStepRoleId as StepRoleId,
 } from '@haive/shared/step-outputs';
-import type { ComposableStepEntry } from '@haive/shared/modularity';
+import { fixConsumerSchema, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepDefinition } from './step-definition.js';
 
-type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces'> &
+type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces' | 'fixConsumer'> &
   Partial<
     Pick<
       StepDefinition,
@@ -29,6 +29,8 @@ export function hasConflictingReplacementHooks(step: Declaration): boolean {
 
 /** Boot validation of executable declarations; no module-defined validators. */
 export function assertStepOutputDeclaration(step: Declaration): void {
+  if (step.fixConsumer !== undefined && !fixConsumerSchema.safeParse(step.fixConsumer).success)
+    throw new Error('fix-consumer-invalid');
   if (step.outputContract !== undefined && !parseStepOutputContractRef(step.outputContract)) {
     throw new Error('step-output-contract-unknown');
   }
@@ -58,6 +60,8 @@ export function assertMatchingOutputDeclaration(
 ): void {
   assertStepOutputDeclaration(step);
   assertStepOutputDeclaration(entry);
+  if (step.fixConsumer?.version !== entry.fixConsumer?.version)
+    throw new Error('fix-consumer-mismatch');
   if (
     (step.outputContract !== undefined || entry.outputContract !== undefined) &&
     !stepOutputContractsEqual(step.outputContract, entry.outputContract)

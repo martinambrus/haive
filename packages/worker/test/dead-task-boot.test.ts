@@ -868,6 +868,51 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       expect(await events(id, 'task.failed')).toHaveLength(0);
     });
 
+    it.each([
+      {
+        version: 1,
+        guardedSpans: [
+          { id: 'a', firstStepId: A, lastStepId: B, predicateId: 'module.fx.planned', args: {} },
+        ],
+      },
+      { version: 1, guardedSpans: [], fixTarget: { stepId: A, capabilityVersion: 1 } },
+    ])(
+      'START refuses unsupported execution pins with no row, event or job writes',
+      async (executionContract) => {
+        const id = await make({
+          status: 'queued',
+          currentStepId: null,
+          repositoryId,
+          executionContract,
+        });
+        const before = await task(id);
+        const adds = h.adds.length;
+        await expect(
+          processTaskJob(job(TASK_JOB_NAMES.START, { taskId: id, userId })),
+        ).rejects.toThrow('not yet supported by this worker');
+        expect(await task(id)).toEqual(before);
+        expect(await events(id)).toHaveLength(0);
+        expect(h.adds).toHaveLength(adds);
+      },
+    );
+
+    it('keeps an unsupported execution pin dead at direct revival without remapping it', async () => {
+      const id = await makeDead({
+        repositoryId,
+        executionContract: {
+          version: 1,
+          guardedSpans: [],
+          fixTarget: { stepId: A, capabilityVersion: 1 },
+        },
+      });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+      expect(await reviveDeadTask(db, await view(id), deps)).toBeNull();
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
+    });
+
     it('a stray START leaves a deferred created draft untouched', async () => {
       const id = await make({ status: 'created', currentStepId: null, repositoryId });
       const before = await task(id);

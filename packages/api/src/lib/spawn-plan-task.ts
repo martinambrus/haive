@@ -52,14 +52,11 @@ export async function spawnPlanTask(args: {
       () => lockRepositoryTasksKey(tx, args.repositoryId),
       TASK_START_LOCK_TIMEOUT_MS,
     );
-    const { runListSnapshot, customSteps, dataEdgePlan } = await definitionForCreate(
-      tx,
-      args.type,
-      {
+    const { runListSnapshot, customSteps, dataEdgePlan, executionContract } =
+      await definitionForCreate(tx, args.type, {
         generic: false,
         locked: true,
-      },
-    );
+      });
     const [task] = await tx
       .insert(schema.tasks)
       .values({
@@ -74,6 +71,7 @@ export async function spawnPlanTask(args: {
         autoContinue: true,
         runListSnapshot,
         dataEdgePlan,
+        executionContract: executionContract ?? null,
         customSteps,
         status: 'created',
         expectedAttachmentCount:

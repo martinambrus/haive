@@ -436,6 +436,10 @@ export const moduleManifestSchema = z
       if (seed.runListStrategy !== 'static') {
         fail('a module task type must use the static strategy');
       }
+      for (const span of seed.executionContract?.guardedSpans ?? []) {
+        if (!span.predicateId.startsWith(`module.${m.id}.`))
+          fail(`predicate "${span.predicateId}" must belong to this module`);
+      }
       const seen = new Set<string>();
       for (const stepId of seed.stepIds ?? []) {
         if (seen.has(stepId)) fail(`step "${stepId}" appears twice`);

@@ -1,3 +1,4 @@
+import { assertExecutionContractUsable } from './execution-contract-admission.js';
 import {
   buildDataEdgePlan,
   DataEdgePlanError,
@@ -21,7 +22,9 @@ import {
   parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  type CompositionIssue,
+  type ExecutionCompositionIssue,
+  parseExecutionContract,
+  type ExecutionContract,
   type DerivedRunPlan,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
@@ -68,6 +71,7 @@ export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   derivedRunPlan?: DerivedRunPlan | null;
   dataEdgePlan?: DataEdgePlan | null;
+  executionContract?: ExecutionContract | null;
   candidateStepIds?: string[];
   warnings?: unknown[];
   /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
@@ -99,7 +103,7 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   restoresDatabase: false,
 });
 
-function describeIssue(issue: CompositionIssue): string {
+function describeIssue(issue: ExecutionCompositionIssue): string {
   return (
     insightRequirementMessage(issue) ??
     ('stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind)
@@ -161,6 +165,7 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
+  assertExecutionContractUsable(def.executionContract);
   // Preserve the availability precedence before evaluating a potentially stale overlay.
   if (def.runListStrategy === 'derived') {
     if (!def.enabled) throw new HttpError(403, `Task type ${slug} is disabled`);
@@ -352,6 +357,8 @@ export async function definitionForCreate(
   }
   return {
     dataEdgePlan,
+    executionContract:
+      def.executionContract == null ? null : parseExecutionContract(def.executionContract),
     runListSnapshot: snapshot === null ? null : [...snapshot],
     ...(derived
       ? {

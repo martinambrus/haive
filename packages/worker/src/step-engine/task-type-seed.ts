@@ -8,6 +8,7 @@ import {
   validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
+  type ExecutionPredicateDeclaration,
   type ModuleManifest,
 } from '@haive/shared/modularity';
 import type { LoadedWorkerModule, ModuleTaskTypeOutcome } from '../modules/loader.js';
@@ -49,9 +50,19 @@ const SELECTABLE_SLUGS = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_a
 const changesAnyOf = (...columns: AnyColumn[]) =>
   or(...columns.map((c) => sql`${c} is distinct from excluded.${sql.identifier(c.name)}`));
 
-const contentHashOf = (runListStrategy: RunListStrategy, stepIds: string[] | null): string =>
+const contentHashOf = (
+  runListStrategy: RunListStrategy,
+  stepIds: string[] | null,
+  executionContract?: unknown,
+): string =>
   createHash('sha256')
-    .update(JSON.stringify({ strategy: runListStrategy, stepIds }))
+    .update(
+      JSON.stringify({
+        strategy: runListStrategy,
+        stepIds,
+        ...(executionContract != null ? { executionContract } : {}),
+      }),
+    )
     .digest('hex');
 
 export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[] {
@@ -78,6 +89,7 @@ async function seedModuleTaskTypes(
   manifest: ModuleManifest,
   now: Date,
   composables: ReadonlyMap<string, ComposableStepEntry>,
+  predicates: ReadonlyMap<string, ExecutionPredicateDeclaration>,
 ): Promise<ModuleTaskTypeOutcome> {
   const source = `module:${manifest.id}`;
   const declared = (manifest.taskTypes ?? []).map((seed) => ({
@@ -93,7 +105,8 @@ async function seedModuleTaskTypes(
     source,
     requiresRepository: seed.requiresRepository,
     sortOrder: seed.sortOrder ?? 0,
-    contentHash: contentHashOf(seed.runListStrategy, seed.stepIds),
+    executionContract: seed.executionContract ?? null,
+    contentHash: contentHashOf(seed.runListStrategy, seed.stepIds, seed.executionContract),
   }));
   const invalid = declared
     .map((row) => {
@@ -110,9 +123,11 @@ async function seedModuleTaskTypes(
             composables,
           ),
           // A step with no composable entry is internal: what it requires and provides is unknown.
-          ...(stepIds.every((id) => composables.has(id))
+          ...(row.executionContract != null || stepIds.every((id) => composables.has(id))
             ? validateComposition(stepIds, composables, {
                 requiresRepository: row.requiresRepository,
+                executionContract: row.executionContract,
+                predicates,
               })
             : []),
         ],
@@ -140,6 +155,7 @@ async function seedModuleTaskTypes(
           runListStrategy: row.runListStrategy,
           stepIds: row.stepIds,
           description: row.description,
+          executionContract: row.executionContract,
           preAnswerDefaults: row.preAnswerDefaults,
           stepLoopLimitDefaults: row.stepLoopLimitDefaults,
           selectable: row.selectable,
@@ -153,6 +169,7 @@ async function seedModuleTaskTypes(
             schema.taskTypeDefinitions.runListStrategy,
             schema.taskTypeDefinitions.stepIds,
             schema.taskTypeDefinitions.description,
+            schema.taskTypeDefinitions.executionContract,
             schema.taskTypeDefinitions.preAnswerDefaults,
             schema.taskTypeDefinitions.stepLoopLimitDefaults,
             schema.taskTypeDefinitions.selectable,
@@ -212,6 +229,7 @@ export async function syncTaskTypeDefinitions(
       (entry) => [entry.stepId, entry] as const,
     ),
   );
+  const predicates = new Map(loaded.flatMap((m) => [...(m.predicates ?? [])]));
   const outcomes: Record<string, ModuleTaskTypeOutcome> = {};
 
   await db.transaction(async (tx) => {
@@ -269,7 +287,7 @@ export async function syncTaskTypeDefinitions(
     }
 
     for (const { manifest } of loaded) {
-      outcomes[manifest.id] = await seedModuleTaskTypes(tx, manifest, now, composables);
+      outcomes[manifest.id] = await seedModuleTaskTypes(tx, manifest, now, composables, predicates);
     }
   });
   return outcomes;

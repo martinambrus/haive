@@ -6,6 +6,7 @@ import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import {
   parseStepId,
+  assertExecutionContractSupported,
   parseDerivedRunPlan,
   type PromptStepEntry,
   type DerivedRunPlan,
@@ -63,6 +64,7 @@ export interface ResolvedTaskContext {
   runListStrategy: RunListStrategy;
   derivedRunPlan?: unknown;
   dataEdgePlan?: unknown;
+  executionContract?: unknown;
   runListSnapshot: string[] | null;
   /** The prompt steps this task pinned at create, by step id (tasks.custom_steps, invalid entries dropped). */
   customSteps?: Record<string, PromptStepEntry>;
@@ -246,6 +248,7 @@ export async function buildRunList(
   ctx: ResolvedTaskContext,
   db: Database,
 ): Promise<StepDefinition[]> {
+  assertExecutionContractSupported(ctx.executionContract);
   assertDataEdgeSupport(ctx, stepRegistry);
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).

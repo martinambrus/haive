@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,7 +39,16 @@ const STEP_WITHOUT_ENTRY = 'internal';
 function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModule {
   const steps = [...LOCAL_STEPS, STEP_WITHOUT_ENTRY].map(
     (local) =>
-      ({ metadata: { id: local, workflowType: 'x', title: local } }) as unknown as StepDefinition,
+      ({
+        metadata: { id: local, workflowType: 'x', title: local },
+        ...(local === 'report'
+          ? {
+              guardPredicates: {
+                planned: { argsSchema: z.strictObject({}), evaluate: async () => true },
+              },
+            }
+          : {}),
+      }) as unknown as StepDefinition,
   );
   const composableSteps = LOCAL_STEPS.map((local) => ({
     stepId: local,
@@ -101,6 +111,81 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
   afterAll(async () => {
     await db.delete(schema.taskTypeDefinitions);
     await db.$client.end({ timeout: 5 });
+  });
+
+  it('owns execution-contract storage, hashes, no-op detection and updates without changing admin columns', async () => {
+    const contract = { version: 1 as const, guardedSpans: [] };
+    const fx = moduleOf([seedOf({ executionContract: contract })]);
+    await sync(fx);
+    const before = await one('fx__weekly');
+    expect(before?.executionContract).toEqual(contract);
+    expect(before?.contentHash).not.toBe(hashOf(['module.fx.report']));
+    await sync(fx);
+    expect(await one('fx__weekly')).toEqual(before);
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ enabled: false, displayName: 'Admin title', sortOrder: 42 })
+      .where(eq(schema.taskTypeDefinitions.slug, 'fx__weekly'));
+    const guarded = moduleOf([
+      seedOf({
+        stepIds: ['module.fx.report', 'module.fx.extra'],
+        executionContract: {
+          version: 1,
+          guardedSpans: [
+            {
+              id: 'report',
+              firstStepId: 'module.fx.report',
+              lastStepId: 'module.fx.report',
+              predicateId: 'module.fx.planned',
+              args: {},
+            },
+          ],
+        },
+      }),
+    ]);
+    // Trusted code registration is separate from the stored manifest's ids and JSON args.
+    await sync(guarded);
+    expect(await one('fx__weekly')).toMatchObject({
+      enabled: false,
+      displayName: 'Admin title',
+      sortOrder: 42,
+      executionContract: guarded.manifest.taskTypes![0]!.executionContract,
+    });
+    expect((await one('fx__weekly'))?.contentHash).not.toBe(before?.contentHash);
+    await sync(moduleOf([seedOf()]));
+    expect((await one('fx__weekly'))?.executionContract).toBeNull();
+  });
+
+  it('refuses unknown predicates even on a seed containing an internal step', async () => {
+    const fx = moduleOf([
+      seedOf({
+        stepIds: ['module.fx.internal'],
+        preAnswerDefaults: {},
+        stepLoopLimitDefaults: {},
+        executionContract: {
+          version: 1,
+          guardedSpans: [
+            {
+              id: 'x',
+              firstStepId: 'module.fx.internal',
+              lastStepId: 'module.fx.internal',
+              predicateId: 'module.fx.unknown',
+              args: {},
+            },
+          ],
+        },
+      }),
+    ]);
+    const result = await sync(fx);
+    expect(result.fx?.invalid?.[0]?.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'invalid-execution-contract',
+          reason: expect.stringContaining('unknown-predicate'),
+        }),
+      ]),
+    );
+    expect(await one('fx__weekly')).toBeUndefined();
   });
 
   it('stores a seed as <module>__<local> with every field', async () => {

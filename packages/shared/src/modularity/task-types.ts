@@ -1,7 +1,8 @@
+import { assertExecutionContractSupported, ExecutionContractError } from './execution-contract.js';
 import { z } from 'zod';
 import { type RunListStrategy } from '../step-engine/run-list.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
-import { validateComposition, type CompositionIssue } from './composition.js';
+import { validateComposition, type ExecutionCompositionIssue } from './composition.js';
 import { RESERVED_TASK_TYPE_SLUGS, parseStepId, type ComposableStepEntry } from './contracts.js';
 import { derivedChangesSchema } from './derived-changes.js';
 import { promptStepEntrySchema } from './prompt-steps.js';
@@ -62,6 +63,7 @@ export interface TaskTypeAvailabilityInput {
     runListStrategy: RunListStrategy;
     stepIds: readonly string[] | null;
     requiresRepository: boolean;
+    executionContract?: unknown;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
   // Null when no rows were read, which turns the module reasons off; a module with no row is missing.
@@ -80,7 +82,7 @@ export type TaskTypeAvailability =
       available: false;
       reason: TaskTypeUnavailableReason;
       missingStepIds?: string[];
-      issues?: CompositionIssue[];
+      issues?: ExecutionCompositionIssue[];
       modules?: TaskTypeModuleRef[];
     };
 
@@ -112,6 +114,16 @@ export function resolveTaskTypeAvailability(
   }
   if (definition.source.startsWith('module:') && !switches.moduleEnabled) {
     return { available: false, reason: 'module-types-off' };
+  }
+  try {
+    assertExecutionContractSupported(definition.executionContract);
+  } catch (error) {
+    if (!(error instanceof ExecutionContractError)) throw error;
+    return {
+      available: false,
+      reason: 'invalid-composition',
+      issues: [{ kind: 'invalid-execution-contract', reason: error.message }],
+    };
   }
   if (definition.runListStrategy === 'derived') {
     const moduleAvailability = resolveTaskTypeAvailability({

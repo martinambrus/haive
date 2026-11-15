@@ -1,3 +1,4 @@
+import { assertExecutionContractUsable } from './execution-contract-admission.js';
 import { and, eq, isNull } from 'drizzle-orm';
 import {
   TASK_START_LOCK_TIMEOUT_MS,
@@ -43,9 +44,12 @@ export async function markQueuedForStart(
         deadAt: schema.tasks.deadAt,
         type: schema.tasks.type,
         customSteps: schema.tasks.customSteps,
+        executionContract: schema.tasks.executionContract,
       })
       .from(schema.tasks)
       .where(eq(schema.tasks.id, taskId));
+    if (task?.status === 'created' && task.deadAt == null)
+      assertExecutionContractUsable(task.executionContract);
     // A start refuses pinned custom tools that would fail at their step; a started or dead task falls through.
     if (task && task.status === 'created' && task.deadAt == null && task.customSteps != null) {
       await assertCustomToolsUsable(tx, task);

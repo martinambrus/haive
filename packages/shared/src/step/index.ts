@@ -1,3 +1,7 @@
+import type {
+  ExecutionPredicateDeclaration,
+  FixConsumer,
+} from '../modularity/execution-contract.js';
 import type { CommittedSnapshotRef } from '../committed-snapshot.js';
 export type { CommittedSnapshotRef } from '../committed-snapshot.js';
 import type { StepOutputContractRef, LegacyStepRoleId } from '../step-engine/output-contracts.js';
@@ -631,6 +635,18 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly outputContract?: StepOutputContractRef;
   /** Declares role capability only. Replacement admission remains a separate host decision. */
   readonly replaces?: readonly LegacyStepRoleId[];
+  /** Executable promise to consume the host fix protocol at this exact version.
+   * Declaring it grants no output replacement authority. P6 admits no custom target. */
+  readonly fixConsumer?: FixConsumer;
+  /** Trusted executable predicates, keyed by module-local id. P6 validates but never evaluates. */
+  readonly guardPredicates?: Readonly<
+    Record<
+      string,
+      ExecutionPredicateDeclaration & {
+        evaluate(ctx: StepContext, args: Record<string, unknown>): Promise<boolean>;
+      }
+    >
+  >;
   /** May edit deliverable code or tests, including through a fixer. Its successful/skip
    * hand-off compares validation snapshots when after 07b and before the commit gate.
    * Prompt steps with the file_write capability opt in.

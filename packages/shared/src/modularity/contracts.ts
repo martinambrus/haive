@@ -1,3 +1,4 @@
+import { executionContractSchema, fixConsumerSchema } from './execution-contract.js';
 import { z } from 'zod';
 import {
   parseStepOutputContractRef,
@@ -192,6 +193,7 @@ export const composableStepEntrySchema = z
     paramFormSchema: formSchemaSchema.optional(),
     loopBudgetEditable: z.boolean().optional(),
     loopTargetStepId: stepIdSchema.optional(),
+    fixConsumer: fixConsumerSchema.optional(),
     closes: z.boolean().optional(),
     agentAuthoredOutput: z.boolean().optional(),
     outputContract: z
@@ -237,6 +239,7 @@ export const taskTypeDefinitionSeedSchema = z
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     stepLoopLimitDefaults: stepLoopLimitsSchema,
     sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
+    executionContract: executionContractSchema.optional(),
   })
   .refine(
     (s) =>
