@@ -92,6 +92,14 @@ export function stepRoleOutputContract<R extends StepRoleId>(
 
 /** Exact id + version, with no module-supplied validator or compatibility assertion. */
 export function parseStepOutputContractRef(value: unknown): StepOutputContractRef | null {
+  const ref = parseRegistryOutputContractRef(value);
+  return ref && HOST_POLICY_STEP_ROLES.some((role) => STEP_ROLE_REGISTRY[role].contract === ref)
+    ? ref
+    : null;
+}
+
+/** Internal data-port lookup. Never use for executable declarations, manifests or v1/v2 pins. */
+function parseRegistryOutputContractRef(value: unknown): StepOutputContractRef | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const ref = value as Record<string, unknown>;
   if (Object.keys(ref).length !== 2 || !Object.hasOwn(ref, 'id') || !Object.hasOwn(ref, 'version'))
@@ -343,7 +351,7 @@ export function safeParseStepOutput<C extends StepOutputContractRef>(
   value: unknown,
   limits: { maxIssues?: number; maxPathChars?: number } = {},
 ): OutputParseResult<OutputFor<C>> {
-  const registered = parseStepOutputContractRef(ref);
+  const registered = parseRegistryOutputContractRef(ref);
   if (!registered) return { success: false, issuePaths: ['$contract'] };
   const validator = outputValidators[registered.id];
   const result = validator.safeParse(value);

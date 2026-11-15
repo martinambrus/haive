@@ -1,4 +1,4 @@
-import { SPEC_ROLES, SPEC_RESOLVED_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { SPEC_ROLES } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
@@ -135,7 +135,6 @@ const FIX_RULES = [
 
 export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, ResolveWarningsApply> =
   {
-    outputContract: SPEC_RESOLVED_OUTPUT_CONTRACT,
     metadata: {
       id: '05a-resolve-spec-warnings',
       workflowType: 'workflow',

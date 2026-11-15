@@ -359,7 +359,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '04-phase-0b-pre-planning',
-    outputContract: SPEC_DRAFT_OUTPUT_CONTRACT,
     providesRoles: [{ role: SPEC_ROLES.draft, contract: SPEC_DRAFT_OUTPUT_CONTRACT }],
     label: 'Phase 0b: Pre-planning',
     group: 'spec',
@@ -388,7 +387,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
         optional: false,
       },
     ],
-    outputContract: SPEC_CHECKED_OUTPUT_CONTRACT,
     providesRoles: [{ role: SPEC_ROLES.checked, contract: SPEC_CHECKED_OUTPUT_CONTRACT }],
     label: 'Phase 0b.5: Spec quality review',
     group: 'spec',
@@ -414,7 +412,6 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
         optional: true,
       },
     ],
-    outputContract: SPEC_RESOLVED_OUTPUT_CONTRACT,
     providesRoles: [{ role: SPEC_ROLES.resolved, contract: SPEC_RESOLVED_OUTPUT_CONTRACT }],
     label: 'Resolve spec warnings',
     group: 'spec',

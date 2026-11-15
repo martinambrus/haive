@@ -26,7 +26,7 @@ describe('host spec registry and frozen old plans', () => {
       expect(entry.authorship).toBe('mixed');
       expect('quoteProjection' in entry).toBe(false);
       const ref = stepRoleOutputContract(role);
-      expect(parseStepOutputContractRef(ref)).toBe(ref);
+      expect(parseStepOutputContractRef(ref)).toBeNull();
       expect(parseStepOutputContractRef({ ...ref, version: 2 })).toBeNull();
       expect(safeParseStepOutput(ref, { spec: '', extension: true })).toMatchObject({
         success: true,
@@ -95,8 +95,46 @@ describe('host spec registry and frozen old plans', () => {
         name: 'Example',
         version: '1',
         schemaVersion: 1,
-        composableSteps: [declaration],
+        composableSteps: [{ ...declaration, stepId: 'spec' }],
       }).success,
     ).toBe(false);
   });
+});
+
+it.each(
+  Object.values(SPEC_ROLES).flatMap((role) =>
+    ['manifest', 'v1', 'v2'].map((boundary) => ({ role, boundary })),
+  ),
+)('refuses $role contract in $boundary', ({ role, boundary }) => {
+  const declaration = {
+    stepId: 'module.example.spec',
+    label: 'Spec',
+    group: 'spec',
+    dispatchesCli: false,
+    requires: [],
+    provides: [],
+    outputContract: stepRoleOutputContract(role),
+  };
+  const manifest = { id: 'example', name: 'Example', version: '1', schemaVersion: 1 };
+  expect(
+    moduleManifestSchema.safeParse({
+      ...manifest,
+      composableSteps: [{ ...declaration, stepId: 'spec', outputContract: undefined }],
+    }).success,
+  ).toBe(true);
+  if (boundary === 'manifest')
+    expect(
+      moduleManifestSchema.safeParse({
+        ...manifest,
+        composableSteps: [{ ...declaration, stepId: 'spec' }],
+      }).success,
+    ).toBe(false);
+  const v1 = rolePlan(1);
+  v1.composableEntries.push(declaration);
+  if (boundary === 'v1') expect(() => parseDerivedRunPlan(v1)).toThrow();
+  const v2 = rolePlan(2);
+  if (v2.version !== 2) throw new Error('expected v2');
+  // Keep the valid replacement declarations; only change the contract at the decode gate.
+  v2.candidates[0]!.effectiveEntries[0]!.outputContract = declaration.outputContract;
+  if (boundary === 'v2') expect(() => parseDerivedRunPlan(v2)).toThrow();
 });

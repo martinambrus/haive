@@ -1,4 +1,4 @@
-import { SPEC_ROLES, SPEC_CHECKED_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { SPEC_ROLES } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -597,7 +597,6 @@ const SELF_REVIEW_FALLBACK = [
 ].join('\n');
 
 export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQualityApply> = {
-  outputContract: SPEC_CHECKED_OUTPUT_CONTRACT,
   metadata: {
     id: '05-phase-0b5-spec-quality',
     workflowType: 'workflow',

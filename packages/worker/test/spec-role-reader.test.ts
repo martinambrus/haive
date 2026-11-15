@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
-import { validatePromptStep } from '@haive/shared/modularity';
+import { composableStepEntrySchema, validatePromptStep } from '@haive/shared/modularity';
 import { assertPinnedCandidateSupport } from '../src/queues/run-list.js';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -17,6 +17,7 @@ import {
   gate1SpecApprovalStep,
   buildSpecSummary,
 } from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
+import { phase0bPrePlanningStep } from '../src/step-engine/steps/workflow/04-phase-0b-pre-planning.js';
 import { phase0b5SpecQualityStep } from '../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from '../src/step-engine/steps/workflow/05a-resolve-spec-warnings.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -308,4 +309,21 @@ it('keeps mixed spec producers unquotable and outside executable host policy', (
     { get },
   );
   expect(get).not.toHaveBeenCalled();
+});
+
+it('catalog serialization never persists spec output contracts or activates runner validation', () => {
+  for (const step of [phase0bPrePlanningStep, phase0b5SpecQualityStep, resolveSpecWarningsStep]) {
+    expect(step.outputContract).toBeUndefined();
+    const entry = CORE_COMPOSABLE_STEPS.find((e) => e.stepId === step.metadata.id)!;
+    expect(entry.outputContract).toBeUndefined();
+  }
+  // Catalog reads and derived admission use this same entry decoder. Serialized pins
+  // must remain readable by the base contract decoder (review/audit references only).
+  const serialized = CORE_COMPOSABLE_STEPS.map((e) => composableStepEntrySchema.parse(e));
+  expect(serialized.flatMap((e) => (e.outputContract ? [e.outputContract.id] : []))).not.toEqual(
+    expect.arrayContaining(Object.values(SPEC_ROLES)),
+  );
+  expect(
+    serialized.every((e) => !e.outputContract || !e.outputContract.id.startsWith('haive.spec.')),
+  ).toBe(true);
 });
