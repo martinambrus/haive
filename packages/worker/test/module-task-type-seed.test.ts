@@ -156,6 +156,65 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
     expect((await one('fx__weekly'))?.executionContract).toBeNull();
   });
 
+  it('accepts the same internal-step seed with and without an inert execution contract', async () => {
+    const seed = seedOf({
+      stepIds: ['module.fx.internal', '07-phase-2-implement'],
+      preAnswerDefaults: {},
+      stepLoopLimitDefaults: {},
+    });
+    const plain = await sync(moduleOf([seed]));
+    const before = await one('fx__weekly');
+    expect(plain).toEqual({ fx: { seeded: ['fx__weekly'], conflicts: [] } });
+    expect(before).toBeDefined();
+    const executionContract = { version: 1, guardedSpans: [] };
+    expect(await sync(moduleOf([{ ...seed, executionContract }]))).toEqual(plain);
+    const after = await one('fx__weekly');
+    expect(after?.executionContract).toEqual(executionContract);
+    expect(after?.contentHash).not.toBe(before?.contentHash);
+    const behavior = (row: typeof before) => {
+      const { executionContract: _contract, contentHash: _hash, updatedAt: _time, ...rest } = row!;
+      return rest;
+    };
+    expect(behavior(after)).toEqual(behavior(before));
+  });
+
+  it.each(['guarded', 'fixed'])(
+    'still validates an internal-step seed with a nonempty %s contract',
+    async (kind) => {
+      const executionContract =
+        kind === 'guarded'
+          ? {
+              version: 1,
+              guardedSpans: [
+                {
+                  id: 'report',
+                  firstStepId: 'module.fx.report',
+                  lastStepId: 'module.fx.report',
+                  predicateId: 'module.fx.planned',
+                  args: {},
+                },
+              ],
+            }
+          : {
+              version: 1,
+              guardedSpans: [],
+              fixTarget: { stepId: 'module.fx.report', capabilityVersion: 1 },
+            };
+      const outcome = await sync(
+        moduleOf([
+          seedOf({
+            stepIds: ['module.fx.internal', 'module.fx.report'],
+            preAnswerDefaults: {},
+            stepLoopLimitDefaults: {},
+            executionContract,
+          }),
+        ]),
+      );
+      expect(outcome.fx?.invalid?.[0]?.issues.length).toBeGreaterThan(0);
+      expect(await one('fx__weekly')).toBeUndefined();
+    },
+  );
+
   it('refuses unknown predicates even on a seed containing an internal step', async () => {
     const fx = moduleOf([
       seedOf({

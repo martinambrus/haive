@@ -123,7 +123,10 @@ async function seedModuleTaskTypes(
             composables,
           ),
           // A step with no composable entry is internal: what it requires and provides is unknown.
-          ...(row.executionContract != null || stepIds.every((id) => composables.has(id))
+          ...((row.executionContract != null &&
+            (row.executionContract.guardedSpans.length > 0 ||
+              row.executionContract.fixTarget != null)) ||
+          stepIds.every((id) => composables.has(id))
             ? validateComposition(stepIds, composables, {
                 requiresRepository: row.requiresRepository,
                 executionContract: row.executionContract,
