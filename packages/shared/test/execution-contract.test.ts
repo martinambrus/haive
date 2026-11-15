@@ -68,6 +68,16 @@ describe('pinned execution contract', () => {
     ])
       expect(() => parseExecutionContract(raw)).toThrow('invalid-execution-contract');
   });
+  it('accepts a registered guard from a module whose id starts with a digit', () => {
+    const c = contract([span('x', 'setup', 'module.3scan.planned')]);
+    expect(parseExecutionContract(c)).toEqual(c);
+    expect(
+      validateComposition(['setup', 'report'], catalog, {
+        executionContract: c,
+        predicates: new Map([['module.3scan.planned', { argsSchema: z.strictObject({}) }]]),
+      }),
+    ).toEqual([]);
+  });
   it('refuses unknown predicates and invalid arguments by name', () => {
     expect(check(['setup'], contract([span('x', 'setup', 'module.scan.unknown')]))).toEqual(
       expect.arrayContaining([

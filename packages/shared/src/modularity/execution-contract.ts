@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MODULE_ID_PATTERN_SOURCE } from './module-id.js';
 import type { ComposableStepEntry } from './contracts.js';
 
 const id = z.string().min(1).max(128);
@@ -18,7 +19,7 @@ export const executionContractSchema = z.strictObject({
         predicateId: z
           .string()
           .max(128)
-          .regex(/^module\.[a-z][a-z0-9-]*\.[a-z0-9_-]+$/),
+          .regex(new RegExp(`^module\\.${MODULE_ID_PATTERN_SOURCE}\\.[a-z0-9_-]+$`)),
         args: z.record(z.string(), json),
         requiresSpan: id.optional(),
       }),
