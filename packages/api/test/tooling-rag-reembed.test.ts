@@ -206,7 +206,7 @@ it('reports a refused stored re-embed DSN instead of a generic failure', async (
   expect(await res.json()).toEqual({
     code: 'user_postgres_dsn_refused',
     error:
-      'PostgreSQL connection parameter "sslrootcert" is not allowed. Remove it from the saved connection string and save again.',
+      'PostgreSQL connection parameter "sslrootcert" is not allowed. Update the connection string in onboarding step 04 (Tooling and infrastructure) without this parameter.',
   });
   expect(h.statements).toEqual([]);
 });

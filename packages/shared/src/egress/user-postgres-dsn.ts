@@ -1,3 +1,5 @@
+type DsnSurface = 'input' | 'stored-rag' | 'stored-global-kb';
+
 type RefusedParameter = 'sslrootcert' | 'sslcert' | 'sslkey' | 'host';
 
 /** Reviewed against postgres.js 4.1.1's parsed options and consumed DSN selectors.
@@ -62,10 +64,17 @@ export const USER_POSTGRES_DSN_KNOWN_OPTIONS = [
 
 export class UserPostgresDsnError extends Error {
   readonly code = 'user_postgres_dsn_refused';
-  constructor(readonly parameter: RefusedParameter) {
-    super(
-      `PostgreSQL connection parameter "${parameter}" is not allowed. Remove it from the saved connection string and save again.`,
-    );
+  constructor(
+    readonly parameter: RefusedParameter,
+    surface: DsnSurface = 'input',
+  ) {
+    const guidance =
+      surface === 'stored-rag'
+        ? 'Update the connection string in onboarding step 04 (Tooling and infrastructure) without this parameter.'
+        : surface === 'stored-global-kb'
+          ? 'Ask an admin to replace the saved connection string in Settings > Global KB without this parameter.'
+          : 'Remove the parameter and try again.';
+    super(`PostgreSQL connection parameter "${parameter}" is not allowed. ${guidance}`);
     this.name = 'UserPostgresDsnError';
   }
 }
@@ -74,7 +83,7 @@ export class UserPostgresDsnError extends Error {
  * strip parameters: that would silently change the requested TLS policy.
  * Keep this tail/authority split aligned with postgres.js parseUrl, which accepts
  * multi-host authorities and unescaped @ in passwords that WHATWG URL rejects. */
-export function assertUserPostgresDsn(dsn: string): void {
+export function assertUserPostgresDsn(dsn: string, surface: DsnSurface = 'input'): void {
   const rest = dsn.slice(dsn.indexOf('://') + 3);
   const end = rest.search(/[/?]/);
   const authority = end === -1 ? rest : rest.slice(0, end);
@@ -86,7 +95,7 @@ export function assertUserPostgresDsn(dsn: string): void {
   }
   for (const parameter of ['sslrootcert', 'sslcert', 'sslkey'] as const) {
     // Presence matters even for empty, duplicated, or "system" values.
-    if (tail.searchParams.has(parameter)) throw new UserPostgresDsnError(parameter);
+    if (tail.searchParams.has(parameter)) throw new UserPostgresDsnError(parameter, surface);
   }
   // The driver's query reduction keeps the last value. Query hosts are already
   // URL-decoded; authority hosts get one forgiving decode in parseUrl.
@@ -109,7 +118,7 @@ export function assertUserPostgresDsn(dsn: string): void {
       })
       .join(',');
   }
-  if (host.includes('/')) throw new UserPostgresDsnError('host');
+  if (host.includes('/')) throw new UserPostgresDsnError('host', surface);
 }
 
 /** Probe responses never carry driver messages: parser, TLS and server errors

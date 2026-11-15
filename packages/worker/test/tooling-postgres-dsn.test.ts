@@ -18,7 +18,7 @@ it.each(['sslrootcert', 'sslcert', 'sslkey', 'host'])(
     ).rejects.toMatchObject({
       code: 'user_postgres_dsn_refused',
       parameter,
-      message: `PostgreSQL connection parameter "${parameter}" is not allowed. Remove it from the saved connection string and save again.`,
+      message: `PostgreSQL connection parameter "${parameter}" is not allowed. Remove the parameter and try again.`,
     });
   },
 );

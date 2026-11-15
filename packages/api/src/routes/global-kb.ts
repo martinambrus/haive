@@ -447,8 +447,9 @@ async function putConfig(c: Context<AppEnv>) {
   const saved = await resolveGlobalKbSettings();
   const given = d.connectionString?.trim() ?? '';
   const clearing = d.clearConnectionString === true;
-  // The page sends every field on every save, so only a CHANGED value is refused.
-  // An unchanged one is accepted and not written, so it cannot undo a concurrent admin change.
+  // The page sends every field on every save, so only a CHANGED value needs admin rights.
+  // An unchanged DSN is not written, so it cannot undo a concurrent admin change,
+  // but it must still pass DSN validation below.
   if (!isAdmin) {
     // The resolver turns a blank URL or model into its default, and the page sends either form.
     const orDefault = (value: string | null | undefined, fallback: string) =>
@@ -521,7 +522,9 @@ async function putConfig(c: Context<AppEnv>) {
     );
   }
   const storesString = isAdmin && given !== '' && given !== saved.connectionString;
-  if (given !== '') assertUserPostgresDsn(given);
+  // An echoed refused DSN is still invalid, but identify it as the saved admin setting.
+  if (given !== '')
+    assertUserPostgresDsn(given, given === saved.connectionString ? 'stored-global-kb' : 'input');
   const fields: [name: string, key: string, value: string | undefined][] = [
     ['enabled', CONFIG_KEYS.GLOBAL_KB_ENABLED, isAdmin ? d.enabled?.toString() : undefined],
     ['digestEnabled', CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, d.digestEnabled?.toString()],
@@ -703,6 +706,8 @@ globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
   }
   let conn: Awaited<ReturnType<typeof resolveGlobalKbConnection>> | null = null;
   try {
+    if (mode === 'external' && parsed.data.connectionString?.trim())
+      assertUserPostgresDsn(connectionString!);
     conn = await resolveGlobalKbConnection({ ...saved, mode, connectionString }, getDb());
     const pg = conn.pg;
     await withTimeout(

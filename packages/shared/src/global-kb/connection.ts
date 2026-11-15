@@ -175,7 +175,7 @@ function resolveExternal(
   connectionString: string,
   opts: GlobalKbConnectOptions,
 ): GlobalKbConnection {
-  assertUserPostgresDsn(connectionString);
+  assertUserPostgresDsn(connectionString, 'stored-global-kb');
   const pg = postgres(connectionString, poolOptions(opts));
   return buildConnection('external', pg, settings);
 }

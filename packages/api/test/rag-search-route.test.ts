@@ -139,7 +139,7 @@ it('reports a refused stored RAG parameter with actionable, secret-free copy', a
   await expect(executeRagSearch('task-1', 'query', 8, 'local')).rejects.toMatchObject({
     code: 'user_postgres_dsn_refused',
     message:
-      'PostgreSQL connection parameter "sslcert" is not allowed. Remove it from the saved connection string and save again.',
+      'PostgreSQL connection parameter "sslcert" is not allowed. Update the connection string in onboarding step 04 (Tooling and infrastructure) without this parameter.',
   });
 });
 
