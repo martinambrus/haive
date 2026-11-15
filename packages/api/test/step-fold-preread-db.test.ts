@@ -493,14 +493,12 @@ describe.skipIf(!url)(
         const gateId = '09-gate-2-verify-approval';
         const taskId = await seedTask('running', { currentStepId: gateId, currentRound: 0 });
         const row = await seedStep(taskId, { stepId: gateId, status: 'pending', detectOutput: {} });
-        await db
-          .insert(schema.taskEvents)
-          .values({
-            taskId,
-            taskStepId: row.id,
-            eventType: 'insight.check',
-            payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
-          });
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: row.id,
+          eventType: 'insight.check',
+          payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+        });
         let entered!: () => void;
         const inApply = new Promise<void>((resolve) => (entered = resolve));
         let release!: () => void;
@@ -585,6 +583,89 @@ describe.skipIf(!url)(
         ).toEqual(['verify_failed', 'gate2_approved']);
         expect(apply).toHaveBeenCalledOnce();
         expect(h.jobs).toHaveLength(1);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'INS5 malformed owner feedback fails validation before gate-2 apply or reject formatting',
+      async () => {
+        const workerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
+          .pathname;
+        const gatePath = new URL(
+          '../../worker/src/step-engine/steps/workflow/09-gate-2-verify-approval.ts',
+          import.meta.url,
+        ).pathname;
+        const { advanceStep } = await import(workerPath);
+        const { gate2VerifyApprovalStep: gate } = await import(gatePath);
+        const gateId = gate.metadata.id;
+        const taskId = await seedTask('running', {
+          currentStepId: gateId,
+          currentRound: 0,
+          preAnswers: { [gateId]: { decision: 'approve' } },
+        });
+        const detected = {
+          verify: { test: null, lint: null, typecheck: null },
+          allPassed: false,
+          validation: null,
+          testManagement: null,
+          browser: null,
+          codeReview: null,
+          codeAudit: null,
+          adversarial: null,
+          liveBrowser: null,
+          runtimeSmoke: null,
+        };
+        const row = await seedStep(taskId, {
+          stepId: gateId,
+          status: 'pending',
+          detectOutput: detected,
+        });
+        await db
+          .insert(schema.taskEvents)
+          .values({
+            taskId,
+            taskStepId: row.id,
+            eventType: 'insight.check',
+            payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+          });
+        const apply = vi.fn(gate.apply);
+        const step = { ...gate, detect: undefined, prepareForm: undefined, apply };
+        const params = {
+          db,
+          taskId,
+          userId: USER,
+          repoPath: '/unused',
+          workspacePath: '/unused',
+          cliProviderId: null,
+          stepDef: step,
+          epoch: 3,
+          round: 0,
+          moduleDeactivation: null,
+        };
+        const parked = await advanceStep(params);
+        expect(parked.status).toBe('waiting_form');
+        expect(
+          parked.row.formSchema.fields.find((f: { id: string }) => f.id === 'decision'),
+        ).toMatchObject({ type: 'radio', default: 'reject' });
+        expect(
+          await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+            values: { decision: 'reject', feedback: { malformed: true } },
+          }),
+        ).toMatchObject({ status: 200 });
+        const result = await advanceStep(params);
+        expect(result).toMatchObject({
+          status: 'failed',
+          error: 'feedback: expected string',
+          row: { errorMessage: 'validation failed: feedback: expected string' },
+        });
+        expect(apply).not.toHaveBeenCalled();
+        const events = await db.query.taskEvents.findMany({
+          where: eq(schema.taskEvents.taskId, taskId),
+        });
+        expect(
+          events.filter((e) => e.eventType === 'insight.check').map((e) => e.payload!.kind),
+        ).toEqual(['verify_failed']);
       },
       TEST_TIMEOUT,
     );

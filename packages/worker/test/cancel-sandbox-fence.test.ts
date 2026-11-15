@@ -1077,7 +1077,8 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     };
     if (source === 'persisted preset schema') {
       const oldForm = step.form!(ctx, {}, null)!;
-      oldForm.fields[0]!.default = 'approve';
+      const decision = oldForm.fields[0]!;
+      if (decision.type === 'radio') decision.default = 'approve';
       await db
         .update(schema.taskSteps)
         .set({ formSchema: oldForm })

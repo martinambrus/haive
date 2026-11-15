@@ -3724,13 +3724,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
     // Values carried by the job can then only be a submit redelivered after it was applied.
     const continuing = row.status === 'waiting_cli' && current.formValues != null;
-    // A fresh latched answer is saved by the submit route, rather than trusted from
-    // the job. Close its form before apply just as the ordinary submitted path does.
-    if (insightHumanSubmission && !continuing) {
-      current = await updateRow(db, current.id, { status: 'running' });
-    }
-    if (persistedSchema && submitted && !continuing) {
-      const expanded = validateFormValues(persistedSchema, submitted);
+    // A latched owner answer comes from the attested saved values, never the job.
+    // Validate it and close the form through the ordinary submitted-answer path.
+    const submittedAnswer = insightHumanSubmission ? formValues : submitted;
+    if (persistedSchema && submittedAnswer && !continuing) {
+      const expanded = validateFormValues(persistedSchema, submittedAnswer);
       const validation = expanded.success
         ? normalizeStepFormValues(meta.id, expanded.data)
         : expanded;
@@ -3746,7 +3744,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           error: validation.issues.join('; '),
         };
       }
-      formValues = answersForPersistence(validation.data, submitted);
+      formValues = answersForPersistence(validation.data, submittedAnswer);
       current = await updateRow(db, current.id, {
         formValues,
         status: 'running',
