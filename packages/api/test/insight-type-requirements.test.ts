@@ -43,18 +43,18 @@ it('names the earlier verification and review required by a stored insight type'
       loopTargetStepId: '08-phase-5-verify',
     },
   });
-  await expect(
-    definitionForCreate(
-      fake.db as unknown as Parameters<typeof definitionForCreate>[0],
-      'insights',
-      { generic: false },
-    ),
-  ).rejects.toMatchObject({
+  const error = await definitionForCreate(
+    fake.db as unknown as Parameters<typeof definitionForCreate>[0],
+    'insights',
+    { generic: false },
+  ).catch((error: unknown) => error);
+  expect(error).toMatchObject({
     status: 409,
     message: expect.stringMatching(
       /08e-insights-triage requires earlier 08-phase-5-verify.*08c-code-review/,
     ),
   });
+  expect((error as Error).message.match(/08e-insights-triage requires earlier/g)).toHaveLength(1);
 });
 
 import { DerivedTaskAdmissionError } from '../src/lib/derived-errors.js';

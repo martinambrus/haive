@@ -236,7 +236,7 @@ export async function definitionForCreate(
         if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
-          `Task type ${slug} has an invalid step composition: ${(availability.issues ?? []).map(describeIssue).join(', ')}`,
+          `Task type ${slug} has an invalid step composition: ${[...new Set((availability.issues ?? []).map(describeIssue))].join(', ')}`,
           availability.reason,
         );
       default: {
