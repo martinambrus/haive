@@ -2711,8 +2711,13 @@ function makeSpawnDb(reviewerRuns: unknown[] = []) {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     // The ownership probe a run is recorded under: these cases never lose the row.
     select: () => ({
-      from: () => ({
-        where: () => ({ for: async () => [{ id: 'step1' }], orderBy: async () => reviewerRuns }),
+      from: (table: unknown) => ({
+        where: () => ({
+          for: async () => [{ id: 'step1' }],
+          orderBy: async () => reviewerRuns,
+          then: (resolve: (rows: unknown[]) => void) =>
+            resolve(table === schema.taskDagIssues ? [] : reviewerRuns),
+        }),
       }),
     }),
     query: {
@@ -3958,6 +3963,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         agentRuns?: unknown[];
         issue?: Parameters<typeof makeDagMergeWaitDb>[0]['issue'];
         enqueued?: unknown[];
+        failurePolicy?: 'fail-step' | 'record-and-continue';
       } = {},
     ) {
       const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-c-'));
@@ -3995,7 +4001,10 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         };
         const outcome = await resolveDagPhase(
           h.db as never,
-          dagExecuteStep as never,
+          {
+            ...dagExecuteStep,
+            dagExecute: { ...dagExecuteStep.dagExecute, failurePolicy: extra.failurePolicy },
+          } as never,
           { id: 'step1', status: stepRowStatus, round: 0 } as never,
           ctx,
           params as never,
@@ -4254,19 +4263,32 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         ]);
       });
 
-      it('fails the issue when no provider can take the re-dispatch', async () => {
-        vi.mocked(resolveTaskDispatch).mockImplementationOnce(
-          async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
-        );
-        const { issueUpdates, h } = await ingestCoder('running', killedOnce, {
-          agentRuns: [fixRun],
-          issue: advisorRetry,
-        });
-        expect(h.invocationInserts).toHaveLength(0);
-        expect(issueUpdates).toEqual([
-          expect.objectContaining({ outcome: 'failed_unrecoverable' }),
-        ]);
-      });
+      it.each([undefined, 'fail-step', 'record-and-continue'] as const)(
+        'F2 fix-coder provider absence under %s',
+        async (failurePolicy) => {
+          vi.mocked(resolveTaskDispatch).mockImplementationOnce(
+            async () => ({ mode: 'skip', invocation: null, reason: 'none' }) as never,
+          );
+          const { outcome, issueUpdates, h } = await ingestCoder('running', killedOnce, {
+            agentRuns: [fixRun],
+            issue: advisorRetry,
+            failurePolicy,
+          });
+          expect(h.invocationInserts).toHaveLength(0);
+          if (failurePolicy === 'record-and-continue') {
+            expect('error' in outcome && outcome.error).toEqual(
+              expect.objectContaining({
+                message: expect.stringContaining('no cli provider available'),
+              }),
+            );
+            expect(issueUpdates).toEqual([]);
+          } else {
+            expect(issueUpdates).toEqual([
+              expect.objectContaining({ outcome: 'failed_unrecoverable' }),
+            ]);
+          }
+        },
+      );
     });
 
     it('still resets a transiently killed level coder to pending for step (B)', async () => {

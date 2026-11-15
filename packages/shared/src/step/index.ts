@@ -381,6 +381,11 @@ export interface DagCoderContext {
  *  only supplies the coder prompt + capabilities; the orchestration lives in the
  *  runner so it has the dispatcher + provider list. */
 export interface DagExecuteSpec {
+  /** Final issue failures may be recorded while independent work continues. Under this
+   *  opt-in, required provider, environment and merge faults halt. Defaults to fail-step,
+   *  preserving the existing review-loop and replanner failure/escalation paths.
+   *  The runner adds dagOutcomes counts to apply output only under this opt-in. */
+  failurePolicy?: 'fail-step' | 'record-and-continue';
   requiredCapabilities: StepCapability[];
   /** Build one coder's prompt. `upstreamDebt` is a pre-formatted block of notes
    *  from completed lower-level issues (empty string when none). */

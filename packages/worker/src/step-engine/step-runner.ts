@@ -138,6 +138,7 @@ import {
   type StepLoopPassRecord,
 } from './step-definition.js';
 import { resolveDagPhase } from './dag-executor.js';
+import { loadDagOutcomeCounts } from './dag-outcomes.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import {
@@ -3750,6 +3751,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     for (;;) {
       try {
         output = await stepDef.apply(ctx, { ...applyArgs });
+        if (stepDef.dagExecute?.failurePolicy === 'record-and-continue') {
+          output = {
+            ...(output as Record<string, unknown>),
+            dagOutcomes: await loadDagOutcomeCounts(db, ctx.taskId),
+          };
+        }
         break;
       } catch (applyErr) {
         // A bounded, user-approved apply batch completed but produced another

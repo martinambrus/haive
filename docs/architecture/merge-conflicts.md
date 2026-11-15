@@ -456,3 +456,16 @@ dirty or unreadable worktree and still finishes the task, and the completion of 
 without step 12 reaps its worktree only while clean. Ignored files are not counted. `run_app`'s
 Finish and Cancel still remove the worktree: Cancel is the discard action, and `run_app` has no step
 that could ask.
+
+## Empty issue branches under partial DAG completion
+
+An opt-in `record-and-continue` DAG leaves an accepted issue with no host-created
+nonempty issue commit unmerged, with the host `DAG_HOST_NO_CHANGE` marker in
+`concerns`. Neither `merge_status` nor `merged_at` claims a merge. Both the host
+commit iteration and the level merge's own filter exclude that structural outcome,
+so replay before checkpoint cannot retry the empty issue or call it a clean merge.
+Successful siblings still merge; cleanup/checkpoint happens only after those merges
+settle. A dependent of the unmerged empty issue is unconfirmed and blocked,
+transitively, before its worktree or invocation exists. With the default policy an
+empty accepted branch still fails the step. Merge refusal, abort failure, conflict
+exhaustion and a provider-refused merge fixer halt under either policy.

@@ -379,3 +379,20 @@ describe('the ledger block is fenced', () => {
     expect(out.indexOf('THE PROMPT')).toBeGreaterThan(close);
   });
 });
+
+it('withholds excluded issue ledger provenance before augmenting an advisor', async () => {
+  const { db } = mockDb([
+    entry('refused payload', { stepId: '06c-dag-execute/refused' }),
+    entry('blocked payload', { stepId: '06c-dag-execute/blocked' }),
+    entry('healthy workspace fact', { stepId: '06c-dag-execute/healthy' }),
+  ]);
+  const prompt = await augmentPromptWithLedger(
+    db,
+    'task',
+    'ADVISE',
+    new Set(['06c-dag-execute/refused', '06c-dag-execute/blocked']),
+  );
+  expect(prompt).not.toContain('refused payload');
+  expect(prompt).not.toContain('blocked payload');
+  expect(prompt).toContain('healthy workspace fact');
+});

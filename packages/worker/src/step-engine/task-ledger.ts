@@ -215,10 +215,11 @@ export async function augmentPromptWithLedger(
   db: Database,
   taskId: string,
   prompt: string,
+  excludedStepIds?: ReadonlySet<string>,
 ): Promise<string> {
   let entries: LedgerEntry[];
   try {
-    entries = await loadLedgerEntries(db, taskId);
+    entries = (await loadLedgerEntries(db, taskId)).filter((e) => !excludedStepIds?.has(e.stepId));
   } catch (err) {
     log.warn({ err, taskId }, 'failed to load the task ledger for prompt context');
     return prompt;

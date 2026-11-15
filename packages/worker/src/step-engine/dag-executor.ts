@@ -1,3 +1,12 @@
+import {
+  DAG_NO_CHANGE_MARKER,
+  DAG_BLOCKED_BY_MARKER,
+  DAG_FINAL_FAILURE_MARKER,
+  issueNoChange,
+  issueBlocked,
+  issueFinalFailure,
+  stripDagHostMarkers,
+} from './dag-outcomes.js';
 import { beginFixTestCapture, finishFixTestCapture } from './steps/workflow/_fix-test-store.js';
 import { stageAllArgs } from '../repo/git-stage.js';
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
@@ -402,7 +411,7 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
       outcome: parsed.data.outcome,
       filesModified: parsed.data.files_modified,
       debtItems: parsed.data.debt_items,
-      concerns: parsed.data.concerns,
+      concerns: stripDagHostMarkers(parsed.data.concerns),
       similarSites: sanitizeSimilarSites(parsed.data.similar_sites),
       parsed: true,
     };
@@ -921,7 +930,7 @@ async function runLevelMerge(
 ): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
   const { db, integration, level, issues, gitEnv } = m;
   const mergeable = issues.filter((i) => {
-    if (i.branchName === null) return false;
+    if (i.branchName === null || issueNoChange(i)) return false;
     return m.reviewEnabled
       ? i.resolution === 'approved' || i.resolution === 'completed_with_debt'
       : i.outcome === 'completed' || i.outcome === 'completed_with_debt';
@@ -1321,8 +1330,8 @@ function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
 
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
  *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
- *  null when no provider would take it — every caller's truthiness check reads the same
- *  either way, and the one caller that must ROUTE the run's result back to the issue
+ *  null when no provider would take it under fail-step; record-and-continue throws a
+ *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
  *  (ingestAdvisor's fix coder) needs the id.
  *
  *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
@@ -1341,6 +1350,22 @@ async function spawnReviewAgent(
   afterTruncation = false,
   timeoutMs?: number,
 ): Promise<string | null> {
+  if (role === 'issue_advisor' && issueExcludedFromAdvice(issue)) {
+    throw new Error('Refused or blocked DAG issue cannot be advised');
+  }
+  const excludedLedgerSteps =
+    role === 'issue_advisor'
+      ? new Set(
+          (
+            await ra.db
+              .select()
+              .from(schema.taskDagIssues)
+              .where(eq(schema.taskDagIssues.taskId, ra.taskId))
+          )
+            .filter(issueExcludedFromAdvice)
+            .map((i) => `06c-dag-execute/${i.issueKey}`),
+        )
+      : undefined;
   const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ra.db,
@@ -1357,7 +1382,12 @@ async function spawnReviewAgent(
   const meta = await loadTaskMeta(ra.db, ra.taskId);
   const taskBoundary = `=== Original user request (scope constraints) ===\n${briefFromTaskMeta(meta.title, meta.description)}\n\n`;
   const augmentedPrompt = await augmentPromptWithTerseness(
-    await augmentPromptWithLedger(ra.db, ra.taskId, ra.attachmentsNotice + taskBoundary + prompt),
+    await augmentPromptWithLedger(
+      ra.db,
+      ra.taskId,
+      ra.attachmentsNotice + taskBoundary + prompt,
+      excludedLedgerSteps,
+    ),
   );
   const fullPrompt = afterTruncation
     ? `${augmentedPrompt}\n\n${TRUNCATION_RETRY_NOTICE}`
@@ -1373,7 +1403,12 @@ async function spawnReviewAgent(
       effortLevel: preferredEffort ?? undefined,
     },
   });
-  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+    if (recordsFailures(ra.stepDef)) {
+      throw new Error(`no cli provider available for required DAG ${role}: ${plan.reason}`);
+    }
+    return null;
+  }
   const { id: invId } = await insertOwnedRun(ra.db, ra.current.id, {
     taskId: ra.taskId,
     taskStepId: ra.current.id,
@@ -1873,7 +1908,26 @@ interface EscalationArgs extends ReviewArgs {
   plan: DagPlanRow;
 }
 
+function assertEscalationEnvironment(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  stepDef: StepDefinition,
+) {
+  // Retry supersedes the invocation but keeps the plan's pointer until re-entry frees it.
+  if (!recordsFailures(stepDef) || runNeverAnswered(inv)) return;
+  const fault = dagEnvironmentHaltReason({ errorMessage: inv.errorMessage });
+  if (fault || isProviderOutage(inv.errorMessage)) {
+    throw new Error(`DAG required agent failed: ${fault ?? inv.errorMessage}`);
+  }
+  if (classifyDagIssueFailure(inv) === 'transient') {
+    throw new Error(
+      `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'}); Retry to recover`,
+    );
+  }
+}
+
 export function advisorPrompt(issue: DagIssueRow, spec: string): string {
+  if (issueExcludedFromAdvice(issue))
+    throw new Error('Refused or blocked DAG issue cannot be advised');
   return [
     // The key is named OUTSIDE the fence, so it is reduced rather than escaped; the title
     // and the verdict are agent prose and go inside it. The verdict is the reviewer's own
@@ -1959,7 +2013,13 @@ export function replannerPrompt(
   failed: DagIssueRow[],
   all: DagIssueRow[],
 ): string {
-  const dependsOn = (i: DagIssueRow): string[] => (i.dependsOn ?? []) as string[];
+  const withheld = new Set(
+    [...all, ...failed].filter(issueExcludedFromAdvice).map((i) => i.issueKey),
+  );
+  failed = failed.filter((i) => !withheld.has(i.issueKey));
+  all = all.filter((i) => !withheld.has(i.issueKey));
+  const dependsOn = (i: DagIssueRow): string[] =>
+    ((i.dependsOn ?? []) as string[]).filter((key) => !withheld.has(key));
   // Sanitised BEFORE the cap, so a slice can never leave a half-written fence behind.
   const reason = (i: DagIssueRow): string =>
     fenceSafe((i.errorMessage ?? i.concerns ?? '').trim().replace(/\s+/g, ' ')).slice(
@@ -2006,9 +2066,9 @@ export function replannerPrompt(
   // control characters, so it cannot break the line, but it still places arbitrary
   // planner text in the controlling region. Reduced through the same safeKey.
   const safeLevels = (Array.isArray(plan.levels) ? (plan.levels as unknown[]) : []).map((lvl) =>
-    (Array.isArray(lvl) ? (lvl as unknown[]) : []).map((k) =>
-      safeKey(typeof k === 'string' ? k : String(k)),
-    ),
+    (Array.isArray(lvl) ? (lvl as unknown[]) : [])
+      .filter((k) => !withheld.has(String(k)))
+      .map((k) => safeKey(typeof k === 'string' ? k : String(k))),
   );
 
   return [
@@ -2037,7 +2097,10 @@ export function replannerPrompt(
     .join('\n');
 }
 
-export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
+export function parseAdvisor(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  requireDecision = false,
+): AdvisorOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -2045,17 +2108,22 @@ export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): Ad
     c = b ? safeJsonParse(b) : null;
   }
   const p = advisorOutputSchema.safeParse(c);
-  return p.success
-    ? p.data
-    : {
-        action: 'ESCALATE_TO_REPLAN',
-        reasoning: 'advisor returned no valid structured decision',
-        drop_criteria: [],
-        sub_issues: [],
-      };
+  if (p.success) return p.data;
+  if (requireDecision) {
+    throw new Error('DAG required advisor returned no valid structured decision; Retry to recover');
+  }
+  return {
+    action: 'ESCALATE_TO_REPLAN',
+    reasoning: 'advisor returned no valid structured decision',
+    drop_criteria: [],
+    sub_issues: [],
+  };
 }
 
-export function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): ReplannerOutput {
+export function parseReplanner(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  requireDecision = false,
+): ReplannerOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -2063,14 +2131,18 @@ export function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): 
     c = b ? safeJsonParse(b) : null;
   }
   const p = replannerOutputSchema.safeParse(c);
-  return p.success
-    ? p.data
-    : {
-        action: 'ABORT',
-        reasoning: 'replanner returned no valid structured decision',
-        skip_downstream: [],
-        new_levels: [],
-      };
+  if (p.success) return p.data;
+  if (requireDecision) {
+    throw new Error(
+      'DAG required replanner returned no valid structured decision; Retry to recover',
+    );
+  }
+  return {
+    action: 'ABORT',
+    reasoning: 'replanner returned no valid structured decision',
+    skip_downstream: [],
+    new_levels: [],
+  };
 }
 
 async function escalateIssueToReplan(
@@ -2096,7 +2168,7 @@ async function pushDebt(db: Database, issue: DagIssueRow, items: unknown[]): Pro
     .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
-async function skipIssue(db: Database, issue: DagIssueRow): Promise<void> {
+async function skipIssue(db: ClaimDb, issue: DagIssueRow): Promise<void> {
   await db
     .update(schema.taskDagIssues)
     .set({
@@ -2134,21 +2206,25 @@ export async function ingestAdvisor(
   run: typeof schema.dagAgentRuns.$inferSelect,
   inv: typeof schema.cliInvocations.$inferSelect,
 ): Promise<'retry' | 'split' | 'accept' | 'escalate'> {
-  await ea.db
-    .update(schema.dagAgentRuns)
-    .set({
-      status: 'done',
-      consumedAt: new Date(),
-      endedAt: new Date(),
-      rawOutput: inv.rawOutput ?? null,
-    })
-    .where(eq(schema.dagAgentRuns.id, run.id));
+  assertEscalationEnvironment(inv, ea.stepDef);
+  const consumeRun = async () => {
+    await ea.db
+      .update(schema.dagAgentRuns)
+      .set({
+        status: 'done',
+        consumedAt: new Date(),
+        endedAt: new Date(),
+        rawOutput: inv.rawOutput ?? null,
+      })
+      .where(eq(schema.dagAgentRuns.id, run.id));
+  };
   // An advisor that never answered, or was cut at the output limit (once), must not be charged an
   // attempt or read as ESCALATE_TO_REPLAN.
   const truncatedOnce =
     classifyDagIssueFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) ===
       'truncated' && truncationRetryable(inv);
   if (runNeverAnswered(inv) || truncatedOnce) {
+    await consumeRun();
     const ok = await spawnReviewAgent(
       ea,
       issue,
@@ -2165,7 +2241,15 @@ export async function ingestAdvisor(
     }
     return 'retry';
   }
-  const out = parseAdvisor(inv);
+  // Opt-in records the refusal without relaying the refused assignment to another agent.
+  // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
+  if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
+    await consumeRun();
+    await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
+    return 'escalate';
+  }
+  const out = parseAdvisor(inv, recordsFailures(ea.stepDef));
+  await consumeRun();
   await ea.db
     .update(schema.taskDagIssues)
     .set({
@@ -2374,7 +2458,12 @@ async function spawnReplanner(
     houseRules: houseRulesOptOut('the replanner reorders the remaining issues and writes no code'),
     invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
-  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+    if (recordsFailures(ea.stepDef)) {
+      throw new Error(`no cli provider available for required DAG replanner: ${plan.reason}`);
+    }
+    return false;
+  }
   // The replanner is a per-step SINGLETON, so the one-live-per-step index rejects a second
   // concurrent dispatch (two advance jobs racing into the escalation phase). That rejection
   // is not an error: the winner already inserted its invocation AND stamped
@@ -2418,7 +2507,23 @@ async function ingestReplanner(
   inv: typeof schema.cliInvocations.$inferSelect,
   failed: DagIssueRow[],
 ): Promise<'continue' | 'abort'> {
-  const out = parseReplanner(inv);
+  assertEscalationEnvironment(inv, ea.stepDef);
+  if (recordsFailures(ea.stepDef)) {
+    return ea.db.transaction(async (tx) => {
+      const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
+      await assertOwnsStep(tx, ea.current.id);
+      return action;
+    });
+  }
+  return applyReplannerDecision(ea, inv, failed);
+}
+
+async function applyReplannerDecision(
+  ea: Omit<EscalationArgs, 'db'> & { db: ClaimDb },
+  inv: typeof schema.cliInvocations.$inferSelect,
+  failed: DagIssueRow[],
+): Promise<'continue' | 'abort'> {
+  const out = parseReplanner(inv, recordsFailures(ea.stepDef));
   await ea.db
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
@@ -2432,7 +2537,12 @@ async function ingestReplanner(
       updatedAt: new Date(),
     })
     .where(eq(schema.taskDagPlans.id, ea.plan.id));
-  if (out.action === 'ABORT') return 'abort';
+  if (out.action === 'ABORT') {
+    if (recordsFailures(ea.stepDef)) {
+      await recordFinalFailures(ea.db, ea.current, ea.issues.filter(needsEscalation));
+    }
+    return 'abort';
+  }
   // CONTINUE / REDUCE_SCOPE / MODIFY_DAG → skip the failed issues and proceed.
   // (MODIFY_DAG's full level-restructure is intentionally conservative here: the
   // failed work is skipped rather than re-sequenced, which is always safe.)
@@ -2452,6 +2562,109 @@ async function reReadLevelIssues(ea: EscalationArgs): Promise<DagIssueRow[]> {
     )) as DagIssueRow[];
 }
 
+const recordsFailures = (step: StepDefinition) =>
+  step.dagExecute?.failurePolicy === 'record-and-continue';
+const issueExcludedFromAdvice = (i: DagIssueRow) => issueRefused(i) || issueBlocked(i);
+const needsEscalation = (i: DagIssueRow) =>
+  i.resolution === 'failed_unrecoverable' && !issueBlocked(i) && !issueFinalFailure(i);
+
+/** Write terminal outcomes before any merge/checkpoint; replay never re-advises them.
+ *  Issue rows precede the owned step lock, matching Retry's DAG reset order. */
+async function recordFinalFailures(db: ClaimDb, current: TaskStepRow, issues: DagIssueRow[]) {
+  await db.transaction(async (tx) => {
+    for (const issue of issues) {
+      if (issueBlocked(issue) || issueFinalFailure(issue)) continue;
+      await tx
+        .update(schema.taskDagIssues)
+        .set({
+          resolution: 'failed_unrecoverable',
+          concerns: `${DAG_FINAL_FAILURE_MARKER}\n${stripDagHostMarkers(issue.concerns ?? '')}`,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+    }
+    await assertOwnsStep(tx, current.id);
+  });
+}
+
+/** At the next level, an unmerged failed/empty prerequisite cannot be assumed delivered. */
+async function blockUnavailableDependencies(
+  db: Database,
+  current: TaskStepRow,
+  planId: string,
+  level: number,
+) {
+  const all = await db
+    .select()
+    .from(schema.taskDagIssues)
+    .where(eq(schema.taskDagIssues.dagPlanId, planId));
+  const unavailable = new Set(
+    all
+      .filter(
+        (i) =>
+          i.mergeStatus !== 'clean' &&
+          i.mergeStatus !== 'resolved' &&
+          (issueFinalFailure(i) ||
+            issueRefused(i) ||
+            issueBlocked(i) ||
+            i.resolution === 'skipped' ||
+            issueNoChange(i)),
+      )
+      .map((i) => i.issueKey),
+  );
+  const blocked: { issue: DagIssueRow; by: string[] }[] = [];
+  const splitParents = new Map(
+    all.filter((i) => i.resolution === 'split').map((i) => [i.id, i.issueKey]),
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const issue of all) {
+      // Dependents name the original issue key, while split children point to its row id.
+      // Propagate through split ancestors as well as ordinary dependency edges.
+      const parentKey = issue.parentIssueId ? splitParents.get(issue.parentIssueId) : undefined;
+      if (parentKey && unavailable.has(issue.issueKey) && !unavailable.has(parentKey)) {
+        unavailable.add(parentKey);
+        changed = true;
+      }
+      if (
+        issue.outcome !== 'pending' ||
+        issue.cliInvocationId !== null ||
+        unavailable.has(issue.issueKey)
+      )
+        continue;
+      const by = ((issue.dependsOn ?? []) as string[]).filter((key) => unavailable.has(key));
+      if (by.length === 0) continue;
+      unavailable.add(issue.issueKey);
+      if (issue.level === level) blocked.push({ issue, by });
+      changed = true;
+    }
+  }
+  if (blocked.length === 0) return;
+  await db.transaction(async (tx) => {
+    for (const { issue, by } of blocked) {
+      await tx
+        .update(schema.taskDagIssues)
+        .set({
+          outcome: 'failed_unrecoverable',
+          resolution: 'failed_unrecoverable',
+          concerns: `${DAG_BLOCKED_BY_MARKER}${JSON.stringify(by)}`,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.taskDagIssues.id, issue.id),
+            eq(schema.taskDagIssues.outcome, 'pending'),
+            isNull(schema.taskDagIssues.cliInvocationId),
+          ),
+        );
+    }
+    await assertOwnsStep(tx, current.id);
+  });
+}
+
 /** Handle a level's failed issues: issue-advisor (middle loop) then replanner
  *  (outer loop). Returns 'ok' (no failures left → merge), 'waiting' (an agent is
  *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. Exported for
@@ -2468,6 +2681,7 @@ export async function resolveEscalationPhase(
       return { status: 'waiting', row: ea.current };
     }
     if (inv.supersededAt != null) await assertOwnsStep(ea.db, ea.current.id);
+    assertEscalationEnvironment(inv, ea.stepDef);
     // A replanner that never answered, or was cut at the output limit (once), is not an attempt:
     // free the slot instead of parseReplanner's ABORT-on-no-output default.
     const truncatedOnce =
@@ -2488,14 +2702,17 @@ export async function resolveEscalationPhase(
         .set({ consumedAt: new Date() })
         .where(eq(schema.cliInvocations.id, inv.id));
       if (truncatedOnce) {
-        const failed = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+        const failed = ea.issues.filter(needsEscalation);
         if (await spawnReplanner(ea, failed, true)) return { status: 'waiting', row: ea.current };
       }
       return { status: 'reloop', row: ea.current };
     }
-    const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+    const failedNow = ea.issues.filter(needsEscalation).filter((i) => !issueExcludedFromAdvice(i));
     const action = await ingestReplanner(ea, inv, failedNow);
     if (action === 'abort') {
+      if (recordsFailures(ea.stepDef)) {
+        return { status: 'ok', row: ea.current };
+      }
       const msg = `DAG aborted by replanner at level ${ea.level.level}: ${failedNow
         .map((f) => f.issueKey)
         .join(', ')}`;
@@ -2509,7 +2726,7 @@ export async function resolveEscalationPhase(
     return { status: 'reloop', row: ea.current };
   }
 
-  const failed = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+  const failed = ea.issues.filter(needsEscalation);
   if (failed.length === 0) return { status: 'ok', row: ea.current };
 
   // Middle loop: issue-advisor per failed (not-yet-escalated) issue.
@@ -2569,7 +2786,10 @@ export async function resolveEscalationPhase(
   if (reloop) return { status: 'reloop', row: ea.current };
 
   const refused = failed.filter(issueRefused);
-  if (refused.length > 0) {
+  if (refused.length > 0 && recordsFailures(ea.stepDef)) {
+    await recordFinalFailures(ea.db, ea.current, refused);
+  }
+  if (refused.length > 0 && !recordsFailures(ea.stepDef)) {
     const msg =
       `DAG escalation aborted at level ${ea.level.level}: the provider refused ` +
       `${refused.map((i) => i.issueKey).join(', ')}; its content is not re-sent to an advisor or replanner`;
@@ -2583,12 +2803,17 @@ export async function resolveEscalationPhase(
 
   // Outer loop: replanner when failures are broad / escalated.
   const fresh = await reReadLevelIssues(ea);
-  const stillFailed = fresh.filter((i) => i.resolution === 'failed_unrecoverable');
-  if (stillFailed.length === 0) return { status: 'reloop', row: ea.current };
+  const stillFailed = fresh.filter(needsEscalation).filter((i) => !issueExcludedFromAdvice(i));
+  if (stillFailed.length === 0)
+    return { status: recordsFailures(ea.stepDef) ? 'ok' : 'reloop', row: ea.current };
   const escalated = stillFailed.some((i) => i.lastAdvisorAction === 'ESCALATE_TO_REPLAN');
   const ratioTrigger = stillFailed.length / Math.max(1, fresh.length) >= REPLAN_FAIL_RATIO;
   const trigger = escalated || stillFailed.length >= 2 || ratioTrigger;
   if (!trigger || ea.plan.replannerInvocations >= MAX_REPLANNER_INVOCATIONS) {
+    if (recordsFailures(ea.stepDef)) {
+      await recordFinalFailures(ea.db, ea.current, stillFailed);
+      return { status: 'ok', row: ea.current };
+    }
     const reason = !trigger
       ? 'failed issue could not be resolved safely'
       : `replanner retry budget exhausted after ${MAX_REPLANNER_INVOCATIONS} attempts`;
@@ -2661,8 +2886,8 @@ export async function resolveDagPhase(
   // links to THIS step row, so one check at re-entry covers them all. Without it a
   // depleted-provider failure is swallowed by escalation (advisor → replanner →
   // accept-with-debt) and every retry re-hits the dead provider, burning calls and
-  // silently degrading an OUTAGE into accepted technical debt. We scan all ended
-  // (not superseded) invocations rather than only the most recent because a
+  // silently degrading an OUTAGE into accepted technical debt. Both policies scan the
+  // fifty newest ended errors (not superseded), rather than only the most recent, because a
   // successful sibling coder can finish AFTER the one that hit the wall. The user
   // retries the task (Retry resumes this step) once the provider is back.
   const endedInvocations = await db
@@ -2745,6 +2970,20 @@ export async function resolveDagPhase(
         ),
       )) as DagIssueRow[];
 
+    if (recordsFailures(stepDef)) {
+      await assertOwnsStep(db, current.id);
+      await blockUnavailableDependencies(db, current, plan.id, curLevel.level);
+      issues = await db
+        .select()
+        .from(schema.taskDagIssues)
+        .where(
+          and(
+            eq(schema.taskDagIssues.dagPlanId, plan.id),
+            eq(schema.taskDagIssues.level, curLevel.level),
+          ),
+        );
+    }
+
     if (issues.length === 0) {
       await db
         .update(schema.taskDagLevels)
@@ -2754,10 +2993,10 @@ export async function resolveDagPhase(
     }
 
     // (A) Worktrees not created for this level yet.
-    if (issues.some((i) => i.worktreePath === null)) {
+    if (issues.some((i) => i.worktreePath === null && !issueBlocked(i))) {
       await ctx.emitProgress(`Creating ${issues.length} worktree(s) for level ${curLevel.level}…`);
       for (const issue of issues) {
-        if (issue.worktreePath) continue;
+        if (issue.worktreePath || issueBlocked(issue)) continue;
         const p = issuePaths(ctx, integration, issue.issueKey);
         await createIssueWorktree(ctx, integration, p.worktreePath, p.branchName);
         await db
@@ -3144,7 +3383,10 @@ export async function resolveDagPhase(
         },
       };
     }
-    if (coderFailed.length > 0 && !plan.reviewEnabled) {
+    if (coderFailed.length > 0 && !plan.reviewEnabled && recordsFailures(stepDef)) {
+      await recordFinalFailures(db, current, coderFailed);
+    }
+    if (coderFailed.length > 0 && !plan.reviewEnabled && !recordsFailures(stepDef)) {
       const msg = levelFailureMessage(curLevel.level, coderFailed);
       const updated = await setStepStatus(db, current.id, {
         status: 'failed',
@@ -3256,7 +3498,7 @@ export async function resolveDagPhase(
         : issue.outcome === 'completed' || issue.outcome === 'completed_with_debt',
     );
     for (const issue of acceptedForMerge) {
-      if (!issue.worktreePath || issue.mergeStatus !== null) continue;
+      if (!issue.worktreePath || issue.mergeStatus !== null || issueNoChange(issue)) continue;
       await commitIssueWork({ ...ctx, db }, issue.worktreePath, issue, gitEnv);
       if (!(await issueBranchHasChanges(ctx, issue))) {
         const error =
@@ -3266,6 +3508,18 @@ export async function resolveDagPhase(
           .update(schema.taskDagIssues)
           .set({ errorMessage: error, updatedAt: new Date() })
           .where(eq(schema.taskDagIssues.id, issue.id));
+        if (recordsFailures(stepDef)) {
+          const concerns = `${DAG_NO_CHANGE_MARKER}\n${stripDagHostMarkers(issue.concerns ?? '')}`;
+          await db.transaction(async (tx) => {
+            await tx
+              .update(schema.taskDagIssues)
+              .set({ concerns, updatedAt: new Date() })
+              .where(eq(schema.taskDagIssues.id, issue.id));
+            await assertOwnsStep(tx, current.id);
+          });
+          issue.concerns = concerns;
+          continue;
+        }
         const row = await setStepStatus(db, current.id, {
           status: 'failed',
           errorMessage: error,
