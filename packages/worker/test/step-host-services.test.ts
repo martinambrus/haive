@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { openDirNoFollow } from '@haive/shared/fs-safe';
@@ -210,3 +211,133 @@ it.each(['EMFILE', 'ENFILE'])(
     ).rejects.toBe(error);
   },
 );
+
+// The insight adapter is exercised through its real loader and a faked SQL seam.
+const dialect = new PgDialect();
+function insightContext() {
+  const reads: unknown[][] = [];
+  let answer: unknown[] = [];
+  const chain = {
+    from() {
+      return chain;
+    },
+    innerJoin() {
+      return chain;
+    },
+    where(sql: Parameters<PgDialect['sqlToQuery']>[0]) {
+      reads.push(dialect.sqlToQuery(sql).params);
+      return chain;
+    },
+    orderBy() {
+      return chain;
+    },
+    then(resolve: (value: unknown[]) => unknown) {
+      return Promise.resolve(answer).then(resolve);
+    },
+  };
+  const select = vi.fn(() => chain);
+  const db = { ...ctx.db, select } as unknown as Database;
+  return {
+    context: { ...ctx, db },
+    reads,
+    select,
+    setAnswer(value: unknown[]) {
+      answer = value;
+    },
+    chain,
+  };
+}
+
+it('loads insight inventory without a worktree, forwarding options to the bound task only', async () => {
+  const f = insightContext();
+  // First read contains source output; later rows lack a selected array.
+  f.setAnswer([
+    { stepId: 'review', raw: '## INSIGHTS\n- INSIGHT: One | a.ts\n- INSIGHT: Two | b.ts' },
+  ]);
+  const result = await createStepHostServices(f.context).loadUnactedInsights({
+    limit: 1,
+    includePicked: true,
+  });
+  expect(result.insights).toHaveLength(1);
+  expect(result.omitted).toBe(1);
+  expect(result.insights[0]).toMatchObject({ title: 'One', picked: false });
+  expect(f.reads.every((params) => params.includes('task'))).toBe(true);
+  expect(openDirNoFollow).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['foreign task', () => task.mockResolvedValue(undefined)],
+  ['foreign user', () => task.mockResolvedValue({ id: 'task', userId: 'other', currentRound: 2 })],
+  ['foreign step', () => step.mockResolvedValue({ taskId: 'other', round: 2 })],
+  ['missing step', () => step.mockResolvedValue(undefined)],
+  ['foreign round', () => step.mockResolvedValue({ taskId: 'task', round: 3 })],
+  ['future round', () => task.mockResolvedValue({ id: 'task', userId: 'user', currentRound: 1 })],
+] as const)('refuses insight reads with %s binding', async (_label, setup) => {
+  const f = insightContext();
+  setup();
+  await expect(createStepHostServices(f.context).loadUnactedInsights()).rejects.toMatchObject({
+    name: 'StepHostBindingError',
+  });
+  expect(f.select).not.toHaveBeenCalled();
+});
+
+it('cannot retarget insight reads by mutating context or smuggling identity/path options', async () => {
+  const f = insightContext();
+  const host = createStepHostServices(f.context);
+  Object.assign(f.context, {
+    taskId: 'foreign',
+    taskStepId: 'foreign-step',
+    userId: 'foreign-user',
+    round: 99,
+    repoPath: '/foreign',
+  });
+  await host.loadUnactedInsights({
+    taskId: 'foreign',
+    userId: 'foreign-user',
+    worktreePath: '/foreign',
+  } as never);
+  expect(f.reads.every((params) => params.includes('task') && !params.includes('foreign'))).toBe(
+    true,
+  );
+  expect(dialect.sqlToQuery(task.mock.calls[0]![0].where).params).toEqual(['task']);
+  expect(dialect.sqlToQuery(step.mock.calls[0]![0].where).params).toEqual(['step']);
+  task.mockResolvedValue({ id: 'task', userId: 'foreign-user', currentRound: 99 });
+  await expect(host.loadUnactedInsights()).rejects.toMatchObject({ name: 'StepHostBindingError' });
+});
+
+it('refuses insight loading cancelled before identity or after source reads', async () => {
+  const f = insightContext();
+  const host = createStepHostServices(f.context);
+  controller.abort();
+  await expect(host.loadUnactedInsights()).rejects.toBeInstanceOf(TaskCancelledError);
+  expect(task).not.toHaveBeenCalled();
+  expect(f.select).not.toHaveBeenCalled();
+});
+
+it('normalizes insight cancellation during a pending source read and after its result', async () => {
+  const f = insightContext();
+  let finish!: (value: unknown[]) => void;
+  f.chain.then = (resolve) =>
+    new Promise<unknown[]>((r) => {
+      finish = r;
+    }).then(resolve);
+  const pending = createStepHostServices(f.context).loadUnactedInsights();
+  const rejected = expect(pending).rejects.toBeInstanceOf(TaskCancelledError);
+  // Let the identity lookups settle and the source read start.
+  while (!finish) await Promise.resolve();
+  controller.abort();
+  await rejected;
+  finish([]);
+});
+
+it('checks cancellation after identity reads before touching insight sources', async () => {
+  const f = insightContext();
+  step.mockImplementationOnce(async () => {
+    controller.abort();
+    return { taskId: 'task', round: 2 };
+  });
+  await expect(createStepHostServices(f.context).loadUnactedInsights()).rejects.toBeInstanceOf(
+    TaskCancelledError,
+  );
+  expect(f.select).not.toHaveBeenCalled();
+});

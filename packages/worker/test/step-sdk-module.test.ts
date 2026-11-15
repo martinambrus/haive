@@ -99,8 +99,9 @@ describe('compiled module step SDK consumer', () => {
     }
   });
 
-  it('calls all three host services through the compiled public-only fixture', async () => {
+  it('calls all four host services through the compiled public-only fixture', async () => {
     const host = {
+      loadUnactedInsights: vi.fn(async () => ({ insights: [], omitted: 0 })),
       loadPreviousStepOutput: vi.fn(async () => ({
         detect: null,
         output: { worktreePath: '/fixture/tree' },
@@ -130,7 +131,9 @@ describe('compiled module step SDK consumer', () => {
       async emitProgress() {},
       host,
     };
-    await reviewWithHost(ctx);
+    const result = await reviewWithHost(ctx);
+    expect(result.inventory).toEqual({ insights: [], omitted: 0 });
+    expect(host.loadUnactedInsights).toHaveBeenCalledWith({ includePicked: true });
     expect(host.loadPreviousStepOutput).toHaveBeenCalledWith('01-worktree-setup');
     expect(host.collectImplementationFiles).toHaveBeenCalledWith('/fixture/tree');
     expect(host.readReviewDiff).toHaveBeenCalledWith({

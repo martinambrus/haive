@@ -92,7 +92,14 @@ export async function reviewWithHost(ctx: import('@haive/shared/step').StepConte
     maxBytes: 4096,
     includeFileContents: true,
   });
-  return { scope, review };
+  const options: import('@haive/shared/step').InsightLoadOptions = { includePicked: true };
+  const inventory: import('@haive/shared/step').InsightLoadResult =
+    await host.loadUnactedInsights(options);
+  const records: import('@haive/shared/step').LoadedInsight[] = inventory.insights;
+  const refs: import('@haive/shared/step').InsightSourceRef[] = records.flatMap(
+    (i) => i.sourceRefs ?? [],
+  );
+  return { scope, review, inventory, refs };
 }
 
 // A real compiled consumer of the host contract and its inferred SDK output type.
