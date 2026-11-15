@@ -15,6 +15,7 @@ export interface StepPortViewProps {
   request: { path: string; body?: unknown; revision?: string };
   executionPath?: string | null;
   disabled?: boolean;
+  onCanvasChange?: (canvas: boolean) => void;
   onReorder?: (from: number, to: number) => void;
 }
 
@@ -25,6 +26,7 @@ export function StepPortView({
   executionPath,
   disabled = false,
   onReorder,
+  onCanvasChange,
 }: StepPortViewProps) {
   const [canvas, setCanvas] = useState(false);
   const [result, setResult] = useState<{ key: string; data: StepPortProjection } | null>(null);
@@ -62,7 +64,10 @@ export function StepPortView({
           variant={canvas ? 'secondary' : 'primary'}
           disabled={disabled}
           aria-pressed={!canvas}
-          onClick={() => setCanvas(false)}
+          onClick={() => {
+            setCanvas(false);
+            onCanvasChange?.(false);
+          }}
         >
           List
         </Button>
@@ -71,7 +76,10 @@ export function StepPortView({
           variant={canvas ? 'primary' : 'secondary'}
           disabled={disabled}
           aria-pressed={canvas}
-          onClick={() => setCanvas(true)}
+          onClick={() => {
+            setCanvas(true);
+            onCanvasChange?.(true);
+          }}
         >
           Canvas
         </Button>

@@ -208,6 +208,7 @@ export function TaskTypeComposer({
   const [query, setQuery] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
+  const [canvasOpen, setCanvasOpen] = useState(false);
   const [focus, setFocus] = useState<{ index: number; kind: FocusKind } | null>(null);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dropMark, setDropMark] = useState<{ index: number; intent: 'before' | 'after' } | null>(
@@ -480,6 +481,7 @@ export function TaskTypeComposer({
               },
             }
           }
+          onCanvasChange={setCanvasOpen}
           executionPath={executionPath}
           disabled={disabled}
           onReorder={readOnly ? undefined : move}
@@ -751,7 +753,11 @@ export function TaskTypeComposer({
             )}
           </div>
         )}
-        <p role="status" aria-live="polite" className="mt-2 text-sm text-neutral-300">
+        <p
+          role="status"
+          aria-live="polite"
+          className={canvasOpen ? 'mt-2 text-sm text-neutral-300' : 'sr-only'}
+        >
           {announcement}
         </p>
       </section>

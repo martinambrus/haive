@@ -72,3 +72,19 @@ it('shows an explicit state when the selected path is absent instead of borrowin
   expect(textOf(view.tree())).toContain('No port graph is available for the selected path.');
   expect(textOf(view.tree())).not.toContain('wrong path');
 });
+
+it('reports canvas visibility so composer refusals are visible only in canvas mode', () => {
+  h.get.mockResolvedValue(graph('ports'));
+  const onCanvasChange = vi.fn();
+  const view = createRenderer(() => (
+    <StepPortView request={{ path: '/ports' }} onCanvasChange={onCanvasChange}>
+      <div>List</div>
+    </StepPortView>
+  ));
+  fire.click(buttons(view.tree(), /^canvas$/)[0]!);
+  view.draw();
+  expect(onCanvasChange).toHaveBeenLastCalledWith(true);
+  fire.click(buttons(view.tree(), /^list$/)[0]!);
+  view.draw();
+  expect(onCanvasChange).toHaveBeenLastCalledWith(false);
+});
