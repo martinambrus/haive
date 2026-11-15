@@ -61,6 +61,11 @@ export function StepPortView({
   const graph = candidates.find(
     (candidate) => candidate.executionPath === (executionPath ?? null),
   )?.graph;
+  // Keep the existing flow mounted during a refresh so an accepted reorder retains
+  // its viewport. Hide stale data until the matching response arrives.
+  const retainedGraph = result?.data.candidates.find(
+    (candidate) => candidate.executionPath === (executionPath ?? null),
+  )?.graph;
   if (!hasSteps) return <>{children}</>;
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -103,7 +108,14 @@ export function StepPortView({
               Path not selected. Candidate ports only; bindings are not pinned.
             </p>
           )}
-          {graph && <StepPortCanvas graph={graph} onReorder={disabled ? undefined : onReorder} />}
+          {retainedGraph && (
+            <div hidden={!graph}>
+              <StepPortCanvas
+                graph={graph ?? retainedGraph}
+                onReorder={disabled || !graph ? undefined : onReorder}
+              />
+            </div>
+          )}
         </>
       )}
       {(!canvas || keepListVisible) && children}

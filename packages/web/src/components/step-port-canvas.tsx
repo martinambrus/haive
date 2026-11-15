@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import {
   ReactFlow,
+  applyNodeChanges,
   MarkerType,
   Handle,
   Position,
@@ -93,8 +94,7 @@ export default function StepPortCanvas({
   onReorder?: (from: number, to: number) => void;
 }) {
   const [selected, setSelected] = useState<{ index: number; port: string } | null>(null);
-  const [dragRevision, setDragRevision] = useState(0);
-  const nodes: GraphNode[] = useMemo(
+  const layout: GraphNode[] = useMemo(
     () =>
       graph.nodes.map((node, index) => ({
         id: `${index}:${node.id}`,
@@ -104,6 +104,10 @@ export default function StepPortCanvas({
       })),
     [graph],
   );
+  const [transient, setTransient] = useState<{ graph: StepPortGraph; nodes: GraphNode[] } | null>(
+    null,
+  );
+  const nodes = transient?.graph === graph ? transient.nodes : layout;
   const edges = graph.edges.map((edge, index) => {
     const highlighted =
       selected &&
@@ -127,8 +131,13 @@ export default function StepPortCanvas({
       />
       <div className="h-[650px] rounded border border-neutral-700" aria-label="Step port canvas">
         <ReactFlow
-          key={dragRevision}
           nodes={nodes}
+          onNodesChange={(changes) =>
+            setTransient((current) => ({
+              graph,
+              nodes: applyNodeChanges(changes, current?.graph === graph ? current.nodes : layout),
+            }))
+          }
           edges={edges}
           nodeTypes={nodeTypes}
           colorMode="dark"
@@ -147,7 +156,10 @@ export default function StepPortCanvas({
             );
             if (from !== to) onReorder?.(from, to);
             // Discard transient positions even after a refused move. Order always comes from the draft.
-            setDragRevision((revision) => revision + 1);
+            setTransient({
+              graph,
+              nodes: layout.map((node) => ({ ...node, position: { ...node.position } })),
+            });
           }}
         >
           <Controls showInteractive={false} />
