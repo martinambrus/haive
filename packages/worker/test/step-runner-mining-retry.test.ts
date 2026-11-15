@@ -1,3 +1,4 @@
+import { resolveTaskCommittedSnapshots } from '../src/repo/committed-snapshot.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableColumns, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -32,6 +33,11 @@ import {
   OUTPUT_TRUNCATION_HEADLINE,
   PROVIDER_FATAL_HEADLINES,
 } from '../src/queues/cli-exec/failure-class.js';
+
+vi.mock('../src/repo/committed-snapshot.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveTaskCommittedSnapshots: vi.fn(async () => null),
+}));
 
 // The barrier's tab sweep runs `docker exec` into the task's runner, four calls per fan-out that
 // ends; nothing in this file may reach docker, so the two helpers that spawn it are stubbed.
@@ -3634,7 +3640,7 @@ describe('a fan-out dispatch when the config store is unreadable', () => {
   });
 });
 
-describe('committed snapshot mining replay (P5a)', () => {
+describe('committed snapshot mining replay', () => {
   const miningLinks = (saved: MockState) =>
     (saved.miningUpdateLog ?? []).filter((u) => u.set.status === 'pending');
   const snapshotRef = {
@@ -3701,6 +3707,40 @@ describe('committed snapshot mining replay (P5a)', () => {
       expect(miningLinks(saved)[0]?.set).toMatchObject(refs);
     },
   );
+  it.each([false, true])(
+    'replays pinned refs after a crash between link and enqueue (queue accepted: %s)',
+    async (queuedBeforeCrash) => {
+      const saved = state({ cliInvocationId: 'lost-invocation' });
+      saved.invocationRows = [
+        {
+          id: 'lost-invocation',
+          prompt: 'recorded prompt',
+          errorMessage:
+            'CLI invocation orphaned by a worker restart (the worker exited before queueing it)',
+          endedAt: new Date(),
+          startedAt: null,
+          exitCode: queuedBeforeCrash ? -1 : null,
+        },
+      ];
+      const queued: CliExecJobPayload[] = [];
+      await run(makeMockDb(saved), step(false), queued);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject(refs);
+      expect(miningLinks(saved)[0]?.set).toMatchObject({ ...refs, attempts: 2 });
+    },
+  );
+  it('validates every snapshot before reserving any agent', async () => {
+    const saved = freshState([]);
+    saved.taskStepRow.status = 'pending';
+    vi.mocked(resolveTaskCommittedSnapshots).mockRejectedValueOnce(
+      new Error('SNAPSHOT_INVALID: inventory unavailable'),
+    );
+    const queued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(saved), step(true), queued);
+    expect(result.status).toBe('failed');
+    expect(saved.inserts.filter((i) => i.table === 'task_step_agent_minings')).toEqual([]);
+    expect(queued).toEqual([]);
+  });
   it('timeout reroll preserves the row pin and charges only the attempt', async () => {
     const message = 'CLI process exceeded its time budget (30m).';
     const saved = state({
@@ -3795,11 +3835,25 @@ describe('committed snapshot mining replay (P5a)', () => {
       expect(saved.miningRows[0]?.snapshotRef).toHaveProperty('hostPath', '/private/host');
     },
   );
-  it('NULL/NULL remains a live-checkout dispatch even when the new offer has a ref', async () => {
+  it('requires explicit Retry for a new generation when a pinned offer meets a NULL/NULL reservation', async () => {
     const saved = state({ snapshotRef: null, baseSnapshotRef: null });
     const queued: CliExecJobPayload[] = [];
-    await run(makeMockDb(saved), step(true), queued);
-    expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ snapshotRef: null, baseSnapshotRef: null });
+    const result = await run(makeMockDb(saved), step(true), queued);
+    expect(result.status).toBe('failed');
+    expect(queued).toHaveLength(0);
+    expect(saved.miningRows[0]).toMatchObject({ snapshotRef: null, baseSnapshotRef: null });
+    expect(String(saved.taskStepRow.errorMessage)).toContain('new analysis generation');
+  });
+  it('fails the step for an invalid snapshot instead of degrading a failed agent', async () => {
+    const saved = state({
+      status: 'failed',
+      errorMessage: 'SNAPSHOT_INVALID: Committed snapshot unavailable',
+      cliInvocationId: 'inv-snapshot-agent',
+    });
+    const queued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(saved), step(false), queued);
+    expect(result.status).toBe('failed');
+    expect(saved.taskStepRow.errorMessage).toContain('SNAPSHOT_INVALID:');
+    expect(queued).toEqual([]);
   });
 });

@@ -1,4 +1,9 @@
 import {
+  resolveTaskCommittedSnapshots,
+  isCommittedSnapshotFailure,
+  CommittedSnapshotError,
+} from '../repo/committed-snapshot.js';
+import {
   validateSuccessfulStepOutput,
   StepOutputContractInvalidError,
 } from './step-output-contract.js';
@@ -1724,7 +1729,9 @@ async function resolveAgentMiningPhase(
     // the one that hit the wall.
     // A content-filter refusal is that one agent's failure and degrades like any other.
     const fatalAgent = existing.find(
-      (r) => r.status === 'failed' && isProviderOutage(r.errorMessage),
+      (r) =>
+        r.status === 'failed' &&
+        (isProviderOutage(r.errorMessage) || isCommittedSnapshotFailure(r.errorMessage)),
     );
     if (fatalAgent?.errorMessage) {
       ctx.logger.warn(
@@ -2005,6 +2012,19 @@ function recordedRequirements(row: MiningRow | undefined): DispatchRequirements 
   return out;
 }
 
+/** Existing reservations always retain their pin. A newly pinned offer cannot upgrade a live-
+ * checkout generation in place: fail it and require explicit Retry, whose existing reset deletes
+ * reservations and bumps rerun_generation. Resume/recovery never declares new analysis. */
+function replaySnapshotGeneration(
+  fresh: RunnerMiningDispatch,
+  row: MiningRow | undefined,
+): RunnerMiningDispatch {
+  const recorded = parseCommittedSnapshotRefs(row ?? {});
+  const offered = parseCommittedSnapshotRefs(fresh);
+  if (!recorded.snapshotRef && offered.snapshotRef) throw new CommittedSnapshotError();
+  return { ...fresh, ...recorded };
+}
+
 const isStepCapability = (value: string): value is StepCapability =>
   (STEP_CAPABILITIES as readonly string[]).includes(value);
 
@@ -2180,6 +2200,9 @@ async function dispatchMiningAgents(
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<MiningDispatchOutcome> {
+  // Validate every pin before reserving any sibling, then repeat in dispatcher and exec.
+  for (const dispatch of dispatches)
+    await resolveTaskCommittedSnapshots(db, params.taskId, dispatch);
   const spec = stepDef.agentMining!;
   const targets = new Map(
     existing ??
@@ -2303,6 +2326,8 @@ async function dispatchMiningAgents(
             // attached) cannot live on the step's static list.
             capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
           },
+          snapshotRef: requirements.snapshotRef,
+          baseSnapshotRef: requirements.baseSnapshotRef,
           preferVision: dispatch.preferVision === true,
           // A mining agent that IS a persona (03's roster) is an assignment its prompt never
           // marks; the dispatch names it and the dispatcher unions it with the marker ids.
@@ -2654,7 +2679,7 @@ async function dispatchReservedAgents(
     const fresh = offered.get(row.agentId);
     if (fresh) {
       // A new offer may refresh the prompt/persona, never an existing reservation's pin.
-      dispatches.push({ ...fresh, ...parseCommittedSnapshotRefs(row) });
+      dispatches.push(replaySnapshotGeneration(fresh, row));
       targets.set(row.agentId, target);
       continue;
     }
@@ -4633,11 +4658,7 @@ async function retryMiningAgents(
     })
   )
     .filter((d) => targets.has(d.agentId))
-    .map((d) => ({
-      ...d,
-      // Rerolls (including human reruns) belong to the recorded generation.
-      ...parseCommittedSnapshotRefs(rowByAgentId.get(d.agentId) ?? {}),
-    }));
+    .map((d) => replaySnapshotGeneration(d, rowByAgentId.get(d.agentId)));
 
   // Agents `selectAgents` cannot re-offer, recovered from what their rows recorded.
   //
