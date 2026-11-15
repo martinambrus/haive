@@ -1656,15 +1656,28 @@ export async function ingestReviewRun(
     }
     return;
   }
-  const reviewPreparation =
+  const reviewerFailure =
     recordsFailures(ra.stepDef) && run.role === 'reviewer' && !verdict
+      ? classifyDagIssueFailure(inv)
+      : null;
+  // Preflight only a branch that will dispatch, before consuming the retained run or
+  // charging recovery. Missing/blocked required providers must remain hard faults.
+  const retryReviewer =
+    (reviewerFailure === 'truncated' && truncationRetryable(inv)) ||
+    (reviewerFailure === 'transient' &&
+      (runNeverAnswered(inv) || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES));
+  const reviewPrompt = retryReviewer
+    ? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue))
+    : undefined;
+  const reviewPreparation =
+    reviewPrompt !== undefined
       ? await prepareReviewAgent(
           ra,
           issue,
           'reviewer',
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt,
           ['tool_use'],
-          classifyDagIssueFailure(inv) === 'truncated' && truncationRetryable(inv),
+          reviewerFailure === 'truncated',
         )
       : undefined;
   await consume();
@@ -1687,7 +1700,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           true,
@@ -1716,7 +1729,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          reviewPrompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           false,
@@ -1882,16 +1895,14 @@ export async function resolveReviewPhase(
       // phase crash-resumable: re-spawn a fresh reviewer, bounded by the reviewer's OWN
       // transient budget; once it is spent, resolve failed_unrecoverable so the escalation
       // path (advisor) decides instead of the level wedging.
-      const preparation = recordsFailures(ra.stepDef)
-        ? await prepareReviewAgent(
-            ra,
-            issue,
-            'reviewer',
-            reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
-            ['tool_use'],
-          )
-        : undefined;
       if (issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
+        const prompt = recordsFailures(ra.stepDef)
+          ? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue))
+          : undefined;
+        const preparation =
+          prompt !== undefined
+            ? await prepareReviewAgent(ra, issue, 'reviewer', prompt, ['tool_use'])
+            : undefined;
         await ra.db
           .update(schema.taskDagIssues)
           .set({ reviewInfraRetries: issue.reviewInfraRetries + 1, updatedAt: new Date() })
@@ -1901,7 +1912,7 @@ export async function resolveReviewPhase(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          prompt ?? reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           false,

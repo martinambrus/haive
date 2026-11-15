@@ -22,6 +22,7 @@ import { StepSupersededError } from './step-ownership.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { gitRun } from '../repo/git-exec.js';
 import { recordLedgerEntry } from './task-ledger.js';
+import * as implementationChanges from './steps/workflow/_impl-changes.js';
 import {
   openMerge,
   abortOtherMerge,
@@ -1590,6 +1591,108 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
   errorMessage: 'permission denied',
   ...patch,
 });
+
+for (const policy of ['fail-step', 'record-and-continue'] as const) {
+  it.each(['no-verdict', 'stalled'])(
+    `DGL-5 ${policy} does not prepare a reviewer when no dispatch is due: %s`,
+    async (kind) => {
+      const h = auxiliaryHarness('reviewer');
+      h.stepDef.dagExecute.failurePolicy = policy;
+      vi.mocked(resolveTaskDispatch).mockResolvedValue({
+        mode: 'skip',
+        reason: 'disabled',
+      } as never);
+      const measure = vi
+        .spyOn(implementationChanges, 'collectChangeSet')
+        .mockResolvedValue(null as never);
+      try {
+        if (kind === 'stalled') {
+          h.rows[0]!.reviewInfraRetries = 2;
+          h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+          await resolveReviewPhase(h.args() as never);
+        } else {
+          await h.fold(
+            auxiliaryFault('no-verdict', {
+              exitCode: 0,
+              errorMessage: null,
+              rawOutput: 'not a verdict',
+            }),
+          );
+        }
+        expect(h.rows[0]!.resolution).toBe('failed_unrecoverable');
+        expect(h.rows[0]!.errorMessage).toContain(
+          kind === 'stalled' ? 'review stalled' : 'no valid reviewer verdict',
+        );
+        expect(resolveTaskDispatch).not.toHaveBeenCalled();
+        expect(measure).not.toHaveBeenCalled();
+        expect(h.enqueued).toEqual([]);
+      } finally {
+        measure.mockRestore();
+      }
+    },
+  );
+
+  it.each(['free', 'truncated', 'stalled'])(
+    `DGL-5 ${policy} measures and prepares a reviewer dispatch once: %s`,
+    async (kind) => {
+      const h = auxiliaryHarness('reviewer');
+      h.stepDef.dagExecute.failurePolicy = policy;
+      const measure = vi
+        .spyOn(implementationChanges, 'collectChangeSet')
+        .mockResolvedValue(null as never);
+      try {
+        if (kind === 'stalled') {
+          h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+          await resolveReviewPhase(h.args() as never);
+        } else {
+          await h.fold(
+            auxiliaryFault('retry', {
+              exitCode: 137,
+              errorMessage: kind === 'truncated' ? OUTPUT_TRUNCATION_HEADLINE : null,
+              supersededAt: kind === 'free' ? new Date() : null,
+            }),
+          );
+        }
+        expect(measure).toHaveBeenCalledTimes(1);
+        expect(resolveTaskDispatch).toHaveBeenCalledTimes(1);
+        expect(h.enqueued).toHaveLength(1);
+      } finally {
+        measure.mockRestore();
+      }
+    },
+  );
+}
+
+it.each(['free', 'truncated', 'stalled'])(
+  'DGL-5 a required reviewer provider remains a hard retryable fault: %s',
+  async (kind) => {
+    const h = auxiliaryHarness('reviewer');
+    vi.mocked(resolveTaskDispatch).mockResolvedValue({ mode: 'skip', reason: 'disabled' } as never);
+    let fold;
+    if (kind === 'stalled') {
+      h.runs.push({ id: 'stalled', dagIssueId: 'A', role: 'reviewer', consumedAt: new Date() });
+      fold = () => resolveReviewPhase(h.args() as never);
+    } else {
+      fold = () =>
+        h.fold(
+          auxiliaryFault('retry', {
+            exitCode: 137,
+            errorMessage: kind === 'truncated' ? OUTPUT_TRUNCATION_HEADLINE : null,
+            supersededAt: kind === 'free' ? new Date() : null,
+          }),
+        );
+    }
+    const consumedAt = h.runs[0]?.consumedAt;
+    await expect(fold()).rejects.toThrow(
+      /no cli provider available for required DAG reviewer: disabled/,
+    );
+    expect(h.runs[0]!.consumedAt).toEqual(kind === 'stalled' ? consumedAt : null);
+    expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+    expect(h.rows[0]!.resolution).toBeNull();
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    expect(h.enqueued).toEqual([]);
+  },
+);
 
 for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
   it(`DGL-4 ${role} rejects a truncated structured result followed by a kill`, async () => {
