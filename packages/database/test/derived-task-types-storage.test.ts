@@ -106,6 +106,46 @@ describe.skipIf(!url)('derived task type storage on PostgreSQL', () => {
       (slug, display_name, run_list_strategy, base_slug, changes, source)
     VALUES ('derived-example', 'Derived', 'derived', 'workflow', '[]', 'admin')`;
 
+  it.each([false, true])(
+    'insight switch migration replays, keeps existing values and appends last (ahead: %s)',
+    async (ahead) => {
+      const migration = readFileSync(
+        new URL('../migrations/0243_auto_act_on_insights.sql', import.meta.url),
+        'utf8',
+      );
+      const isolatedNamespace = `insight_switch_${randomBytes(6).toString('hex')}`;
+      await db.begin(async (tx) => {
+        await tx`CREATE SCHEMA ${tx(isolatedNamespace)}`;
+        await tx`SET LOCAL search_path TO ${tx(isolatedNamespace)}`;
+        await tx`CREATE TABLE tasks (id text PRIMARY KEY, note text)`;
+        await tx`INSERT INTO tasks VALUES ('legacy', 'keep')`;
+        if (ahead) {
+          await tx`ALTER TABLE tasks ADD COLUMN auto_act_on_insights boolean NOT NULL DEFAULT false`;
+          await tx`UPDATE tasks SET auto_act_on_insights = true`;
+        }
+        await tx.unsafe(migration);
+        const first = [...(await tx`SELECT * FROM tasks`)];
+        await tx.unsafe(migration);
+        expect([...(await tx`SELECT * FROM tasks`)]).toEqual(first);
+        expect(first).toEqual([{ id: 'legacy', note: 'keep', auto_act_on_insights: ahead }]);
+        const columns =
+          await tx`SELECT column_name, is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = ${isolatedNamespace} AND table_name = 'tasks' ORDER BY ordinal_position`;
+        expect(columns.at(-1)).toEqual({
+          column_name: 'auto_act_on_insights',
+          is_nullable: 'NO',
+          column_default: 'false',
+        });
+        await tx`INSERT INTO tasks (id) VALUES ('new')`;
+        expect(
+          (await tx`SELECT auto_act_on_insights FROM tasks WHERE id = 'new'`)[0]!
+            .auto_act_on_insights,
+        ).toBe(false);
+        await tx`DROP SCHEMA ${tx(isolatedNamespace)} CASCADE`;
+      });
+    },
+  );
+
   it('applies twice without rewriting any existing built-in or static admin byte', async () => {
     expect(afterFirstApply).toEqual(before);
     expect([...(await legacyRows())]).toEqual(before);
