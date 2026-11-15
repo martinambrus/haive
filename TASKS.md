@@ -778,9 +778,9 @@ From #1183 (bounded plan writers 11f/01f), reviews in `.claude/tmp/codex-run/PB5
 20. (#1193) `step-runner-llm.test.ts` ~:160-176: the mock's `insert().values()` is not thenable, so a bare `await db.insert(t).values(row)` records nothing and the assertion cannot see it. Test strength. LOW, parked.
 21. (#1193) The legacy recovery opens a transaction on every advance of 01-plan-chat even when the hook returns null. NIT, parked.
 
-### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+33)
+### T674 · FNF[release-bundle-publish] · release bundle publish, read, swap and install lows, after #1180, #1181, #1185 and #1189 (+38)
 
-status: open (queued 2026-11-14 overnight: items 16, 26, 27 plus any finding of the two-install check, one bundle; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1180 review 2026-11-14 · priority: P4
+status: parked (items 16, 26, 27 and 34 resolved 2026-11-15 in #1197; the two-install check's forced verify rollback and crash recovery cases are still NOT RUN and owed after #1197; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1180 review 2026-11-14 · priority: P4
 
 Review in `.claude/tmp/codex-run/RBP-S/review-1.md`; installer items in `IN6-S/review-{1,2,3}.md`.
 
@@ -820,6 +820,11 @@ From #1181 (updater reads the bundle), reviews in `.claude/tmp/codex-run/RBR-S/r
 31. (#1189) Tests: no base-file hash mismatch control (only run file and GPU overlay) and no public bundle version/channel mismatch case (`scripts/test/install-channel.test.mjs` ~:442).
 32. (#1189) A relative `TMPDIR` breaks the public path, since the scratch copy runs after `cd "$INSTALL_DIR"` (`install.sh` ~:758-765). Resolve the scratch dir to an absolute path.
 33. (#1189) `install.ps1` reads owners with GNU-only `stat -c` on every non-Windows host (`install.ps1` ~:627-634), so pwsh on macOS fails at the record write. Found by the DeepPattern smoke audit. macOS installs use `install.sh`; add a BSD `stat -f` fallback or refuse pwsh on macOS by name.
+34. (two-install check 2026-11-14) The updater's drain and inventory counted work only on the current schema; on a legacy schema without `dead_at` it miscounted queued and running rows before migrating. Resolved in #1197.
+35. (#1197 review) `install.ps1` has no test for a dangling `.env` link (the sh installer does).
+36. (#1197 review) Rollback `--remove-orphans` also removes a service the user added in a compose override that the restored bundle does not name. Document it or scope the removal to services of the target bundle.
+37. (#1197 review) The recovery message names the `upgrade_runs.to_version` journal field, a Postgres table an operator may not reach while the stack is down; also print the value when the updater can read it.
+38. (#1197 review) `shared/test/encryption-key-boot.test.ts` ~:203-206: the "inventory fails" case now rejects the catalog query first, so its name overclaims. Rename or add a case that fails the inventory query itself.
 
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
