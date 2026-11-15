@@ -4,6 +4,7 @@ import {
   freshInsightGate2Submission,
 } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
+import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { assertRequiredRoleInputs } from './module-role-read.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
@@ -4414,6 +4415,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // and still hard-fail on the ones no amount of re-implementing would clear.
     const routeErrorToFixLoop =
       !(err instanceof StepOutputContractInvalidError) &&
+      !(err instanceof DataEdgePlanError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       if (meta.id === '08-phase-5-verify')

@@ -1752,3 +1752,101 @@ it.each(['answer', 'preset'] as const)(
       expect(state.taskStepRow.formSchema).toMatchObject({ fields: [{ default: true }] });
   },
 );
+
+// Both the pre-dispatch gate and a consumer's own read must fail without spending a fix round.
+it.each(['required pre-dispatch', 'module loadRoleOutput'])(
+  'keeps a data-edge failure from %s out of fixLoopOnError',
+  async (path) => {
+    const { buildDataEdgePlan } = await import('@haive/shared/data-edge-plan');
+    const { dataPortNodes } = await import('@haive/shared/step-ports');
+    const { SPEC_ROLES, STEP_ROLE_REGISTRY } = await import('@haive/shared/step-outputs');
+    const role = SPEC_ROLES.checked;
+    const consumerId = 'module.ports.consumer';
+    const nodes = dataPortNodes(['05-phase-0b5-spec-quality', consumerId]);
+    nodes[1]!.inputs = [
+      {
+        id: 'spec',
+        role,
+        contract: STEP_ROLE_REGISTRY[role].contract,
+        authorship: 'mixed',
+        optional: false,
+      },
+    ];
+    const plan = buildDataEdgePlan('static', [{ executionPath: null, nodes }]);
+    const state = freshState();
+    Object.assign(state.taskStepRow, { stepId: consumerId, round: 0 });
+    state.taskRow = { id: 'task-1', userId: 'user-1', currentRound: 0, dataEdgePlan: plan };
+    const db = makeMockDb(state);
+    let producerStatus = path === 'required pre-dispatch' ? 'pending' : 'done';
+    // The newest producer is pending, with an older-looking output that must stay unreadable.
+    Object.assign(db.query, { taskSteps: { findFirst: async () => state.taskStepRow } });
+    const baseSelect = db.select.bind(db);
+    Object.assign(db, {
+      select: (...args: unknown[]) => {
+        const selected = baseSelect(...(args as []));
+        const from = selected.from.bind(selected);
+        return {
+          ...selected,
+          from: (table: unknown) => {
+            const result = from(table as never);
+            if (tableNameOf(table) !== 'task_steps') return result;
+            const where = result.where.bind(result);
+            return {
+              ...result,
+              where: (condition: unknown) => {
+                const filtered = where(condition as never);
+                if (!conditionValues(condition).includes('05-phase-0b5-spec-quality'))
+                  return filtered;
+                return {
+                  ...filtered,
+                  orderBy: () => ({
+                    limit: async () => [
+                      {
+                        id: 'producer',
+                        taskId: 'task-1',
+                        stepId: '05-phase-0b5-spec-quality',
+                        round: 0,
+                        status: producerStatus,
+                        output: { spec: 'stale' },
+                      },
+                    ],
+                  }),
+                };
+              },
+            };
+          },
+        };
+      },
+    });
+    const detect = vi.fn(async () => {
+      producerStatus = 'pending';
+      return {};
+    });
+    const apply = vi.fn(async (ctx: import('@haive/shared/step').StepContext) =>
+      ctx.host!.loadRoleOutput('spec'),
+    );
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      moduleDeactivation: null,
+      stepDef: {
+        metadata: { ...makeStep({}).metadata, id: consumerId },
+        fixLoopOnError: true,
+        detect,
+        apply,
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toContain('spec: required input not ready');
+    expect(state.updates.some((u) => u.patch.status === 'done')).toBe(false);
+    expect(state.updates.some((u) => u.patch.status === 'pending')).toBe(false);
+    expect(state.taskRow.currentRound).toBe(0);
+    expect(detect).toHaveBeenCalledTimes(path === 'required pre-dispatch' ? 0 : 1);
+    expect(apply).toHaveBeenCalledTimes(path === 'required pre-dispatch' ? 0 : 1);
+  },
+);
