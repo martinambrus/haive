@@ -21,6 +21,7 @@ import {
 import { StepSupersededError } from './step-ownership.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { gitRun } from '../repo/git-exec.js';
+import { recordLedgerEntry } from './task-ledger.js';
 import {
   openMerge,
   abortOtherMerge,
@@ -79,7 +80,7 @@ vi.mock('./steps/workflow/_spec-artifact.js', async (original) => ({
 }));
 vi.mock('./task-ledger.js', () => ({
   augmentPromptWithLedger: async (_db: unknown, _task: unknown, p: string) => p,
-  recordLedgerEntry: async () => {},
+  recordLedgerEntry: vi.fn(),
 }));
 vi.mock('./terseness-context.js', () => ({ augmentPromptWithTerseness: async (p: string) => p }));
 vi.mock('./attachments-context.js', () => ({ augmentPromptWithAttachments: async () => '' }));
@@ -1908,6 +1909,33 @@ for (const role of ['reviewer', 'coder'] as const) {
     else expect(h.enqueued).toHaveLength(1); // Re-review the fix, rather than reject its output.
   });
 }
+
+it('DGL-2 a content-refused section C fix coder records the host refusal note in its ledger', async () => {
+  const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+  h.invocations.push(
+    auxiliaryFault('fix', {
+      errorMessage: PROVIDER_FATAL_HEADLINES.content_filter,
+      parsedOutput: {
+        issue_id: 'A',
+        outcome: 'completed',
+        concerns: 'Coder claims all is well',
+        files_modified: ['a.ts'],
+      },
+    }),
+  );
+  h.runs.push({ id: 'fix-run', dagIssueId: 'A', role: 'coder', cliInvocationId: 'fix' });
+  await h.run();
+  expect(h.rows[0]!.outcome).toBe('failed_unrecoverable');
+  expect(h.rows[0]!.errorMessage).toBe(PROVIDER_FATAL_HEADLINES.content_filter);
+  expect(h.rows[0]!.concerns).toContain('coder was refused by the provider');
+  expect(recordLedgerEntry).toHaveBeenCalledWith(
+    h.db,
+    'task',
+    'step',
+    expect.objectContaining({ text: expect.stringContaining('coder was refused by the provider') }),
+  );
+  expect(h.enqueued).toEqual([]);
+});
 
 for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
   it.each([

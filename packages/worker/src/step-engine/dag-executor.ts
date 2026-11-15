@@ -3405,6 +3405,8 @@ export async function resolveDagPhase(
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
+        const refused =
+          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         let validFixResult = false;
         // Advisor-started fix coders first re-enter here while their issue is running.
         // Check them before section C's ordinary coder redispatch can consume the fault.
@@ -3420,7 +3422,7 @@ export async function resolveDagPhase(
               ),
             )
             .limit(1);
-          validFixResult = !!fixRun && result.parsed;
+          validFixResult = !!fixRun && result.parsed && !refused;
           if (fixRun && !result.parsed)
             await checkAuxiliaryEnvironment(
               { db, current, level: curLevel, stepDef },
@@ -3429,8 +3431,6 @@ export async function resolveDagPhase(
             );
         }
         // A refusal fails the issue whatever partial result the coder printed before it.
-        const refused =
-          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         if (refused) result.outcome = 'failed_unrecoverable';
         // A valid structured reply is a usable decision whatever its outcome. A failed issue
         // never reaches ingestReviewRun's clear, so clear the coder streak here.
