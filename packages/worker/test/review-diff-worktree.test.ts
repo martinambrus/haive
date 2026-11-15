@@ -81,7 +81,7 @@ it.each(['before-files', 'after-files'])(
           taskSteps: { findFirst: async () => ({ taskId: 'task', round: 0 }) },
         },
       } as unknown as Database,
-      logger,
+      logger: logger.child({ test: 'review-worktree' }),
       throwIfCancelled() {},
       async emitProgress() {},
     } satisfies StepContext;
