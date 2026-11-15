@@ -64,6 +64,7 @@ vi.mock('../../../orchestrator/house-rules-dispatch.js', async (importOriginal) 
   changeFingerprint: m.changeFingerprint,
 }));
 
+import { INSIGHTS_AT_GATE } from './_gate-insights.js';
 import { recurrenceTag } from './09-gate-2-verify-approval.js';
 import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
@@ -1307,6 +1308,36 @@ describe('gate-2 validation row: how much of the change the validator was given'
     };
   }
 
+  it('persists only the bounded gate shape with the original position', async () => {
+    m.loadUnactedInsights.mockResolvedValueOnce({
+      insights: [
+        {
+          id: 'insight-v1-stable',
+          legacyId: 'i-3',
+          sourceStep: 'review',
+          title: 'Fix\u0085it',
+          location: 'a.ts',
+          description: 'd'.repeat(5000),
+          identity: 'a.ts::fix it',
+          picked: false,
+          sourceRefs: [],
+        },
+      ],
+      omitted: 2,
+    });
+    const { detected } = await gate('valid');
+    expect(detected.outOfScopeInsights).toEqual([
+      {
+        id: 'i-3',
+        sourceStep: 'review',
+        title: 'Fix it',
+        location: 'a.ts',
+        description: 'd'.repeat(200),
+      },
+    ]);
+    expect(detected.outOfScopeInsightsOmitted).toBe(2);
+  });
+
   it('reads what 07b stored into the payload, with the cap it implies', async () => {
     expect((await gate('valid', { listed: 2, total: 3 })).detected.validation?.coverage).toEqual({
       listed: 2,
@@ -1319,6 +1350,9 @@ describe('gate-2 validation row: how much of the change the validator was given'
       truncated: false,
     });
     expect((await gate('valid')).detected.validation?.coverage ?? null).toBeNull();
+    expect(m.loadUnactedInsights).toHaveBeenCalledWith(expect.anything(), 'task-1', {
+      limit: INSIGHTS_AT_GATE,
+    });
   });
 
   it('calls a VALID verdict over part of the change PARTIAL, names the cap, and does not default to approve', async () => {

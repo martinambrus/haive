@@ -45,3 +45,44 @@ export interface Insight {
   location: string;
   description: string;
 }
+
+export type InsightSourceRef =
+  | {
+      kind: 'invocation';
+      invocationId: string;
+      taskStepId: string;
+      stepId: string;
+      round: number;
+      superseded: boolean;
+    }
+  | {
+      kind: 'dag_withheld';
+      issueId: string;
+      stepId: '06c-dag-execute';
+      severity: 'high' | 'medium' | 'low' | null;
+    };
+
+export interface InsightLoadOptions {
+  /** Absent means unlimited. Must be a finite, safe, non-negative integer. */
+  limit?: number;
+  /** Include previously selected items, labelled picked; selection does not prove repair. */
+  includePicked?: boolean;
+}
+
+export interface LoadedInsight extends Insight {
+  /** Original parser position for compatibility with persisted gate snapshots, before pick filtering. */
+  legacyId?: string;
+  /** Physical sources, attached only by the inventory loader. */
+  sourceRefs?: InsightSourceRef[];
+  /** Stable versioned hash of the complete case-insensitive title/location pair. */
+  id: string;
+  /** findingIdentity over the full location/title, before presentation clipping. */
+  identity: string;
+  picked: boolean;
+}
+
+export interface InsightLoadResult {
+  insights: LoadedInsight[];
+  /** Eligible records cut by limit, after deliberately excluded picks are removed. */
+  omitted: number;
+}

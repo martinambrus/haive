@@ -1,0 +1,51 @@
+{
+  "outputs": [
+    {
+      "stepId": "08c-code-review",
+      "raw": "## INSIGHTS\n- INSIGHT: ![x](http://e.test/i.png) | a`b.ts:2 | long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** \n- INSIGHT: Fixit | llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll | llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll\n- INSIGHT: Title only\n- INSIGHT: Selected | f.ts:1 | done"
+    }
+  ],
+  "triage": [
+    {
+      "output": {
+        "selected": [
+          {
+            "title": "Selected",
+            "location": "f.ts:1"
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "label": "Out-of-scope findings — not acted on",
+    "status": "info",
+    "statusLabel": "3 FOUND",
+    "detail": "3 improvements noted outside the task's scope",
+    "body": "Agents noted these improvements outside the task's scope and did not make them. Next.\n\n- \\!\\[x\\]\\(http\\:\\/\\/e\\.test\\/i\\.png\\) (``a`b.ts:2``) — long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*description\\*\\* long \\*\\*desc (from 08c-code-review)\n- Fix it (`llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll`) (from 08c-code-review)\n- Title only (from 08c-code-review)",
+    "defaultOpen": false
+  },
+  "expectedInsights": [
+    {
+      "id": "i-1",
+      "sourceStep": "08c-code-review",
+      "title": "![x](http://e.test/i.png)",
+      "location": "a`b.ts:2",
+      "description": "long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **description** long **desc"
+    },
+    {
+      "id": "i-2",
+      "sourceStep": "08c-code-review",
+      "title": "Fix it",
+      "location": "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll",
+      "description": "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"
+    },
+    {
+      "id": "i-3",
+      "sourceStep": "08c-code-review",
+      "title": "Title only",
+      "location": "",
+      "description": ""
+    }
+  ]
+}

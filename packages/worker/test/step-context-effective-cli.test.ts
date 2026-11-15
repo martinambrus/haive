@@ -14,11 +14,12 @@ const providers = [
 ];
 
 describe('the CLI a step context carries for a task', () => {
-  it('supplies exactly the three host capabilities on a production context', async () => {
+  it('supplies exactly the four host capabilities on a production context', async () => {
     const ctx = await realStepContext({ cliProviderId: null });
     expect(Object.keys(ctx.host ?? {}).sort()).toEqual([
       'collectImplementationFiles',
       'loadPreviousStepOutput',
+      'loadUnactedInsights',
       'readReviewDiff',
     ]);
   });

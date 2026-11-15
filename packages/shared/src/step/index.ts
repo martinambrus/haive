@@ -750,6 +750,10 @@ export type {
   ChangedLineNotes,
   FileCoverage,
   Insight,
+  InsightSourceRef,
+  InsightLoadOptions,
+  LoadedInsight,
+  InsightLoadResult,
 } from './review-types.js';
 
 /** The existing previous-step projection, bounded to the calling round. */
@@ -781,6 +785,10 @@ export type ReviewDiff =
       scope: import('./review-types.js').ImplementationFileSet;
     };
 export interface StepHostServices {
+  /** Task-wide historical inventory; no worktree required. Picks are selections, not repairs. */
+  loadUnactedInsights(
+    options?: import('./review-types.js').InsightLoadOptions,
+  ): Promise<import('./review-types.js').InsightLoadResult>;
   loadPreviousStepOutput(stepId: string): Promise<PreviousStepOutput | null>;
   collectImplementationFiles(
     worktreePath: string,

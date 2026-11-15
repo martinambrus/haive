@@ -512,8 +512,8 @@ entries. These entries grant no new dispatch service.
 
 Every production context supplies `ctx.host`, typed as optional `StepHostServices` so existing
 test doubles remain valid. A module requiring it checks once and fails clearly when it is absent.
-The three services capture the context's task, user and round, verify task-step ownership, and
-accept only its resolved worktree, using the canonical latest setup decision (a skipped 01
+The four services capture the context's task, user and round, verify task-step ownership, and
+the worktree-backed services accept only its resolved worktree, using the canonical latest setup decision (a skipped 01
 selects the repository root even with an old worktree column); a mismatch throws `StepHostBindingError`.
 `loadPreviousStepOutput(stepId)` adapts the core helper with a ceiling of `ctx.round`;
 `collectImplementationFiles(worktreePath)` adapts the same collector used by built-in reviews,
@@ -572,7 +572,36 @@ excluding denied paths. maxBytes bounds the change payload and hunk output.
 Services honor the context signal and normalize cancellation through `throwIfCancelled`;
 no database transaction spans git or file reads. `PreviousStepOutput`, `ReviewDiffOptions`
 and `StepHostServices` are declared in the public contract entry, with no worker type imports.
-Fix-loop diagnosis and unacted-insight services remain deferred to the deep-analysis consumer.
+`loadUnactedInsights({limit?, includePicked?})` adapts the same worker loader used by 08e
+and both gates. It verifies the captured task owner, task-step binding and round, honors
+cancellation before and after reads, and accepts no task, user or path override. Like previous
+output, it requires no surviving worktree. The task-wide inventory includes superseded invocation
+history and DAG-withheld findings; invocation references retain invocation id, task-step id,
+physical step id, round and superseded flag, and withheld references retain issue id, step id
+and original severity. References are attached only by the inventory loader; the parser defaults
+to omitting them, so 08e detect and apply snapshots retain their original shape.
+
+No limit means unlimited; picked items are excluded unless `includePicked: true`. A limit must be
+a finite, safe, non-negative integer. The host adapter validates synchronously before hostCall
+or any identity read; the loader validates before source reads too. Zero returns
+nothing and counts every eligible record as omitted. Pick filtering precedes the limit, and
+`omitted` counts only eligible records that the limit cut. Full title, location and description
+stay in `LoadedInsight`; gate callers explicitly request 30. Before persistence, the shared gate
+projection keeps only `{id, sourceStep, title, location, description}`, collapses every field
+to one line and clips it to 200 characters. The stored entries keep their original positional
+`i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
+also clips for older parked snapshots. Unlimited inventory is not an unlimited prompt budget; report
+consumers must page or stream large results rather than put them in every task poll.
+
+`InsightLoadOptions`, `InsightLoadResult`, `LoadedInsight` and `InsightSourceRef` are exported
+only through `@haive/shared/step`. A loaded record's stable versioned occurrence `id` hashes its
+complete case-insensitive title/location pair encoded as a JSON array. Dedupe and pick
+matching retain the legacy full `title::location` key, including its delimiter ambiguity. `identity` uses unchanged `findingIdentity`
+normalization on full fields, so line-shift aliases share an identity but keep distinct
+occurrence ids and legacy selection/count semantics. 08e's existing positional `i-N` selections
+continue to resolve against their persisted detect snapshot, not a new loader result.
+`picked` means selected in an 08e output, never verified as repaired; malformed legacy selections
+are ignored. Fix-loop diagnosis remains deferred to the deep-analysis consumer.
 
 ### Core-row writes
 
