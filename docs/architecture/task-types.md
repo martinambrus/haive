@@ -272,7 +272,7 @@ before, a run list without 07 ran 07 off-list and then completed the task.
 **Composition** (`validateComposition`). A `ComposableStepEntry` declares what a step `requires`
 (tokens with a reason), `provides`, `precedes`, `removes`, `entails`, its loop target and whether it
 `closes` the run. The walk starts with `repository` unless the type does not require one; issues are
-`unknown-step`, `unmet-need` (no EARLIER step provides it), `too-late`, `unfulfilled`,
+`unknown-step`, `unmet-need` (no EARLIER step provides it), `need-out-of-order`, `too-late`, `unfulfilled`,
 `missing-loop-target`, `duplicate-step`, `loop-after-closing` and `empty`. `repository` is implicit: no
 step can provide or remove it, so a module step cannot fake a repository. Built-in seeded lists are not
 composition-checked at boot. A guard test (`worker/test/composable-core.test.ts`) enumerates
@@ -281,6 +281,12 @@ unset pre-triage path, including the environment prelude. Every shipped step mus
 entry, and every complete path must validate with **no issues**, including `unmet-need`; no step or
 issue is filtered out. The environment and registered workflow ordering guard stays too. The core
 catalog has 58 entries: all 54 registered workflow steps plus the four environment steps.
+
+A requirement may declare `after: <token>`: both tokens must be available, and the current provider
+of `needs` must strictly follow the current provider of `after`. A shared producer does not satisfy
+that order. A reversed order reports `need-out-of-order` on the consuming step, carrying both tokens
+and its reason. This is a consumer-local rule: lists without that consumer stay unrestricted. Module
+requirements accept the same field; module step namespacing and replacement authority are unchanged.
 
 Requirements describe inputs a step actually uses; optional report sections and explicit fallbacks
 stay optional. Sprint planning accepts missing spec and gate-1 feedback; every spec producer and
@@ -851,8 +857,11 @@ new conditional skipped cards added to those run lists. An active route runs fre
 and the automatic 08e checkpoint. Existing snapshots are never rewritten.
 
 The composable 08e entry requires earlier verification/review tokens and a verify loop
-target. Runtime preflight checks ordered verification, the pinned code-review producer,
-and triage before a nonempty selection can dispatch an editor, and again before handoff.
+target. Its review requirement declares `after: verification`, so the review provider must
+follow the verification provider before triage. Editor, preview, admission, seed and derived-path
+checks all use this shared rule; review before verification stays valid without 08e. Runtime
+preflight checks ordered verification, the pinned code-review producer, and triage before a
+nonempty selection can dispatch an editor, and again before handoff.
 A standalone module declaration is not a pinned replacement role. An old/custom pin that
 lacks the required destinations refuses visibly rather than jumping off-list.
 
