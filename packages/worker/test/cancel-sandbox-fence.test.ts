@@ -945,7 +945,9 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
   });
   const selected = [
     {
-      id: 'insight-v1-one',
+      id: `insight-v1-${createHash('sha256')
+        .update(JSON.stringify(['one', 'a.ts']))
+        .digest('hex')}`,
       legacyId: 'i-1',
       identity: 'a.ts::one',
       picked: false,
@@ -1253,8 +1255,18 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     const ctx = { taskId: stepCtx.taskId, userId, orchestrationEpoch: 0 } as ResolvedTaskContext;
     return { ctx, source: source!, continuation };
   }
+  async function seedGateInventory(ctx: StepContext) {
+    await db.insert(schema.cliInvocations).values({
+      taskId: ctx.taskId,
+      taskStepId: ctx.taskStepId,
+      mode: 'cli',
+      prompt: 'review',
+      rawOutput: '## INSIGHTS\n- INSIGHT: One | a.ts | detail',
+    });
+  }
   async function seedGatePick(stale = true) {
     const stepCtx = await seed();
+    await seedGateInventory(stepCtx);
     await db
       .update(schema.taskSteps)
       .set({ stepId: '10-gate-3-commit' })
@@ -1538,6 +1550,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
   });
   it('PR5 the actual gate definition through advanceStep journals a pick before any commit and replays it', async () => {
     const ctx = await seed();
+    await seedGateInventory(ctx);
     const { gate3CommitStep } =
       await import('../src/step-engine/steps/workflow/10-gate-3-commit.js');
     const detected = {

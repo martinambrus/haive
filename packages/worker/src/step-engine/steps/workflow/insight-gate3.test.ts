@@ -10,6 +10,13 @@ import * as auto from './_insight-auto.js';
 import * as sites from './_similar-sites.js';
 import * as rules from './_gate-house-rules.js';
 import * as pages from './_insight-page.js';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import * as gateInsights from './_gate-insights.js';
+import * as commit from '../../../repo/git-commit.js';
+import * as dependency from './_dependency-policy.js';
+import * as identity from '../../../secrets/user-git-identity.js';
+import * as gitlinks from './_gitlink-registration.js';
 import * as captures from './_fix-test-store.js';
 import type { StepContext } from '../../step-definition.js';
 const item = (id: string) => ({
@@ -42,6 +49,7 @@ const detected = {
   insightChoices: [item('minor'), item('nit')],
 };
 beforeEach(() => {
+  vi.spyOn(gateInsights, 'gate3InsightPicksAvailable').mockResolvedValue(true);
   vi.spyOn(returns, 'pendingInsightApproval').mockResolvedValue(null);
   vi.spyOn(loader, 'loadUnactedInsights').mockResolvedValue({
     insights: [item('minor'), item('nit')],
@@ -373,4 +381,56 @@ it('zero identities omit detect/apply summaries and the Insight summary section,
       expect(out).not.toHaveProperty('findingsSummary');
     }
   }
+});
+
+it.each([
+  { type: 'admin-custom', runListSnapshot: ['01-worktree-setup', '10-gate-3-commit'] },
+  { type: 'module__type', runListSnapshot: ['01-worktree-setup', '10-gate-3-commit'] },
+  {
+    type: 'workflow',
+    executionPath: 'quick_bugfix',
+    runListSnapshot: [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '08-phase-5-verify',
+      '10-gate-3-commit',
+    ],
+  },
+])('a run without 08e is summary only and commits normally: %j', async (task) => {
+  vi.mocked(gateInsights.gate3InsightPicksAvailable).mockRestore();
+  const fake = createFakeDb({ tasks: schema.tasks });
+  const taskId = '00000000-0000-4000-8000-0000000000b1';
+  const userId = '00000000-0000-4000-8000-0000000000a1';
+  fake.insert(schema.tasks, { id: taskId, userId, ...task });
+  const context = { ...ctx, taskId, userId, db: fake.db };
+  vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
+  vi.spyOn(gitWorkspace, 'requireUsableGit').mockResolvedValue(false);
+  vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(false);
+  vi.spyOn(auto, 'loadAutoHistory').mockResolvedValue({ claims: [], results: [] });
+  vi.spyOn(batches, 'loadInsightBatchRecords').mockResolvedValue([]);
+  vi.spyOn(captures, 'loadFixTestRecords').mockResolvedValue([]);
+  vi.spyOn(sites, 'loadTaskSimilarSites').mockResolvedValue({ sites: [], omitted: 0 });
+  vi.spyOn(rules, 'loadGateHouseRules').mockResolvedValue(null);
+  const d = await gate3CommitStep.detect!(context);
+  const form = await gate3CommitStep.form!(context, d, null);
+  expect(form!.fields.find((f) => f.id === 'selectedInsights')).toBeUndefined();
+  expect(form!.infoSections?.some((s) => s.title === 'Insight summary')).toBe(true);
+  expect(JSON.stringify(form)).not.toContain('Select improvements below');
+  const run = vi.spyOn(git, 'gitRun').mockImplementation(async (_cwd, args) => ({
+    code: 0,
+    stdout: args.includes('rev-parse') ? 'sha' : '',
+    stderr: '',
+  }));
+  vi.spyOn(dependency, 'assertDependencyCommitSafe').mockResolvedValue(undefined);
+  vi.spyOn(identity, 'resolveGitEnv').mockResolvedValue({});
+  vi.spyOn(gitlinks, 'unregisteredGitlinks').mockResolvedValue([]);
+  vi.spyOn(commit, 'gitCommitStaged').mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+  const out = await gate3CommitStep.apply(context, {
+    detected: { ...d, hasGit: true },
+    formValues: { commit: true, commitMessage: 'fix: change' },
+    llmOutput: null,
+  } as never);
+  expect(out).toMatchObject({ committed: true, commitSha: 'sha' });
+  expect(gate3CommitStep.reviseLoop!.evaluate(out)).toBeNull();
+  expect(run).toHaveBeenCalled();
 });

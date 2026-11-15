@@ -127,17 +127,20 @@ export function validateComposition(
         }
       }
     }
-    if (entry.loopTargetStepId !== undefined && !seen.has(entry.loopTargetStepId)) {
+    const loopTarget =
+      entry.loopTargetWhenPresent && !stepIds.includes(entry.loopTargetStepId!)
+        ? undefined
+        : entry.loopTargetStepId;
+    if (loopTarget !== undefined && !seen.has(loopTarget)) {
       issues.push({
         kind: 'missing-loop-target',
         index,
         stepId,
-        target: entry.loopTargetStepId,
+        target: loopTarget,
       });
     }
     if (entry.closes && !entry.loopBeforeClose) closing = { stepId, index };
-    const targetIndex =
-      entry.loopTargetStepId === undefined ? undefined : (seen.get(entry.loopTargetStepId) ?? -1);
+    const targetIndex = loopTarget === undefined ? undefined : (seen.get(loopTarget) ?? -1);
     if (targetIndex !== undefined && closing !== undefined && targetIndex < closing.index) {
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }

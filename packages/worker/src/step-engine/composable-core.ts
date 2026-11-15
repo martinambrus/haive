@@ -680,6 +680,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     stepId: '10-gate-3-commit',
     loopBeforeClose: true,
     loopTargetStepId: '08e-insights-triage',
+    loopTargetWhenPresent: true,
     closes: true,
     label: 'Gate 3: Commit',
     group: 'finish',

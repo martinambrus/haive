@@ -247,3 +247,24 @@ it('quick paths retain a dormant gate2 which becomes active only for a durable a
     ).toBe(failed);
   }
 });
+
+it('stored admin/module/derived gate3 compositions without 08e remain valid', () => {
+  const ids = [
+    '01-worktree-setup',
+    '07-phase-2-implement',
+    '08-phase-5-verify',
+    '09-gate-2-verify-approval',
+    '10-gate-3-commit',
+  ];
+  const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e]));
+  expect(validateComposition(ids, catalog)).toEqual([]);
+  const prefix = ['00-model-health-workflow', '00a-sync-base', '00-triage'];
+  expect(
+    evaluateDerivedTaskType({
+      baseCandidates: [{ executionPath: 'quick_bugfix', stepIds: [...prefix, ...ids] }],
+      changes: [],
+      catalog,
+      installedStepIds: new Set(catalog.keys()),
+    }).issues,
+  ).toEqual([]);
+});

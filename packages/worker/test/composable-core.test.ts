@@ -19,13 +19,6 @@ const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const)
 const replace = (stepId: string, patch: Partial<ComposableStepEntry>): ComposableStepEntry[] =>
   CORE_COMPOSABLE_STEPS.map((e) => (e.stepId === stepId ? { ...e, ...patch } : e));
 
-const missingInsightTarget = (index: number) => ({
-  kind: 'missing-loop-target',
-  index,
-  stepId: '10-gate-3-commit',
-  target: '08e-insights-triage',
-});
-
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
@@ -83,7 +76,7 @@ describe('core composable catalog', () => {
   it('allows run configuration after commit because commit consumes none of its settings', () => {
     expect(
       validateComposition(['01-worktree-setup', '10-gate-3-commit', '06-run-config'], catalog),
-    ).toEqual([missingInsightTarget(1)]);
+    ).toEqual([]);
   });
 
   it.each([
@@ -197,7 +190,6 @@ describe('core composable catalog', () => {
       '08-phase-5-verify',
     ];
     expect(validateComposition(order, catalog)).toEqual([
-      missingInsightTarget(2),
       {
         kind: 'loop-after-closing',
         index: 3,
@@ -214,7 +206,7 @@ describe('core composable catalog', () => {
       '08-phase-5-verify',
       '10-gate-3-commit',
     ];
-    expect(validateComposition(order, catalog)).toEqual([missingInsightTarget(3)]);
+    expect(validateComposition(order, catalog)).toEqual([]);
   });
 
   it('requires the insight destination even when learning follows the commit', () => {
@@ -224,7 +216,7 @@ describe('core composable catalog', () => {
       '10-gate-3-commit',
       '11-phase-8-learning',
     ];
-    expect(validateComposition(order, catalog)).toEqual([missingInsightTarget(2)]);
+    expect(validateComposition(order, catalog)).toEqual([]);
   });
 
   it('rejects plugin installation before the worktree step', () => {
@@ -280,11 +272,10 @@ describe('core composable catalog', () => {
     const base = ['01-worktree-setup', '07-phase-2-implement', '10-gate-3-commit'];
     expect(
       validateComposition([...base, '11a-gate-4-push', '12-worktree-cleanup'], catalog),
-    ).toEqual([missingInsightTarget(2)]);
+    ).toEqual([]);
     expect(
       validateComposition([...base, '12-worktree-cleanup', '11a-gate-4-push'], catalog),
     ).toEqual([
-      missingInsightTarget(2),
       expect.objectContaining({ kind: 'unmet-need', stepId: '11a-gate-4-push', needs: 'worktree' }),
     ]);
   });
@@ -437,7 +428,6 @@ describe('core composable catalog', () => {
     ];
     const tail = ['11a-gate-4-push', '12-worktree-cleanup'];
     expect(validateComposition([...head, ...tail], catalog)).toEqual([
-      missingInsightTarget(2),
       expect.objectContaining({
         kind: 'unmet-need',
         stepId: '11a-gate-4-push',
@@ -451,7 +441,7 @@ describe('core composable catalog', () => {
     ]);
     expect(
       validateComposition([...head, '11d-skill-sync', '11b-kb-commit', ...tail], catalog),
-    ).toEqual([missingInsightTarget(2)]);
+    ).toEqual([]);
   });
 
   it('places the database save after the push and before cleanup', () => {
@@ -468,7 +458,7 @@ describe('core composable catalog', () => {
         [...head, '11a-gate-4-push', '11g-save-database', '12-worktree-cleanup'],
         catalog,
       ),
-    ).toEqual([missingInsightTarget(5)]);
+    ).toEqual([]);
     expect(
       validateComposition(
         [...head, '11g-save-database', '11a-gate-4-push', '12-worktree-cleanup'],
@@ -487,9 +477,7 @@ describe('core composable catalog', () => {
       '10-gate-3-commit',
       '11-phase-8-learning',
     ];
-    expect(validateComposition([...head, '11b-kb-commit'], catalog)).toEqual([
-      missingInsightTarget(2),
-    ]);
+    expect(validateComposition([...head, '11b-kb-commit'], catalog)).toEqual([]);
     expect(
       validateComposition([...head, '11b-kb-commit', '11d-skill-sync'], catalog),
     ).toContainEqual(
@@ -499,9 +487,7 @@ describe('core composable catalog', () => {
         token: 'knowledge-committed',
       }),
     );
-    expect(validateComposition([...head, '11d-skill-sync', '11b-kb-commit'], catalog)).toEqual([
-      missingInsightTarget(2),
-    ]);
+    expect(validateComposition([...head, '11d-skill-sync', '11b-kb-commit'], catalog)).toEqual([]);
   });
 
   it('needs the scope picker before re-indexing', () => {
@@ -560,7 +546,7 @@ describe('core composable catalog', () => {
     const head = ['01-worktree-setup', '07-phase-2-implement', '08-phase-5-verify'];
     expect(
       validateComposition([...head, '09-gate-2-verify-approval', '10-gate-3-commit'], catalog),
-    ).toEqual([missingInsightTarget(4)]);
+    ).toEqual([]);
     expect(
       validateComposition([...head, '10-gate-3-commit', '09-gate-2-verify-approval'], catalog),
     ).toContainEqual(
@@ -627,7 +613,7 @@ describe('core composable catalog', () => {
         [...head, '08a-browser-verify', '09-gate-2-verify-approval', '10-gate-3-commit'],
         catalog,
       ),
-    ).toEqual([missingInsightTarget(10)]);
+    ).toEqual([]);
   });
 
   it.each([
@@ -769,7 +755,7 @@ describe('core composable catalog', () => {
     const qa = [...head, '08d-adversarial-qa'];
     expect(
       validateComposition([...qa, '08d2-adversarial-qa-review', '10-gate-3-commit'], catalog),
-    ).toEqual([missingInsightTarget(4)]);
+    ).toEqual([]);
     expect(
       validateComposition([...qa, '10-gate-3-commit', '08d2-adversarial-qa-review'], catalog),
     ).toContainEqual(
@@ -814,7 +800,6 @@ describe('core composable catalog', () => {
   it('makes every DDEV composition reach the restore and the final save', () => {
     const base = ['01-worktree-setup', '01c-ddev-env', '07-phase-2-implement', '10-gate-3-commit'];
     expect(validateComposition(base, catalog)).toEqual([
-      missingInsightTarget(3),
       { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-restored' },
       { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-saved' },
       { kind: 'unfulfilled', index: 2, stepId: '07-phase-2-implement', token: 'reconciled' },
@@ -832,7 +817,7 @@ describe('core composable catalog', () => {
         ],
         catalog,
       ),
-    ).toEqual([missingInsightTarget(5)]);
+    ).toEqual([]);
   });
 
   it('requires an image build after declaring dependencies', () => {
@@ -874,7 +859,6 @@ describe('core composable catalog', () => {
       '00a-sync-base',
     ];
     expect(validateComposition(order, catalog)).toEqual([
-      missingInsightTarget(2),
       { kind: 'too-late', index: 4, stepId: '00a-sync-base', token: 'worktree' },
     ]);
   });
@@ -896,7 +880,6 @@ describe('core composable catalog', () => {
       '11c-rag-reindex',
     ];
     expect(validateComposition(order, catalog)).toEqual([
-      missingInsightTarget(2),
       expect.objectContaining({ kind: 'unmet-need', stepId: '11c-rag-reindex', needs: 'worktree' }),
     ]);
     expect(
@@ -904,7 +887,7 @@ describe('core composable catalog', () => {
         [...order.slice(0, 4), '11c-rag-reindex', '12-worktree-cleanup', '13-pr-wait'],
         catalog,
       ),
-    ).toEqual([missingInsightTarget(2)]);
+    ).toEqual([]);
   });
 
   it('rejects verify without implement earlier', () => {

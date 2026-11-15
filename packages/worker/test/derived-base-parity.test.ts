@@ -279,11 +279,36 @@ it('new derived quick candidates keep the added tail dormant, while old pins and
     candidates: legacyBase.map((c) => ({ ...c, outcomes: [], compositionIssues: [] })),
     composableEntries: CORE_COMPOSABLE_STEPS.map((e) => {
       if (e.stepId !== '10-gate-3-commit') return e;
-      const { loopTargetStepId: _target, loopBeforeClose: _before, ...old } = e;
+      const {
+        loopTargetStepId: _target,
+        loopBeforeClose: _before,
+        loopTargetWhenPresent: _conditional,
+        ...old
+      } = e;
       return old;
     }),
   };
   expect(isConditionalInsightStep({ ...scope, derivedRunPlan: legacy }, '08c-code-review')).toBe(
     false,
   );
+  const { gate3InsightPicksAvailable } =
+    await import('../src/step-engine/steps/workflow/_gate-insights.js');
+  for (const derivedRunPlan of [plan, legacy]) {
+    const db = {
+      query: {
+        tasks: {
+          findFirst: async () => ({
+            type: 'derived-custom',
+            derivedRunPlan,
+            executionPath: 'quick_bugfix',
+            // Deliberately stale snapshot: derived pins must decide their own membership.
+            runListSnapshot: ['08e-insights-triage'],
+          }),
+        },
+      },
+    };
+    expect(await gate3InsightPicksAvailable({ db, throwIfCancelled() {} } as never)).toBe(
+      derivedRunPlan === plan,
+    );
+  }
 });

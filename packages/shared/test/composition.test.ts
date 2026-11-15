@@ -422,3 +422,24 @@ it('explicit precommit branching may revise before the gate closes, while later 
     { kind: 'loop-after-closing', index: 2, stepId: 'later', closingStepId: 'gate' },
   ]);
 });
+
+it('conditional loop destinations preserve absent-target compositions and enforce present-target order and barriers', () => {
+  const gate = {
+    ...entry('gate', { loop: 'triage', closes: true }),
+    loopBeforeClose: true,
+    loopTargetWhenPresent: true,
+  };
+  const catalog = catalogOf(entry('triage'), gate, entry('later', { loop: 'triage' }));
+  expect(composableStepEntrySchema.safeParse(gate).success).toBe(true);
+  expect(
+    composableStepEntrySchema.safeParse({ ...entry('gate'), loopTargetWhenPresent: true }).success,
+  ).toBe(false);
+  expect(validateComposition(['gate'], catalog)).toEqual([]);
+  expect(validateComposition(['triage', 'gate'], catalog)).toEqual([]);
+  expect(validateComposition(['gate', 'triage'], catalog)).toContainEqual(
+    expect.objectContaining({ kind: 'missing-loop-target', stepId: 'gate' }),
+  );
+  expect(validateComposition(['triage', 'gate', 'later'], catalog)).toEqual([
+    { kind: 'loop-after-closing', index: 2, stepId: 'later', closingStepId: 'gate' },
+  ]);
+});

@@ -35,6 +35,7 @@ import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_
 import {
   INSIGHTS_AT_GATE,
   gateInsights,
+  gate3InsightPicksAvailable,
   insightsRow,
   loadUnactedInsights,
 } from './_gate-insights.js';
@@ -94,6 +95,7 @@ interface CommitGateDetect {
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
   insightChoices?: Insight[];
+  insightPicksAvailable?: boolean;
   insightSummary?: InsightSummary;
   insightPage?: number;
   insightTotal?: number;
@@ -299,9 +301,13 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
           currentFingerprint: () => taskChangeFingerprint(ctx),
         });
     const insightSummary = await loadInsightSummary(ctx, inventory.insights, offset);
+    const insightPicksAvailable = await gate3InsightPicksAvailable(ctx);
     const insightView = {
+      insightPicksAvailable,
       // Use stable occurrence ids for choices; the legacy status row keeps positional ids.
-      insightChoices: gateInsights(insights.insights.map((i) => ({ ...i, legacyId: i.id }))),
+      insightChoices: insightPicksAvailable
+        ? gateInsights(insights.insights.map((i) => ({ ...i, legacyId: i.id })))
+        : [],
       ...(insightSummary.totals.identities ? { insightSummary } : {}),
       insightPage: offset,
       insightTotal: Math.max(unacted.length, insightSummary.totals.identities),
@@ -475,7 +481,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const insightRow = insightsRow(
       detected.outOfScopeInsights ?? [],
       detected.outOfScopeInsightsOmitted ?? 0,
-      'Select improvements below to apply them and run fresh checks before returning to this gate.',
+      detected.insightPicksAvailable === false
+        ? 'These improvements remain available in the insight summary and report.'
+        : 'Select improvements below to apply them and run fresh checks before returning to this gate.',
     );
     const statusRows = [
       houseRulesRow(detected.houseRules),
@@ -530,7 +538,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
           detected.insightPage,
           detected.insightPageSize,
         ),
-        ...(detected.insightChoices?.length
+        ...(detected.insightPicksAvailable !== false && detected.insightChoices?.length
           ? [
               {
                 type: 'multi-select' as const,
@@ -602,6 +610,10 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     await changeInsightPage(ctx, args.detected, args.formValues);
     const offered = selectOfferedInsights(args.detected.insightChoices ?? [], args.formValues);
     if (offered.length) {
+      if (!(await gate3InsightPicksAvailable(ctx)))
+        throw new Error(
+          'Insight triage is not in this task run list. Refresh the form before committing.',
+        );
       const inventory = await loadUnactedInsights(ctx.db, ctx.taskId, { includePicked: true });
       ctx.throwIfCancelled();
       // Never turn a disappeared id into an empty selection and fall through to Git.
