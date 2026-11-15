@@ -27,7 +27,9 @@ describe('ungated step-role reader ratchet', () => {
       roleReaderSites(file, readFileSync(path.join(root, file), 'utf8')),
     );
     expect(checkRoleReaderPins(sites, pins)).toEqual([]);
-  }, 20_000);
+    // ~4 s alone here; a CI runner sharing its cores with the other vitest workers went past
+    // 20 s, so the bound follows fs-ratchet's.
+  }, 60_000);
   it.each([
     `eq(schema.taskSteps.stepId, '08c-code-review')`,
     "sql`${schema.taskSteps.stepId} = '08c-code-review' and task_id = ${id}`",
