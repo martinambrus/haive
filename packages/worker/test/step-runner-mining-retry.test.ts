@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableColumns, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
 import {
   CONFIG_KEYS,
   ConfigUnavailableError,
@@ -3924,16 +3926,18 @@ describe('08e implementer dispatch and recovery', () => {
   let records: insightJournal.InsightBatchRecord[];
   beforeEach(() => {
     records = [];
-    vi.spyOn(insightJournal, 'ensureInsightIntent').mockImplementation(async () => {
-      let intent = records.find((r) => r.stage === 'intent');
+    vi.spyOn(insightJournal, 'ensureInsightIntent').mockImplementation(async (ctx) => {
+      const generation = ctx.rerunGeneration ?? 0;
+      const currentBatch = insightJournal.insightBatchId(ctx.taskStepId, generation);
+      let intent = records.find((r) => r.stage === 'intent' && r.batchId === currentBatch);
       if (!intent) {
         intent = {
           version: 1,
           protocolVersion: 1,
           mode: 'manual_08e',
-          batchId,
+          batchId: currentBatch,
           sourceStepRowId: 'ts-1',
-          generation: 0,
+          generation,
           stage: 'intent',
           selected: selected.map(({ picked, ...i }) => i),
           items: [{ id: selected[0]!.id, outcome: 'unconfirmed', changes: [], reason: '' }],
@@ -3972,6 +3976,143 @@ describe('08e implementer dispatch and recovery', () => {
     });
     return state;
   }
+  it.each(['manual Resume', 'automatic Resume'])(
+    'settles a provider-outage writer through apply after %s, and permits a new generation on Retry',
+    async (entry) => {
+      const outage = `${PROVIDER_FATAL_HEADLINES.rate_limit}: 429`;
+      const writer = miningRow(`implementer-${batchId}`, 1, {
+        status: 'failed',
+        errorMessage: outage,
+        rawOutput: null,
+      });
+      const state = stateFor([writer]);
+      state.invocationRows = [
+        {
+          id: writer.cliInvocationId!,
+          prompt: 'edit',
+          endedAt: new Date(),
+          startedAt: new Date(),
+          exitCode: 1,
+          errorMessage: outage,
+        },
+      ];
+      if (entry === 'automatic Resume') {
+        const taskId = '00000000-0000-4000-8000-000000000001';
+        const stepRowId = '00000000-0000-4000-8000-000000000002';
+        const miningId = '00000000-0000-4000-8000-000000000003';
+        const invocationId = '00000000-0000-4000-8000-000000000004';
+        const userId = '00000000-0000-4000-8000-000000000005';
+        const repositoryId = '00000000-0000-4000-8000-000000000006';
+        const fake = createFakeDb({
+          modules: schema.modules,
+          tasks: schema.tasks,
+          taskSteps: schema.taskSteps,
+          repositories: schema.repositories,
+          cliInvocations: schema.cliInvocations,
+          taskStepAgentMinings: schema.taskStepAgentMinings,
+          taskEvents: schema.taskEvents,
+        });
+        fake.insert(schema.repositories, {
+          id: repositoryId,
+          userId,
+          name: 'repo',
+          status: 'ready',
+        });
+        fake.insert(schema.tasks, {
+          id: taskId,
+          userId,
+          repositoryId,
+          status: 'failed',
+          currentStepId: insightJournal.INSIGHT_STEP,
+          currentRound: 0,
+          allowanceAutoResumeCount: 0,
+        });
+        fake.insert(schema.taskSteps, {
+          ...state.taskStepRow,
+          id: stepRowId,
+          taskId,
+          status: 'failed',
+          errorMessage: outage,
+        });
+        fake.insert(schema.taskStepAgentMinings, {
+          ...writer,
+          id: miningId,
+          taskStepId: stepRowId,
+          cliInvocationId: invocationId,
+        });
+        fake.insert(schema.cliInvocations, {
+          ...state.invocationRows[0],
+          id: invocationId,
+          taskId,
+          taskStepId: stepRowId,
+          mode: 'agent_mining',
+        });
+        vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+        expect(
+          await autoResumeFailedStep(fake.db as unknown as Database, {
+            taskId,
+            stepId: insightJournal.INSIGHT_STEP,
+            round: 0,
+            providerId: null,
+            via: 'reset_at',
+            watchSince: null,
+          }),
+        ).toBe(true);
+        // Feed the actual auto-resume's persisted rows to the continuation, translating only
+        // the UUID keys into this harness's existing symbolic keys.
+        state.taskStepRow = { ...fake.rows(schema.taskSteps)[0]!, id: 'ts-1', taskId: 'task-1' };
+        state.miningRows = [
+          {
+            ...fake.rows(schema.taskStepAgentMinings)[0]!,
+            id: writer.id,
+            cliInvocationId: writer.cliInvocationId,
+          } as unknown as MiningRow,
+        ];
+      } else {
+        // The API fan-out Resume retains the failed row and outage text, sets this marker,
+        // and reopens the step without changing its generation (resume-saved-replies.test.ts).
+        Object.assign(state.taskStepRow, { status: 'running', errorMessage: null, endedAt: null });
+        writer.userRetryRequestedAt = new Date();
+      }
+      expect(state.miningRows[0]).toMatchObject({
+        status: 'failed',
+        errorMessage: outage,
+        userRetryRequestedAt: expect.any(Date),
+      });
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(makeMockDb(state), insightsTriageStep, enqueued);
+      expect(result.status).toBe('done');
+      expect(result.row.output).toMatchObject({
+        batchId,
+        implemented: false,
+        items: [{ id: selected[0]!.id, outcome: 'unconfirmed' }],
+      });
+      expect(records.find((r) => r.stage === 'outcome')).toMatchObject({
+        batchId,
+        generation: 0,
+        invocationId: writer.cliInvocationId,
+        items: [{ id: selected[0]!.id, outcome: 'unconfirmed' }],
+      });
+      expect(enqueued).toEqual([]);
+      expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toEqual([]);
+      expect(insightJournal.recordInsightInvocation).not.toHaveBeenCalled();
+
+      // Retry clears mining rows and advances the generation; after the next approved form,
+      // it must dispatch a distinct batch while retaining the prior uncertain outcome.
+      const retry = stateFor();
+      retry.taskStepRow.rerunGeneration = 1;
+      expect((await run(makeMockDb(retry), insightsTriageStep, enqueued)).status).toBe(
+        'waiting_cli',
+      );
+      const nextBatch = insightJournal.insightBatchId('ts-1', 1);
+      expect(nextBatch).not.toBe(batchId);
+      expect(enqueued).toHaveLength(1);
+      expect(retry.inserts.find((i) => i.table === 'task_step_agent_minings')?.row.agentId).toBe(
+        `implementer-${nextBatch}`,
+      );
+      expect(records.find((r) => r.batchId === batchId && r.stage === 'outcome')).toBeDefined();
+    },
+  );
   it.each([
     { exitCode: 0, errorMessage: null, status: 'done' },
     { exitCode: 1, errorMessage: null, status: 'failed' },

@@ -1783,7 +1783,12 @@ async function resolveAgentMiningPhase(
     const fatalAgent = existing.find(
       (r) =>
         r.status === 'failed' &&
-        (isProviderOutage(r.errorMessage) || isCommittedSnapshotFailure(r.errorMessage)),
+        // An 08e writer may have edited before its provider failed. Fold that row through
+        // apply into the batch's unconfirmed outcome, including after either Resume path.
+        // It cannot be retried in this generation, so failing on the retained outage text
+        // here would strand every Resume before it could publish the outcome journal.
+        ((stepDef.metadata.id !== INSIGHT_STEP && isProviderOutage(r.errorMessage)) ||
+          isCommittedSnapshotFailure(r.errorMessage)),
     );
     if (fatalAgent?.errorMessage) {
       ctx.logger.warn(
