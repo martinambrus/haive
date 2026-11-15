@@ -386,3 +386,12 @@ async function oldGateSpec(ctx: StepContext) {
   const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
   return resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
 }
+
+it.each(['08c-code-review', '08c2-code-audit'] as const)(
+  'refuses host-policy role %s until pinned resolution is supported',
+  async (role) => {
+    const { ctx } = fixture();
+    // @ts-expect-error canonical spec reader cannot resolve legacy host-policy bindings
+    await expect(readRole(ctx, role)).rejects.toThrow('host-policy');
+  },
+);

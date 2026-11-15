@@ -35,6 +35,8 @@ export const SPEC_ROLES = Object.freeze({
   resolved: 'haive.spec.resolved',
 } as const);
 
+export type SpecRoleId = (typeof SPEC_ROLES)[keyof typeof SPEC_ROLES];
+
 /** Host-owned data ports. A port grants no routing, replacement or quotation authority.
  * Physical review/audit role ids remain aliases for the exact original contracts. */
 export const STEP_ROLE_REGISTRY = Object.freeze({
