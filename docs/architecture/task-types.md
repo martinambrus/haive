@@ -351,7 +351,7 @@ or output-shape fallback.
 
 The strict dual decoder accepts unchanged v1 and contracted v2 pins. V2 adds candidate-local
 `roleBindings: { [role]: { stepId, outputContract } }`; the existing `composableEntries` pin holds
-raw declarations and exact host contract references. Candidate-local `effectiveEntries` store only effective replacement declarations; `derivedCandidateEntries` combines them with unchanged pinned declarations. The reader also accepts older full candidate arrays. Each bound entry is checked structurally for the host provided tokens, required-token superset, loop target and closing policy; it is never merged again with today’s code. The decoder replays pinned applied
+raw declarations and exact host contract references. Candidate-local `effectiveEntries` are required on every v2 candidate and store only effective replacement declarations; `derivedCandidateEntries` combines them with unchanged pinned declarations. The reader also accepts older full candidate arrays. Each bound entry is checked structurally for the host provided tokens, required-token superset, loop target and closing policy; it is never merged again with today’s code. The decoder replays pinned applied
 outcomes to verify surviving physical positions, one-hop contracts, binding removal, unique
 producers and canonical-role ambiguity. It does not re-run today's composition rules. Admission emits v2 only when at least one candidate applies a replacement; existing v1 pins are never rewritten.
 
@@ -440,7 +440,7 @@ prompt definitions used by any candidate. Traits, canary, module admission, inte
 saved-step CLI previews use the candidate union before selection. Integration previews identify steps
 that may run after path selection. Dispatch still resolves each required account.
 
-`assertStepOutputDeclaration` refuses `replaces` together with `metadata.allowSkip: true` at registration or override, preventing a failed review replacement from being skipped past gate 2. A bound replacement receives the host role requirements, ordering, entailments, loop target and closing policy; its own declared tokens must satisfy them. Runtime review uses the canonical finding-based fix evaluator, audit stays report-only and retains its broad-audit skip. Replacement-capable executables cannot supply conflicting loop/error hooks. No binding inherits host CLI seats, dispatch preferences or grants.
+`assertStepOutputDeclaration` refuses `replaces` together with `metadata.allowSkip: true` at registration or override, preventing a failed review replacement from being skipped past gate 2. A bound replacement receives the host role requirements, ordering, entailments, loop target and closing policy; its own declared tokens must satisfy them. Runtime review uses the host run decision and canonical finding-based fix evaluator: a module’s `shouldRun` cannot suppress a bound review. A standalone module step retains its own run decision. Audit stays report-only, retaining the host broad-audit/worktree skip AND the module’s own `shouldRun` when present. Replacement-capable executables cannot supply conflicting loop/error hooks. No binding inherits host CLI seats, dispatch preferences or grants.
 
 **First triage.** Only the common prefix executes before selection. The derived-only selection
 transaction locks the owned step before the task, checks current step/round, epoch, live status and
