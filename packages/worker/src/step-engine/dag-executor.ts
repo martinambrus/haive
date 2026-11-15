@@ -2006,6 +2006,15 @@ async function updateAuxiliaryFault(
 ): Promise<number> {
   if (!recordsFailures(ra.stepDef) || runNeverAnswered(inv) || isProviderOutage(inv.errorMessage))
     return 0;
+  if (!failed) {
+    const plan = await ra.db.query.taskDagPlans.findFirst({
+      where: eq(schema.taskDagPlans.id, ra.level.dagPlanId),
+    });
+    if (!plan) throw new Error('DAG plan missing while recording auxiliary fault');
+    // A no-op clear linearizes at this read. A concurrent fault written afterwards
+    // remains a new streak. When an entry exists, re-read under the lock before writing.
+    if (!auxiliaryStreak(plan.escalationLog ?? [], role, ra.level.level)) return 0;
+  }
   return ra.db.transaction(async (tx) => {
     const [plan] = await tx
       .select()

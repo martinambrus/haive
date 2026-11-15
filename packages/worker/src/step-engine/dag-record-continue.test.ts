@@ -1924,3 +1924,32 @@ for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
     },
   );
 }
+
+for (const role of ['reviewer', 'coder', 'issue_advisor', 'replanner'] as const) {
+  it(`DAGP-F6 ${role} skips the streak transaction when no entry exists`, async () => {
+    const h = auxiliaryHarness(role);
+    // Another role's entry must survive, and must not make this clear take a lock.
+    h.plan.escalationLog = [
+      { kind: 'dag_auxiliary_faults', role: 'unrelated', level: 0, count: 1 },
+    ];
+    const transaction = vi.spyOn(h.db, 'transaction');
+    const parsedOutput =
+      role === 'reviewer'
+        ? { verdict: 'approve', criteria_results: [], issues: [] }
+        : role === 'coder'
+          ? { issue_id: 'A', outcome: 'completed', files_modified: ['a.ts'] }
+          : {
+              action: role === 'replanner' ? 'CONTINUE' : 'ESCALATE_TO_REPLAN',
+              reasoning: 'proceed',
+            };
+    await h.fold(auxiliaryFault('valid', { exitCode: 0, errorMessage: null, parsedOutput }));
+    expect(
+      h.operations.filter((o) => o.kind === 'lock' && o.table === schema.taskDagPlans),
+    ).toEqual([]);
+    expect(h.plan.escalationLog).toEqual([
+      { kind: 'dag_auxiliary_faults', role: 'unrelated', level: 0, count: 1 },
+    ]);
+    if (role === 'reviewer' || role === 'issue_advisor') expect(transaction).not.toHaveBeenCalled();
+    if (role === 'replanner') expect(transaction).toHaveBeenCalledTimes(1); // Atomic decision only.
+  });
+}
