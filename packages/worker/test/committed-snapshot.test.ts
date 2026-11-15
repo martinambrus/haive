@@ -18,6 +18,7 @@ let repo: string;
 let commitOid: string;
 const scope = { userId: randomUUID(), repositoryId: randomUUID(), taskId: randomUUID() };
 const secret = randomBytes(24).toString('hex');
+const binary = Buffer.concat([Buffer.from([0, 255]), randomBytes(12)]);
 const git = (...args: string[]) =>
   execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
 const options = () => ({ storageRoot: root, repositoryRoot: repo, scope });
@@ -29,6 +30,7 @@ beforeAll(async () => {
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'Test');
   await writeFile(join(repo, '.env'), secret);
+  await writeFile(join(repo, 'data.bin'), binary);
   await mkdir(join(repo, 'nested'));
   await writeFile(join(repo, 'nested', 'content'), 'pinned');
   git('add', '.');
@@ -45,9 +47,11 @@ describe('owned committed snapshot', () => {
     await writeFile(join(repo, '.env'), randomBytes(24).toString('hex'));
     git('add', '.');
     git('commit', '-qm', 'move');
+    git('replace', commitOid, git('rev-parse', 'HEAD'));
     let resolved = await resolveCommittedSnapshots({ snapshotRef: ref }, options());
     expect(await readFile(join(resolved!.target.workerRoot, '.env'), 'utf8')).toBe(secret);
     expect(resolved!.target.tracked.has('.env')).toBe(true);
+    expect(await readFile(join(resolved!.target.workerRoot, 'data.bin'))).toEqual(binary);
     expect(await readFile(join(resolved!.target.workerRoot, 'nested/content'), 'utf8')).toBe(
       'pinned',
     );
@@ -85,7 +89,12 @@ describe('owned committed snapshot', () => {
           await holdRead;
         },
       );
-      await enteredRead;
+      await Promise.race([
+        enteredRead,
+        reader.then(() => {
+          throw new Error('Dispatch reader did not run');
+        }),
+      ]);
       let reaperEntered = false;
       const reaper = withTaskScratchWorkspace(scope.userId, scope.taskId, async () => {
         reaperEntered = true;

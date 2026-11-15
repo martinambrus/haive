@@ -102,7 +102,7 @@ async function withObjects<T>(
         'sh',
         [
           '-c',
-          'cd /proc/self/fd/3 && GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null exec git "$@"',
+          'cd /proc/self/fd/3 && GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null exec git "$@"',
           'snapshot-git',
           ...args,
         ],
@@ -164,10 +164,18 @@ async function inventory(
     }
   }
   await tree(treeOid, '', 0);
-  entries.sort((a, c) => a.path.localeCompare(c.path, 'en'));
+  entries.sort((a, c) => (a.path < c.path ? -1 : a.path > c.path ? 1 : 0));
   if (new Set(entries.map((e) => e.path)).size !== entries.length)
     throw new CommittedSnapshotError();
-  const body = JSON.stringify({ version: 1, ...opts.scope, commitOid, treeOid, entries });
+  const body = JSON.stringify({
+    version: 1,
+    userId: opts.scope.userId,
+    repositoryId: opts.scope.repositoryId,
+    taskId: opts.scope.taskId,
+    commitOid,
+    treeOid,
+    entries,
+  });
   return { treeOid, entries, body };
 }
 
@@ -245,9 +253,17 @@ async function materialize(
   async function verify(dir: string, depth: number) {
     b.check();
     if (depth > b.limits.maxDepth) throw new CommittedSnapshotError();
+    const directory = await lstatNoFollow(anchor, dir, { strict: true });
+    if (
+      directory?.kind !== 'directory' ||
+      directory.stats.uid !== process.getuid?.() ||
+      (directory.stats.mode & 0o022) !== 0
+    )
+      throw new CommittedSnapshotError();
     const listing = await readdirNoFollow(anchor, dir, { strict: true });
     if (!listing) throw new CommittedSnapshotError();
     for (const item of listing) {
+      b.check();
       if (++count > b.limits.maxEntries || !validPath(item.name))
         throw new CommittedSnapshotError();
       const rel = `${dir}/${item.name}`;
@@ -276,6 +292,7 @@ async function materialize(
     }
   }
   await verify(tree, 0);
+  b.check();
   if (seen.size !== entries.length) throw new CommittedSnapshotError();
 }
 
