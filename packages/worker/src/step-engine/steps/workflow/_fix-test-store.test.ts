@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import picomatch from 'picomatch';
 import { describe, expect, it, vi } from 'vitest';
@@ -22,7 +23,12 @@ vi.mock('../../../queues/cli-exec/secret-mask.js', () => ({
 }));
 
 // The loader's query seam returns a before event, an after event and their durable manifests.
-function fixture(before: TestImage, after: TestImage, beforeData: Buffer | null | undefined) {
+function fixture(
+  before: TestImage,
+  after: TestImage,
+  beforeData: Buffer | null | undefined,
+  blobs: unknown[] = [],
+) {
   const meta = { invocationId: 'run', stepId: '08b-test-management', pass: 1, round: 1 };
   const a = fixTestManifestReference(meta, before);
   const b = fixTestManifestReference(meta, after);
@@ -35,6 +41,7 @@ function fixture(before: TestImage, after: TestImage, beforeData: Buffer | null 
         : [{ hash: 'manifest:' + a.manifestHash, data: beforeData }]),
       { hash: 'manifest:' + b.manifestHash, data: gzipSync(JSON.stringify(after)) },
     ],
+    blobs,
   ];
   const select = vi.fn(() => {
     const result = replies.shift() ?? [];
@@ -59,6 +66,22 @@ const after: TestImage = {
 };
 
 describe('repair manifest loading', () => {
+  it('redacts retained legacy contents before constructing gate patches', async () => {
+    const secret = randomBytes(24).toString('hex');
+    const { db } = fixture(before, after, gzipSync(JSON.stringify(before)), [
+      {
+        contentHash: 'before',
+        content: Buffer.from(`TOKEN="${secret}"\nbefore\n`),
+        expiredAt: null,
+      },
+      { contentHash: 'after', content: Buffer.from(`TOKEN="${secret}"\nafter\n`), expiredAt: null },
+    ]);
+    const records = await loadFixTestRecords(db, 'task');
+    expect(JSON.stringify(records)).not.toContain(secret);
+    expect(records[0]!.changes[0]!.patch).toContain('content withheld by secret policy.');
+    expect(records[0]!.changes[0]!.patch).toContain('+after');
+  });
+
   it.each([
     ['missing row', undefined],
     ['missing gzip', null],

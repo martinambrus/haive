@@ -1,5 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { copyFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,7 @@ import {
   FIX_TEST_RECORD_LIMIT,
   FIX_TEST_PENDING_COUNT,
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
+import { gitExec } from '../src/repo/git-exec.js';
 import { captureTestImage } from '../src/step-engine/steps/workflow/_fix-test-edits.js';
 
 const url = process.env.CANCEL_FENCE_TEST_URL;
@@ -189,6 +190,44 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       }))!.payload,
     ).toEqual(saved!.payload);
   });
+
+  it.each(['tests/.env.test', '.env'])(
+    'redacts a credential copied from %s at the blob write',
+    async (source) => {
+      const meta = await seed();
+      const secret = randomBytes(24).toString('hex');
+      const content = `ordinary before\r\nTOKEN="${secret}"\r\nordinary after\n`;
+      await writeFile(join(meta.workspace, source), content);
+      if (source.startsWith('tests/')) {
+        await gitExec(['init', '-q'], { cwd: meta.workspace });
+        await gitExec(['add', '--', source], { cwd: meta.workspace });
+      }
+      await beginFixTestCapture(db, meta);
+      await copyFile(join(meta.workspace, source), join(meta.workspace, 'tests/copied.json'));
+      await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after copy\r\n');
+      await end(meta.invocationId);
+      await finishFixTestCapture(db, meta.invocationId);
+      const blobs = await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        );
+      const contents = blobs.map((b) => b.content?.toString());
+      expect(contents).toContain(
+        'ordinary before\r\ncontent withheld by secret policy.\r\nordinary after\n',
+      );
+      expect(contents).toContain('after copy\r\n');
+      expect(
+        blobs.some((b) => b.contentHash === createHash('sha256').update(content).digest('hex')),
+      ).toBe(true);
+      expect(contents.join('')).not.toContain(secret);
+      expect(JSON.stringify(await loadFixTestRecords(db, meta.taskId))).not.toContain(secret);
+    },
+  );
 
   it('keeps no content when a protected fixture moves to an allowed name', async () => {
     const meta = await seed();

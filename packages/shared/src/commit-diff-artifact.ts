@@ -1,3 +1,5 @@
+import { CREDENTIAL_WITHHELD, redactCredentialText } from './credential-scan.js';
+
 export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
 
 export type CommitDiffLink = 'symlink' | 'gitlink';
@@ -39,4 +41,32 @@ export interface CommitDiffArtifact {
   /** File list was capped at MAX_FILES. */
   truncated: boolean;
   files: CommitDiffFile[];
+}
+
+/** Recheck legacy artifacts at serve time. Invalid/partial JSON never falls back to raw
+ * content, which could contain escaped credentials the text scanner cannot recognise. */
+export function redactCommitDiffJson(text: string): string {
+  try {
+    const artifact: unknown = JSON.parse(text);
+    if (
+      !artifact ||
+      typeof artifact !== 'object' ||
+      !('files' in artifact) ||
+      !Array.isArray(artifact.files)
+    )
+      return CREDENTIAL_WITHHELD;
+    let changed = false;
+    for (const file of artifact.files) {
+      if (!file || typeof file !== 'object') return CREDENTIAL_WITHHELD;
+      for (const key of ['oldContent', 'newContent'] as const) {
+        if (typeof file[key] !== 'string') return CREDENTIAL_WITHHELD;
+        const safe = redactCredentialText(file[key]);
+        changed ||= safe !== file[key];
+        file[key] = safe;
+      }
+    }
+    return changed ? JSON.stringify(artifact) : text;
+  } catch {
+    return CREDENTIAL_WITHHELD;
+  }
 }

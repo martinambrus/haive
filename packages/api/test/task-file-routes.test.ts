@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -86,6 +87,47 @@ describe('task file read routes', () => {
     await rm(storage, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   });
+
+  it.each([
+    ['/files/raw', false],
+    ['/files/content', false],
+    ['/files/raw', true],
+    ['/files/content', true],
+  ] as const)(
+    'redacts a legacy gate-3 artifact at %s (outside current workspace=%s)',
+    async (route, outsideWorkspace) => {
+      const secret = randomBytes(24).toString('hex');
+      const ordinary = 'ordinary\r\nunchanged\n';
+      const artifact = {
+        headSha: null,
+        fileCount: 1,
+        truncated: false,
+        files: [
+          {
+            path: 'tests/copied.json',
+            status: 'modified',
+            binary: false,
+            truncated: false,
+            oldContent: `TOKEN="${secret}"\n`,
+            newContent: ordinary,
+          },
+        ],
+      };
+      const target = path.join(outsideWorkspace ? repo : worktree, '.haive/gate3-diff.json');
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, JSON.stringify(artifact));
+      const res = await get(route, { path: target });
+      expect(res.status).toBe(200);
+      const body = route.endsWith('raw')
+        ? await res.text()
+        : ((await res.json()) as { content: string }).content;
+      expect(body).not.toContain(secret);
+      expect(JSON.parse(body).files[0]).toMatchObject({
+        oldContent: 'content withheld by secret policy.\n',
+        newContent: ordinary,
+      });
+    },
+  );
 
   describe('GET /files', () => {
     it('lists the workspace, with a link as neither file nor directory', async () => {

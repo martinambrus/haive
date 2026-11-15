@@ -254,6 +254,10 @@
     "./step/review": {
       "types": "./dist/step/review.d.ts",
       "import": "./dist/step/review.js"
+    },
+    "./credential-scan": {
+      "types": "./dist/credential-scan.d.ts",
+      "import": "./dist/credential-scan.js"
     }
   },
   "scripts": {

@@ -1,3 +1,4 @@
+import { redactCredentialText } from '@haive/shared/credential-scan';
 import path from 'node:path';
 import type {
   CommitDiffArtifact,
@@ -267,8 +268,8 @@ export async function buildFileEntry(
     status,
     binary,
     truncated,
-    oldContent,
-    newContent,
+    oldContent: redactCredentialText(oldContent),
+    newContent: redactCredentialText(newContent),
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
   if (unreadable) file.unreadable = true;

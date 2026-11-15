@@ -1,3 +1,4 @@
+import { redactCredentialText } from '@haive/shared/credential-scan';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -256,7 +257,12 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
   let task = usage.filter((b) => b.taskId === taskId).reduce((n, b) => n + b.size, 0);
   const evicted = new Set<object>();
   for (const [hash, file] of candidates) {
-    const content = Buffer.from(file.base64!, 'base64');
+    const original = Buffer.from(file.base64!, 'base64');
+    const text = original.toString('utf8');
+    const redacted = redactCredentialText(text);
+    // The key remains the measured original identity: different edits must not alias
+    // merely because their credential lines redact to the same display text.
+    const content = redacted === text ? original : Buffer.from(redacted);
     if (
       content.length > (options.taskBytes ?? FIX_TEST_TASK_BYTES) ||
       content.length > (options.storeBytes ?? FIX_TEST_STORE_BYTES)
@@ -515,7 +521,10 @@ export async function loadFixTestRecords(
   const bytes = new Map(
     blobs
       .filter((b) => b.content && !b.expiredAt)
-      .map((b) => [b.contentHash, b.content!.toString('base64')]),
+      .map((b) => [
+        b.contentHash,
+        Buffer.from(redactCredentialText(b.content!.toString('utf8'))).toString('base64'),
+      ]),
   );
   const hydrate = (image: TestImage | undefined, changed: Set<string>): TestImage =>
     image

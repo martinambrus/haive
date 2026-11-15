@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,6 +28,37 @@ const GIT_ENV = {
 const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
 
 describe('buildCommitDiffArtifact', () => {
+  it('redacts both content sides before writing the artifact and preserves ordinary bytes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-redaction-'));
+    const secret = randomBytes(24).toString('hex');
+    const old = `before\r\nTOKEN="${secret}"\r\nafter\n`;
+    try {
+      await mkdir(path.join(dir, 'tests'));
+      await writeFile(path.join(dir, 'tests/copied.json'), old + 'edit\n');
+      const fakeGit: Parameters<typeof buildCommitDiffArtifact>[1] = async (_cwd, args) => ({
+        code: 0,
+        stderr: '',
+        stdout: args.includes('status')
+          ? ' M tests/copied.json\0'
+          : args.includes('ls-tree')
+            ? `100644 blob ${'a'.repeat(40)} ${Buffer.byteLength(old)}\ttests/copied.json\0`
+            : args.includes('show')
+              ? old
+              : 'a'.repeat(40),
+      });
+      const result = await buildCommitDiffArtifact(dir, fakeGit);
+      const saved = await readFile(result.artifactPath, 'utf8');
+      expect(saved).not.toContain(secret);
+      const safe = 'before\r\ncontent withheld by secret policy.\r\nafter\n';
+      expect(result.artifact.files[0]).toMatchObject({
+        oldContent: safe,
+        newContent: safe + 'edit\n',
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('clears an earlier artifact on a failed git status', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
     try {
