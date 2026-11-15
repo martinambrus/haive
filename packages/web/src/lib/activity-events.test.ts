@@ -9,9 +9,11 @@ describe('Activity events', () => {
       { eventType: 'learning.refine' },
       { eventType: 'future.user_action' },
       { eventType: 'insight.batch' },
+      { eventType: 'insight.page' },
+      { eventType: 'task.markdown_report' },
     ];
     expect(activityEvents(events)).toEqual([events[0], events[2], events[3]]);
-    expect(events).toHaveLength(5);
-    expect(activityEvents([events[1]!, events[4]!])).toEqual([]);
+    expect(events).toHaveLength(7);
+    expect(activityEvents([events[1]!, events[4]!, events[5]!, events[6]!])).toEqual([]);
   });
 });

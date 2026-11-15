@@ -134,3 +134,23 @@ describe('completed Markdown reports', () => {
     expect((await app.request(`/tasks/${TASK}/reports/${reportId}`)).status).toBe(404);
   });
 });
+
+it.each([
+  null,
+  { version: 2, title: 'Future', items: [] },
+  { version: 1, title: 'Invalid', items: [42] },
+])('unsupported report payload returns a typed 4xx through the route: %j', async (payload) => {
+  const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
+  fake.insert(schema.tasks, { id: TASK, userId: USER });
+  const reportId = '00000000-0000-4000-8000-0000000000c1';
+  fake.insert(schema.taskEvents, {
+    id: reportId,
+    taskId: TASK,
+    eventType: 'task.markdown_report',
+    payload,
+  });
+  h.db = fake.db;
+  const response = await app.request(`/tasks/${TASK}/reports/${reportId}`);
+  expect(response.status).toBe(422);
+  expect(await response.json()).toMatchObject({ code: 'markdown-report-unsupported' });
+});

@@ -1,4 +1,5 @@
 import { INSIGHTS_AT_GATE } from '@haive/shared';
+import { HttpError } from '../../context.js';
 /** A report page is bounded independently of its complete durable snapshot. */
 export function markdownReportPage(
   payload: Record<string, unknown> | null,
@@ -13,7 +14,7 @@ export function markdownReportPage(
     !Array.isArray(payload.items) ||
     payload.items.some((i) => typeof i !== 'string')
   )
-    throw new Error('Unsupported markdown report.');
+    throw new HttpError(422, 'Unsupported markdown report.', 'markdown-report-unsupported');
   const items = payload.items as string[];
   return {
     title: payload.title,
