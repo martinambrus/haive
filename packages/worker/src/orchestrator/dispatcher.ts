@@ -1,3 +1,11 @@
+import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
+import {
+  resolveTaskCommittedSnapshots,
+  snapshotToolProfile,
+  type SnapshotDispatchCache,
+  type ResolvedCommittedSnapshots,
+} from '../repo/committed-snapshot.js';
+import type { CommittedSnapshotRef } from '@haive/shared';
 import type { Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -140,6 +148,8 @@ export interface DispatchPlan {
 }
 
 export interface DispatchRequest {
+  snapshotRef?: CommittedSnapshotRef | null;
+  baseSnapshotRef?: CommittedSnapshotRef | null;
   promptBudget?: {
     maxChars: number;
     outputReserveChars: number;
@@ -339,6 +349,28 @@ export async function resolveTaskDispatch(
   db: Database,
   taskId: string,
   req: DispatchRequest,
+  cache?: SnapshotDispatchCache,
+): Promise<DispatchPlan> {
+  const snapshots = await resolveTaskCommittedSnapshots(db, taskId, req, undefined, cache);
+  const clamped = snapshots
+    ? {
+        ...req,
+        toolProfile: snapshotToolProfile(true, req.toolProfile),
+        customTools: undefined,
+        integrations: undefined,
+      }
+    : req;
+  return resolveTaskDispatchOnTree(db, taskId, clamped, snapshots);
+}
+
+type SnapshotDispatchRequest = DispatchRequest & {
+  snapshotWorkspace?: ResolvedCommittedSnapshots | null;
+};
+async function resolveTaskDispatchOnTree(
+  db: Database,
+  taskId: string,
+  req: DispatchRequest,
+  snapshotWorkspace: ResolvedCommittedSnapshots | null,
 ): Promise<DispatchPlan> {
   const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
   const [
@@ -352,8 +384,10 @@ export async function resolveTaskDispatch(
     agentIsolation,
     agentRulesInjection,
   ] = await Promise.all([
-    hasReadyLspBridge(db, taskId),
-    resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
+    snapshotWorkspace ? false : hasReadyLspBridge(db, taskId),
+    snapshotWorkspace
+      ? false
+      : resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
     req.toolProfile === 'none'
       ? emptyMcpSurface()
       : resolveMcpSurface(
@@ -372,16 +406,32 @@ export async function resolveTaskDispatch(
   ]);
   const appServesOtherTree =
     isReachableApp(appReach) &&
-    req.worktreeRel !== undefined &&
-    (await resolveInvocationWorkerTree(db, taskId, req.worktreeRel)) !==
-      (await resolveInvocationWorkerTree(db, taskId));
+    (snapshotWorkspace !== null ||
+      (req.worktreeRel !== undefined &&
+        (await resolveInvocationWorkerTree(db, taskId, req.worktreeRel)) !==
+          (await resolveInvocationWorkerTree(db, taskId))));
   const houseRuleSelection = houseRules
-    ? await selectForDispatch(db, taskId, houseRules, req.worktreeRel, globalKb)
+    ? await selectForDispatch(
+        db,
+        taskId,
+        houseRules,
+        req.worktreeRel,
+        globalKb,
+        snapshotWorkspace
+          ? [
+              ...new Set([
+                ...snapshotWorkspace.target.tracked,
+                ...(snapshotWorkspace.base?.tracked ?? []),
+              ]),
+            ]
+          : undefined,
+      )
     : undefined;
   if (houseRuleSelection?.status === 'unavailable') {
     await recordHouseRulesUnavailable(db, taskId, houseRuleSelection.errorClass ?? 'other');
   }
-  const resolved: DispatchRequest = {
+  const resolved: SnapshotDispatchRequest = {
+    snapshotWorkspace,
     ...req,
     input: neutraliseUnresolvedTemplateMarkers(req),
     lspConfigured,
@@ -394,7 +444,7 @@ export async function resolveTaskDispatch(
     appServesOtherTree,
     codexAppServer,
     hasRepo,
-    agentIsolation,
+    agentIsolation: snapshotWorkspace ? false : agentIsolation,
     agentRulesInjection,
     houseRules,
     houseRuleSelection,
@@ -427,7 +477,7 @@ export async function resolveTaskDispatch(
   if (templated !== null && 'failure' in templated) {
     return { ...skipPlan(templated.failure), personaFailure: templated.failure };
   }
-  const withTemplates: DispatchRequest =
+  const withTemplates: SnapshotDispatchRequest =
     templated === null ? resolved : { ...resolved, templatePersonas: templated.personas };
   const isolation = await resolveAgentIsolation(
     db,
@@ -466,7 +516,7 @@ function neutraliseUnresolvedTemplateMarkers(req: DispatchRequest): DispatchInpu
 async function resolveTemplatePersonas(
   db: Database,
   taskId: string,
-  resolved: DispatchRequest,
+  resolved: SnapshotDispatchRequest,
   provider: CliProviderRecord,
 ): Promise<
   | { personas: Record<string, { body: string; rel: string }>; used: number }
@@ -477,7 +527,9 @@ async function resolveTemplatePersonas(
   const ids = templatePersonaIds(stripHaivePreamble(resolved.input.prompt));
   if (ids.length === 0) return null;
 
-  const workerTree = await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel);
+  const workerTree =
+    resolved.snapshotWorkspace?.target.workerRoot ??
+    (await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel));
   if (workerTree === null) {
     return {
       failure: templatePersonaFailure(
@@ -486,20 +538,30 @@ async function resolveTemplatePersonas(
       ),
     };
   }
-  const mask = await resolvePersonaMaskPolicy(db, taskId, workerTree);
+  const mask = await resolvePersonaMaskPolicy(
+    db,
+    taskId,
+    workerTree,
+    resolved.snapshotWorkspace?.target.tracked,
+  );
   if (mask === null) {
     return {
       failure: templatePersonaFailure(ids[0]!, 'the secret-mask policy could not be evaluated'),
     };
   }
   const metadata = getCliProviderMetadata(provider.name);
-  const result = await readTemplatePersonas({
-    workerTree,
-    providerAgentsDir: metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null,
-    ids,
-    policy: mask.policy,
-    loadTracked: mask.loadTracked,
-  });
+  const read = () =>
+    readTemplatePersonas({
+      workerTree,
+      providerAgentsDir: metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null,
+      ids,
+      policy: mask.policy,
+      loadTracked: mask.loadTracked,
+    });
+  // Only the file read holds scratch; policy queries and provider probes stay outside it.
+  const result = resolved.snapshotWorkspace
+    ? await withTaskScratchWorkspace(resolved.snapshotRef!.userId, taskId, read)
+    : await read();
   return result.ok ? { personas: result.personas, used: result.used } : { failure: result.failure };
 }
 
@@ -512,14 +574,16 @@ async function resolveTemplatePersonas(
 async function resolveAgentIsolation(
   db: Database,
   taskId: string,
-  resolved: DispatchRequest,
+  resolved: SnapshotDispatchRequest,
   provider: CliProviderRecord,
   adapter: BaseCliAdapter,
   templateBytes: number,
 ): Promise<Pick<DispatchRequest, 'instructionsNameAgentPath' | 'agentBodies'> | null> {
   if (!agentIsolationApplies(resolved)) return null;
 
-  const workerTree = await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel);
+  const workerTree =
+    resolved.snapshotWorkspace?.target.workerRoot ??
+    (await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel));
   // No repository tree: nothing is mounted, so no agent directory can be read or masked, and the
   // instructions that would name one do not exist either.
   if (workerTree === null) return { instructionsNameAgentPath: false };
@@ -550,7 +614,12 @@ async function resolveAgentIsolation(
 
   // Fails CLOSED, unlike the rest of isolation: a policy that cannot be evaluated pastes nothing,
   // because a body already in a prompt cannot be retracted.
-  const mask = await resolvePersonaMaskPolicy(db, taskId, workerTree);
+  const mask = await resolvePersonaMaskPolicy(
+    db,
+    taskId,
+    workerTree,
+    resolved.snapshotWorkspace?.target.tracked,
+  );
   if (mask === null) return { instructionsNameAgentPath: false };
 
   const { bodies, oversized } = await readPersonaBodies({

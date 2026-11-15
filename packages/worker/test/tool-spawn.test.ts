@@ -46,6 +46,37 @@ describe('runTool', () => {
     return open(path.join(dir, name), 'r');
   };
 
+  it('exchanges multiple requests with one child over a held descriptor', async () => {
+    const file = await held('dialogue.txt', 'owned');
+    const replies: string[] = [];
+    try {
+      await runTool(
+        process.execPath,
+        [
+          '-e',
+          `
+        const fs = require('fs'), readline = require('readline');
+        const body = fs.readFileSync(3, 'utf8');
+        readline.createInterface({ input: process.stdin }).on('line', line => process.stdout.write(line + ':' + body + '\\n'));
+      `,
+        ],
+        {
+          fds: [file],
+          interact: async (input, output) => {
+            const chunks = output[Symbol.asyncIterator]();
+            for (const request of ['first', 'second']) {
+              input.write(request + '\n');
+              replies.push(String((await chunks.next()).value));
+            }
+          },
+        },
+      );
+      expect(replies).toEqual(['first:owned\n', 'second:owned\n']);
+    } finally {
+      await file.close();
+    }
+  });
+
   it('hands the child its descriptors in slot order', async () => {
     const a = await held('a.txt', 'first\n');
     const b = await held('b.txt', 'second\n');

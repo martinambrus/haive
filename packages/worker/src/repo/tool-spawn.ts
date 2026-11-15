@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
@@ -24,6 +25,9 @@ export interface RunToolOptions {
   fds?: readonly FileHandle[];
   /** Streamed to the child's stdin from offset 0; without it stdin is closed. */
   stdin?: FileHandle;
+  /** A bounded request/response protocol over one child. The caller bounds each response;
+   * stdout is consumed here instead of captured. stdin closes when the dialogue ends. */
+  interact?: (stdin: Writable, stdout: Readable) => Promise<void>;
   /** Capture stdout up to this many bytes, killing the child past it; without it stdout is dropped. */
   maxStdout?: number;
   /** Exit codes that count as success. */
@@ -47,14 +51,14 @@ export function runTool(
   cmd: string,
   args: readonly string[],
   opts: RunToolOptions = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: string; stdoutBytes: Buffer; stderr: string; exitCode: number }> {
   const asRoot = process.getuid?.() === 0;
   const okExits = opts.okExits ?? [0];
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, {
       stdio: [
-        opts.stdin ? 'pipe' : 'ignore',
-        opts.maxStdout === undefined ? 'ignore' : 'pipe',
+        opts.stdin || opts.interact ? 'pipe' : 'ignore',
+        opts.maxStdout === undefined && !opts.interact ? 'ignore' : 'pipe',
         'pipe',
         ...(opts.fds ?? []).map((fh) => fh.fd),
       ],
@@ -71,15 +75,16 @@ export function runTool(
     };
     const stdout: Buffer[] = [];
     let stdoutBytes = 0;
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBytes += chunk.length;
-      if (opts.maxStdout !== undefined && stdoutBytes > opts.maxStdout) {
-        proc.kill('SIGKILL');
-        fail(new Error(`${cmd} wrote more than ${opts.maxStdout} bytes`));
-        return;
-      }
-      stdout.push(chunk);
-    });
+    if (!opts.interact)
+      proc.stdout?.on('data', (chunk: Buffer) => {
+        stdoutBytes += chunk.length;
+        if (opts.maxStdout !== undefined && stdoutBytes > opts.maxStdout) {
+          proc.kill('SIGKILL');
+          fail(new Error(`${cmd} wrote more than ${opts.maxStdout} bytes`));
+          return;
+        }
+        stdout.push(chunk);
+      });
     let stderr = '';
     proc.stderr?.on('data', (chunk: Buffer) => {
       if (stderr.length < MAX_STDERR) stderr += chunk.toString('utf8');
@@ -94,13 +99,27 @@ export function runTool(
       input.on('error', fail);
       input.pipe(proc.stdin);
     }
+    const dialogue = opts.interact
+      ? opts.interact(proc.stdin!, proc.stdout!).then(
+          () => {
+            proc.stdin!.end();
+          },
+          (err) => {
+            proc.kill('SIGKILL');
+            fail(err);
+          },
+        )
+      : Promise.resolve();
+    if (opts.interact) proc.stdin?.on('error', fail);
     proc.on('error', fail);
-    proc.on('close', (code) => {
+    proc.on('close', async (code) => {
+      await dialogue;
       input?.destroy();
       if (settled) return;
       if (code !== null && okExits.includes(code)) {
         settled = true;
-        resolve({ stdout: Buffer.concat(stdout).toString('utf8'), stderr, exitCode: code });
+        const stdoutBytes = Buffer.concat(stdout);
+        resolve({ stdout: stdoutBytes.toString('utf8'), stdoutBytes, stderr, exitCode: code });
         return;
       }
       fail(new Error(`${cmd} failed (exit ${code ?? 'killed'}): ${stderr.trim()}`));

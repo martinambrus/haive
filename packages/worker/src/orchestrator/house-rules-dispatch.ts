@@ -157,6 +157,7 @@ async function readNamedFiles(
   taskId: string,
   worktreeRel: string | undefined,
   extraText?: string,
+  snapshotFiles?: readonly string[],
 ): Promise<string[]> {
   try {
     const names = [
@@ -166,8 +167,12 @@ async function readNamedFiles(
       ]),
     ];
     if (names.length === 0) return [];
-    const tree = await resolveInvocationWorkerTree(db, taskId, worktreeRel);
-    const tracked = tree === null ? null : await readTrackedFiles(tree);
+    const tree = snapshotFiles ? null : await resolveInvocationWorkerTree(db, taskId, worktreeRel);
+    const tracked = snapshotFiles
+      ? [...snapshotFiles]
+      : tree === null
+        ? null
+        : await readTrackedFiles(tree);
     if (tracked !== null) return resolveNamedFiles(names, tracked);
     log.warn({ taskId }, 'could not list the tracked files to resolve the paths a task names');
     return [];
@@ -195,17 +200,24 @@ export async function selectForDispatch(
   request: HouseRulesRequest,
   worktreeRel: string | undefined,
   kb: Pick<GlobalKbContext, 'status' | 'errorClass' | 'rules' | 'refused'>,
+  snapshotFiles?: readonly string[],
 ): Promise<HouseRuleSelection> {
   if (kb.status === 'disabled') return disabledSelection();
   if (kb.status === 'unavailable') return unavailableSelection(kb.errorClass ?? 'other');
   const scoped = kb.rules.some((rule) => rule.spec.mode === 'files');
-  const changedFiles = scoped ? await readDispatchChange(db, taskId, worktreeRel) : [];
+  // A committed view has no checkout/index. Conservatively cover the entire target/base
+  // inventory, including base-only deletions, rather than scope on a different live tree.
+  const changedFiles = scoped
+    ? snapshotFiles
+      ? [...snapshotFiles]
+      : await readDispatchChange(db, taskId, worktreeRel)
+    : [];
   const named =
     scoped &&
     changedFiles !== null &&
     request.mode === 'write' &&
     request.estimatedFiles === undefined
-      ? await readNamedFiles(db, taskId, worktreeRel, request.namedText)
+      ? await readNamedFiles(db, taskId, worktreeRel, request.namedText, snapshotFiles)
       : [];
   return selectHouseRules({
     mode: request.mode,

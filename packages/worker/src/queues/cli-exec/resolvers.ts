@@ -1,3 +1,9 @@
+import {
+  resolveTaskCommittedSnapshots,
+  SNAPSHOT_BASE_TARGET,
+  type ResolvedCommittedSnapshots,
+} from '../../repo/committed-snapshot.js';
+import type { CommittedSnapshotRef } from '@haive/shared';
 import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import {
@@ -403,24 +409,31 @@ export async function resolveMcpExtraFiles(
   networkPolicy: CliNetworkPolicy | null,
   /** The run these files are for; only a prompt step's own run names custom tools, and its invocation row may carry integrations. */
   run?: CustomRun,
+  workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
     await clearVolumeBackedMcp(taskId, providerName, sandboxImage);
     return empty;
   }
-  const ragOnly = profile === 'rag_only';
+  const ragOnly = profile === 'rag_only' || workspaceKind === 'snapshot';
 
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a
   // prompt can advertise a server this mount does not wire.
-  const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
+  const surface = await resolveMcpSurface(
+    db,
+    taskId,
+    ragOnly,
+    workspaceKind === 'snapshot' ? undefined : run?.customTools,
+  );
   const customFiles =
     run && surface.custom ? await resolveCustomFiles(db, taskId, run, surface.custom) : null;
   const integrationsFiles =
     run && !ragOnly ? await resolveIntegrationsFiles(db, taskId, run) : null;
 
   const ragLspAvailable =
+    workspaceKind !== 'snapshot' &&
     cliAdapterRegistry.has(providerName) &&
     cliAdapterRegistry.get(providerName).supportsLsp &&
     (await hasReadyLspBridge(db, taskId));
@@ -688,7 +701,40 @@ export async function resolveInvocationRepoMount(
   db: Database,
   taskId: string,
   worktreeRel?: string,
-): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean; hasRepo: boolean }> {
+  refs: {
+    snapshotRef?: CommittedSnapshotRef | null;
+    baseSnapshotRef?: CommittedSnapshotRef | null;
+  } = {},
+): Promise<{
+  repoMount: DockerVolumeMount | null;
+  hasWorktree: boolean;
+  hasRepo: boolean;
+  workspaceKind: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none';
+  snapshots?: ResolvedCommittedSnapshots;
+  baseMount?: DockerVolumeMount | null;
+}> {
+  const snapshots = await resolveTaskCommittedSnapshots(db, taskId, refs);
+  if (snapshots)
+    return {
+      repoMount: {
+        source: REPO_VOLUME_NAME,
+        target: REPO_MOUNT_TARGET,
+        subpath: snapshots.target.subpath,
+        readOnly: true,
+      },
+      baseMount: snapshots.base
+        ? {
+            source: REPO_VOLUME_NAME,
+            target: SNAPSHOT_BASE_TARGET,
+            subpath: snapshots.base.subpath,
+            readOnly: true,
+          }
+        : null,
+      hasWorktree: false,
+      hasRepo: true,
+      workspaceKind: 'snapshot',
+      snapshots,
+    };
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: {
@@ -700,13 +746,13 @@ export async function resolveInvocationRepoMount(
       metadata: true,
     },
   });
-  if (!task) return { repoMount: null, hasWorktree: false, hasRepo: false };
+  if (!task) return { repoMount: null, hasWorktree: false, hasRepo: false, workspaceKind: 'none' };
   if (!task.repositoryId) {
     // `hasRepo` is separate from "there is a mount" precisely because of this branch: a
     // repo-less task DOES get a mount (an empty scratch workspace), so a null check on
     // repoMount can no longer answer "is there a repository here".
     if (!taskMayRunWithoutRepository(task)) {
-      return { repoMount: null, hasWorktree: false, hasRepo: false };
+      return { repoMount: null, hasWorktree: false, hasRepo: false, workspaceKind: 'none' };
     }
     // Same reason as resolveTaskRepoMount: the directory has to EXIST before docker will
     // mount the subpath, and ensuring is idempotent.
@@ -719,6 +765,7 @@ export async function resolveInvocationRepoMount(
       },
       hasWorktree: false,
       hasRepo: false,
+      workspaceKind: 'scratch',
     };
   }
 
@@ -726,7 +773,7 @@ export async function resolveInvocationRepoMount(
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { source: true, storagePath: true, localPath: true },
   });
-  if (!repo) return { repoMount: null, hasWorktree: false, hasRepo: false };
+  if (!repo) return { repoMount: null, hasWorktree: false, hasRepo: false, workspaceKind: 'none' };
 
   const storagePath = repo.storagePath ?? repo.localPath;
 
@@ -740,6 +787,7 @@ export async function resolveInvocationRepoMount(
       repoMount: { source: hostPath, target: REPO_MOUNT_TARGET, readOnly: true },
       hasWorktree: false,
       hasRepo: true,
+      workspaceKind: 'repository',
     };
   }
 
@@ -764,7 +812,8 @@ export async function resolveInvocationRepoMount(
   });
   // A local-path repo is the only case it declines, and that branch returned above. Narrowed
   // rather than asserted, so a change to either side surfaces as no mount instead of a wrong one.
-  if (subpath === undefined) return { repoMount: null, hasWorktree: false, hasRepo: true };
+  if (subpath === undefined)
+    return { repoMount: null, hasWorktree: false, hasRepo: true, workspaceKind: 'repository' };
   // A linked worktree lives under WORKTREE_SUBDIR and its `.git` is a gitfile (mask it);
   // the repo root — onboarding, or a 12-cleanup merge that runs at the parent checkout —
   // has a `.git` DIRECTORY and must NOT be masked. Key the signal on the mounted path so a
@@ -780,6 +829,7 @@ export async function resolveInvocationRepoMount(
     repoMount: { source: REPO_VOLUME_NAME, target: REPO_MOUNT_TARGET, subpath },
     hasWorktree,
     hasRepo: true,
+    workspaceKind: hasWorktree ? 'worktree' : 'repository',
   };
 }
 
@@ -847,7 +897,7 @@ export {
  *  user's host filesystem. Failure is fatal so an unwritable agent run cannot
  *  be misreported later as completed implementation debt. */
 export async function ensureRepoMountWritable(repoMount: DockerVolumeMount | null): Promise<void> {
-  if (!repoMount) return;
+  if (!repoMount || repoMount.readOnly) return;
   if (repoMount.source !== REPO_VOLUME_NAME) return;
   if (!repoMount.subpath) return;
 

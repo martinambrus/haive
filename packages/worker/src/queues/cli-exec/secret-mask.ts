@@ -13,7 +13,7 @@ import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-ru
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { splitWorktreePath, WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../../repo/worktree-git-boundary.js';
-import { resolveInvocationWorkerRoot } from './resolvers.js';
+import { resolveInvocationWorkerRoot } from '../../repo/worktree-git-boundary.js';
 import {
   secretMaskDeniesPath,
   secretMaskPolicy,
@@ -56,6 +56,7 @@ export async function resolveSecretMasks(
   db: Database,
   taskId: string,
   repoMount?: DockerVolumeMount | null,
+  trackedInventory?: ReadonlySet<string>,
 ): Promise<SandboxExtraFile[]> {
   // Global kill-switch: lets ops disable masking everywhere without per-repo
   // edits or a redeploy. Default true.
@@ -91,6 +92,7 @@ export async function resolveSecretMasks(
     workerRoot,
     { allow: repo.secretMaskAllow, denyExtend: repo.secretMaskDenyExtend },
     repoMount?.target ?? SANDBOX_WORKDIR,
+    trackedInventory,
   );
 }
 
@@ -171,6 +173,7 @@ export async function assertPastedPersonasStillAllowed(
   taskId: string,
   repoMount: DockerVolumeMount | null | undefined,
   paths: readonly string[],
+  trackedInventory?: ReadonlySet<string>,
 ): Promise<void> {
   if (paths.length === 0) return;
 
@@ -221,7 +224,7 @@ export async function assertPastedPersonasStillAllowed(
 
   // The tracked set is resolved at most once, and only for a path the globs already deny: masking is
   // untracked-only, so git can rescue a denied path but never condemn an allowed one.
-  let tracked: Set<string> | null | undefined;
+  let tracked: ReadonlySet<string> | null | undefined = trackedInventory;
   const denied: string[] = [];
   for (const rel of paths) {
     if (!secretMaskDeniesPath(policy, rel)) continue;
@@ -235,7 +238,8 @@ export async function assertPastedPersonasStillAllowed(
         }),
       );
     }
-    if (secretMaskDeniesPath({ ...policy, tracked }, rel)) denied.push(rel);
+    if (secretMaskDeniesPath({ ...policy, tracked: tracked ? new Set(tracked) : null }, rel))
+      denied.push(rel);
   }
   if (denied.length === 0) return;
 
@@ -261,6 +265,7 @@ export async function computeSecretMasks(
   workerRoot: string,
   opts: { allow?: string[] | null; denyExtend?: string[] | null },
   containerWorkdir: string = SANDBOX_WORKDIR,
+  trackedInventory?: ReadonlySet<string>,
 ): Promise<SandboxExtraFile[]> {
   const { deny, ignore } = computeEffectiveSecretGlobs(opts);
 
@@ -312,7 +317,11 @@ export async function computeSecretMasks(
   if (matches.length === 0) return [];
 
   // Tier 1: mask untracked files only. Sorted so the set is reproducible run to run.
-  const rels = (await filterUntracked(workerRoot, matches)).sort();
+  const rels = (
+    trackedInventory
+      ? matches.filter((rel) => !trackedInventory.has(rel))
+      : await filterUntracked(workerRoot, matches)
+  ).sort();
   if (rels.length === 0) return [];
 
   // Masking an arbitrary subset leaves the remainder readable, which is the one

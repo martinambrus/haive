@@ -234,8 +234,10 @@ export interface LlmInvocationSpec {
 }
 
 export interface AgentMiningDispatch {
-  /** Host-issued descriptors, never fields parsed from agent output. Inert until the host
-   * snapshot consumer is enabled; execution currently refuses every non-null ref. */
+  /** Host-issued committed views, never fields parsed from agent output. The host validates
+   * owner, pinned objects and inventory before reservation and execution; mounts are read-only.
+   * No core step offers a pin by default. Disable new consumers before rollback and retain a
+   * capable worker for every queued or resumable pinned generation; older workers ignore pins. */
   snapshotRef?: CommittedSnapshotRef | null;
   baseSnapshotRef?: CommittedSnapshotRef | null;
   agentId: string;

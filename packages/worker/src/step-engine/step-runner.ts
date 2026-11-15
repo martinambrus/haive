@@ -1,4 +1,11 @@
 import {
+  resolveTaskCommittedSnapshots,
+  snapshotToolProfile,
+  SnapshotReservationPredatesError,
+  type SnapshotDispatchCache,
+  isCommittedSnapshotFailure,
+} from '../repo/committed-snapshot.js';
+import {
   validateSuccessfulStepOutput,
   StepOutputContractInvalidError,
 } from './step-output-contract.js';
@@ -1707,7 +1714,10 @@ async function resolveAgentMiningPhase(
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
 
-    // Fail fast on a fatal provider failure (rate-limit/quota, bad/expired auth, 5xx),
+    // Fail fast on provider outages and invalid/unavailable committed snapshots.
+    // Mining rows have no failure-class column: the snapshot sentinel matches both the exec
+    // writer and the prefixed releaseUnsentAgents writer, pinned through those real paths.
+    // Provider failures (rate-limit/quota, bad/expired auth, 5xx) are handled here,
     // mirroring the DAG guard (pickFatalProviderError in dag-executor). A fan-out otherwise
     // DEGRADES every terminal failure identically: apply() reports the dead agent as a
     // non-approving finding and the step still passes, so a depleted provider silently became
@@ -1724,12 +1734,14 @@ async function resolveAgentMiningPhase(
     // the one that hit the wall.
     // A content-filter refusal is that one agent's failure and degrades like any other.
     const fatalAgent = existing.find(
-      (r) => r.status === 'failed' && isProviderOutage(r.errorMessage),
+      (r) =>
+        r.status === 'failed' &&
+        (isProviderOutage(r.errorMessage) || isCommittedSnapshotFailure(r.errorMessage)),
     );
     if (fatalAgent?.errorMessage) {
       ctx.logger.warn(
         { stepId: stepDef.metadata.id, agentId: fatalAgent.agentId },
-        'mining fan-out hit a fatal provider failure; failing the step instead of degrading',
+        'mining fan-out hit a provider outage or committed snapshot failure; failing the step instead of degrading',
       );
       const failedRow = await updateRow(db, current.id, {
         status: 'failed',
@@ -2005,6 +2017,19 @@ function recordedRequirements(row: MiningRow | undefined): DispatchRequirements 
   return out;
 }
 
+/** Existing reservations always retain their pin. A newly pinned offer cannot upgrade a live-
+ * checkout generation in place: fail it and require explicit Retry, whose existing reset deletes
+ * reservations and bumps rerun_generation. Resume/recovery never declares new analysis. */
+function replaySnapshotGeneration(
+  fresh: RunnerMiningDispatch,
+  row: MiningRow | undefined,
+): RunnerMiningDispatch {
+  const recorded = parseCommittedSnapshotRefs(row ?? {});
+  const offered = parseCommittedSnapshotRefs(fresh);
+  if (!recorded.snapshotRef && offered.snapshotRef) throw new SnapshotReservationPredatesError();
+  return { ...fresh, ...recorded };
+}
+
 const isStepCapability = (value: string): value is StepCapability =>
   (STEP_CAPABILITIES as readonly string[]).includes(value);
 
@@ -2180,6 +2205,10 @@ async function dispatchMiningAgents(
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<MiningDispatchOutcome> {
+  // Verify each inventory once for this fan-out; dispatch can reuse it, exec always rechecks bytes.
+  const snapshotCache: SnapshotDispatchCache = new Map();
+  for (const dispatch of dispatches)
+    await resolveTaskCommittedSnapshots(db, params.taskId, dispatch, undefined, snapshotCache);
   const spec = stepDef.agentMining!;
   const targets = new Map(
     existing ??
@@ -2198,7 +2227,15 @@ async function dispatchMiningAgents(
   // leaves `targets` only once settled, so a throw anywhere after the reservation releases it.
   let linking: { rowId: string; invocationId: string; linked: boolean } | null = null;
   try {
-    const stamp = await resolveDispatchStamp(db, params.taskId, stepDef, spec.toolProfile);
+    const stamp = await resolveDispatchStamp(
+      db,
+      params.taskId,
+      stepDef,
+      snapshotToolProfile(
+        dispatches.every((d) => d.snapshotRef != null),
+        spec.toolProfile,
+      ),
+    );
     let refusal = stamp.failure;
     const refuse = async (
       dispatch: RunnerMiningDispatch,
@@ -2264,6 +2301,7 @@ async function dispatchMiningAgents(
     const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
     let enqueued = 0;
     for (const dispatch of dispatches) {
+      const toolProfile = snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
       if (refusal !== null) {
@@ -2291,31 +2329,40 @@ async function dispatchMiningAgents(
       let plan: Awaited<ReturnType<typeof resolveTaskDispatch>> | undefined;
       let buildFailure: string | null = null;
       try {
-        plan = await resolveTaskDispatch(db, params.taskId, {
-          providers: params.providers!,
-          preferredProviderId,
-          steeringRequested,
-          input: {
-            kind: 'prompt',
-            prompt,
-            // Per-agent when the dispatch says so: a capability that depends on the
-            // task's inputs (the plan builder's `vision`, when a wireframe was
-            // attached) cannot live on the step's static list.
-            capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
+        plan = await resolveTaskDispatch(
+          db,
+          params.taskId,
+          {
+            providers: params.providers!,
+            preferredProviderId,
+            steeringRequested,
+            input: {
+              kind: 'prompt',
+              prompt,
+              // Per-agent when the dispatch says so: a capability that depends on the
+              // task's inputs (the plan builder's `vision`, when a wireframe was
+              // attached) cannot live on the step's static list.
+              capabilities: dispatch.capabilities ?? spec.requiredCapabilities,
+            },
+            snapshotRef: requirements.snapshotRef,
+            baseSnapshotRef: requirements.baseSnapshotRef,
+            preferVision: dispatch.preferVision === true,
+            // A mining agent that IS a persona (03's roster) is an assignment its prompt never
+            // marks; the dispatch names it and the dispatcher unions it with the marker ids.
+            assignedAgentIds: dispatch.personaIds,
+            toolProfile,
+            ...(dispatch.snapshotRef == null && stamp.bindings.length > 0
+              ? { integrations: stamp.bindings }
+              : {}),
+            houseRules: houseRulesFor(stepDef.metadata.id, dispatch.roleKey ?? 'default'),
+            invokeOpts: {
+              cwd: params.workspacePath,
+              effortLevel: preferredEffort ?? undefined,
+              disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+            },
           },
-          preferVision: dispatch.preferVision === true,
-          // A mining agent that IS a persona (03's roster) is an assignment its prompt never
-          // marks; the dispatch names it and the dispatcher unions it with the marker ids.
-          assignedAgentIds: dispatch.personaIds,
-          toolProfile: spec.toolProfile,
-          ...(stamp.bindings.length > 0 ? { integrations: stamp.bindings } : {}),
-          houseRules: houseRulesFor(stepDef.metadata.id, dispatch.roleKey ?? 'default'),
-          invokeOpts: {
-            cwd: params.workspacePath,
-            effortLevel: preferredEffort ?? undefined,
-            disallowedTools: miningDisallowedTools(stepDef.metadata.id),
-          },
-        });
+          snapshotCache,
+        );
       } catch (err) {
         if (!(err instanceof ProviderBuildError)) throw err;
         buildFailure = `cannot build a command for ${err.providerName}: ${err.message}`;
@@ -2425,7 +2472,7 @@ async function dispatchMiningAgents(
         kind: 'agent_mining',
         spec: plan.invocation.spec,
         timeoutMs: budget.timeoutMs,
-        toolProfile: spec.toolProfile,
+        toolProfile,
         agentMiningId: target.id,
         snapshotRef: requirements.snapshotRef,
         baseSnapshotRef: requirements.baseSnapshotRef,
@@ -2654,7 +2701,7 @@ async function dispatchReservedAgents(
     const fresh = offered.get(row.agentId);
     if (fresh) {
       // A new offer may refresh the prompt/persona, never an existing reservation's pin.
-      dispatches.push({ ...fresh, ...parseCommittedSnapshotRefs(row) });
+      dispatches.push(replaySnapshotGeneration(fresh, row));
       targets.set(row.agentId, target);
       continue;
     }
@@ -4643,11 +4690,7 @@ async function retryMiningAgents(
     })
   )
     .filter((d) => targets.has(d.agentId))
-    .map((d) => ({
-      ...d,
-      // Rerolls (including human reruns) belong to the recorded generation.
-      ...parseCommittedSnapshotRefs(rowByAgentId.get(d.agentId) ?? {}),
-    }));
+    .map((d) => replaySnapshotGeneration(d, rowByAgentId.get(d.agentId)));
 
   // Agents `selectAgents` cannot re-offer, recovered from what their rows recorded.
   //

@@ -37,6 +37,7 @@ export async function executeSubAgentNative(
    *  disagree about whether git is usable here. */
   hasWorktree: boolean,
   hasRepo: boolean,
+  workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -80,6 +81,7 @@ export async function executeSubAgentNative(
     hasRepo,
     provider.networkPolicy,
     payload,
+    workspaceKind,
   );
   // Resolved here as well: the sub-agent kinds do NOT share exec-core's per-invocation
   // composition block, so anything added there (this, the uploads mount) reaches them only
@@ -123,6 +125,7 @@ export async function executeSubAgentSequential(
    *  disagree about whether git is usable here. */
   hasWorktree: boolean,
   hasRepo: boolean,
+  workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -160,6 +163,7 @@ export async function executeSubAgentSequential(
     hasRepo,
     provider.networkPolicy,
     payload,
+    workspaceKind,
   );
   const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
   const spawner = createSandboxSpawner(

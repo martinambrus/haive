@@ -1,3 +1,5 @@
+import type { ResolvedCommittedSnapshots } from '../src/repo/committed-snapshot.js';
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -18,6 +20,93 @@ import { breakAugmentationMarkers } from '../src/step-engine/step-runner.js';
 import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
+
+const pinned = vi.hoisted(() => ({
+  view: null as ResolvedCommittedSnapshots | null,
+  locked: false,
+  planUnderLock: false,
+  policyUnderLock: false,
+  personaUnderLock: false,
+}));
+vi.mock('../src/repo/committed-snapshot.js', async (original) => ({
+  ...(await original<object>()),
+  resolveTaskCommittedSnapshots: async (
+    _db: unknown,
+    _task: string,
+    refs: { snapshotRef?: unknown },
+    consume?: (snapshots: ResolvedCommittedSnapshots) => Promise<void>,
+  ) => {
+    if (!refs.snapshotRef) return null;
+    if (!pinned.view) throw new Error('missing snapshot fixture');
+    pinned.locked = true;
+    try {
+      await consume?.(pinned.view);
+    } finally {
+      pinned.locked = false;
+    }
+    return pinned.view;
+  },
+}));
+
+vi.mock('../src/repo/scratch-workspace.js', async (original) => {
+  const actual = await original<typeof import('../src/repo/scratch-workspace.js')>();
+  return {
+    ...actual,
+    withTaskScratchWorkspace: async <T>(user: string, task: string, use: () => Promise<T>) =>
+      actual.withTaskScratchWorkspace(user, task, async () => {
+        pinned.locked = true;
+        try {
+          return await use();
+        } finally {
+          pinned.locked = false;
+        }
+      }),
+  };
+});
+vi.mock('../src/sandbox/mcp-surface.js', async (original) => {
+  const actual = await original<typeof import('../src/sandbox/mcp-surface.js')>();
+  return {
+    ...actual,
+    resolveMcpSurface: async (...args: Parameters<typeof actual.resolveMcpSurface>) => {
+      if (pinned.view) pinned.planUnderLock = pinned.locked;
+      return actual.resolveMcpSurface(...args);
+    },
+  };
+});
+vi.mock('../src/orchestrator/agent-isolation.js', async (original) => {
+  const actual = await original<typeof import('../src/orchestrator/agent-isolation.js')>();
+  return {
+    ...actual,
+    resolvePersonaMaskPolicy: async (
+      ...args: Parameters<typeof actual.resolvePersonaMaskPolicy>
+    ) => {
+      if (pinned.view) pinned.policyUnderLock = pinned.locked;
+      return actual.resolvePersonaMaskPolicy(...args);
+    },
+    readTemplatePersonas: async (...args: Parameters<typeof actual.readTemplatePersonas>) => {
+      if (pinned.view) pinned.personaUnderLock = pinned.locked;
+      return actual.readTemplatePersonas(...args);
+    },
+  };
+});
+vi.mock('../src/queues/cli-exec/app-reach.js', async (original) => {
+  const real = await original<typeof import('../src/queues/cli-exec/app-reach.js')>();
+  return {
+    ...real,
+    resolveAppReach: async (...args: Parameters<typeof real.resolveAppReach>) =>
+      pinned.view
+        ? {
+            mode: 'sandbox_http',
+            url: 'http://fixture.invalid',
+            mounts: [],
+            env: {},
+            addHosts: [],
+            noProxyHosts: [],
+            tlsTrusted: false,
+          }
+        : real.resolveAppReach(...args),
+  };
+});
 
 vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -113,6 +202,10 @@ const specOf = (plan: Awaited<ReturnType<typeof dispatch>>) =>
   plan.invocation?.kind === 'cli' ? plan.invocation.spec : null;
 
 beforeEach(async () => {
+  pinned.view = null;
+  pinned.planUnderLock = false;
+  pinned.policyUnderLock = false;
+  pinned.personaUnderLock = false;
   isolation = true;
   fx = await makePointerFixture();
   vi.spyOn(configService, 'getBoolean').mockImplementation(async (key, def = false) =>
@@ -239,6 +332,53 @@ describe('template persona paste at dispatch', () => {
     const plan = await dispatch('claude-code', `${MARKER('reviewer')} then ${MARKER('reviewer')}`);
     expect(plan.effectivePrompt?.split('Once.').length).toBe(3);
     expect(specOf(plan)?.pastedPersonaPaths).toEqual(['.claude/agents/reviewer.md']);
+  });
+});
+
+describe('snapshot template personas', () => {
+  it('reads the pinned persona with its tracked exemption instead of the live checkout', async () => {
+    await put('.claude/agents/reviewer.md', persona('Live persona.'));
+    await put('pinned/.claude/agents/reviewer.md', persona('Pinned persona.'));
+    const root = join(fx.repoRoot, 'pinned');
+    pinned.view = {
+      target: {
+        workerRoot: root,
+        subpath: 'owned/tree',
+        tracked: new Set(['.claude/agents/reviewer.md']),
+      },
+      base: null,
+    };
+    const pin = {
+      version: 1 as const,
+      userId: randomUUID(),
+      repositoryId: randomUUID(),
+      taskId: randomUUID(),
+      commitOid: 'a'.repeat(40),
+      treeOid: 'b'.repeat(40),
+      inventoryId: randomUUID(),
+      inventorySha256: 'c'.repeat(64),
+    };
+    const plan = await resolveTaskDispatch(
+      fakeDb({ secretMaskDenyExtend: ['**/reviewer.md'] }),
+      pin.taskId,
+      {
+        providers: [provider('claude-code')],
+        snapshotRef: pin,
+        promptStepPersonaIds: ['reviewer'],
+        input: { kind: 'prompt', prompt: MARKER('reviewer'), capabilities: [] },
+        invokeOpts: {},
+      },
+    );
+    expect(plan.mode).toBe('cli');
+    expect(plan.effectivePrompt).toContain('Pinned persona.');
+    expect(pinned.planUnderLock).toBe(false);
+    expect(pinned.policyUnderLock).toBe(false);
+    expect(pinned.personaUnderLock).toBe(true);
+    expect(plan.effectivePrompt).not.toContain('Live persona.');
+    expect(plan.effectivePrompt).toContain(
+      "It serves the task's own worktree, not the one you are working in",
+    );
+    expect(specOf(plan)?.maskAgentDefinitions).not.toBe(true);
   });
 });
 

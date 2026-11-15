@@ -1,4 +1,8 @@
-import { lstat, mkdir, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import type { DockerVolumeMount } from '../src/sandbox/docker-runner.js';
+import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +16,16 @@ process.env.REPO_STORAGE_ROOT = storageRoot;
 const stubs = vi.hoisted(() => ({
   runInSandbox: vi.fn(),
   error: null as Error | null,
-  invocation: { repoMount: null as unknown, hasWorktree: false, hasRepo: true },
+  invocation: { repoMount: null as unknown, hasWorktree: false, hasRepo: true } as {
+    repoMount: unknown;
+    hasWorktree: boolean;
+    hasRepo: boolean;
+    workspaceKind?: string;
+    baseMount?: DockerVolumeMount;
+    snapshots?: { target: { tracked: Set<string> }; base: { tracked: Set<string> } };
+  },
+  ensureRepoMountWritable: vi.fn(),
+  mcp: vi.fn(async (..._args: unknown[]) => ({ files: [], extraArgs: [] })),
 }));
 
 vi.mock('node:fs/promises', async (original) => {
@@ -38,7 +51,7 @@ vi.mock('../src/sandbox/sandbox-runner.js', async (importOriginal) => ({
 vi.mock('../src/queues/cli-exec/resolvers.js', () => ({
   WORKER_REPO_STORAGE_ROOT: process.env.REPO_STORAGE_ROOT,
   resolveInvocationRepoMount: async () => stubs.invocation,
-  ensureRepoMountWritable: async () => undefined,
+  ensureRepoMountWritable: stubs.ensureRepoMountWritable,
   loadProviderRuntimeConfig: async () => ({
     wrapperContent: null,
     sandboxImage: null,
@@ -46,7 +59,7 @@ vi.mock('../src/queues/cli-exec/resolvers.js', () => ({
     egressDomains: [],
   }),
   resolveAuthMounts: async () => [],
-  resolveMcpExtraFiles: async () => ({ files: [], extraArgs: [] }),
+  resolveMcpExtraFiles: stubs.mcp,
   resolveEffectiveEgressDomains: () => [],
   networkPolicyReachesPackageRegistries: () => false,
   createStepStatusUpdater: () => undefined,
@@ -148,6 +161,8 @@ const rw = (subpath: string, rel: string) => ({
 
 beforeEach(async () => {
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+  stubs.ensureRepoMountWritable.mockClear();
+  stubs.mcp.mockClear();
   stubs.runInSandbox.mockReset();
   stubs.runInSandbox.mockResolvedValue({
     exitCode: 0,
@@ -294,7 +309,7 @@ describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox g
   });
 });
 
-describe('P5a snapshot execution admission', () => {
+describe('committed snapshot execution admission', () => {
   it('NULL/NULL retains the normal live-checkout mount', async () => {
     const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
     stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
@@ -308,27 +323,148 @@ describe('P5a snapshot execution admission', () => {
     expect(stubs.runInSandbox.mock.calls[0]?.[1].extraMounts).toContainEqual(repoMount);
   });
 
-  it.each(KINDS)('refuses a pinned %s before any database or mount access', async (kind) => {
-    const snapshotRef = {
-      version: 1,
-      userId: '11111111-1111-4111-8111-111111111111',
-      repositoryId: '22222222-2222-4222-8222-222222222222',
-      taskId: '33333333-3333-4333-8333-333333333333',
-      commitOid: 'a'.repeat(40),
-      treeOid: 'b'.repeat(40),
-      inventoryId: '44444444-4444-4444-8444-444444444444',
-      inventorySha256: 'c'.repeat(64),
-    };
-    await expect(
-      executeByKind(
-        {} as never,
-        { ...payloadFor(kind), snapshotRef } as CliExecJobPayload,
+  it.each(KINDS)(
+    'mounts both pinned %s trees read-only with no writable metadata overlay',
+    async (kind) => {
+      const snapshotRef = {
+        version: 1 as const,
+        userId: randomUUID(),
+        repositoryId: randomUUID(),
+        taskId: randomUUID(),
+        commitOid: 'a'.repeat(40),
+        treeOid: 'b'.repeat(40),
+        inventoryId: randomUUID(),
+        inventorySha256: 'c'.repeat(64),
+      };
+      const repoMount = {
+        source: 'haive_repos',
+        target: WORKDIR,
+        subpath: WORKTREE_SUBPATH,
+        readOnly: true,
+      };
+      const baseMount = {
+        source: 'haive_repos',
+        target: '/haive/diff-base',
+        subpath: `${SUBPATH}/base/tree`,
+        readOnly: true,
+      };
+      stubs.invocation = {
+        repoMount,
+        hasWorktree: false,
+        hasRepo: true,
+        workspaceKind: 'snapshot',
+        baseMount,
+        snapshots: { target: { tracked: new Set(['.env']) }, base: { tracked: new Set() } },
+      };
+      await executeByKind(
+        db,
+        {
+          ...payloadFor(kind),
+          snapshotRef,
+          baseSnapshotRef: { ...snapshotRef, inventoryId: randomUUID() },
+        },
         {} as never,
         {},
-      ),
-    ).rejects.toThrow('Committed snapshot execution is not enabled');
-    expect(stubs.runInSandbox).not.toHaveBeenCalled();
-  });
+      );
+      expect(stubs.ensureRepoMountWritable).not.toHaveBeenCalled();
+      expect(stubs.mcp.mock.calls[0]?.[5]).toBe('rag_only');
+      expect(stubs.mcp.mock.calls[0]?.[10]).toBe('snapshot');
+      expect(stubs.runInSandbox).toHaveBeenCalled();
+      for (const [, options] of stubs.runInSandbox.mock.calls) {
+        expect(options.extraMounts).toContainEqual(repoMount);
+        expect(options.extraMounts).toContainEqual(baseMount);
+        expect(
+          options.extraMounts.filter((m: DockerVolumeMount) => m.target.startsWith(WORKDIR + '/')),
+        ).toEqual([]);
+      }
+    },
+  );
+  it.skipIf(!process.env.SNAPSHOT_SANDBOX_TEST_IMAGE)(
+    'enforces both actual Docker mounts and keeps metadata read-only',
+    async () => {
+      const run = promisify(execFile);
+      const image = process.env.SNAPSHOT_SANDBOX_TEST_IMAGE!;
+      const name = `committed-view-test-${randomUUID()}`;
+      const baseRel = `${SUBPATH}/base/tree`;
+      await mkdir(path.join(storageRoot, baseRel), { recursive: true });
+      await writeFile(path.join(storageRoot, baseRel, 'content'), 'base');
+      await writeFile(path.join(treeDir, 'content'), 'target');
+      const target = {
+        source: 'haive_repos',
+        target: WORKDIR,
+        subpath: WORKTREE_SUBPATH,
+        readOnly: true,
+      };
+      const base = {
+        source: 'haive_repos',
+        target: '/haive/diff-base',
+        subpath: baseRel,
+        readOnly: true,
+      };
+      stubs.invocation = {
+        repoMount: target,
+        baseMount: base,
+        workspaceKind: 'snapshot',
+        hasWorktree: false,
+        hasRepo: true,
+        snapshots: { target: { tracked: new Set() }, base: { tracked: new Set() } },
+      };
+      stubs.runInSandbox.mockImplementation(async (_spec, options) => {
+        const mounts: DockerVolumeMount[] = options.extraMounts.filter(
+          (mount: DockerVolumeMount) => mount.source === 'haive_repos',
+        );
+        const args = mounts.flatMap((mount) => [
+          '--mount',
+          `type=bind,src=${path.join(storageRoot, mount.subpath!)},dst=${mount.target}${mount.readOnly ? ',readonly' : ''}`,
+        ]);
+        const program = `const fs = require('fs'), assert = require('assert/strict');
+        assert.equal(fs.readFileSync('/haive/workdir/content', 'utf8'), 'target');
+        assert.equal(fs.readFileSync('/haive/diff-base/content', 'utf8'), 'base');
+        assert.equal(fs.existsSync('/haive/workdir/.git'), false);
+        for (const file of ['/haive/workdir/content', '/haive/diff-base/content', '/haive/workdir/.haive-data/state/new']) {
+          assert.throws(() => fs.writeFileSync(file, 'mutated'), e => e.code === 'EROFS');
+        }
+        assert.throws(() => fs.mkdirSync('/haive/workdir/.haive'), e => e.code === 'EROFS');`;
+        await run(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '--pull',
+            'never',
+            '--name',
+            name,
+            '--network',
+            'none',
+            '--user',
+            '1000:1000',
+            ...args,
+            '--entrypoint',
+            'node',
+            image,
+            '-e',
+            program,
+          ],
+          { timeout: 20_000 },
+        );
+        return {
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          durationMs: 1,
+          timedOut: false,
+          resolvedCommand: 'node',
+          wrapperId: null,
+        };
+      });
+      try {
+        await executeByKind(db, payloadFor('agent_mining'), {} as never, {});
+      } finally {
+        await run('docker', ['rm', '-f', name]).catch(() => undefined);
+      }
+      expect(stubs.runInSandbox).toHaveBeenCalled();
+    },
+  );
   it.each([{ snapshotRef: {} }, { baseSnapshotRef: {} }])(
     'refuses malformed refs before live checkout resolution: %j',
     async (refs) => {
@@ -339,7 +475,7 @@ describe('P5a snapshot execution admission', () => {
           {} as never,
           {},
         ),
-      ).rejects.toThrow('Invalid committed snapshot');
+      ).rejects.toThrow('SNAPSHOT_INVALID:');
       expect(stubs.runInSandbox).not.toHaveBeenCalled();
     },
   );

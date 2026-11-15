@@ -159,6 +159,7 @@ describe('resolveInvocationRepoMount', () => {
       repoMount: null,
       hasWorktree: false,
       hasRepo: false,
+      workspaceKind: 'none',
     });
     // And nothing is created for it: a torn state must not be handed a workspace.
     expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
@@ -183,6 +184,7 @@ describe('resolveInvocationRepoMount', () => {
       repoMount: null,
       hasWorktree: false,
       hasRepo: false,
+      workspaceKind: 'none',
     });
     expect(ensureTaskScratchWorkspace).not.toHaveBeenCalled();
   });
@@ -210,6 +212,7 @@ describe('resolveInvocationRepoMount', () => {
       // The point of the separate flag: there IS a mount, and there is NO repository. A null
       // check on repoMount can no longer answer the second question.
       hasRepo: false,
+      workspaceKind: 'scratch',
     });
     // The mount is only valid if the directory EXISTS by the time it is returned: docker
     // refuses a volume-subpath that does not, and the human Terminal resolves this before

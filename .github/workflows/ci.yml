@@ -925,7 +925,7 @@ jobs:
         if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
-            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
+            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/committed-snapshot.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
 
       - name: Module pin helper inside the worker image
         timeout-minutes: 3
@@ -938,6 +938,30 @@ jobs:
             --mount "type=bind,src=$pin_tmp,dst=$pin_tmp" \
             -e TMPDIR="$pin_tmp" -e MODULE_SOURCE_DOCKER_TEST=true \
             "$image" sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/module-source-pin.test.ts'
+
+      # Worker tooling and a host-visible TMPDIR are required for the nested Docker bind mounts.
+      # Static pins cover this wiring; only a PR run proves the Actions environment works.
+      - name: Committed snapshot read-only mounts
+        timeout-minutes: 7
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
+        run: |
+          for attempt in $(seq 1 150); do
+            if docker image inspect haive-cli-sandbox:latest > /dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 150 ]; then
+              echo 'Sandbox image was not built within 300s'
+              exit 1
+            fi
+            sleep 2
+          done
+          snapshot_tmp=$(mktemp -d /tmp/snapshot-mount-ci-XXXXXX)
+          trap 'rm -rf "$snapshot_tmp"' EXIT
+          image=$(docker container inspect --format '{{.Image}}' haive-worker)
+          docker run --rm --pull never --volumes-from haive-worker \
+            --mount "type=bind,src=$snapshot_tmp,dst=$snapshot_tmp" \
+            -e TMPDIR="$snapshot_tmp" -e SNAPSHOT_SANDBOX_TEST_IMAGE=haive-cli-sandbox:latest \
+            "$image" sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/exec-core-boundary-mounts.test.ts'
 
       - name: Dump service status
         if: always()

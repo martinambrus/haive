@@ -447,6 +447,7 @@ export async function resolvePersonaMaskPolicy(
   db: Database,
   taskId: string,
   workerTree: string,
+  trackedInventory?: ReadonlySet<string>,
 ): Promise<{ policy: SecretMaskPolicy; loadTracked: () => Promise<Set<string> | null> } | null> {
   let maskingEnabled: boolean;
   try {
@@ -481,7 +482,8 @@ export async function resolvePersonaMaskPolicy(
       allow: repo.secretMaskAllow,
       denyExtend: repo.secretMaskDenyExtend,
     }),
-    loadTracked: () => listTrackedFiles(workerTree),
+    loadTracked: () =>
+      trackedInventory ? Promise.resolve(new Set(trackedInventory)) : listTrackedFiles(workerTree),
   };
 }
 

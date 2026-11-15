@@ -11,14 +11,51 @@ aged out of retention is failed rather than waited on.
 Mining rows also retain host-issued `snapshot_ref` and optional `base_snapshot_ref` identities.
 Both are strict version-1 descriptors: owner/task/repository IDs, pinned commit and tree OIDs,
 and an inventory ID and SHA-256 digest; they contain no host path or agent-controlled policy.
-The shared parser rejects unknown fields, malformed identities and an unpaired or foreign-scope
-base. Parsing proves shape only; the future host consumer must verify ownership and content.
-Every reservation, link, refusal and queue payload carries both refs. Unsent reservation recovery,
-wave recovery and rerolls preserve the row's refs even if `selectAgents` now offers different
-ones. NULL/NULL retains the live-checkout contract. Malformed stored refs fail visibly.
-This storage is inert: execution refuses any non-null ref before resolving a repository mount,
-until an owned snapshot consumer is implemented. It must never fall back to the live checkout.
-Rollback keeps the nullable columns and reverts unused application code. That is safe only while every mining row and queued job holds NULL refs. Once one holds a ref, an older worker would ignore it and mount the live checkout, and dropping the columns would lose the pin. A module dispatch may already set a ref; execution refuses it until snapshot mounts ship.
+The host resolves the actual task/repository owner and derives every artifact path under
+`<storage>/<user>/_scratch/<task>/committed-snapshots/<inventoryId>/`. It verifies the commit,
+tree objects, inventory digest and scope, and tracked file bytes before reservation and again
+before execution. One fan-out reuses verified results keyed by inventory ID and full descriptor/
+owner/root identity during dispatch; execution never uses that cache. A missing tree may be rebuilt
+from those recorded objects; a missing inventory is refused, never recreated from a
+live index. Version, pairing, ownership, inventory and object failures never use the checkout.
+Materialization defaults to 256 MiB, 50,000 entries, depth 64 and 30 seconds, all injectable.
+Serialized inventories are capped at the smaller of 16 MiB and 512 bytes per allowed entry,
+with an injectable byte cap shared by issuance and resolution. Issuance refuses an oversized
+UTF-8 body before publishing any inventory or descriptor.
+The work budget starts after the per-task scratch lock is acquired, so queued siblings do not
+spend it waiting. One descriptor-backed Git batch-command child serves object reads for each
+issue or resolve. Empty/incomplete crash claims are rebuilt in a private stage and published
+under that lock. The old tree is moved aside before the new one is published, so the rebuild
+is recoverable, not atomic: a crash between the two leaves a `stage-*` or `incomplete-*`
+directory that stays until the task scratch is reaped. Directories are explicitly 0755 regardless of umask; modified bytes, unsafe
+ownership/modes, links and files/directories outside the inventory are refused. Every tracked
+file must retain its exact issued permission bits: 0444 for a regular blob or 0555 for an
+executable blob; missing read bits, added write bits and special permission bits refuse. Tracked
+file modes are checked before reading their bytes.
+Only regular Git blobs (including executable blobs) are supported; symlinks, gitlinks, traversal,
+Git metadata paths and alternate object stores refuse visibly. A shallow clone is supported
+when its pinned commit, tree and blobs are present; no history traversal is needed.
+
+Every reservation, link, refusal and queue payload carries both refs. Both row-only recovery
+paths, wave recovery, human reruns, timeout rerolls and orphan redelivery preserve the recorded
+pin even when selectAgents offers another. A NULL/NULL reservation facing a newly pinned offer
+fails with explicit Retry guidance. Resume and recovery retain that generation; explicit Retry
+uses the existing reset that deletes reservations and increments `rerun_generation`, allowing a
+new analysis to choose new pins. This avoids retargeting an existing reservation or adding a
+second generation counter. A `SNAPSHOT_INVALID:` failed agent fails the step at the barrier,
+instead of becoming a degraded result that apply could pass. No structural failure-class
+column exists: the sentinel recognizes both the direct exec writer and the unsent-release
+prefix. A reservation predating snapshots says so and requires Retry. Fixed snapshot errors
+retain a cause and log sanitized structured diagnostics; database connection codes, including
+SQLSTATE 57P01 through a Drizzle cause, propagate unchanged for normal retry handling.
+
+The optional fields remain in the public module step contract now that a consumer exists.
+No core step issues or offers a pin by default: this is opt-in through host-issued descriptors
+and the module dispatch seam, with direct issuance currently exercised only by controls.
+Rollback must disable new snapshot dispatches and settle queued/live snapshot invocations, while
+retaining a capable worker for every resumable pinned task. Deploying an older worker is unsafe
+while any snapshot work can resume: it ignores the pin and mounts the live checkout. Retain the
+additive columns and inventory evidence; dropping them is not an application rollback.
 
 **Every write that links or fails a row is a compare-and-swap on the state read**
 (`sameMiningState`: id, status, invocation link). Two passes over one step, such as a duplicate
