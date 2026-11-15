@@ -4159,7 +4159,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Only new successful apply returns are validated. Throws and parks above, and
     // terminal-row recovery, retain their existing semantics. Check ownership before
     // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
-    if (stepDef.outputContract) {
+    if (stepDef.outputContract || stepDef.providesRoles?.length) {
       const taskPin = stepDef.replaces?.length
         ? await db.query.tasks.findFirst({
             where: eq(schema.tasks.id, taskId),

@@ -115,13 +115,12 @@ export function validateSuccessfulStepOutput(
   logger: { warn(bindings: object, message: string): void },
   replacedRole?: StepRoleId,
 ): void {
-  if (step.metadata.id.startsWith('module.'))
-    for (const provided of step.providesRoles ?? []) {
-      const ref = STEP_ROLE_REGISTRY[provided.role].contract;
-      const result = safeParseStepOutput(ref, output);
-      if (!result.success)
-        throw new StepOutputContractInvalidError(ref, step.metadata.id, result.issuePaths);
-    }
+  for (const provided of step.providesRoles ?? []) {
+    const ref = STEP_ROLE_REGISTRY[provided.role].contract;
+    const result = safeParseStepOutput(ref, output);
+    if (!result.success)
+      throw new StepOutputContractInvalidError(ref, step.metadata.id, result.issuePaths);
+  }
   const ref = step.outputContract;
   const builtin = step.metadata.id === '08c-code-review' || step.metadata.id === '08c2-code-audit';
   const replacement = !builtin && replacedRole !== undefined;
