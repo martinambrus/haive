@@ -1,5 +1,8 @@
+import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
   resolveTaskCommittedSnapshots,
+  snapshotToolProfile,
+  type SnapshotDispatchCache,
   type ResolvedCommittedSnapshots,
 } from '../repo/committed-snapshot.js';
 import type { CommittedSnapshotRef } from '@haive/shared';
@@ -346,17 +349,18 @@ export async function resolveTaskDispatch(
   db: Database,
   taskId: string,
   req: DispatchRequest,
+  cache?: SnapshotDispatchCache,
 ): Promise<DispatchPlan> {
-  let snapshotPlan: DispatchPlan | undefined;
-  const snapshots = await resolveTaskCommittedSnapshots(
-    db,
-    taskId,
-    req,
-    async (snapshotWorkspace) => {
-      snapshotPlan = await resolveTaskDispatchOnTree(db, taskId, req, snapshotWorkspace);
-    },
-  );
-  return snapshots ? snapshotPlan! : resolveTaskDispatchOnTree(db, taskId, req, null);
+  const snapshots = await resolveTaskCommittedSnapshots(db, taskId, req, undefined, cache);
+  const clamped = snapshots
+    ? {
+        ...req,
+        toolProfile: snapshotToolProfile(true, req.toolProfile),
+        customTools: undefined,
+        integrations: undefined,
+      }
+    : req;
+  return resolveTaskDispatchOnTree(db, taskId, clamped, snapshots);
 }
 
 type SnapshotDispatchRequest = DispatchRequest & {
@@ -546,13 +550,18 @@ async function resolveTemplatePersonas(
     };
   }
   const metadata = getCliProviderMetadata(provider.name);
-  const result = await readTemplatePersonas({
-    workerTree,
-    providerAgentsDir: metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null,
-    ids,
-    policy: mask.policy,
-    loadTracked: mask.loadTracked,
-  });
+  const read = () =>
+    readTemplatePersonas({
+      workerTree,
+      providerAgentsDir: metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null,
+      ids,
+      policy: mask.policy,
+      loadTracked: mask.loadTracked,
+    });
+  // Only the file read holds scratch; policy queries and provider probes stay outside it.
+  const result = resolved.snapshotWorkspace
+    ? await withTaskScratchWorkspace(resolved.snapshotRef!.userId, taskId, read)
+    : await read();
   return result.ok ? { personas: result.personas, used: result.used } : { failure: result.failure };
 }
 

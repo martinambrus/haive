@@ -1,3 +1,7 @@
+import {
+  CommittedSnapshotError,
+  isCommittedSnapshotFailure,
+} from '../src/repo/committed-snapshot.js';
 import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -616,3 +620,12 @@ it.each(['EACCES', 'EIO', 'EMFILE'])(
     expect(stubs.resumeStepIfLinked).toHaveBeenCalledWith(base, false, expected);
   },
 );
+
+it('preserves snapshot failure through the actual exec failure writer', async () => {
+  const failure = new CommittedSnapshotError();
+  stubs.executeByKind.mockRejectedValue(failure);
+  const { db, writes } = fakeDb({});
+  await expect(handleCliExecJob(db, base)).rejects.toBe(failure);
+  const failed = miningWrites(writes).find((w) => w.set.status === 'failed');
+  expect(isCommittedSnapshotFailure(failed?.set.errorMessage as string)).toBe(true);
+});

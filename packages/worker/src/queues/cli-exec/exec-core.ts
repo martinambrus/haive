@@ -1,4 +1,4 @@
-import { CommittedSnapshotError } from '../../repo/committed-snapshot.js';
+import { CommittedSnapshotError, snapshotToolProfile } from '../../repo/committed-snapshot.js';
 import { assertSnapshotOwner } from '../../plan/chat-snapshot.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { join } from 'node:path';
@@ -414,6 +414,10 @@ export async function executeByKind(
   const { repoMount, hasWorktree, hasRepo, workspaceKind, snapshots, baseMount } =
     await resolveInvocationRepoMount(db, payload.taskId, payload.worktreeRel, refs);
   if (workspaceKind !== 'snapshot') await ensureRepoMountWritable(repoMount);
+  payload = {
+    ...payload,
+    toolProfile: snapshotToolProfile(workspaceKind === 'snapshot', payload.toolProfile),
+  };
   const sandboxWorkdir = SANDBOX_WORKDIR;
   // Empty-file masks hiding deny-listed secret files from the agent (Tier 1,
   // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
@@ -522,6 +526,7 @@ export async function executeByKind(
       // step machine, so by the time it runs the task has moved on and the file it would clear
       // belongs to the step now running. Skipping costs the recap nothing and saves a helper
       // container and an MCP boot per summarised step.
+      const toolProfile = payload.toolProfile;
       const mcp =
         providerRow && payload.purpose !== 'step_summary'
           ? await resolveMcpExtraFiles(
@@ -535,11 +540,12 @@ export async function executeByKind(
               // machinery is shared by knowledge mining, the review personas and the
               // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
               // app URL it had no browser to reach.
-              payload.toolProfile ?? 'full',
+              toolProfile ?? 'full',
               hasWorktree,
               hasRepo,
               networkPolicy,
               payload,
+              workspaceKind,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
@@ -557,12 +563,8 @@ export async function executeByKind(
       // warm. `/tmp` is used because it always exists and is readable; the server prints
       // its banner, reads EOF on the absent stdin and exits 0 in ~1s.
       // Nothing to pre-warm when no server is wired.
-      if (providerRow && sandboxImage && payload.toolProfile !== 'none') {
-        const surface = await resolveMcpSurface(
-          db,
-          payload.taskId,
-          payload.toolProfile === 'rag_only',
-        );
+      if (providerRow && sandboxImage && toolProfile !== 'none') {
+        const surface = await resolveMcpSurface(db, payload.taskId, toolProfile === 'rag_only');
         if (surface.chromeDevtools.enabled) {
           await warmNpmPackage(
             sandboxImage,
@@ -580,7 +582,7 @@ export async function executeByKind(
           emittedDefaultServerNames({
             hasRepo,
             hasWorktree,
-            ragOnly: payload.toolProfile === 'rag_only',
+            ragOnly: toolProfile === 'rag_only',
             registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
           }).has('filesystem')
         ) {
@@ -633,6 +635,7 @@ export async function executeByKind(
         boundaryMounts,
         hasWorktree,
         hasRepo,
+        workspaceKind,
       );
     case 'subagent_native':
       return executeSubAgentNative(
@@ -646,6 +649,7 @@ export async function executeByKind(
         boundaryMounts,
         hasWorktree,
         hasRepo,
+        workspaceKind,
       );
     default:
       throw new Error(

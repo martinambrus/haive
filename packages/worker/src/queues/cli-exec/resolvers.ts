@@ -409,24 +409,31 @@ export async function resolveMcpExtraFiles(
   networkPolicy: CliNetworkPolicy | null,
   /** The run these files are for; only a prompt step's own run names custom tools, and its invocation row may carry integrations. */
   run?: CustomRun,
+  workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
     await clearVolumeBackedMcp(taskId, providerName, sandboxImage);
     return empty;
   }
-  const ragOnly = profile === 'rag_only';
+  const ragOnly = profile === 'rag_only' || workspaceKind === 'snapshot';
 
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a
   // prompt can advertise a server this mount does not wire.
-  const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
+  const surface = await resolveMcpSurface(
+    db,
+    taskId,
+    ragOnly,
+    workspaceKind === 'snapshot' ? undefined : run?.customTools,
+  );
   const customFiles =
     run && surface.custom ? await resolveCustomFiles(db, taskId, run, surface.custom) : null;
   const integrationsFiles =
     run && !ragOnly ? await resolveIntegrationsFiles(db, taskId, run) : null;
 
   const ragLspAvailable =
+    workspaceKind !== 'snapshot' &&
     cliAdapterRegistry.has(providerName) &&
     cliAdapterRegistry.get(providerName).supportsLsp &&
     (await hasReadyLspBridge(db, taskId));

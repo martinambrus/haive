@@ -25,6 +25,7 @@ const stubs = vi.hoisted(() => ({
     snapshots?: { target: { tracked: Set<string> }; base: { tracked: Set<string> } };
   },
   ensureRepoMountWritable: vi.fn(),
+  mcp: vi.fn(async (..._args: unknown[]) => ({ files: [], extraArgs: [] })),
 }));
 
 vi.mock('node:fs/promises', async (original) => {
@@ -58,7 +59,7 @@ vi.mock('../src/queues/cli-exec/resolvers.js', () => ({
     egressDomains: [],
   }),
   resolveAuthMounts: async () => [],
-  resolveMcpExtraFiles: async () => ({ files: [], extraArgs: [] }),
+  resolveMcpExtraFiles: stubs.mcp,
   resolveEffectiveEgressDomains: () => [],
   networkPolicyReachesPackageRegistries: () => false,
   createStepStatusUpdater: () => undefined,
@@ -161,6 +162,7 @@ const rw = (subpath: string, rel: string) => ({
 beforeEach(async () => {
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
   stubs.ensureRepoMountWritable.mockClear();
+  stubs.mcp.mockClear();
   stubs.runInSandbox.mockReset();
   stubs.runInSandbox.mockResolvedValue({
     exitCode: 0,
@@ -365,6 +367,8 @@ describe('committed snapshot execution admission', () => {
         {},
       );
       expect(stubs.ensureRepoMountWritable).not.toHaveBeenCalled();
+      expect(stubs.mcp.mock.calls[0]?.[5]).toBe('rag_only');
+      expect(stubs.mcp.mock.calls[0]?.[10]).toBe('snapshot');
       expect(stubs.runInSandbox).toHaveBeenCalled();
       for (const [, options] of stubs.runInSandbox.mock.calls) {
         expect(options.extraMounts).toContainEqual(repoMount);
@@ -380,7 +384,7 @@ describe('committed snapshot execution admission', () => {
     async () => {
       const run = promisify(execFile);
       const image = process.env.SNAPSHOT_SANDBOX_TEST_IMAGE!;
-      const name = `sec-p5b-${randomUUID()}`;
+      const name = `committed-view-test-${randomUUID()}`;
       const baseRel = `${SUBPATH}/base/tree`;
       await mkdir(path.join(storageRoot, baseRel), { recursive: true });
       await writeFile(path.join(storageRoot, baseRel, 'content'), 'base');

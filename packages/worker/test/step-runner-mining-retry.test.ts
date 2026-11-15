@@ -1,4 +1,8 @@
-import { resolveTaskCommittedSnapshots } from '../src/repo/committed-snapshot.js';
+import {
+  CommittedSnapshotError,
+  isCommittedSnapshotFailure,
+  resolveTaskCommittedSnapshots,
+} from '../src/repo/committed-snapshot.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableColumns, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -3842,12 +3846,16 @@ describe('committed snapshot mining replay', () => {
     expect(result.status).toBe('failed');
     expect(queued).toHaveLength(0);
     expect(saved.miningRows[0]).toMatchObject({ snapshotRef: null, baseSnapshotRef: null });
-    expect(String(saved.taskStepRow.errorMessage)).toContain('new analysis generation');
+    expect(String(saved.taskStepRow.errorMessage)).toContain('predates committed snapshots');
+    expect(String(saved.taskStepRow.errorMessage)).toContain('Retry');
   });
-  it('fails the step for an invalid snapshot instead of degrading a failed agent', async () => {
+  it.each([
+    'SNAPSHOT_INVALID: Committed snapshot unavailable',
+    'dispatch failed before the agent was queued: SNAPSHOT_INVALID: Committed snapshot unavailable',
+  ])('fails the step for an invalid snapshot writer: %s', async (message) => {
     const saved = state({
       status: 'failed',
-      errorMessage: 'SNAPSHOT_INVALID: Committed snapshot unavailable',
+      errorMessage: message,
       cliInvocationId: 'inv-snapshot-agent',
     });
     const queued: CliExecJobPayload[] = [];
@@ -3855,5 +3863,40 @@ describe('committed snapshot mining replay', () => {
     expect(result.status).toBe('failed');
     expect(saved.taskStepRow.errorMessage).toContain('SNAPSHOT_INVALID:');
     expect(queued).toEqual([]);
+  });
+  it.each([undefined, 'rag_only', 'none'] as const)(
+    'clamps snapshot mining profiles in the plan and queued payload: %s',
+    async (profile) => {
+      const saved = state();
+      const queued: CliExecJobPayload[] = [];
+      const def = step(false);
+      def.agentMining!.toolProfile = profile;
+      await run(makeMockDb(saved), def, queued);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]!.toolProfile).toBe(profile === 'none' ? 'none' : 'rag_only');
+    },
+  );
+  it('preserves the sentinel through the actual unsent-release writer', async () => {
+    const saved = state();
+    await advanceStep({
+      db: makeMockDb(saved),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step(false),
+      providers: [makeProvider()],
+      deps: {
+        enqueueCliInvocation: async () => {
+          throw new CommittedSnapshotError();
+        },
+      },
+    });
+    const message = (saved.miningUpdateLog ?? []).find((u) =>
+      String(u.set.errorMessage).startsWith('dispatch failed before the agent was queued:'),
+    )?.set.errorMessage as string;
+    expect(message).toContain('dispatch failed before the agent was queued: SNAPSHOT_INVALID:');
+    expect(isCommittedSnapshotFailure(message)).toBe(true);
   });
 });

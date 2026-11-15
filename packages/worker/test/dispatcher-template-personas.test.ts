@@ -21,7 +21,13 @@ import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
 
-const pinned = vi.hoisted(() => ({ view: null as ResolvedCommittedSnapshots | null }));
+const pinned = vi.hoisted(() => ({
+  view: null as ResolvedCommittedSnapshots | null,
+  locked: false,
+  planUnderLock: false,
+  policyUnderLock: false,
+  personaUnderLock: false,
+}));
 vi.mock('../src/repo/committed-snapshot.js', async (original) => ({
   ...(await original<object>()),
   resolveTaskCommittedSnapshots: async (
@@ -32,11 +38,57 @@ vi.mock('../src/repo/committed-snapshot.js', async (original) => ({
   ) => {
     if (!refs.snapshotRef) return null;
     if (!pinned.view) throw new Error('missing snapshot fixture');
-    await consume?.(pinned.view);
+    pinned.locked = true;
+    try {
+      await consume?.(pinned.view);
+    } finally {
+      pinned.locked = false;
+    }
     return pinned.view;
   },
 }));
 
+vi.mock('../src/repo/scratch-workspace.js', async (original) => {
+  const actual = await original<typeof import('../src/repo/scratch-workspace.js')>();
+  return {
+    ...actual,
+    withTaskScratchWorkspace: async <T>(user: string, task: string, use: () => Promise<T>) =>
+      actual.withTaskScratchWorkspace(user, task, async () => {
+        pinned.locked = true;
+        try {
+          return await use();
+        } finally {
+          pinned.locked = false;
+        }
+      }),
+  };
+});
+vi.mock('../src/sandbox/mcp-surface.js', async (original) => {
+  const actual = await original<typeof import('../src/sandbox/mcp-surface.js')>();
+  return {
+    ...actual,
+    resolveMcpSurface: async (...args: Parameters<typeof actual.resolveMcpSurface>) => {
+      if (pinned.view) pinned.planUnderLock = pinned.locked;
+      return actual.resolveMcpSurface(...args);
+    },
+  };
+});
+vi.mock('../src/orchestrator/agent-isolation.js', async (original) => {
+  const actual = await original<typeof import('../src/orchestrator/agent-isolation.js')>();
+  return {
+    ...actual,
+    resolvePersonaMaskPolicy: async (
+      ...args: Parameters<typeof actual.resolvePersonaMaskPolicy>
+    ) => {
+      if (pinned.view) pinned.policyUnderLock = pinned.locked;
+      return actual.resolvePersonaMaskPolicy(...args);
+    },
+    readTemplatePersonas: async (...args: Parameters<typeof actual.readTemplatePersonas>) => {
+      if (pinned.view) pinned.personaUnderLock = pinned.locked;
+      return actual.readTemplatePersonas(...args);
+    },
+  };
+});
 vi.mock('../src/queues/cli-exec/app-reach.js', async (original) => {
   const real = await original<typeof import('../src/queues/cli-exec/app-reach.js')>();
   return {
@@ -151,6 +203,9 @@ const specOf = (plan: Awaited<ReturnType<typeof dispatch>>) =>
 
 beforeEach(async () => {
   pinned.view = null;
+  pinned.planUnderLock = false;
+  pinned.policyUnderLock = false;
+  pinned.personaUnderLock = false;
   isolation = true;
   fx = await makePointerFixture();
   vi.spyOn(configService, 'getBoolean').mockImplementation(async (key, def = false) =>
@@ -305,7 +360,7 @@ describe('snapshot template personas', () => {
     };
     const plan = await resolveTaskDispatch(
       fakeDb({ secretMaskDenyExtend: ['**/reviewer.md'] }),
-      'task-1',
+      pin.taskId,
       {
         providers: [provider('claude-code')],
         snapshotRef: pin,
@@ -316,6 +371,9 @@ describe('snapshot template personas', () => {
     );
     expect(plan.mode).toBe('cli');
     expect(plan.effectivePrompt).toContain('Pinned persona.');
+    expect(pinned.planUnderLock).toBe(false);
+    expect(pinned.policyUnderLock).toBe(false);
+    expect(pinned.personaUnderLock).toBe(true);
     expect(plan.effectivePrompt).not.toContain('Live persona.');
     expect(plan.effectivePrompt).toContain(
       "It serves the task's own worktree, not the one you are working in",
