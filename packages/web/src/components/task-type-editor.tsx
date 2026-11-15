@@ -524,6 +524,23 @@ export function TaskTypeEditor({
     <>
       <TaskTypeComposer
         catalog={catalog}
+        {...(derived
+          ? {
+              portRequest: {
+                path: '/admin/task-types/ports',
+                body: {
+                  slug: typeSlug && slugProblem(typeSlug) === null ? typeSlug : 'port-preview',
+                  displayName: 'Port preview',
+                  runListStrategy: 'derived',
+                  baseSlug,
+                  changes,
+                  requiresRepository,
+                  promptSteps,
+                },
+              },
+              executionPath: selectedCandidate?.executionPath ?? null,
+            }
+          : {})}
         integrationCategories={integrationCategories}
         integrationInfo={integrationInfo}
         onRefreshIntegrationInfo={() => {

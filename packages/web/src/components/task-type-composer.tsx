@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CORE_INTEGRATION_CATEGORY_SPECS,
   promptStepId,
+  validateComposition,
   type ComposableStepEntry,
   type CompositionIssue,
 } from '@haive/shared/modularity';
@@ -45,6 +46,7 @@ import { dropIntentFromY } from '@/lib/sidebar-tree';
 import { cn } from '@/lib/cn';
 import { Badge, Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { StepPortView } from './step-port-view';
 import { PromptStepEditor } from '@/components/prompt-step-editor';
 
 interface TaskTypeComposerProps {
@@ -54,6 +56,8 @@ interface TaskTypeComposerProps {
     onRemove?: (step: string) => void;
     limitsEditable: boolean;
   };
+  portRequest?: { path: string; body?: unknown };
+  executionPath?: string | null;
   catalog: TaskTypeCatalog;
   stepIds: string[] | null;
   loopLimits: Record<string, number>;
@@ -167,6 +171,8 @@ function groupedSteps(catalog: TaskTypeCatalog, query: string) {
 
 export function TaskTypeComposer({
   catalog,
+  portRequest,
+  executionPath,
   overlay,
   stepIds,
   loopLimits,
@@ -202,6 +208,7 @@ export function TaskTypeComposer({
   const [query, setQuery] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
+  const [canvasOpen, setCanvasOpen] = useState(false);
   const [focus, setFocus] = useState<{ index: number; kind: FocusKind } | null>(null);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dropMark, setDropMark] = useState<{ index: number; intent: 'before' | 'after' } | null>(
@@ -296,12 +303,34 @@ export function TaskTypeComposer({
     if (focusTo) setFocus(focusTo);
   }
 
+  function reorder(next: string[], message: string, focusTo?: { index: number; kind: FocusKind }) {
+    const before = new Set(
+      validateComposition(stepIds!, entries, { requiresRepository }).map((issue) =>
+        JSON.stringify({ ...issue, index: undefined }),
+      ),
+    );
+    const refused = validateComposition(next, entries, { requiresRepository }).find(
+      (issue) => !before.has(JSON.stringify({ ...issue, index: undefined })),
+    );
+    if (refused) {
+      setAnnouncement(
+        describeIssue(refused, { stepIds: next, catalog: entries, requiresRepository }).message,
+      );
+      return;
+    }
+    commit(next, message, focusTo);
+  }
+
   function move(index: number, to: number) {
     const id = stepIds![index]!;
-    commit(moveStep(stepIds!, index, to), `Moved ${stepLabel(id, entries)} to position ${to + 1}`, {
-      index: to,
-      kind: to < index ? 'up' : 'down',
-    });
+    reorder(
+      moveStep(stepIds!, index, to),
+      `Moved ${stepLabel(id, entries)} to position ${to + 1}`,
+      {
+        index: to,
+        kind: to < index ? 'up' : 'down',
+      },
+    );
   }
 
   function remove(index: number) {
@@ -439,243 +468,269 @@ export function TaskTypeComposer({
             )}
           </div>
         )}
-        <ol ref={listRef} className="flex flex-col gap-2">
-          {stepIds.map((stepId, index) => {
-            const entry = entries.get(stepId);
-            const label = stepLabel(stepId, entries);
-            const rowIssues = byRow.get(index) ?? [];
-            const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(stepId, typeSlug);
-            const promptEntry = promptSlug === null ? undefined : promptSteps[promptSlug];
-            const rowPromptIssues = promptByStep.get(stepId) ?? [];
-            const toolRowIssues =
-              prompt && promptEntry && openStepId === stepId
-                ? rowPromptIssues.filter((issue) =>
-                    promptEntry.tools.some((tool) => isToolIssue(issue, tool)),
-                  )
-                : [];
-            const limitEditable =
-              (!readOnly || overlay?.limitsEditable === true) && entry?.loopBudgetEditable === true;
-            return (
-              <li
-                key={`${stepId}-${index}`}
-                data-row={index}
-                onDragOver={
-                  readOnly || dragFrom === null
-                    ? undefined
-                    : (e) => {
-                        e.preventDefault();
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const intent = dropIntentFromY(e.clientY - rect.top, rect.height, false);
-                        setDropMark({ index, intent: intent === 'after' ? 'after' : 'before' });
-                      }
-                }
-                onDrop={
-                  readOnly || dragFrom === null
-                    ? undefined
-                    : (e) => {
-                        e.preventDefault();
-                        const intent = dropMark?.index === index ? dropMark.intent : 'before';
-                        const next = dropMove(stepIds, dragFrom, index, intent);
-                        setDragFrom(null);
-                        setDropMark(null);
-                        commit(next, `Moved ${stepLabel(stepIds[dragFrom]!, entries)}`);
-                      }
-                }
-                className={cn(
-                  'rounded-md border bg-neutral-950/60 px-3 py-2',
-                  rowIssues.length > 0 || rowPromptIssues.length > 0 || (!entry && !readOnly)
-                    ? 'border-red-800/70'
-                    : 'border-neutral-800',
-                  rowShadow(index),
-                )}
-              >
-                <div className="flex flex-wrap items-start gap-2 sm:flex-nowrap">
-                  {!readOnly && (
-                    <span
-                      aria-hidden
-                      draggable={!disabled}
-                      title="Drag to reorder"
-                      onDragStart={(e) => {
-                        const li = e.currentTarget.closest('li');
-                        if (li) e.dataTransfer.setDragImage(li, 0, 0);
-                        e.dataTransfer.effectAllowed = 'move';
-                        e.dataTransfer.setData('text/plain', stepId);
-                        setDragFrom(index);
-                      }}
-                      onDragEnd={() => {
-                        setDragFrom(null);
-                        setDropMark(null);
-                      }}
-                      className="mt-1 hidden cursor-grab select-none text-neutral-600 lg:block"
-                    >
-                      ⋮⋮
-                    </span>
+        <StepPortView
+          request={
+            portRequest ?? {
+              path: '/admin/task-types/ports',
+              body: {
+                slug: typeSlug && slugProblem(typeSlug) === null ? typeSlug : 'port-preview',
+                displayName: 'Port preview',
+                requiresRepository,
+                stepIds,
+                promptSteps,
+              },
+            }
+          }
+          onCanvasChange={setCanvasOpen}
+          executionPath={executionPath}
+          disabled={disabled}
+          onReorder={readOnly ? undefined : move}
+        >
+          <ol ref={listRef} className="flex flex-col gap-2">
+            {stepIds.map((stepId, index) => {
+              const entry = entries.get(stepId);
+              const label = stepLabel(stepId, entries);
+              const rowIssues = byRow.get(index) ?? [];
+              const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(stepId, typeSlug);
+              const promptEntry = promptSlug === null ? undefined : promptSteps[promptSlug];
+              const rowPromptIssues = promptByStep.get(stepId) ?? [];
+              const toolRowIssues =
+                prompt && promptEntry && openStepId === stepId
+                  ? rowPromptIssues.filter((issue) =>
+                      promptEntry.tools.some((tool) => isToolIssue(issue, tool)),
+                    )
+                  : [];
+              const limitEditable =
+                (!readOnly || overlay?.limitsEditable === true) &&
+                entry?.loopBudgetEditable === true;
+              return (
+                <li
+                  key={`${stepId}-${index}`}
+                  data-row={index}
+                  onDragOver={
+                    readOnly || dragFrom === null
+                      ? undefined
+                      : (e) => {
+                          e.preventDefault();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const intent = dropIntentFromY(e.clientY - rect.top, rect.height, false);
+                          setDropMark({ index, intent: intent === 'after' ? 'after' : 'before' });
+                        }
+                  }
+                  onDrop={
+                    readOnly || dragFrom === null
+                      ? undefined
+                      : (e) => {
+                          e.preventDefault();
+                          const intent = dropMark?.index === index ? dropMark.intent : 'before';
+                          const next = dropMove(stepIds, dragFrom, index, intent);
+                          setDragFrom(null);
+                          setDropMark(null);
+                          reorder(next, `Moved ${stepLabel(stepIds[dragFrom]!, entries)}`);
+                        }
+                  }
+                  className={cn(
+                    'rounded-md border bg-neutral-950/60 px-3 py-2',
+                    rowIssues.length > 0 || rowPromptIssues.length > 0 || (!entry && !readOnly)
+                      ? 'border-red-800/70'
+                      : 'border-neutral-800',
+                    rowShadow(index),
                   )}
-                  <span className="mt-0.5 w-6 shrink-0 text-right text-sm tabular-nums text-neutral-500">
-                    {index + 1}.
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
-                      {label}
-                      {promptEntry && <Badge variant="warning">Prompt step</Badge>}
-                    </p>
-                    {entry ? (
-                      <>
-                        <p className="font-mono text-[11px] text-neutral-500 [overflow-wrap:anywhere]">
-                          {stepId}
-                        </p>
-                        <StepFacts entry={entry} />
-                      </>
-                    ) : (
-                      <StepWithoutEntryNote stepId={stepId} readOnly={readOnly} catalog={catalog} />
-                    )}
-                    <StepIntegrationOverview
-                      requirements={
-                        promptEntry?.integrations ??
-                        entry?.integrations ??
-                        catalog.unavailableSteps?.find((step) => step.stepId === stepId)?.entry
-                          .integrations
-                      }
-                      info={integrationInfo}
-                      categories={integrationCategories}
-                    />
-                    {promptEntry && prompt && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="mt-2 h-11"
-                        disabled={disabled}
-                        aria-expanded={openStepId === stepId}
-                        aria-label={`${openStepId === stepId ? 'Close' : 'Edit'} prompt step ${label}`}
-                        onClick={() => setOpenPromptSlug(openStepId === stepId ? null : promptSlug)}
+                >
+                  <div className="flex flex-wrap items-start gap-2 sm:flex-nowrap">
+                    {!readOnly && (
+                      <span
+                        aria-hidden
+                        draggable={!disabled}
+                        title="Drag to reorder"
+                        onDragStart={(e) => {
+                          const li = e.currentTarget.closest('li');
+                          if (li) e.dataTransfer.setDragImage(li, 0, 0);
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', stepId);
+                          setDragFrom(index);
+                        }}
+                        onDragEnd={() => {
+                          setDragFrom(null);
+                          setDropMark(null);
+                        }}
+                        className="mt-1 hidden cursor-grab select-none text-neutral-600 lg:block"
                       >
-                        {openStepId === stepId ? 'Close editor' : 'Edit'}
-                      </Button>
+                        ⋮⋮
+                      </span>
                     )}
-                    {entry?.loopTargetStepId !== undefined && (
-                      <InlineMarkdown
-                        body={`Fix loops return to ${stepLabel(entry.loopTargetStepId, entries)}`}
-                        className="mt-1 text-xs text-neutral-400"
-                      />
-                    )}
-                    {limitEditable && (
-                      <label className="mt-2 flex items-center gap-2 text-xs text-neutral-400">
-                        Loop limit
-                        <Input
-                          type="number"
-                          min={1}
-                          max={50}
-                          step={1}
-                          inputMode="numeric"
-                          placeholder="default"
-                          value={loopLimits[stepId] ?? ''}
-                          onChange={(e) => setLimit(stepId, e.target.value)}
-                          disabled={disabled}
-                          className="h-11 w-24"
+                    <span className="mt-0.5 w-6 shrink-0 text-right text-sm tabular-nums text-neutral-500">
+                      {index + 1}.
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
+                        {label}
+                        {promptEntry && <Badge variant="warning">Prompt step</Badge>}
+                      </p>
+                      {entry ? (
+                        <>
+                          <p className="font-mono text-[11px] text-neutral-500 [overflow-wrap:anywhere]">
+                            {stepId}
+                          </p>
+                          <StepFacts entry={entry} />
+                        </>
+                      ) : (
+                        <StepWithoutEntryNote
+                          stepId={stepId}
+                          readOnly={readOnly}
+                          catalog={catalog}
                         />
-                      </label>
-                    )}
-                    {readOnly && !limitEditable && loopLimits[stepId] !== undefined && (
-                      <p className="mt-1 text-xs text-neutral-400">{`Loop limit ${loopLimits[stepId]}`}</p>
+                      )}
+                      <StepIntegrationOverview
+                        requirements={
+                          promptEntry?.integrations ??
+                          entry?.integrations ??
+                          catalog.unavailableSteps?.find((step) => step.stepId === stepId)?.entry
+                            .integrations
+                        }
+                        info={integrationInfo}
+                        categories={integrationCategories}
+                      />
+                      {promptEntry && prompt && (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="mt-2 h-11"
+                          disabled={disabled}
+                          aria-expanded={openStepId === stepId}
+                          aria-label={`${openStepId === stepId ? 'Close' : 'Edit'} prompt step ${label}`}
+                          onClick={() =>
+                            setOpenPromptSlug(openStepId === stepId ? null : promptSlug)
+                          }
+                        >
+                          {openStepId === stepId ? 'Close editor' : 'Edit'}
+                        </Button>
+                      )}
+                      {entry?.loopTargetStepId !== undefined && (
+                        <InlineMarkdown
+                          body={`Fix loops return to ${stepLabel(entry.loopTargetStepId, entries)}`}
+                          className="mt-1 text-xs text-neutral-400"
+                        />
+                      )}
+                      {limitEditable && (
+                        <label className="mt-2 flex items-center gap-2 text-xs text-neutral-400">
+                          Loop limit
+                          <Input
+                            type="number"
+                            min={1}
+                            max={50}
+                            step={1}
+                            inputMode="numeric"
+                            placeholder="default"
+                            value={loopLimits[stepId] ?? ''}
+                            onChange={(e) => setLimit(stepId, e.target.value)}
+                            disabled={disabled}
+                            className="h-11 w-24"
+                          />
+                        </label>
+                      )}
+                      {readOnly && !limitEditable && loopLimits[stepId] !== undefined && (
+                        <p className="mt-1 text-xs text-neutral-400">{`Loop limit ${loopLimits[stepId]}`}</p>
+                      )}
+                    </div>
+                    {!readOnly && (
+                      <div className="flex w-full shrink-0 gap-1 pl-8 sm:w-auto sm:pl-0">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className={ICON_BUTTON}
+                          data-act="up"
+                          aria-label={`Move ${label} up`}
+                          disabled={disabled || index === 0}
+                          onClick={() => move(index, index - 1)}
+                        >
+                          ↑
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className={ICON_BUTTON}
+                          data-act="down"
+                          aria-label={`Move ${label} down`}
+                          disabled={disabled || index === stepIds.length - 1}
+                          onClick={() => move(index, index + 1)}
+                        >
+                          ↓
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className={cn(ICON_BUTTON, 'text-red-300')}
+                          data-act="remove"
+                          aria-label={`Remove ${label}`}
+                          disabled={disabled}
+                          onClick={() => remove(index)}
+                        >
+                          ×
+                        </Button>
+                      </div>
                     )}
                   </div>
-                  {!readOnly && (
-                    <div className="flex w-full shrink-0 gap-1 pl-8 sm:w-auto sm:pl-0">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className={ICON_BUTTON}
-                        data-act="up"
-                        aria-label={`Move ${label} up`}
-                        disabled={disabled || index === 0}
-                        onClick={() => move(index, index - 1)}
-                      >
-                        ↑
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className={ICON_BUTTON}
-                        data-act="down"
-                        aria-label={`Move ${label} down`}
-                        disabled={disabled || index === stepIds.length - 1}
-                        onClick={() => move(index, index + 1)}
-                      >
-                        ↓
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className={cn(ICON_BUTTON, 'text-red-300')}
-                        data-act="remove"
-                        aria-label={`Remove ${label}`}
-                        disabled={disabled}
-                        onClick={() => remove(index)}
-                      >
-                        ×
-                      </Button>
-                    </div>
-                  )}
-                </div>
-                {promptEntry && prompt && openStepId === stepId && (
-                  <PromptStepEditor
-                    entry={promptEntry}
-                    issues={toolRowIssues}
-                    integrationCategories={integrationCategories}
-                    disabled={disabled}
-                    onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
-                    onRemove={() => remove(index)}
-                  />
-                )}
-                {rowPromptIssues
-                  .filter((issue) => !toolRowIssues.includes(issue))
-                  .map((issue) => (
-                    <InlineMarkdown
-                      key={promptIssueKey(issue)}
-                      className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
-                      body={describePromptStepIssue(issue)}
+                  {promptEntry && prompt && openStepId === stepId && (
+                    <PromptStepEditor
+                      entry={promptEntry}
+                      issues={toolRowIssues}
+                      integrationCategories={integrationCategories}
+                      disabled={disabled}
+                      onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
+                      onRemove={() => remove(index)}
                     />
-                  ))}
-                {rowIssues.map((issue) => {
-                  const view = describeIssue(issue, {
-                    stepIds,
-                    catalog: entries,
-                    requiresRepository,
-                  });
-                  const addAfter = issue.kind === 'unfulfilled';
-                  const suggestions = view.providedBy.filter((p) => !stepIds.includes(p.stepId));
-                  return (
-                    <div key={JSON.stringify(issue)} className="mt-2 text-xs text-red-300">
-                      <InlineMarkdown className="[overflow-wrap:anywhere]" body={view.message} />
-                      {view.providedBy.length > 0 && issue.kind !== 'missing-loop-target' && (
-                        <InlineMarkdown
-                          className="mt-0.5 text-neutral-400 [overflow-wrap:anywhere]"
-                          body={`Provided by: ${view.providedBy.map((p) => p.label).join(', ')}`}
-                        />
-                      )}
-                      {suggestions.length > 0 && (
-                        <div className="mt-1 flex flex-wrap gap-2">
-                          {suggestions.map((p) => (
-                            <Button
-                              key={p.stepId}
-                              type="button"
-                              variant="secondary"
-                              className="h-11 whitespace-normal py-1 text-xs"
-                              disabled={disabled}
-                              onClick={() => addSuggestion(p, index, addAfter)}
-                            >
-                              {`Add ${p.label} ${addAfter ? 'after' : 'before'} this`}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </li>
-            );
-          })}
-        </ol>
+                  )}
+                  {rowPromptIssues
+                    .filter((issue) => !toolRowIssues.includes(issue))
+                    .map((issue) => (
+                      <InlineMarkdown
+                        key={promptIssueKey(issue)}
+                        className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
+                        body={describePromptStepIssue(issue)}
+                      />
+                    ))}
+                  {rowIssues.map((issue) => {
+                    const view = describeIssue(issue, {
+                      stepIds,
+                      catalog: entries,
+                      requiresRepository,
+                    });
+                    const addAfter = issue.kind === 'unfulfilled';
+                    const suggestions = view.providedBy.filter((p) => !stepIds.includes(p.stepId));
+                    return (
+                      <div key={JSON.stringify(issue)} className="mt-2 text-xs text-red-300">
+                        <InlineMarkdown className="[overflow-wrap:anywhere]" body={view.message} />
+                        {view.providedBy.length > 0 && issue.kind !== 'missing-loop-target' && (
+                          <InlineMarkdown
+                            className="mt-0.5 text-neutral-400 [overflow-wrap:anywhere]"
+                            body={`Provided by: ${view.providedBy.map((p) => p.label).join(', ')}`}
+                          />
+                        )}
+                        {suggestions.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            {suggestions.map((p) => (
+                              <Button
+                                key={p.stepId}
+                                type="button"
+                                variant="secondary"
+                                className="h-11 whitespace-normal py-1 text-xs"
+                                disabled={disabled}
+                                onClick={() => addSuggestion(p, index, addAfter)}
+                              >
+                                {`Add ${p.label} ${addAfter ? 'after' : 'before'} this`}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </li>
+              );
+            })}
+          </ol>
+        </StepPortView>
         {prompt && (
           <div className="mt-3">
             <Button
@@ -698,7 +753,11 @@ export function TaskTypeComposer({
             )}
           </div>
         )}
-        <p role="status" aria-live="polite" className="sr-only">
+        <p
+          role="status"
+          aria-live="polite"
+          className={canvasOpen ? 'mt-2 text-sm text-neutral-300' : 'sr-only'}
+        >
           {announcement}
         </p>
       </section>

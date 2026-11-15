@@ -164,6 +164,8 @@ async function fakeFetch(input: unknown, init?: { body?: string; method?: string
     }
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
+  if (path === '/tasks/t1/ports')
+    return { ok: true, status: 200, json: async () => ({ candidates: [] }) };
   if (path === '/tasks/t1/attachments') {
     net.attachmentFetches.push(path);
     return { ok: true, status: 200, json: async () => ({ attachments: [] }) };
@@ -786,4 +788,34 @@ describe('saved mining reply recovery', () => {
     ]);
     expect(buttons(view.tree(), 'resume (apply saved replies)')).toHaveLength(0);
   });
+});
+
+it('keeps active step cards and approval forms visible when canvas is open', async () => {
+  const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+    {
+      ...stepRow(),
+      status: 'waiting_form',
+      formSchema: {
+        fields: [
+          {
+            id: 'approval',
+            type: 'select',
+            label: 'Approval decision',
+            options: [{ value: 'approve', label: 'Approve' }],
+          },
+        ],
+        sections: [],
+      },
+    },
+  ]);
+  const before = textOf(view.tree());
+  expect(before).toContain('Approval decision');
+  fire.click(buttons(view.tree(), /^canvas$/)[0]!);
+  await view.flush();
+  expect(textOf(view.tree())).toContain('Approval decision');
+  expect(textOf(view.tree())).toContain(STEP_TITLE);
+});
+it('hides the step view toggle when the task has no steps', async () => {
+  const view = await mount({});
+  expect(buttons(view.tree(), /^canvas$/)).toHaveLength(0);
 });

@@ -83,7 +83,8 @@ describe('TaskTypeComposer', () => {
       />,
     );
     expect(html).toContain('Phase 0b.5: Spec quality review');
-    expect(html).not.toContain('<button');
+    expect(html).not.toContain('Move Phase');
+    expect(html).toContain('Canvas');
     expect(html).not.toContain('<input');
     expect(html).not.toContain('draggable');
     expect(html).not.toContain('Needs spec first');

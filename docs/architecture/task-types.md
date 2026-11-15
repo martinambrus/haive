@@ -580,6 +580,39 @@ before enqueueing START; it never records message or prompt content.
 - **Step panels** (`UiPanelSpec`, `BUILTIN_STEP_PANELS`, `resolveStepPanels`) are a web table keyed by
   step id: a custom type reusing a core step gets its panels; module and prompt steps get none.
 
+The Steps section offers List (the default keyboard view) and a client-only Canvas.
+The canvas reads a display-only projection of the current serialized draft from
+`POST /admin/task-types/ports`; `GET /admin/task-types/:slug/ports` projects a stored
+static type or each derived path. Draft port projection alone caps static lists at
+`MAX_PORT_DRAFT_STEPS` (256), over four times the 58-step stock workflow (including the environment
+prelude). Invalid or reserved in-progress editor slugs use a projection-only placeholder.
+Ports show role, exact contract version, authorship, optionality and
+wired/ambiguous/dangling/optional-absent state from the shared pure `validatePortEdges`.
+The validator indexes earlier producers by role and exact contract once, with work linear
+in ports plus the candidate identities returned. Bindings and canvas endpoints carry run
+positions so transient duplicate step IDs remain distinct. The effective-spec input shows
+the existing ordered host adapter, not a new direct consumer declaration. Worker controls
+compare spec declarations and adapter/review reader inventories with this projection.
+No port diagnostic changes save/admission policy in this stage.
+
+Static canvas drag and list reorder share the existing draft mutation and
+`validateComposition` diagnostics. A move introducing a composition problem is refused
+with the existing message; an already invalid draft can still be repaired. List announcements
+stay screen-reader-only; Canvas displays them while open. Derived path order remains
+read-only in both views; overlay operations are the editor's writer.
+`GET /tasks/:id/ports` is owner-scoped and projects canonical history or the validated
+v1/v2 candidate pin. Selected paths show their review/audit bindings. An unselected task
+shows only the null-path candidate, clears replacement bindings and labels the graph as
+candidate-only. A missing selected path displays an explicit unavailable state. Edges never
+consult a live catalog or definition; the route may read the live definition's strategy
+only to identify a missing required derived pin, as the existing output-role projection does.
+The response omits the full plan and output bodies. History nodes use persisted step titles.
+Task history defaults to its existing list; opening Canvas keeps step cards and approval
+forms visible, and an empty task has no view toggle. Canvas state never becomes task or
+definition state. Catalog entry serialization and v1/v2 pin decoding are unchanged.
+`@xyflow/react` is pinned to 12.9.3; its stylesheet and inline positioning styles pass the
+existing CSP without a policy change.
+
 ## Prompt-template steps
 
 An admin type may carry prompt steps (`prompt_steps`, keyed by the step slug; never on built-in or

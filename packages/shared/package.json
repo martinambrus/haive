@@ -258,6 +258,10 @@
     "./credential-scan": {
       "types": "./dist/credential-scan.d.ts",
       "import": "./dist/credential-scan.js"
+    },
+    "./step-ports": {
+      "types": "./dist/step-engine/step-ports.d.ts",
+      "import": "./dist/step-engine/step-ports.js"
     }
   },
   "scripts": {

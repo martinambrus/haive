@@ -1,3 +1,4 @@
+import { projectTaskPorts } from '../../lib/step-port-projection.js';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { derivedTaskWarnings } from '@haive/shared/modularity';
 import { assertTaskRootMergeIdle } from '../../lib/root-merge-busy.js';
@@ -1134,6 +1135,43 @@ taskRoutes.get('/estimation-accuracy', async (c) => {
     };
   });
   return c.json(buildEstimationAccuracy(data));
+});
+
+taskRoutes.get('/:id/ports', async (c) => {
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, c.req.param('id')), eq(schema.tasks.userId, c.get('userId'))),
+    columns: {
+      id: true,
+      type: true,
+      runListSnapshot: true,
+      derivedRunPlan: true,
+      executionPath: true,
+    },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  let runListStrategy: string | undefined;
+  if (
+    task.derivedRunPlan == null &&
+    !new Set<string>(schema.workflowTypeEnum.enumValues).has(task.type)
+  ) {
+    const definition = await db.query.taskTypeDefinitions.findFirst({
+      where: eq(schema.taskTypeDefinitions.slug, task.type),
+      columns: { runListStrategy: true },
+    });
+    runListStrategy = definition?.runListStrategy;
+  }
+  const steps = await db
+    .select({ stepId: schema.taskSteps.stepId, title: schema.taskSteps.title })
+    .from(schema.taskSteps)
+    .where(eq(schema.taskSteps.taskId, task.id))
+    .orderBy(
+      asc(schema.taskSteps.round),
+      asc(schema.taskSteps.runSeq),
+      asc(schema.taskSteps.createdAt),
+      asc(schema.taskSteps.stepIndex),
+    );
+  return c.json(projectTaskPorts({ ...task, runListStrategy }, steps));
 });
 
 taskRoutes.get('/:id', async (c) => {

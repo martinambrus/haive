@@ -65,6 +65,7 @@ function mount(start: { stepIds: string[]; promptSteps?: PromptSteps; catalog?: 
     />
   ));
   return {
+    statusClass: () => findAll(view.tree(), (h) => h.props.role === 'status')[0]!.props.className,
     summary: () =>
       findAll(view.tree(), (h) => h.tag === 'p' && /^(No problems|\d+ problems?)$/.test(textOf(h)))
         .map((h) => textOf(h))
@@ -121,4 +122,10 @@ describe('what the composer announces after a change', () => {
     expect(m.summary()).toBe('1 problem');
     expect(m.announced()).toBe('Removed Needy; 1 problem');
   });
+});
+
+it('keeps the list announcement visually hidden', () => {
+  const m = mount({ stepIds: ['04-phase-0b-pre-planning', '01-worktree-setup'] });
+  m.press(/^move worktree setup up$/);
+  expect(m.statusClass()).toBe('sr-only');
 });
