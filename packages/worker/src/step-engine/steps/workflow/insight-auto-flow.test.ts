@@ -301,4 +301,41 @@ describe('automatic insight stages', () => {
       ),
     ).toContain('applied (agent report)');
   });
+  it('keeps already-classified minor/nit items listed when new cap-final items need manual decisions', async () => {
+    history.claims = Array.from({ length: 3 }, (_, n) => ({
+      ...claim,
+      batchId: `old-${n}`,
+      insights: [{ ...one, identity: `old-${n}` }],
+    }));
+    history.results = [
+      {
+        version: 1,
+        batchId: 'old-0',
+        sourceStepRowId: 'old',
+        generation: 0,
+        complete: true,
+        items: [
+          {
+            id: one.id,
+            identity: one.identity,
+            class: 'minor',
+            kind: 'cosmetic',
+            eligible: true,
+            outcome: 'left_minor',
+            reason: 'style',
+          },
+        ],
+        invocationIds: [],
+      },
+    ];
+    const fresh = { ...one, id: 'fresh', identity: 'a.ts::fresh', title: 'Fresh' };
+    const detected = await detectAutoInsights(ctx, [one, fresh], '/repo');
+    expect(detected).toMatchObject({ mode: 'manual', stopReason: 'cap', candidates: [fresh] });
+    expect(detected.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: one.id, class: 'minor', outcome: 'left_minor' }),
+        expect.objectContaining({ id: 'fresh', class: 'unclassified', outcome: 'cap_reached' }),
+      ]),
+    );
+  });
 });

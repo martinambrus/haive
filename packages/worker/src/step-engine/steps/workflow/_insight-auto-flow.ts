@@ -118,7 +118,15 @@ export async function detectAutoInsights(
   }
   const pending =
     mode === 'manual'
-      ? insights.filter((i) => cap || priorUnknown || manualIdentities.has(i.identity))
+      ? insights.filter(
+          (i) =>
+            manualIdentities.has(i.identity) ||
+            candidates.some((c) => c.identity === i.identity) ||
+            (priorUnknown &&
+              !decisions.some(
+                (d) => d.identity === i.identity && (d.class === 'minor' || d.class === 'nit'),
+              )),
+        )
       : candidates;
   const state: AutoDetect = {
     version: 1,
