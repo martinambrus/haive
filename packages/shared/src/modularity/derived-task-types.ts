@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+  STEP_ROLES,
+  type StepRoleId,
+  type StepOutputContractRef,
+  stepRoleOutputContract,
+  stepOutputContractsEqual,
+} from '../step-engine/output-contracts.js';
 import { EXECUTION_PATHS, executionPathSchema, type ExecutionPath } from '../schemas/tasks.js';
 import type { DerivedBaseCandidate } from '../step-engine/run-list.js';
 import {
@@ -97,7 +104,16 @@ export interface DerivedRunPlanV1 {
   integrationAdmissions?: { categoryId: string; moduleId: string }[];
   defaultWarnings?: { kind: string; stepId: string; field?: string }[];
 }
-export type DerivedRunPlan = DerivedRunPlanV1;
+export interface PinnedRoleProducer {
+  stepId: string;
+  outputContract: StepOutputContractRef;
+}
+export type DerivedRoleBindings = Partial<Record<StepRoleId, PinnedRoleProducer>>;
+export interface DerivedRunPlanV2 extends Omit<DerivedRunPlanV1, 'version' | 'candidates'> {
+  version: 2;
+  candidates: (DerivedEvaluatedCandidate & { roleBindings: DerivedRoleBindings })[];
+}
+export type DerivedRunPlan = DerivedRunPlanV1 | DerivedRunPlanV2;
 
 interface EvaluationInput {
   baseCandidates: readonly DerivedBaseCandidate[];
@@ -353,9 +369,118 @@ const planSchema = z
   })
   .strict();
 
+const producerSchema = z
+  .object({
+    stepId: derivedStepIdSchema,
+    outputContract: z.object({ id: z.string(), version: z.number().int() }).strict(),
+  })
+  .strict();
+const v2PlanSchema = planSchema.extend({
+  version: z.literal(2),
+  candidates: z
+    .array(
+      candidateSchema.extend({
+        outcomes: z.array(outcomeSchema),
+        compositionIssues: z.array(z.never()),
+        roleBindings: z
+          .object({
+            [STEP_ROLES.codeReview]: producerSchema.optional(),
+            [STEP_ROLES.codeAudit]: producerSchema.optional(),
+          })
+          .strict(),
+      }),
+    )
+    .length(4),
+});
+
+/** Replay only the PINNED operations/outcomes. No current catalog or composition rules.
+ * This verifies physical positions, one-hop bindings and removals without enabling admission. */
+function validV2Bindings(plan: DerivedRunPlanV2): boolean {
+  const entries = new Map(plan.composableEntries.map((e) => [e.stepId, e]));
+  if (entries.size !== plan.composableEntries.length) return false;
+  const roles = Object.values(STEP_ROLES);
+  let replaced = false;
+  for (const candidate of plan.candidates) {
+    const ids = [
+      ...plan.base.candidates.find((c) => c.executionPath === candidate.executionPath)!.stepIds,
+    ];
+    const bindings: DerivedRoleBindings = {};
+    const removed = new Set<string>();
+    for (const outcome of candidate.outcomes) {
+      const change = outcome.change;
+      const target = targetOf(change);
+      const index = ids.indexOf(target);
+      if (outcome.outcome !== 'applied') {
+        if (
+          index >= 0 ||
+          removed.has(target) ||
+          outcome.reason !==
+            (outcome.outcome === 'path-absent' ? 'target-not-on-path' : 'target-not-in-base')
+        )
+          return false;
+        continue;
+      }
+      if (
+        index < 0 ||
+        outcome.reason !== 'change-applied' ||
+        ('insertAfter' in change
+          ? index < DERIVED_WORKFLOW_PREFIX.length - 1
+          : DERIVED_WORKFLOW_PREFIX.includes(target))
+      )
+        return false;
+      if ('replace' in change) {
+        if (
+          !roles.includes(change.replace as StepRoleId) ||
+          roles.includes(change.with as StepRoleId)
+        )
+          return false;
+        const role = change.replace as StepRoleId;
+        const entry = entries.get(change.with);
+        if (
+          bindings[role] ||
+          !entry?.replaces?.includes(role) ||
+          !stepOutputContractsEqual(stepRoleOutputContract(role), entry.outputContract)
+        )
+          return false;
+        ids.splice(index, 1, change.with);
+        removed.add(target);
+        bindings[role] = { stepId: change.with, outputContract: entry.outputContract! };
+        replaced = true;
+      } else if ('remove' in change) {
+        ids.splice(index, 1);
+        removed.add(target);
+        for (const role of roles) if (bindings[role]?.stepId === target) delete bindings[role];
+      } else {
+        if (DERIVED_WORKFLOW_PREFIX.includes(change.step)) return false;
+        ids.splice(index + 1, 0, change.step);
+        removed.delete(change.step);
+      }
+      if (new Set(ids).size !== ids.length) return false;
+      if (roles.some((role) => bindings[role] && ids.includes(role))) return false;
+    }
+    if (JSON.stringify(ids) !== JSON.stringify(candidate.stepIds)) return false;
+    const producers = new Set<string>();
+    for (const role of roles) {
+      const expected = bindings[role];
+      const actual = candidate.roleBindings[role];
+      if (!expected !== !actual) return false;
+      if (expected && actual) {
+        if (
+          actual.stepId !== expected.stepId ||
+          !stepOutputContractsEqual(expected.outputContract, actual.outputContract) ||
+          producers.has(actual.stepId)
+        )
+          return false;
+        producers.add(actual.stepId);
+      }
+    }
+  }
+  return replaced;
+}
+
 /** Read pinned shape/invariants only. Composition rules run at admission and first triage. */
 export function parseDerivedRunPlan(raw: unknown): DerivedRunPlan {
-  const parsed = planSchema.safeParse(raw);
+  const parsed = z.union([planSchema, v2PlanSchema]).safeParse(raw);
   if (!parsed.success) throw new DerivedRunPlanError();
   const plan = parsed.data;
   const paths = [null, ...EXECUTION_PATHS];
@@ -383,7 +508,9 @@ export function parseDerivedRunPlan(raw: unknown): DerivedRunPlan {
   ) {
     throw new DerivedRunPlanError();
   }
-  return plan;
+  if (plan.version === 2 && !validV2Bindings(plan as DerivedRunPlanV2))
+    throw new DerivedRunPlanError();
+  return plan as DerivedRunPlan;
 }
 
 export function derivedCandidateIds(

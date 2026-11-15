@@ -16,8 +16,8 @@
       "import": "./dist/step-engine/execution-paths.js"
     },
     "./step-outputs": {
-      "types": "./dist/step-engine/output-contracts.d.ts",
-      "import": "./dist/step-engine/output-contracts.js"
+      "types": "./dist/step-engine/step-outputs.d.ts",
+      "import": "./dist/step-engine/step-outputs.js"
     },
     "./run-list": {
       "types": "./dist/step-engine/run-list.d.ts",

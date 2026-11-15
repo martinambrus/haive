@@ -12,10 +12,14 @@ export const CODE_AUDIT_OUTPUT_CONTRACT = Object.freeze({
 } as const);
 export type StepOutputContractRef =
   typeof CODE_REVIEW_OUTPUT_CONTRACT | typeof CODE_AUDIT_OUTPUT_CONTRACT;
-export type StepRoleId = '08c-code-review' | '08c2-code-audit';
+export const STEP_ROLES = Object.freeze({
+  codeReview: '08c-code-review',
+  codeAudit: '08c2-code-audit',
+} as const);
+export type StepRoleId = (typeof STEP_ROLES)[keyof typeof STEP_ROLES];
 
 export function stepRoleOutputContract(role: StepRoleId): StepOutputContractRef {
-  return role === '08c-code-review' ? CODE_REVIEW_OUTPUT_CONTRACT : CODE_AUDIT_OUTPUT_CONTRACT;
+  return role === STEP_ROLES.codeReview ? CODE_REVIEW_OUTPUT_CONTRACT : CODE_AUDIT_OUTPUT_CONTRACT;
 }
 
 /** Exact id + version, with no module-supplied validator or compatibility assertion. */
