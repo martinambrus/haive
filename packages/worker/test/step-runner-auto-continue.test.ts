@@ -1573,7 +1573,7 @@ describe('manual insight choices under auto-continue', () => {
         autoContinue: true,
         preAnswers: preset ? { '08e-insights-triage': preset } : {},
       };
-      const prompt = vi.fn(insightsTriageStep.llm!.buildPrompt);
+      const select = vi.fn(insightsTriageStep.agentMining!.selectAgents);
       const def = {
         ...insightsTriageStep,
         shouldRun: undefined,
@@ -1590,15 +1590,16 @@ describe('manual insight choices under auto-continue', () => {
             },
           ],
         }),
-        llm: { ...insightsTriageStep.llm!, buildPrompt: prompt },
+        agentMining: { ...insightsTriageStep.agentMining!, selectAgents: select },
       } as StepDefinition;
       const first = await run(state, def);
       expect(first.status).toBe('waiting_form');
       expect(state.taskStepRow.formValues).toBeNull();
-      expect(prompt).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
       expect(state.invocation).toBeUndefined();
       expect((await run(state, def, { selectedInsights: [] })).status).toBe('done');
-      expect(prompt).not.toHaveBeenCalled();
+      for (const r of select.mock.results) expect(await r.value).toEqual([]);
+      expect(state.invocation).toBeUndefined();
     },
   );
 });
