@@ -831,7 +831,7 @@ taskTypeRoutes.get('/', async (c) => {
 taskTypeRoutes.get('/:slug/saved-step-clis', async (c) => {
   const db = getDb();
   const slug = c.req.param('slug');
-  const definition = await definitionForCreate(db, slug, { generic: true });
+  const definition = await definitionForCreate(db, slug, { locked: false, generic: true });
   const flags = withTaskCustomSteps(await loadStepFlags(db), {
     type: slug,
     requiresRepository: definition.requiresRepository,

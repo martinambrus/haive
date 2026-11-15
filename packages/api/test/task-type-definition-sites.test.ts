@@ -112,7 +112,10 @@ describe('POST /tasks pins the run list', () => {
       });
       expect(res.status).toBe(201);
       expect(((await res.json()) as { task: unknown }).task).not.toHaveProperty('dataEdgePlan');
-      expect(h.definition).toHaveBeenNthCalledWith(1, expect.anything(), type, { generic: true });
+      expect(h.definition).toHaveBeenNthCalledWith(1, expect.anything(), type, {
+        generic: true,
+        locked: false,
+      });
       expect(h.definition).toHaveBeenNthCalledWith(2, expect.anything(), type, {
         generic: true,
         locked: true,

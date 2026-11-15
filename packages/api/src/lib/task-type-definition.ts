@@ -144,7 +144,7 @@ const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
 export async function definitionForCreate(
   handle: Pick<Database, 'select' | 'execute'>,
   slug: string,
-  opts: { generic: boolean; locked?: boolean; catalogLockTimeoutMs?: number },
+  opts: { generic: boolean; locked: boolean; catalogLockTimeoutMs?: number },
 ): Promise<TaskTypeDefinitionForCreate> {
   // Only INSERT admission holds locks; previews and preflights are ordinary reads.
   const read = handle

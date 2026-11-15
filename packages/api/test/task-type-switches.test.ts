@@ -101,7 +101,10 @@ beforeEach(() => {
 
 describe('definitionForCreate and the task type switches', () => {
   const create = (source: string) =>
-    definitionForCreate(handle([defRow('x-type', source)]), 'x-type', { generic: false });
+    definitionForCreate(handle([defRow('x-type', source)]), 'x-type', {
+      locked: false,
+      generic: false,
+    });
 
   it('refuses an admin-authored type while its switch is off, and allows it when on', async () => {
     const err = await refusal(create('admin'));
@@ -136,6 +139,7 @@ describe('definitionForCreate and the task type switches', () => {
   describe('a module the type uses', () => {
     const create = (modules: unknown[]) =>
       definitionForCreate(handle([defRow('x-type', 'module:acme')], modules), 'x-type', {
+        locked: false,
         generic: false,
       });
 
@@ -172,7 +176,7 @@ describe('definitionForCreate and the task type switches', () => {
   it('never touches a built-in, with a row or without', async () => {
     await expect(create('builtin')).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
     await expect(
-      definitionForCreate(handle([]), 'plan_merge', { generic: false }),
+      definitionForCreate(handle([]), 'plan_merge', { locked: false, generic: false }),
     ).resolves.toMatchObject({ runListSnapshot: null });
   });
 });

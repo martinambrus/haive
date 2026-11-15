@@ -115,47 +115,65 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
   });
 
   it('copies the step list of a static type', async () => {
-    expect(await definitionForCreate(db, 'ttd-static', { generic: true })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-static', { locked: false, generic: true }),
+    ).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
 
   it('pins nothing for a dynamic type', async () => {
-    expect(await definitionForCreate(db, 'ttd-dynamic', { generic: true })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-dynamic', { locked: false, generic: true }),
+    ).toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('refuses an unseeded built-in on the generic route unless it is a generic type', async () => {
-    const err = await refusal(definitionForCreate(db, 'plan_merge', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'plan_merge', { locked: false, generic: true }),
+    );
     expect([err.status, err.message]).toEqual([403, 'Task type plan_merge cannot be created here']);
-    await expect(definitionForCreate(db, 'onboarding', { generic: true })).resolves.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'onboarding', { locked: false, generic: true }),
+    ).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('lets a built-in type through with no snapshot before the worker has seeded it', async () => {
-    await expect(definitionForCreate(db, 'plan_merge', { generic: false })).resolves.toMatchObject({
+    await expect(
+      definitionForCreate(db, 'plan_merge', { locked: false, generic: false }),
+    ).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('is a 404 for an unknown type', async () => {
-    const err = await refusal(definitionForCreate(db, 'ttd-missing', { generic: false }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-missing', { locked: false, generic: false }),
+    );
     expect([err.status, err.message]).toEqual([404, 'Unknown task type ttd-missing']);
   });
 
   it('is a 403 for a disabled type, generic or not', async () => {
     for (const generic of [true, false]) {
-      const err = await refusal(definitionForCreate(db, 'ttd-disabled', { generic }));
+      const err = await refusal(
+        definitionForCreate(db, 'ttd-disabled', { locked: false, generic }),
+      );
       expect([err.status, err.message]).toEqual([403, 'Task type ttd-disabled is disabled']);
     }
   });
 
   it('refuses a type that is not selectable only on the generic path', async () => {
-    const err = await refusal(definitionForCreate(db, 'ttd-hidden', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-hidden', { locked: false, generic: true }),
+    );
     expect([err.status, err.message]).toEqual([403, 'Task type ttd-hidden cannot be created here']);
-    expect(await definitionForCreate(db, 'ttd-hidden', { generic: false })).toMatchObject({
+    expect(
+      await definitionForCreate(db, 'ttd-hidden', { locked: false, generic: false }),
+    ).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
@@ -164,7 +182,9 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     await expect(
       db.transaction(async (tx) => {
         await tx.insert(schema.taskTypeDefinitions).values(row('ttd-in-tx'));
-        expect(await definitionForCreate(tx, 'ttd-in-tx', { generic: true })).toMatchObject({
+        expect(
+          await definitionForCreate(tx, 'ttd-in-tx', { locked: true, generic: true }),
+        ).toMatchObject({
           runListSnapshot: STEPS,
         });
         const outside = await db
@@ -175,7 +195,9 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         throw new Error('rollback');
       }),
     ).rejects.toThrow('rollback');
-    const err = await refusal(definitionForCreate(db, 'ttd-in-tx', { generic: true }));
+    const err = await refusal(
+      definitionForCreate(db, 'ttd-in-tx', { locked: false, generic: true }),
+    );
     expect(err.status).toBe(404);
   });
 
@@ -204,11 +226,15 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         'utf8',
       );
       try {
-        await expect(definitionForCreate(db, slug, { generic: true })).rejects.toMatchObject({
+        await expect(
+          definitionForCreate(db, slug, { locked: false, generic: true }),
+        ).rejects.toMatchObject({
           status: 409,
         });
         await db.$client.unsafe(migration);
-        await expect(definitionForCreate(db, slug, { generic: true })).resolves.toMatchObject({
+        await expect(
+          definitionForCreate(db, slug, { locked: false, generic: true }),
+        ).resolves.toMatchObject({
           runListSnapshot: [c, b, QUIET],
         });
         const once = await db.query.taskTypeDefinitions.findFirst({
@@ -264,7 +290,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
     describe.each(SOURCES)('$source row', ({ tag, traits }) => {
       const create = (name: string) =>
-        definitionForCreate(db, traitSlug(tag, name), { generic: true });
+        definitionForCreate(db, traitSlug(tag, name), { locked: false, generic: true });
 
       it('puts the model-health step first only when a step dispatches a CLI', async () => {
         expect((await create('agent')).runListSnapshot).toEqual(
@@ -332,14 +358,14 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
     it('keeps them on an admin type, whose steps ask for the model-health step', async () => {
       const id = promptStepId('ttd-t-ps-adm', PROMPT.slug);
-      const def = await definitionForCreate(db, 'ttd-t-ps-adm', { generic: true });
+      const def = await definitionForCreate(db, 'ttd-t-ps-adm', { locked: false, generic: true });
       expect(def.customSteps).toEqual({ [id]: PROMPT });
       expect(def.runListSnapshot).toEqual([CANARY, QUIET, id]);
     });
 
     it('gives a module type none, whatever its row stores', async () => {
       const id = promptStepId('ttd-t-ps-mod', PROMPT.slug);
-      const def = await definitionForCreate(db, 'ttd-t-ps-mod', { generic: true });
+      const def = await definitionForCreate(db, 'ttd-t-ps-mod', { locked: false, generic: true });
       expect(def.customSteps).toBeNull();
       expect(def.runListSnapshot).toEqual([QUIET, id]);
     });
@@ -473,7 +499,7 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
     expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
   });
   it('uses the definition and catalog at INSERT, not the preflight copy', async () => {
-    const before = await definitionForCreate(db, slugs[0]!, { generic: true });
+    const before = await definitionForCreate(db, slugs[0]!, { locked: false, generic: true });
     await db
       .update(schema.taskTypeDefinitions)
       .set({ stepIds: [ids[2]!] })
@@ -630,7 +656,7 @@ describe.skipIf(!url)('catalog locks belong to INSERT admission only', () => {
   it.each(slugs)(
     'previews %s normally while another transaction holds catalog write locks',
     async (slug) => {
-      const expected = await definitionForCreate(db, slug, { generic: true });
+      const expected = await definitionForCreate(db, slug, { locked: false, generic: true });
       let acquired!: () => void;
       let release!: () => void;
       const locked = new Promise<void>((resolve) => {
@@ -652,7 +678,7 @@ describe.skipIf(!url)('catalog locks belong to INSERT admission only', () => {
       await locked;
       try {
         await expect(
-          definitionForCreate(db, slug, { generic: true, catalogLockTimeoutMs: 30 }),
+          definitionForCreate(db, slug, { locked: false, generic: true, catalogLockTimeoutMs: 30 }),
         ).resolves.toEqual(expected);
       } finally {
         release();

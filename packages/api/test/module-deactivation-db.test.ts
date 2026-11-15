@@ -1865,7 +1865,10 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       let raced: string | undefined;
       let madeId = '';
       await db.transaction(async (tx) => {
-        const { runListSnapshot } = await definitionForCreate(tx, TYPE, { generic: true });
+        const { runListSnapshot } = await definitionForCreate(tx, TYPE, {
+          locked: true,
+          generic: true,
+        });
         const [made] = await tx
           .insert(schema.tasks)
           .values({ userId, type: TYPE, title: 'Mid-create', status: 'created', runListSnapshot })
@@ -1890,7 +1893,10 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       let raced: string | undefined;
       let madeId = '';
       await db.transaction(async (tx) => {
-        const { runListSnapshot } = await definitionForCreate(tx, TYPE, { generic: true });
+        const { runListSnapshot } = await definitionForCreate(tx, TYPE, {
+          locked: true,
+          generic: true,
+        });
         const [made] = await tx
           .insert(schema.tasks)
           .values({ userId, type: TYPE, title: 'Mid-create', status: 'created', runListSnapshot })
@@ -1914,7 +1920,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       await insertType();
       let raced: string | undefined;
       await db.transaction(async (tx) => {
-        await definitionForCreate(tx, TYPE, { generic: true });
+        await definitionForCreate(tx, TYPE, { locked: true, generic: true });
         const update = db
           .update(schema.modules)
           .set({ missingAt: null })

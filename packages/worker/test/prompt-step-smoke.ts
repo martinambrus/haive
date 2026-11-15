@@ -186,13 +186,16 @@ async function main(): Promise<void> {
       definitionForCreate: (
         handle: unknown,
         slug: string,
-        opts: { generic: boolean },
+        opts: { generic: boolean; locked: boolean },
       ) => Promise<{
         runListSnapshot: string[] | null;
         customSteps?: Record<string, unknown> | null;
       }>;
     };
-    const def = await apiDefinitions.definitionForCreate(db, TYPE, { generic: true });
+    const def = await apiDefinitions.definitionForCreate(db, TYPE, {
+      locked: false,
+      generic: true,
+    });
     const okTask = await taskFor('Prompt step smoke', def.runListSnapshot, def.customSteps);
     const missingSnapshot =
       control === 'resolvable' ? [MODEL_HEALTH_STEP_ID] : [MODEL_HEALTH_STEP_ID, MISSING_ID];

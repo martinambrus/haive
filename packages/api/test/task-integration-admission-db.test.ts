@@ -346,7 +346,7 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
     let pending!: ReturnType<typeof beginModuleDrain>;
     let createdId = '';
     await db.transaction(async (tx) => {
-      const definition = await definitionForCreate(tx, TYPE, { generic: true });
+      const definition = await definitionForCreate(tx, TYPE, { locked: true, generic: true });
       const admission = await admitTaskIntegrations(tx, {
         userId: h.userId,
         repositoryId: repoId,

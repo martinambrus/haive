@@ -776,7 +776,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   await loadUsableProvider(db, userId, data.cliProviderId);
 
   // Refused here, a disabled type writes no skeleton; the task's transaction reads it again.
-  await definitionForCreate(db, 'kb_author', { generic: false });
+  await definitionForCreate(db, 'kb_author', { locked: false, generic: false });
 
   const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {

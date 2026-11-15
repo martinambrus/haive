@@ -564,7 +564,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     await loadUsableProvider(db, userId, body.summaryCliProviderId, 'summaryCliProviderId');
   }
 
-  const definition = await definitionForCreate(db, body.type, { generic: true });
+  const definition = await definitionForCreate(db, body.type, { locked: false, generic: true });
   if (definition.requiresRepository && !body.repositoryId) {
     throw new HttpError(400, `${body.type} tasks require a repositoryId`);
   }
@@ -941,7 +941,7 @@ taskRoutes.get('/integration-preview', async (c) => {
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
-  const definition = await definitionForCreate(db, query.type, { generic: true });
+  const definition = await definitionForCreate(db, query.type, { locked: false, generic: true });
   return c.json(
     await taskIntegrationPreview(db, {
       userId,
