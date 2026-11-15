@@ -323,16 +323,22 @@ export async function definitionForCreate(
         { executionPath: null, nodes: dataPortNodes(snapshot) },
       ]);
     } else if (def.runListStrategy === 'workflow_paths' && storedCatalog.synced) {
-      dataEdgePlan = buildDataEdgePlan(
-        'workflow',
-        catalogWorkflowBaseCandidates(
+      let candidates: ReturnType<typeof catalogWorkflowBaseCandidates>;
+      try {
+        candidates = catalogWorkflowBaseCandidates(
           storedCatalog.orderedRows as {
             stepId: string;
             workflowType: string;
             stepIndex: number;
           }[],
           { includeConditionalInsightSteps: true },
-        ).map((c) => ({
+        );
+      } catch {
+        throw new HttpError(409, 'The step catalog order is invalid', 'catalog-order-invalid');
+      }
+      dataEdgePlan = buildDataEdgePlan(
+        'workflow',
+        candidates.map((c) => ({
           executionPath: c.executionPath,
           nodes: dataPortNodes(c.stepIds),
         })),

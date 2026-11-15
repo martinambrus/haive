@@ -428,6 +428,29 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
         .returning();
       return task!;
     });
+  it('maps ambiguous builtin workflow catalog order to a coded 409', async () => {
+    await expect(
+      db.transaction(async (tx) => {
+        // Keep the rest of the fixture catalog out of this two-row ambiguity.
+        await tx.update(schema.stepCatalog).set({ workflowType: 'module.prt3' });
+        await tx.insert(schema.stepCatalog).values([
+          { ...catalogRow('prt3-tied-a'), stepIndex: 7 },
+          { ...catalogRow('prt3-tied-b'), stepIndex: 7 },
+        ]);
+        await tx.insert(schema.taskTypeDefinitions).values(
+          row('workflow', {
+            source: 'builtin',
+            runListStrategy: 'workflow_paths',
+            stepIds: null,
+          }),
+        );
+        await expect(
+          definitionForCreate(tx, 'workflow', { generic: true, locked: true }),
+        ).rejects.toMatchObject({ status: 409, code: 'catalog-order-invalid' });
+        throw new Error('fixture rollback');
+      }),
+    ).rejects.toThrow('fixture rollback');
+  });
   it('gives static admin and module-seed tasks the same exact immutable edges', async () => {
     const admin = await insert(slugs[0]!);
     const module = await insert(slugs[1]!);
