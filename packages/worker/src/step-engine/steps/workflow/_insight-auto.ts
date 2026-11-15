@@ -1,4 +1,4 @@
-import { and, eq, isNull, notInArray, inArray } from 'drizzle-orm';
+import { and, asc, eq, isNull, notInArray, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database } from '@haive/database';
 import { INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/shared/schemas';
@@ -253,7 +253,8 @@ export async function loadAutoHistory(
         // Separate from telemetry; unknown protocol versions must refuse replay.
         inArray(schema.taskEvents.eventType, [INSIGHT_AUTO_EVENT, INSIGHT_CLASSIFIED_EVENT]),
       ),
-    );
+    )
+    .orderBy(asc(schema.taskEvents.createdAt), asc(schema.taskEvents.id));
   return {
     claims: rows
       .filter((r) => r.eventType === INSIGHT_AUTO_EVENT)

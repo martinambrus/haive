@@ -2,7 +2,12 @@ import { INSIGHTS_AT_GATE } from '@haive/shared';
 import type { InsightSummary, LoadedInsight } from '@haive/shared/step';
 import type { InsightBatchRecord } from './_insight-batch.js';
 import { loadInsightBatchRecords } from './_insight-batch.js';
-import { loadAutoHistory, insightAutoEnabled, type AutoDecision } from './_insight-auto.js';
+import {
+  INSIGHT_AUTO_ROUNDS,
+  loadAutoHistory,
+  insightAutoEnabled,
+  type AutoDecision,
+} from './_insight-auto.js';
 import type { StepContext } from '../../step-definition.js';
 import { asPlainText } from './_similar-sites.js';
 import { collapseToLine } from '../_untrusted-repo.js';
@@ -67,7 +72,8 @@ export function buildInsightSummary(
         : last.reportedOutcome
       : occurrences.some((i) => i.picked)
         ? 'unconfirmed'
-        : (decision?.outcome ?? (automatic && roundsStarted >= 3 ? 'cap_reached' : 'not_selected'));
+        : (decision?.outcome ??
+          (automatic && roundsStarted >= INSIGHT_AUTO_ROUNDS ? 'cap_reached' : 'not_selected'));
     return {
       id: i.id,
       identity: clip(identity),
@@ -102,7 +108,7 @@ export function buildInsightSummary(
     roundsStarted,
     stopReason: !automatic
       ? 'disabled'
-      : roundsStarted >= 3
+      : roundsStarted >= INSIGHT_AUTO_ROUNDS
         ? 'cap'
         : decisions.some((d) => d.class === 'unclassified')
           ? 'incomplete'

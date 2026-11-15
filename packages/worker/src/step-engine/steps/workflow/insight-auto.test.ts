@@ -1,5 +1,8 @@
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { describe, expect, it } from 'vitest';
 import {
+  loadAutoHistory,
   INSIGHT_AUTO_ROUNDS,
   INSIGHT_CLASSIFIER_INPUT_CHARS,
   INSIGHT_CLASSIFIER_TIMEOUT_MS,
@@ -98,4 +101,35 @@ describe('automatic insight classification', () => {
     ]);
     expect(autoCandidates([one, alias], new Set())).toEqual([one]);
   });
+});
+
+it('loads classification history by creation time then id, independent of insertion order', async () => {
+  const fake = createFakeDb({ taskEvents: schema.taskEvents });
+  const taskId = '00000000-0000-4000-8000-0000000000a1';
+  for (const [n, timestamp] of [
+    [3, 2000],
+    [2, 1000],
+    [1, 1000],
+  ] as const) {
+    fake.insert(schema.taskEvents, {
+      id: `00000000-0000-4000-8000-00000000000${n}`,
+      taskId,
+      eventType: 'insight.classified',
+      createdAt: new Date(timestamp),
+      payload: {
+        version: 1,
+        batchId: `batch-${n}`,
+        sourceStepRowId: 'row',
+        generation: n,
+        complete: true,
+        items: [],
+        invocationIds: [],
+      },
+    });
+  }
+  expect((await loadAutoHistory(fake.db, taskId)).results.map((r) => r.batchId)).toEqual([
+    'batch-1',
+    'batch-2',
+    'batch-3',
+  ]);
 });
