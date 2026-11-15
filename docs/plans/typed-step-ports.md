@@ -1,6 +1,6 @@
 # Typed step ports: roles in addition to step ids
 
-> Status: approved 2026-11-15; PR1 in progress. Builds on the review/audit roles from #1211.
+> Status: approved 2026-11-15; PR1 and PR2 merged; PR3 implements universal v3 per-consumer data-edge pins and its first review fixes. PR4 remains pending. Builds on the review/audit roles from #1211.
 
 ## Context
 

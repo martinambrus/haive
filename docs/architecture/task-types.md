@@ -148,12 +148,12 @@ edit that touches steps, `requiresRepository`, prompt steps or defaults.
 
 ## Creating a task
 
-Every task INSERT is in the api, and each calls `definitionForCreate(handle, slug, {generic})` on the
+Every task INSERT is in the api, and each explicitly calls
+`definitionForCreate(handle, slug, {generic, locked: true})` on the
 same handle first: `POST /tasks` (including upgrades), the upgrade rollback, KB enrichment, the plan
 spawners and the creator drafts route. It reads the definition `FOR SHARE` (an admin DELETE takes
 `FOR UPDATE`, so a type cannot vanish between the read and the insert — where the read is in the insert
-transaction: KB enrichment and three of the five plan spawns read on the pool, which is safe only
-because their built-in types cannot be deleted) and the module rows the type
+transaction, including KB enrichment and all five plan spawns) and the module rows the type
 uses `FOR KEY SHARE` (a deactivation's `FOR UPDATE` waits and then counts the new task, while the boot's
 non-key updates of the same rows do not conflict — `FOR SHARE` blocked the boot's intent sync).
 
@@ -403,12 +403,12 @@ source; ignored external-module files are not enumerated by git. The ungated sca
 seconds to the shared test job and has an explicit 20-second cold-run timeout. It changes neither
 the gated-file count nor the configured CI time budgets.
 
-The worker's core `readRole(ctx, role, maxRound?)` accepts spec roles only and resolves their
-canonical legacy producer. It returns `ready`, `absent`, `not-ready` or `invalid`, with producer
+For tasks without v3, the worker's core `readRole(ctx, role, maxRound?)` accepts spec roles only
+and resolves their canonical legacy producer. It returns `ready`, `absent`, `not-ready` or `invalid`, with producer
 row id, physical step id, round, status and exact contract. Selection keeps the physical loader's
 newest-round ordering, no status predicate and no implicit round ceiling; an explicit ceiling is
 forwarded. Review/audit reads continue through `readStepRole` and the immutable v1/v2 task pin.
-Future per-input pins will change selection only for newly admitted tasks.
+Newly admitted v3 tasks use the per-input reader described below.
 
 Existing spec consumers use an explicit legacy projection even for invalid or non-done historical
 output. Readiness is diagnostic here, not a new gate. `EFFECTIVE_SPEC_INPUTS` drives the host
@@ -422,11 +422,55 @@ House-rules task-text SQL intentionally stays physical. It selects non-empty spe
 round before stage precedence and caps text in SQL; the effective-spec adapter instead selects by
 stage before round and preserves empty strings. Replacing that bounded SQL would change behavior.
 No `{{role:}}` token is added; existing `{{step:}}` quotes cannot quote the mixed spec producers.
-Rollback of these registry/spec adapters is a clean code revert: no persisted pin or serialized
-catalog entry names a spec contract, so no migration or pin rewrite is needed. Retain the
+The original PR1 registry/spec adapters introduced no persisted spec pin or serialized catalog
+reference. With v3 admission now available, follow the v3 rollback policy below and retain the
 pre-existing v1/v2 support described below.
 
 Rollback stops new replacement creation and retains v2-capable readers and workers for every resumable v2 task. Never downgrade pins to v1 or revert runtime support underneath those tasks.
+
+## V3 per-consumer data-edge pins
+
+New static, module-seeded, builtin workflow and derived tasks carry nullable
+`tasks.data_edge_plan`, version 3, separate from the frozen v1/v2 derived plan.
+Locked admission records ordered candidates, declarations, each position/input's
+exact producer and contract, explicit optional absences, and a SHA-256 fingerprint
+with recursively sorted object keys (array order stays significant). Admission caps
+each candidate at 256 steps before edge validation. Ambiguous or dangling required
+inputs refuse creation with no task, event or job. An ambiguous builtin workflow
+catalog order refuses with 409 `catalog-order-invalid`.
+
+The `locked` option of `definitionForCreate` is a required boolean, with no default.
+All five task INSERT creators pass `locked: true` in their INSERT transaction:
+`POST /tasks`, upgrade rollback, KB enrichment, `spawnPlanTask` and creator drafts.
+Catalog table SHARE and row locks cover that INSERT, including module admission.
+The saved-step CLI and integration previews, plus task-create and KB-enrichment
+preflights, explicitly pass `locked: false`. These ordinary reads take no definition,
+module or catalog locks and do not report `data-edge-catalog-busy`; locked admission
+can still refuse a busy catalog.
+Task list, detail, create and PATCH responses omit the full `dataEdgePlan`.
+
+Spec stage inputs are independently optional; the host's effective-spec adapter keeps
+resolved > checked > draft precedence, including intentional empty bodies. 06-run-config
+and 08b declare the same inputs they read. No module/SDK/prompt ports are added here.
+A present v3 binding is authoritative: the read uses the pinned producer and the
+consumer's current-round ceiling, selecting the newest row before testing status.
+A non-done pinned row cannot expose stale successful output. A done but schema-invalid
+row reports `invalid`, with bounded issue paths, and retains the explicit legacy
+projection from that same row so compatibility consumers do not silently lose findings.
+Required invalid inputs still fail by name.
+
+An input or whole consumer absent from an otherwise valid v3 pin reads through the
+canonical no-v3 path, with exactly the same states and round semantics. It did not
+exist when the task was admitted, so this is not a binding remap. Each such read logs
+once at debug with task id, consumer and input only. An explicitly pinned optional
+absence remains absent, and a present binding still wins over a canonical producer.
+Malformed, tampered and wrong-version pins fail loudly before this fallback.
+Without v3, canonical legacy resolution stays unchanged. Definition/catalog edits,
+Retry, Resume, boot and dead revival never rewrite bindings.
+
+Rollback stops new v3 admission and retains capable readers/workers until no v3 task
+can resume. Leave the nullable column and applied migration; never regenerate,
+downgrade or backfill pins. Stopping admission currently requires a code deploy.
 
 ## Derived overlays (PR4 of 4)
 
@@ -827,9 +871,7 @@ tasks are listed in the task list like any other task (a product decision).
 7. The `workflow_type` enum stays defined; a new built-in is `ADD VALUE`, declared last.
 8. Both switches default off and gate creation only; the first non-built-in task closes the 0193
    rollback.
-9. Create admits on the definition read `FOR SHARE` inside the insert transaction wherever a
-   non-built-in type can be created (KB enrichment and most plan spawns read on the pool, safe only
-   because their built-in types cannot be deleted); DELETE takes `FOR UPDATE`; module rows are read
+9. Create admits on the definition read `FOR SHARE` inside the insert transaction at all five task INSERT sites; DELETE takes `FOR UPDATE`; module rows are read
    `FOR KEY SHARE`.
 10. The availability order is fixed and the create switch is exhaustive.
 11. Only `07-phase-2-implement` is a fix-loop target; an unroutable target fails by name before any reset.
