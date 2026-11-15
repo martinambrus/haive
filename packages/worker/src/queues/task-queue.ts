@@ -1,4 +1,3 @@
-import { insightAutoEnabled } from '../step-engine/steps/workflow/_insight-auto.js';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { isConditionalInsightStep } from './run-list.js';
 import {
@@ -125,7 +124,7 @@ import {
   classifyRuntime,
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import { computeFoldContribution } from '@haive/shared/timing';
-import type { StepDefinition } from '../step-engine/step-definition.js';
+import type { AgentMiningDispatch, StepDefinition } from '../step-engine/step-definition.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
 import { providerHoldMessage } from '../orchestrator/provider-hold.js';
 import {
@@ -2202,6 +2201,17 @@ function assertInsightSelection(
     assertInsightTaskSteps(ctx, steps);
 }
 
+/** Automatic choices are known only after classification; preflight the writer wave. */
+function assertInsightDispatch(
+  ctx: ResolvedTaskContext,
+  steps: readonly StepDefinition[],
+  stepId: string,
+  dispatches: readonly AgentMiningDispatch[],
+): void {
+  if (stepId === '08e-insights-triage' && dispatches.some((d) => d.roleKey === 'implementer'))
+    assertInsightTaskSteps(ctx, steps);
+}
+
 /** Refusals belong to the source row so Retry targets the failed step. */
 async function failStepTransition(
   db: Database,
@@ -3211,6 +3221,8 @@ async function handleStartTask(
       stepDef: first,
       validateResolvedForm: (values) =>
         assertInsightSelection(ctx, steps, first.metadata.id, values),
+      validateMiningDispatch: (dispatches) =>
+        assertInsightDispatch(ctx, steps, first.metadata.id, dispatches),
       // first === steps[0], so its run-list position (run_seq) is 0.
       runSeq: 0,
       providers,
@@ -3591,8 +3603,8 @@ async function handleAdvanceStep(
   // Refuse an old/custom pin before allowing its human selection to dispatch an editor.
   if (
     payload.stepId === '08e-insights-triage' &&
-    ((Array.isArray(formValues?.selectedInsights) && formValues.selectedInsights.length > 0) ||
-      (await insightAutoEnabled(db, ctx.taskId)))
+    Array.isArray(formValues?.selectedInsights) &&
+    formValues.selectedInsights.length > 0
   ) {
     try {
       assertInsightSelection(ctx, runList, payload.stepId, formValues);
@@ -4013,6 +4025,8 @@ async function handleAdvanceStep(
       stepDef,
       validateResolvedForm: (values) =>
         assertInsightSelection(ctx, runList, stepDef.metadata.id, values),
+      validateMiningDispatch: (dispatches) =>
+        assertInsightDispatch(ctx, runList, stepDef.metadata.id, dispatches),
       round,
       runSeq: runIdx >= 0 ? runIdx : undefined,
       formValues,

@@ -392,6 +392,8 @@ export interface AdvanceStepParams {
   /** Caller guard after saved, submitted and auto-submitted answers have resolved,
    * before any post-form CLI work or apply side effects. */
   validateResolvedForm?: (values: FormValues | null) => void;
+  /** Validate each selected wave before reserving or dispatching any of its agents. */
+  validateMiningDispatch?: (dispatches: readonly AgentMiningDispatch[]) => void;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
@@ -1955,6 +1957,7 @@ async function resolveAgentMiningPhase(
       llmOutput,
     });
     ctx.throwIfCancelled();
+    params.validateMiningDispatch?.(dispatches);
     const results: AgentMiningResult[] = dispatches.map((d) => ({
       agentId: d.agentId,
       agentTitle: d.agentTitle,
@@ -2379,6 +2382,7 @@ async function dispatchMiningAgents(
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<MiningDispatchOutcome> {
+  params.validateMiningDispatch?.(dispatches);
   // Verify each inventory once for this fan-out; dispatch can reuse it, exec always rechecks bytes.
   const snapshotCache: SnapshotDispatchCache = new Map();
   for (const dispatch of dispatches)
@@ -3930,6 +3934,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           applyArgs.miningWaveExhausted !== true
         ) {
           if (meta.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+            params.validateMiningDispatch?.(applyErr.dispatches);
             const synthetic: AgentMiningResult[] = applyErr.dispatches.map((d) => ({
               agentId: d.agentId,
               agentTitle: d.agentTitle,
