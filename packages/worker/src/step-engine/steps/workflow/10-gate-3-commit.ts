@@ -302,7 +302,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const insightView = {
       // Use stable occurrence ids for choices; the legacy status row keeps positional ids.
       insightChoices: gateInsights(insights.insights.map((i) => ({ ...i, legacyId: i.id }))),
-      insightSummary,
+      ...(insightSummary.totals.identities ? { insightSummary } : {}),
       insightPage: offset,
       insightTotal: Math.max(unacted.length, insightSummary.totals.identities),
       insightPageSize: INSIGHTS_AT_GATE,
@@ -509,7 +509,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         detected.diffSummary,
       ].join('\n'),
       ...(statusRows.length > 0 ? { statusSummary: statusRows } : {}),
-      ...(detected.insightSummary
+      ...(detected.insightSummary?.totals.identities
         ? {
             infoSections: [
               {
@@ -589,7 +589,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
           'Verification failed during insight checks. A new gate-2 approval is required before committing.',
         approvalRequired: true,
       };
-    const summary = args.detected.insightSummary
+    const summary = args.detected.insightSummary?.totals.identities
       ? {
           insightSummary: args.detected.insightSummary,
           findingsSummary:

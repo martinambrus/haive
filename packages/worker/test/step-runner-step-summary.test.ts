@@ -585,3 +585,45 @@ describe('stored sandbox-boundary failures', () => {
     expect(state.taskStepRow.errorMessage).toBe(code + ': open [path]');
   });
 });
+
+it('zero-insight gate3 keeps the asynchronous LLM recap and leaves the ledger for its completion', async () => {
+  const checks = await import('../src/queues/insight-gate3-return.js');
+  const latch = vi.spyOn(checks, 'pendingInsightApproval').mockResolvedValue(null);
+  const { gate3CommitStep } = await import('../src/step-engine/steps/workflow/10-gate-3-commit.js');
+  const { buildInsightSummary } =
+    await import('../src/step-engine/steps/workflow/_insight-summary.js');
+  const state = freshState({ summaryLlmEnabled: true });
+  state.taskStepRow.stepId = gate3CommitStep.metadata.id;
+  state.taskStepRow.formValues = { commit: false, selectedInsights: [] };
+  state.taskStepRow.detectOutput = {
+    hasGit: true,
+    workspacePath: '/tmp',
+    insightChoices: [],
+    insightSummary: buildInsightSummary([], [], [], false),
+  };
+  const enqueued: CliExecJobPayload[] = [];
+  const result = await advanceStep({
+    db: makeMockDb(state),
+    taskId: 'task-1',
+    userId: 'user-1',
+    repoPath: '/tmp',
+    workspacePath: '/tmp',
+    cliProviderId: 'prov-1',
+    stepDef: gate3CommitStep,
+    providers: [makeProvider()],
+    deps: {
+      async enqueueCliInvocation(payload) {
+        enqueued.push(payload);
+      },
+    },
+  });
+  latch.mockRestore();
+  expect(result.status).toBe('done');
+  expect(state.taskStepRow.output).toEqual({
+    committed: false,
+    commitSha: null,
+    message: 'commit skipped',
+  });
+  expect(summaries(enqueued)).toHaveLength(1);
+  expect(state.inserts.filter((i) => i.table === 'task_ledger')).toEqual([]);
+});

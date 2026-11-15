@@ -345,3 +345,32 @@ describe('gate-3 persisted choice bounds', () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+it('zero identities omit detect/apply summaries and the Insight summary section, including legacy zero summaries', async () => {
+  vi.mocked(loader.loadUnactedInsights).mockResolvedValue({ insights: [], omitted: 0 });
+  vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
+  vi.spyOn(gitWorkspace, 'requireUsableGit').mockResolvedValue(false);
+  vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(false);
+  vi.spyOn(auto, 'loadAutoHistory').mockResolvedValue({ claims: [], results: [] });
+  vi.spyOn(batches, 'loadInsightBatchRecords').mockResolvedValue([]);
+  vi.spyOn(captures, 'loadFixTestRecords').mockResolvedValue([]);
+  vi.spyOn(sites, 'loadTaskSimilarSites').mockResolvedValue({ sites: [], omitted: 0 });
+  vi.spyOn(rules, 'loadGateHouseRules').mockResolvedValue(null);
+  const { buildInsightSummary } = await import('./_insight-summary.js');
+  const d = await gate3CommitStep.detect!(ctx);
+  expect(d).not.toHaveProperty('insightSummary');
+  expect(d).not.toHaveProperty('findingsSummary');
+  for (const snapshot of [d, { ...d, insightSummary: buildInsightSummary([], [], [], false) }]) {
+    const form = await gate3CommitStep.form!(ctx, snapshot, null);
+    expect(form!.infoSections?.some((s) => s.title === 'Insight summary')).not.toBe(true);
+    for (const commit of [false, true]) {
+      const out = await gate3CommitStep.apply(ctx, {
+        detected: snapshot,
+        formValues: { commit, selectedInsights: [] },
+        llmOutput: null,
+      } as never);
+      expect(out).not.toHaveProperty('insightSummary');
+      expect(out).not.toHaveProperty('findingsSummary');
+    }
+  }
+});
