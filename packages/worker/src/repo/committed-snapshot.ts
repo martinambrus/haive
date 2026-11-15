@@ -7,6 +7,7 @@ import {
   type CommittedSnapshotRef,
   taskScratchSubpath,
 } from '@haive/shared';
+import { logger as log, serializeError } from '@haive/shared/logger';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import {
   ensureDirNoFollow,
@@ -29,15 +30,72 @@ export const SNAPSHOT_LIMITS = {
   timeoutMs: 30_000,
 };
 export class CommittedSnapshotError extends Error {
-  constructor() {
+  constructor(cause?: unknown, message?: string) {
     super(
-      'SNAPSHOT_INVALID: Committed snapshot is unavailable or invalid. Restore its recorded objects and inventory, or use Retry to start a new analysis generation.',
+      message ??
+        'SNAPSHOT_INVALID: Committed snapshot is unavailable or invalid. Restore its recorded objects and inventory, or use Retry to start a new analysis generation.',
+      { cause },
     );
     this.name = 'CommittedSnapshotError';
   }
 }
 export const isCommittedSnapshotFailure = (message: string | null | undefined) =>
-  message?.startsWith('SNAPSHOT_INVALID:') === true;
+  message?.startsWith('SNAPSHOT_INVALID:') === true ||
+  message?.startsWith('dispatch failed before the agent was queued: SNAPSHOT_INVALID:') === true;
+export class SnapshotReservationPredatesError extends CommittedSnapshotError {
+  constructor() {
+    super(
+      undefined,
+      'SNAPSHOT_INVALID: This reservation predates committed snapshots. Use Retry to start a new analysis generation.',
+    );
+    this.name = 'SnapshotReservationPredatesError';
+  }
+}
+
+function transientDatabaseFault(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (
+    let e = error;
+    e && typeof e === 'object' && !seen.has(e);
+    e = (e as { cause?: unknown }).cause
+  ) {
+    seen.add(e);
+    const code = (e as { code?: unknown }).code;
+    if (
+      typeof code === 'string' &&
+      (code.startsWith('CONNECTION_') ||
+        code.startsWith('08') ||
+        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', '57P01', '57P02', '57P03'].includes(
+          code,
+        ))
+    )
+      return true;
+  }
+  return false;
+}
+function snapshotFailure(error: unknown, taskId: string, refs: object): Error {
+  if (transientDatabaseFault(error)) throw error;
+  if (error instanceof CommittedSnapshotError && error.cause !== undefined) return error;
+  const ids: Record<string, string> = {};
+  for (const key of ['snapshotRef', 'baseSnapshotRef'] as const) {
+    const ref = (refs as Record<string, unknown>)[key];
+    if (ref && typeof ref === 'object') {
+      for (const field of ['inventoryId', 'commitOid', 'treeOid'] as const) {
+        const value = (ref as Record<string, unknown>)[field];
+        if (
+          typeof value === 'string' &&
+          /^(?:[0-9a-f-]{36}|[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
+        )
+          ids[`${key}_${field}`] = value;
+      }
+    }
+  }
+  const commitOid = (refs as { commitOid?: unknown }).commitOid;
+  if (typeof commitOid === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commitOid))
+    ids.commitOid = commitOid;
+  log.warn({ err: serializeError(error), taskId, ...ids }, 'Committed snapshot resolution failed');
+  return new CommittedSnapshotError(error);
+}
 type Scope = Pick<CommittedSnapshotRef, 'userId' | 'repositoryId' | 'taskId'>;
 export interface SnapshotOptions {
   scope: Scope;
@@ -54,6 +112,17 @@ export interface ResolvedCommittedSnapshot {
 export interface ResolvedCommittedSnapshots {
   target: ResolvedCommittedSnapshot;
   base: ResolvedCommittedSnapshot | null;
+}
+/** Scoped to ONE fan-out; never pass this cache to execution, which rechecks mounted bytes. */
+export type SnapshotDispatchCache = Map<
+  string,
+  { identity: string; snapshot: ResolvedCommittedSnapshot }
+>;
+export function snapshotToolProfile<T extends 'full' | 'rag_only' | 'none' | undefined>(
+  snapshot: boolean,
+  requested: T,
+): T | 'rag_only' {
+  return snapshot && requested !== 'none' ? 'rag_only' : requested;
 }
 const storageRoot = () => process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 const hash = (data: Buffer | string) => createHash('sha256').update(data).digest('hex');
@@ -92,27 +161,69 @@ async function withObjects<T>(
       const info = await lstatNoFollow(anchor, rel, { strict: true });
       if (info && info.kind !== 'directory') throw new CommittedSnapshotError();
     }
-    for (const rel of ['objects/info/alternates', 'objects/info/http-alternates', 'shallow']) {
+    for (const rel of ['objects/info/alternates', 'objects/info/http-alternates']) {
       if (await lstatNoFollow(anchor, rel, { strict: true })) throw new CommittedSnapshotError();
     }
-    return await use(async (kind, oid, cap) => {
-      b.check();
-      const args = hardenGitArgs(['--git-dir=.', '-c', 'safe.directory=*', 'cat-file', kind, oid]);
-      const result = await runTool(
-        'sh',
-        [
-          '-c',
-          'cd /proc/self/fd/3 && GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null exec git "$@"',
-          'snapshot-git',
-          ...args,
-        ],
-        { fds: [dir], maxStdout: cap, signal: b.signal },
-      );
-      b.check();
-      if (kind !== '-s' && objectHash(kind, result.stdoutBytes, oid.length) !== oid)
-        throw new CommittedSnapshotError();
-      return result.stdoutBytes;
-    });
+    let value!: T;
+    await runTool(
+      'sh',
+      [
+        '-c',
+        'cd /proc/self/fd/3 && GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null exec git "$@"',
+        'snapshot-git',
+        ...hardenGitArgs(['--git-dir=.', '-c', 'safe.directory=*', 'cat-file', '--batch-command']),
+      ],
+      {
+        fds: [dir],
+        signal: b.signal,
+        interact: async (input, output) => {
+          const chunks = output[Symbol.asyncIterator]();
+          let pending = Buffer.alloc(0);
+          async function read(size: number): Promise<Buffer> {
+            const parts: Buffer[] = [];
+            let remaining = size;
+            while (remaining > 0) {
+              if (pending.length === 0) {
+                const next = await chunks.next();
+                if (next.done) throw new Error('Git object stream ended early');
+                pending = Buffer.from(next.value);
+              }
+              const take = Math.min(remaining, pending.length);
+              parts.push(pending.subarray(0, take));
+              pending = pending.subarray(take);
+              remaining -= take;
+            }
+            return Buffer.concat(parts, size);
+          }
+          value = await use(async (kind, oid, cap) => {
+            b.check();
+            if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) throw new CommittedSnapshotError();
+            input.write(`${kind === '-s' ? 'info' : 'contents'} ${oid}\n`);
+            let header = '';
+            for (let i = 0; i < 256; i++) {
+              const byte = (await read(1))[0]!;
+              if (byte === 10) break;
+              header += String.fromCharCode(byte);
+            }
+            const match = /^([0-9a-f]+) (commit|tree|blob) ([0-9]+)$/.exec(header);
+            const size = Number(match?.[3]);
+            if (!match || match[1] !== oid || !Number.isSafeInteger(size) || size < 0)
+              throw new CommittedSnapshotError();
+            if (kind === '-s') {
+              if (match[2] !== 'blob') throw new CommittedSnapshotError();
+              return Buffer.from(String(size));
+            }
+            if (match[2] !== kind || size > cap) throw new CommittedSnapshotError();
+            const data = await read(size);
+            if ((await read(1))[0] !== 10 || objectHash(kind, data, oid.length) !== oid)
+              throw new CommittedSnapshotError();
+            b.check();
+            return data;
+          });
+        },
+      },
+    );
+    return value;
   } finally {
     await dir.close();
   }
@@ -226,30 +337,16 @@ async function materialize(
   b: ReturnType<typeof budget>,
 ) {
   const tree = `${artifact}/tree`;
-  if (!(await lstatNoFollow(anchor, tree, { strict: true }))) {
-    const stage = `${artifact}/stage-${randomUUID()}`;
-    await ensureDirNoFollow(anchor, stage, { mode: 0o755 });
-    try {
-      for (const entry of entries) {
-        b.check();
-        const bytes = await git('blob', entry.oid, entry.size);
-        if (bytes.length !== entry.size) throw new CommittedSnapshotError();
-        await writeFileNoFollow(anchor, `${stage}/${entry.path}`, bytes, {
-          mode: 'create-exclusive',
-          createParents: true,
-          fileMode: entry.mode === '100755' ? 0o555 : 0o444,
-        });
-      }
-      b.check();
-      await renameNoFollow(anchor, stage, tree, { noReplace: true });
-    } finally {
-      await removeNoFollow(anchor, stage, { recursive: true });
-    }
-  }
   const tracked = new Map(entries.map((e) => [e.path, e]));
   let bytes = 0,
     count = 0;
   const seen = new Set<string>();
+  const directories = new Set(
+    entries.flatMap((e) => {
+      const parts = e.path.split('/');
+      return parts.slice(0, -1).map((_part, i) => parts.slice(0, i + 1).join('/') + '/');
+    }),
+  );
   async function verify(dir: string, depth: number) {
     b.check();
     if (depth > b.limits.maxDepth) throw new CommittedSnapshotError();
@@ -257,7 +354,8 @@ async function materialize(
     if (
       directory?.kind !== 'directory' ||
       directory.stats.uid !== process.getuid?.() ||
-      (directory.stats.mode & 0o022) !== 0
+      ((directory.stats.mode & 0o777) !== 0o755 &&
+        !(dir === tree && (directory.stats.mode & 0o777) === 0o700))
     )
       throw new CommittedSnapshotError();
     const listing = await readdirNoFollow(anchor, dir, { strict: true });
@@ -269,6 +367,8 @@ async function materialize(
       const rel = `${dir}/${item.name}`;
       const info = await lstatNoFollow(anchor, rel, { strict: true });
       if (info?.kind === 'directory') {
+        const prefix = rel.slice(tree.length + 1) + '/';
+        if (!directories.has(prefix)) throw new CommittedSnapshotError();
         await verify(rel, depth + 1);
         continue;
       }
@@ -278,7 +378,7 @@ async function materialize(
       if (bytes > b.limits.maxBytes) throw new CommittedSnapshotError();
       const name = rel.slice(tree.length + 1),
         expected = tracked.get(name);
-      if (!expected) continue; // Additional files receive ordinary secret masking, never tracked status.
+      if (!expected) throw new CommittedSnapshotError();
       const read = await readFileNoFollow(anchor, rel, { strict: true, maxBytes: expected.size });
       if (
         !read ||
@@ -291,6 +391,38 @@ async function materialize(
       seen.add(name);
     }
   }
+  const present = await lstatNoFollow(anchor, tree, { strict: true });
+  if (present) {
+    await verify(tree, 0); // Refuse altered bytes, extra files, links and unsafe permissions.
+    b.check();
+    if (seen.size === entries.length && (present.stats.mode & 0o777) === 0o755) return;
+  }
+  // A missing tree or a valid subset left by a crashed publication is rebuilt privately.
+  const stage = `${artifact}/stage-${randomUUID()}`;
+  const retired = `${artifact}/incomplete-${randomUUID()}`;
+  await ensureDirNoFollow(anchor, stage, { mode: 0o755 });
+  try {
+    for (const entry of entries) {
+      b.check();
+      const bytes = await git('blob', entry.oid, entry.size);
+      if (bytes.length !== entry.size) throw new CommittedSnapshotError();
+      const parent = path.posix.dirname(entry.path);
+      if (parent !== '.') await ensureDirNoFollow(anchor, `${stage}/${parent}`, { mode: 0o755 });
+      await writeFileNoFollow(anchor, `${stage}/${entry.path}`, bytes, {
+        mode: 'create-exclusive',
+        fileMode: entry.mode === '100755' ? 0o555 : 0o444,
+      });
+    }
+    b.check();
+    if (present) await renameNoFollow(anchor, tree, retired, { noReplace: true });
+    await renameNoFollow(anchor, stage, tree, { noReplace: true });
+  } finally {
+    await removeNoFollow(anchor, stage, { recursive: true });
+    await removeNoFollow(anchor, retired, { recursive: true });
+  }
+  seen.clear();
+  bytes = 0;
+  count = 0;
   await verify(tree, 0);
   b.check();
   if (seen.size !== entries.length) throw new CommittedSnapshotError();
@@ -307,9 +439,9 @@ export async function issueCommittedSnapshot(
   opts: SnapshotOptions,
 ): Promise<CommittedSnapshotRef> {
   try {
-    const b = budget(opts);
-    return await owned(opts, (anchor, namespace) =>
-      withObjects(
+    return await owned(opts, (anchor, namespace) => {
+      const b = budget(opts);
+      return withObjects(
         opts,
         async (git) => {
           const data = await inventory(commitOid, opts, git, b);
@@ -332,11 +464,11 @@ export async function issueCommittedSnapshot(
           return ref;
         },
         b,
-      ),
-    );
+      );
+    });
   } catch (error) {
     if (error instanceof SnapshotConsumerError) throw error;
-    throw new CommittedSnapshotError();
+    throw snapshotFailure(error, opts.scope.taskId, { commitOid });
   }
 }
 
@@ -344,19 +476,31 @@ export async function resolveCommittedSnapshots(
   refs: { snapshotRef?: unknown; baseSnapshotRef?: unknown },
   opts: SnapshotOptions,
   consume?: (snapshots: ResolvedCommittedSnapshots) => Promise<void>,
+  cache?: SnapshotDispatchCache,
 ): Promise<ResolvedCommittedSnapshots | null> {
   try {
     const parsed = parseCommittedSnapshotRefs(refs);
     if (!parsed.snapshotRef) return null;
-    const b = budget(opts);
-    return await owned(opts, (anchor, namespace) =>
-      withObjects(
+    return await owned(opts, (anchor, namespace) => {
+      const b = budget(opts);
+      return withObjects(
         opts,
         async (git) => {
           async function resolve(ref: CommittedSnapshotRef): Promise<ResolvedCommittedSnapshot> {
             b.check();
             for (const key of ['taskId', 'userId', 'repositoryId'] as const)
               if (ref[key] !== opts.scope[key]) throw new CommittedSnapshotError();
+            const identity = JSON.stringify([
+              opts.scope,
+              opts.repositoryRoot,
+              opts.storageRoot ?? storageRoot(),
+              ref,
+            ]);
+            const cached = cache?.get(ref.inventoryId);
+            if (cached) {
+              if (cached.identity !== identity) throw new CommittedSnapshotError();
+              return cached.snapshot;
+            }
             const artifact = `${namespace}/${ref.inventoryId}`;
             const stored = await readFileNoFollow(anchor, `${artifact}/inventory.json`, {
               strict: true,
@@ -369,11 +513,13 @@ export async function resolveCommittedSnapshots(
               throw new CommittedSnapshotError();
             await materialize(anchor, artifact, data.entries, git, b);
             const subpath = `${taskScratchSubpath(ref.userId, ref.taskId)}/committed-snapshots/${ref.inventoryId}/tree`;
-            return {
+            const snapshot = {
               subpath,
               workerRoot: path.join(opts.storageRoot ?? storageRoot(), subpath),
               tracked: new Set(data.entries.map((e) => e.path)),
             };
+            cache?.set(ref.inventoryId, { identity, snapshot });
+            return snapshot;
           }
           const snapshots = {
             target: await resolve(parsed.snapshotRef!),
@@ -389,11 +535,11 @@ export async function resolveCommittedSnapshots(
           return snapshots;
         },
         b,
-      ),
-    );
+      );
+    });
   } catch (error) {
     if (error instanceof SnapshotConsumerError) throw error;
-    throw new CommittedSnapshotError();
+    throw snapshotFailure(error, opts.scope.taskId, refs);
   }
 }
 
@@ -403,6 +549,7 @@ export async function resolveTaskCommittedSnapshots(
   taskId: string,
   refs: { snapshotRef?: unknown; baseSnapshotRef?: unknown },
   consume?: (snapshots: ResolvedCommittedSnapshots) => Promise<void>,
+  cache?: SnapshotDispatchCache,
 ): Promise<ResolvedCommittedSnapshots | null> {
   try {
     const parsed = parseCommittedSnapshotRefs(refs);
@@ -428,9 +575,10 @@ export async function resolveTaskCommittedSnapshots(
         scope: { taskId, userId: task.userId, repositoryId: task.repositoryId },
       },
       consume,
+      cache,
     );
   } catch (error) {
     if (error instanceof SnapshotConsumerError) throw error.original;
-    throw new CommittedSnapshotError();
+    throw snapshotFailure(error, taskId, refs);
   }
 }

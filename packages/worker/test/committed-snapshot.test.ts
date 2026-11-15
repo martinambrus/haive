@@ -1,17 +1,44 @@
+import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
+import { logger } from '@haive/shared/logger';
+import { runTool } from '../src/repo/tool-spawn.js';
 import type { Database } from '@haive/database';
 import { withTaskScratchWorkspace } from '../src/repo/scratch-workspace.js';
 import { computeSecretMasks } from '../src/queues/cli-exec/secret-mask.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, chmod } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  rm,
+  symlink,
+  chmod,
+  stat,
+  cp,
+  chown,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   issueCommittedSnapshot,
   resolveCommittedSnapshots,
   resolveTaskCommittedSnapshots,
 } from '../src/repo/committed-snapshot.js';
+
+vi.mock('../src/repo/tool-spawn.js', async (original) => ({
+  ...(await original<object>()),
+  runTool: vi.fn((await original<typeof import('../src/repo/tool-spawn.js')>()).runTool),
+}));
+
+vi.mock('@haive/shared/fs-safe', async (original) => ({
+  ...(await original<object>()),
+  readFileNoFollow: vi.fn(
+    (await original<typeof import('@haive/shared/fs-safe')>()).readFileNoFollow,
+  ),
+}));
 
 let root: string;
 let repo: string;
@@ -29,6 +56,9 @@ beforeAll(async () => {
   git('init', '-q');
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'Test');
+  await writeFile(join(repo, 'history'), 'first');
+  git('add', '.');
+  git('commit', '-qm', 'first');
   await writeFile(join(repo, '.env'), secret);
   await writeFile(join(repo, 'data.bin'), binary);
   await mkdir(join(repo, 'nested'));
@@ -149,11 +179,14 @@ describe('owned committed snapshot', () => {
       issueCommittedSnapshot(commitOid, { ...options(), limits: { [key]: value } }),
     ).rejects.toThrow('SNAPSHOT_INVALID');
   });
-  it('keeps committed secrets visible and masks only denied additions using the host inventory', async () => {
+  it("refuses extra files while retaining the masking helper's tracked-secret policy", async () => {
     const ref = await issueCommittedSnapshot(commitOid, options());
     const result = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!;
     await writeFile(join(result.target.workerRoot, 'private.key'), randomBytes(24));
-    const verified = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!;
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+    const verified = result;
     expect(
       await computeSecretMasks(
         verified.target.workerRoot,
@@ -215,6 +248,244 @@ describe('owned committed snapshot', () => {
     const resolved = await resolveCommittedSnapshots({ snapshotRef: ref }, options());
     await rm(resolved!.target.workerRoot, { recursive: true });
     await symlink(repo, resolved!.target.workerRoot);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+  });
+  it('resolves HEAD from a depth-one clone with multiple source commits', async () => {
+    const shallow = join(root, 'shallow');
+    execFileSync('git', ['clone', '-q', '--depth', '1', `file://${repo}`, shallow]);
+    const opts = { ...options(), repositoryRoot: shallow };
+    const head = execFileSync('git', ['-C', shallow, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    expect(
+      execFileSync('git', ['-C', shallow, 'rev-parse', '--is-shallow-repository'], {
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('true');
+    const ref = await issueCommittedSnapshot(head, opts);
+    expect(
+      (await resolveCommittedSnapshots({ snapshotRef: ref }, opts))?.target.tracked.has('.env'),
+    ).toBe(true);
+  });
+  it.each(['empty', 'incomplete'])('rebuilds a crash-claimed %s tree', async (kind) => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const tree = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!.target
+      .workerRoot;
+    await rm(tree, { recursive: true });
+    await mkdir(tree, { mode: 0o700 });
+    if (kind === 'incomplete') await writeFile(join(tree, '.env'), secret, { mode: 0o444 });
+    const rebuilt = await resolveCommittedSnapshots({ snapshotRef: ref }, options());
+    expect(await readFile(join(rebuilt!.target.workerRoot, 'nested/content'), 'utf8')).toBe(
+      'pinned',
+    );
+  });
+  it.each([0o002, 0o077])(
+    'sets readable, non-writable directory modes under umask %s',
+    async (mask) => {
+      const previous = process.umask(mask);
+      try {
+        const ref = await issueCommittedSnapshot(commitOid, options());
+        const view = await resolveCommittedSnapshots({ snapshotRef: ref }, options());
+        expect((await stat(join(view!.target.workerRoot, 'nested'))).mode & 0o777).toBe(0o755);
+      } finally {
+        process.umask(previous);
+      }
+    },
+  );
+  it('does not charge concurrent resolver lock wait against the work budget', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => {
+      enter = r;
+    });
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const blocker = withTaskScratchWorkspace(scope.userId, scope.taskId, async () => {
+      enter();
+      await held;
+    });
+    await entered;
+    try {
+      const resolutions = Array.from({ length: 4 }, () =>
+        resolveCommittedSnapshots(
+          { snapshotRef: ref },
+          { ...options(), limits: { timeoutMs: 10000 } },
+        ),
+      );
+      now += 50000;
+      release();
+      await blocker;
+      const views = await Promise.all(resolutions);
+      expect(views.every((v) => v!.target.tracked.has('.env'))).toBe(true);
+    } finally {
+      release();
+      clock.mockRestore();
+    }
+  });
+  it.each([
+    ['maxBytes', 1],
+    ['maxEntries', 1],
+    ['maxDepth', 0],
+    ['timeoutMs', 0],
+  ] as const)('fails the resolve-time %s bound', async (key, value) => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    await expect(
+      resolveCommittedSnapshots({ snapshotRef: ref }, { ...options(), limits: { [key]: value } }),
+    ).rejects.toThrow('SNAPSHOT_INVALID');
+  });
+  it.each(['symlink', 'gitlink', '.git', 'alternates', 'http-alternates'])(
+    'refuses a committed or object-store %s',
+    async (kind) => {
+      const copy = join(root, `unsafe-${kind}`);
+      await cp(repo, copy, { recursive: true });
+      const localGit = (...args: string[]) =>
+        execFileSync('git', ['-C', copy, ...args], { encoding: 'utf8' }).trim();
+      let oid = commitOid;
+      if (kind === 'alternates' || kind === 'http-alternates') {
+        await writeFile(join(copy, '.git/objects/info', kind), repo + '/.git/objects');
+      } else {
+        const blob = localGit('rev-parse', `${commitOid}:.env`);
+        const mode = kind === 'symlink' ? '120000' : kind === 'gitlink' ? '160000' : '100644';
+        const childOid = kind === 'gitlink' ? commitOid : blob;
+        // Raw trees allow adversarial metadata names which git's index refuses to write.
+        const raw = Buffer.concat([
+          Buffer.from(`${mode} ${kind === '.git' ? '.git' : 'unsafe'}\0`),
+          Buffer.from(childOid, 'hex'),
+        ]);
+        const treeOid = execFileSync(
+          'git',
+          ['-C', copy, 'hash-object', '-t', 'tree', '--literally', '-w', '--stdin'],
+          { input: raw, encoding: 'utf8' },
+        ).trim();
+        oid = execFileSync(
+          'git',
+          ['-C', copy, 'hash-object', '-t', 'commit', '--literally', '-w', '--stdin'],
+          {
+            input: `tree ${treeOid}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nfixture\n`,
+            encoding: 'utf8',
+          },
+        ).trim();
+      }
+      await expect(
+        issueCommittedSnapshot(oid, { ...options(), repositoryRoot: copy }),
+      ).rejects.toThrow('SNAPSHOT_INVALID');
+    },
+  );
+  it('refuses an unsafe directory mode and an unsafe tracked-file mode', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const tree = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!.target
+      .workerRoot;
+    await chmod(join(tree, 'nested'), 0o775);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+    await chmod(join(tree, 'nested'), 0o755);
+    await chmod(join(tree, '.env'), 0o444 | 0o111);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+  });
+  it.runIf(process.getuid?.() === 0)('refuses a foreign tree uid', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const tree = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!.target
+      .workerRoot;
+    await chown(join(tree, '.env'), 65534, 65534);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+  });
+  it('preserves the original cause on a sanitized snapshot error', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const db = {
+      query: {
+        tasks: {
+          findFirst: async () => {
+            throw new Error('lookup failed');
+          },
+        },
+      },
+    } as unknown as Database;
+    const logged = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const error = await resolveTaskCommittedSnapshots(db, scope.taskId, { snapshotRef: ref }).catch(
+      (e) => e,
+    );
+    expect(logged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: expect.anything(),
+        taskId: scope.taskId,
+        snapshotRef_inventoryId: ref.inventoryId,
+      }),
+      expect.any(String),
+    );
+    logged.mockRestore();
+    expect(error.message).toContain('SNAPSHOT_INVALID');
+    expect(error.cause?.message).toBe('lookup failed');
+  });
+  it.each(['CONNECTION_CLOSED', 'CONNECTION_DESTROYED', 'ECONNRESET', '57P01'])(
+    'preserves transient %s faults for retry',
+    async (code) => {
+      const ref = await issueCommittedSnapshot(commitOid, options());
+      const driver = Object.assign(new Error('database interrupted'), { code });
+      const failure = new DrizzleQueryError('select task', [], driver);
+      const db = {
+        query: {
+          tasks: {
+            findFirst: async () => {
+              throw failure;
+            },
+          },
+        },
+      } as unknown as Database;
+      await expect(
+        resolveTaskCommittedSnapshots(db, scope.taskId, { snapshotRef: ref }),
+      ).rejects.toBe(failure);
+    },
+  );
+
+  it('uses one bounded Git batch child for issue and for resolve', async () => {
+    vi.mocked(runTool).mockClear();
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    expect(runTool).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runTool).mock.calls[0]![1]).toContain('--batch-command');
+    vi.mocked(runTool).mockClear();
+    await resolveCommittedSnapshots({ snapshotRef: ref }, options());
+    expect(runTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses a verified inventory within one fan-out while exec still verifies tree bytes', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const cache = new Map();
+    const first = await resolveCommittedSnapshots(
+      { snapshotRef: ref },
+      options(),
+      undefined,
+      cache,
+    );
+    vi.mocked(readFileNoFollow).mockClear();
+    const next = await resolveCommittedSnapshots(
+      { snapshotRef: ref, baseSnapshotRef: ref },
+      options(),
+      undefined,
+      cache,
+    );
+    expect(next!.target).toBe(first!.target);
+    expect(next!.base).toBe(first!.target);
+    expect(readFileNoFollow).not.toHaveBeenCalled();
+    await expect(
+      resolveCommittedSnapshots(
+        { snapshotRef: { ...ref, treeOid: 'f'.repeat(40) } },
+        options(),
+        undefined,
+        cache,
+      ),
+    ).rejects.toThrow('SNAPSHOT_INVALID');
+    await chmod(join(first!.target.workerRoot, '.env'), 0o644);
+    await writeFile(join(first!.target.workerRoot, '.env'), randomBytes(24));
     await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
       'SNAPSHOT_INVALID',
     );
