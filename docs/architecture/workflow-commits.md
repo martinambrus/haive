@@ -175,3 +175,21 @@ as recorded with its SHA unavailable, both in the prompt and in the deterministi
 An explicit no-commit outcome retains the no-commit wording. An older detection payload with neither
 a SHA nor a recorded outcome says that its outcome was not recorded, rather than inferring it from
 message text.
+
+Every diff builder redacts both content sides with the committed-secret scanner
+before artifact persistence. This covers `.haive/gate3-diff.json` (gate 3 and Run app),
+`learning-knowledge-diff.json`, `kb-commit-diff.json` and `external-kb-diff.json`.
+Learning extras, including learning operations and investigation drafts, use the
+same rule as git-backed files. Redacted entries carry `contentWithheld`, lose their
+`editPath` and stay read-only; a redacted preview must never overwrite actual files.
+
+The files/raw and files/content routes recheck all four names under `.haive/`,
+including legacy artifacts outside the current workspace but inside the repository
+anchor. Redaction parses JSON before scanning each content side, so escaped source
+is not scanned as serialized JSON. NUL content is withheld in full. Malformed or
+partial artifacts return a valid withheld diff artifact whose unreadable entry
+shows the policy marker, rather than raw text or an unparseable marker response.
+Raw artifact reads are bounded to 128 MiB (including JSON escaping) and refuse larger
+files. Existing repository files and Git contents are unchanged. The ordinary
+worktree/editor/archive endpoints still serve actual files; these are separate from
+the named diff artifacts. Existing artifact files are rechecked on serve, not backfilled.

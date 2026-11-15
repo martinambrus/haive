@@ -26,6 +26,27 @@ import {
   type FixTestRecord,
 } from './_fix-test-edits.js';
 
+describe('compareTestImages withheld-only change', () => {
+  it('explains a change that redaction made invisible', () => {
+    const shown = Buffer.from('const k = "content withheld by secret policy.";\n').toString(
+      'base64',
+    );
+    const file = (hash: string) => ({
+      path: 'tests/a.test.ts',
+      hash,
+      mode: 0o100644,
+      status: 'available' as const,
+      base64: shown,
+    });
+    const result = compareTestImages(
+      { state: 'captured', files: [file(randomBytes(8).toString('hex'))] },
+      { state: 'captured', files: [file(randomBytes(8).toString('hex'))] },
+    );
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]!.patch).toContain('The change lies inside withheld text');
+  });
+});
+
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));

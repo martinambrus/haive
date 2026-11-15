@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -55,6 +56,43 @@ async function artifactFor(untracked: number): Promise<CommitDiffArtifact> {
 }
 
 describe('buildKnowledgeDiffArtifact', () => {
+  it.each([
+    KNOWLEDGE_DIFF_ARTIFACT_NAME,
+    KB_COMMIT_DIFF_ARTIFACT_NAME,
+    EXTERNAL_KB_DIFF_ARTIFACT_NAME,
+  ])(
+    'redacts synthesized old and new content before writing %s and prevents editing redacted bytes',
+    async (artifactName) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-redaction-'));
+      const secret = randomBytes(24).toString('hex');
+      try {
+        const draft = {
+          ...extra('draft'),
+          oldContent: `TOKEN="${secret}"\nbefore\n`,
+          newContent: `TOKEN="${secret}"\nafter\n`,
+          editPath: path.join(dir, 'draft.md'),
+        };
+        const fakeGitRun = async () => ({ code: 0, stdout: '', stderr: '' });
+        const written = await buildKnowledgeDiffArtifact(dir, fakeGitRun, [draft, extra('safe')], {
+          artifactName,
+        });
+        const text = await readFile(written, 'utf8');
+        expect(text).not.toContain(secret);
+        const artifact = JSON.parse(text) as CommitDiffArtifact;
+        expect(artifact.files[0]).toMatchObject({
+          oldContent: 'content withheld by secret policy.\nbefore\n',
+          newContent: 'content withheld by secret policy.\nafter\n',
+          contentWithheld: true,
+        });
+        expect(artifact.files[0]!.editPath).toBeUndefined();
+        expect(artifact.files[1]).toEqual(extra('safe'));
+        expect(draft.newContent).toContain(secret);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([undefined, KB_COMMIT_DIFF_ARTIFACT_NAME, EXTERNAL_KB_DIFF_ARTIFACT_NAME])(
     'clears an earlier artifact on a failed git status (%s)',
     async (artifactName) => {

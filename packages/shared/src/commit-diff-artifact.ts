@@ -1,3 +1,5 @@
+import { CREDENTIAL_WITHHELD, redactCredentialText } from './credential-scan.js';
+
 export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
 
 export type CommitDiffLink = 'symlink' | 'gitlink';
@@ -30,6 +32,8 @@ export interface CommitDiffFile {
    *  for a draft the step has not written yet — the viewer does not care which,
    *  it just PUTs the path back. */
   editPath?: string;
+  /** Display content was withheld; it must never seed a file edit. */
+  contentWithheld?: boolean;
 }
 
 export interface CommitDiffArtifact {
@@ -39,4 +43,80 @@ export interface CommitDiffArtifact {
   /** File list was capped at MAX_FILES. */
   truncated: boolean;
   files: CommitDiffFile[];
+}
+
+/** Shared by every gate builder and the serve-time legacy recheck. A redacted
+ * display is read-only: saving it would replace real file bytes with the marker. */
+export function redactCommitDiffFile(file: CommitDiffFile): CommitDiffFile {
+  const oldContent = redactCredentialText(file.oldContent);
+  const newContent = redactCredentialText(file.newContent);
+  const withheld =
+    file.contentWithheld ||
+    oldContent !== file.oldContent ||
+    newContent !== file.newContent ||
+    oldContent.includes(CREDENTIAL_WITHHELD) ||
+    newContent.includes(CREDENTIAL_WITHHELD);
+  if (!withheld) return file;
+  const { editPath: _editPath, ...readonly } = file;
+  return { ...readonly, oldContent, newContent, contentWithheld: true };
+}
+
+const WITHHELD_ARTIFACT = JSON.stringify({
+  headSha: null,
+  fileCount: 1,
+  truncated: false,
+  files: [
+    {
+      path: 'withheld',
+      status: 'modified',
+      binary: false,
+      truncated: false,
+      unreadable: true,
+      unreadableReason: CREDENTIAL_WITHHELD,
+      oldContent: '',
+      newContent: '',
+    },
+  ],
+} satisfies CommitDiffArtifact);
+
+/** Recheck legacy artifacts at serve time. Invalid/partial JSON never falls back to raw
+ * content, which could contain escaped credentials the text scanner cannot recognise. */
+export function redactCommitDiffJson(text: string): string {
+  try {
+    const artifact: unknown = JSON.parse(text);
+    if (
+      !artifact ||
+      typeof artifact !== 'object' ||
+      !('headSha' in artifact) ||
+      (artifact.headSha !== null && typeof artifact.headSha !== 'string') ||
+      !('fileCount' in artifact) ||
+      typeof artifact.fileCount !== 'number' ||
+      !Number.isSafeInteger(artifact.fileCount) ||
+      artifact.fileCount < 0 ||
+      !('truncated' in artifact) ||
+      typeof artifact.truncated !== 'boolean' ||
+      !('files' in artifact) ||
+      !Array.isArray(artifact.files)
+    )
+      return WITHHELD_ARTIFACT;
+    let changed = false;
+    for (const [index, file] of artifact.files.entries()) {
+      if (!file || typeof file !== 'object') return WITHHELD_ARTIFACT;
+      if (
+        typeof file.path !== 'string' ||
+        !['added', 'modified', 'deleted', 'renamed'].includes(file.status) ||
+        typeof file.binary !== 'boolean' ||
+        typeof file.truncated !== 'boolean' ||
+        typeof file.oldContent !== 'string' ||
+        typeof file.newContent !== 'string'
+      )
+        return WITHHELD_ARTIFACT;
+      const safe = redactCommitDiffFile(file);
+      changed ||= safe !== file;
+      artifact.files[index] = safe;
+    }
+    return changed ? JSON.stringify(artifact) : text;
+  } catch {
+    return WITHHELD_ARTIFACT;
+  }
 }

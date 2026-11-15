@@ -1,3 +1,4 @@
+import { CREDENTIAL_WITHHELD } from '@haive/shared/credential-scan';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
 import { readdirSizesNoFollow, openFileNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
@@ -374,7 +375,7 @@ export function compareTestImages(
         : null;
     const patch = unavailable
       ? unavailable.status === 'content withheld'
-        ? 'content withheld by secret policy.'
+        ? CREDENTIAL_WITHHELD
         : unavailable.status === 'refused'
           ? 'Test path refused; content not captured.'
           : 'content not retained (size, storage budget, restart, expiry or a protected test path change in this task); hashes and manifest retained.'
@@ -389,7 +390,10 @@ export function compareTestImages(
               : []),
             `--- ${a ? path : '/dev/null'}`,
             `+++ ${b ? path : '/dev/null'}`,
-            diff?.patch ?? '',
+            diff?.patch ||
+              (a && b && a.mode === b.mode && left.equals(right)
+                ? `${CREDENTIAL_WITHHELD} The change lies inside withheld text; hashes retained.`
+                : ''),
           ].join('\n');
     const bounded = cutPatch(patch, Math.max(0, bytes), Math.max(0, lines));
     bytes -= Buffer.byteLength(bounded.patch);

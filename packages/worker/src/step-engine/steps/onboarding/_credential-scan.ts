@@ -3,12 +3,8 @@ import { spawn } from 'node:child_process';
 import { GIT_BASE_ENV, hardenGitArgs } from '../../../repo/git-exec.js';
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 
-/** Location only: neither the value nor its surrounding source may enter detect_output. */
-export interface CredentialCandidate {
-  file: string;
-  line: number;
-  kind: 'credential assignment' | 'provider key' | 'private key' | 'credential URL';
-}
+import { visitCredentials, type CredentialCandidate } from '@haive/shared/credential-scan';
+export { scanTextForCredentials, type CredentialCandidate } from '@haive/shared/credential-scan';
 
 export interface CredentialScan {
   hits: CredentialCandidate[];
@@ -34,72 +30,6 @@ const DEFAULT_LIMITS: ScanLimits = {
 
 const READ_CAP = 512 * 1024;
 const PATH_BYTES = 4096;
-// Classify a captured whole key separately to avoid greedy keyword-prefix/suffix
-// patterns backtracking quadratically on long, repeated identifiers.
-const CREDENTIAL_NAME =
-  /(?:^|[_-])(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(?=$|[_-])/i;
-const ASSIGNMENT = /(?<![\w-])([\w-]+)["']?(?:[ \t]*\])?\s*(?:=>|[:=])\s*(["'`])([^"'`\r\n]+)\2/gi;
-// .env and YAML commonly use bare scalars. Require a scalar terminator rather
-// than matching the prefix of a function call or another compound expression.
-const UNQUOTED_ASSIGNMENT =
-  /(?<![\w-])([\w-]+)["']?(?:[ \t]*\])?[ \t]*(?:=>|[:=])[ \t]*([^\s"'`#,;{}\[\]()\\]{1,4096})(?=[ \t]*(?:[,;#}\r\n]|$))/gi;
-const PROVIDER_KEY =
-  /\b(?:(?:AKIA|ASIA)[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|sk_live_[A-Za-z0-9]{20,}|sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}|AIza[A-Za-z0-9_-]{35}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/;
-const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
-const CREDENTIAL_URL =
-  /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s/:'"<>]*:([^\s/@'"<>]+)@[^\s/'"<>]+/i;
-
-function placeholder(value: string): boolean {
-  return (
-    /^(?:\$|\{|<|your[-_ ]|example|placeholder|dummy|changeme|change[-_ ]?me|redacted|process\.env\.|import\.meta\.env\.|x{3,}|\*{3,}|\.{3,})/i.test(
-      value,
-    ) ||
-    /^(?:undefined|null|none|false|true)$/i.test(value) ||
-    value === 'AKIAIOSFODNN7EXAMPLE'
-  );
-}
-
-function hasLiteralAssignment(text: string, pattern: RegExp, group: number): boolean {
-  for (const match of text.matchAll(pattern)) {
-    const key = match[1]!
-      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-      .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2');
-    if (CREDENTIAL_NAME.test(key) && !placeholder(match[group]!)) return true;
-  }
-  return false;
-}
-
-/** Visit matches without accumulating source text, regex matches or candidate objects. */
-function visitCredentials(
-  content: string,
-  visit: (line: number, kind: CredentialCandidate['kind']) => void,
-): void {
-  if (content.includes('\0')) return;
-  const lines = content.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const text = lines[i]!;
-    // One location per line keeps accountability unambiguous when multiple patterns match.
-    let kind: CredentialCandidate['kind'] | undefined;
-    if (PRIVATE_KEY.test(text)) kind = 'private key';
-    else if (PROVIDER_KEY.test(text) && !text.includes('AKIAIOSFODNN7EXAMPLE'))
-      kind = 'provider key';
-    else if (hasLiteralAssignment(text, ASSIGNMENT, 3)) kind = 'credential assignment';
-    else if (hasLiteralAssignment(text, UNQUOTED_ASSIGNMENT, 2)) kind = 'credential assignment';
-    else {
-      const url = text.includes('://') ? CREDENTIAL_URL.exec(text) : null;
-      if (url && !placeholder(url[1]!)) kind = 'credential URL';
-    }
-    if (kind) visit(i + 1, kind);
-  }
-}
-
-/** Deliberately candidates, never verdicts. Tests, examples and upstream files need judgement. */
-export function scanTextForCredentials(file: string, content: string): CredentialCandidate[] {
-  const hits: CredentialCandidate[] = [];
-  visitCredentials(content, (line, kind) => hits.push({ file, line, kind }));
-  return hits;
-}
-
 interface RankedCandidate {
   ordinal: number;
   fileIndex: number;

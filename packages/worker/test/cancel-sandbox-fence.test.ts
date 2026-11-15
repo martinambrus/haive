@@ -1,5 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { copyFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,7 @@ import {
   FIX_TEST_RECORD_LIMIT,
   FIX_TEST_PENDING_COUNT,
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
+import { gitExec } from '../src/repo/git-exec.js';
 import { captureTestImage } from '../src/step-engine/steps/workflow/_fix-test-edits.js';
 
 const url = process.env.CANCEL_FENCE_TEST_URL;
@@ -190,6 +191,89 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     ).toEqual(saved!.payload);
   });
 
+  it.each(['tests/.env.test', '.env'])(
+    'redacts a credential copied from %s at the blob write',
+    async (source) => {
+      const meta = await seed();
+      const secret = randomBytes(24).toString('hex');
+      const content = `ordinary before\r\nTOKEN="${secret}"\r\nordinary after\n`;
+      await writeFile(join(meta.workspace, source), content);
+      if (source.startsWith('tests/')) {
+        await gitExec(['init', '-q'], { cwd: meta.workspace });
+        await gitExec(['add', '--', source], { cwd: meta.workspace });
+      }
+      await beginFixTestCapture(db, meta);
+      await copyFile(join(meta.workspace, source), join(meta.workspace, 'tests/copied.json'));
+      await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'after copy\r\n');
+      await end(meta.invocationId);
+      await finishFixTestCapture(db, meta.invocationId);
+      const blobs = await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        );
+      const contents = blobs.map((b) => b.content?.toString());
+      expect(contents).toContain(
+        'ordinary before\r\ncontent withheld by secret policy.\r\nordinary after\n',
+      );
+      expect(contents).toContain('after copy\r\n');
+      expect(
+        blobs.some((b) => b.contentHash === createHash('sha256').update(content).digest('hex')),
+      ).toBe(true);
+      expect(contents.join('')).not.toContain(secret);
+      expect(JSON.stringify(await loadFixTestRecords(db, meta.taskId))).not.toContain(secret);
+    },
+  );
+
+  it.each([
+    ['NUL-containing', Buffer.from([0])],
+    ['non-UTF-8', Buffer.from([0xff])],
+  ] as const)(
+    'withholds an entire %s repair blob while preserving its measured hash',
+    async (_kind, binaryByte) => {
+      const meta = await seed();
+      await beginFixTestCapture(db, meta);
+      const secret = randomBytes(24).toString('hex');
+      const content = Buffer.concat([
+        Buffer.from('before'),
+        binaryByte,
+        Buffer.from(`\nTOKEN="${secret}"\nafter`),
+      ]);
+      await writeFile(join(meta.workspace, 'tests/a.test.ts'), content);
+      await end(meta.invocationId);
+      await finishFixTestCapture(db, meta.invocationId);
+      const hash = createHash('sha256').update(content).digest('hex');
+      const blob = await db.query.fixTestBlobs.findFirst({
+        where: and(
+          eq(schema.fixTestBlobs.taskId, meta.taskId),
+          eq(schema.fixTestBlobs.contentHash, hash),
+        ),
+      });
+      expect(blob?.content?.toString()).toBe('content withheld by secret policy.');
+      expect(blob?.content?.includes(Buffer.from(secret))).toBe(false);
+      const records = await loadFixTestRecords(db, meta.taskId);
+      expect(records[0]!.changes[0]!.afterHash).toBe(hash);
+      expect(JSON.stringify(records)).not.toContain(secret);
+      // Existing rows are rechecked at display too; do not wait for expiry to hide them.
+      await db
+        .update(schema.fixTestBlobs)
+        .set({ content: Buffer.from(content) })
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            eq(schema.fixTestBlobs.contentHash, hash),
+          ),
+        );
+      const legacy = JSON.stringify(await loadFixTestRecords(db, meta.taskId));
+      expect(legacy).not.toContain(secret);
+      expect(legacy).toContain('content withheld by secret policy.');
+    },
+  );
+
   it('keeps no content when a protected fixture moves to an allowed name', async () => {
     const meta = await seed();
     const secret = `TOKEN=${randomBytes(24).toString('hex')}`;
@@ -246,6 +330,153 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     expect(blobs).toHaveLength(0);
   });
 
+  it('keeps an ended DAG sibling open for its normal finish without tainting later passes', async () => {
+    const meta = await seed();
+    await db
+      .update(schema.cliInvocations)
+      .set({ mode: 'dag_parallel' })
+      .where(eq(schema.cliInvocations.id, meta.invocationId));
+    await beginFixTestCapture(db, meta);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'legitimate sibling edit');
+    await end(meta.invocationId);
+    const [next] = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: meta.taskId,
+        taskStepId: meta.taskStepId,
+        mode: 'dag_parallel',
+        prompt: 'sibling fix',
+      })
+      .returning();
+    // resolveReviewPhase can begin issue X's next coder before ingesting ended issue Z.
+    await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2 });
+    await loadFixTestRecords(db, meta.taskId);
+    const unsettled = await db.query.taskEvents.findMany({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(unsettled).toHaveLength(0);
+    await finishFixTestCapture(db, meta.invocationId);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'later sibling edit');
+    await end(next!.id);
+    await finishFixTestCapture(db, next!.id);
+    const records = await loadFixTestRecords(db, meta.taskId);
+    expect(records).toHaveLength(2);
+    expect(records.every((r) => r.state === 'captured')).toBe(true);
+    expect(records[0]!.changes[0]!.patch).toContain('+legitimate sibling edit');
+    expect(records[1]!.changes[0]!.patch).toContain('+later sibling edit');
+    const settled = await db.query.taskEvents.findMany({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(settled.every((e) => !e.payload?.protectedChanged)).toBe(true);
+  });
+
+  it.each(['superseded', 'stopped', 'failed', 'step reset', 'epoch moved'] as const)(
+    'taints a %s repair before the next pass can retain moved content',
+    async (terminal) => {
+      const meta = await seed();
+      // An opaque moved value intentionally has no scanner shape: terminal taint is
+      // independent of content redaction and protects unknown credential formats too.
+      const secret = randomBytes(24).toString('hex');
+      await writeFile(join(meta.workspace, 'tests/.env.test'), secret);
+      await beginFixTestCapture(db, meta);
+      await rm(join(meta.workspace, 'tests/.env.test'));
+      await writeFile(join(meta.workspace, 'tests/config.json'), secret);
+      await db
+        .update(schema.cliInvocations)
+        .set({
+          ...(['superseded', 'stopped'].includes(terminal) ? { supersededAt: new Date() } : {}),
+          ...(terminal !== 'superseded'
+            ? { endedAt: new Date(), exitCode: terminal === 'failed' ? 1 : 137 }
+            : {}),
+        })
+        .where(eq(schema.cliInvocations.id, meta.invocationId));
+      await db
+        .update(schema.taskSteps)
+        .set({ status: terminal === 'epoch moved' ? 'waiting_cli' : 'failed' })
+        .where(eq(schema.taskSteps.id, meta.taskStepId));
+      await db
+        .update(schema.tasks)
+        .set({ status: 'running', orchestrationEpoch: terminal === 'step reset' ? 0 : 1 })
+        .where(eq(schema.tasks.id, meta.taskId));
+      // The old pass is never handed back to resolveLlmPhase after Stop/Retry.
+      await db
+        .update(schema.tasks)
+        .set({ status: 'running' })
+        .where(eq(schema.tasks.id, meta.taskId));
+      if (terminal !== 'step reset')
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli' })
+          .where(eq(schema.taskSteps.id, meta.taskStepId));
+      // Reconcile while the reset row still proves loss of ownership.
+      if (terminal === 'step reset') {
+        await loadFixTestRecords(db, meta.taskId);
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli' })
+          .where(eq(schema.taskSteps.id, meta.taskStepId));
+      }
+      const [next] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId: meta.taskId,
+          taskStepId: meta.taskStepId,
+          mode: 'cli',
+          prompt: 'next',
+        })
+        .returning();
+      await beginFixTestCapture(db, {
+        ...meta,
+        invocationId: next!.id,
+        pass: 2,
+        epoch: terminal === 'step reset' ? 0 : 1,
+      });
+      await writeFile(join(meta.workspace, 'tests/config.json'), `${secret} edited`);
+      await end(next!.id);
+      await finishFixTestCapture(db, next!.id);
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, meta.taskId),
+      });
+      const closed = events.find(
+        (e) => e.eventType === FIX_TEST_AFTER && e.payload?.invocationId === meta.invocationId,
+      );
+      expect(closed?.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
+      const blobs = await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        );
+      expect(blobs).toHaveLength(0);
+      expect(JSON.stringify(await loadFixTestRecords(db, meta.taskId))).not.toContain(secret);
+    },
+  );
+
+  it('taints an unmeasurable after capture even without a known protected endpoint', async () => {
+    const meta = await seed();
+    await beginFixTestCapture(db, meta);
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId, {
+      capture: async () => ({ state: 'not captured', reason: 'Injected unreadable directory.' }),
+    });
+    const after = await db.query.taskEvents.findFirst({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(after?.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
+  });
+
   it('does not publish a complete after-image when cancellation wins during capture', async () => {
     const meta = await seed();
     await beginFixTestCapture(db, meta);
@@ -287,7 +518,8 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     const events = await db.query.taskEvents.findMany({
       where: eq(schema.taskEvents.taskId, meta.taskId),
     });
-    expect(events.map((e) => e.eventType)).toEqual([FIX_TEST_BEFORE]);
+    expect(events.map((e) => e.eventType)).toEqual([FIX_TEST_BEFORE, FIX_TEST_AFTER]);
+    expect(events[1]!.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
   });
 
   it('marks a storage refusal and an interrupted invocation as not captured', async () => {

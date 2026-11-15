@@ -121,3 +121,13 @@ form, and prompt locations sit in an untrusted-text fence. A failed pre-scan is
 recorded internally rather than represented as zero candidates; a cancelled scan propagates
 cancellation. This inventory covers the current tracked working tree; it does
 not deterministically scan historical blobs or validate credentials remotely.
+
+The pure text rules now live in `@haive/shared/credential-scan`; the tracked-inventory
+scanner imports the same visitor used by repair-evidence and gate-3 diff redaction.
+Discovery still returns locations only. Evidence sinks withhold every nominated line
+using `content withheld by secret policy.`. Private-key nominations also withhold
+all lines through the corresponding END marker, or EOF if unfinished. Other lines
+and their line endings remain unchanged. These are the existing candidate rules,
+including their placeholder exclusions, not exhaustive secret recognition. Discovery
+still skips NUL-containing content; evidence redaction instead withholds that whole
+content with the marker, including repair blobs and legacy artifact content.

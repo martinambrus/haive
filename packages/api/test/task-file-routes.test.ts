@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -86,6 +87,81 @@ describe('task file read routes', () => {
     await rm(storage, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   });
+
+  it.each([
+    ...[
+      'gate3-diff.json',
+      'learning-knowledge-diff.json',
+      'kb-commit-diff.json',
+      'external-kb-diff.json',
+    ].flatMap(
+      (name) =>
+        [
+          ['/files/raw', false, name],
+          ['/files/content', false, name],
+          ['/files/raw', true, name],
+          ['/files/content', true, name],
+        ] as const,
+    ),
+  ] as const)(
+    'redacts a legacy artifact at %s (outside current workspace=%s, artifact=%s)',
+    async (route, outsideWorkspace, name) => {
+      const secret = randomBytes(24).toString('hex');
+      const ordinary = 'ordinary\r\nunchanged\n';
+      const artifact = {
+        headSha: null,
+        fileCount: 1,
+        truncated: false,
+        files: [
+          {
+            path: 'tests/copied.json',
+            status: 'modified',
+            binary: false,
+            truncated: false,
+            oldContent: `TOKEN="${secret}"\n`,
+            newContent: ordinary,
+            editPath: path.join(worktree, 'draft.md'),
+          },
+        ],
+      };
+      const target = path.join(outsideWorkspace ? repo : worktree, '.haive', name);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, JSON.stringify(artifact));
+      const res = await get(route, { path: target });
+      expect(res.status).toBe(200);
+      const body = route.endsWith('raw')
+        ? await res.text()
+        : ((await res.json()) as { content: string }).content;
+      expect(body).not.toContain(secret);
+      expect(JSON.parse(body).files[0].editPath).toBeUndefined();
+      expect(JSON.parse(body).files[0]).toMatchObject({
+        oldContent: 'content withheld by secret policy.\n',
+        newContent: ordinary,
+      });
+    },
+  );
+
+  it.each(['/files/raw', '/files/content'])(
+    'serves malformed gate JSON as a valid withheld artifact at %s',
+    async (route) => {
+      const secret = randomBytes(24).toString('hex');
+      const target = path.join(worktree, '.haive', 'learning-knowledge-diff.json');
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, `{"files":[{"newContent":${JSON.stringify(`TOKEN="${secret}"`)}`);
+      const res = await get(route, { path: target });
+      expect(res.status).toBe(200);
+      const artifact = route.endsWith('raw')
+        ? await res.json()
+        : JSON.parse(((await res.json()) as { content: string }).content);
+      expect(artifact).toMatchObject({
+        headSha: null,
+        fileCount: 1,
+        truncated: false,
+        files: [{ unreadable: true, unreadableReason: 'content withheld by secret policy.' }],
+      });
+      expect(JSON.stringify(artifact)).not.toContain(secret);
+    },
+  );
 
   describe('GET /files', () => {
     it('lists the workspace, with a link as neither file nor directory', async () => {

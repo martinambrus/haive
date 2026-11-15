@@ -1,3 +1,4 @@
+import { redactCommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import path from 'node:path';
 import type {
   CommitDiffArtifact,
@@ -274,7 +275,7 @@ export async function buildFileEntry(
   if (unreadable) file.unreadable = true;
   if (unreadableReason) file.unreadableReason = unreadableReason;
   if (link) file.link = link;
-  return file;
+  return redactCommitDiffFile(file);
 }
 
 /** Builds the gate-3 commit-diff artifact for the worktree and writes it to

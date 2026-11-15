@@ -1,4 +1,10 @@
-import type { CommitDiffFile, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
+import { randomBytes } from 'node:crypto';
+import { api } from '@/lib/api-client';
+import {
+  redactCommitDiffJson,
+  type CommitDiffFile,
+  type CommitDiffStatus,
+} from '@haive/shared/commit-diff-artifact';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CommitDiffViewer } from './commit-diff-viewer';
 import { createRenderer, findAll, fire, textOf, type Renderer } from '../../test/render-tree';
@@ -6,6 +12,11 @@ import { createRenderer, findAll, fire, textOf, type Renderer } from '../../test
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../test/render-tree')).reactHooks,
+}));
+
+vi.mock('@/lib/api-client', () => ({
+  api: { get: vi.fn() },
+  API_BASE_URL: '',
 }));
 
 let files: CommitDiffFile[] = [];
@@ -162,5 +173,48 @@ describe('the diff viewer names a link and shows what it points at', () => {
     const text = textOf(view.tree());
     expect(text).not.toContain('symlink');
     expect(text).not.toContain('submodule');
+  });
+});
+
+describe('knowledge preview redaction', () => {
+  it('renders a malformed artifact as withheld instead of a JSON parse failure', async () => {
+    const artifact = JSON.parse(redactCommitDiffJson('{"files":['));
+    const view = await mount(artifact.files);
+    const text = textOf(view.tree());
+    expect(text).toContain('content withheld by secret policy.');
+    expect(text).not.toContain('Could not load changes');
+  });
+
+  it('never fetches live unredacted bytes for a withheld artifact entry', async () => {
+    vi.mocked(api.get).mockClear();
+    const view = await mount([
+      file('notes.md', 'modified', {
+        oldContent: 'content withheld by secret policy.',
+        newContent: 'safe',
+        contentWithheld: true,
+        editPath: '/repo/notes.md',
+      }),
+    ]);
+    expect(api.get).not.toHaveBeenCalled();
+    expect(textOf(view.tree())).toContain('content withheld by secret policy.');
+    expect(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Edit')).toHaveLength(0);
+  });
+
+  it('refuses live credentials added after the artifact snapshot without seeding an editor', async () => {
+    const secret = randomBytes(24).toString('hex');
+    vi.mocked(api.get).mockResolvedValueOnce({ content: `TOKEN="${secret}"`, binary: false });
+    const view = await mount([
+      file('notes.md', 'modified', {
+        oldContent: 'before',
+        newContent: 'safe snapshot',
+        editPath: '/repo/notes.md',
+      }),
+    ]);
+    for (let i = 0; i < 3; i++) await view.flush();
+    const text = textOf(view.tree());
+    expect(text).not.toContain(secret);
+    expect(text).toContain('not editable');
+    expect(text).toContain('safe snapshot');
+    expect(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Edit')).toHaveLength(0);
   });
 });

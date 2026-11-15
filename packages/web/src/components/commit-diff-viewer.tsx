@@ -1,5 +1,6 @@
 'use client';
 
+import { CREDENTIAL_WITHHELD, redactCredentialText } from '@haive/shared/credential-scan';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CommitDiffArtifact, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
 import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
@@ -385,7 +386,7 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
   // editing for that file rather than falling back to the artifact copy: saving
   // content we could not verify we were editing is how one silently clobbers an
   // agent's rewrite.
-  const selectedEditPath = selectedFile?.editPath ?? null;
+  const selectedEditPath = selectedFile?.contentWithheld ? null : (selectedFile?.editPath ?? null);
   const selectedPath = selectedFile?.path ?? null;
   useEffect(() => {
     if (!selectedEditPath || !selectedPath) return;
@@ -402,6 +403,10 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
           return;
         }
         const text = res.content;
+        if (redactCredentialText(text) !== text) {
+          setLiveErrors((m) => ({ ...m, [selectedPath]: CREDENTIAL_WITHHELD }));
+          return;
+        }
         const sha = await sha256(text);
         if (cancelled) return;
         setLive((m) => ({ ...m, [selectedPath]: { text, sha } }));

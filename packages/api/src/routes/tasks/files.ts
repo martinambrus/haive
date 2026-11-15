@@ -1,3 +1,4 @@
+import { redactCommitDiffJson } from '@haive/shared/commit-diff-artifact';
 import { createHash } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
@@ -46,6 +47,21 @@ function workspaceRel(anchor: string, root: string, requested: string | undefine
     throw new HttpError(403, 'Path is outside the task workspace');
   }
 }
+
+const readTaskFile = (anchor: string, rel: string, maxBytes: number) =>
+  readFileNoFollow(anchor, rel, { maxBytes, strict: true }).catch(containmentHttpError);
+
+// The gate viewer uses /files/raw, while the Editor can also read /files/content.
+const GATE_DIFF_ARTIFACT_NAMES = new Set([
+  'gate3-diff.json',
+  'learning-knowledge-diff.json',
+  'kb-commit-diff.json',
+  'external-kb-diff.json',
+]);
+const isGateDiff = (target: string) =>
+  GATE_DIFF_ARTIFACT_NAMES.has(basename(target)) && basename(dirname(target)) === '.haive';
+// JSON escaping can expand the builder's 16 MiB content budget sixfold.
+const MAX_GATE_ARTIFACT_BYTES = 128 * 1024 * 1024;
 
 export const fileRoutes = new Hono<AppEnv>();
 
@@ -108,10 +124,7 @@ fileRoutes.get('/:id/files/content', async (c) => {
   const rel = workspaceRel(anchor, root, requested);
   const target = resolve(anchor, rel);
 
-  const read = await readFileNoFollow(anchor, rel, {
-    maxBytes: MAX_FILE_CONTENT_BYTES,
-    strict: true,
-  }).catch(containmentHttpError);
+  const read = await readTaskFile(anchor, rel, MAX_FILE_CONTENT_BYTES);
   if (read === null) throw new HttpError(404, 'File not found');
   const st = { size: read.size };
   const truncated = read.truncated;
@@ -137,7 +150,8 @@ fileRoutes.get('/:id/files/content', async (c) => {
     });
   }
 
-  const content = buf.toString('utf8');
+  const text = buf.toString('utf8');
+  const content = isGateDiff(target) ? redactCommitDiffJson(text) : text;
   return c.json({
     path: target,
     size: st.size,
@@ -160,6 +174,18 @@ fileRoutes.get('/:id/files/raw', async (c) => {
   const requested = c.req.query('path');
   if (!requested) throw new HttpError(400, 'Missing path query parameter');
   const rel = workspaceRel(anchor, root, requested);
+
+  if (isGateDiff(resolve(anchor, rel))) {
+    const read = await readTaskFile(anchor, rel, MAX_GATE_ARTIFACT_BYTES);
+    if (!read) throw new HttpError(404, 'File not found');
+    if (read.truncated) throw new HttpError(413, 'Commit diff artifact is too large');
+    c.header('Cache-Control', 'no-store');
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Content-Security-Policy', 'sandbox');
+    return c.body(redactCommitDiffJson(read.data.toString('utf8')), 200, {
+      'Content-Type': 'application/octet-stream',
+    });
+  }
 
   // Streamed from the descriptor the walk verified, not from the path again: a second resolution
   // is a second chance for the tree to have changed under it. `Content-Length` comes from that
