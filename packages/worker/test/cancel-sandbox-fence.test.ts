@@ -1,3 +1,4 @@
+import { startAutoClassification } from '../src/step-engine/steps/workflow/_insight-auto-flow.js';
 import {
   claimAutoRound,
   loadAutoHistory,
@@ -1845,8 +1846,7 @@ describe.skipIf(!url)('automatic insight admission on PostgreSQL', () => {
         .set({ ...patch, updatedAt: new Date() })
         .where(eq(schema.tasks.id, ctx.taskId));
       if (kind === 'owner') ctx.userId = randomUUID();
-      if (kind === 'OFF' || kind === 'pause')
-        expect(await claimAutoRound(ctx, [insight('one')])).toBeNull();
+      if (kind === 'OFF') expect(await claimAutoRound(ctx, [insight('one')])).toBeNull();
       else
         await expect(claimAutoRound(ctx, [insight('one')])).rejects.toMatchObject({
           name: 'StepSupersededError',
@@ -1854,6 +1854,31 @@ describe.skipIf(!url)('automatic insight admission on PostgreSQL', () => {
       expect((await loadAutoHistory(db, ctx.taskId)).claims).toEqual([]);
     },
   );
+  it('pause between detection and claim holds without spending or downgrading the cohort', async () => {
+    const ctx = await seed();
+    const state = {
+      version: 1 as const,
+      mode: 'classify' as const,
+      candidates: [insight('one')],
+      roundsStarted: 0,
+      decisions: [],
+      stopReason: 'classifying' as const,
+    };
+    await db
+      .update(schema.tasks)
+      .set({ pausedAt: new Date() })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await expect(startAutoClassification(ctx, state)).rejects.toMatchObject({
+      name: 'StepSupersededError',
+    });
+    expect(await loadAutoHistory(db, ctx.taskId)).toEqual({ claims: [], results: [] });
+    await db.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, ctx.taskId));
+    expect(await startAutoClassification(ctx, state)).toMatchObject([{ roleKey: 'triage' }]);
+    expect(await loadAutoHistory(db, ctx.taskId)).toMatchObject({
+      claims: [{ ordinal: 1 }],
+      results: [],
+    });
+  });
   it('publishes classification once before any editor and refuses an overtaken generation', async () => {
     const ctx = await seed();
     const claim = (await claimAutoRound(ctx, [insight('one')]))!;

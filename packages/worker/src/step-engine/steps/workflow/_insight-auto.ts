@@ -304,7 +304,8 @@ export async function claimAutoRound(
   limits: InsightAutoLimits = {},
 ): Promise<AutoClaim | null> {
   return withAutoFence(ctx, async (db, task) => {
-    if (!INSIGHT_AUTO_ACTION_AVAILABLE || !task.autoActOnInsights || task.pausedAt) return null;
+    if (!INSIGHT_AUTO_ACTION_AVAILABLE || !task.autoActOnInsights) return null;
+    if (task.pausedAt) throw new StepSupersededError(ctx.taskStepId);
     const history = await loadAutoHistory(db, ctx.taskId);
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
     const existing = history.claims.find((r) => r.batchId === batchId);
