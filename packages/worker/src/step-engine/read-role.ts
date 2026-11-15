@@ -151,7 +151,7 @@ export async function readRole(
     contract,
     producer: { rowId: row.id, stepId: row.stepId, round: row.round, status: row.status },
     iterations: row.iterations,
-    legacyOutput: pinned ? null : projectRoleOutput(role, row.output),
+    legacyOutput: pinned && row.status !== 'done' ? null : projectRoleOutput(role, row.output),
   };
   if (row.status !== 'done') return { ...common, state: 'not-ready' };
   const result = safeParseStepOutput(contract, row.output);

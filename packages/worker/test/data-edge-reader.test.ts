@@ -190,3 +190,30 @@ it.each([{}, { version: 2 }, { version: 4 }])(
     await expect(readRole(ctx, 'draft')).rejects.toThrow('invalid-data-edge-plan');
   },
 );
+
+it('keeps an invalid done pinned row diagnostic and exposes its legacy fields to the consumer', async () => {
+  const { ctx, fake, taskId, put } = fixture();
+  const checked = STEP_ROLE_REGISTRY[SPEC_ROLES.checked].legacyStepId;
+  const nodes = dataPortNodes([checked, '07-phase-2-implement']);
+  nodes[0]!.id = 'pinned-producer';
+  fake.patch(schema.tasks, taskId, {
+    dataEdgePlan: buildDataEdgePlan('static', [{ executionPath: null, nodes }]),
+  });
+  fake.patch(schema.taskSteps, ctx.taskStepId, { stepId: '07-phase-2-implement' });
+  const output = { score: 42, findings: [{ severity: 'high', description: 'retained diagnosis' }] };
+  put('pinned-producer', 1, output);
+  put(checked, 1, { spec: 'canonical decoy', score: 100 });
+  const read = await readRole(ctx, 'checked');
+  expect(read).toMatchObject({
+    state: 'invalid',
+    issuePaths: expect.arrayContaining(['spec']),
+    producer: { stepId: 'pinned-producer', round: 1, status: 'done' },
+  });
+  expect(legacyRoleOutput(read)).toMatchObject({ score: 42, findings: [{ severity: 'high' }] });
+  fake.patch(schema.tasks, taskId, { dataEdgePlan: null });
+  await fake.db.delete(schema.taskSteps).where(eq(schema.taskSteps.stepId, checked));
+  put(checked, 1, output);
+  const legacy = await readRole(ctx, 'checked');
+  expect(legacy.state).toBe('invalid');
+  expect(legacyRoleOutput(read)).toEqual(legacyRoleOutput(legacy));
+});
