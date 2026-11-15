@@ -33,8 +33,9 @@ export const reviewSeverityEnum = pgEnum('review_severity', ['critical', 'high',
 
 /** What became of a finding after it was raised.
  *  - open: raised, not yet resolved either way.
- *  - fixed: a later round of the same reviewer no longer raises it.
- *  - recurred: raised again in a later round after being seen before.
+ *  - fixed, recurred: declared but superseded and never written. Absence of a finding is not
+ *    evidence of a fix, and recurrence is counted in `recurrence_count`
+ *    (docs/architecture/review-findings.md).
  *  - dismissed_human: the developer accepted it at 08d2 or approved past it at gate 2.
  *  - dismissed_refuted: a refutation pass could not substantiate it.
  *  - accepted_risk: the fix-loop cap was reached and the developer accepted the remainder. */

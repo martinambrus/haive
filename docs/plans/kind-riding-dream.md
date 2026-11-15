@@ -475,14 +475,15 @@ pre-answer included, and 01 falls back to `HEAD`, so remediation refuses there a
 built on a tip the source has moved away from is work its push cannot land. A check that cannot
 be answered, a history too shallow to connect the commits, refuses rather than guesses.
 
-**Two things it inherits must change.** The first is the DAG's fail-fast guard (`pickFatalProviderError`) cancels
-every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
-fix the provider's filter refuses carries one, so one refused issue would stop its whole level.
-Taking the guard away alone would send that issue to the advisor instead, which can re-send the
-refused content. The first new core change covers both; the refused issue's findings stay recorded
-as not remediated, naming the refusal.
+**Refusal isolation is already shipped; partial DAG completion still needs a core change.**
+`pickFatalProviderError` uses `isProviderOutage`, which excludes `content_filter`, so a refusal
+no longer cancels sibling coders (`packages/worker/src/step-engine/dag-executor.ts:459`,
+`:2681`; `packages/worker/src/queues/cli-exec/failure-class.ts:514`). The refused issue is recorded
+as `failed_unrecoverable`, and escalation skips its advisor and aborts before sending it to a
+replanner (`dag-executor.ts:2958`, `:2519`, `:2571`). Keep those guards; the scan records its
+findings as not remediated, naming the refusal.
 
-The second is what an issue that fails for good does to the step. With per-issue review off,
+What still needs to change is what an issue that fails for good does to the step. With per-issue review off,
 `resolveDagPhase` fails the step as soon as a level has a failed coder, and with it on, an
 escalation that cannot replan aborts it, so `scan-remediate` itself ends `failed` and nothing after
 it runs, the report included. That fits a workflow task, whose plan is one change that is wrong
@@ -585,9 +586,11 @@ themes ahead of `diminishing` ones and most severe first within each:
   a refuter disproved it, and so are an earlier round's `open` rows, which a later round re-reviewed;
 - `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted, read through
   `loadUnactedInsights` with no limit (see Core changes) rather than re-parsed: those 08e did not
-  pick, and those it did as implementation attempted and unconfirmed, since 08e's `implemented` is
-  true whenever anything was picked, whatever its agent did. `scan-remediate`'s coder prompt and
-  `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
+  pick, and those it did as implementation attempted and unconfirmed. 08e now sets `implemented`
+  only when its model's reported change list contains a nonblank string, with a selection required
+  to consume that report (`packages/worker/src/step-engine/steps/workflow/08e-insights-triage.ts:46`,
+  `:281`); neither selection nor this self-report establishes repair. `scan-remediate`'s coder
+  prompt and `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
 
 Each entry's reason is derived from structural state — the triage step's output, the issue's
 `task_dag_issues` outcome, marker and `mergeStatus` reached through the plan id and `issueKey` its finding's
