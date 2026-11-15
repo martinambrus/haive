@@ -587,3 +587,112 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
     expect(enqueues).toBe(0);
   });
 });
+
+// Real MVCC and lock interaction: a boot catalog writer must not block previews.
+describe.skipIf(!url)('catalog locks belong to INSERT admission only', () => {
+  let db: Database;
+  const slugs = ['prt3-preview', 'prt3-preview-derived', 'workflow'];
+  const ids = [
+    '00-model-health-workflow',
+    '00a-sync-base',
+    '00-triage',
+    '04-phase-0b-pre-planning',
+    '05-phase-0b5-spec-quality',
+  ];
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    await db.delete(schema.stepCatalog);
+    await db.insert(schema.stepCatalog).values(
+      ids.map((id, stepIndex) => ({
+        ...catalogRow(id),
+        stepIndex,
+      })),
+    );
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values([
+        row(slugs[0]!, { source: 'admin', stepIds: ids }),
+        row('workflow', { source: 'builtin', runListStrategy: 'workflow_paths', stepIds: null }),
+        row(slugs[1]!, {
+          source: 'admin',
+          runListStrategy: 'derived',
+          stepIds: null,
+          baseSlug: 'workflow',
+          changes: [],
+        }),
+      ]);
+  });
+  afterAll(async () => {
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, slugs[1]!));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+    await db.delete(schema.stepCatalog);
+    await db.$client.end({ timeout: 5 });
+  });
+  it.each(slugs)(
+    'previews %s normally while another transaction holds catalog write locks',
+    async (slug) => {
+      const expected = await definitionForCreate(db, slug, { generic: true });
+      let acquired!: () => void;
+      let release!: () => void;
+      const locked = new Promise<void>((resolve) => {
+        acquired = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const writer = db.transaction(async (tx) => {
+        await tx.execute(sql`LOCK TABLE ${schema.stepCatalog} IN ROW EXCLUSIVE MODE`);
+        await tx
+          .select()
+          .from(schema.stepCatalog)
+          .where(eq(schema.stepCatalog.stepId, ids[0]!))
+          .for('update');
+        acquired();
+        await gate;
+      });
+      await locked;
+      try {
+        await expect(
+          definitionForCreate(db, slug, { generic: true, catalogLockTimeoutMs: 30 }),
+        ).resolves.toEqual(expected);
+      } finally {
+        release();
+        await writer;
+      }
+    },
+  );
+  it('still refuses a busy catalog on explicit INSERT admission', async () => {
+    let acquired!: () => void;
+    let release!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      acquired = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writer = db.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE ${schema.stepCatalog} IN ROW EXCLUSIVE MODE`);
+      acquired();
+      await gate;
+    });
+    await locked;
+    try {
+      await expect(
+        db.transaction((tx) =>
+          definitionForCreate(tx, slugs[0]!, {
+            generic: true,
+            locked: true,
+            catalogLockTimeoutMs: 30,
+          }),
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'data-edge-catalog-busy' });
+    } finally {
+      release();
+      await writer;
+    }
+  });
+});

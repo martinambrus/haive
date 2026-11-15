@@ -110,6 +110,7 @@ function describeIssue(issue: CompositionIssue): string {
 export async function readModuleStates(
   handle: Pick<Database, 'select'>,
   only?: readonly string[],
+  lock = true,
 ): Promise<Map<string, TaskTypeModuleState>> {
   if (only?.length === 0) return new Map();
   const read = handle
@@ -121,10 +122,9 @@ export async function readModuleStates(
       drainingAt: schema.modules.drainingAt,
     })
     .from(schema.modules);
-  const rows =
-    only === undefined
-      ? await read
-      : await read.where(inArray(schema.modules.moduleId, [...only])).for('key share');
+  const selected =
+    only === undefined ? read : read.where(inArray(schema.modules.moduleId, [...only]));
+  const rows = await (lock && only !== undefined ? selected.for('key share') : selected);
   return new Map(
     rows.map((row) => [
       row.moduleId,
@@ -142,17 +142,17 @@ const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
   modules.map((m) => (m.name === null ? m.id : `${m.name} (${m.id})`)).join(', ');
 
 export async function definitionForCreate(
-  handle: Pick<Database, 'select' | 'execute' | 'transaction'>,
+  handle: Pick<Database, 'select' | 'execute'>,
   slug: string,
   opts: { generic: boolean; locked?: boolean; catalogLockTimeoutMs?: number },
 ): Promise<TaskTypeDefinitionForCreate> {
-  // FOR SHARE holds the row until the caller's insert commits, so a concurrent delete waits and then sees the task.
-  const [def] = await handle
+  // Only INSERT admission holds locks; previews and preflights are ordinary reads.
+  const read = handle
     .select()
     .from(schema.taskTypeDefinitions)
     .where(eq(schema.taskTypeDefinitions.slug, slug))
-    .limit(1)
-    .for('share');
+    .limit(1);
+  const [def] = await (opts.locked ? read.for('share') : read);
   if (!def) {
     // The worker seeds the built-ins at boot; until it has, a built-in keeps today's live run list.
     if (!BUILTIN_TASK_TYPES.has(slug)) throw new HttpError(404, `Unknown task type ${slug}`);
@@ -172,8 +172,6 @@ export async function definitionForCreate(
     )
       throw new HttpError(403, 'Custom task types are disabled on this install');
   }
-  if (!opts.locked)
-    return handle.transaction((tx) => definitionForCreate(tx, slug, { ...opts, locked: true }));
   if (def.stepIds && def.stepIds.length > MAX_DATA_EDGE_STEPS)
     throw new HttpError(
       409,
@@ -182,7 +180,7 @@ export async function definitionForCreate(
     );
   // A table SHARE lock also excludes boot inserts/deletes, not merely edits to existing rows.
   // Bound the wait, restoring the caller's timeout before other admission locks.
-  if (def.runListStrategy !== 'derived') {
+  if (opts.locked && def.runListStrategy !== 'derived') {
     const [setting] = await handle.execute<{ timeout: string }>(
       sql`SELECT current_setting('lock_timeout') AS timeout`,
     );
@@ -201,14 +199,18 @@ export async function definitionForCreate(
     await handle.execute(sql`SELECT set_config('lock_timeout', ${setting?.timeout ?? '0'}, true)`);
   }
   const derived =
-    def.runListStrategy === 'derived' ? await readDerivedDefinition(handle, def) : null;
+    def.runListStrategy === 'derived'
+      ? await readDerivedDefinition(handle, def, undefined, { lock: opts.locked === true })
+      : null;
   const membership = derived?.stepIds ?? def.stepIds;
   const modules = await readModuleStates(
     handle,
     moduleIdsOfTaskType({ ...def, stepIds: derived?.dependencyStepIds ?? membership }),
+    opts.locked === true,
   );
   const storedCatalog =
-    derived?.catalog ?? (await readStepCatalog(handle, { ordered: true, lock: true }));
+    derived?.catalog ??
+    (await readStepCatalog(handle, { ordered: true, lock: opts.locked === true }));
   const catalog = storedCatalog?.synced ? mergePromptStepCatalog(storedCatalog, def) : null;
   const availability = resolveTaskTypeAvailability({
     definition: def,

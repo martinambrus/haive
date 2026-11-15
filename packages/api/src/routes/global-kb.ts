@@ -824,6 +824,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         'kb_author',
         {
           generic: false,
+          locked: true,
         },
       );
       await tx.insert(schema.tasks).values({

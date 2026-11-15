@@ -91,6 +91,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
       'type_draft',
       {
         generic: false,
+        locked: true,
       },
     );
     const [task] = await tx

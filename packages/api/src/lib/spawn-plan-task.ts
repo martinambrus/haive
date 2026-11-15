@@ -57,6 +57,7 @@ export async function spawnPlanTask(args: {
       args.type,
       {
         generic: false,
+        locked: true,
       },
     );
     const [task] = await tx

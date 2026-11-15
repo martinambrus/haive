@@ -111,7 +111,11 @@ describe('POST /tasks pins the run list', () => {
         repositoryId: REPO,
       });
       expect(res.status).toBe(201);
-      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: true });
+      expect(h.definition).toHaveBeenNthCalledWith(1, expect.anything(), type, { generic: true });
+      expect(h.definition).toHaveBeenNthCalledWith(2, expect.anything(), type, {
+        generic: true,
+        locked: true,
+      });
       expect(created()).toHaveLength(1);
       expect(created()[0]).toMatchObject({
         type,
@@ -168,6 +172,7 @@ describe('the rollback pins the run list', () => {
     expect(res.status).toBe(201);
     expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'onboarding_upgrade', {
       generic: false,
+      locked: true,
     });
     expect(created()[0]).toMatchObject({
       runListSnapshot: SNAPSHOT,
@@ -194,7 +199,10 @@ describe('spawnPlanTask pins the run list', () => {
           enqueue: false,
         }),
       );
-      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: false });
+      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, {
+        generic: false,
+        locked: true,
+      });
       expect(fake.rows(schema.tasks)[0]).toMatchObject({
         type,
         runListSnapshot: SNAPSHOT,
@@ -240,7 +248,10 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
     const fake = draftWorld();
     const res = await post('/admin/task-type-drafts', { message: 'a TODO audit' });
     expect(res.status).toBe(201);
-    expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'type_draft', { generic: false });
+    expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'type_draft', {
+      generic: false,
+      locked: true,
+    });
     expect(fake.rows(schema.tasks)).toMatchObject([
       { type: 'type_draft', runListSnapshot: SNAPSHOT, customSteps: PINNED },
     ]);

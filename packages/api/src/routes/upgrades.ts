@@ -1204,6 +1204,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', requireNewWorkAllowed, async (c) => 
         'onboarding_upgrade',
         {
           generic: false,
+          locked: true,
         },
       );
       const [row] = await tx
