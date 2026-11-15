@@ -459,9 +459,19 @@ user to switch the step's CLI. Replaying the same invocation does not increase t
 valid usable reply clears it, and a different CLI starts a fresh streak. Worker-restart
 orphans, signal kills, cancellation, OOM and other non-timeout interruptions keep the
 first-time Retry message, never increment the streak and never create a dispatch block.
-Provider outages and free redispatches do not count. A blocked reviewer stays blocked across
+Provider outages and free redispatches do not count. Content refusals neither count toward nor
+clear the streak, for all four auxiliary roles (a refusal whose provider detail also reads as an
+environment fault still counts for the advisor, replanner and fix coder, which check the
+environment first). An interruption message includes the underlying
+CLI error (path-scrubbed when the step error is persisted); persistently failing MCP startup remains an uncounted
+interruption, so Retry alone cannot repair it. While recovery budget remains, a blocked reviewer stays blocked across
 same-CLI Retries without consuming the retained run or spending its recovery budget; it
-cannot turn into a misleading review-stalled failure. Streaks also cover advisor-started fix
+cannot turn into a misleading review-stalled failure. Once that budget is spent, the
+exhausted path records `review stalled` instead. Reviewer recovery builds its prompt and
+change set once, only when a replacement will dispatch; a missing required provider still throws
+before consuming the retained run or charging recovery. A terminal no-verdict or exhausted
+recovery path records its own failure without preparing a provider it will not dispatch.
+Streaks also cover advisor-started fix
 coders returning through coder ingestion. An explicit structured ABORT remains recordable.
 Superseded, never-started and preempted auxiliary runs release their slots without spending
 an attempt, including when a superseded run retains fault text. One-time output-truncation
