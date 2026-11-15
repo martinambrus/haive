@@ -176,6 +176,36 @@ default when there is none (`preserveOmittedFormFields`). A preset for 06 itself
 step. A Retry shows the answers the previous run stored, which cannot be told apart from defaults 06
 wrote itself.
 
+**Insight auto-action (execution not yet available).** `06-run-config` records
+`autoActOnInsights` in its output and in `tasks.auto_act_on_insights`, a NOT NULL boolean
+with default false appended by guarded migration 0243. The column survives step output
+resets. Once execution is available, an explicit boolean answer wins over the task's explicit
+06 preset, then the owner's most recently completed task with a non-null completion timestamp
+on the same repository and type supplies the default; missing, legacy and malformed values
+resolve false. Only this switch is remembered: 06 still has no whole-form reuse or reconcile
+hook, and its recommendation cannot enable it.
+
+`INSIGHT_AUTO_ACTION_AVAILABLE` stays false until automatic execution ships. Its checkbox
+uses an empty `visibleWhen.in` allow-list and starts with a false default. While it is false,
+06 apply resolves an answer of true to false unless the task's explicit type preset is true,
+and the API submit route always stamps false. So only an explicit type preset can record true,
+and it has no execution effect yet: an auto-submitted true preset records true because the
+submitted candidate is the preset itself, while a manual API save of the same form records
+false. A remembered true alone cannot enable the unavailable switch.
+The shared `upgradeRunConfigSchema` appends the missing checkbox with default false to
+parked 06 schemas on both API display routes, submit validation and worker normalization.
+It is idempotent and leaves existing defaults, saved answers, waiting timestamps and
+recommendation results alone. A submit that omits the new field remains valid and records false.
+
+06 no longer generates an empty `08e-insights-triage.selectedInsights` pre-answer. Fresh
+08e entry ignores the exact legacy singleton `{selectedInsights: []}` preset, so offered
+choices park even with auto-continue on. This includes in-flight tasks whose pre-answers
+already hold that legacy empty preset. A type's deliberate `{selectedInsights: []}` 08e
+preset has the same shape and is ignored too. Saved answers and a deliberate empty submit still
+pass, and manual entry dispatches no classifier. Existing parked schemas need no data
+migration. Rollback reverts application code and retains the default-false column; never
+edit or remove an applied migration.
+
 **Availability** (`resolveTaskTypeAvailability`, pure, shared by create and every list), first match
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →
 `module-missing` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes
