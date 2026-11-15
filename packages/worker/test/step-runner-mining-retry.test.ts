@@ -4445,7 +4445,10 @@ describe('08e implementer dispatch and recovery', () => {
     it('preserves a separate selected CLI for the triage seat', async () => {
       const state = autoState();
       const db = makeMockDb(state);
-      vi.spyOn(db.query.userStepCliRolePreferences,'findFirst').mockResolvedValue({cliProviderId:'triage-provider',effortLevel:null} as never);
+      vi.spyOn(db.query.userStepCliRolePreferences, 'findFirst').mockResolvedValue({
+        cliProviderId: 'triage-provider',
+        effortLevel: null,
+      } as never);
       const enqueued: CliExecJobPayload[] = [];
       await run(db, insightsTriageStep, enqueued, [
         makeProvider(),
