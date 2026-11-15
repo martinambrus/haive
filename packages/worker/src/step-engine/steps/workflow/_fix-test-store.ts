@@ -1,4 +1,5 @@
-import { redactCredentialText } from '@haive/shared/credential-scan';
+import { CREDENTIAL_WITHHELD, redactCredentialText } from '@haive/shared/credential-scan';
+import { isUtf8 } from 'node:buffer';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -236,6 +237,14 @@ async function capture(
   });
 }
 
+/** Binary bytes have no useful text preview and cannot be safely text-scanned. */
+function redactBlobContent(original: Buffer): Buffer {
+  if (!isUtf8(original)) return Buffer.from(CREDENTIAL_WITHHELD);
+  const text = original.toString('utf8');
+  const redacted = redactCredentialText(text);
+  return redacted === text ? original : Buffer.from(redacted);
+}
+
 /** Only changed contents enter the durable store. Caps account raw size metadata and
  * evict oldest live blobs so earlier tasks cannot starve later ones. */
 async function retain(tx: Tx, taskId: string, files: TestFile[], options: CaptureOptions) {
@@ -266,11 +275,9 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
   const evicted = new Set<object>();
   for (const [hash, file] of candidates) {
     const original = Buffer.from(file.base64!, 'base64');
-    const text = original.toString('utf8');
-    const redacted = redactCredentialText(text);
     // The key remains the measured original identity: different edits must not alias
     // merely because their credential lines redact to the same display text.
-    const content = redacted === text ? original : Buffer.from(redacted);
+    const content = redactBlobContent(original);
     if (
       content.length > (options.taskBytes ?? FIX_TEST_TASK_BYTES) ||
       content.length > (options.storeBytes ?? FIX_TEST_STORE_BYTES)
@@ -604,10 +611,7 @@ export async function loadFixTestRecords(
   const bytes = new Map(
     blobs
       .filter((b) => b.content && !b.expiredAt)
-      .map((b) => [
-        b.contentHash,
-        Buffer.from(redactCredentialText(b.content!.toString('utf8'))).toString('base64'),
-      ]),
+      .map((b) => [b.contentHash, redactBlobContent(b.content!).toString('base64')]),
   );
   const hydrate = (image: TestImage | undefined, changed: Set<string>): TestImage =>
     image
