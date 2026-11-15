@@ -2233,13 +2233,18 @@ export async function holdReopenedForm(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await consumeFoldedMiningRows(tx, taskStepId, folded, at);
-    await updateOwnedStep(tx, taskStepId, {
-      ...(nextGeneration == null ? {} : { rerunGeneration: nextGeneration }),
-      detectOutput: null,
-      formSchema: null,
-      formValues: null,
-      pauseFormOnRetry: true,
-    });
+    await updateOwnedStep(
+      tx,
+      taskStepId,
+      {
+        ...(nextGeneration == null ? {} : { rerunGeneration: nextGeneration }),
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        pauseFormOnRetry: true,
+      },
+      nextGeneration == null ? undefined : nextGeneration - 1,
+    );
   });
 }
 

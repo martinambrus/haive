@@ -813,6 +813,39 @@ describe.skipIf(!url)(
       },
     );
 
+    it.each([1, 2])(
+      'W2d: concurrent Retry generation %s supersedes a stale new-attempt hold without repeating or lowering it',
+      async (generation) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, S, 'running', { ...OPEN_FORM, pauseFormOnRetry: false });
+        await seedMining();
+        const before = await rowOf(S.id);
+        const run = await interleave(
+          () => settle(holdReopenedForm(db, S.id, [reopenedAgent()], AT, 1)),
+          {
+            first: lockMining(M),
+            second: async (tx) => {
+              // A Retry and its next pass can leave the same status but a newer identity.
+              await tx
+                .update(schema.taskSteps)
+                .set({ rerunGeneration: generation, status: 'running' })
+                .where(eq(schema.taskSteps.id, S.id));
+            },
+          },
+          [S.id],
+        );
+        expectClean(run);
+        expect(run.result?.ok, 'the stale hold must supersede').toBe(false);
+        expect(run.result?.ok ? undefined : run.result?.error).toBeInstanceOf(StepSupersededError);
+        expect(await rowOf(S.id)).toEqual({ ...before, rerunGeneration: generation });
+        expect(
+          (await miningOf(M)).consumedAt,
+          'consumption rolls back with the stale hold',
+        ).toBeNull();
+      },
+      TEST_TIMEOUT,
+    );
+
     it('W2c: a reopened insight batch accepts a different manual selection and retains the prior outcome', async () => {
       const taskId = await seedTask('running');
       await seedStep(taskId, S, 'running', OPEN_FORM);
