@@ -15,8 +15,10 @@ in [Worker restarts](worker-restarts.md), module states in [Modules](modules.md)
 description, `run_list_strategy` (`static`, `workflow_paths`, `run_app_modes`, `derived`), `step_ids` (static
 types only), `pre_answer_defaults`, `step_loop_limit_defaults`, `fix_loop`, `enabled`, `selectable`,
 `source` (`builtin`, `admin` or `module:<moduleId>`), `requires_repository`, `sort_order`,
-`content_hash`, `prompt_steps`, then nullable `base_slug varchar(128)` and `changes jsonb` (declared
-last, in that order).
+`content_hash`, `prompt_steps`, nullable `base_slug varchar(128)` and `changes jsonb`, then nullable
+`execution_contract jsonb` appended by guarded migration 0245, then nullable
+`data_role_bindings jsonb` appended last by guarded migration 0246. Author choices are copied into
+the immutable v3 task pin at INSERT; they never update an existing task.
 
 Each source owns its own columns, and every upsert carries `setWhere source = <own source> AND some
 owned column IS DISTINCT FROM excluded`:
@@ -344,10 +346,15 @@ The spec ports are `haive.spec.draft@1` (04), `haive.spec.checked@1` (05), and
 `haive.spec.resolved@1` (05a). All three have mixed authorship and no quote projection. Their
 contracts declare the fields consumers use, including draft impact, quality findings/score and
 scope questions. Unknown storage fields survive validation; readers project declared fields.
-Core-only `providesRoles`/`consumesRoles` metadata does not add manifest/SDK ports, prompt tokens
-or replacement support. The spec definitions and serialized catalog entries have no
+`providesRoles`/`consumesRoles` are also module executable and manifest declarations, checked
+for exact host contract references and boot parity. A data declaration grants no replacement
+policy. Prompt role tokens and structured prompt output remain separate work. The spec definitions and serialized catalog entries have no
 `outputContract`; the runner's successful-output validation block therefore remains unchanged.
-The executable declaration, manifest and v1/v2 plan contract-ref gates accept review/audit only.
+The executable `outputContract` and v1/v2 replacement gates still accept review/audit only;
+module data declarations use the separate exact registry reference gate and reject every
+role carrying `hostPolicy`, including `08c-code-review` and `08c2-code-audit`, in both
+`providesRoles` and `consumesRoles`. Review/audit replacements retain their host-policy
+support check even if an executable also carries a data declaration.
 
 The review and broad-audit definitions declare their immutable host output contract.
 After a successful apply return, the runner checks cancellation and ownership, then validates
@@ -454,7 +461,8 @@ Task list, detail, create and PATCH responses omit the full `dataEdgePlan`.
 
 Spec stage inputs are independently optional; the host's effective-spec adapter keeps
 resolved > checked > draft precedence, including intentional empty bodies. 06-run-config
-and 08b declare the same inputs they read. No module/SDK/prompt ports are added here.
+and 08b declare the same inputs they read. Module declarations enter the same edge validator;
+prompt role tokens are not supported yet.
 A present v3 binding is authoritative: the read uses the pinned producer and the
 consumer's current-round ceiling, selecting the newest row before testing status.
 A non-done pinned row cannot expose stale successful output. A done but schema-invalid
@@ -473,7 +481,17 @@ Retry, Resume, boot and dead revival never rewrite bindings.
 
 Rollback stops new v3 admission and retains capable readers/workers until no v3 task
 can resume. Leave the nullable column and applied migration; never regenerate,
-downgrade or backfill pins. Stopping admission currently requires a code deploy.
+downgrade or backfill pins. Compose passes `HAIVE_DATA_EDGE_ADMISSION_ENABLED` to the API,
+with a default of `true`; `.env.example` documents it. Set the exact lowercase value `false`
+and recreate the API through the install's supported lifecycle command to refuse ALL new
+tasks whose plans would be pinned, with 503 `data-edge-admission-disabled`. This covers all
+seeded static built-ins (`onboarding`, `env_replicate`, `onboarding_upgrade`, `kb_author`,
+`plan_build`, `plan_chat`, `advisory`, `plan_sequence`, `plan_merge`, `type_draft`), `workflow`,
+static admin/module types and derived types, including plan spawns, upgrade rollback and KB
+enrichment. `run_app` uses an unpinned dynamic list and is unaffected, as are legacy/unseeded
+fallbacks without a pin. Preflights remain available. The switch never touches existing
+tasks: their readers, Retry, Resume and boot recovery never consult it. Keep capable readers
+and the nullable authoring column while any affected task can resume.
 
 ## Pinned execution declarations (P6; admission only)
 
@@ -693,9 +711,15 @@ before enqueueing START; it never records message or prompt content.
   step id: a custom type reusing a core step gets its panels; module and prompt steps get none.
 
 The Steps section offers List (the default keyboard view) and a client-only Canvas.
-The canvas reads a display-only projection of the current serialized draft from
-`POST /admin/task-types/ports`; `GET /admin/task-types/:slug/ports` projects a stored
-static type or each derived path. Draft port projection alone caps static lists at
+With no author bindings, the canvas and binding list retain the server's display-only
+projection of the current serialized draft from `POST /admin/task-types/ports`, including
+catalog titles and server diagnostics. `GET /admin/task-types/:slug/ports` projects a stored
+static type or each derived path. With author bindings, one memoized local projection uses
+the same declarations, catalog labels, selected candidate's v2 `roleBindings` and
+candidate-local `dataRoleBindings` as server validation. Canvas and list share it. A stale
+choice or an invalid declaration becomes a visible issue; the step list and selected-binding
+Clear binding actions remain usable, even after a module or input disappears or changes.
+Draft port projection alone caps static lists at
 `MAX_PORT_DRAFT_STEPS` (256), over four times the 58-step stock workflow (including the environment
 prelude). Invalid or reserved in-progress editor slugs use a projection-only placeholder.
 Ports show role, exact contract version, authorship, optionality and
@@ -705,7 +729,8 @@ in ports plus the candidate identities returned. Bindings and canvas endpoints c
 positions so transient duplicate step IDs remain distinct. The effective-spec input shows
 the existing ordered host adapter, not a new direct consumer declaration. Worker controls
 compare spec declarations and adapter/review reader inventories with this projection.
-No port diagnostic changes save/admission policy in this stage.
+Ambiguous and dangling required inputs block save and admission. An optional absence is
+allowed; an explicit producer choice must still be earlier and exactly compatible.
 
 Static canvas drag and list reorder share the existing draft mutation and
 `validateComposition` diagnostics. A move introducing a composition problem is refused
@@ -720,8 +745,13 @@ consult a live catalog or definition; the route may read the live definition's s
 only to identify a missing required derived pin, as the existing output-role projection does.
 The response omits the full plan and output bodies. History nodes use persisted step titles.
 Task history defaults to its existing list; opening Canvas keeps step cards and approval
-forms visible, and an empty task has no view toggle. Canvas state never becomes task or
-definition state. Catalog entry serialization and v1/v2 pin decoding are unchanged.
+forms visible, and an empty task has no view toggle. Canvas positions and selection never become task or definition state. A connection and the
+List producer selector both update the same serialized `dataRoleBindings` list of
+`{executionPath, consumerStepId, input, producerStepId}`. Static choices use a null path;
+derived choices are candidate-local. Clear binding removes an author choice. No independent
+graph store is saved. Catalog entries now retain data declarations; old v1/v2 pin bytes and
+reads remain unchanged. For a core input absent from a valid v3 pin, history adds the canonical
+compatibility edge that the worker reads, without changing the pin.
 `@xyflow/react` is pinned to 12.9.3; its stylesheet and inline positioning styles pass the
 existing CSP without a policy change.
 

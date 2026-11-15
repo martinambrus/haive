@@ -793,7 +793,12 @@ admission as a Retry whatever status the dead task kept (`running` and `queued` 
 only the task itself from the sibling checks. A revival the repository's own state refuses for now
 (its root claim, a live upgrade or onboarding of the repository, or unanswered project-state
 conflicts) counts as held and is logged at info with that structural reason; a revival refused
-because the repository was deleted is permanent and keeps no timer running.
+because the repository was deleted is permanent and keeps no timer running. A malformed v3 or derived pin is permanent
+too: an epoch-fenced update fails the task, clears the dead marker and records one
+`task.failed` event in the same transaction. The pin is retained unchanged. Remaining runs
+are superseded after that commit under the new failed epoch. Later boot/revival passes
+do not fail it again or keep the revival timer alive. Explicit Retry still cannot repair a
+malformed pin or remap its producer.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
 the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands
