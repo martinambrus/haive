@@ -9,6 +9,7 @@ import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 const io = vi.hoisted(() => ({
   files: new Map<string, string>(),
   failAt: '',
+  stopAfterIntent: false,
   promote: vi.fn(async () => ({ id: 'draft-id' })),
   revert: vi.fn(async () => {}),
 }));
@@ -23,6 +24,8 @@ vi.mock('@haive/shared/fs-safe', () => ({
   writeFileNoFollow: async (_anchor: string, rel: string, body: string) => {
     if (rel === io.failAt) throw new Error('write refused');
     io.files.set(rel, body);
+    if (io.stopAfterIntent && rel.startsWith('.haive/learning-deletions/'))
+      throw new Error('stopped after intent');
   },
   removeNoFollow: async (_anchor: string, rel: string) => {
     if (rel === io.failAt) throw new Error('remove refused');
@@ -160,6 +163,7 @@ function setup() {
 beforeEach(() => {
   io.files.clear();
   io.failAt = '';
+  io.stopAfterIntent = false;
   io.promote.mockClear();
   io.revert.mockClear();
 });
@@ -310,13 +314,7 @@ describe('learning filesystem replay', () => {
       operationKinds.map((second) => ({ preExisting, first, second })),
     ),
   );
-  // A deleted pre-existing target leaves no provenance to recover its original existence.
-  // These two known failures are captured by the full-matrix diagnostic, not fixed here.
-  const recoverableMatrix = matrix.filter(
-    ({ preExisting, first, second }) =>
-      !(preExisting && first === 'update' && ['delete', 'supersede'].includes(second)),
-  );
-  it.each(recoverableMatrix)(
+  it.each(matrix)(
     'replays $first then $second (pre-existing target: $preExisting)',
     async ({ preExisting, first, second }) => {
       const s = setup();
@@ -337,6 +335,139 @@ describe('learning filesystem replay', () => {
       expect(files()).toEqual(initial);
     },
   );
+
+  it('recovers an update then delete after deletion and before telemetry', async () => {
+    const s = setup();
+    s.refuse();
+    (s.args.llmOutput as any).entries = [
+      entry('old', { op: 'update', targetId: 'old' }),
+      { op: 'delete', targetId: 'old' },
+      entry('later'),
+    ];
+    io.failAt = `${dir}/later.md`;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    expect(io.files.has(`${dir}/old.md`)).toBe(false);
+    expect(s.rows.size).toBe(0);
+    io.failAt = '';
+    s.ctx.epoch = 9;
+    s.ctx.rerunGeneration = 1;
+    for (let replay = 0; replay < 5; replay++) {
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      expect(io.files.has(`${dir}/old-2.md`)).toBe(false);
+    }
+  });
+
+  it('retries unlink after a crash immediately after publishing intent', async () => {
+    const s = setup();
+    s.refuse();
+    (s.args.llmOutput as any).entries = [
+      entry('old', { op: 'update', targetId: 'old' }),
+      { op: 'delete', targetId: 'old' },
+    ];
+    io.stopAfterIntent = true;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('stopped after intent');
+    const updated = io.files.get(`${dir}/old.md`)!;
+    expect(parseLearningRecord(updated).provenance.updates).toHaveLength(1);
+    expect(
+      [...io.files.keys()].filter((file) => file.startsWith('.haive/learning-deletions/')),
+    ).toHaveLength(1);
+    io.stopAfterIntent = false;
+    await phase8LearningStep.apply(s.ctx, s.args);
+    expect(io.files.has(`${dir}/old.md`)).toBe(false);
+    expect(io.files.has(`${dir}/old-2.md`)).toBe(false);
+    expect(s.rows.size).toBe(0);
+  });
+
+  it('refuses to delete when publishing intent fails', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'old' }];
+    // Determine the stable metadata path without coupling the test to its hash algorithm.
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const intent = [...io.files.keys()].find((file) =>
+      file.startsWith('.haive/learning-deletions/'),
+    )!;
+    io.files.delete(intent);
+    io.files.set(`${dir}/old.md`, '# Still here');
+    io.failAt = intent;
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+    expect(io.files.get(`${dir}/old.md`)).toBe('# Still here');
+  });
+
+  it.each(['task', 'step', 'round', 'invocation', 'proposal'])(
+    'does not restore another %s deletion target',
+    async (changed) => {
+      const s = setup();
+      (s.args.llmOutput as any).entries = [
+        entry('old', { op: 'update', targetId: 'old' }),
+        { op: 'delete', targetId: 'old' },
+      ];
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      if (changed === 'task') s.ctx.taskId = 'another-task';
+      if (changed === 'step') s.ctx.taskStepId = 'another-step';
+      if (changed === 'round') s.ctx.round = 1;
+      if (changed === 'invocation') s.args.llmInvocationId = 'another-invocation';
+      if (changed === 'proposal')
+        (s.args.llmOutput as any).entries[1] = { op: 'delete', targetId: 'missing' };
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(io.files.get(`${dir}/old.md`)).toContain('private-body-old');
+    },
+  );
+
+  it('fails closed on damaged deletion intent instead of resurrecting a target', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [
+      entry('old', { op: 'update', targetId: 'old' }),
+      { op: 'delete', targetId: 'old' },
+    ];
+    await phase8LearningStep.apply(s.ctx, s.args);
+    const intent = [...io.files.keys()].find((file) =>
+      file.startsWith('.haive/learning-deletions/'),
+    )!;
+    io.files.set(intent, '{');
+    await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow();
+    expect(io.files.has(`${dir}/old.md`)).toBe(false);
+  });
+
+  it.each([false, true])(
+    'retains the staged collision suffix after a crash between delete and insert (extra collision: %s)',
+    async (extraCollision) => {
+      const s = setup();
+      s.refuse();
+      (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'old' }, entry('old')];
+      if (extraCollision) io.files.set(`${dir}/old-2.md`, '# Unrelated collision');
+      const replacementId = extraCollision ? 'old-3' : 'old-2';
+      io.files.set(
+        `${drafts}/${replacementId}.md`,
+        '# Approved replacement\n\nHuman edit src/a.ts:99.',
+      );
+      io.failAt = `${dir}/${replacementId}.md`;
+      await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      io.failAt = '';
+      for (let replay = 0; replay < 5; replay++) {
+        await phase8LearningStep.apply(s.ctx, s.args);
+        expect(io.files.has(`${dir}/old.md`)).toBe(false);
+        expect(io.files.get(`${dir}/${replacementId}.md`)).toContain('Human edit src/a.ts:99.');
+        expect(io.files.has(`${dir}/old-4.md`)).toBe(false);
+        if (extraCollision) expect(io.files.get(`${dir}/old-2.md`)).toBe('# Unrelated collision');
+        else expect(io.files.has(`${dir}/old-3.md`)).toBe(false);
+      }
+      expect(s.rows.size).toBe(0);
+    },
+  );
+
+  it('keeps a cleared replacement draft excluded after deletion and replay', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'old' }, entry('old')];
+    io.files.set(`${drafts}/old-2.md`, '');
+    for (let replay = 0; replay < 5; replay++) {
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      expect(io.files.has(`${dir}/old-2.md`)).toBe(false);
+    }
+  });
 
   it('keeps identical insert entries distinct through replay', async () => {
     const s = setup();
@@ -591,6 +722,8 @@ describe('behavior fixture', () => {
       output,
       // P1.2 adds a separately tested footer. Keep the original P1.1 content snapshot intact.
       files: [...io.files]
+        // Deletion intents are separately tested recovery metadata, outside learning readers.
+        .filter(([file]) => !file.startsWith('.haive/learning-deletions/'))
         .map(([file, body]) => [file, file.startsWith(`${dir}/`) ? learningContent(body) : body])
         .sort(),
       promotions: io.promote.mock.calls,
