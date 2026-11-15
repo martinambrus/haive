@@ -4121,8 +4121,8 @@ async function maybeEnqueueStepSummary(
   logger: StepContext['logger'],
 ): Promise<void> {
   // Hoisted: the catch has to finalise THIS row if the enqueue failed after it was inserted.
-  // Left pending it reads as a summary that is still coming, which is what the repo-less
-  // scratch-workspace reaper waits on before reclaiming a task's directory.
+  // Left pending it reads as a summary that is still coming. The scratch-workspace reaper
+  // retains repository-backed and repo-less scratch for any unended, unsuperseded invocation.
   let summaryInvocationId: string | null = null;
   try {
     const { providers, deps } = params;
@@ -4315,8 +4315,8 @@ async function recordSummaryEnqueueFailure(
   /** The row already inserted for this summary, when the insert succeeded and the ENQUEUE did
    *  not. Finalising it beats inserting a second row beside it: the original carries
    *  `summary_for_step_id` with a null `ended_at`, which every reader has to treat as a summary
-   *  still in flight — and one of them, `cleanupTaskScratchWorkspace`, defers a repo-less task's
-   *  workspace removal on exactly that, so the directory would be leaked for good. Null when the
+   *  still in flight. `cleanupTaskScratchWorkspace` retains repository-backed and repo-less
+   *  scratch for any unended, unsuperseded invocation, so leaving this row live leaks scratch. Null when the
    *  INSERT itself threw, where there is nothing to finalise and a fresh row is the only record. */
   invocationId: string | null = null,
 ): Promise<void> {

@@ -423,8 +423,9 @@ export async function runDestructiveDataMigrations(db: Database): Promise<void> 
  *  no job that will ever finalize it. Nothing else recovers it: `reconcileOrphanedSteps` is keyed
  *  on `task_step_id`, which a recap leaves NULL by design, and it deliberately skips
  *  `started_at IS NULL` rows because for a NORMAL invocation that state means "BullMQ still owes
- *  it a run". The row is therefore pending forever, and `cleanupTaskScratchWorkspace` defers to
- *  exactly that predicate — so a repo-less task's workspace is never reaped either.
+ *  it a run". The row is therefore pending forever, and `cleanupTaskScratchWorkspace` retains
+ *  scratch for any unended, unsuperseded invocation, summary or otherwise, on repository-backed
+ *  and repo-less tasks alike — so this row also prevents scratch cleanup.
  *
  *  The queue is checked at boot and on every stalled-task sweep. A live queue job or root
  *  claim keeps the repository alone. The final update re-checks status, age and claim so a
