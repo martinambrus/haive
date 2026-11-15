@@ -1,0 +1,386 @@
+[
+  {
+    "file": "packages/shared/src/modularity/contracts.ts",
+    "symbol": "composableStepEntrySchema.replaces",
+    "context": "z.enum",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Portable declaration schema restricts capability to the two registered host roles."
+  },
+  {
+    "file": "packages/shared/src/modularity/contracts.ts",
+    "symbol": "composableStepEntrySchema.replaces",
+    "context": "z.enum",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Portable declaration schema restricts capability to the two registered host roles."
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "v2PlanSchema.candidates.roleBindings.[STEP_ROLES.codeReview]",
+    "context": "z\n          .object",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Strict v2 pinned-binding consistency validation; no live definition lookup."
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "v2PlanSchema.candidates.roleBindings.[STEP_ROLES.codeAudit]",
+    "context": "z\n          .object",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Strict v2 pinned-binding consistency validation; no live definition lookup."
+  },
+  {
+    "file": "packages/shared/src/modularity/derived-task-types.ts",
+    "symbol": "validV2Bindings.roles",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Strict v2 pinned-binding consistency validation; no live definition lookup."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PLAN_TASKLIST_EXTRA",
+    "context": "ArrayLiteralExpression",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin execution-path membership and loop closure; physical core implementations."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PLAN_TASKLIST_EXTRA",
+    "context": "ArrayLiteralExpression",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Builtin execution-path membership and loop closure; physical core implementations."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PATH_REQUIRED_TARGETS.'08c-code-review'",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin execution-path membership and loop closure; physical core implementations."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLES",
+    "context": "VariableDeclaration",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Canonical host role vocabulary and exact contract selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLES.codeReview",
+    "context": "Object.freeze",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Canonical host role vocabulary and exact contract selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLES.codeAudit",
+    "context": "Object.freeze",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Canonical host role vocabulary and exact contract selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "<module>",
+    "context": "TypeQuery",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Canonical host role vocabulary and exact contract selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "stepRoleOutputContract",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Canonical host role vocabulary and exact contract selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/step-role-reader.ts",
+    "symbol": "export",
+    "context": "ExportSpecifier",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Sole immutable task role resolver and DTO projector."
+  },
+  {
+    "file": "packages/shared/src/step-engine/step-role-reader.ts",
+    "symbol": "projectStepOutputRoles.bindings",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Sole immutable task role resolver and DTO projector."
+  },
+  {
+    "file": "packages/shared/src/step-engine/timing.ts",
+    "symbol": "TIME_CATEGORY_BY_STEP.'08c-code-review'",
+    "context": "Object.freeze",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin phase labels; invocation timing remains attributed to the physical producer."
+  },
+  {
+    "file": "packages/shared/src/step-engine/timing.ts",
+    "symbol": "TIME_CATEGORY_BY_STEP.'08c2-code-audit'",
+    "context": "Object.freeze",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Builtin phase labels; invocation timing remains attributed to the physical producer."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "HOUSE_RULE_ROLES.'08c-code-review'",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin metadata, house-rule dispatch seats and mining seats; no replacement privilege inheritance."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "STEP_MINING_SEATS.'08c-code-review'",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin metadata, house-rule dispatch seats and mining seats; no replacement privilege inheritance."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "CLI_DISPATCH_STEPS.id",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Builtin metadata, house-rule dispatch seats and mining seats; no replacement privilege inheritance."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "CLI_DISPATCH_STEPS.id",
+    "context": "PropertyAssignment",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Builtin metadata, house-rule dispatch seats and mining seats; no replacement privilege inheritance."
+  },
+  {
+    "file": "packages/web/src/lib/task-history.ts",
+    "symbol": "IMPLEMENTATION_STEPS",
+    "context": "Set",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Builtin identity whitelist plus API-projected output roles; never infers a module role from shape."
+  },
+  {
+    "file": "packages/web/src/lib/task-history.ts",
+    "symbol": "buildTaskHistory",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Builtin identity whitelist plus API-projected output roles; never infers a module role from shape."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules.ts",
+    "symbol": "FINDINGS_STEPS",
+    "context": "Set",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Core-only peer-seat findings framing; replacements do not inherit dispatch grants."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.stepId",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Canonical composable role owner definitions."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.stepId",
+    "context": "PropertyAssignment",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Canonical composable role owner definitions."
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-output-contract.ts",
+    "symbol": "assertStepOutputDeclaration",
+    "context": "ExclamationEqualsEqualsToken",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Boot capability checks and builtin warn-only successful-write policy; no output lookup."
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-output-contract.ts",
+    "symbol": "assertStepOutputDeclaration",
+    "context": "ExclamationEqualsEqualsToken",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Boot capability checks and builtin warn-only successful-write policy; no output lookup."
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-output-contract.ts",
+    "symbol": "validateSuccessfulStepOutput.builtin",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Boot capability checks and builtin warn-only successful-write policy; no output lookup."
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-output-contract.ts",
+    "symbol": "validateSuccessfulStepOutput.builtin",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Boot capability checks and builtin warn-only successful-write policy; no output lookup."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c-code-review.ts",
+    "symbol": "codeReviewStep.metadata.id",
+    "context": "PropertyAssignment",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c-code-review.ts",
+    "symbol": "codeReviewStep.detect",
+    "context": "Error",
+    "value": "08c-code-review requires 01-worktree-setup to have produced a worktree",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c-code-review.ts",
+    "symbol": "codeReviewStep.agentMining.selectAgents",
+    "context": "assertReviewableChange",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c-code-review.ts",
+    "symbol": "codeReviewStep.apply",
+    "context": "recordReviewFindings",
+    "value": "08c-code-review",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c2-code-audit.ts",
+    "symbol": "codeAuditStep.metadata.id",
+    "context": "PropertyAssignment",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c2-code-audit.ts",
+    "symbol": "codeAuditStep.detect",
+    "context": "Error",
+    "value": "08c2-code-audit requires 01-worktree-setup to have produced a worktree",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c2-code-audit.ts",
+    "symbol": "codeAuditStep.llm.buildPrompt",
+    "context": "assertReviewableChange",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08c2-code-audit.ts",
+    "symbol": "codeAuditStep.apply",
+    "context": "recordReviewFindings",
+    "value": "08c2-code-audit",
+    "count": 1,
+    "reason": "Own implementation metadata, error, scope guard and telemetry writer identity."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/09-gate-2-verify-approval.ts",
+    "symbol": "gate2VerifyApprovalStep.detect.phase8c.role",
+    "context": "loadPreviousStepOutput",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Both gate role reads pass an explicit role selector to the adapted loader."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/09-gate-2-verify-approval.ts",
+    "symbol": "gate2VerifyApprovalStep.detect.phase8c2.role",
+    "context": "loadPreviousStepOutput",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Both gate role reads pass an explicit role selector to the adapted loader."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_fix-loop.ts",
+    "symbol": "loadHonoredConstraints.reviewId",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver selects honored event-source membership; events keep physical IDs."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_gate-house-rules.ts",
+    "symbol": "codeReviewCheck.review.role",
+    "context": "loadPreviousStepOutput",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Resolve the review output through the role-aware loader, preserving actual invocation stamps."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "guidanceTargetStep",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver selects guidance target membership; reports keep physical IDs."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
+    "symbol": "extractFindings",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver chooses the physical producer before extracting every round as review evidence."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
+    "symbol": "renderTaskHistoryDigest.reviewId",
+    "context": "readStepRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver chooses the physical producer before extracting every round as review evidence."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
+    "symbol": "renderTaskHistoryDigest",
+    "context": "extractFindings",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Shared role resolver chooses the physical producer before extracting every round as review evidence."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./08c-code-review.js",
+    "count": 1,
+    "reason": "Registration import of the executable core implementation."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./08c2-code-audit.js",
+    "count": 1,
+    "reason": "Registration import of the executable core implementation."
+  }
+]
