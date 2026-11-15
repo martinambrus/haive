@@ -17,6 +17,9 @@ import {
  */
 const FIXTURE_FILES = [
   '.env',
+  '.auth/user.json',
+  'playwright/.auth/nested/session.json',
+  '.auth/example.json',
   '.env.local',
   '.env.example',
   'sub/.env',
@@ -55,6 +58,15 @@ async function buildFixture(): Promise<string> {
 }
 
 describe('secretMaskDeniesPath', () => {
+  it('denies root and nested auth state while preserving policy exceptions', () => {
+    for (const rel of ['.auth/user.json', 'playwright/.auth/nested/session.json']) {
+      expect(secretMaskDeniesPath(secretMaskPolicy({}), rel)).toBe(true);
+      expect(secretMaskDeniesPath(secretMaskPolicy({ allow: ['**/.auth/**'] }), rel)).toBe(false);
+      expect(secretMaskDeniesPath(secretMaskPolicy({ tracked: new Set([rel]) }), rel)).toBe(false);
+    }
+    expect(secretMaskDeniesPath(secretMaskPolicy({}), '.auth/example.json')).toBe(false);
+  });
+
   it('keeps compiled and per-call decisions equivalent across effective policies', () => {
     const paths = [
       ...FIXTURE_FILES,

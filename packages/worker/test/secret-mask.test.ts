@@ -76,6 +76,18 @@ describe('computeSecretMasks', () => {
     expect(p.has('/work/app.ts')).toBe(false);
   });
 
+  it('masks root and nested auth snapshots with the shared deny policy', async () => {
+    const paths = ['.auth/user.json', 'playwright/.auth/nested/session.json'];
+    for (const rel of [...paths, '.auth/example.json']) {
+      await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+      await writeFile(path.join(root, rel), '{}');
+    }
+    const masks = await computeSecretMasks(root, {}, '/work');
+    expect(maskPaths(masks)).toEqual(new Set(paths.map((p) => `/work/${p}`)));
+    expect(masks.every((m) => m.content === '')).toBe(true);
+    expect(await computeSecretMasks(root, { allow: ['**/.auth/**'] }, '/work')).toEqual([]);
+  });
+
   it('produces empty read-only mask content', async () => {
     await writeFile(path.join(root, '.env'), 'SECRET=1\n');
     const masks = await computeSecretMasks(root, {}, '/work');
