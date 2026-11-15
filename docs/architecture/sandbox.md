@@ -2,6 +2,34 @@
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. The cloned repository and the run-owned files described below are mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
 
+**Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
+resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,
+read-only host-folder and integration-worktree branches and reports `workspaceKind: 'snapshot'`.
+Only its target tree is mounted at `/haive/workdir`; an optional base tree is mounted separately
+at `/haive/diff-base`. Both are read-only. Neither the scratch parent, inventory body nor object
+repository is mounted. Every object is independently hashed; Git receives a held `.git` descriptor
+through `runTool` as the unprivileged extraction uid, without ambient credentials or lazy fetch.
+
+Materializers retain `withTaskScratchWorkspace` through their entire use. Dispatch retains
+workerRoot and the verified tracked inventory in memory, taking the lock only while reading
+persona bodies; MCP/global-KB/app-reach queries and codex probes run outside that section.
+Exec acquisition happens after the durable invocation exists; that live row protects the mount
+from scratch reaping after acquisition returns. A snapshot has no `.git` and bypasses writable-tree
+repair, git-data preparation, `.haive-data`/worktrees overlays, uploads nesting and agent-directory
+stub creation. Agent isolation is disabled for these views. Template personas read the same target
+and its verified tracked inventory. House-rule file scopes conservatively cover the target/base
+inventory union, never a live index. Snapshot runs clamp to `rag_only` (preserving `none`),
+excluding live DDEV, browser, repository-defined, custom and integration MCP servers. Their
+MCP configuration includes neither git nor LSP tools on plain or sub-agent execution paths.
+RAG search answers from the live index, not the pinned snapshot; ground its hits against the
+mounted bytes before using them as snapshot evidence. App reach explicitly
+says the runtime serves the task's live tree, so it cannot validate the snapshot's contents.
+
+The real read-only mount control runs in CI `compose-boot` inside the built worker image,
+with a shared host-visible temporary path and a bounded wait for `haive-cli-sandbox:latest`.
+It adds no GATED row (the list stays at 156). Local controls and static workflow pins do not
+prove the Actions environment: only a PR run proves this wiring works, and it must pass before merge.
+
 **A run sees only its own files.** `runInSandbox` writes a run's wrapper script and extra files (MCP
 configs, the `haive-custom` and `haive-integrations` token files) into the shared wrappers volume under
 the run's own directory and mounts each one by subpath at its sandbox path, read-only. The volume's
