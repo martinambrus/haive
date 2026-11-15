@@ -35,55 +35,55 @@ export function validatePortEdges(
   bindings: Readonly<Record<string, string>> = {},
 ): StepPortGraph {
   const edges: StepPortGraph['edges'] = [];
-  return {
-    nodes: nodes.map((node, index) => ({
-      ...node,
-      inputs: node.inputs.map((input) => {
-        const alternatives = input.alternatives ?? [input];
-        // effective-spec chooses the first present stage; that is host precedence, not ambiguity.
-        const options = alternatives.map((alternative) =>
-          nodes
-            .slice(0, index)
-            .flatMap((producer) =>
-              producer.outputs
-                .filter(
-                  (output) =>
-                    output.role === alternative.role &&
-                    output.contract.id === alternative.contract.id &&
-                    output.contract.version === alternative.contract.version,
-                )
-                .map((output) => ({ producer, output })),
-            ),
-        );
-        const candidates = options.find((items) => items.length) ?? [];
-        const key = `${node.id}:${input.id}`;
-        const selected = Object.hasOwn(bindings, key)
-          ? candidates.filter(({ producer }) => producer.id === bindings[key])
-          : candidates;
-        const state: PortInputState =
-          selected.length === 1
-            ? 'wired'
-            : selected.length > 1
-              ? 'ambiguous'
-              : input.optional && !Object.hasOwn(bindings, key)
-                ? 'optional-absent'
-                : 'dangling';
-        if (state === 'wired')
-          edges.push({
-            source: selected[0]!.producer.id,
-            sourcePort: selected[0]!.output.id,
-            target: node.id,
-            targetPort: input.id,
-          });
-        return {
-          ...input,
-          state,
-          candidates: [...new Set(candidates.map(({ producer }) => producer.id))],
-        };
-      }),
-    })),
-    edges,
-  };
+  type Producer = { producer: PortNode; output: StepPort };
+  const producers = new Map<string, { all: Producer[]; byId: Map<string, Producer[]> }>();
+  const contractKey = (port: { role: string; contract: { id: string; version: number } }) =>
+    JSON.stringify([port.role, port.contract.id, port.contract.version]);
+  // Walk once in run order: the index contains only earlier producers. Work is linear
+  // in ports plus the candidate ids returned (an ambiguous result may itself be large).
+  const projected = nodes.map((node) => {
+    const inputs = node.inputs.map((input) => {
+      const alternatives = input.alternatives ?? [input];
+      const bucket = alternatives
+        .map((alternative) => producers.get(contractKey(alternative)))
+        .find((bucket) => bucket?.all.length);
+      const candidates = bucket?.all ?? [];
+      const key = `${node.id}:${input.id}`;
+      const bound = Object.hasOwn(bindings, key);
+      const selected = bound ? (bucket?.byId.get(bindings[key]!) ?? []) : candidates;
+      const state: PortInputState =
+        selected.length === 1
+          ? 'wired'
+          : selected.length > 1
+            ? 'ambiguous'
+            : input.optional && !bound
+              ? 'optional-absent'
+              : 'dangling';
+      if (state === 'wired')
+        edges.push({
+          source: selected[0]!.producer.id,
+          sourcePort: selected[0]!.output.id,
+          target: node.id,
+          targetPort: input.id,
+        });
+      return { ...input, state, candidates: [...(bucket?.byId.keys() ?? [])] };
+    });
+    for (const output of node.outputs) {
+      const key = contractKey(output);
+      let bucket = producers.get(key);
+      if (!bucket) {
+        bucket = { all: [], byId: new Map() };
+        producers.set(key, bucket);
+      }
+      const item = { producer: node, output };
+      bucket.all.push(item);
+      const matches = bucket.byId.get(node.id) ?? [];
+      matches.push(item);
+      bucket.byId.set(node.id, matches);
+    }
+    return { ...node, inputs };
+  });
+  return { nodes: projected, edges };
 }
 
 const port = (role: StepRoleId, id: string = role): StepPort => ({

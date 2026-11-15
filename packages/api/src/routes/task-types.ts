@@ -279,14 +279,22 @@ adminTaskTypeRoutes.post('/preview', async (c) => {
   return c.json(preview, diagnostics.issues.length || diagnostics.defaultIssues.length ? 400 : 200);
 });
 
-/** Read-only draft projection; the existing create schemas bound and validate its shape.
+// Largest stock path is 58 steps (full workflow plus environment prelude).
+// 256 leaves over four times that size for custom drafts. Only projection is capped.
+export const MAX_PORT_DRAFT_STEPS = 256;
+
+/** Read-only draft projection; the existing create schemas validate its shape.
  * Port diagnostics are informational here; this route adds no save/admission rule. */
 adminTaskTypeRoutes.post('/ports', async (c) => {
   const raw: unknown = await c.req.json();
   const body =
     (raw as { runListStrategy?: unknown } | null)?.runListStrategy === 'derived'
       ? derivedTaskTypeCreateSchema.parse(raw)
-      : customTaskTypeCreateSchema.parse(raw);
+      : customTaskTypeCreateSchema
+          .extend({
+            stepIds: customTaskTypeCreateSchema.shape.stepIds.max(MAX_PORT_DRAFT_STEPS),
+          })
+          .parse(raw);
   const db = getDb();
   const catalog = await loadCatalog(db);
   if ('runListStrategy' in body) {

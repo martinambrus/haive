@@ -102,3 +102,19 @@ describe('port edge validation', () => {
     );
   });
 });
+
+it('indexes each producer output once rather than rereading earlier nodes per input', () => {
+  let reads = 0;
+  const nodes = Array.from({ length: 8 }, (_, i) => {
+    const node = producer(String(i));
+    Object.defineProperty(node.outputs[0], 'role', {
+      get() {
+        reads++;
+        return role;
+      },
+    });
+    return node;
+  });
+  validatePortEdges([...nodes, ...Array.from({ length: 8 }, () => consumer())]);
+  expect(reads).toBeLessThanOrEqual(8);
+});

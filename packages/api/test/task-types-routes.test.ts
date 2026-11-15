@@ -390,3 +390,15 @@ it('projects a stored derived type with the same candidate-local graph as its un
   expect(unsaved.status).toBe(200);
   expect(await stored.json()).toEqual(await unsaved.json());
 });
+
+it('refuses port drafts above the fixed projection step cap before reading the catalog', async () => {
+  h.role = 'admin';
+  const res = await send('POST', '/admin/task-types/ports', {
+    slug: 'ports',
+    displayName: 'Ports',
+    stepIds: Array(257).fill('07-phase-2-implement'),
+    requiresRepository: true,
+  });
+  expect(res.status).toBe(400);
+  expect(h.getDb).not.toHaveBeenCalled();
+});
