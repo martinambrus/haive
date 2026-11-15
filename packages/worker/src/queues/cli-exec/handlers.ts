@@ -238,6 +238,14 @@ export async function handleCliExecJob(
       runCliExecJob(db, payload, deps, house),
     );
   } finally {
+    // Every invocation can be the last holder of task scratch, including a scan or a
+    // finalized redelivery. Keep this outside the run's error handler: cleanup cannot
+    // rewrite a recorded outcome, and boot covers a process that exits before this pass.
+    try {
+      await cleanupTaskScratchWorkspace(db, payload.taskId);
+    } catch (err) {
+      log.warn({ err, taskId: payload.taskId }, 'terminal invocation scratch cleanup failed');
+    }
     await house.scoring;
   }
 }
@@ -620,7 +628,7 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
     // record of what was applied to them goes now rather than inside the removal's success
     // path. Before the check it must NOT run: a live task's preparations are still in place.
     clearTaskAuthPreparationState(taskId);
-    // The auth work gets its OWN catch so a failure in it cannot skip the scratch reap below.
+    // The auth work gets its OWN catch; scratch is retried in the handler's finally.
     // They are unrelated resources that happen to share a trigger, and credentials are the
     // half more likely to throw — a rotated token, a volume still held. Sharing one try meant
     // one bad sync leaked a repo-less task's workspace for good, since this is the LAST thing
@@ -643,14 +651,8 @@ async function cleanupAuthAfterTerminalSummary(db: Database, taskId: string): Pr
     } catch (err) {
       log.warn({ err, taskId }, 'terminal step summary auth cleanup failed');
     }
-    // Same deferral, different resource: a repo-less task's scratch workspace was left in
-    // place by task completion precisely so THIS invocation could mount it.
-    //
-    // NOT on a FAILED task, matching the guard on the task-queue side and the keep-alive-on-
-    // 'failed' rule its neighbours follow: a failed task keeps its workspace so the Editor and
-    // Terminal can still open it. This path admits `failed` because the AUTH volumes do go at
-    // that point, so the status has to be re-read for the one resource that does not.
-    if (task.status !== 'failed') await cleanupTaskScratchWorkspace(db, taskId);
+    // Scratch cleanup runs for every invocation in handleCliExecJob's finally. Its
+    // settlement guard keeps failed recovery workspaces even though auth volumes go.
   } catch (err) {
     // The summary is best-effort and already finalized. Cleanup trouble must not turn its
     // successful task back into a failed queue job; boot's orphan reaper is the final backstop.
