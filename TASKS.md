@@ -961,7 +961,7 @@ Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.
 
 ### T686 · FNF[dag-partial] · record-and-continue DAG policy lows, after #1217 (+3)
 
-status: open (items 1 and 3 MUST land before any workflow opts into `record-and-continue`) · kind: fix · found: #1217 review-2 2026-11-15 · priority: P2
+status: done (#1219, dce128eaf; follow-up lows in T688) · kind: fix · found: #1217 review-2 2026-11-15 · priority: P2
 
 Reviews in `.claude/tmp/codex-run/P9-S/` (review-2.md, review-3.md).
 
