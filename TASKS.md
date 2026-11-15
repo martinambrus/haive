@@ -672,7 +672,7 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 
 ### T688 · FNF[dag-partial-2] · opt-in DAG hardening lows, after T686 (+6)
 
-status: open (items 1, 2 and 4-6 should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
+status: open (all items should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
 
 Review in `.claude/tmp/codex-run/DAGP-S/review-2.md`. All opt-in only; the default policy is unaffected.
 
