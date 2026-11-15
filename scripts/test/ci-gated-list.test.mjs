@@ -69,7 +69,7 @@ const gatedFiles = testFiles(join(root, 'packages'))
 // These files already run with their guard's URL in independent CI steps.
 const exemptions = {
   'packages/worker/test/exec-core-boundary-mounts.test.ts':
-    'smokes runs the snapshot mount control against the locally built sandbox image.',
+    'compose-boot runs the snapshot mount control inside the worker image after a bounded sandbox image wait.',
   'packages/api/test/auth-throttle.test.ts': 'smokes runs the auth throttle Redis check.',
   'packages/shared/test/rag-sync-lock.test.ts': 'smokes runs the RAG sync lock Redis check.',
   'packages/shared/test/encryption-key-boot-redis.test.ts':
@@ -165,7 +165,11 @@ describe('the environment-gated list in ci.yml', () => {
         (job.steps ?? []).map((step) => ({ ...step, env: { ...job.env, ...step.env } })),
       );
     for (const file of Object.keys(exemptions).filter(
-      (file) => file !== 'packages/worker/test/module-source-pin.test.ts',
+      (file) =>
+        ![
+          'packages/worker/test/module-source-pin.test.ts',
+          'packages/worker/test/exec-core-boundary-mounts.test.ts',
+        ].includes(file),
     )) {
       const [, pkg, ...rel] = file.split('/');
       const env = gatedEnvironment(readFileSync(join(root, file), 'utf8'));
@@ -191,4 +195,15 @@ describe('the environment-gated list in ci.yml', () => {
       `exempt file has no workflow invocation with its guard environment: ${pin}`,
     );
   });
+});
+
+it('runs the snapshot control in compose-boot with worker tooling, shared bind paths and an image wait', () => {
+  const job = readWorkflow('ci.yml').jobs['compose-boot'];
+  const step = job.steps.find((s) => s.name === 'Committed snapshot read-only mounts');
+  assert.ok(step.run.includes('docker image inspect haive-cli-sandbox:latest'));
+  assert.ok(step.run.includes('--volumes-from haive-worker'));
+  assert.ok(step.run.includes('-e SNAPSHOT_SANDBOX_TEST_IMAGE=haive-cli-sandbox:latest'));
+  assert.ok(step.run.includes('vitest run --root . test/exec-core-boundary-mounts.test.ts'));
+  assert.ok(!step.run.includes('pnpm --filter'));
+  assert.equal(listedFiles.length, 156);
 });
