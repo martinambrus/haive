@@ -1,6 +1,6 @@
 import { ExecutionContractError } from '@haive/shared/modularity';
-import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
-import { isConditionalInsightStep } from './run-list.js';
+import { gate3InsightCycle, recordGate3Check } from './insight-gate3-return.js';
+import { isConditionalInsightStep, insightStepActive } from './run-list.js';
 import {
   InsightRunListError,
   assertInsightTaskSteps,
@@ -2197,11 +2197,11 @@ function assertInsightSelection(
   values: import('@haive/shared').FormValues | null | undefined,
 ): void {
   if (
-    stepId === '08e-insights-triage' &&
+    (stepId === '08e-insights-triage' || stepId === '10-gate-3-commit') &&
     Array.isArray(values?.selectedInsights) &&
     values.selectedInsights.length > 0
   )
-    assertInsightTaskSteps(ctx, steps);
+    assertInsightTaskSteps(ctx, steps, stepId === '10-gate-3-commit');
 }
 
 /** Automatic choices are known only after classification; preflight the writer wave. */
@@ -2366,6 +2366,11 @@ export async function handleResult(
         await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [stepId]);
         return;
       }
+      if (
+        stepId === '09-gate-2-verify-approval' &&
+        (result.row.output as { decision?: string } | null)?.decision === 'approve'
+      )
+        await recordGate3Check(db, ctx, result.row, 'gate2_approved');
       let successor;
       try {
         successor = await validationSuccessor(
@@ -2400,6 +2405,37 @@ export async function handleResult(
             { status: 'loop_back', row: result.row, sourceStepId: stepId, ...routing },
             opts,
           );
+        }
+      }
+      // Skip only gate 2 after a successful insight check round. Preserve every
+      // configured step on either side of it, including custom safety checks.
+      if (
+        stepId === '08e-insights-triage' ||
+        successor.next?.metadata.id === '09-gate-2-verify-approval'
+      ) {
+        const cycle = await gate3InsightCycle(db, ctx.taskId, result.row.round);
+        if (
+          cycle &&
+          !cycle.verifyFailed &&
+          !successor.recheck &&
+          successor.next?.metadata.id === '09-gate-2-verify-approval'
+        ) {
+          successor = { next: steps[steps.indexOf(successor.next) + 1], round: result.row.round };
+        } else if (
+          cycle?.verifyFailed &&
+          stepId === '08e-insights-triage' &&
+          !steps.some((s) => s.metadata.id === '09-gate-2-verify-approval')
+        ) {
+          if (
+            !(await failStepTransition(
+              db,
+              ctx,
+              result.row,
+              'Verification failed during insight checks. This task has no gate-2 approval step; inspect the failure and repair the task type before Retry.',
+            ))
+          )
+            await logLost('insight_run_list');
+          return;
         }
       }
       await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
@@ -2531,6 +2567,8 @@ export async function handleResult(
       return;
     }
     case 'loop_back': {
+      if (stepId === '08-phase-5-verify')
+        await recordGate3Check(db, ctx, result.row, 'verify_failed');
       // A downstream step found a blocking defect. Bump the round and re-enter at the
       // implementation step (which re-runs in fix mode with this diagnosis); the
       // forward walk then re-runs the whole post-implementation chain as round-N rows.
@@ -2760,6 +2798,22 @@ export async function handleResult(
       return;
     }
     case 'revise': {
+      if (
+        stepId === '10-gate-3-commit' &&
+        result.targetStepId === '09-gate-2-verify-approval' &&
+        !(await buildRunList(ctx, db)).some((s) => s.metadata.id === result.targetStepId)
+      ) {
+        if (
+          !(await failStepTransition(
+            db,
+            ctx,
+            result.row,
+            'A new gate-2 approval is required after failed insight verification, but this task has no gate-2 step. Repair the task type before Retry.',
+          ))
+        )
+          await logLost('insight_run_list');
+        return;
+      }
       if (result.continuation) {
         let route;
         try {
@@ -3608,7 +3662,7 @@ async function handleAdvanceStep(
   const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
   // Refuse an old/custom pin before allowing its human selection to dispatch an editor.
   if (
-    payload.stepId === '08e-insights-triage' &&
+    (payload.stepId === '08e-insights-triage' || payload.stepId === '10-gate-3-commit') &&
     Array.isArray(formValues?.selectedInsights) &&
     formValues.selectedInsights.length > 0
   ) {
@@ -3643,7 +3697,7 @@ async function handleAdvanceStep(
   const dormantInsight =
     fresh &&
     isConditionalInsightStep(ctx, payload.stepId) &&
-    !(await activeInsightContinuation(db, ctx.taskId, round));
+    !(await insightStepActive(db, ctx.taskId, round, payload.stepId));
   const pause = fresh && !dormantInsight ? await resolvePause(db, ctx.taskId) : null;
   if (
     !pause &&
@@ -4122,7 +4176,7 @@ export async function hasCliWork(
     .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId))
     .limit(1);
   if (agent) return true;
-  if (stepId === '08e-insights-triage') {
+  if (stepId === '08e-insights-triage' || stepId === '10-gate-3-commit') {
     // An insight intent is required state even before its mining reservation exists. Keep
     // its approved snapshot and answers when recovering that pre-dispatch crash window.
     const [intent] = await db

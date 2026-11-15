@@ -226,3 +226,24 @@ describe('insight composition destination order', () => {
     expect(evaluate([...head, review, verify]).issues).toEqual([]);
   });
 });
+
+it('quick paths retain a dormant gate2 which becomes active only for a durable approval latch', async () => {
+  const id = '09-gate-2-verify-approval';
+  expect(keepForPath(id, 'quick_bugfix')).toBe(true);
+  const step = resolveTaskStep(
+    { executionPath: 'quick_bugfix', runListStrategy: 'workflow_paths' },
+    id,
+    { get: () => ({ metadata: { id } }) as StepDefinition },
+  )!;
+  for (const failed of [false, true]) {
+    const chain = {
+      from: () => chain,
+      where: () => chain,
+      orderBy: async () =>
+        failed ? [{ payload: { version: 1, kind: 'verify_failed', batchId: 'batch' } }] : [],
+    };
+    expect(
+      await step.shouldRun!({ db: { select: () => chain }, throwIfCancelled() {} } as never),
+    ).toBe(failed);
+  }
+});

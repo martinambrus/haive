@@ -135,12 +135,15 @@ export function validateComposition(
         target: entry.loopTargetStepId,
       });
     }
-    if (entry.closes) closing = { stepId, index };
+    if (entry.closes && !entry.loopBeforeClose) closing = { stepId, index };
     const targetIndex =
       entry.loopTargetStepId === undefined ? undefined : (seen.get(entry.loopTargetStepId) ?? -1);
     if (targetIndex !== undefined && closing !== undefined && targetIndex < closing.index) {
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }
+    // A closing gate may branch back before performing its closing action. Later
+    // steps must still never loop across a gate that has already closed.
+    if (entry.closes) closing = { stepId, index };
     for (const token of entry.provides) {
       if (IMPLICIT_COMPOSITION_TOKENS.has(token)) continue;
       provided.set(token, index);

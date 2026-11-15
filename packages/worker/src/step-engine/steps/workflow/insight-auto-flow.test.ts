@@ -1,3 +1,4 @@
+import * as pages from './_insight-page.js';
 import * as secretPolicy from '../../../queues/cli-exec/secret-mask.js';
 import * as safeFs from '@haive/shared/fs-safe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -70,6 +71,7 @@ const result = (
 describe('automatic insight stages', () => {
   let history: { claims: auto.AutoClaim[]; results: auto.AutoClassification[] };
   beforeEach(() => {
+    vi.spyOn(pages, 'insightPageOffset').mockResolvedValue(0);
     history = { claims: [claim], results: [] };
     vi.spyOn(auto, 'loadAutoHistory').mockImplementation(async () => history);
     vi.spyOn(auto, 'saveAutoClassification').mockImplementation(async (_ctx, record) => {

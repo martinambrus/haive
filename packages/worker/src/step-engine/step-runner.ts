@@ -1,3 +1,4 @@
+import { recordGate3Check } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
@@ -4255,11 +4256,24 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // The row is still done; handleResult turns loop_back into a new round at implement and
     // revise into a reset of its target.
     const finalize = (patch: UpdatePatch) =>
-      meta.id === INSIGHT_STEP &&
+      (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
       ((output as { continuation?: unknown } | null)?.continuation ||
         (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
         ? publishInsightStep(ctx, patch)
         : updateRow(db, current.id, patch);
+    if (
+      (meta.id === '08-phase-5-verify' &&
+        (output as { passed?: boolean } | null)?.passed === false) ||
+      (meta.id === '09-gate-2-verify-approval' &&
+        (output as { decision?: string } | null)?.decision === 'approve')
+    ) {
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+        current,
+        meta.id === '08-phase-5-verify' ? 'verify_failed' : 'gate2_approved',
+      );
+    }
     const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
     if (verdict) {
       const finished = await finalize({
@@ -4365,6 +4379,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       !(err instanceof StepOutputContractInvalidError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
+      if (meta.id === '08-phase-5-verify')
+        await recordGate3Check(
+          db,
+          { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+          row,
+          'verify_failed',
+        );
       const finished = await writeEnd({
         status: 'done',
         statusMessage: null,
@@ -4391,6 +4412,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ...(advised?.advice ? { guidance: advised.advice } : {}),
       };
     }
+    if (!cancelled && meta.id === '08-phase-5-verify')
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+        row,
+        'verify_failed',
+      );
     const storedError = scrubWorkerErrorPaths(errorMessage);
     const failed = await writeEnd({
       status: 'failed',

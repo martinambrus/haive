@@ -55,6 +55,7 @@ const SPINE: readonly string[] = [
   // Conditional on an active insight continuation on the shorter paths.
   '08c-code-review',
   '08e-insights-triage',
+  '09-gate-2-verify-approval',
   '10-gate-3-commit',
   '11b1-rag-source-selection',
   '11a-gate-4-push',
@@ -63,14 +64,14 @@ const SPINE: readonly string[] = [
   '13-pr-wait',
 ];
 
-/** Members added only for built-in insight continuation reachability. Derived overlays
- * keep their historical base membership, so anchors and removes retain their meaning. */
+/** Conditional members on shorter workflow paths. Stored derived pins retain their
+ * original base membership; new candidates include these destinations. */
 export function isPathAddedInsightStep(
   path: ExecutionPath | null | undefined,
   id: string,
 ): boolean {
   return (
-    (id === '08c-code-review' && path === 'quick_bugfix') ||
+    ((id === '08c-code-review' || id === '09-gate-2-verify-approval') && path === 'quick_bugfix') ||
     (id === '08e-insights-triage' && (path === 'quick_bugfix' || path === 'plan_tasklist'))
   );
 }
@@ -138,6 +139,7 @@ export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '06-gate-1-spec-approval': '04-phase-0b-pre-planning', // reviseLoop
   '03c-business-requirements-review': '03b-business-requirements', // reviseLoop
   '08e-insights-triage': '08-phase-5-verify', // reviseLoop
+  '10-gate-3-commit': '08e-insights-triage', // human insight picks
   '11-phase-8-learning': '11-phase-8-learning', // reviseLoop (self-target: refine drafts)
 };
 

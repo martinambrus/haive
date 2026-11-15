@@ -193,6 +193,8 @@ export const composableStepEntrySchema = z
     loopTargetStepId: stepIdSchema.optional(),
     fixConsumer: fixConsumerSchema.optional(),
     closes: z.boolean().optional(),
+    /** The gate chooses its revise branch before performing the closing action. */
+    loopBeforeClose: z.boolean().optional(),
     agentAuthoredOutput: z.boolean().optional(),
     outputContract: z
       .custom<StepOutputContractRef>(
@@ -208,6 +210,9 @@ export const composableStepEntrySchema = z
       .array(z.object({ provided: z.string(), entails: z.array(z.string()) }))
       .optional(),
     integrations: z.array(integrationRequirementSchema).optional(),
+  })
+  .refine((e) => !e.loopBeforeClose || (e.closes === true && e.loopTargetStepId !== undefined), {
+    message: 'loopBeforeClose requires a closing step and a loop target',
   })
   .refine(
     (e) => {

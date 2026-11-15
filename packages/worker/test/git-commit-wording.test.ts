@@ -45,6 +45,7 @@ function context(repo: string): { ctx: StepContext; writes: unknown[] } {
     where: () => chain,
     orderBy: () => chain,
     limit: async () => [],
+    then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
   };
   const ctx = {
     workspacePath: repo,

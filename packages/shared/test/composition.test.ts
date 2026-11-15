@@ -376,3 +376,49 @@ it('preserves ordered needs on module manifests without granting another replace
     }).success,
   ).toBe(false);
 });
+
+it('explicit precommit branching may revise before the gate closes, while later loops remain fenced', () => {
+  const catalog = new Map([
+    [
+      'impl',
+      {
+        stepId: 'impl',
+        label: 'Implementation',
+        group: 'build',
+        requires: [],
+        provides: [],
+        dispatchesCli: false,
+      },
+    ],
+    [
+      'gate',
+      {
+        stepId: 'gate',
+        label: 'Gate',
+        group: 'finish',
+        requires: [],
+        provides: [],
+        dispatchesCli: false,
+        closes: true,
+        loopBeforeClose: true,
+        loopTargetStepId: 'impl',
+      },
+    ],
+    [
+      'later',
+      {
+        stepId: 'later',
+        label: 'Later',
+        group: 'finish',
+        requires: [],
+        provides: [],
+        dispatchesCli: false,
+        loopTargetStepId: 'impl',
+      },
+    ],
+  ]);
+  expect(validateComposition(['impl', 'gate'], catalog)).toEqual([]);
+  expect(validateComposition(['impl', 'gate', 'later'], catalog)).toEqual([
+    { kind: 'loop-after-closing', index: 2, stepId: 'later', closingStepId: 'gate' },
+  ]);
+});

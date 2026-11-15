@@ -1,3 +1,4 @@
+import { pendingInsightApproval } from './insight-gate3-return.js';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import { isPathAddedInsightStep } from '@haive/shared/execution-paths';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
@@ -149,12 +150,35 @@ export function resolveTaskStep(
 }
 
 export function isConditionalInsightStep(ctx: TaskStepScope, id: string): boolean {
-  return (
-    ctx.runListStrategy === 'workflow_paths' &&
-    ctx.derivedRunPlan == null &&
-    !ctx.runListSnapshot?.includes(id) &&
-    isPathAddedInsightStep(ctx.executionPath, id)
-  );
+  if (!isPathAddedInsightStep(ctx.executionPath, id)) return false;
+  if (ctx.derivedRunPlan != null) {
+    const plan = parseDerivedRunPlan(ctx.derivedRunPlan);
+    const base = plan.base.candidates.find((c) => c.executionPath === ctx.executionPath);
+    // New base candidates contain the conditional tail; old pins and explicit
+    // overlay insertions retain their original listed behavior.
+    return (
+      !!base?.stepIds.includes(id) &&
+      !plan.overlay.changes.some(
+        (change) =>
+          ('replace' in change && change.replace === id) ||
+          ('remove' in change && change.remove === id) ||
+          ('step' in change && change.step === id),
+      )
+    );
+  }
+  return ctx.runListStrategy === 'workflow_paths' && !ctx.runListSnapshot?.includes(id);
+}
+
+/** Gate 2 stays reachable after its check continuation settles when approval is latched. */
+export async function insightStepActive(
+  db: Database,
+  taskId: string,
+  round: number,
+  stepId: string,
+): Promise<boolean> {
+  return stepId === '09-gate-2-verify-approval'
+    ? (await pendingInsightApproval(db, taskId)) !== null
+    : (await activeInsightContinuation(db, taskId, round)) !== null;
 }
 
 /** New reachability is inert on paths that previously omitted these steps. */
@@ -168,7 +192,7 @@ function conditionalInsightStep(
   return {
     ...def,
     async shouldRun(context) {
-      const active = await activeInsightContinuation(context.db, context.taskId, context.round);
+      const active = await insightStepActive(context.db, context.taskId, context.round, id);
       context.throwIfCancelled();
       return !!active && (!def.shouldRun || (await def.shouldRun(context)));
     },

@@ -26,13 +26,6 @@ describe('derived workflow registry/catalog parity', () => {
           executionPath,
         },
         source,
-      ).filter(
-        (id) =>
-          !(
-            (id === '08c-code-review' && executionPath === 'quick_bugfix') ||
-            (id === '08e-insights-triage' &&
-              (executionPath === 'quick_bugfix' || executionPath === 'plan_tasklist'))
-          ),
       ),
     }));
     const rows = stepRegistry
@@ -64,7 +57,7 @@ describe('derived workflow registry/catalog parity', () => {
   it.each([
     { remove: '08c-code-review' },
     { insertAfter: '08c-code-review', step: 'custom.example.note' },
-  ])('keeps quick overlays path-absent for the historically absent review (%j)', (change) => {
+  ])('new quick overlays can address the conditional review (%j)', (change) => {
     const result = evaluateDerivedTaskType({
       baseCandidates: workflowBaseCandidates((type) =>
         stepRegistry.listByWorkflow(type).map((s) => s.metadata.id),
@@ -90,10 +83,21 @@ describe('derived workflow registry/catalog parity', () => {
       ]),
     });
     const quick = result.candidates.find((c) => c.executionPath === 'quick_bugfix')!;
-    expect(quick.compositionIssues).toEqual([]);
-    expect(quick.outcomes[0]).toMatchObject({ outcome: 'path-absent' });
-    expect(quick.stepIds).not.toContain('08c-code-review');
-    expect(quick.stepIds).not.toContain('08e-insights-triage');
+    expect(quick.outcomes[0]).toMatchObject({ outcome: 'applied' });
+    expect(quick.stepIds).toContain('08e-insights-triage');
+    if ('remove' in change) {
+      expect(quick.stepIds).not.toContain('08c-code-review');
+      expect(quick.compositionIssues).toContainEqual(
+        expect.objectContaining({
+          kind: 'unmet-need',
+          stepId: '08e-insights-triage',
+          needs: 'review',
+        }),
+      );
+    } else {
+      expect(quick.compositionIssues).toEqual([]);
+      expect(quick.stepIds).toContain('08c-code-review');
+    }
   });
 
   it('preserves the whole pre-continuation quick and plan base lists', () => {
@@ -183,7 +187,9 @@ describe('derived workflow registry/catalog parity', () => {
     const source = (type: string) => stepRegistry.listByWorkflow(type).map((s) => s.metadata.id);
     for (const executionPath of ['quick_bugfix', 'plan_tasklist'] as const) {
       expect(
-        workflowBaseCandidates(source).find((c) => c.executionPath === executionPath)!.stepIds,
+        workflowBaseCandidates(source, { includeConditionalInsightSteps: false }).find(
+          (c) => c.executionPath === executionPath,
+        )!.stepIds,
       ).toEqual(expected[executionPath]);
       const live = taskRunListIds(
         {
@@ -195,14 +201,89 @@ describe('derived workflow registry/catalog parity', () => {
         source,
       );
       expect(
+        workflowBaseCandidates(source).find((c) => c.executionPath === executionPath)!.stepIds,
+      ).toEqual(live);
+      expect(
         live.filter(
           (id) =>
             !(
               id === '08e-insights-triage' ||
-              (executionPath === 'quick_bugfix' && id === '08c-code-review')
+              (executionPath === 'quick_bugfix' &&
+                (id === '08c-code-review' || id === '09-gate-2-verify-approval'))
             ),
         ),
       ).toEqual(expected[executionPath]);
     }
   });
+});
+
+import { isConditionalInsightStep, resolveTaskStep } from '../src/queues/run-list.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+it('new derived quick candidates keep the added tail dormant, while old pins and explicit overlays retain their behavior', async () => {
+  registerStepsOnce();
+  const base = workflowBaseCandidates((type) =>
+    stepRegistry.listByWorkflow(type).map((s) => s.metadata.id),
+  );
+  const plan = {
+    version: 1,
+    base: {
+      slug: 'workflow',
+      runListStrategy: 'workflow_paths',
+      candidates: base,
+      catalogFingerprint: 'control',
+    },
+    overlay: { revision: 'control', changes: [] },
+    requiresRepository: true,
+    composableEntries: CORE_COMPOSABLE_STEPS,
+    candidates: base.map((c) => ({ ...c, outcomes: [], compositionIssues: [] })),
+    commonPrefix: ['00-model-health-workflow', '00a-sync-base', '00-triage'],
+    warnings: [],
+  };
+  const quick = base.find((c) => c.executionPath === 'quick_bugfix')!.stepIds;
+  const scope = {
+    runListStrategy: 'derived' as const,
+    derivedRunPlan: plan,
+    executionPath: 'quick_bugfix' as const,
+    runListSnapshot: [...quick],
+  };
+  for (const id of ['08c-code-review', '08e-insights-triage']) {
+    expect(isConditionalInsightStep(scope, id)).toBe(true);
+    const step = resolveTaskStep(scope, id, {
+      get: () => ({ metadata: { id }, shouldRun: async () => true }) as unknown as StepDefinition,
+    })!;
+    expect(
+      await step.shouldRun!({
+        db: { query: { taskEvents: { findMany: async () => [] } } },
+        throwIfCancelled() {},
+      } as never),
+    ).toBe(false);
+  }
+  const inserted = {
+    ...plan,
+    overlay: {
+      revision: 'insert',
+      changes: [{ insertAfter: '08c-code-review', step: '08e-insights-triage' }],
+    },
+  };
+  // A malformed pin is refused rather than treated as a dormant workflow.
+  expect(() =>
+    isConditionalInsightStep({ ...scope, derivedRunPlan: inserted }, '08e-insights-triage'),
+  ).toThrow();
+  const legacyBase = workflowBaseCandidates(
+    (type) => stepRegistry.listByWorkflow(type).map((s) => s.metadata.id),
+    { includeConditionalInsightSteps: false },
+  );
+  const legacy = {
+    ...plan,
+    base: { ...plan.base, candidates: legacyBase },
+    candidates: legacyBase.map((c) => ({ ...c, outcomes: [], compositionIssues: [] })),
+    composableEntries: CORE_COMPOSABLE_STEPS.map((e) => {
+      if (e.stepId !== '10-gate-3-commit') return e;
+      const { loopTargetStepId: _target, loopBeforeClose: _before, ...old } = e;
+      return old;
+    }),
+  };
+  expect(isConditionalInsightStep({ ...scope, derivedRunPlan: legacy }, '08c-code-review')).toBe(
+    false,
+  );
 });

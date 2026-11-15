@@ -86,3 +86,36 @@ export interface InsightLoadResult {
   /** Eligible records cut by limit, after deliberately excluded picks are removed. */
   omitted: number;
 }
+
+/** Bounded deterministic display copy; complete source and attempts remain in invocation/event history. */
+export interface InsightSummary {
+  version: 1;
+  automatic: boolean;
+  roundsStarted: number;
+  stopReason: 'disabled' | 'cap' | 'no_new_consequential' | 'incomplete';
+  totals: { identities: number; occurrences: number; picked: number };
+  offset: number;
+  omitted: number;
+  items: Array<{
+    id: string;
+    identity: string;
+    title: string;
+    location: string;
+    description: string;
+    occurrences: number;
+    sourceRefs: InsightSourceRef[];
+    sourceRefsOmitted: number;
+    class: 'consequential' | 'minor' | 'nit' | 'unclassified';
+    kind: string | null;
+    reason: string;
+    outcome: string;
+    attempts: Array<{
+      insightId: string;
+      batchId: string;
+      mode: string;
+      invocationId: string | null;
+      reportedOutcome: string;
+    }>;
+    attemptsOmitted: number;
+  }>;
+}

@@ -788,6 +788,7 @@ export type {
   InsightLoadOptions,
   LoadedInsight,
   InsightLoadResult,
+  InsightSummary,
 } from './review-types.js';
 
 /** The existing previous-step projection, bounded to the calling round. */
@@ -838,4 +839,6 @@ export interface InsightReviseContinuation {
   sourceStepRow: string;
   generation: number;
   round: number;
+  mode?: 'gate3';
+  stage?: 'apply' | 'checks';
 }

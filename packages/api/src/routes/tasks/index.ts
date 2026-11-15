@@ -1,3 +1,4 @@
+import { markdownReportPage } from './_markdown-report.js';
 import { z } from 'zod';
 import { insightEventPage } from './_insight-event-page.js';
 import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
@@ -1946,6 +1947,33 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   });
 
   return c.json({ ok: true });
+});
+
+// Durable, read-only Markdown report pages remain available after a form completes.
+taskRoutes.get('/:id/reports/:reportId', async (c) => {
+  const id = z.string().uuid().parse(c.req.param('id'));
+  const reportId = z.string().uuid().parse(c.req.param('reportId'));
+  const offset = z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .parse(c.req.query('offset') ?? 0);
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, c.get('userId'))),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  const report = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.id, reportId),
+      eq(schema.taskEvents.taskId, id),
+      eq(schema.taskEvents.eventType, 'task.markdown_report'),
+    ),
+  });
+  if (!report) throw new HttpError(404, 'Report not found');
+  return c.json(markdownReportPage(report.payload, offset));
 });
 
 taskRoutes.get('/:id/events', async (c) => {
