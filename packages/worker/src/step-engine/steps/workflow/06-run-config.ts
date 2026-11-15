@@ -1,6 +1,6 @@
 import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { autoActOnInsightsField, INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/shared/schemas';
 import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
@@ -174,6 +174,7 @@ export async function loadLastCompletedAutoActOnInsights(
         eq(schema.tasks.repositoryId, scope.repositoryId),
         eq(schema.tasks.type, scope.type),
         eq(schema.tasks.status, 'completed'),
+        isNotNull(schema.tasks.completedAt),
       ),
     )
     .orderBy(desc(schema.tasks.completedAt), desc(schema.tasks.createdAt), desc(schema.tasks.id))

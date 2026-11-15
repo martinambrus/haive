@@ -543,6 +543,34 @@ describe('owner-scoped insight default', () => {
     });
     expect(value).toBe(Object.keys(change).length === 0);
   });
+  it('ignores completed rows without a completion timestamp, including when no dated row exists', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks });
+    const scope = {
+      userId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      repositoryId: 'aaaaaaaa-0000-4000-8000-000000000002',
+      type: 'workflow',
+    };
+    fake.insert(schema.tasks, {
+      ...scope,
+      id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      status: 'completed',
+      completedAt: null,
+      autoActOnInsights: true,
+    });
+    expect(await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, scope)).toBe(
+      false,
+    );
+    fake.insert(schema.tasks, {
+      ...scope,
+      id: 'aaaaaaaa-0000-4000-8000-000000000004',
+      status: 'completed',
+      completedAt: new Date('2026-01-01'),
+      autoActOnInsights: false,
+    });
+    expect(await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, scope)).toBe(
+      false,
+    );
+  });
   it('uses the most recently completed matching task, regardless of creation order', async () => {
     const fake = createFakeDb({ tasks: schema.tasks });
     const row = {
