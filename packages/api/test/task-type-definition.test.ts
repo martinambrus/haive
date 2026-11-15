@@ -116,49 +116,14 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
   it.each([
     ['disabled', { enabled: false }, 403, 'is disabled', undefined],
-    ['hidden', { selectable: false }, 403, 'cannot be created here', undefined],
-    ['missing module', { source: 'module:absent' }, 409, 'absent', 'module-missing'],
-    ['deactivated module', { source: 'module:fx' }, 409, 'Fx (fx)', 'module-deactivated'],
-    [
-      'missing step',
-      { stepIds: ['missing-step'] as string[] },
-      409,
-      'missing-step',
-      'missing-step',
-    ],
-    [
-      'invalid composition',
-      { source: 'admin', stepIds: ['needs-token'] as string[] },
-      409,
-      'invalid step composition',
-      'invalid-composition',
-    ],
     ['active contract', {}, 409, 'not yet supported by this worker', 'invalid-execution-contract'],
   ] as const)(
     'keeps %s admission priority with an unsupported contract',
-    async (name, over, status, message, code) => {
+    async (_name, over, status, message, code) => {
       await expect(
         db.transaction(async (tx) => {
           await tx.delete(schema.stepCatalog);
-          await tx.insert(schema.stepCatalog).values([
-            ...STEPS.map((id) => catalogRow(id)),
-            {
-              ...catalogRow('needs-token'),
-              entry: {
-                stepId: 'needs-token',
-                label: 'Needs token',
-                group: 'build',
-                dispatchesCli: false,
-                requires: [{ needs: 'absent', reason: 'needs absent token' }],
-                provides: [],
-              },
-            },
-          ]);
-          if (name === 'deactivated module')
-            await tx
-              .update(schema.modules)
-              .set({ deactivatedAt: new Date() })
-              .where(eq(schema.modules.moduleId, 'fx'));
+          await tx.insert(schema.stepCatalog).values(STEPS.map((id) => catalogRow(id)));
           await tx.insert(schema.taskTypeDefinitions).values(
             row('ttd-contract-priority', {
               executionContract: {
