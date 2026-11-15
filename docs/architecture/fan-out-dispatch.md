@@ -19,13 +19,19 @@ owner/root identity during dispatch; execution never uses that cache. A missing 
 from those recorded objects; a missing inventory is refused, never recreated from a
 live index. Version, pairing, ownership, inventory and object failures never use the checkout.
 Materialization defaults to 256 MiB, 50,000 entries, depth 64 and 30 seconds, all injectable.
+Serialized inventories are capped at the smaller of 16 MiB and 512 bytes per allowed entry,
+with an injectable byte cap shared by issuance and resolution. Issuance refuses an oversized
+UTF-8 body before publishing any inventory or descriptor.
 The work budget starts after the per-task scratch lock is acquired, so queued siblings do not
 spend it waiting. One descriptor-backed Git batch-command child serves object reads for each
 issue or resolve. Empty/incomplete crash claims are rebuilt in a private stage and published
 under that lock. The old tree is moved aside before the new one is published, so the rebuild
 is recoverable, not atomic: a crash between the two leaves a `stage-*` or `incomplete-*`
 directory that stays until the task scratch is reaped. Directories are explicitly 0755 regardless of umask; modified bytes, unsafe
-ownership/modes, links and files/directories outside the inventory are refused.
+ownership/modes, links and files/directories outside the inventory are refused. Every tracked
+file must retain its exact issued permission bits: 0444 for a regular blob or 0555 for an
+executable blob; missing read bits, added write bits and special permission bits refuse. Tracked
+file modes are checked before reading their bytes.
 Only regular Git blobs (including executable blobs) are supported; symlinks, gitlinks, traversal,
 Git metadata paths and alternate object stores refuse visibly. A shallow clone is supported
 when its pinned commit, tree and blobs are present; no history traversal is needed.
