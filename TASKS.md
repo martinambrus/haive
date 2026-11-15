@@ -672,13 +672,13 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 
 ### T688 · FNF[dag-partial-2] · opt-in DAG hardening lows, after T686 (+6)
 
-status: open (items 1-3 should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
+status: open (items 1, 2 and 4-6 should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
 
 Review in `.claude/tmp/codex-run/DAGP-S/review-2.md`. All opt-in only; the default policy is unaffected.
 
 1. LOW, REGRESSION: a replanner content refusal writes the issue rows before the invocation row (`worker/src/step-engine/dag-executor.ts` ~:2732-2740), the reverse of Retry's order (`queues/_step-reset.ts` ~:93-121), so a Retry overlapping that ingest can deadlock (rolled back, a second Retry recovers). Fix: move the `consumedAt` update above the `setResolution` loop; assert the order in the control.
 2. LOW, REGRESSION: `validFixResult` is computed before `refused` (~:3422 vs :3431), so a content-refused advisor-started fix coder that printed a valid result keeps its own `concerns` text instead of the refusal note. Fix: `validFixResult = parsed && !refused`.
-3. LOW, REGRESSION: a valid `failed_unrecoverable` fix-coder result through section C does not clear the coder streak (only `ingestReviewRun` ~:1825 clears), so timeout, valid failure, timeout can block. Fix: clear in section C on a valid result; control from a count-1 entry.
+3. Fixed in #1219 before merge (section C clears the coder streak on a valid result). Replaced by: LOW, PRE-EXISTING: refusals and the streak differ by role. The advisor (~:2431-2436) and replanner (~:2715) clear the streak on a content refusal; coder and reviewer neither count nor clear. Fix: pick one rule for all four roles and state it in fix-loop.md.
 4. LOW, coverage: no control for a truncated result plus a kill (the parser refuses it, `_fenced-json.ts`); add one per role.
 5. LOW: `prepareReviewAgent` and `issueChangeSet` run before branches that may not dispatch (~:1659, :1887), so a missing provider throws instead of recording the issue's own failure; the prompt and change set are built twice.
 6. INFO: under opt-in, a persistently failing MCP server is an interruption (never counted), so only a person stops its Retry loop, and the thrown text omits the underlying message.
