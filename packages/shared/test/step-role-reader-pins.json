@@ -1368,8 +1368,8 @@
     "reason": "Path membership policy names the physical built-in review added only to quick; derived bases exclude it while pinned replacements retain their own policy."
   },
   {
-    "file": "packages/api/src/lib/task-type-definition.ts",
-    "symbol": "describeIssue",
+    "file": "packages/api/src/lib/derived-errors.ts",
+    "symbol": "insightRequirementMessage",
     "context": "ReturnStatement",
     "value": "08e-insights-triage requires earlier 08-phase-5-verify and 08c-code-review (or its pinned replacement) for insight continuations",
     "count": 1,

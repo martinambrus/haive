@@ -56,3 +56,20 @@ it('names the earlier verification and review required by a stored insight type'
     ),
   });
 });
+
+import { DerivedTaskAdmissionError } from '../src/lib/derived-errors.js';
+it('names the insight requirement in derived admission errors too', () => {
+  const error = new DerivedTaskAdmissionError([
+    {
+      kind: 'invalid-composition',
+      executionPath: 'full_workflow',
+      issue: { kind: 'unmet-need', stepId: '08e-insights-triage', needs: 'review' },
+    },
+  ]);
+  expect(error.message).toMatch(
+    /08e-insights-triage requires earlier 08-phase-5-verify.*08c-code-review/,
+  );
+  expect(new DerivedTaskAdmissionError([{ kind: 'catalog-not-synced' }]).message).toBe(
+    'The derived task type cannot be admitted',
+  );
+});

@@ -1,4 +1,4 @@
-import { DerivedTaskAdmissionError } from './derived-errors.js';
+import { DerivedTaskAdmissionError, insightRequirementMessage } from './derived-errors.js';
 import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -89,14 +89,10 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
 });
 
 function describeIssue(issue: CompositionIssue): string {
-  if (
-    'stepId' in issue &&
-    issue.stepId === '08e-insights-triage' &&
-    ((issue.kind === 'unmet-need' && ['verification', 'review'].includes(issue.needs)) ||
-      issue.kind === 'missing-loop-target')
-  )
-    return '08e-insights-triage requires earlier 08-phase-5-verify and 08c-code-review (or its pinned replacement) for insight continuations';
-  return 'stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind;
+  return (
+    insightRequirementMessage(issue) ??
+    ('stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind)
+  );
 }
 
 // FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
