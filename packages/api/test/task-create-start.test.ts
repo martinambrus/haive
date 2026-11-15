@@ -35,7 +35,7 @@ vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
   },
 }));
 
-import { replacementAdmissionFixture } from '../../shared/test/derived-admission-fixtures.js';
+import { replacementAdmissionFixture } from './derived-admission-fixtures.js';
 import { inspectDerivedDefinition } from '@haive/shared/modularity-server';
 import { DerivedTaskAdmissionError } from '../src/lib/derived-errors.js';
 import { Hono } from 'hono';

@@ -11,7 +11,7 @@ vi.mock('../src/step-engine/step-ownership.js', async (original) => ({
 import { schema } from '@haive/database';
 import { pinDerivedWorkflowPath } from '../src/step-engine/derived-path.js';
 import { buildRunList, type ResolvedTaskContext } from '../src/queues/run-list.js';
-import { stepRegistry } from '../src/step-engine/registry.js';
+import { stepRegistry, type StepRegistry } from '../src/step-engine/registry.js';
 import { codeReviewStep } from '../src/step-engine/steps/workflow/08c-code-review.js';
 import { rolePin, REVIEW, PRODUCER } from './replacement-fixtures.js';
 import { CODE_REVIEW_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
@@ -84,7 +84,7 @@ it.each([1, 2] as const)('parses a v%s pin once while triage holds the rows', as
     query: { tasks: { findFirst: async () => task } },
     transaction: async (fn: (handle: typeof tx) => unknown) => fn(tx),
   };
-  const registry = {
+  const registry: Pick<StepRegistry, 'get'> = {
     get: (id: string) =>
       id === REVIEW
         ? codeReviewStep
