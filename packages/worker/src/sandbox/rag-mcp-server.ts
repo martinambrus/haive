@@ -1,4 +1,19 @@
-import { formatRagHits } from '@haive/shared/rag';
+import { formatRagHits, type RagSearchHit } from '@haive/shared/rag';
+
+/** Embedded in the dependency-free MCP script. Pass the hit formatter explicitly
+ * so the serialized function has no dependency on a transpiler's import bindings. */
+export function formatRagResponse(
+  hits: RagSearchHit[],
+  note: unknown,
+  groundingTools: string,
+  formatHits: typeof formatRagHits,
+): string {
+  const prefix = typeof note === 'string' ? note + '\n\n' : '';
+  if (hits.length === 0) {
+    return prefix + 'No RAG hits — ground directly with ' + groundingTools + '.';
+  }
+  return prefix + formatHits(hits);
+}
 
 /** Container path where the haive-rag MCP server file is bind-mounted, and the
  *  source of that file. The server is a dependency-free Node ESM script that
@@ -33,6 +48,7 @@ function error(id, code, message) {
 }
 
 ${formatRagHits.toString()}
+${formatRagResponse.toString()}
 
 const TOOL = {
   name: 'rag_search',
@@ -73,11 +89,7 @@ async function ragSearch(args) {
   }
   const data = await resp.json().catch(() => ({}));
   const hits = Array.isArray(data?.hits) ? data.hits : [];
-  const note = typeof data?.note === 'string' ? data.note + '\n\n' : '';
-  if (hits.length === 0) {
-    return { isError: false, text: note + 'No RAG hits — ground directly with ' + GROUNDING_TOOLS + '.' };
-  }
-  return { isError: false, text: note + formatRagHits(hits) };
+  return { isError: false, text: formatRagResponse(hits, data?.note, GROUNDING_TOOLS, formatRagHits) };
 }
 
 async function handle(msg) {
