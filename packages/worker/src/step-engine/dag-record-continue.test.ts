@@ -8,6 +8,7 @@ import { logger } from '@haive/shared';
 import {
   resolveDagPhase,
   resolveEscalationPhase,
+  resolveReviewPhase,
   replannerPrompt,
   parseCoderResult,
   ingestReviewRun,
@@ -1821,5 +1822,50 @@ it.each(['CONTINUE', 'ABORT'])(
       expect(Math.max(...writes)).toBeLessThan(stepLock);
     }
     expect(h.plan.escalationLog).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'DAGP-F3 blocked reviewer survives repeated Retry (consumed=%s)',
+  async (consumed) => {
+    const h = auxiliaryHarness('reviewer');
+    await expect(
+      h.fold(
+        auxiliaryFault('first', {
+          exitCode: 137,
+          errorMessage: 'CLI process exceeded its time budget',
+        }),
+      ),
+    ).rejects.toThrow(/DAG required/);
+    await expect(
+      h.fold(
+        auxiliaryFault('second', {
+          exitCode: 137,
+          errorMessage: 'CLI process exceeded its time budget',
+        }),
+      ),
+    ).rejects.toThrow(/switch the step's CLI/);
+    // A real Retry retains unconsumed reviewer runs and supersedes their invocations.
+    for (const inv of h.invocations) inv.supersededAt = new Date();
+    // The fake select keeps insertion order; keep only the actual latest run for this scenario.
+    h.runs.shift();
+    h.runs[0]!.cliInvocationId = 'second';
+    if (consumed) h.runs[0]!.consumedAt = new Date();
+    const originalConsumedAt = h.runs[0]!.consumedAt;
+    for (let retry = 0; retry < 4; retry++) {
+      await expect(resolveReviewPhase(h.args() as never)).rejects.toThrow(/switch the step's CLI/);
+      expect(h.runs[0]!.consumedAt).toEqual(originalConsumedAt);
+      expect(h.rows[0]!.reviewInfraRetries).toBe(0);
+      expect(h.rows[0]!.resolution).toBeNull();
+      expect(h.rows[0]!.errorMessage).toBeNull();
+    }
+    expect(h.enqueued).toEqual([]);
+    vi.mocked(resolveTaskDispatch).mockResolvedValue({
+      mode: 'cli',
+      providerId: 'replacement',
+      invocation: { kind: 'cli', spec: {} },
+    } as never);
+    await resolveReviewPhase(h.args() as never);
+    expect(h.enqueued).toHaveLength(1);
   },
 );

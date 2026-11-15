@@ -1328,28 +1328,15 @@ function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
   return !inv.truncationRetry;
 }
 
-/** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
- *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
- *  null when no provider would take it under fail-step; record-and-continue throws a
- *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
- *  (ingestAdvisor's fix coder) needs the id.
- *
- *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
- *  load-bearing rather than tidy: the moment the job is on the queue the run can start and
- *  resolveDagPhase can re-enter, so an issue claimed afterwards is briefly in whatever state
- *  the caller was trying to leave — which for the advisor's fix coder is exactly the
- *  `failed_unrecoverable` that section (D) re-stamps. */
-async function spawnReviewAgent(
+/** Resolve the actual provider and enforce its fault block before callers mutate retry state. */
+async function prepareReviewAgent(
   ra: ReviewArgs,
   issue: DagIssueRow,
   role: 'reviewer' | 'coder' | 'issue_advisor',
-  iteration: number,
   prompt: string,
   capabilities: StepCapability[],
-  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
   afterTruncation = false,
-  timeoutMs?: number,
-): Promise<string | null> {
+) {
   if (role === 'issue_advisor' && issueExcludedFromAdvice(issue)) {
     throw new Error('Refused or blocked DAG issue cannot be advised');
   }
@@ -1410,12 +1397,44 @@ async function spawnReviewAgent(
     return null;
   }
   await assertAuxiliaryDispatch(ra, role, plan.providerId);
+  return { plan, invocation: plan.invocation, worktreeRel, fullPrompt };
+}
+
+/** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
+ *  worktree, recording a dag_agent_runs row. Returns the cli_invocations id it created, or
+ *  null when no provider would take it under fail-step; record-and-continue throws a
+ *  retryable configuration fault instead. The caller that must ROUTE the run's result back to the issue
+ *  (ingestAdvisor's fix coder) needs the id.
+ *
+ *  `claim` runs after both rows exist and BEFORE the job is enqueued. That order is
+ *  load-bearing rather than tidy: the moment the job is on the queue the run can start and
+ *  resolveDagPhase can re-enter, so an issue claimed afterwards is briefly in whatever state
+ *  the caller was trying to leave — which for the advisor's fix coder is exactly the
+ *  `failed_unrecoverable` that section (D) re-stamps. */
+async function spawnReviewAgent(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  role: 'reviewer' | 'coder' | 'issue_advisor',
+  iteration: number,
+  prompt: string,
+  capabilities: StepCapability[],
+  claim?: (invocationId: string, db: ClaimDb) => Promise<void>,
+  afterTruncation = false,
+  timeoutMs?: number,
+  preparation?: Awaited<ReturnType<typeof prepareReviewAgent>>,
+): Promise<string | null> {
+  const prepared =
+    preparation === undefined
+      ? await prepareReviewAgent(ra, issue, role, prompt, capabilities, afterTruncation)
+      : preparation;
+  if (!prepared) return null;
+  const { plan, invocation, worktreeRel, fullPrompt } = prepared;
   const { id: invId } = await insertOwnedRun(ra.db, ra.current.id, {
     taskId: ra.taskId,
     taskStepId: ra.current.id,
     cliProviderId: plan.providerId,
     effort: plan.effort ?? null,
-    assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
+    assignedAgentIds: invocation.spec.assignedAgentIds ?? [],
     // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
     // concurrent invocations on the ONE 06c step, so it must be exempt from the
     // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
@@ -1470,7 +1489,7 @@ async function spawnReviewAgent(
     worktreeRel,
     cliProviderId: plan.providerId,
     kind: 'cli',
-    spec: plan.invocation.spec,
+    spec: invocation.spec,
     timeoutMs: timeoutMs ?? overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
   return invId;
@@ -1634,6 +1653,17 @@ export async function ingestReviewRun(
     }
     return;
   }
+  const reviewPreparation =
+    recordsFailures(ra.stepDef) && run.role === 'reviewer' && !parseReviewerOutput(inv)
+      ? await prepareReviewAgent(
+          ra,
+          issue,
+          'reviewer',
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+          ['tool_use'],
+          classifyDagIssueFailure(inv) === 'truncated' && truncationRetryable(inv),
+        )
+      : undefined;
   await consume();
 
   if (run.role === 'reviewer') {
@@ -1659,6 +1689,8 @@ export async function ingestReviewRun(
           ['tool_use'],
           undefined,
           true,
+          undefined,
+          reviewPreparation,
         );
         if (!ok)
           await setResolution(
@@ -1684,6 +1716,10 @@ export async function ingestReviewRun(
           issue.innerIteration,
           reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
+          undefined,
+          false,
+          undefined,
+          reviewPreparation,
         );
         if (!ok)
           await setResolution(
@@ -1844,6 +1880,15 @@ export async function resolveReviewPhase(
       // phase crash-resumable: re-spawn a fresh reviewer, bounded by the reviewer's OWN
       // transient budget; once it is spent, resolve failed_unrecoverable so the escalation
       // path (advisor) decides instead of the level wedging.
+      const preparation = recordsFailures(ra.stepDef)
+        ? await prepareReviewAgent(
+            ra,
+            issue,
+            'reviewer',
+            reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+            ['tool_use'],
+          )
+        : undefined;
       if (issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
         await ra.db
           .update(schema.taskDagIssues)
@@ -1856,6 +1901,10 @@ export async function resolveReviewPhase(
           issue.innerIteration,
           reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
+          undefined,
+          false,
+          undefined,
+          preparation,
         );
         if (!ok)
           await setResolution(
