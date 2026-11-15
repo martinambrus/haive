@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
+import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
@@ -1509,4 +1510,70 @@ describe('contract checks preserve pass ownership and continuation semantics', (
     expect(validateSuccessfulStepOutput).toHaveBeenCalledOnce();
     expect(state.taskStepRow.output).toBe(value);
   });
+});
+
+describe('manual insight choices under auto-continue', () => {
+  it.each([undefined, { selectedInsights: [] }])(
+    'parks with choices and legacy preset %j, then accepts a deliberate empty submit',
+    async (preset) => {
+      const state = freshState();
+      state.taskStepRow.stepId = '08e-insights-triage';
+      state.taskRow = {
+        id: 'task-1',
+        autoContinue: true,
+        preAnswers: preset ? { '08e-insights-triage': preset } : {},
+      };
+      const prompt = vi.fn(insightsTriageStep.llm!.buildPrompt);
+      const def = {
+        ...insightsTriageStep,
+        shouldRun: undefined,
+        detect: async () => ({
+          worktreePath: '/tmp',
+          sandboxWorktreePath: '/workspace',
+          spec: '',
+          insights: [
+            {
+              id: 'i1',
+              title: 'Improve handling',
+              location: 'a.ts:1',
+              sourceStep: '08c-code-review',
+            },
+          ],
+        }),
+        llm: { ...insightsTriageStep.llm!, buildPrompt: prompt },
+      } as StepDefinition;
+      const first = await run(state, def);
+      expect(first.status).toBe('waiting_form');
+      expect(state.taskStepRow.formValues).toBeNull();
+      expect(prompt).not.toHaveBeenCalled();
+      expect(state.invocation).toBeUndefined();
+      expect((await run(state, def, { selectedInsights: [] })).status).toBe('done');
+      expect(prompt).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it('upgrades a persisted 06 schema in a schema-only write while retaining saved answers and recommendation', async () => {
+  const state = freshState();
+  const old: FormSchema = {
+    title: 'Run',
+    fields: [{ id: 'simplifyCode', type: 'checkbox', label: 'Simplify', default: true }],
+  };
+  state.taskStepRow.stepId = '06-run-config';
+  state.taskStepRow.formSchema = old;
+  state.taskStepRow.formValues = { simplifyCode: false };
+  state.taskStepRow.waitingStartedAt = new Date('2026-01-01');
+  const def = makeStep({ form: () => old });
+  def.metadata.id = '06-run-config';
+  expect((await run(state, def)).status).toBe('done');
+  const patch = state.updates.find((u) => u.patch.formSchema)?.patch;
+  expect(Object.keys(patch!)).toEqual(['formSchema', 'updatedAt']);
+  expect(patch!.formSchema).toMatchObject({
+    fields: [
+      { id: 'simplifyCode', default: true },
+      { id: 'autoActOnInsights', default: false },
+    ],
+  });
+  expect(state.taskStepRow.formValues).toEqual({ simplifyCode: false });
+  expect(old.fields).toHaveLength(1);
 });

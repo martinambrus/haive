@@ -1,7 +1,8 @@
 import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import { autoActOnInsightsField } from '@haive/shared/schemas';
 import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
 import { CONFIG_KEYS, configService, extractFormDefaults } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -27,6 +28,8 @@ import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 // Gate 2 into tasks.pre_answers + the task run-config columns.
 
 interface RunConfigDetect {
+  /** Only this switch is remembered; old detect payloads resolve false. */
+  autoActOnInsightsDefault?: boolean;
   /** Downstream answers mapped back to form fields; absent on older detect payloads. */
   preAnswerDefaults?: Record<string, unknown>;
   /** Approved spec body (markdown), used only to ground the recommendation LLM. */
@@ -69,6 +72,7 @@ interface RunConfigDetect {
  *  test action, verify slots, sprint mode). Recorded in the step output and written to
  *  tasks.pre_answers. */
 interface RunConfig {
+  autoActOnInsights: boolean;
   adversarialQaLevel: string;
   simplifyCode: boolean;
   sprintDecision: string;
@@ -155,6 +159,39 @@ const ANSWER_FIELDS: Record<string, Record<string, keyof RunConfig>> = {
   '08b-test-management': { action: 'testAction', runTests: 'testRunTests' },
 };
 
+/** The latest completed task is the default source, even when its value is absent/legacy. */
+export async function loadLastCompletedAutoActOnInsights(
+  db: Database,
+  scope: { userId: string; repositoryId: string | null; type: string },
+): Promise<boolean> {
+  if (!scope.repositoryId) return false;
+  const [prior] = await db
+    .select({ autoActOnInsights: schema.tasks.autoActOnInsights })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, scope.userId),
+        eq(schema.tasks.repositoryId, scope.repositoryId),
+        eq(schema.tasks.type, scope.type),
+        eq(schema.tasks.status, 'completed'),
+      ),
+    )
+    .orderBy(desc(schema.tasks.completedAt), desc(schema.tasks.createdAt), desc(schema.tasks.id))
+    .limit(1);
+  return prior?.autoActOnInsights === true;
+}
+
+function resolveAutoActOnInsights(
+  answers: Record<string, unknown>,
+  preset: Record<string, unknown> | undefined,
+  remembered: unknown,
+): boolean {
+  if (Object.hasOwn(answers, 'autoActOnInsights')) return answers.autoActOnInsights === true;
+  if (preset && Object.hasOwn(preset, 'autoActOnInsights'))
+    return preset.autoActOnInsights === true;
+  return remembered === true;
+}
+
 export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
   preserveOmittedFormFields: true,
   metadata: {
@@ -195,6 +232,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: {
+        repositoryId: true,
+        type: true,
         adversarialQaLevel: true,
         maxFixRounds: true,
         executionPath: true,
@@ -210,6 +249,17 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     const verifyCommands = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
 
     return {
+      autoActOnInsightsDefault: resolveAutoActOnInsights(
+        {},
+        taskRow?.preAnswers?.['06-run-config'],
+        taskRow?.repositoryId && taskRow.type
+          ? await loadLastCompletedAutoActOnInsights(ctx.db, {
+              userId: ctx.userId,
+              repositoryId: taskRow.repositoryId,
+              type: taskRow.type,
+            })
+          : false,
+      ),
       preAnswerDefaults: Object.fromEntries(
         Object.entries(ANSWER_FIELDS).flatMap(([stepId, fields]) =>
           Object.entries(fields).flatMap(([key, source]) => {
@@ -506,11 +556,16 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       }
       return field;
     });
+    form.fields.push(autoActOnInsightsField(detected.autoActOnInsightsDefault));
     return form;
   },
 
   async apply(ctx, args): Promise<RunConfig> {
     const submitted = args.formValues as Record<string, unknown>;
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { preAnswers: true },
+    });
     // The runner keeps this step's answers sparse so omitted fields cannot masquerade
     // as submitted overrides. Resolve the same dynamic defaults as its form for workflows.
     const defaults = extractFormDefaults(
@@ -525,6 +580,11 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       return Number.isFinite(n) && n >= 1 && n <= 50 ? Math.floor(n) : fallback;
     };
     const runConfig: RunConfig = {
+      autoActOnInsights: resolveAutoActOnInsights(
+        submitted,
+        task?.preAnswers?.['06-run-config'],
+        args.detected.autoActOnInsightsDefault,
+      ),
       adversarialQaLevel: str(values.adversarialQaLevel, 'none'),
       simplifyCode: bool(values.simplifyCode, true),
       sprintDecision: str(values.sprintDecision, 'proceed'),
@@ -547,12 +607,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // Map run-config answers to the downstream steps' exact field ids. The runner
     // auto-submits these in auto-continue mode and pre-fills the forms otherwise.
     // 06a/07 get fixed empty entries so their optional-only forms auto-pass (detect-time
-    // defaults win); 08e gets an explicit empty selection so the optional-insights triage
-    // never blocks the run.
+    // defaults win). Insight choices remain a person's decision, even under auto-continue.
     const preAnswers: Record<string, Record<string, unknown>> = {
       '06a-db-migrate': {},
       '07-phase-2-implement': {},
-      '08e-insights-triage': { selectedInsights: [] },
     };
     for (const [stepId, fields] of Object.entries(ANSWER_FIELDS)) {
       preAnswers[stepId] = Object.fromEntries(
@@ -563,10 +621,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // Creation copied the type presets through normalizeStepFormValues. This step
     // is their only later writer: submitted fields win, while defaults only fill gaps.
     // Empty 06a/07 entries must not erase migration or implementation guidance.
-    const task = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { preAnswers: true },
-    });
     const mergedPreAnswers = { ...task?.preAnswers };
     for (const [stepId, answers] of Object.entries(preAnswers)) {
       const merged = { ...mergedPreAnswers[stepId] };
@@ -583,6 +637,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       .update(schema.tasks)
       .set({
         simplifyCode: runConfig.simplifyCode,
+        autoActOnInsights: runConfig.autoActOnInsights,
         adversarialQaLevel:
           runConfig.adversarialQaLevel !== 'none' ? runConfig.adversarialQaLevel : null,
         maxFixRounds: runConfig.maxFixRounds,

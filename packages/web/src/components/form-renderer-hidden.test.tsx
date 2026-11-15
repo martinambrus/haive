@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { FormSchema } from '@haive/shared';
+import { autoActOnInsightsField } from '@haive/shared/schemas';
 import { FormRenderer } from './form-renderer';
 import { validateRequired } from './form-validation';
 
@@ -72,4 +73,13 @@ describe('FormRenderer with a hidden textarea', () => {
     expect(validateRequired(required, {})).toBeNull();
     expect(render(required)).not.toContain('Editor state');
   });
+});
+
+it('never offers the insight auto-action checkbox, including with a remembered true', () => {
+  const field = autoActOnInsightsField(true);
+  expect(field).toMatchObject({ type: 'checkbox', default: false });
+  expect(render({ title: 'Run configuration', fields: [field] })).not.toContain(
+    'Automatically apply',
+  );
+  expect(render({ title: 'Run configuration', fields: [field] })).not.toContain('type="checkbox"');
 });

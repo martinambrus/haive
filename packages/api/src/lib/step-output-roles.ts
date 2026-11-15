@@ -1,3 +1,5 @@
+import { upgradeRunConfigSchema } from '@haive/shared/schemas';
+import type { FormSchema } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { projectStepOutputRoles, type RoleTaskPin } from '@haive/shared/step-outputs';
@@ -19,5 +21,10 @@ export async function projectTaskStepOutputRoles<T extends { stepId: string }>(
     });
     pin = { ...task, runListStrategy: definition?.runListStrategy };
   }
-  return projectStepOutputRoles(pin, steps);
+  return projectStepOutputRoles(pin, steps).map((step) => {
+    if (!('formSchema' in step)) return step;
+    const previous = step.formSchema as FormSchema | null;
+    const formSchema = upgradeRunConfigSchema(step.stepId, previous);
+    return formSchema === previous ? step : { ...step, formSchema };
+  });
 }
