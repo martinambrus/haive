@@ -285,7 +285,53 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     expect(blobs).toHaveLength(0);
   });
 
-  it.each(['superseded', 'stopped', 'failed'] as const)(
+  it('keeps an ended DAG sibling open for its normal finish without tainting later passes', async () => {
+    const meta = await seed();
+    await db
+      .update(schema.cliInvocations)
+      .set({ mode: 'dag_parallel' })
+      .where(eq(schema.cliInvocations.id, meta.invocationId));
+    await beginFixTestCapture(db, meta);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'legitimate sibling edit');
+    await end(meta.invocationId);
+    const [next] = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: meta.taskId,
+        taskStepId: meta.taskStepId,
+        mode: 'dag_parallel',
+        prompt: 'sibling fix',
+      })
+      .returning();
+    // resolveReviewPhase can begin issue X's next coder before ingesting ended issue Z.
+    await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2 });
+    await loadFixTestRecords(db, meta.taskId);
+    const unsettled = await db.query.taskEvents.findMany({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(unsettled).toHaveLength(0);
+    await finishFixTestCapture(db, meta.invocationId);
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), 'later sibling edit');
+    await end(next!.id);
+    await finishFixTestCapture(db, next!.id);
+    const records = await loadFixTestRecords(db, meta.taskId);
+    expect(records).toHaveLength(2);
+    expect(records.every((r) => r.state === 'captured')).toBe(true);
+    expect(records[0]!.changes[0]!.patch).toContain('+legitimate sibling edit');
+    expect(records[1]!.changes[0]!.patch).toContain('+later sibling edit');
+    const settled = await db.query.taskEvents.findMany({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(settled.every((e) => !e.payload?.protectedChanged)).toBe(true);
+  });
+
+  it.each(['superseded', 'stopped', 'failed', 'step reset', 'epoch moved'] as const)(
     'taints a %s repair before the next pass can retain moved content',
     async (terminal) => {
       const meta = await seed();
@@ -299,7 +345,7 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
       await db
         .update(schema.cliInvocations)
         .set({
-          ...(terminal !== 'failed' ? { supersededAt: new Date() } : {}),
+          ...(['superseded', 'stopped'].includes(terminal) ? { supersededAt: new Date() } : {}),
           ...(terminal !== 'superseded'
             ? { endedAt: new Date(), exitCode: terminal === 'failed' ? 1 : 137 }
             : {}),
@@ -307,21 +353,30 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
         .where(eq(schema.cliInvocations.id, meta.invocationId));
       await db
         .update(schema.taskSteps)
-        .set({ status: 'failed' })
+        .set({ status: terminal === 'epoch moved' ? 'waiting_cli' : 'failed' })
         .where(eq(schema.taskSteps.id, meta.taskStepId));
       await db
         .update(schema.tasks)
-        .set({ status: 'failed', orchestrationEpoch: 1 })
+        .set({ status: 'running', orchestrationEpoch: terminal === 'step reset' ? 0 : 1 })
         .where(eq(schema.tasks.id, meta.taskId));
       // The old pass is never handed back to resolveLlmPhase after Stop/Retry.
       await db
         .update(schema.tasks)
         .set({ status: 'running' })
         .where(eq(schema.tasks.id, meta.taskId));
-      await db
-        .update(schema.taskSteps)
-        .set({ status: 'waiting_cli' })
-        .where(eq(schema.taskSteps.id, meta.taskStepId));
+      if (terminal !== 'step reset')
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli' })
+          .where(eq(schema.taskSteps.id, meta.taskStepId));
+      // Reconcile while the reset row still proves loss of ownership.
+      if (terminal === 'step reset') {
+        await loadFixTestRecords(db, meta.taskId);
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_cli' })
+          .where(eq(schema.taskSteps.id, meta.taskStepId));
+      }
       const [next] = await db
         .insert(schema.cliInvocations)
         .values({
@@ -331,7 +386,12 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
           prompt: 'next',
         })
         .returning();
-      await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2, epoch: 1 });
+      await beginFixTestCapture(db, {
+        ...meta,
+        invocationId: next!.id,
+        pass: 2,
+        epoch: terminal === 'step reset' ? 0 : 1,
+      });
       await writeFile(join(meta.workspace, 'tests/config.json'), `${secret} edited`);
       await end(next!.id);
       await finishFixTestCapture(db, next!.id);

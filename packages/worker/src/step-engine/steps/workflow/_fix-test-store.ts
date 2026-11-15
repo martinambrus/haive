@@ -202,6 +202,14 @@ async function owned(tx: Tx, meta: CaptureMeta, ended: boolean): Promise<boolean
     .where(eq(schema.cliInvocations.id, meta.invocationId))
     .for('no key update');
   if (!run || run.supersededAt || (ended ? !run.endedAt : run.endedAt)) return false;
+  return ownsCaptureStep(tx, meta);
+}
+
+/** Called with the invocation lock held, preserving Retry/Stop lock order. */
+async function ownsCaptureStep(
+  tx: Tx,
+  meta: Pick<CaptureMeta, 'taskId' | 'taskStepId' | 'epoch'>,
+): Promise<boolean> {
   if (!(await lockOwnedStep(tx, meta.taskStepId))) return false;
   const [task] = await tx
     .select({ status: schema.tasks.status, epoch: schema.tasks.orchestrationEpoch })
@@ -333,9 +341,22 @@ async function closeTerminalCapture(db: Database, taskId: string, invocationId: 
     if (!run || (!run.endedAt && !run.supersededAt)) return;
     const before = await stored(tx, taskId, invocationId, FIX_TEST_BEFORE);
     if (!before || (await stored(tx, taskId, invocationId, FIX_TEST_AFTER))) return;
+    // Ended is not abandoned: a DAG sibling may still be due for ingestion in
+    // this same tick. Only ownership loss proves its normal finish cannot land.
+    const refBefore = before.payload as unknown as Reference;
+    if (
+      !run.supersededAt &&
+      before.taskStepId &&
+      (await ownsCaptureStep(tx, {
+        taskId,
+        taskStepId: before.taskStepId,
+        epoch: refBefore.epoch,
+      }))
+    )
+      return;
     const image: TestImage = {
       state: 'not captured',
-      reason: 'Invocation ended without a settled repair capture.',
+      reason: 'Invocation lost ownership without a settled repair capture.',
     };
     const ref = fixTestManifestReference(before.payload as unknown as Reference, image);
     await retainManifest(tx, taskId, image, ref.manifestHash!);
