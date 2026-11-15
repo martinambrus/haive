@@ -931,14 +931,15 @@ Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.
 7. No test sets setuid, setgid or sticky on a tracked file, though the `& 0o7777` mode check refuses them (`committed-snapshot.ts` ~:384); coverage only.
 8. `{ ...SNAPSHOT_LIMITS, ...opts.limits }` (~:142) turns an explicit `undefined` limit into `NaN`, which never refuses; no production caller passes `limits` (theoretical, same for every limit).
 
-### T686 · FNF[dag-partial] · record-and-continue DAG policy lows, after #1217 (+2)
+### T686 · FNF[dag-partial] · record-and-continue DAG policy lows, after #1217 (+3)
 
-status: open (item 1 MUST land before any workflow opts into `record-and-continue`) · kind: fix · found: #1217 review-2 2026-11-15 · priority: P2
+status: open (items 1 and 3 MUST land before any workflow opts into `record-and-continue`) · kind: fix · found: #1217 review-2 2026-11-15 · priority: P2
 
 Reviews in `.claude/tmp/codex-run/P9-S/` (review-2.md, review-3.md).
 
 1. MEDIUM, REGRESSION (opt-in only, unreachable today): a deterministic auxiliary fault (for example a replanner prompt the provider always content-filters) faults again on every Retry, because a fault spends neither `advisorInvocations` nor `replannerInvocations` and `resetDagCurrentLevelForRetry` re-runs the same prompt (`worker/src/step-engine/dag-executor.ts` parseReplanner ~:2133, parseAdvisor ~:2093). The replanner has no `isProviderRefusal` branch, unlike the advisor (~:2246). Fix direction: treat a replanner content-filter refusal like the advisor's (an explicit outcome), and/or bound consecutive hard faults per auxiliary role with a counter separate from the replan budget, ending in a clear non-retry message. Docs (fix-loop.md) currently say Retry does not cure it and to switch the step's CLI.
 2. LOW: `dag-executor.test.ts` runs about 10 s, over the 5 s per-file budget (testing.md); split the per-policy provider cases into their own file if it grows.
+3. MEDIUM, REGRESSION (opt-in only, #1217 Greptile P1): `ingestReviewRun` (`dag-executor.ts` ~:1564) never calls `assertEscalationEnvironment`, so under opt-in a reviewer or fix-coder run that ended in an environment, outage or interrupted fault is consumed and the review loop continues (another reviewer, or escalation records the issue). Fix direction: call the check after the content-filter branch and before the truncation and re-spawn handling (it returns early for never-answered runs); controls for reviewer and fix coder under both policies.
 
 ### T685 · Typed step ports: roles in addition to step ids (series, approved)
 
