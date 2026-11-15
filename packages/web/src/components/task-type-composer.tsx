@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CORE_INTEGRATION_CATEGORY_SPECS,
   promptStepId,
+  validateComposition,
   type ComposableStepEntry,
   type CompositionIssue,
 } from '@haive/shared/modularity';
@@ -46,7 +47,6 @@ import { cn } from '@/lib/cn';
 import { Badge, Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { StepPortView } from './step-port-view';
-import { validateComposition } from '@haive/shared/modularity';
 import { PromptStepEditor } from '@/components/prompt-step-editor';
 
 interface TaskTypeComposerProps {

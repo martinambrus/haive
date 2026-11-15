@@ -1162,7 +1162,7 @@ taskRoutes.get('/:id/ports', async (c) => {
     runListStrategy = definition?.runListStrategy;
   }
   const steps = await db
-    .select({ stepId: schema.taskSteps.stepId })
+    .select({ stepId: schema.taskSteps.stepId, title: schema.taskSteps.title })
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, task.id))
     .orderBy(

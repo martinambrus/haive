@@ -130,3 +130,19 @@ it('shows only the unselected candidate without replacement bindings', async () 
     [],
   );
 });
+
+it('uses persisted history titles for canvas nodes', async () => {
+  const fake = setup();
+  fake.insert(schema.taskSteps, {
+    id: '00000000-0000-4000-8000-000000000003',
+    taskId: TASK,
+    stepId: '04-phase-0b-pre-planning',
+    title: 'Historical spec title',
+    round: 0,
+    runSeq: 0,
+    stepIndex: 4,
+  });
+  const response = await app.request(`/tasks/${TASK}/ports`);
+  const body = (await response.json()) as StepPortProjection;
+  expect(body.candidates[0]!.graph.nodes[0]!.label).toBe('Historical spec title');
+});
