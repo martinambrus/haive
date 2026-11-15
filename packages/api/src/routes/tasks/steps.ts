@@ -996,6 +996,9 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     await appendTaskEvent(tx, id, step.id, 'step.form_submitted', {
       stepId,
       fieldCount: Object.keys(values).length,
+      ...(stepId === '09-gate-2-verify-approval'
+        ? { userId, generation: step.rerunGeneration, decision: values.decision }
+        : {}),
     });
   };
   await db.transaction(async (tx) => {

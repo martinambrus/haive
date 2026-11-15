@@ -168,3 +168,42 @@ it('answers queued true when the queue accepts', async () => {
   });
   expect(await res.json()).toEqual({ ok: true, queued: true });
 });
+
+it('binds a gate-2 human decision to the authenticated owner and parked generation', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  const stepId = '09-gate-2-verify-approval';
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId,
+    status: 'waiting_form',
+    round: 2,
+    rerunGeneration: 3,
+    idleMs: 0,
+    waitingStartedAt: fake.now(),
+  });
+  h.db = fake.db;
+  h.add.mockResolvedValueOnce(undefined);
+  const response = await app.request(`/${TASK}/steps/${stepId}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { decision: 'approve' } }),
+  });
+  expect(response.status).toBe(200);
+  expect(fake.rows(schema.taskEvents)).toEqual([
+    expect.objectContaining({
+      taskId: TASK,
+      taskStepId: fake.rows(schema.taskSteps)[0]!.id,
+      eventType: 'step.form_submitted',
+      payload: expect.objectContaining({ userId: USER, generation: 3, decision: 'approve' }),
+    }),
+  ]);
+  expect(fake.rows(schema.taskSteps)[0]).toMatchObject({
+    waitingStartedAt: null,
+    formValues: { decision: 'approve' },
+  });
+});

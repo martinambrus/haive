@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lte, isNull, notInArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, lte, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { lockOwnedStep, StepSupersededError } from '../step-engine/step-ownership.js';
 import { readInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
@@ -25,6 +25,46 @@ export async function pendingInsightApproval(db: Database, taskId: string): Prom
     pending = p.kind === 'verify_failed' ? p.batchId : null;
   }
   return pending;
+}
+
+/** Only the owner-authenticated submit route can attest a decision for this generation.
+ * Saved defaults, queue payloads and legacy events are not human approval evidence. */
+export async function freshInsightGate2Submission(
+  db: Pick<Database, 'query'>,
+  userId: string,
+  row: typeof schema.taskSteps.$inferSelect,
+): Promise<boolean> {
+  const decision = row.formValues?.decision;
+  if (
+    row.stepId !== '09-gate-2-verify-approval' ||
+    row.waitingStartedAt !== null ||
+    (decision !== 'approve' && decision !== 'reject')
+  )
+    return false;
+  const submission = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, row.taskId),
+      eq(schema.taskEvents.taskStepId, row.id),
+      eq(schema.taskEvents.eventType, 'step.form_submitted'),
+      // Compare at PostgreSQL precision; JavaScript Dates truncate microseconds.
+      gt(
+        schema.taskEvents.createdAt,
+        sql`(
+        select max(failed.created_at) from ${schema.taskEvents} failed
+        where failed.task_id = ${row.taskId} and failed.event_type = 'insight.check'
+          and failed.payload->>'kind' = 'verify_failed'
+      )`,
+      ),
+    ),
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
+  if (
+    submission?.payload?.userId !== userId ||
+    submission.payload.generation !== row.rerunGeneration ||
+    submission.payload.decision !== decision
+  )
+    return false;
+  return true;
 }
 /** A gate-3 cycle outlives its triage checkpoint and ordinary blocking fix rounds. */
 export async function gate3InsightCycle(db: Database, taskId: string, round: number) {
@@ -66,8 +106,9 @@ export async function recordGate3Check(
 ): Promise<void> {
   const cycle = await gate3InsightCycle(db, ctx.taskId, row.round);
   const batchId =
-    cycle?.request.batchId ??
-    (kind === 'gate2_approved' ? await pendingInsightApproval(db, ctx.taskId) : null);
+    kind === 'gate2_approved'
+      ? await pendingInsightApproval(db, ctx.taskId)
+      : cycle?.request.batchId;
   if (!batchId) return;
   await db.transaction(async (tx) => {
     if (!(await lockOwnedStep(tx, row.id))) throw new StepSupersededError(row.id);
@@ -90,6 +131,8 @@ export async function recordGate3Check(
       )
       .for('share');
     if (!task) throw new StepSupersededError(row.id);
+    if (kind === 'gate2_approved' && !(await freshInsightGate2Submission(tx, ctx.userId, held)))
+      throw new Error('A fresh owner gate-2 submission is required after failed insight checks.');
     const previous = await tx.query.taskEvents.findMany({
       where: and(
         eq(schema.taskEvents.taskId, ctx.taskId),

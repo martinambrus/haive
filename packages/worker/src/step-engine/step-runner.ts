@@ -1,4 +1,8 @@
-import { recordGate3Check } from '../queues/insight-gate3-return.js';
+import {
+  recordGate3Check,
+  pendingInsightApproval,
+  freshInsightGate2Submission,
+} from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
@@ -3506,7 +3510,19 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
-    const rawPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const insightApprovalRequired =
+      meta.id === '09-gate-2-verify-approval' &&
+      (await pendingInsightApproval(db, taskId)) !== null;
+    const insightHumanSubmission =
+      insightApprovalRequired && (await freshInsightGate2Submission(db, params.userId, current));
+    // A queue payload is delivery, never proof of a person. Only the submit route's
+    // atomic saved answer/event can satisfy the failed-insight approval requirement.
+    if (insightApprovalRequired && !insightHumanSubmission && current.formValues) {
+      current = await updateRow(db, current.id, { formValues: null });
+    }
+    const rawPreAnswer = insightApprovalRequired
+      ? undefined
+      : (taskFlags?.preAnswers ?? {})[meta.id];
     const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
     if (normalizedPreAnswer && !normalizedPreAnswer.success)
       throw new Error(normalizedPreAnswer.issues.join('; '));
@@ -3548,9 +3564,25 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    if (insightApprovalRequired && persistedSchema) {
+      // Remove an old/preset approve default too: an omitted decision must not be
+      // expanded into consent when this refreshed form is submitted.
+      persistedSchema = {
+        ...persistedSchema,
+        autoSubmit: false,
+        fields: persistedSchema.fields.map((field) =>
+          field.id === 'decision' ? { ...field, default: undefined } : field,
+        ),
+      };
+      current = await updateRow(db, current.id, { formSchema: persistedSchema });
+    }
+
     // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
     // set, so values a job carries can only be a submit sent before it: the form parks instead.
-    const submitted = redetected || current.pauseFormOnRetry ? undefined : params.formValues;
+    const submitted =
+      redetected || current.pauseFormOnRetry || insightApprovalRequired
+        ? undefined
+        : params.formValues;
 
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -3596,6 +3628,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
         // user can inspect and edit. Cleared on park below (one-shot).
         !isGateForm &&
+        !insightApprovalRequired &&
         !current.pauseFormOnRetry &&
         !meta.alwaysWaitForUser &&
         (autoContinue || persistedSchema.autoSubmit === true) &&

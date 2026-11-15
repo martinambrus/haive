@@ -34,7 +34,7 @@ import { advanceStep, finishedStepResult } from '../src/step-engine/step-runner.
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { lockOwnedStep } from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
-import type { StepContext } from '../src/step-engine/step-definition.js';
+import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 import {
   insightBatchId,
   ensureInsightIntent,
@@ -984,6 +984,286 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       throwIfCancelled() {},
     } as unknown as StepContext;
   }
+  it.each(
+    [
+      'preAnswerDefaults',
+      'preAnswers',
+      'prior-task reuse',
+      'autoContinue',
+      'form autoSubmit',
+      'step defaults',
+      'saved synthetic answer',
+      'job answer',
+    ].flatMap((source) => [[source, true] as const, [source, false] as const]),
+  )('INS5 fresh approval: %s (latched=%s)', async (source, latched) => {
+    const ctx = await seed();
+    const gateId = '09-gate-2-verify-approval';
+    const preset = { [gateId]: { decision: 'approve' } };
+    let preAnswers = source === 'preAnswers' ? preset : {};
+    let type = 'workflow';
+    if (source === 'preAnswerDefaults') {
+      type = `ins5-${randomUUID()}`;
+      const [definition] = await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: 'Insight approval preset',
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [gateId],
+          preAnswerDefaults: preset,
+        })
+        .returning();
+      // Task creation copies these defaults; the worker must distrust that copy too.
+      preAnswers = definition!.preAnswerDefaults!;
+    }
+    await db
+      .update(schema.tasks)
+      .set({
+        type,
+        currentStepId: gateId,
+        currentRound: 0,
+        autoContinue: source !== 'form autoSubmit',
+        preAnswers,
+      })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await db
+      .update(schema.taskSteps)
+      .set({
+        stepId: gateId,
+        status: 'pending',
+        detectOutput: {},
+        formValues: source === 'saved synthetic answer' ? { decision: 'approve' } : null,
+      })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    if (latched)
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: ctx.taskStepId,
+        eventType: 'insight.check',
+        payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+      });
+    const apply = vi.fn(async (_ctx, args) => ({ decision: args.formValues.decision }));
+    const step: StepDefinition = {
+      metadata: {
+        id: gateId,
+        index: 9,
+        workflowType: 'workflow',
+        title: 'Gate 2',
+        description: '',
+        requiresCli: false,
+        autoSubmitDefaults: source === 'step defaults',
+        reuseLastCompletedFormValues: source === 'prior-task reuse',
+      },
+      form: () => ({
+        title: 'Gate 2',
+        autoSubmit: source === 'form autoSubmit',
+        fields: [
+          {
+            id: 'decision',
+            type: 'select',
+            label: 'Decision',
+            required: true,
+            options: [
+              { value: 'approve', label: 'Approve' },
+              { value: 'reject', label: 'Reject' },
+            ],
+            default: 'approve',
+          },
+        ],
+      }),
+      apply,
+    };
+    // A prior task's answer is read only with a matching repository and type.
+    if (source === 'prior-task reuse') {
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'ins5 approval',
+          source: 'blank',
+          storagePath: '/unused',
+          localPath: '/unused',
+        })
+        .returning();
+      await db
+        .update(schema.tasks)
+        .set({ repositoryId: repo!.id })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      const [prior] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: repo!.id,
+          type,
+          title: 'prior',
+          status: 'completed',
+          completedAt: new Date(),
+        })
+        .returning();
+      await db.insert(schema.taskSteps).values({
+        taskId: prior!.id,
+        stepId: gateId,
+        stepIndex: 9,
+        title: 'Gate 2',
+        status: 'done',
+        formValues: { decision: 'approve' },
+      });
+    }
+    const params = {
+      db,
+      taskId: ctx.taskId,
+      userId,
+      repoPath: '/unused',
+      workspacePath: '/unused',
+      cliProviderId: null,
+      stepDef: step,
+      epoch: 0,
+      round: 0,
+      moduleDeactivation: null,
+      ...(source === 'job answer' ? { formValues: { decision: 'approve' } } : {}),
+    };
+    try {
+      const result = await advanceStep(params);
+      if (!latched) {
+        expect(result.status).toBe(source === 'autoContinue' ? 'waiting_form' : 'done');
+        expect(
+          (result.row.formSchema as { fields: { default?: unknown }[] }).fields[0]!.default,
+        ).toBe('approve');
+        expect(await pendingInsightApproval(db, ctx.taskId)).toBeNull();
+        if (source !== 'autoContinue') expect(apply).toHaveBeenCalledOnce();
+        return;
+      }
+      expect(result.status).toBe('waiting_form');
+      expect(result.row.formValues).toBeNull();
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(
+        (result.row.formSchema as { fields: { default?: unknown }[] }).fields[0]!.default,
+      ).toBeUndefined();
+      expect(apply).not.toHaveBeenCalled();
+      expect(await pendingInsightApproval(db, ctx.taskId)).toBe('failed-batch');
+      await expect(
+        recordGate3Check(
+          db,
+          {
+            taskId: ctx.taskId,
+            userId,
+            orchestrationEpoch: 0,
+          },
+          result.row,
+          'gate2_approved',
+        ),
+      ).rejects.toThrow(/fresh owner gate-2 submission/);
+      if (source === 'autoContinue') {
+        for (const invalid of [
+          'owner',
+          'generation',
+          'row',
+          'legacy',
+          'before failure',
+          'omitted decision',
+        ]) {
+          await db
+            .delete(schema.taskEvents)
+            .where(
+              and(
+                eq(schema.taskEvents.taskId, ctx.taskId),
+                eq(schema.taskEvents.eventType, 'step.form_submitted'),
+              ),
+            );
+          await db
+            .update(schema.taskSteps)
+            .set({ formValues: { decision: 'approve' }, waitingStartedAt: null })
+            .where(eq(schema.taskSteps.id, ctx.taskStepId));
+          await db.insert(schema.taskEvents).values({
+            taskId: ctx.taskId,
+            taskStepId: invalid === 'row' ? null : ctx.taskStepId,
+            eventType: 'step.form_submitted',
+            ...(invalid === 'before failure' ? { createdAt: new Date(0) } : {}),
+            payload:
+              invalid === 'legacy'
+                ? { stepId: gateId, fieldCount: 1 }
+                : {
+                    userId: invalid === 'owner' ? randomUUID() : userId,
+                    generation: invalid === 'generation' ? 1 : 0,
+                    ...(invalid === 'omitted decision' ? {} : { decision: 'approve' }),
+                  },
+          });
+          const refused = await advanceStep(params);
+          expect(refused.status, invalid).toBe('waiting_form');
+          expect(await pendingInsightApproval(db, ctx.taskId), invalid).toBe('failed-batch');
+          expect(apply, invalid).not.toHaveBeenCalled();
+        }
+      }
+      // This is the submit route's atomic answer + structural attestation. The API
+      // route control independently proves the authenticated writer emits it.
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskSteps)
+          .set({ formValues: { decision: 'approve' }, waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          eventType: 'step.form_submitted',
+          payload: { userId, generation: 0, decision: 'approve' },
+        });
+      });
+      // A forged queue answer cannot replace the owner's saved decision.
+      expect(await advanceStep({ ...params, formValues: { decision: 'reject' } })).toMatchObject({
+        status: 'done',
+        output: { decision: 'approve' },
+      });
+      expect(await pendingInsightApproval(db, ctx.taskId)).toBeNull();
+      expect(apply).toHaveBeenCalledOnce();
+      if (source === 'preAnswers') {
+        const workspace = await mkdtemp(join(tmpdir(), 'ins5-approved-commit-'));
+        try {
+          await gitExec(['init'], { cwd: workspace });
+          await gitExec(
+            [
+              '-c',
+              'user.name=Test',
+              '-c',
+              'user.email=test@haive.local',
+              'commit',
+              '--allow-empty',
+              '-m',
+              'base',
+            ],
+            { cwd: workspace },
+          );
+          await writeFile(join(workspace, 'approved.txt'), 'approved improvement\n');
+          const { gate3CommitStep } =
+            await import('../src/step-engine/steps/workflow/10-gate-3-commit.js');
+          const commitCtx = {
+            ...ctx,
+            repoPath: workspace,
+            workspacePath: workspace,
+            logger: { info() {}, warn() {}, error() {}, debug() {} },
+          } as unknown as StepContext;
+          const committed = await gate3CommitStep.apply(commitCtx, {
+            detected: { hasGit: true, workspacePath: workspace },
+            formValues: { commit: true, commitMessage: 'Apply approved improvement' },
+          } as never);
+          expect(committed).toMatchObject({ committed: true });
+          expect(
+            (await gitExec(['log', '-1', '--format=%s'], { cwd: workspace })).stdout.trim(),
+          ).toBe('Apply approved improvement');
+        } finally {
+          await rm(workspace, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      // User cascade removes the tasks, but the custom type has no owner FK.
+      if (source === 'preAnswerDefaults') {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, ctx.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    }
+  });
   it('deduplicates concurrent stages under the source-row lock', async () => {
     const ctx = await seed();
     const [a, b] = await Promise.all([
@@ -1469,8 +1749,15 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
             round: 2,
             status: 'done',
             output: { decision: 'approve' },
+            formValues: { decision: 'approve' },
           })
           .returning();
+        await db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: approval!.id,
+          eventType: 'step.form_submitted',
+          payload: { userId, generation: approval!.rerunGeneration, decision: 'approve' },
+        });
         await recordGate3Check(
           db,
           { ...ctx, orchestrationEpoch: checks!.epoch },
