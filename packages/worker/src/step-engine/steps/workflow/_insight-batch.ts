@@ -211,7 +211,6 @@ export async function appendInsightBatch(
           eq(schema.tasks.userId, ctx.userId),
           ...(ctx.epoch == null ? [] : [eq(schema.tasks.orchestrationEpoch, ctx.epoch)]),
           notInArray(schema.tasks.status, ['failed', 'cancelled', 'completed']),
-          isNull(schema.tasks.pausedAt),
           isNull(schema.tasks.deadAt),
         ),
       )

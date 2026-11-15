@@ -989,22 +989,46 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     expect(records).toHaveLength(2);
     expect(records[0]!.items[0]!.outcome).toBe('unconfirmed');
   });
-  it.each(['pause', 'Stop', 'dead', 'Cancel', 'epoch', 'foreign owner'])(
+  it.each(['intent', 'reservation', 'invocation', 'outcome'] as const)(
+    'allows the in-flight %s write while paused',
+    async (stage) => {
+      const ctx = await seed();
+      const intent = await ensureInsightIntent(ctx, selected);
+      await db
+        .update(schema.tasks)
+        .set({ pausedAt: new Date() })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      if (stage === 'intent')
+        await expect(ensureInsightIntent(ctx, selected)).resolves.toEqual(intent);
+      if (stage === 'reservation')
+        await recordInsightReservation(ctx, `implementer-${intent.batchId}`, 'mining');
+      if (stage === 'invocation')
+        await recordInsightInvocation(ctx, `implementer-${intent.batchId}`, 'mining', 'run');
+      if (stage === 'outcome')
+        await appendInsightBatch(ctx, {
+          ...intent,
+          stage,
+          items: intent.items.map((i) => ({ ...i, outcome: 'not_applied' })),
+        });
+      expect((await loadInsightBatchRecords(db, ctx.taskId)).some((r) => r.stage === stage)).toBe(
+        true,
+      );
+    },
+  );
+  it.each(['Stop', 'dead', 'Cancel', 'epoch', 'foreign owner'])(
     'refuses %s at the journal fence',
     async (kind) => {
       const ctx = await seed();
       const patch =
-        kind === 'pause'
-          ? { pausedAt: new Date() }
-          : kind === 'Stop'
-            ? { status: 'failed' as const }
-            : kind === 'dead'
-              ? { deadAt: new Date() }
-              : kind === 'Cancel'
-                ? { status: 'cancelled' as const }
-                : kind === 'epoch'
-                  ? { orchestrationEpoch: 1 }
-                  : {};
+        kind === 'Stop'
+          ? { status: 'failed' as const }
+          : kind === 'dead'
+            ? { deadAt: new Date() }
+            : kind === 'Cancel'
+              ? { status: 'cancelled' as const }
+              : kind === 'epoch'
+                ? { orchestrationEpoch: 1 }
+                : {};
       await db
         .update(schema.tasks)
         .set({ ...patch, updatedAt: new Date() })
