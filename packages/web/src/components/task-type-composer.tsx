@@ -1,5 +1,10 @@
-import { projectStepPorts, type DataRoleBindingsDraft } from '@haive/shared/step-ports';
-('use client');
+'use client';
+
+import {
+  projectStepPorts,
+  type DataRoleBindingsDraft,
+  type PortProjectionOptions,
+} from '@haive/shared/step-ports';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -58,6 +63,7 @@ interface TaskTypeComposerProps {
     limitsEditable: boolean;
   };
   dataRoleBindings?: DataRoleBindingsDraft;
+  roleBindings?: PortProjectionOptions['roleBindings'];
   onBind?: (consumer: string, input: string, producer: string) => void;
   portRequest?: { path: string; body?: unknown };
   executionPath?: string | null;
@@ -174,6 +180,7 @@ function groupedSteps(catalog: TaskTypeCatalog, query: string) {
 
 export function TaskTypeComposer({
   dataRoleBindings,
+  roleBindings,
   onBind,
   catalog,
   portRequest,
@@ -207,6 +214,24 @@ export function TaskTypeComposer({
       ? base
       : withPromptStepEntries(base, typeSlug, requiresRepository, promptSteps);
   }, [catalog, typeSlug, requiresRepository, promptSteps]);
+  const draftPorts = useMemo(() => {
+    // Empty bindings keep the server projection (including its labels and issues).
+    if (stepIds === null || !dataRoleBindings?.length) return {};
+    try {
+      return {
+        graph: projectStepPorts(stepIds, {
+          declarations: entries,
+          labels: new Map([...entries].map(([id, entry]) => [id, entry.label])),
+          roleBindings,
+          dataRoleBindings,
+          executionPath: executionPath ?? null,
+        }),
+      };
+    } catch {
+      // Saved choices can outlive a module or input. Keep the list and Clear binding usable.
+      return { issue: 'Data inputs: invalid declarations or producer choice' };
+    }
+  }, [stepIds, entries, roleBindings, dataRoleBindings, executionPath]);
   const [openPromptSlug, setOpenPromptSlug] = useState<string | null>(null);
   const openStepId =
     prompt && openPromptSlug !== null ? promptStepId(prompt.typeSlug, openPromptSlug) : null;
@@ -473,20 +498,11 @@ export function TaskTypeComposer({
             )}
           </div>
         )}
+        {draftPorts.issue && (
+          <InlineMarkdown className="text-sm text-red-300" body={draftPorts.issue} />
+        )}
         <StepPortView
-          draftGraph={
-            dataRoleBindings
-              ? projectStepPorts(stepIds, {
-                  declarations: entries,
-                  dataRoleBindings: dataRoleBindings.filter(
-                    (b) =>
-                      b.executionPath !== (executionPath ?? null) ||
-                      stepIds.includes(b.consumerStepId),
-                  ),
-                  executionPath: executionPath ?? null,
-                })
-              : undefined
-          }
+          draftGraph={draftPorts.graph}
           onBind={onBind}
           request={
             portRequest ?? {

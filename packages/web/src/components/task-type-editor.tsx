@@ -1,9 +1,10 @@
+'use client';
+
 import {
   bindPortInput,
   dataRoleDraftIssues,
   type DataRoleBindingsDraft,
 } from '@haive/shared/step-ports';
-('use client');
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -616,6 +617,7 @@ export function TaskTypeEditor({
                 },
               },
               executionPath: selectedCandidate?.executionPath ?? null,
+              roleBindings: selectedCandidate?.roleBindings,
             }
           : {})}
         integrationCategories={integrationCategories}

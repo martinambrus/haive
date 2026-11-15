@@ -41,8 +41,9 @@ export function StepPortView({
   const [result, setResult] = useState<{ key: string; data: StepPortProjection } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const key = JSON.stringify(request);
+  const editable = onBind !== undefined;
   useEffect(() => {
-    if (draftGraph || !canvas || !hasSteps) return;
+    if (draftGraph || (!canvas && !editable) || !hasSteps) return;
     const controller = new AbortController();
     setError(null);
     const current = JSON.parse(key) as StepPortViewProps['request'];
@@ -59,7 +60,7 @@ export function StepPortView({
           setError(cause instanceof Error ? cause.message : 'Could not load ports');
       });
     return () => controller.abort();
-  }, [canvas, key, hasSteps, draftGraph]);
+  }, [canvas, key, hasSteps, draftGraph, editable]);
   const candidates = result?.key === key ? result.data.candidates : [];
   const loaded = !!draftGraph || result?.key === key;
   const graph =
@@ -157,7 +158,7 @@ export function StepPortView({
                       </option>
                       {input.candidates.map((id) => (
                         <option key={id} value={id}>
-                          {id}
+                          {graph.nodes.find((node) => node.id === id)?.label ?? id}
                         </option>
                       ))}
                     </select>

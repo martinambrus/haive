@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { projectStepPorts } from '@haive/shared/step-ports';
 import { CODE_REVIEW_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -116,6 +117,15 @@ beforeEach(() => {
       diagnostics: preview,
     }),
   );
+  mocks.post.mockResolvedValue({
+    candidates: fixture.candidates.map((candidate) => ({
+      executionPath: candidate.executionPath,
+      graph: projectStepPorts(candidate.stepIds, {
+        declarations: new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry])),
+        labels: new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry.label])),
+      }),
+    })),
+  });
   mocks.previewDerivedTaskType.mockResolvedValue(preview);
   mocks.createTaskType.mockResolvedValue({ taskType: row });
 });
@@ -137,7 +147,11 @@ describe('derived editor', () => {
       expect(
         screen.queryAllByText(fixture.catalog.steps[0]!.entry!.label, { exact: false }).length,
       ).toBeGreaterThan(0);
-      expect(mocks.post).not.toHaveBeenCalled();
+      expect(mocks.post).toHaveBeenLastCalledWith(
+        '/admin/task-types/ports',
+        expect.objectContaining({ slug: 'port-preview', runListStrategy: 'derived' }),
+        expect.any(AbortSignal),
+      );
     },
   );
 
