@@ -56,7 +56,8 @@ made it. A move never counts toward
   switches, Skip's task move, and worker recheck/fix-loop/revise resets. The task move
   includes only pending durable rows downstream in the same round; a task restart
   through START settles pending save rows as well. Recovery preserves their generations.
-  Only explicit resets increment `rerun_generation`;
+  Explicit resets and a journal-backed 08e batch requested on a reopened form increment
+  `rerun_generation`;
   recovery's epoch bump fences old jobs without declaring new work. Environment-image
   builds reconcile a completed tag carrying their `haive.apply-id` label. Custom
   migrations reuse a recorded success only after its durability snapshot was recorded
@@ -824,9 +825,23 @@ unconfirmed instead of failing, since its edits may exist.
 The first 08e writer provider outage fails the step visibly, preserving the
 `provider_unavailable` hint and arming the allowance watch under the existing outage policy.
 On manual or automatic Resume, the failed writer folds through apply as unconfirmed without
-another writer in that generation; its retained outage text cannot fail the barrier again.
+another writer in that generation, and its retained outage text cannot fail the barrier
+again: a Resume fold that completes the step relies on the Resume marker, and when the form
+reopens the runner stamps `consumed_at` on the folded rows in the hold transaction. The
+fatal-agent scan considers only unconsumed rows; a fresh writer's own outage still fails the
+step and arms the allowance watch.
 Unfenced reports must be whole, strictly valid JSON objects; fenced reports are also parsed
 strictly, with no repair or substitution of earlier examples.
+
+An automatic 08e visit that produced no continuation reopens for outstanding human
+decisions in the current unacted inventory. When a writer intent already exists,
+`ReopenStepFormError.newAttempt` advances the generation atomically with consuming the old
+mining rows and holding the form. The write compares the stored generation with the pass's
+expected generation; an overtaking Retry supersedes the hold and rolls consumption back.
+Detection uses the new generation, giving a later manual selection a distinct batch while
+preserving the automatic outcome and all spent claims. A generation bump is safe only for
+steps whose identity is journal-backed, currently 08e. Ordinary reopens preserve their
+generation. A manual submit does not reopen again.
 
 Outcome publication is required and replayed from the journal after a lost done write.
 A done-row replay keeps the ordinary successor unless its stored outcome carries an insight
