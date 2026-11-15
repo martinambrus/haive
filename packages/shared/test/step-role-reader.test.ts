@@ -10,7 +10,7 @@ import { REVIEW, AUDIT, PRODUCER, rolePlan, rolePin } from './step-role-fixtures
 
 const resolve = (
   pin: Parameters<typeof readStepRole>[0],
-  role: import('../src/step-engine/output-contracts.js').StepRoleId = STEP_ROLES.codeReview,
+  role: import('../src/step-engine/output-contracts.js').LegacyStepRoleId = STEP_ROLES.codeReview,
 ) => readStepRole(pin, role, (b) => b);
 describe('one pinned role reader', () => {
   it.each([

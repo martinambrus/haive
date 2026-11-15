@@ -20,7 +20,8 @@ export type { ComposableStepEntry } from '../modularity/contracts.js';
 
 export type {
   StepOutputContractRef,
-  StepRoleId,
+  LegacyStepRoleId,
+  LegacyStepRoleId as StepRoleId,
   CodeReviewOutput,
   CodeAuditOutput,
 } from '../step-engine/output-contracts.js';
