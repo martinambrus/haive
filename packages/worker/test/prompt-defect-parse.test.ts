@@ -24,7 +24,7 @@ describe('parsePromptDefects', () => {
     const raw = block(
       '- DEFECT: prompt_ambiguity | Say which directory the new module belongs in | packages/api/src/routes/admin.ts:12',
     );
-    const out = parsePromptDefects([{ stepId: REVIEWER, raw }]);
+    const out = parsePromptDefects([{ stepId: REVIEWER, raw }], {});
     expect(out).toHaveLength(1);
     expect(out[0]!.cause).toBe('prompt_ambiguity');
     expect(out[0]!.guidance).toBe('Say which directory the new module belongs in');
@@ -41,7 +41,7 @@ describe('parsePromptDefects', () => {
       '## INSIGHTS',
       '- INSIGHT: x',
     ].join('\n');
-    expect(parsePromptDefects([{ stepId: REVIEWER, raw }])).toEqual([]);
+    expect(parsePromptDefects([{ stepId: REVIEWER, raw }], {})).toEqual([]);
   });
 
   it('stops the block at the next heading, so a following section is not swallowed', () => {
@@ -51,42 +51,46 @@ describe('parsePromptDefects', () => {
       '## INSIGHTS',
       '- DEFECT: missing_context | not a defect line, wrong section | b.ts:2',
     ].join('\n');
-    const out = parsePromptDefects([{ stepId: REVIEWER, raw }]);
+    const out = parsePromptDefects([{ stepId: REVIEWER, raw }], {});
     expect(out).toHaveLength(1);
     expect(out[0]!.guidance).toBe('State the DB engine');
   });
 
   it('drops a line whose cause is not one of the three offered', () => {
     const raw = block('- DEFECT: model_was_lazy | Try harder next time | a.ts:1');
-    expect(parsePromptDefects([{ stepId: REVIEWER, raw }])).toEqual([]);
+    expect(parsePromptDefects([{ stepId: REVIEWER, raw }], {})).toEqual([]);
   });
 
   it('drops a line with no guidance text', () => {
     expect(
-      parsePromptDefects([{ stepId: REVIEWER, raw: block('- DEFECT: prompt_ambiguity') }]),
+      parsePromptDefects([{ stepId: REVIEWER, raw: block('- DEFECT: prompt_ambiguity') }], {}),
     ).toEqual([]);
   });
 
   it('ignores output from a step with no guidance target', () => {
     const raw = block('- DEFECT: prompt_ambiguity | Something | a.ts:1');
-    expect(parsePromptDefects([{ stepId: '03-phase-0a-discovery', raw }])).toEqual([]);
+    expect(parsePromptDefects([{ stepId: '03-phase-0a-discovery', raw }], {})).toEqual([]);
   });
 
   it('dedupes two reporters raising the same complaint at different lines', () => {
     const a = block('- DEFECT: missing_context | Name the config key to add | src/a.ts:10');
     const b = block('- DEFECT: missing_context | Name the config key to add | src/b.ts:99');
-    const out = parsePromptDefects([
-      { stepId: REVIEWER, raw: a },
-      { stepId: '08d-adversarial-qa', raw: b },
-    ]);
+    const out = parsePromptDefects(
+      [
+        { stepId: REVIEWER, raw: a },
+        { stepId: '08d-adversarial-qa', raw: b },
+      ],
+      {},
+    );
     expect(out).toHaveLength(1);
   });
 
   it('truncates a guidance line past the 400-char cap rather than dropping it', () => {
     const long = 'x'.repeat(600);
-    const out = parsePromptDefects([
-      { stepId: REVIEWER, raw: block(`- DEFECT: prompt_ambiguity | ${long} | a.ts:1`) },
-    ]);
+    const out = parsePromptDefects(
+      [{ stepId: REVIEWER, raw: block(`- DEFECT: prompt_ambiguity | ${long} | a.ts:1`) }],
+      {},
+    );
     expect(out[0]!.guidance).toHaveLength(400);
   });
 });
@@ -131,12 +135,12 @@ describe('guidanceTargetStep', () => {
       '08c-code-review',
       '08d-adversarial-qa',
     ]) {
-      expect(guidanceTargetStep(id)).toBe('07-phase-2-implement');
+      expect(guidanceTargetStep(id, {})).toBe('07-phase-2-implement');
     }
   });
 
   it('returns null for an unregistered reporter, so nothing unplaceable is stored', () => {
-    expect(guidanceTargetStep('99-not-a-step')).toBeNull();
+    expect(guidanceTargetStep('99-not-a-step', {})).toBeNull();
   });
 });
 

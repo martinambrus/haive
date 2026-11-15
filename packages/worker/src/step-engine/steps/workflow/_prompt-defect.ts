@@ -100,7 +100,7 @@ const GUIDANCE_TARGET: Record<string, string> = {
 /** The step whose prompt guidance from `sourceStep` is appended to, or null when
  *  the reporting step has no registered target (an unknown step id — never store
  *  guidance we cannot place). */
-export function guidanceTargetStep(sourceStep: string, task: RoleTaskPin = {}): string | null {
+export function guidanceTargetStep(sourceStep: string, task: RoleTaskPin): string | null {
   if (readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId) === sourceStep)
     return '07-phase-2-implement';
   return GUIDANCE_TARGET[sourceStep] ?? null;
@@ -113,7 +113,7 @@ export function guidanceTargetStep(sourceStep: string, task: RoleTaskPin = {}): 
  *  invents a category has not answered the question. */
 export function parsePromptDefects(
   outputs: { stepId: string; raw: string }[],
-  task: RoleTaskPin = {},
+  task: RoleTaskPin,
 ): PromptDefect[] {
   const seen = new Set<string>();
   const out: PromptDefect[] = [];

@@ -136,7 +136,7 @@ export interface ExistingGuidanceRow {
 export function filterCandidates(
   defects: PromptDefect[],
   existing: ExistingGuidanceRow[],
-  task: RoleTaskPin = {},
+  task: RoleTaskPin,
 ): GuidanceCandidate[] {
   const out: GuidanceCandidate[] = [];
   for (const d of defects) {

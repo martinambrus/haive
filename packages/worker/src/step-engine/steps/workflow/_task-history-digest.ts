@@ -212,7 +212,7 @@ export async function buildTaskHistoryDigest(
 export function renderTaskHistoryDigest(
   steps: DigestStepInput[],
   events: DigestEventInput[],
-  task: RoleTaskPin = {},
+  task: RoleTaskPin,
 ): TaskHistoryDigest {
   const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const maxRound = steps.reduce((m, s) => Math.max(m, s.round ?? 0), 0);

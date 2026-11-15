@@ -3,9 +3,10 @@ import { filterCandidates } from '../src/step-engine/steps/workflow/11e-prompt-g
 import { parsePromptDefects } from '../src/step-engine/steps/workflow/_prompt-defect.js';
 
 function defects(...lines: string[]) {
-  return parsePromptDefects([
-    { stepId: '08c-code-review', raw: ['## PROMPT-DEFECT', ...lines].join('\n') },
-  ]);
+  return parsePromptDefects(
+    [{ stepId: '08c-code-review', raw: ['## PROMPT-DEFECT', ...lines].join('\n') }],
+    {},
+  );
 }
 
 const AMBIGUITY = '- DEFECT: prompt_ambiguity | Name the target directory | a.ts:1';
@@ -13,7 +14,7 @@ const TASK_TEXT = '- DEFECT: task_description_defect | The user never said which
 
 describe('filterCandidates', () => {
   it('offers a fresh defect with seen = 0', () => {
-    const out = filterCandidates(defects(AMBIGUITY), []);
+    const out = filterCandidates(defects(AMBIGUITY), [], {});
     expect(out).toHaveLength(1);
     expect(out[0]!.seen).toBe(0);
     expect(out[0]!.disposition).toBe('new');
@@ -25,6 +26,7 @@ describe('filterCandidates', () => {
     const out = filterCandidates(
       [d!],
       [{ fingerprint: d!.fingerprint, status: 'rejected', occurrences: 1 }],
+      {},
     );
     expect(out).toEqual([]);
   });
@@ -34,6 +36,7 @@ describe('filterCandidates', () => {
     const out = filterCandidates(
       [d!],
       [{ fingerprint: d!.fingerprint, status: 'active', occurrences: 4 }],
+      {},
     );
     expect(out[0]!.seen).toBe(4);
   });
@@ -43,6 +46,7 @@ describe('filterCandidates', () => {
     const out = filterCandidates(
       [d!],
       [{ fingerprint: d!.fingerprint, status: 'archived', occurrences: 2 }],
+      {},
     );
     expect(out).toHaveLength(1);
     expect(out[0]!.disposition).toBe('new');
@@ -59,6 +63,7 @@ describe('filterCandidates', () => {
         { fingerprint: d!.fingerprint, status: 'active', occurrences: 3 },
         { fingerprint: d!.fingerprint, status: 'rejected', occurrences: 1 },
       ],
+      {},
     );
     expect(out).toEqual([]);
   });
@@ -68,13 +73,13 @@ describe('filterCandidates', () => {
   // offered -- storing it as step guidance would append a complaint about one task's
   // wording to every later task's prompt.
   it('surfaces a task_description_defect as display-only', () => {
-    const out = filterCandidates(defects(TASK_TEXT), []);
+    const out = filterCandidates(defects(TASK_TEXT), [], {});
     expect(out).toHaveLength(1);
     expect(out[0]!.disposition).toBe('display_only');
   });
 
   it('drops a defect from a reporter with no registered target step', () => {
     const [d] = defects(AMBIGUITY);
-    expect(filterCandidates([{ ...d!, sourceStep: '99-unknown' }], [])).toEqual([]);
+    expect(filterCandidates([{ ...d!, sourceStep: '99-unknown' }], [], {})).toEqual([]);
   });
 });
