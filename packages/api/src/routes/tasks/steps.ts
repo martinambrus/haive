@@ -1,5 +1,10 @@
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
-import { normalizeStepFormValues } from '@haive/shared/schemas';
+import {
+  INSIGHT_AUTO_ACTION_AVAILABLE,
+  upgradeRunConfigSchema,
+  normalizeStepFormValues,
+} from '@haive/shared/schemas';
+import { validateFormValues, type FormSchema } from '@haive/shared';
 import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -927,7 +932,22 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw formNotWaiting('form submission', stepId);
-  const normalized = normalizeStepFormValues(stepId, body.values);
+  // Upgrade the same persisted 06 schema the display and worker readers use. Keep all
+  // other fields sparse: their existing defaults/presets are resolved by 06 apply.
+  const submitSchema = upgradeRunConfigSchema(
+    stepId,
+    (step.formSchema as FormSchema | null) ?? null,
+  );
+  let submittedValues = body.values;
+  if (stepId === '06-run-config' && submitSchema) {
+    const validated = validateFormValues(submitSchema, body.values);
+    if (!validated.success) throw new HttpError(400, validated.issues.join('; '));
+    submittedValues = { ...body.values, autoActOnInsights: validated.data.autoActOnInsights };
+  }
+  if (stepId === '06-run-config' && !INSIGHT_AUTO_ACTION_AVAILABLE) {
+    submittedValues = { ...submittedValues, autoActOnInsights: false };
+  }
+  const normalized = normalizeStepFormValues(stepId, submittedValues);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
   if (

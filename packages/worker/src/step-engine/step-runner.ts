@@ -11,7 +11,7 @@ import {
 } from './steps/workflow/_fix-test-store.js';
 import { fixTestReviewNotice } from './steps/workflow/_fix-test-edits.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
-import { normalizeStepFormValues } from '@haive/shared/schemas';
+import { upgradeRunConfigSchema, normalizeStepFormValues } from '@haive/shared/schemas';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { scrubWorkerErrorPaths } from '../repo/stored-error.js';
 import {
@@ -3217,7 +3217,17 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
     if (normalizedPreAnswer && !normalizedPreAnswer.success)
       throw new Error(normalizedPreAnswer.issues.join('; '));
-    const stepPreAnswer = normalizedPreAnswer?.data;
+    const normalizedAnswers = normalizedPreAnswer?.data;
+    // 06 used to generate this exact empty 08e preset. It is not a human decision.
+    // Saved answers and deliberate submits are handled separately below and remain valid.
+    const stepPreAnswer =
+      meta.id === '08e-insights-triage' &&
+      normalizedAnswers &&
+      Object.keys(normalizedAnswers).length === 1 &&
+      Array.isArray(normalizedAnswers.selectedInsights) &&
+      normalizedAnswers.selectedInsights.length === 0
+        ? undefined
+        : normalizedAnswers;
 
     let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
     const safeExistingSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
@@ -5473,6 +5483,7 @@ function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>):
 /** A schema default is a source of answers, including a legacy default restored by validation.
  *  Normalize stored forms before validation, keeping editor text separate from answer defaults. */
 function normalizeStepSchemaDefaults(stepId: string, schema: FormSchema | null): FormSchema | null {
+  schema = upgradeRunConfigSchema(stepId, schema);
   if (!schema) return schema;
   if (stepId === '01-plan-chat') {
     let changed = false;

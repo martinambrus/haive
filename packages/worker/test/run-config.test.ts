@@ -3,7 +3,12 @@ import type { FormSchema } from '@haive/shared';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { configService, extractFormDefaults, validateFormValues } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
-import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import {
+  loadLastCompletedAutoActOnInsights,
+  runConfigStep,
+} from '../src/step-engine/steps/workflow/06-run-config.js';
 
 function detectedStub(ddevMode: boolean) {
   return {
@@ -339,7 +344,6 @@ describe('06-run-config apply', () => {
       '08a-browser-setup': { mode: 'skip' },
       '08a-browser-verify': { mode: 'skip' },
       '08b-test-management': { action: 'manage', runTests: true },
-      '08e-insights-triage': { selectedInsights: [] },
     });
   });
 
@@ -445,7 +449,7 @@ describe('06-run-config apply', () => {
     expect(pre['08-phase-5-verify']).toEqual({ runTest: false, runLint: true, runTypecheck: true });
     expect(pre['08a-browser-verify']).toEqual({ mode: 'mcp' });
     expect(pre['08b-test-management']).toEqual({ action: 'manage', runTests: false });
-    expect(pre['08e-insights-triage']).toEqual({ selectedInsights: [] });
+    expect(pre['08e-insights-triage']).toBeUndefined();
     expect((output as { browserMode: string }).browserMode).toBe('mcp');
   });
 
@@ -455,3 +459,205 @@ describe('06-run-config apply', () => {
     expect(sets[0]!.adversarialQaLevel).toBeNull();
   });
 });
+
+describe('insight auto-action authorization', () => {
+  it('keeps the switch hidden and false even when a recommendation requests true', () => {
+    const { ctx } = makeApplyCtx();
+    const form = runConfigStep.form!(ctx, detectedStub(true), {
+      autoActOnInsights: true,
+    }) as FormSchema;
+    expect(leafFields(form).get('autoActOnInsights')).toMatchObject({
+      type: 'checkbox',
+      visibleWhen: { field: 'autoActOnInsights', in: [] },
+      default: false,
+    });
+    expect(runConfigStep.metadata.reuseLastCompletedFormValues).toBeUndefined();
+    expect(runConfigStep.reconcileReusedFormValues).toBeUndefined();
+  });
+  it.each([undefined, null, 'true', 1, {}, false, true])(
+    'an unavailable switch rejects submitted authorization (%j)',
+    async (value) => {
+      const { ctx, sets } = makeApplyCtx();
+      const out = await runConfigStep.apply(
+        ctx,
+        applyArgs(value === undefined ? {} : { autoActOnInsights: value }),
+      );
+      expect(out).toMatchObject({ autoActOnInsights: false });
+      expect(sets[0]!.autoActOnInsights).toBe(false);
+    },
+  );
+  it.each([false, true])('an explicit preset %s wins over the remembered true', async (value) => {
+    const { ctx, sets } = makeApplyCtx({ '06-run-config': { autoActOnInsights: value } });
+    const args = {
+      ...(applyArgs({}) as unknown as Record<string, unknown>),
+      detected: { ...detectedStub(false), autoActOnInsightsDefault: true },
+    };
+    await runConfigStep.apply(ctx, args as never);
+    expect(sets[0]!.autoActOnInsights).toBe(value);
+  });
+  it('does not enable an unavailable switch from a remembered true', async () => {
+    const { ctx, sets } = makeApplyCtx();
+    const args = {
+      ...(applyArgs({}) as unknown as Record<string, unknown>),
+      detected: { ...detectedStub(false), autoActOnInsightsDefault: true },
+    };
+    await runConfigStep.apply(ctx, args as never);
+    expect(sets[0]!.autoActOnInsights).toBe(false);
+  });
+  it('an explicit false answer wins over both preset and remembered true', async () => {
+    const { ctx, sets } = makeApplyCtx({ '06-run-config': { autoActOnInsights: true } });
+    await runConfigStep.apply(ctx, {
+      ...(applyArgs({ autoActOnInsights: false }) as unknown as Record<string, unknown>),
+      detected: { ...detectedStub(false), autoActOnInsightsDefault: true },
+    } as never);
+    expect(sets[0]!.autoActOnInsights).toBe(false);
+  });
+});
+
+describe('owner-scoped insight default', () => {
+  it.each([
+    { userId: 'aaaaaaaa-0000-4000-8000-000000000006' },
+    { repositoryId: 'aaaaaaaa-0000-4000-8000-000000000006' },
+    { type: 'aaaaaaaa-0000-4000-8000-000000000006' },
+    { status: 'running' },
+    { status: 'failed' },
+    { autoActOnInsights: undefined },
+    { autoActOnInsights: 'true' },
+    {},
+  ])('uses only the latest completed matching task column: %j', async (change) => {
+    const fake = createFakeDb({ tasks: schema.tasks });
+    const base = {
+      id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      userId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      repositoryId: 'aaaaaaaa-0000-4000-8000-000000000002',
+      type: 'workflow',
+      status: 'completed',
+      completedAt: new Date('2026-01-01'),
+      autoActOnInsights: true,
+    };
+    fake.insert(schema.tasks, { ...base, ...change });
+    const value = await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, {
+      userId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      repositoryId: 'aaaaaaaa-0000-4000-8000-000000000002',
+      type: 'workflow',
+    });
+    expect(value).toBe(Object.keys(change).length === 0);
+  });
+  it('ignores completed rows without a completion timestamp, including when no dated row exists', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks });
+    const scope = {
+      userId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      repositoryId: 'aaaaaaaa-0000-4000-8000-000000000002',
+      type: 'workflow',
+    };
+    fake.insert(schema.tasks, {
+      ...scope,
+      id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      status: 'completed',
+      completedAt: null,
+      autoActOnInsights: true,
+    });
+    expect(await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, scope)).toBe(
+      false,
+    );
+    fake.insert(schema.tasks, {
+      ...scope,
+      id: 'aaaaaaaa-0000-4000-8000-000000000004',
+      status: 'completed',
+      completedAt: new Date('2026-01-01'),
+      autoActOnInsights: false,
+    });
+    expect(await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, scope)).toBe(
+      false,
+    );
+  });
+  it('uses the most recently completed matching task, regardless of creation order', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks });
+    const row = {
+      userId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      repositoryId: 'aaaaaaaa-0000-4000-8000-000000000002',
+      type: 'workflow',
+      status: 'completed',
+    };
+    fake.insert(schema.tasks, {
+      ...row,
+      id: 'aaaaaaaa-0000-4000-8000-000000000004',
+      autoActOnInsights: true,
+      completedAt: new Date('2026-01-01'),
+    });
+    fake.insert(schema.tasks, {
+      ...row,
+      id: 'aaaaaaaa-0000-4000-8000-000000000005',
+      autoActOnInsights: false,
+      completedAt: new Date('2026-02-01'),
+    });
+    expect(await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, row)).toBe(
+      false,
+    );
+    expect(
+      await loadLastCompletedAutoActOnInsights(fake.db as unknown as Database, {
+        ...row,
+        repositoryId: null,
+      }),
+    ).toBe(false);
+  });
+});
+
+it.each([undefined, false, true])(
+  'detect and apply resolve the remembered switch with current preset %j without reusing other fields',
+  async (preset) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      repositories: schema.repositories,
+    });
+    const owner = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const repositoryId = 'aaaaaaaa-0000-4000-8000-000000000002';
+    const taskId = 'aaaaaaaa-0000-4000-8000-000000000003';
+    fake.insert(schema.tasks, {
+      id: 'aaaaaaaa-0000-4000-8000-000000000004',
+      userId: owner,
+      repositoryId,
+      type: 'workflow',
+      status: 'completed',
+      completedAt: new Date('2026-01-01'),
+      autoActOnInsights: true,
+      adversarialQaLevel: 'enterprise',
+      maxFixRounds: 49,
+    });
+    fake.insert(schema.tasks, {
+      id: taskId,
+      userId: owner,
+      repositoryId,
+      type: 'workflow',
+      status: 'running',
+      preAnswers: preset === undefined ? {} : { '06-run-config': { autoActOnInsights: preset } },
+    });
+    const ctx = {
+      ...makeApplyCtx().ctx,
+      db: fake.db as unknown as Database,
+      taskId,
+      userId: owner,
+    };
+    const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    try {
+      const detected = await runConfigStep.detect!(ctx);
+      expect(detected.autoActOnInsightsDefault).toBe(preset === true);
+      expect(detected.taskAdversarialQaLevel).toBeNull();
+      expect(detected.taskMaxFixRounds).toBe(5);
+      const out = await runConfigStep.apply(ctx, {
+        detected,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: { autoActOnInsights: true },
+      });
+      expect(out.autoActOnInsights).toBe(preset === true);
+      expect(fake.rows(schema.tasks).find((row) => row.id === taskId)!.autoActOnInsights).toBe(
+        preset === true,
+      );
+    } finally {
+      config.mockRestore();
+    }
+  },
+);

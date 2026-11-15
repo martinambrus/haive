@@ -483,6 +483,8 @@ export const tasks = pgTable(
     prRemoteUrl: text('pr_remote_url'),
     /** Storage only. Shared's DerivedRunPlanV1 cannot be imported: shared depends on database. */
     derivedRunPlan: jsonb('derived_run_plan').$type<unknown>(),
+    /** Owner-authorized insight switch. Survives step output resets. Migration 0243. */
+    autoActOnInsights: boolean('auto_act_on_insights').notNull().default(false),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
