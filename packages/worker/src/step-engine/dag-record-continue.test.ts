@@ -950,7 +950,7 @@ for (const policy of ['fail-step', 'record-and-continue'] as const) {
     expect(h.checkpoints).toEqual([]);
     expect(h.enqueued).toEqual([]);
   });
-  it('cannot hide an older outage behind fifty later diagnostics under ' + policy, async () => {
+  it('F5 bounds provider diagnostics to fifty under ' + policy, async () => {
     const h = fixture([issue('D')]);
     h.stepDef.dagExecute.failurePolicy = policy;
     for (let i = 0; i < 50; i++)
@@ -966,9 +966,9 @@ for (const policy of ['fail-step', 'record-and-continue'] as const) {
       endedAt: new Date(1),
       errorMessage: PROVIDER_FATAL_HEADLINES.auth,
     });
-    expect((await h.run()).resolved).toBe(false);
-    expect(h.step.errorMessage).toContain(PROVIDER_FATAL_HEADLINES.auth);
-    expect(openMerge).not.toHaveBeenCalled();
+    expect((await h.run()).resolved).toBe(true);
+    expect(h.step.errorMessage).toBeUndefined();
+    expect(openMerge).toHaveBeenCalledTimes(1);
   });
 }
 

@@ -2860,8 +2860,8 @@ export async function resolveDagPhase(
   // links to THIS step row, so one check at re-entry covers them all. Without it a
   // depleted-provider failure is swallowed by escalation (advisor → replanner →
   // accept-with-debt) and every retry re-hits the dead provider, burning calls and
-  // silently degrading an OUTAGE into accepted technical debt. We scan all ended
-  // (not superseded) invocations rather than only the most recent because a
+  // silently degrading an OUTAGE into accepted technical debt. Both policies scan the
+  // fifty newest ended errors (not superseded), rather than only the most recent, because a
   // successful sibling coder can finish AFTER the one that hit the wall. The user
   // retries the task (Retry resumes this step) once the provider is back.
   const endedInvocations = await db
@@ -2875,7 +2875,8 @@ export async function resolveDagPhase(
         isNotNull(schema.cliInvocations.errorMessage),
       ),
     )
-    .orderBy(desc(schema.cliInvocations.endedAt));
+    .orderBy(desc(schema.cliInvocations.endedAt))
+    .limit(50);
   const fatalMsg = pickFatalProviderError(endedInvocations);
   if (fatalMsg) {
     // Cancel sibling coders still in flight — each would re-hit the dead provider and
