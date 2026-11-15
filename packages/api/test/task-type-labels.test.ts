@@ -35,6 +35,7 @@ function stubDb() {
         findMany: async (opts: { where?: unknown }) => (opts.where ? h.tasks : []),
         findFirst: async () => h.tasks[0],
       },
+      taskTypeDefinitions: { findFirst: async () => undefined },
     },
   };
 }
@@ -70,12 +71,14 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => ({
   findQueuedInvocationStepIds: async () => new Set<string>(),
   sumTaskTokens: async () => new Map(),
   resolveCurrentStepCliProviderIds: async () => new Map(),
-  enrichStepsWithCliPreferences: async (_db: unknown, _u: unknown, rows: unknown[]) => rows,
-  enrichStepsWithSkipFlag: async (_db: unknown, _id: unknown, rows: unknown[]) => rows,
+  enrichStepsWithCliPreferences: async (_db: unknown, _f: unknown, _u: unknown, rows: unknown[]) =>
+    rows,
+  enrichStepsWithSkipFlag: async (_db: unknown, _f: unknown, _id: unknown, rows: unknown[]) => rows,
   enrichStepsWithCliStats: async (_db: unknown, _id: unknown, rows: unknown[]) => rows,
-  enrichStepsWithActiveRole: async (_db: unknown, _id: unknown, rows: unknown[]) => rows,
+  enrichStepsWithActiveRole: async (_db: unknown, _f: unknown, _id: unknown, rows: unknown[]) =>
+    rows,
   enrichStepsWithAgentCounts: async (_db: unknown, _id: unknown, rows: unknown[]) => rows,
-  enrichStepsWithCliUsage: (rows: unknown[]) => rows,
+  enrichStepsWithCliUsage: (_flags: unknown, rows: unknown[]) => rows,
   findActiveCliInvocation: async () => null,
   sumTaskProviderBreakdown: async () => [],
   buildUpcomingCliSteps: async () => [],
