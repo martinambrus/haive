@@ -56,26 +56,32 @@ export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVer
         'refreshed cli versions',
       );
     } catch (err) {
-      const error = safeErrorMessage(err);
+      const error = safeErrorMessage(err).slice(0, 2000);
       errors.push({ name, error });
       log.warn({ err, name, error }, 'failed to refresh cli versions');
-      await db
-        .insert(schema.cliPackageVersions)
-        .values({
-          name,
-          versions: [],
-          latestVersion: null,
-          fetchedAt: null,
-          fetchError: error,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: schema.cliPackageVersions.name,
-          set: {
+      try {
+        await db
+          .insert(schema.cliPackageVersions)
+          .values({
+            name,
+            versions: [],
+            latestVersion: null,
+            fetchedAt: null,
             fetchError: error,
             updatedAt: new Date(),
-          },
-        });
+          })
+          .onConflictDoUpdate({
+            target: schema.cliPackageVersions.name,
+            set: {
+              fetchError: error,
+              updatedAt: new Date(),
+            },
+          });
+      } catch (recordErr) {
+        const error = safeErrorMessage(recordErr).slice(0, 2000);
+        log.warn({ err: recordErr, name, error }, 'failed to record version refresh error');
+        errors.push({ name, error });
+      }
     }
   }
 
@@ -123,23 +129,29 @@ export async function refreshAllToolVersions(db: Database): Promise<RefreshCliVe
         'refreshed tool versions',
       );
     } catch (err) {
-      const error = safeErrorMessage(err);
+      const error = safeErrorMessage(err).slice(0, 2000);
       errors.push({ name, error });
       log.warn({ err, name, error }, 'failed to refresh tool versions');
-      await db
-        .insert(schema.toolPackageVersions)
-        .values({
-          name,
-          versions: [],
-          latestVersion: null,
-          fetchedAt: null,
-          fetchError: error,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: schema.toolPackageVersions.name,
-          set: { fetchError: error, updatedAt: new Date() },
-        });
+      try {
+        await db
+          .insert(schema.toolPackageVersions)
+          .values({
+            name,
+            versions: [],
+            latestVersion: null,
+            fetchedAt: null,
+            fetchError: error,
+            updatedAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: schema.toolPackageVersions.name,
+            set: { fetchError: error, updatedAt: new Date() },
+          });
+      } catch (recordErr) {
+        const error = safeErrorMessage(recordErr).slice(0, 2000);
+        log.warn({ err: recordErr, name, error }, 'failed to record version refresh error');
+        errors.push({ name, error });
+      }
     }
   }
 

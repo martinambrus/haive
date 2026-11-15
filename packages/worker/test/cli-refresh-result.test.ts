@@ -1,6 +1,10 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { CLI_PROVIDER_LIST, configService } from '@haive/shared';
+import * as versionFetcher from '../src/cli-versions/fetcher.js';
+import { refreshAllCliVersions, refreshAllToolVersions } from '../src/cli-versions/refresh.js';
+import { refreshOpenRouterModels } from '../src/cli-versions/openrouter-models.js';
+import * as ollama from '../src/cli-versions/ollama-model-prices.js';
 import { refreshModelPrices } from '../src/cli-versions/model-prices.js';
 import { createFakeDb } from '@haive/database/testing';
 
@@ -237,6 +241,148 @@ it.each(['55P03', '23505'])(
       transaction.mockRestore();
       network.mockRestore();
       config.mockRestore();
+    }
+  },
+);
+
+it.each([
+  'sync-read',
+  'litellm-error-record',
+  'openrouter-error-record',
+  'ollama-read',
+  'ollama-error-record',
+  'sync-write',
+] as const)('finishes and refreshes FX after a price %s failure', async (phase) => {
+  const fake = createFakeDb({
+    refreshRuns: schema.refreshRuns,
+    cliPricingSync: schema.cliPricingSync,
+    cliModelPrices: schema.cliModelPrices,
+    openrouterModelCache: schema.openrouterModelCache,
+  });
+  for (const provider of CLI_PROVIDER_LIST)
+    fake.insert(schema.cliPricingSync, {
+      name: provider.name,
+      autoUpdateEnabled:
+        provider.name === 'codex' ||
+        (phase.startsWith('openrouter') && provider.name === 'openrouter') ||
+        (phase.startsWith('ollama') && provider.name === 'ollama'),
+    });
+  const original = new Error('original source failure');
+  const storeError = Object.assign(new Error('private bound data'), {
+    params: ['private-value'],
+    cause: Object.assign(new Error('private driver detail'), { code: '08006' }),
+  });
+  const spies: { mockRestore(): void }[] = [
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true),
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        x: { mode: 'chat', litellm_provider: 'openai', input_cost_per_token: 1 },
+      }),
+    } as Response),
+    vi.spyOn(ollama, 'fetchOllamaModelPrices').mockResolvedValue({ rows: [], errors: [] }),
+  ];
+  if (phase === 'sync-read')
+    spies.push(
+      vi.spyOn(fake.db, 'select').mockImplementationOnce(() => {
+        throw storeError;
+      }),
+    );
+  if (phase === 'litellm-error-record') vi.mocked(fetch).mockRejectedValue(original);
+  if (phase === 'openrouter-error-record')
+    spies.push(
+      vi.spyOn(fake.db.query.openrouterModelCache!, 'findFirst').mockRejectedValue(original),
+    );
+  if (phase === 'ollama-read')
+    vi.mocked(ollama.fetchOllamaModelPrices).mockRejectedValue(storeError);
+  if (phase === 'ollama-error-record')
+    vi.mocked(ollama.fetchOllamaModelPrices).mockResolvedValue({
+      rows: [],
+      errors: [original.message],
+    });
+  if (phase.endsWith('error-record') || phase === 'sync-write')
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.cliPricingSync) throw storeError;
+    };
+  h.prices.mockImplementation(refreshModelPrices);
+  try {
+    const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ error: 'Database operation failed' })]),
+    );
+    if (phase.endsWith('error-record'))
+      expect(result.errors).toEqual(
+        expect.arrayContaining([expect.objectContaining({ error: original.message })]),
+      );
+    expect(JSON.stringify(result)).not.toMatch(/private/);
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: storeError }),
+      expect.any(String),
+    );
+    expect(h.fx).toHaveBeenCalledOnce();
+    expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+      finishedAt: expect.any(Date),
+      result,
+    });
+    // Failed error writes must not prevent a healthy feed from being applied.
+    if (phase.endsWith('error-record') && phase !== 'litellm-error-record')
+      expect(await fake.db.select().from(schema.cliModelPrices)).toHaveLength(1);
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+  }
+});
+
+it.each(['cli', 'tools', 'catalog'] as const)(
+  'finishes after the sibling %s source cannot record its original error',
+  async (source) => {
+    const fake = createFakeDb({
+      refreshRuns: schema.refreshRuns,
+      cliPackageVersions: schema.cliPackageVersions,
+      toolPackageVersions: schema.toolPackageVersions,
+      openrouterModelCache: schema.openrouterModelCache,
+    });
+    const original = new Error('original sibling source failure');
+    const storeError = Object.assign(new Error('private bound data'), {
+      params: ['private-value'],
+    });
+    const versions = vi.spyOn(versionFetcher, 'fetchVersionsFromSource').mockResolvedValue(null);
+    const network = vi.spyOn(globalThis, 'fetch').mockRejectedValue(original);
+    const table =
+      source === 'cli'
+        ? schema.cliPackageVersions
+        : source === 'tools'
+          ? schema.toolPackageVersions
+          : schema.openrouterModelCache;
+    fake.hooks.beforeInsert = (target) => {
+      if (target === table) throw storeError;
+    };
+    if (source === 'cli') h.cli.mockImplementation(refreshAllCliVersions);
+    else if (source === 'tools') h.tools.mockImplementation(refreshAllToolVersions);
+    else h.catalog.mockImplementation(refreshOpenRouterModels);
+    if (source !== 'catalog') versions.mockRejectedValueOnce(original);
+    try {
+      const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
+      expect(result.ok).toBe(false);
+      expect(result.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ error: original.message }),
+          expect.objectContaining({ error: 'Database operation failed' }),
+        ]),
+      );
+      expect(JSON.stringify(result)).not.toMatch(/private/);
+      expect(h.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: storeError }),
+        expect.any(String),
+      );
+      expect(h.fx).toHaveBeenCalledOnce();
+      expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+        finishedAt: expect.any(Date),
+        result,
+      });
+    } finally {
+      versions.mockRestore();
+      network.mockRestore();
     }
   },
 );
