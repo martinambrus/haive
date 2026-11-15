@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   props: {} as {
     nodes: Node[];
     onNodesChange?: (changes: NodeChange[]) => void;
+    onConnect: (connection: import('@xyflow/react').Connection) => void;
     onNodeDragStop: (event: unknown, node: Node) => void;
   },
 }));
@@ -105,4 +106,75 @@ it('keeps the canvas instance through an asynchronous draft projection refresh',
   await waitFor(() => expect(instance.closest('[hidden]')).toBeNull());
   expect(view.getByTestId('flow-instance')).toBe(instance);
   expect(h.props.nodes[0]!.id).toBe('0:01-worktree-setup');
+});
+
+it('canvas connections and list selections update the same serialized input binding', async () => {
+  const { useState } = await import('react');
+  const { validatePortEdges, bindPortInput, portBindingIndexes } =
+    await import('@haive/shared/step-ports');
+  const port = {
+    id: 'spec',
+    role: 'haive.spec.checked',
+    contract: { id: 'haive.spec.checked', version: 1 },
+    authorship: 'mixed' as const,
+    optional: false,
+  };
+  const nodes = [
+    { id: 'a', label: 'a', inputs: [], outputs: [port] },
+    { id: 'b', label: 'b', inputs: [], outputs: [port] },
+    { id: 'use', label: 'use', inputs: [port], outputs: [] },
+  ];
+  let serialized: import('@haive/shared/step-ports').DataRoleBindingsDraft = [];
+  function Draft() {
+    const [bindings, setBindings] = useState(serialized);
+    serialized = bindings;
+    const graph = validatePortEdges(nodes, portBindingIndexes(nodes, bindings, null));
+    return (
+      <StepPortView
+        request={{ path: '/unused' }}
+        draftGraph={graph}
+        onBind={(consumer, input, producer) =>
+          setBindings((v) => bindPortInput(v, null, consumer, input, producer))
+        }
+      >
+        <div>steps</div>
+      </StepPortView>
+    );
+  }
+  const view = render(<Draft />);
+  fireEvent.change(view.getByRole('combobox', { name: 'use.spec producer' }), {
+    target: { value: 'b' },
+  });
+  const fromList = serialized;
+  expect(fromList).toEqual([
+    { executionPath: null, consumerStepId: 'use', input: 'spec', producerStepId: 'b' },
+  ]);
+  fireEvent.click(view.getByRole('button', { name: 'Canvas' }));
+  act(() =>
+    h.props.onConnect({
+      source: '0:a',
+      target: '2:use',
+      sourceHandle: 'spec',
+      targetHandle: 'spec',
+    }),
+  );
+  expect(serialized).toEqual(bindPortInput([], null, 'use', 'spec', 'a'));
+  act(() =>
+    h.props.onConnect({
+      source: '1:b',
+      target: '2:use',
+      sourceHandle: 'spec',
+      targetHandle: 'spec',
+    }),
+  );
+  expect(serialized).toEqual(fromList);
+  act(() =>
+    h.props.onConnect({
+      source: '2:use',
+      target: '0:a',
+      sourceHandle: 'spec',
+      targetHandle: 'spec',
+    }),
+  );
+  expect(serialized).toEqual(fromList);
 });

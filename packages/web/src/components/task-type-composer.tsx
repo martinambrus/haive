@@ -1,4 +1,5 @@
-'use client';
+import { projectStepPorts, type DataRoleBindingsDraft } from '@haive/shared/step-ports';
+('use client');
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -56,6 +57,8 @@ interface TaskTypeComposerProps {
     onRemove?: (step: string) => void;
     limitsEditable: boolean;
   };
+  dataRoleBindings?: DataRoleBindingsDraft;
+  onBind?: (consumer: string, input: string, producer: string) => void;
   portRequest?: { path: string; body?: unknown };
   executionPath?: string | null;
   catalog: TaskTypeCatalog;
@@ -170,6 +173,8 @@ function groupedSteps(catalog: TaskTypeCatalog, query: string) {
 }
 
 export function TaskTypeComposer({
+  dataRoleBindings,
+  onBind,
   catalog,
   portRequest,
   executionPath,
@@ -469,6 +474,20 @@ export function TaskTypeComposer({
           </div>
         )}
         <StepPortView
+          draftGraph={
+            dataRoleBindings
+              ? projectStepPorts(stepIds, {
+                  declarations: entries,
+                  dataRoleBindings: dataRoleBindings.filter(
+                    (b) =>
+                      b.executionPath !== (executionPath ?? null) ||
+                      stepIds.includes(b.consumerStepId),
+                  ),
+                  executionPath: executionPath ?? null,
+                })
+              : undefined
+          }
+          onBind={onBind}
           request={
             portRequest ?? {
               path: '/admin/task-types/ports',

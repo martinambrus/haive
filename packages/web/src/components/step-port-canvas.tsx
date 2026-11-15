@@ -17,7 +17,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 const ROW_HEIGHT = 300;
 type GraphNode = Node<
-  { node: StepPortGraph['nodes'][number]; select: (port: string) => void },
+  { node: StepPortGraph['nodes'][number]; connectable: boolean; select: (port: string) => void },
   'ports'
 >;
 
@@ -25,9 +25,11 @@ function Port({
   port,
   input,
   select,
+  connectable,
 }: {
   port: StepPort & { state?: string };
   input: boolean;
+  connectable: boolean;
   select: () => void;
 }) {
   const color =
@@ -47,7 +49,7 @@ function Port({
         id={port.id}
         type={input ? 'target' : 'source'}
         position={input ? Position.Left : Position.Right}
-        isConnectable={false}
+        isConnectable={connectable}
       />
       <span className="block font-medium">{port.adapter ?? port.role}</span>
       <span className="block font-mono text-indigo-300">
@@ -66,19 +68,31 @@ function Port({
   );
 }
 function PortsNode({ data }: NodeProps<GraphNode>) {
-  const { node, select } = data;
+  const { node, select, connectable } = data;
   return (
     <div className="w-[600px] rounded-lg border border-neutral-600 bg-neutral-950 p-3 text-neutral-100">
       <p className="mb-2 font-medium">{node.label}</p>
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-2">
           {node.inputs.map((port) => (
-            <Port key={port.id} port={port} input select={() => select(port.id)} />
+            <Port
+              connectable={connectable}
+              key={port.id}
+              port={port}
+              input
+              select={() => select(port.id)}
+            />
           ))}
         </div>
         <div className="flex flex-col gap-2">
           {node.outputs.map((port) => (
-            <Port key={port.id} port={port} input={false} select={() => select(port.id)} />
+            <Port
+              connectable={connectable}
+              key={port.id}
+              port={port}
+              input={false}
+              select={() => select(port.id)}
+            />
           ))}
         </div>
       </div>
@@ -90,8 +104,10 @@ export default function StepPortCanvas({
   graph,
   onReorder,
   compact = false,
+  onBind,
 }: {
   graph: StepPortGraph;
+  onBind?: (consumer: string, input: string, producer: string) => void;
   onReorder?: (from: number, to: number) => void;
   compact?: boolean;
 }) {
@@ -102,9 +118,9 @@ export default function StepPortCanvas({
         id: `${index}:${node.id}`,
         type: 'ports',
         position: { x: 0, y: index * ROW_HEIGHT },
-        data: { node, select: (port) => setSelected({ index, port }) },
+        data: { node, connectable: !!onBind, select: (port) => setSelected({ index, port }) },
       })),
-    [graph],
+    [graph, onBind],
   );
   const [transient, setTransient] = useState<{ graph: StepPortGraph; nodes: GraphNode[] } | null>(
     null,
@@ -147,7 +163,26 @@ export default function StepPortCanvas({
           nodeTypes={nodeTypes}
           colorMode="dark"
           nodesDraggable={onReorder !== undefined}
-          nodesConnectable={false}
+          nodesConnectable={!!onBind}
+          onConnect={(connection) => {
+            const sourceIndex = Number(connection.source?.split(':')[0]),
+              targetIndex = Number(connection.target?.split(':')[0]);
+            const source = graph.nodes[sourceIndex],
+              target = graph.nodes[targetIndex];
+            const input = target?.inputs.find((p) => p.id === connection.targetHandle);
+            const output = source?.outputs.find((p) => p.id === connection.sourceHandle);
+            if (
+              source &&
+              target &&
+              input &&
+              output &&
+              sourceIndex < targetIndex &&
+              input.role === output.role &&
+              input.contract.id === output.contract.id &&
+              input.contract.version === output.contract.version
+            )
+              onBind?.(target.id, input.id, source.id);
+          }}
           edgesReconnectable={false}
           deleteKeyCode={null}
           fitView

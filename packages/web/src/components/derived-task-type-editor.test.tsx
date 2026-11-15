@@ -129,20 +129,15 @@ describe('derived editor', () => {
   it.each(['My Type', 'new', '-'])(
     'projects a derived canvas while the slug is %s',
     async (slug) => {
-      mocks.post.mockImplementation(async (_path: string, body: { slug: string }) => {
-        const { derivedTaskTypeCreateSchema } = await import('@haive/shared/modularity');
-        derivedTaskTypeCreateSchema.parse(body);
-        return {
-          candidates: [
-            { executionPath: null, graph: { nodes: [{ label: 'Projected graph' }], edges: [] } },
-          ],
-        };
-      });
       await mount();
       fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: slug } });
       fireEvent.click(screen.getByRole('button', { name: 'Canvas' }));
       await act(async () => {});
-      expect(screen.queryByText('Projected graph')).not.toBeNull();
+      expect(screen.getByLabelText('Step view')).toBeTruthy();
+      expect(
+        screen.queryAllByText(fixture.catalog.steps[0]!.entry!.label, { exact: false }).length,
+      ).toBeGreaterThan(0);
+      expect(mocks.post).not.toHaveBeenCalled();
     },
   );
 

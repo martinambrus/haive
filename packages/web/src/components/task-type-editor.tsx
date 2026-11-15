@@ -1,4 +1,9 @@
-'use client';
+import {
+  bindPortInput,
+  dataRoleDraftIssues,
+  type DataRoleBindingsDraft,
+} from '@haive/shared/step-ports';
+('use client');
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -82,6 +87,7 @@ const NEW_TYPE_DEFAULTS: FormValues = {
 const NO_COMPOSITION = { stepIds: [], stepLoopLimitDefaults: {}, promptSteps: {} };
 
 const CREATE_FIELDS = [
+  'dataRoleBindings',
   'displayName',
   'description',
   'stepIds',
@@ -134,6 +140,7 @@ export function TaskTypeEditor({
   const [changes, setChanges] = useState<DerivedChange[]>([]);
   const [permissionDenied, setPermissionDenied] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string>('pre-triage');
+  const [dataRoleBindings, setDataRoleBindings] = useState<DataRoleBindingsDraft>([]);
   const [stepIds, setStepIds] = useState<string[]>([]);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
   const [promptSteps, setPromptSteps] = useState<PromptSteps>({});
@@ -160,6 +167,7 @@ export function TaskTypeEditor({
     setRow(taskType);
     setBaseSlug(taskType.runListStrategy === 'derived' ? (taskType.baseSlug ?? '') : null);
     setChanges(taskType.changes ?? []);
+    setDataRoleBindings(taskType.dataRoleBindings ?? []);
     setChangedRow(null);
     setStepIds(taskType.stepIds ?? []);
     setLoopLimits(taskType.stepLoopLimitDefaults);
@@ -302,9 +310,19 @@ export function TaskTypeEditor({
       integrationCategories,
     ],
   );
+  const bindingsEdited =
+    JSON.stringify(dataRoleBindings) !== JSON.stringify(row?.dataRoleBindings ?? []);
+  const portIssues = withPrompts
+    ? dataRoleDraftIssues(
+        derivedEvaluation?.candidates ?? [{ executionPath: null, stepIds }],
+        withPrompts,
+        dataRoleBindings,
+      )
+    : [];
   const overlayEdited =
     derived &&
-    (JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
+    (bindingsEdited ||
+      JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
       compositionChanged(
         { stepIds: [], loopLimits, promptSteps },
         {
@@ -326,10 +344,12 @@ export function TaskTypeEditor({
           },
         )
       : null;
+  if (previewBody && dataRoleBindings.length) previewBody.dataRoleBindings = dataRoleBindings;
   const preview = useDerivedPreview(previewBody);
   const overlayStructureEdited =
     derived &&
-    (JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
+    (bindingsEdited ||
+      JSON.stringify(changes) !== JSON.stringify(row?.changes ?? []) ||
       compositionChanged(
         { stepIds: [], loopLimits: {}, promptSteps },
         { stepIds: [], stepLoopLimitDefaults: {}, promptSteps: row?.promptSteps ?? {} },
@@ -343,13 +363,15 @@ export function TaskTypeEditor({
         (derivedEvaluation?.defaultIssues.some((issue) => issue.field !== 'preAnswerDefaults') ??
           false)));
   const compositionEdited =
-    row !== null && compositionChanged({ stepIds, loopLimits, promptSteps }, row);
+    row !== null &&
+    (bindingsEdited || compositionChanged({ stepIds, loopLimits, promptSteps }, row));
   // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
   const compositionTouched =
     creating || compositionEdited || requiresRepository !== row?.requiresRepository;
   const authoringForbidden = derived && (permissionDenied !== null || preview.forbidden);
   const blocked =
     authoringForbidden ||
+    ((creating || compositionEdited || overlayEdited) && portIssues.length > 0) ||
     derivedBlocked ||
     (composable &&
       compositionTouched &&
@@ -368,6 +390,7 @@ export function TaskTypeEditor({
   const dirty =
     initialValues !== undefined &&
     (Object.keys(values).some((k) => values[k] !== initialValues[k]) ||
+      bindingsEdited ||
       compositionChanged({ stepIds, loopLimits, promptSteps }, row ?? NO_COMPOSITION) ||
       overlayEdited);
   const leaveDialog = useUnsavedChangesGuard(dirty && !leaving);
@@ -419,6 +442,10 @@ export function TaskTypeEditor({
     setServerDerivedIssues([]);
     setServerPromptIssues([]);
     try {
+      if (portIssues.length && (creating || bindingsEdited || compositionEdited || overlayEdited)) {
+        setSaveError(portIssues.map((i) => i.message).join('; '));
+        return;
+      }
       if (creating) {
         const problem = slugProblem(String(submitted.slug ?? '').trim());
         if (problem) {
@@ -436,6 +463,7 @@ export function TaskTypeEditor({
               },
             )
           : buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
+        if (dataRoleBindings.length) body.dataRoleBindings = dataRoleBindings;
         await createTaskType(body);
         forgetDraftConversation(null);
         leaveTo(`/admin/task-types/${encodeURIComponent(body.slug)}`);
@@ -456,6 +484,8 @@ export function TaskTypeEditor({
               : null,
             initialValuesOf(row!),
           );
+      if (bindingsEdited && editableFields.includes('dataRoleBindings'))
+        body.dataRoleBindings = dataRoleBindings;
       const res = await updateTaskType(row!.slug, { ...body, expectedUpdatedAt: row!.updatedAt });
       applyRow(res.taskType);
       setSaved(true);
@@ -522,8 +552,55 @@ export function TaskTypeEditor({
   const lastField = schema.fields.at(-1)?.id;
   const composer = (readOnly: boolean) => (
     <>
+      {portIssues.length > 0 && (
+        <div role="alert">
+          <InlineMarkdown
+            className="text-sm text-red-300"
+            body={portIssues.map((i) => i.message).join('; ')}
+          />
+        </div>
+      )}
+      {dataRoleBindings.length > 0 && (
+        <div aria-label="Selected input bindings">
+          {dataRoleBindings.map((binding, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <InlineMarkdown
+                body={`${binding.executionPath ?? 'default'}: ${binding.consumerStepId}.${binding.input} ← ${binding.producerStepId}`}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={saving || !editableFields.includes('dataRoleBindings')}
+                onClick={() => {
+                  touch();
+                  setDataRoleBindings((previous) => previous.filter((_, i) => i !== index));
+                }}
+              >
+                Clear binding
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
       <TaskTypeComposer
         catalog={catalog}
+        dataRoleBindings={dataRoleBindings}
+        onBind={
+          editableFields.includes('dataRoleBindings')
+            ? (consumer, input, producer) => {
+                touch();
+                setDataRoleBindings((previous) =>
+                  bindPortInput(
+                    previous,
+                    derived ? (selectedCandidate?.executionPath ?? null) : null,
+                    consumer,
+                    input,
+                    producer,
+                  ),
+                );
+              }
+            : undefined
+        }
         {...(derived
           ? {
               portRequest: {
@@ -596,6 +673,11 @@ export function TaskTypeEditor({
         onStepIdsChange={(next) => {
           touch();
           setStepIds(next);
+          setDataRoleBindings((previous) =>
+            previous.filter(
+              (b) => next.includes(b.consumerStepId) && next.includes(b.producerStepId),
+            ),
+          );
         }}
         onLoopLimitsChange={(next) => {
           touch();
