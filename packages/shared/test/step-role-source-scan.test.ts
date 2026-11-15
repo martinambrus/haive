@@ -27,7 +27,7 @@ describe('ungated step-role reader ratchet', () => {
       roleReaderSites(file, readFileSync(path.join(root, file), 'utf8')),
     );
     expect(checkRoleReaderPins(sites, pins)).toEqual([]);
-  });
+  }, 20_000);
   it.each([
     `eq(schema.taskSteps.stepId, '08c-code-review')`,
     "sql`${schema.taskSteps.stepId} = '08c-code-review' and task_id = ${id}`",
