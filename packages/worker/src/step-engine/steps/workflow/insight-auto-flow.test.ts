@@ -569,7 +569,7 @@ describe('automatic insight stages', () => {
       expect(detected.auto!.candidates).toEqual([fresh]);
       await expect(
         insightsTriageStep.apply(flowCtx, applyArgs(detected, [classification])),
-      ).rejects.toMatchObject({ name: 'ReopenStepFormError', notice: true });
+      ).rejects.toMatchObject({ name: 'ReopenStepFormError', notice: true, newAttempt: false });
       expect(auto.saveAutoClassification).toHaveBeenCalledOnce();
       const completed = await manualSubmit([one]);
       expect(completed.selected).toEqual([]);
@@ -607,6 +607,7 @@ describe('automatic insight stages', () => {
           .apply(flowCtx, applyArgs(detected, [classification, writer]))
           .catch((err) => err);
         expect(reopened).toBeInstanceOf(ReopenStepFormError);
+        expect(reopened.newAttempt).toBe(true);
         // The runner advances this in the same transaction as consuming the old writer rows.
         if (reopened.newAttempt) flowCtx.rerunGeneration! += 1;
         expect(journal.find((r) => r.stage === 'outcome')!.items).toMatchObject([
