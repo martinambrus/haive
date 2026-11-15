@@ -882,6 +882,9 @@ export const taskStepAgentMinings = pgTable(
      *  0167, and a legacy verbatim replay), which recovers from `cli_invocations.prompt` as
      *  before. Prompt-sized, so the hot reads leave it out (`MINING_ROW_COLUMNS`). */
     dispatchPrompt: text('dispatch_prompt'),
+    /** Untrusted stored JSON until parsed by shared's strict committed snapshot parser. */
+    snapshotRef: jsonb('snapshot_ref').$type<unknown>(),
+    baseSnapshotRef: jsonb('base_snapshot_ref').$type<unknown>(),
   },
   (table) => [
     index('task_step_agent_minings_task_step_id_idx').on(table.taskStepId),

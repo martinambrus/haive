@@ -75,6 +75,8 @@ interface MiningRow {
   preferVision?: boolean | null;
   /** The prompt the step wrote for the agent's last dispatch, before any augmentation. */
   dispatchPrompt?: string | null;
+  snapshotRef?: unknown;
+  baseSnapshotRef?: unknown;
   /** Stamped when a wave-aware step folded the row; cleared when a re-run replaces its result. */
   consumedAt?: Date | null;
 }
@@ -3629,5 +3631,175 @@ describe('a fan-out dispatch when the config store is unreadable', () => {
     expect(result.status).toBe('failed');
     if (result.status === 'failed') expect(result.error).toBe(outage.message);
     expect(enqueued).toEqual([]);
+  });
+});
+
+describe('committed snapshot mining replay (P5a)', () => {
+  const miningLinks = (saved: MockState) =>
+    (saved.miningUpdateLog ?? []).filter((u) => u.set.status === 'pending');
+  const snapshotRef = {
+    version: 1 as const,
+    userId: '11111111-1111-4111-8111-111111111111',
+    repositoryId: '22222222-2222-4222-8222-222222222222',
+    taskId: '33333333-3333-4333-8333-333333333333',
+    commitOid: 'a'.repeat(40),
+    treeOid: 'b'.repeat(40),
+    inventoryId: '44444444-4444-4444-8444-444444444444',
+    inventorySha256: 'c'.repeat(64),
+  };
+  const baseSnapshotRef = { ...snapshotRef, commitOid: 'd'.repeat(40), treeOid: 'e'.repeat(40) };
+  const refs = { snapshotRef, baseSnapshotRef };
+  function step(offered: boolean): StepDefinition {
+    const def = noRetryMiningStep([]);
+    def.agentMining!.selectAgents = async () =>
+      offered
+        ? [
+            {
+              agentId: 'snapshot-agent',
+              agentTitle: 'Snapshot',
+              prompt: 'fresh prompt',
+              snapshotRef: { ...snapshotRef, commitOid: 'f'.repeat(40) },
+            },
+          ]
+        : [];
+    return def;
+  }
+  function state(overrides: Partial<MiningRow> = {}): MockState {
+    return freshState([
+      miningRow('snapshot-agent', 2, {
+        status: 'pending',
+        cliInvocationId: null,
+        dispatchPrompt: 'pinned prompt',
+        ...refs,
+        ...overrides,
+      }),
+    ]);
+  }
+  it.each([false, true])(
+    'unsent reservation uses row refs even when freshly offered: %s',
+    async (offered) => {
+      const saved = state();
+      const queued: CliExecJobPayload[] = [];
+      await run(makeMockDb(saved), step(offered), queued);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject(refs);
+      expect(miningLinks(saved)[0]?.set).toMatchObject({ ...refs, attempts: 2 });
+    },
+  );
+  it.each([false, true])(
+    'human wave recovery uses row refs even when freshly offered: %s',
+    async (offered) => {
+      const saved = state({
+        status: 'failed',
+        cliInvocationId: 'inv-snapshot-agent',
+        userRetryRequestedAt: new Date(),
+      });
+      const queued: CliExecJobPayload[] = [];
+      await run(makeMockDb(saved), step(offered), queued);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject(refs);
+      expect(miningLinks(saved)[0]?.set).toMatchObject(refs);
+    },
+  );
+  it('timeout reroll preserves the row pin and charges only the attempt', async () => {
+    const message = 'CLI process exceeded its time budget (30m).';
+    const saved = state({
+      status: 'failed',
+      cliInvocationId: 'inv-snapshot-agent',
+      errorMessage: message,
+    });
+    saved.invocationRows = [
+      {
+        id: 'inv-snapshot-agent',
+        prompt: 'prior prompt',
+        errorMessage: message,
+        startedAt: new Date(),
+      },
+    ];
+    const def = step(true);
+    def.agentMining!.retry = { maxAttempts: 3, retryOnInvocationFailure: () => true };
+    const queued: CliExecJobPayload[] = [];
+    await run(makeMockDb(saved), def, queued);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject(refs);
+    expect(miningLinks(saved)[0]?.set).toMatchObject({ ...refs, attempts: 3 });
+  });
+  it('legacy verbatim wave recovery preserves row refs', async () => {
+    const saved = state({
+      status: 'failed',
+      cliInvocationId: 'inv-snapshot-agent',
+      userRetryRequestedAt: new Date(),
+      dispatchPrompt: null,
+    });
+    saved.invocationRows = [{ id: 'inv-snapshot-agent', prompt: 'prior effective prompt' }];
+    const queued: CliExecJobPayload[] = [];
+    await run(makeMockDb(saved), step(false), queued);
+    expect(queued[0]).toMatchObject(refs);
+    expect(miningLinks(saved)[0]?.set).toMatchObject({ ...refs, dispatchPrompt: null });
+  });
+  it('reservation and refusal record both refs', async () => {
+    const saved = freshState([]);
+    saved.taskStepRow.status = 'pending';
+    const def = step(true);
+    def.agentMining!.selectAgents = async () => [
+      { agentId: 'snapshot-agent', agentTitle: 'Snapshot', prompt: 'pin', ...refs },
+    ];
+    await run(makeMockDb(saved), def, [], []);
+    expect(saved.inserts.find((i) => i.table === 'task_step_agent_minings')?.row).toMatchObject(
+      refs,
+    );
+    expect(
+      saved.updates.find((u) => u.table === 'task_step_agent_minings' && u.status === 'failed'),
+    ).toMatchObject(refs);
+  });
+  it('duplicate-link loser sends nothing and preserves the winner pin', async () => {
+    const saved = state();
+    let attemptedLink: Record<string, unknown> | undefined;
+    saved.miningCasLost = (set) => {
+      if (set.status !== 'pending') return false;
+      attemptedLink = set;
+      return true;
+    };
+    const queued: CliExecJobPayload[] = [];
+    await run(makeMockDb(saved), step(false), queued);
+    expect(queued).toEqual([]);
+    expect(attemptedLink).toMatchObject(refs);
+    expect(saved.miningRows[0]).toMatchObject(refs);
+    expect(
+      saved.updates.filter((u) => u.table === 'cli_invocations' && u.supersededAt),
+    ).toHaveLength(1);
+  });
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    'malformed stored refs fail visibly with no enqueue (offered: %s, wave: %s)',
+    async (offered, wave) => {
+      const saved = state({
+        snapshotRef: { ...snapshotRef, hostPath: '/private/host' },
+        ...(wave
+          ? {
+              status: 'failed',
+              cliInvocationId: 'inv-snapshot-agent',
+              userRetryRequestedAt: new Date(),
+            }
+          : {}),
+      });
+      const queued: CliExecJobPayload[] = [];
+      const result = await run(makeMockDb(saved), step(offered), queued);
+      expect(result.status).toBe('failed');
+      expect(String(saved.taskStepRow.errorMessage)).toContain('Invalid committed snapshot');
+      expect(queued).toEqual([]);
+      expect(saved.miningRows[0]?.snapshotRef).toHaveProperty('hostPath', '/private/host');
+    },
+  );
+  it('NULL/NULL remains a live-checkout dispatch even when the new offer has a ref', async () => {
+    const saved = state({ snapshotRef: null, baseSnapshotRef: null });
+    const queued: CliExecJobPayload[] = [];
+    await run(makeMockDb(saved), step(true), queued);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ snapshotRef: null, baseSnapshotRef: null });
   });
 });

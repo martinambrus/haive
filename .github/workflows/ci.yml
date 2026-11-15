@@ -526,6 +526,7 @@ jobs:
             ' || failed=1
             echo "::endgroup::"
           done <<'GATED'
+          database test/mining-snapshot.test.ts MINING_SNAPSHOT_TEST_URL mining_snapshot_test pg
           database test/pg-transaction-fence.test.ts PG_TX_FENCE_TEST_URL pg_tx_fence_test pg
           database test/plan-active-time.test.ts PLAN_ACTIVE_TIME_TEST_URL plan_active_time_test pg
           api test/plan-user-active.test.ts PLAN_USER_ACTIVE_TEST_URL plan_user_active_test pg
