@@ -661,7 +661,12 @@ const LEARNING_DELETIONS_DIR = '.haive/learning-deletions';
 const learningDeletionSchema = z.object({
   version: z.literal(1),
   operationId: z.string().regex(/^[a-f0-9]{64}:[a-f0-9]{64}$/),
-  target: z.object({ id: z.string(), title: z.string(), body: z.string() }),
+  target: z.object({
+    // slugify's alphabet, also allowing truncated trailing hyphens and collision suffixes.
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    title: z.string(),
+    body: z.string(),
+  }),
 });
 type LearningDeletion = z.infer<typeof learningDeletionSchema>;
 
