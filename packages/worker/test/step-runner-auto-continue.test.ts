@@ -1652,6 +1652,7 @@ describe('manual insight choices under auto-continue', () => {
       expect(select).not.toHaveBeenCalled();
       expect(state.invocation).toBeUndefined();
       expect((await run(state, def, { selectedInsights: [] })).status).toBe('done');
+      expect(select).toHaveBeenCalled();
       for (const r of select.mock.results) expect(await r.value).toEqual([]);
       expect(state.invocation).toBeUndefined();
     },

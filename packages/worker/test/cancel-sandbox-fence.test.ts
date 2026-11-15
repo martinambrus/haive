@@ -1,3 +1,4 @@
+import { lockOwnedStep } from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
@@ -1040,6 +1041,44 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       expect(await loadInsightBatchRecords(db, ctx.taskId)).toEqual([]);
     },
   );
+  it('rolls back the mining row when the nested reservation journal write throws', async () => {
+    const ctx = await seed();
+    const intent = await ensureInsightIntent(ctx, selected);
+    const agentId = `implementer-${intent.batchId}`;
+    // The task id is a host-generated UUID. Reject only this test's reservation event.
+    await db.execute(
+      sql.raw(
+        `ALTER TABLE task_events ADD CONSTRAINT insight_reservation_test CHECK (task_id <> '${ctx.taskId}'::uuid OR payload->>'stage' <> 'reservation')`,
+      ),
+    );
+    try {
+      await expect(
+        db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(schema.taskStepAgentMinings)
+            .values({ taskStepId: ctx.taskStepId, agentId, status: 'pending' })
+            .returning();
+          expect(await lockOwnedStep(tx, ctx.taskStepId)).toBe(true);
+          await recordInsightReservation(
+            { ...ctx, db: tx as unknown as Database },
+            agentId,
+            row!.id,
+          );
+        }),
+      ).rejects.toMatchObject({ cause: { code: '23514' } });
+      expect(
+        await db
+          .select()
+          .from(schema.taskStepAgentMinings)
+          .where(eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId)),
+      ).toEqual([]);
+      expect((await loadInsightBatchRecords(db, ctx.taskId)).map((r) => r.stage)).toEqual([
+        'intent',
+      ]);
+    } finally {
+      await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_reservation_test`);
+    }
+  });
   it('required event failure blocks selectAgents before any dispatch can be reserved', async () => {
     const ctx = await seed();
     // A rejecting store seam is enough here; locking itself is exercised above on Postgres.
