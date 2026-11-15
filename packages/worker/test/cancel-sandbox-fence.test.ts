@@ -1184,9 +1184,13 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     metadata: { id, index, workflowType: 'workflow' },
     editsCodeOrTests: id === '08e-insights-triage',
   })) as import('../src/step-engine/step-definition.js').StepDefinition[];
-  async function seedRoute(stale = false) {
+  async function seedRoute(stale = false, automatic = false) {
     const stepCtx = await seed();
-    const intent = await ensureInsightIntent(stepCtx, selected);
+    const intent = await ensureInsightIntent(
+      stepCtx,
+      selected,
+      automatic ? 'auto_08e' : 'manual_08e',
+    );
     const outcome = await appendInsightBatch(stepCtx, {
       ...intent,
       stage: 'outcome',
@@ -1414,6 +1418,57 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       newEpoch: 2,
     });
     expect(await activeInsightContinuation(db, ctx.taskId, 2)).toEqual(continuation);
+  });
+  it('an automatic settled checkpoint owns the continuation after an earlier row is abandoned', async () => {
+    const { ctx, source, continuation } = await seedRoute(false, true);
+    await db
+      .update(schema.tasks)
+      .set({ autoActOnInsights: true })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+    await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: source.stepId,
+        stepIndex: 8.95,
+        title: 'Abandoned checkpoint',
+        status: 'pending',
+        round: 1,
+      });
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: source.stepId, currentRound: 2 })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    const spec = vi
+      .spyOn(specArtifacts, 'resolveSpecView')
+      .mockResolvedValue({ text: '' } as never);
+    try {
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        stepDef: insightsTriageStep,
+        repoPath: '/repo',
+        workspacePath: '/repo',
+        cliProviderId: null,
+        round: 2,
+        epoch: 0,
+        runSeq: 4,
+        moduleDeactivation: null,
+      });
+      expect(result.status).toBe('done');
+      expect(result.row.output).toMatchObject({
+        insightCheckpoint: continuation,
+        automatic: { stopReason: 'no_new_consequential' },
+      });
+      expect((await routeEvents(ctx.taskId))[0]?.payload).toMatchObject({
+        checkpoint: { stepRowId: result.row.id, round: 2, generation: 0 },
+      });
+      expect(await activeInsightContinuation(db, ctx.taskId, 2)).toBeNull();
+    } finally {
+      spec.mockRestore();
+    }
   });
   it('rolls checkpoint publication back if its required ownership write fails', async () => {
     const { ctx, source, continuation } = await seedRoute();

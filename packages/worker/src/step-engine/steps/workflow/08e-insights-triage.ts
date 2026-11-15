@@ -187,6 +187,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const auto = automatic ? await detectAutoInsights(ctx, insights, worktreePath) : undefined;
     return {
       ...(auto ? { auto } : {}),
+      ...(checkpoint ? { insightCheckpoint: checkpoint } : {}),
       worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -197,7 +198,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   form(_ctx, detected): FormSchema {
     assertAutoVersion(detected.auto);
-    if (detected.insightCheckpoint)
+    if (detected.insightCheckpoint && !detected.auto)
       return { title: 'Insight checks complete', fields: [], autoSubmit: true };
     if (detected.auto && detected.auto.mode !== 'manual')
       return {
@@ -258,7 +259,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       assertAutoVersion(d.auto);
       if (d.auto?.mode === 'classify') return startAutoClassification(ctx, d.auto);
       if (d.auto?.mode === 'settled') return [];
-      if (d.insightCheckpoint) return [];
+      if (d.insightCheckpoint && !d.auto) return [];
       const selected = selectOfferedInsights(
         d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
         formValues,
@@ -285,7 +286,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const d = args.detected;
     assertAutoVersion(d.auto);
     ctx.throwIfCancelled();
-    if (d.insightCheckpoint)
+    if (d.insightCheckpoint && !d.auto)
       return {
         version: 1,
         batchId: d.insightCheckpoint.batchId,
@@ -431,6 +432,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       skipped: d.insights.length - selected.length,
       ...outcome,
       ...(continuation ? { continuation } : {}),
+      ...(d.insightCheckpoint ? { insightCheckpoint: d.insightCheckpoint } : {}),
     };
   },
   reviseLoop: {
