@@ -30,6 +30,7 @@ import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
 import { resolveMiningSeats, type MiningSeatMap } from '../../modules/mining-seats.js';
+import { INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/shared/schemas';
 
 export const TASK_REPOSITORY_COLUMNS = {
   id: true,
@@ -257,6 +258,25 @@ function unavailableRoundChoice(
   );
 }
 
+const INSIGHT_STEP_ID = '08e-insights-triage';
+const INSIGHT_TRIAGE_SEAT = 'triage';
+
+/** The insight step's Triage seat dispatches only when the task acts on insights automatically,
+ *  so a task that does not hides it. Without a task (06 not answered yet) every seat is listed. */
+async function hidesInsightTriageSeat(
+  db: ReturnType<typeof getDb>,
+  taskId: string | null,
+  stepIds: readonly string[],
+): Promise<boolean> {
+  if (taskId === null || !stepIds.includes(INSIGHT_STEP_ID)) return false;
+  if (!INSIGHT_AUTO_ACTION_AVAILABLE) return true;
+  const [task] = await db
+    .select({ autoActOnInsights: schema.tasks.autoActOnInsights })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  return task?.autoActOnInsights !== true;
+}
+
 export async function enrichStepsWithCliPreferences<T extends { stepId: string; round?: number }>(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
@@ -289,6 +309,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
 > {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
   const miningSeats = await resolveMiningSeats(db);
+  const hideTriage = await hidesInsightTriageSeat(db, taskId, stepIds);
   const { byStep, byStepEffort, roleByStep, roleEffortByStep } = await loadStepCliPrefRows(
     db,
     flags,
@@ -319,7 +340,10 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
     : [];
   return steps.map((s) => {
     const roles = flags.get(s.stepId)?.cliRoles ?? undefined;
-    const seats = miningSeats[s.stepId];
+    const seats =
+      hideTriage && s.stepId === INSIGHT_STEP_ID
+        ? miningSeats[s.stepId]?.filter((seat) => seat.id !== INSIGHT_TRIAGE_SEAT)
+        : miningSeats[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
     const touchedRoles = touchedByStep.get(s.stepId);
@@ -408,6 +432,7 @@ export async function resolveCurrentStepCliProviderIds(
     currentRound?: number;
     cliProviderId: string | null;
     ignoreSavedStepClis: boolean;
+    autoActOnInsights?: boolean;
   }[],
 ): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();
@@ -469,6 +494,11 @@ export async function resolveCurrentStepCliProviderIds(
     // The step default is kept even when every seat is set: it is the fallthrough for a seat
     // the user never touched, and it runs a fan-out step's summary pass.
     for (const seat of (stepId ? miningSeats[stepId] : undefined) ?? []) {
+      const hidden =
+        stepId === INSIGHT_STEP_ID &&
+        seat.id === INSIGHT_TRIAGE_SEAT &&
+        !(INSIGHT_AUTO_ACTION_AVAILABLE && task.autoActOnInsights === true);
+      if (hidden) continue;
       push(usable(slot(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
     }
     for (const role of (stepId ? flags.get(stepId)?.cliRoles : undefined) ?? []) {

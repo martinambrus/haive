@@ -272,7 +272,12 @@ function outcome(
     if (output.version === 1 && Array.isArray(output.items)) {
       if (output.items.length === 0) return null;
       const items = output.items.map(row);
-      const count = (state: string) => items.filter((i) => i.outcome === state).length;
+      // A bounded automatic batch carries whole-batch totals; its item list is only a page.
+      const totals = row(output.itemCounts);
+      const count = (state: string) =>
+        typeof totals[state] === 'number'
+          ? (totals[state] as number)
+          : items.filter((i) => i.outcome === state).length;
       return {
         message: `Agent report: ${count('applied')} applied, ${count('already_handled')} already handled, ${count('not_applied')} not applied, ${count('unconfirmed')} unconfirmed.`,
         tone: count('not_applied') || count('unconfirmed') ? 'warning' : 'neutral',

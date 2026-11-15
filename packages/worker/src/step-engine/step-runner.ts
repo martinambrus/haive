@@ -1,3 +1,4 @@
+import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
@@ -391,6 +392,8 @@ export interface AdvanceStepParams {
   /** Caller guard after saved, submitted and auto-submitted answers have resolved,
    * before any post-form CLI work or apply side effects. */
   validateResolvedForm?: (values: FormValues | null) => void;
+  /** Validate each selected wave before reserving or dispatching any of its agents. */
+  validateMiningDispatch?: (dispatches: readonly AgentMiningDispatch[]) => void;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
@@ -1784,7 +1787,8 @@ async function resolveAgentMiningPhase(
     // mining agents are short and dispatched together, so the doomed calls a sibling kill would
     // save are already spent by the time any row lands here, whereas a coder fan-out runs for
     // half an hour. Scans every row, not just the newest, because a sibling can finish AFTER
-    // the one that hit the wall.
+    // the one that hit the wall. Only unconsumed rows can newly fail a barrier: apply has
+    // already folded consumed failures into its durable outcome before continuing or reopening.
     // A content-filter refusal is that one agent's failure and degrades like any other.
     if (stepDef.metadata.id === INSIGHT_STEP) {
       for (const row of existing) {
@@ -1794,7 +1798,9 @@ async function resolveAgentMiningPhase(
     }
     const fatalAgent = existing.find(
       (r) =>
+        r.consumedAt == null &&
         r.status === 'failed' &&
+        !(stepDef.metadata.id === INSIGHT_STEP && classifierPolicy(r.agentId)) &&
         // The first 08e outage fails visibly and arms the allowance watch. On either Resume
         // path, fold the failed writer through apply into the batch's unconfirmed outcome:
         // it may have edited and cannot be retried in this generation. The in-memory request
@@ -1911,6 +1917,11 @@ async function resolveAgentMiningPhase(
   }
 
   if (!params.providers || !params.deps) {
+    if (
+      stepDef.metadata.id === INSIGHT_STEP &&
+      (detected as { auto?: { mode: string } }).auto?.mode === 'classify'
+    )
+      return { resolved: true, results: [], newResults: [], current };
     // Only an empty manual selection can finish without editor dependencies. Validate
     // the saved selection before calling selectAgents, which may write a batch intent.
     if (
@@ -1948,12 +1959,13 @@ async function resolveAgentMiningPhase(
       llmOutput,
     });
     ctx.throwIfCancelled();
+    params.validateMiningDispatch?.(dispatches);
     const results: AgentMiningResult[] = dispatches.map((d) => ({
       agentId: d.agentId,
       agentTitle: d.agentTitle,
       status: 'done',
       output: null,
-      rawOutput: null,
+      rawOutput: syntheticInsightReply(d, detected),
       errorMessage: null,
     }));
     return { resolved: true, results, newResults: results, current };
@@ -2018,6 +2030,21 @@ async function resolveAgentMiningPhase(
         ),
       );
     if (live.length === 0) {
+      if (
+        stepDef.metadata.id === INSIGHT_STEP &&
+        dispatches.every((d) => classifierPolicy(d.agentId))
+      )
+        return resolveAgentMiningPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          true,
+        );
       const rows = await db
         .select({
           agentId: schema.taskStepAgentMinings.agentId,
@@ -2202,16 +2229,63 @@ export async function holdReopenedForm(
   taskStepId: string,
   folded: readonly AgentMiningResult[] | undefined,
   at: Date,
+  nextGeneration?: number,
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await consumeFoldedMiningRows(tx, taskStepId, folded, at);
-    await updateOwnedStep(tx, taskStepId, {
-      detectOutput: null,
-      formSchema: null,
-      formValues: null,
-      pauseFormOnRetry: true,
-    });
+    await updateOwnedStep(
+      tx,
+      taskStepId,
+      {
+        ...(nextGeneration == null ? {} : { rerunGeneration: nextGeneration }),
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        pauseFormOnRetry: true,
+      },
+      nextGeneration == null ? undefined : nextGeneration - 1,
+    );
   });
+}
+
+/** Test bypass remains synthetic through every wave, including the writer. */
+function syntheticInsightReply(dispatch: AgentMiningDispatch, detected: unknown): string | null {
+  const d = detected as {
+    auto?: {
+      candidates: { id: string }[];
+      decisions?: { id: string; class: string; eligible: boolean }[];
+    };
+    insights: { id: string }[];
+  };
+  if (!d.auto) return null;
+  const classifier = classifierPolicy(dispatch.agentId);
+  const ids = classifier
+    ? d.auto.candidates.map((i) => i.id)
+    : (d.auto.decisions ?? [])
+        .filter((i) => i.class === 'consequential' && i.eligible)
+        .map((i) => i.id);
+  return classifier
+    ? JSON.stringify({
+        version: 1,
+        batchId: dispatch.agentId.slice('triage-'.length, -2),
+        items: ids.map((id) => ({
+          id,
+          class: 'consequential',
+          kind: 'correctness',
+          reason: 'Synthetic classifier',
+        })),
+      })
+    : JSON.stringify({
+        version: 1,
+        batchId: dispatch.agentId.slice('implementer-'.length),
+        items: ids.map((id) => ({
+          id,
+          outcome: 'applied',
+          changes: ['Synthetic improvement'],
+          reason: 'Test bypass',
+        })),
+        notes: '',
+      });
 }
 
 /** Rows per reservation statement; each carries a whole prompt. */
@@ -2271,11 +2345,12 @@ async function reserveMiningAgents(
     await assertOwnsStep(tx, taskStepId);
     if (stepId === INSIGHT_STEP) {
       for (const row of rows)
-        await recordInsightReservation(
-          { ...ctx, db: tx as unknown as Database },
-          row.agentId,
-          row.id,
-        );
+        if (!classifierPolicy(row.agentId))
+          await recordInsightReservation(
+            { ...ctx, db: tx as unknown as Database },
+            row.agentId,
+            row.id,
+          );
     }
     return rows;
   });
@@ -2316,6 +2391,7 @@ async function dispatchMiningAgents(
   dispatches: RunnerMiningDispatch[],
   existing: MiningRetryTargets | null,
 ): Promise<MiningDispatchOutcome> {
+  params.validateMiningDispatch?.(dispatches);
   // Verify each inventory once for this fan-out; dispatch can reuse it, exec always rechecks bytes.
   const snapshotCache: SnapshotDispatchCache = new Map();
   for (const dispatch of dispatches)
@@ -2421,7 +2497,11 @@ async function dispatchMiningAgents(
     let enqueued = 0;
     for (const dispatch of dispatches) {
       ctx.throwIfCancelled();
-      const toolProfile = snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
+      const classifier =
+        stepDef.metadata.id === INSIGHT_STEP ? classifierPolicy(dispatch.agentId) : null;
+      const toolProfile = classifier
+        ? 'none'
+        : snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
       if (refusal !== null) {
@@ -2456,6 +2536,21 @@ async function dispatchMiningAgents(
             providers: params.providers!,
             preferredProviderId,
             steeringRequested,
+            ...(classifier
+              ? {
+                  promptBudget: {
+                    maxChars: classifier.inputChars,
+                    outputReserveChars: 0,
+                    repack: (maxChars: number) => {
+                      if (prompt.length > maxChars)
+                        throw new PromptBudgetExceededError(
+                          'Insight classifier input including dispatch additions exceeds its budget.',
+                        );
+                      return prompt;
+                    },
+                  },
+                }
+              : {}),
             input: {
               kind: 'prompt',
               prompt,
@@ -2479,11 +2574,20 @@ async function dispatchMiningAgents(
               cwd: params.workspacePath,
               effortLevel: preferredEffort ?? undefined,
               disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+              ...(classifier ? { disableTools: true } : {}),
             },
           },
           snapshotCache,
         );
       } catch (err) {
+        if (classifier && err instanceof PromptBudgetExceededError) {
+          await refuse(
+            dispatch,
+            target,
+            'Insight classification input budget exceeded; manual selection required.',
+          );
+          continue;
+        }
         if (!(err instanceof ProviderBuildError)) throw err;
         buildFailure = `cannot build a command for ${err.providerName}: ${err.message}`;
       }
@@ -2563,12 +2667,9 @@ async function dispatchMiningAgents(
           .where(eq(schema.cliInvocations.id, target.cliInvocationId));
       }
 
-      const budget = await resolveMiningTimeoutMs(
-        current,
-        spec.timeoutMs,
-        target.timeoutAttempts,
-        learnedMs,
-      );
+      const budget = classifier
+        ? { timeoutMs: classifier.timeoutMs, timeoutSource: 'declared' }
+        : await resolveMiningTimeoutMs(current, spec.timeoutMs, target.timeoutAttempts, learnedMs);
       await stampLearnedTimeout(db, current.id, budget.timeoutMs);
       if (budget.timeoutMs !== spec.timeoutMs) {
         ctx.logger.info(
@@ -2583,7 +2684,7 @@ async function dispatchMiningAgents(
           'mining agent dispatched with a non-declared timeout budget',
         );
       }
-      if (stepDef.metadata.id === INSIGHT_STEP) {
+      if (stepDef.metadata.id === INSIGHT_STEP && !classifier) {
         await recordInsightInvocation(ctx, dispatch.agentId, target.id, invRow.id);
         ctx.throwIfCancelled();
         await beginFixTestCapture(db, {
@@ -3792,7 +3893,20 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           // below re-detects and stops at the form rather than re-sending the answered items. Only
           // while the pass owns the row, so a Retry's reset keeps its own hold and the agent rows are
           // left as the reset left them.
-          await holdReopenedForm(db, current.id, applyArgs.agentMiningResults, new Date());
+          const nextGeneration = applyErr.newAttempt
+            ? (current.rerunGeneration ?? 0) + 1
+            : undefined;
+          await holdReopenedForm(
+            db,
+            current.id,
+            applyArgs.agentMiningResults,
+            new Date(),
+            nextGeneration,
+          );
+          if (nextGeneration != null) {
+            current = { ...current, rerunGeneration: nextGeneration };
+            ctx.rerunGeneration = nextGeneration;
+          }
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
@@ -3841,6 +3955,19 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           params.deps &&
           applyArgs.miningWaveExhausted !== true
         ) {
+          if (meta.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+            params.validateMiningDispatch?.(applyErr.dispatches);
+            const synthetic: AgentMiningResult[] = applyErr.dispatches.map((d) => ({
+              agentId: d.agentId,
+              agentTitle: d.agentTitle,
+              status: 'done',
+              output: null,
+              rawOutput: syntheticInsightReply(d, detected),
+              errorMessage: null,
+            }));
+            applyArgs.agentMiningResults = [...(applyArgs.agentMiningResults ?? []), ...synthetic];
+            continue;
+          }
           // Mark every row apply() has just folded, BEFORE the wave's fresh rows
           // exist: the next apply() pass asks for the unconsumed set via
           // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref

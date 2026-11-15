@@ -20,6 +20,7 @@ describe('manual insight batch contract', () => {
       timeoutMs: 1800000,
     });
     expect(STEP_MINING_SEATS['08e-insights-triage']).toEqual([
+      { id: 'triage', label: 'Triage' },
       { id: 'implementer', label: 'Implementer' },
     ]);
     expect(HOUSE_RULE_ROLES['08e-insights-triage']?.implementer).toBe('write');

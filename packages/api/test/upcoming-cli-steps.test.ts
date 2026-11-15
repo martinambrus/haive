@@ -9,12 +9,18 @@ const flags = staticStepFlags();
  *  these tests exercise the FILTERING (which steps the CLIs tab offers) and the role/seat
  *  attachment, not the preference resolution that enrichStepsWithCliPreferences owns and
  *  that the step-card path already covers. */
-function makeFakeDb(): never {
+function makeFakeDb(autoActOnInsights?: boolean): never {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db: any = {
-    select: () => ({
+    select: (cols?: Record<string, unknown>) => ({
       from: () => ({
-        where: () => Object.assign(Promise.resolve([]), { orderBy: async () => [] }),
+        where: () => {
+          const rows =
+            autoActOnInsights !== undefined && cols && 'autoActOnInsights' in cols
+              ? [{ autoActOnInsights }]
+              : [];
+          return Object.assign(Promise.resolve(rows), { orderBy: async () => [] });
+        },
       }),
     }),
   };
@@ -83,11 +89,36 @@ describe('buildUpcomingCliSteps', () => {
     expect(browser?.cliRoles?.map((r) => r.id)).toEqual(['tester', 'fixer']);
     expect(browser?.miningSeats).toBeUndefined();
 
+    // A task that does not act on insights automatically never dispatches the Triage seat.
+    const insight = out.find((s) => s.stepId === '08e-insights-triage');
+    expect(insight?.miningSeats?.map((s) => s.id)).toEqual(['implementer']);
+    expect(insight?.cliRoles).toBeUndefined();
     const review = out.find((s) => s.stepId === '08c-code-review');
     expect(review?.miningSeats?.map((r) => r.id)).toContain('security-code-reviewer');
     // Fan-out seats must NOT surface as cliRoles: that field's length is loopPassesPerRound.
     expect(review?.cliRoles).toBeUndefined();
   });
+
+  it.each([
+    ['an automatic task', 'task-1', true, ['triage', 'implementer']],
+    ['a manual task', 'task-1', false, ['implementer']],
+    ['no task yet', null, undefined, ['triage', 'implementer']],
+  ] as const)(
+    'lists the insight Triage seat for %s accordingly',
+    async (_, taskId, auto, seats) => {
+      const out = await buildUpcomingCliSteps(
+        makeFakeDb(auto),
+        flags,
+        'user-1',
+        taskId,
+        'workflow',
+        [],
+      );
+      const insight = out.find((s) => s.stepId === '08e-insights-triage');
+      expect(insight?.miningSeats?.map((s) => s.id)).toEqual(seats);
+      expect(Object.keys(insight?.miningSeatProviders ?? {})).toEqual(seats);
+    },
+  );
 
   it('returns nothing for a pipeline with no CLI steps of its own', async () => {
     expect(await ids('env_replicate')).toEqual([]);

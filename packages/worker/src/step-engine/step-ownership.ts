@@ -63,13 +63,26 @@ export class StepSupersededError extends Error {
 /** Every write a pass makes to its row. It lands only while the row is still the pass's own, not
  *  `pending` (a Retry reset it), `skipped` (a Skip took it) or `failed` (a Stop or a cancel ended
  *  it, or the pass already failed it); otherwise it throws StepSupersededError, which
- *  `advanceStep` turns into `superseded`. */
+ *  `advanceStep` turns into `superseded`. A new durable attempt also compares the generation
+ *  it read, since a Retry and its next claim can restore an owned status in the meantime. */
 export async function updateOwnedStep(
   db: Database | DbHandle,
   id: string,
   patch: PgUpdateSetSource<typeof schema.taskSteps>,
+  expectedGeneration?: number,
 ): Promise<TaskStepRow> {
-  const rows = await db.update(schema.taskSteps).set(stepPatch(patch)).where(owned(id)).returning();
+  const rows = await db
+    .update(schema.taskSteps)
+    .set(stepPatch(patch))
+    .where(
+      and(
+        owned(id),
+        expectedGeneration == null
+          ? undefined
+          : eq(schema.taskSteps.rerunGeneration, expectedGeneration),
+      ),
+    )
+    .returning();
   const row = rows[0];
   if (!row) throw new StepSupersededError(id);
   return row;

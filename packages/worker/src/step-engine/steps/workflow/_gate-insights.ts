@@ -5,7 +5,7 @@ export { loadUnactedInsights } from './_insight-loader.js';
 import { code } from './_plan-ops.js';
 import { asPlainText } from './_similar-sites.js';
 
-export const INSIGHTS_AT_GATE = 30;
+export { INSIGHTS_AT_GATE } from '@haive/shared';
 const INSIGHT_FIELD_CHARS = 200;
 
 /** Persist only the legacy gate shape: bounded display fields, with the pre-filter parser id. */

@@ -1132,6 +1132,89 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     },
   );
 
+  it.each([TASK_JOB_NAMES.ADVANCE_STEP, TASK_JOB_NAMES.START])(
+    'ON validates only writer dispatches after skip via %s',
+    async (jobName) => {
+      const stepId = '08e-insights-triage';
+      const runListSnapshot = [stepId];
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: TYPE,
+          displayName: TYPE,
+          runListStrategy: 'static',
+          source: 'admin',
+          stepIds: runListSnapshot,
+        })
+        .onConflictDoNothing();
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({ userId, name: 'auto preflight', source: 'local_path', localPath: '/tmp' })
+        .returning();
+      try {
+        for (const mode of ['skip', 'classify', 'writer'] as const) {
+          const taskId = await makeTask({
+            type: TYPE,
+            status: jobName === TASK_JOB_NAMES.START ? 'queued' : 'running',
+            repositoryId: repo!.id,
+            currentStepId: stepId,
+            runListSnapshot,
+            autoActOnInsights: true,
+            autoContinue: true,
+          });
+          // Synthetic dispatches exercise both waves without a provider or sandbox.
+          vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '1');
+          stepRegistry.override({
+            ...stub(stepId, 9),
+            shouldRun: () => mode !== 'skip',
+            form: () => ({ title: 'Automatic triage', fields: [], autoSubmit: true }),
+            agentMining: {
+              requiredCapabilities: [],
+              selectAgents: async () =>
+                mode === 'writer'
+                  ? [
+                      {
+                        agentId: 'implementer-batch',
+                        agentTitle: 'Writer',
+                        roleKey: 'implementer',
+                        prompt: 'Write',
+                      },
+                    ]
+                  : [],
+            },
+          });
+          await processTaskJob({
+            name: jobName,
+            data: { taskId, userId, stepId, round: 0, epoch: E },
+            opts: {},
+            attemptsMade: 0,
+          } as never);
+          const row = await db.query.taskSteps.findFirst({
+            where: and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, stepId)),
+          });
+          expect(row).toMatchObject(
+            mode === 'writer'
+              ? { status: 'failed', errorMessage: expect.stringContaining('run list') }
+              : { status: mode === 'skip' ? 'skipped' : 'done' },
+          );
+          expect(
+            await db.query.cliInvocations.findMany({
+              where: eq(schema.cliInvocations.taskId, taskId),
+            }),
+          ).toEqual([]);
+          await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+          h.adds.length = 0;
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, repo!.id));
+        await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, TYPE));
+      }
+    },
+  );
   it('an unreadable insight handoff snapshot fails the source step with ordinary Retry guidance', async () => {
     const stepId = '08e-insights-triage';
     stepRegistry.override({ ...stub(stepId, 9), editsCodeOrTests: true });

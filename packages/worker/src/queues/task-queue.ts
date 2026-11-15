@@ -124,7 +124,7 @@ import {
   classifyRuntime,
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import { computeFoldContribution } from '@haive/shared/timing';
-import type { StepDefinition } from '../step-engine/step-definition.js';
+import type { AgentMiningDispatch, StepDefinition } from '../step-engine/step-definition.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
 import { providerHoldMessage } from '../orchestrator/provider-hold.js';
 import {
@@ -2202,6 +2202,17 @@ function assertInsightSelection(
     assertInsightTaskSteps(ctx, steps);
 }
 
+/** Automatic choices are known only after classification; preflight the writer wave. */
+function assertInsightDispatch(
+  ctx: ResolvedTaskContext,
+  steps: readonly StepDefinition[],
+  stepId: string,
+  dispatches: readonly AgentMiningDispatch[],
+): void {
+  if (stepId === '08e-insights-triage' && dispatches.some((d) => d.roleKey === 'implementer'))
+    assertInsightTaskSteps(ctx, steps);
+}
+
 /** Refusals belong to the source row so Retry targets the failed step. */
 async function failStepTransition(
   db: Database,
@@ -3211,6 +3222,8 @@ async function handleStartTask(
       stepDef: first,
       validateResolvedForm: (values) =>
         assertInsightSelection(ctx, steps, first.metadata.id, values),
+      validateMiningDispatch: (dispatches) =>
+        assertInsightDispatch(ctx, steps, first.metadata.id, dispatches),
       // first === steps[0], so its run-list position (run_seq) is 0.
       runSeq: 0,
       providers,
@@ -4013,6 +4026,8 @@ async function handleAdvanceStep(
       stepDef,
       validateResolvedForm: (values) =>
         assertInsightSelection(ctx, runList, stepDef.metadata.id, values),
+      validateMiningDispatch: (dispatches) =>
+        assertInsightDispatch(ctx, runList, stepDef.metadata.id, dispatches),
       round,
       runSeq: runIdx >= 0 ? runIdx : undefined,
       formValues,
@@ -4089,7 +4104,7 @@ export function bootRecoveryAction(row: {
 
 /** Whether a step has agent work a reset would throw away: a finished loop pass, an agent row, or
  *  a run of its own that nothing has superseded. */
-async function hasCliWork(
+export async function hasCliWork(
   db: Database,
   taskStepId: string,
   iterationCount: number,
@@ -4112,8 +4127,13 @@ async function hasCliWork(
       .where(
         and(
           eq(schema.taskEvents.taskStepId, taskStepId),
-          eq(schema.taskEvents.eventType, 'insight.batch'),
-          sql`${schema.taskEvents.payload}->>'stage' = 'intent'`,
+          or(
+            and(
+              eq(schema.taskEvents.eventType, 'insight.batch'),
+              sql`${schema.taskEvents.payload}->>'stage' = 'intent'`,
+            ),
+            eq(schema.taskEvents.eventType, 'insight.auto_round_started'),
+          ),
           sql`${schema.taskEvents.payload}->>'generation' = ${schema.taskSteps.rerunGeneration}::text`,
         ),
       )

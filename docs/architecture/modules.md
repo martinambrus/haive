@@ -587,12 +587,20 @@ a finite, safe, non-negative integer. The host adapter validates synchronously b
 or any identity read; the loader validates before source reads too. Zero returns
 nothing and counts every eligible record as omitted. Pick filtering precedes the limit, and
 `omitted` counts only eligible records that the limit cut. Full title, location and description
-stay in `LoadedInsight`; 08e and gate callers explicitly request 30. Before persistence, the shared gate
+stay in `LoadedInsight`; manual 08e and gate callers explicitly request 30, while automatic
+08e loads the inventory without a count limit and enforces its classifier prompt budget. Before persistence, the shared gate
 projection keeps only `{id, sourceStep, title, location, description}`, collapses every field
 to one line and clips it to 200 characters. The stored entries keep their original positional
 `i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
 also clips for older parked snapshots. Unlimited inventory is not an unlimited prompt budget; report
 consumers must page or stream large results rather than put them in every task poll.
+Automatic 08e persists at most `INSIGHTS_AT_GATE` (30) inventory entries, candidates, decisions
+and claim entries, with omitted counts in its form and summary. When its stored copy was cut,
+it reloads the complete cohort and host policy before classification; it always reloads the
+complete inventory before checking outstanding decisions. A bounded output keeps whole-batch
+outcome totals (`itemCounts`) beside its item page, so the history line counts every item. Claims and classification/batch journal records stay complete in Postgres;
+`GET /tasks/:id/events` pages their insight arrays with omitted counts, and
+`?insightOffset=30` reads the next page (optionally combined with `type`).
 
 `InsightLoadOptions`, `InsightLoadResult`, `LoadedInsight` and `InsightSourceRef` are exported
 only through `@haive/shared/step`. A loaded record's stable versioned occurrence `id` hashes its
@@ -602,7 +610,7 @@ normalization on full fields, so line-shift aliases share an identity but keep d
 occurrence ids and legacy selection/count semantics. 08e's existing positional `i-N` selections
 continue to resolve against their persisted detect snapshot, not a new loader result.
 `picked` preserves selected-in-output semantics for legacy 08e rows; malformed legacy selections
-are ignored. For protocol-v1 manual batches it means an `applied` or `already_handled` agent
+are ignored. For protocol-v1 manual and automatic batches it means an `applied` or `already_handled` agent
 report in the durable task-event journal, projected across occurrence aliases by loader
 identity. `not_applied` and `unconfirmed` stay selectable even after selection and Retry.
 A v1 output selection alone never excludes an item. Neither legacy picks nor new agent reports

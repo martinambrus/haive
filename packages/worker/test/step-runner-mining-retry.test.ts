@@ -1,3 +1,8 @@
+import * as dispatchEngine from '../src/orchestrator/dispatcher.js';
+import * as insightAuto from '../src/step-engine/steps/workflow/_insight-auto.js';
+import * as insightLoader from '../src/step-engine/steps/workflow/_insight-loader.js';
+import * as previousStep from '../src/step-engine/steps/onboarding/_helpers.js';
+import * as specArtifact from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import {
   CommittedSnapshotError,
   isCommittedSnapshotFailure,
@@ -98,6 +103,7 @@ interface MiningRow {
 }
 
 interface MockState {
+  persistMiningRows?: boolean;
   taskStepRow: Record<string, unknown>;
   miningRows: MiningRow[];
   updates: Record<string, unknown>[];
@@ -210,6 +216,8 @@ function makeMockDb(state: MockState): Database {
   let nextId = 1;
   const rowsFor = (table: string): unknown[] => {
     if (table === 'task_steps') return state.taskStepRow.id ? [state.taskStepRow] : [];
+    if (table === 'tasks' && state.persistMiningRows)
+      return [{ id: 'task-1', userId: 'user-1', orchestrationEpoch: 0, status: 'running' }];
     if (table === 'task_step_agent_minings') return state.miningRows;
     if (table === 'cli_invocations') return state.invocationRows ?? [];
     return [];
@@ -239,6 +247,15 @@ function makeMockDb(state: MockState): Database {
         // A read that asks for the step row as finished finds nothing once it is not, and a lock
         // on it as the pass's own finds nothing once a Retry, a Skip or a Stop took it.
         const where = (cond?: unknown) => {
+          if (state.persistMiningRows && tableNameOf(table) === 'task_step_agent_minings') {
+            const values = conditionValues(cond);
+            if (values.includes('pending') && values.includes('running'))
+              return thenable(
+                (rows as MiningRow[]).filter(
+                  (r) => r.status === 'pending' || r.status === 'running',
+                ),
+              );
+          }
           if (tableNameOf(table) !== 'task_steps') return thenable(rows);
           const values = conditionValues(cond);
           const status = state.taskStepRow.status as string;
@@ -267,6 +284,17 @@ function makeMockDb(state: MockState): Database {
           (Array.isArray(v) ? v : [v]).map((one) => {
             const id = `mock-${nextId++}`;
             const row = { id, createdAt: new Date(), ...one };
+            if (state.persistMiningRows && tableName === 'task_step_agent_minings')
+              state.miningRows.push({
+                attempts: 1,
+                timeoutAttempts: 0,
+                cliInvocationId: null,
+                output: null,
+                rawOutput: null,
+                errorMessage: null,
+                consumedAt: null,
+                ...row,
+              } as unknown as MiningRow);
             state.inserts.push({ table: tableName, row });
             // A reserved mining row comes back with the column default it did not set.
             return tableName === 'task_step_agent_minings' ? { attempts: 1, ...row } : row;
@@ -317,6 +345,15 @@ function makeMockDb(state: MockState): Database {
             }
             if (tableName === 'task_step_agent_minings') {
               (state.miningUpdateLog ??= []).push({ set: v, where });
+              if (state.persistMiningRows)
+                for (const row of state.miningRows)
+                  if (
+                    conditionValues(where).includes(row.id) ||
+                    (v.consumedAt instanceof Date &&
+                      conditionValues(where).includes(row.agentId) &&
+                      conditionValues(where).includes(row.cliInvocationId))
+                  )
+                    Object.assign(row, v);
               state.afterMiningWrite?.(v);
             }
           };
@@ -381,7 +418,12 @@ function makeMockDb(state: MockState): Database {
       tasks: { findFirst: async () => undefined },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
-      taskSteps: { findFirst: async () => undefined },
+      taskSteps: {
+        findFirst: async (opts?: { where?: unknown }) =>
+          state.persistMiningRows && conditionValues(opts?.where).includes('ts-1')
+            ? state.taskStepRow
+            : undefined,
+      },
       envTemplates: { findFirst: async () => undefined },
       repositories: { findFirst: async () => undefined },
       // Every fan-out reads what is attached to the task; nothing is, unless a test says so.
@@ -3995,6 +4037,133 @@ describe('08e implementer dispatch and recovery', () => {
     expect(enqueued).toEqual([]);
     expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toEqual([]);
   });
+  it.each(['empty', 'selection', 'new outage'] as const)(
+    'auto ON Resume reopens, then %s submission ignores the consumed outage writer',
+    async (submission) => {
+      const outage = `${PROVIDER_FATAL_HEADLINES.rate_limit}: old 429`;
+      const writer = miningRow(`implementer-${batchId}`, 1, {
+        status: 'failed',
+        errorMessage: outage,
+        rawOutput: null,
+        consumedAt: null,
+        userRetryRequestedAt: new Date(),
+      });
+      const state = stateFor([writer]);
+      state.persistMiningRows = true;
+      const claim: insightAuto.AutoClaim = {
+        version: 1,
+        batchId,
+        sourceStepRowId: 'ts-1',
+        generation: 0,
+        ordinal: 1,
+        insights: selected,
+      };
+      const classification: insightAuto.AutoClassification = {
+        version: 1,
+        batchId,
+        sourceStepRowId: 'ts-1',
+        generation: 0,
+        complete: true,
+        invocationIds: [],
+        items: [
+          {
+            id: selected[0]!.id,
+            identity: selected[0]!.identity,
+            class: 'consequential',
+            kind: 'correctness',
+            eligible: true,
+            outcome: 'needs_decision',
+            reason: 'Repair',
+          },
+        ],
+      };
+      vi.spyOn(insightAuto, 'insightAutoEnabled').mockResolvedValue(true);
+      vi.spyOn(insightAuto, 'loadAutoHistory').mockResolvedValue({
+        claims: [claim],
+        results: [classification],
+      });
+      vi.spyOn(insightLoader, 'loadUnactedInsights').mockResolvedValue({
+        insights: selected,
+        omitted: 0,
+      } as Awaited<ReturnType<typeof insightLoader.loadUnactedInsights>>);
+      vi.spyOn(previousStep, 'loadPreviousStepOutput').mockResolvedValue(null);
+      vi.spyOn(specArtifact, 'resolveSpecView').mockResolvedValue({ text: 'Task scope' } as never);
+      vi.spyOn(specArtifact, 'hydrateNoSpecBrief').mockResolvedValue(undefined);
+      Object.assign(state.taskStepRow.detectOutput as object, {
+        auto: {
+          version: 1,
+          mode: 'classify',
+          candidates: selected,
+          roundsStarted: 1,
+          decisions: classification.items,
+          stopReason: 'classifying',
+          claim,
+        },
+      });
+      const db = makeMockDb(state);
+      const enqueued: CliExecJobPayload[] = [];
+      const reopened = await run(db, insightsTriageStep, enqueued);
+      expect(reopened.status).toBe('waiting_form');
+      expect(state.taskStepRow.rerunGeneration).toBe(1);
+      expect(state.taskStepRow.detectOutput).toMatchObject({
+        auto: { mode: 'manual', candidates: selected },
+      });
+      expect(writer).toMatchObject({
+        status: 'failed',
+        errorMessage: outage,
+        consumedAt: expect.any(Date),
+        userRetryRequestedAt: null,
+      });
+      expect(records.find((r) => r.stage === 'outcome')).toMatchObject({
+        batchId,
+        generation: 0,
+        items: [{ outcome: 'unconfirmed' }],
+      });
+      expect(enqueued).toEqual([]);
+
+      const submitted = await advanceStep({
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: insightsTriageStep,
+        providers: [makeProvider()],
+        formValues: { selectedInsights: submission === 'empty' ? [] : [selected[0]!.id] },
+        deps: {
+          enqueueCliInvocation: async (payload) => {
+            if (payload.kind === 'agent_mining') enqueued.push(payload);
+          },
+        },
+      });
+      expect(submitted.status).toBe(submission === 'empty' ? 'done' : 'waiting_cli');
+      if (submission === 'empty') {
+        expect(enqueued).toEqual([]);
+        return;
+      }
+      const nextBatch = insightJournal.insightBatchId('ts-1', 1);
+      expect(enqueued).toHaveLength(1);
+      const nextWriter = state.miningRows.find((r) => r.agentId === `implementer-${nextBatch}`)!;
+      expect(nextWriter.consumedAt).toBeNull();
+      const freshOutage = `${PROVIDER_FATAL_HEADLINES.server_error}: new 503`;
+      Object.assign(nextWriter, {
+        status: submission === 'new outage' ? 'failed' : 'done',
+        errorMessage: submission === 'new outage' ? freshOutage : null,
+        rawOutput: JSON.stringify({
+          version: 1,
+          batchId: nextBatch,
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: 'Later' }],
+          notes: '',
+        }),
+      });
+      const finished = await run(db, insightsTriageStep, enqueued);
+      expect(finished.status).toBe(submission === 'new outage' ? 'failed' : 'done');
+      if (finished.status === 'failed') expect(finished.error).toBe(freshOutage);
+      expect(enqueued).toHaveLength(1);
+      expect(writer.consumedAt).toBeInstanceOf(Date);
+    },
+  );
   it.each(['manual Resume', 'automatic Resume'])(
     'settles a provider-outage writer through apply after %s, and permits a new generation on Retry',
     async (entry) => {
@@ -4298,5 +4467,141 @@ describe('08e implementer dispatch and recovery', () => {
     expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe('done');
     expect(enqueued).toEqual([]);
     expect(insightJournal.ensureInsightIntent).not.toHaveBeenCalled();
+  });
+  describe('automatic triage seat', () => {
+    const claim = {
+      version: 1 as const,
+      batchId,
+      sourceStepRowId: 'ts-1',
+      generation: 0,
+      ordinal: 1,
+      insights: selected.map((i) => ({ ...i, legacyId: 'i-1' })),
+    };
+    function autoState(rows: MiningRow[] = []) {
+      const state = stateFor(rows);
+      state.persistMiningRows = true;
+      state.taskStepRow.formValues = {};
+      state.taskStepRow.detectOutput = {
+        ...(state.taskStepRow.detectOutput as object),
+        auto: {
+          version: 1,
+          mode: 'classify',
+          candidates: claim.insights,
+          roundsStarted: 0,
+          decisions: [],
+          stopReason: 'classifying',
+          dependencyPolicy: { drupal: false, drupalRoots: [], ownedPaths: [] },
+        },
+      };
+      return state;
+    }
+    beforeEach(() => {
+      vi.spyOn(insightAuto, 'claimAutoRound').mockResolvedValue(claim);
+      vi.spyOn(insightAuto, 'loadAutoHistory').mockResolvedValue({ claims: [claim], results: [] });
+      vi.spyOn(insightAuto, 'saveAutoClassification').mockImplementation(async (_ctx, r) => r);
+    });
+    it('uses the triage provider seat, 120-second hard budget and real usage-bearing invocation, without editor capture', async () => {
+      const state = autoState();
+      const enqueued: CliExecJobPayload[] = [];
+      expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe(
+        'waiting_cli',
+      );
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]).toMatchObject({
+        kind: 'agent_mining',
+        timeoutMs: 120000,
+        toolProfile: 'none',
+      });
+      expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toHaveLength(1);
+      expect(state.miningRows[0]).toMatchObject({
+        roleKey: 'triage',
+        agentId: insightAuto.classifierId(batchId, 1),
+      });
+      expect(fixCapture.beginFixTestCapture).not.toHaveBeenCalled();
+      expect(insightJournal.recordInsightInvocation).not.toHaveBeenCalled();
+    });
+    it('a complete consequential classification dispatches a separate writer and then returns fresh-check revise', async () => {
+      const raw = JSON.stringify({
+        version: 1,
+        batchId,
+        items: [{ id: selected[0]!.id, class: 'nit', kind: 'security', reason: 'reason' }],
+      });
+      const state = autoState([
+        miningRow(insightAuto.classifierId(batchId, 1), 1, { rawOutput: raw }),
+      ]);
+      const enqueued: CliExecJobPayload[] = [];
+      expect((await run(makeMockDb(state), insightsTriageStep, enqueued)).status).toBe(
+        'waiting_cli',
+      );
+      expect(enqueued).toHaveLength(1);
+      const writer = state.miningRows.find((r) => r.agentId === `implementer-${batchId}`)!;
+      expect(writer).toMatchObject({ roleKey: 'implementer' });
+      expect(insightAuto.saveAutoClassification).toHaveBeenCalledOnce();
+      Object.assign(writer, {
+        status: 'done',
+        rawOutput: JSON.stringify({
+          version: 1,
+          batchId,
+          items: [
+            { id: selected[0]!.id, outcome: 'applied', changes: ['Changed code'], reason: '' },
+          ],
+          notes: '',
+        }),
+      });
+      const ended = await run(makeMockDb(state), insightsTriageStep, enqueued);
+      expect(ended).toMatchObject({ status: 'revise', targetStepId: '08-phase-5-verify' });
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('enforces an injected classifier budget after dispatch augmentations and does not escalate its timeout', async () => {
+      const original = insightAuto.classifierPolicy;
+      vi.spyOn(insightAuto, 'classifierPolicy').mockImplementation((id) =>
+        original(id, { inputChars: 400, timeoutMs: 5 }),
+      );
+      const dispatchSpy = vi.spyOn(dispatchEngine, 'resolveTaskDispatch');
+      const state = autoState();
+      const enqueued: CliExecJobPayload[] = [];
+      const ended = await run(
+        makeMockDb(state),
+        {
+          ...insightsTriageStep,
+          apply: async () => ({ summary: 'manual fallback' }),
+        } as StepDefinition,
+        enqueued,
+      );
+      expect(dispatchSpy.mock.calls[0]?.[2].promptBudget?.maxChars).toBe(400);
+      expect(ended.status).toBe('done');
+      expect(enqueued).toEqual([]);
+      expect(state.miningRows[0]).toMatchObject({
+        status: 'failed',
+        errorMessage: expect.stringMatching(/input budget exceeded/),
+      });
+      expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toEqual([]);
+    });
+    it('preserves a separate selected CLI for the triage seat', async () => {
+      const state = autoState();
+      const db = makeMockDb(state);
+      vi.spyOn(db.query.userStepCliRolePreferences, 'findFirst').mockResolvedValue({
+        cliProviderId: 'triage-provider',
+        effortLevel: null,
+      } as never);
+      const enqueued: CliExecJobPayload[] = [];
+      await run(db, insightsTriageStep, enqueued, [
+        makeProvider(),
+        makeProvider({ id: 'triage-provider', label: 'Triage provider' }),
+      ]);
+      expect(enqueued[0]?.cliProviderId).toBe('triage-provider');
+    });
+    it('hostless bypass keeps the classifier AND writer waves synthetic', async () => {
+      vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '1');
+      try {
+        const enqueued: CliExecJobPayload[] = [];
+        const ended = await run(makeMockDb(autoState()), insightsTriageStep, enqueued);
+        expect(ended.status).toBe('revise');
+        expect(enqueued).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 });

@@ -33,6 +33,7 @@ const database = (
   options: { generation?: number; checkpoint?: string; version?: number; events?: boolean } = {},
 ) =>
   ({
+    select: () => ({ from: () => ({ where: async () => [{ auto: false }] }) }),
     query: {
       taskEvents: {
         findMany: vi

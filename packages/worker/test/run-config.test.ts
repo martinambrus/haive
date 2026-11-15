@@ -461,29 +461,28 @@ describe('06-run-config apply', () => {
 });
 
 describe('insight auto-action authorization', () => {
-  it('keeps the switch hidden and false even when a recommendation requests true', () => {
+  it('keeps the switch visible and false even when a recommendation requests true', () => {
     const { ctx } = makeApplyCtx();
     const form = runConfigStep.form!(ctx, detectedStub(true), {
       autoActOnInsights: true,
     }) as FormSchema;
     expect(leafFields(form).get('autoActOnInsights')).toMatchObject({
       type: 'checkbox',
-      visibleWhen: { field: 'autoActOnInsights', in: [] },
       default: false,
     });
     expect(runConfigStep.metadata.reuseLastCompletedFormValues).toBeUndefined();
     expect(runConfigStep.reconcileReusedFormValues).toBeUndefined();
   });
   it.each([undefined, null, 'true', 1, {}, false, true])(
-    'an unavailable switch rejects submitted authorization (%j)',
+    'only boolean true authorizes automatic insights (%j)',
     async (value) => {
       const { ctx, sets } = makeApplyCtx();
       const out = await runConfigStep.apply(
         ctx,
         applyArgs(value === undefined ? {} : { autoActOnInsights: value }),
       );
-      expect(out).toMatchObject({ autoActOnInsights: false });
-      expect(sets[0]!.autoActOnInsights).toBe(false);
+      expect(out).toMatchObject({ autoActOnInsights: value === true });
+      expect(sets[0]!.autoActOnInsights).toBe(value === true);
     },
   );
   it.each([false, true])('an explicit preset %s wins over the remembered true', async (value) => {
@@ -495,14 +494,14 @@ describe('insight auto-action authorization', () => {
     await runConfigStep.apply(ctx, args as never);
     expect(sets[0]!.autoActOnInsights).toBe(value);
   });
-  it('does not enable an unavailable switch from a remembered true', async () => {
+  it('enables the switch from a remembered true', async () => {
     const { ctx, sets } = makeApplyCtx();
     const args = {
       ...(applyArgs({}) as unknown as Record<string, unknown>),
       detected: { ...detectedStub(false), autoActOnInsightsDefault: true },
     };
     await runConfigStep.apply(ctx, args as never);
-    expect(sets[0]!.autoActOnInsights).toBe(false);
+    expect(sets[0]!.autoActOnInsights).toBe(true);
   });
   it('an explicit false answer wins over both preset and remembered true', async () => {
     const { ctx, sets } = makeApplyCtx({ '06-run-config': { autoActOnInsights: true } });
@@ -642,7 +641,7 @@ it.each([undefined, false, true])(
     const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     try {
       const detected = await runConfigStep.detect!(ctx);
-      expect(detected.autoActOnInsightsDefault).toBe(preset === true);
+      expect(detected.autoActOnInsightsDefault).toBe(preset !== false);
       expect(detected.taskAdversarialQaLevel).toBeNull();
       expect(detected.taskMaxFixRounds).toBe(5);
       const out = await runConfigStep.apply(ctx, {
@@ -652,9 +651,9 @@ it.each([undefined, false, true])(
         previousIterations: [],
         llmOutput: { autoActOnInsights: true },
       });
-      expect(out.autoActOnInsights).toBe(preset === true);
+      expect(out.autoActOnInsights).toBe(preset !== false);
       expect(fake.rows(schema.tasks).find((row) => row.id === taskId)!.autoActOnInsights).toBe(
-        preset === true,
+        preset !== false,
       );
     } finally {
       config.mockRestore();
