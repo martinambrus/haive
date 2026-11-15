@@ -1592,6 +1592,28 @@ const auxiliaryFault = (id: string, patch: Row = {}): Row => ({
 });
 
 for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const) {
+  it.each([false, true])(
+    `DGL-3 ${role} content refusal neither counts nor clears (prior fault: %s)`,
+    async (priorFault) => {
+      const h = auxiliaryHarness(role);
+      if (priorFault) await expect(h.fold(auxiliaryFault('first'))).rejects.toThrow(/DAG required/);
+      const streak = structuredClone(h.plan.escalationLog ?? []);
+      await h.fold(
+        auxiliaryFault('refusal', { errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }),
+      );
+      expect(h.plan.escalationLog ?? []).toEqual(streak);
+      expect(h.rows[0]!.resolution).toBe('failed_unrecoverable');
+      expect(h.enqueued).toEqual([]);
+      // A later fault must extend the old streak, rather than start over after a refusal.
+      await expect(h.fold(auxiliaryFault('after-refusal'))).rejects.toThrow(
+        priorFault ? /switch the step's CLI/ : /DAG required agent failed/,
+      );
+      expect(h.plan.escalationLog).toEqual([
+        expect.objectContaining({ role, count: priorFault ? 2 : 1 }),
+      ]);
+    },
+  );
+
   const faults =
     role === 'issue_advisor' || role === 'replanner'
       ? ['environment', 'timeout', 'malformed']

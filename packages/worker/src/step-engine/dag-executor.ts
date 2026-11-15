@@ -2430,7 +2430,6 @@ export async function ingestAdvisor(
   // Opt-in records the refusal without relaying the refused assignment to another agent.
   // The default policy retains the advisor's ordinary escalate-on-no-decision fallback.
   if (recordsFailures(ea.stepDef) && isProviderRefusal(inv.errorMessage)) {
-    await updateAuxiliaryFault(ea, 'issue_advisor', inv, false);
     await consumeRun();
     await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
     return 'escalate';
@@ -2712,7 +2711,9 @@ async function ingestReplanner(
     return ea.db.transaction(async (tx) => {
       const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
       // All issue/run writes precede the step lock, matching Retry's lock order.
-      await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
+      // A content refusal is not a usable decision and neither counts nor clears a streak.
+      if (!isProviderRefusal(inv.errorMessage))
+        await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
       await assertOwnsStep(tx, ea.current.id);
       return action;
     });
