@@ -2258,6 +2258,8 @@ export default function TaskDetailPage() {
             <div className="text-sm text-neutral-500">{noStepsMessage(task)}</div>
           )}
           <StepPortView
+            keepListVisible
+            hasSteps={steps.length > 0}
             request={{
               path: `/tasks/${id}/ports`,
               revision: `${task.executionPath}:${steps.map((step) => step.stepId).join()}`,

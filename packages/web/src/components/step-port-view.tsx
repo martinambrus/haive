@@ -15,6 +15,9 @@ export interface StepPortViewProps {
   request: { path: string; body?: unknown; revision?: string };
   executionPath?: string | null;
   disabled?: boolean;
+  /** Task cards remain actionable alongside the history graph. */
+  keepListVisible?: boolean;
+  hasSteps?: boolean;
   onCanvasChange?: (canvas: boolean) => void;
   onReorder?: (from: number, to: number) => void;
 }
@@ -25,6 +28,8 @@ export function StepPortView({
   request,
   executionPath,
   disabled = false,
+  keepListVisible = false,
+  hasSteps = true,
   onReorder,
   onCanvasChange,
 }: StepPortViewProps) {
@@ -33,7 +38,7 @@ export function StepPortView({
   const [error, setError] = useState<string | null>(null);
   const key = JSON.stringify(request);
   useEffect(() => {
-    if (!canvas) return;
+    if (!canvas || !hasSteps) return;
     const controller = new AbortController();
     setError(null);
     const current = JSON.parse(key) as StepPortViewProps['request'];
@@ -50,12 +55,13 @@ export function StepPortView({
           setError(cause instanceof Error ? cause.message : 'Could not load ports');
       });
     return () => controller.abort();
-  }, [canvas, key]);
+  }, [canvas, key, hasSteps]);
   const candidates = result?.key === key ? result.data.candidates : [];
   const loaded = result?.key === key;
   const graph = candidates.find(
     (candidate) => candidate.executionPath === (executionPath ?? null),
   )?.graph;
+  if (!hasSteps) return <>{children}</>;
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex gap-2" role="group" aria-label="Step view">
@@ -84,7 +90,7 @@ export function StepPortView({
           Canvas
         </Button>
       </div>
-      {canvas ? (
+      {canvas && (
         <>
           {error && <FormError message={error} />}
           {!error && !graph && (
@@ -99,9 +105,8 @@ export function StepPortView({
           )}
           {graph && <StepPortCanvas graph={graph} onReorder={disabled ? undefined : onReorder} />}
         </>
-      ) : (
-        children
       )}
+      {(!canvas || keepListVisible) && children}
     </div>
   );
 }
