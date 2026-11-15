@@ -1035,6 +1035,103 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     }
   });
 
+  it.each([TASK_JOB_NAMES.ADVANCE_STEP, TASK_JOB_NAMES.START])(
+    'refuses a first-entry insight preset before writer selection or any CLI invocation via %s',
+    async (jobName) => {
+      const stepId = '08e-insights-triage';
+      let writerSelections = 0;
+      const selectAgents = async () => {
+        writerSelections++;
+        return [];
+      };
+      const apply = vi.fn(async () => ({}));
+      stepRegistry.override({
+        ...stub(stepId, 9),
+        form: () => ({
+          title: 'Insights',
+          fields: [
+            {
+              type: 'multi-select',
+              id: 'selectedInsights',
+              label: 'Select',
+              options: [{ value: 'one', label: 'One' }],
+            },
+          ],
+        }),
+        agentMining: { requiredCapabilities: ['tool_use', 'file_write'], selectAgents },
+        apply,
+      });
+      const runListSnapshot =
+        jobName === TASK_JOB_NAMES.START ? [stepId] : ['08-phase-5-verify', stepId];
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: TYPE,
+          displayName: TYPE,
+          runListStrategy: 'static',
+          source: 'admin',
+          stepIds: runListSnapshot,
+        })
+        .onConflictDoNothing();
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({ userId, name: 'preset preflight', source: 'local_path', localPath: '/tmp' })
+        .returning();
+      const taskId = await makeTask({
+        type: TYPE,
+        status: jobName === TASK_JOB_NAMES.START ? 'queued' : 'running',
+        repositoryId: repo!.id,
+        currentStepId: stepId,
+        runListSnapshot,
+        autoContinue: true,
+        preAnswers: { [stepId]: { selectedInsights: ['one'] } },
+      });
+      try {
+        // Neither the job nor a step row supplies the selection; advanceStep must resolve the preset.
+        await processTaskJob({
+          name: jobName,
+          data: { taskId, userId, stepId, round: 0, epoch: E },
+          opts: {},
+          attemptsMade: 0,
+        } as unknown as Parameters<typeof processTaskJob>[0]);
+        expect(writerSelections).toBe(0);
+        expect(apply).not.toHaveBeenCalled();
+        const row = await db.query.taskSteps.findFirst({
+          where: and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, stepId)),
+        });
+        expect(row).toMatchObject({
+          status: 'failed',
+          errorMessage: expect.stringContaining('run list'),
+        });
+        expect(
+          (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status,
+        ).toBe('failed');
+        expect(
+          await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskId, taskId),
+          }),
+        ).toEqual([]);
+        expect(
+          await db.query.taskStepAgentMinings.findMany({
+            where: eq(schema.taskStepAgentMinings.taskStepId, row!.id),
+          }),
+        ).toEqual([]);
+        expect(await eventTypes(taskId)).not.toContain('insight.batch');
+        expect(h.adds).toEqual([]);
+        expect(await resetStepAndDownstream(db, taskId, stepId, 0, E)).toMatchObject({
+          newEpoch: E + 1,
+        });
+        expect(await rowOf(row!.id)).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+        await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, TYPE));
+      }
+    },
+  );
+
   it('an unreadable insight handoff snapshot fails the source step with ordinary Retry guidance', async () => {
     const stepId = '08e-insights-triage';
     stepRegistry.override({ ...stub(stepId, 9), editsCodeOrTests: true });

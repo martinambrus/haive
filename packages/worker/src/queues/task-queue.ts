@@ -2186,6 +2186,21 @@ async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<b
   return task !== undefined && task.orchestrationEpoch !== ctx.orchestrationEpoch;
 }
 
+/** Applied to the final answers too: presets are resolved inside the step runner. */
+function assertInsightSelection(
+  ctx: ResolvedTaskContext,
+  steps: readonly StepDefinition[],
+  stepId: string,
+  values: import('@haive/shared').FormValues | null | undefined,
+): void {
+  if (
+    stepId === '08e-insights-triage' &&
+    Array.isArray(values?.selectedInsights) &&
+    values.selectedInsights.length > 0
+  )
+    assertInsightTaskSteps(ctx, steps);
+}
+
 /** Refusals belong to the source row so Retry targets the failed step. */
 async function failStepTransition(
   db: Database,
@@ -3193,6 +3208,8 @@ async function handleStartTask(
       cliProviderId: ctx.cliProviderId,
       ignoreSavedStepClis: ctx.ignoreSavedStepClis,
       stepDef: first,
+      validateResolvedForm: (values) =>
+        assertInsightSelection(ctx, steps, first.metadata.id, values),
       // first === steps[0], so its run-list position (run_seq) is 0.
       runSeq: 0,
       providers,
@@ -3577,7 +3594,7 @@ async function handleAdvanceStep(
     formValues.selectedInsights.length > 0
   ) {
     try {
-      assertInsightTaskSteps(ctx, runList);
+      assertInsightSelection(ctx, runList, payload.stepId, formValues);
     } catch (err) {
       if (!(err instanceof InsightRunListError)) throw err;
       const row =
@@ -3993,6 +4010,8 @@ async function handleAdvanceStep(
       cliProviderId: ctx.cliProviderId,
       ignoreSavedStepClis: ctx.ignoreSavedStepClis,
       stepDef,
+      validateResolvedForm: (values) =>
+        assertInsightSelection(ctx, runList, stepDef.metadata.id, values),
       round,
       runSeq: runIdx >= 0 ? runIdx : undefined,
       formValues,

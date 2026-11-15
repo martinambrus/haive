@@ -388,6 +388,9 @@ export interface AdvanceStepParams {
    *  then falls back to created_at ordering until a boot backfill fills it in). */
   runSeq?: number;
   formValues?: FormValues;
+  /** Caller guard after saved, submitted and auto-submitted answers have resolved,
+   * before any post-form CLI work or apply side effects. */
+  validateResolvedForm?: (values: FormValues | null) => void;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
@@ -3610,6 +3613,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         status: 'running',
       });
     }
+
+    params.validateResolvedForm?.(formValues);
 
     // --- AI-fix phase (retry_ai recovery) ---
     // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
