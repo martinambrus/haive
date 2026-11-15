@@ -155,10 +155,7 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
       },
     });
   const settled = (task: Awaited<ReturnType<typeof readTask>>) =>
-    task &&
-    (task.status === 'completed' || task.status === 'cancelled') &&
-    !task.deadAt &&
-    !task.pausedAt;
+    task && (task.status === 'completed' || task.status === 'cancelled') && !task.pausedAt;
   const task = await readTask();
   if (!settled(task) || !task || !userDirectoryName(task.userId)) return false;
   const epoch = task.orchestrationEpoch;

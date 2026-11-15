@@ -299,11 +299,21 @@ describe('repository task scratch lifecycle', () => {
     { status: 'failed' },
     { status: 'running' },
     { status: 'waiting_user' },
-    { status: 'completed', deadAt: new Date() },
+    { status: 'running', deadAt: new Date() },
     { status: 'cancelled', pausedAt: new Date() },
   ])('retains recovery scratch for %j', async (extra) => {
     expect(await mod.cleanupTaskScratchWorkspace(dbArg(database(task(extra))), TASK)).toBe(false);
     expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it.each(['cancelled', 'completed'])('reaps a %s task with stale dead_at', async (status) => {
+    expect(
+      await mod.cleanupTaskScratchWorkspace(
+        dbArg(database(task({ status, deadAt: new Date() }))),
+        TASK,
+      ),
+    ).toBe(true);
+    await expect(stat(scratch())).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it.each([true, false])('defers queued and started invocations (summary: %s)', async (summary) => {
