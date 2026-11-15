@@ -670,6 +670,16 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
+
+status: open, BLOCKED on an owner decision for P7's scan scenarios (P6 storage/validation/admission fence in progress, branch feat/execution-contract-pins) · kind: feature · found: DPA design 2026-11-15 · priority: P2
+
+Design `.claude/tmp/codex-run/DPA-S/codex-1/design.md` sections 5 and 10, accepted decisions `DPA-S/accepted.md`, plan `docs/plans/kind-riding-dream.md` (Core changes ~:938-1027). P6 pins `execution_contract` at task INSERT and refuses any contract with a guarded span or custom fix target until this runtime lands. Session decision 2026-11-15: a span may declare `requiresSpan` (skipped whenever that earlier span was skipped, host-enforced), so the validator excludes merged-without-planned.
+
+OWNER QUESTION (blocks the scan seed and P7's zero-merge scenario): the plan runs `12-worktree-cleanup` when issues were planned but none merged (plan ~:542-552), but cleanup requires `commit` (`worker/src/step-engine/composable-core.ts` ~:791-802), which only the skipped commit gate provides; the every-path validator correctly rejects it. Recommended: a new core no-change cleanup step (requires worktree + clean-tree, merges nothing, refuses when the branch has its own commits), guarded to planned-and-nothing-merged, with the normal cleanup moved into the merged span. Alternative: a conditional `commit` requirement on the existing cleanup (weakens a core composition rule).
+
+Before P7 lifts the fence (from the P6 review, `EXC-S/review-1.md`): (1) API refusal covers only START and full-restart Retry; `retryTaskAtStep` (`api/src/routes/tasks/index.ts` ~:1527-1536) and step-level submit/clarify/action revival (`routes/tasks/steps.ts` ~:476-570) reset rows and kill sandboxes before the worker refuses. (2) `resolveTaskTypeAvailability` and the API composition paths call plain `validateComposition` with no predicate map; make them contract-aware. (3) `shared/src/modularity/composition.ts` ~:70 hard-codes `'07-phase-2-implement'`; tie it to the worker constant with a test. (4) No test for boot marking of a live contract-bearing task or for the four creators other than tasks POST. (5) `step-catalog.ts` ~:32-33 comment no longer literally true now that `fixConsumer` is persisted. (6) Nits: import placement in four files; in `definitionForCreate` the contract 409 precedes the disabled/deactivated checks.
+
 ### T688 · FNF[dag-partial-2] · opt-in DAG hardening lows, after T686 (+6)
 
 status: open (all items should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
