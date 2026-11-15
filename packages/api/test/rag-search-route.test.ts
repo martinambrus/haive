@@ -231,7 +231,7 @@ it.each(['all', 'global'] as const)(
       body: JSON.stringify({ tool: 'lookup', arguments: { query: 'query' } }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { ok: boolean; text: string };
     expect(body.ok).toBe(true);
     expect(body.text).toContain(REFUSAL_NOTE);
     if (scope === 'all') expect(body.text).toContain('src/session.ts');
