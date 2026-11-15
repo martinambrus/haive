@@ -40,12 +40,11 @@ describe('port edge validation', () => {
     p.outputs[0]!.contract = { id: port.contract.id, version: 2 };
     expect(validatePortEdges([p, consumer()]).nodes[1]!.inputs[0]!.state).toBe('dangling');
     expect(
-      validatePortEdges([producer('p'), producer('q'), consumer()], { 'c:spec': 'q' }).edges[0]
+      validatePortEdges([producer('p'), producer('q'), consumer()], { '2:spec': 1 }).edges[0]
         ?.source,
     ).toBe('q');
     expect(
-      validatePortEdges([producer('p'), consumer()], { 'c:spec': 'gone' }).nodes[1]!.inputs[0]!
-        .state,
+      validatePortEdges([producer('p'), consumer()], { '1:spec': -1 }).nodes[1]!.inputs[0]!.state,
     ).toBe('dangling');
   });
   it('projects the spec stages and effective-spec adapter without inventing a direct stage input', () => {
@@ -117,4 +116,15 @@ it('indexes each producer output once rather than rereading earlier nodes per in
   });
   validatePortEdges([...nodes, ...Array.from({ length: 8 }, () => consumer())]);
   expect(reads).toBeLessThanOrEqual(8);
+});
+
+it('keeps duplicate consumer bindings and edge endpoints distinct by run position', () => {
+  const graph = validatePortEdges([producer('same'), consumer(), producer('same'), consumer()], {
+    '1:spec': 0,
+    '3:spec': 2,
+  });
+  expect(graph.edges).toEqual([
+    expect.objectContaining({ sourceIndex: 0, targetIndex: 1 }),
+    expect.objectContaining({ sourceIndex: 2, targetIndex: 3 }),
+  ]);
 });

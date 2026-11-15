@@ -16,7 +16,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 const ROW_HEIGHT = 300;
 type GraphNode = Node<
-  { node: StepPortGraph['nodes'][number]; select: (id: string, port: string) => void },
+  { node: StepPortGraph['nodes'][number]; select: (port: string) => void },
   'ports'
 >;
 
@@ -72,12 +72,12 @@ function PortsNode({ data }: NodeProps<GraphNode>) {
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-2">
           {node.inputs.map((port) => (
-            <Port key={port.id} port={port} input select={() => select(node.id, port.id)} />
+            <Port key={port.id} port={port} input select={() => select(port.id)} />
           ))}
         </div>
         <div className="flex flex-col gap-2">
           {node.outputs.map((port) => (
-            <Port key={port.id} port={port} input={false} select={() => select(node.id, port.id)} />
+            <Port key={port.id} port={port} input={false} select={() => select(port.id)} />
           ))}
         </div>
       </div>
@@ -92,7 +92,7 @@ export default function StepPortCanvas({
   graph: StepPortGraph;
   onReorder?: (from: number, to: number) => void;
 }) {
-  const [selected, setSelected] = useState<{ id: string; port: string } | null>(null);
+  const [selected, setSelected] = useState<{ index: number; port: string } | null>(null);
   const [dragRevision, setDragRevision] = useState(0);
   const nodes: GraphNode[] = useMemo(
     () =>
@@ -100,20 +100,19 @@ export default function StepPortCanvas({
         id: `${index}:${node.id}`,
         type: 'ports',
         position: { x: 0, y: index * ROW_HEIGHT },
-        data: { node, select: (id, port) => setSelected({ id, port }) },
+        data: { node, select: (port) => setSelected({ index, port }) },
       })),
     [graph],
   );
-  const nodeId = (id: string) => `${graph.nodes.findIndex((node) => node.id === id)}:${id}`;
   const edges = graph.edges.map((edge, index) => {
     const highlighted =
       selected &&
-      ((selected.id === edge.source && selected.port === edge.sourcePort) ||
-        (selected.id === edge.target && selected.port === edge.targetPort));
+      ((selected.index === edge.sourceIndex && selected.port === edge.sourcePort) ||
+        (selected.index === edge.targetIndex && selected.port === edge.targetPort));
     return {
       id: String(index),
-      source: nodeId(edge.source),
-      target: nodeId(edge.target),
+      source: `${edge.sourceIndex}:${edge.source}`,
+      target: `${edge.targetIndex}:${edge.target}`,
       markerEnd: { type: MarkerType.ArrowClosed },
       sourceHandle: edge.sourcePort,
       targetHandle: edge.targetPort,

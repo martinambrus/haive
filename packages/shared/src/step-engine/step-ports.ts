@@ -27,32 +27,39 @@ export interface StepPortGraph {
   nodes: (Omit<PortNode, 'inputs'> & {
     inputs: (StepPort & { state: PortInputState; candidates: string[] })[];
   })[];
-  edges: { source: string; sourcePort: string; target: string; targetPort: string }[];
+  edges: {
+    source: string;
+    sourceIndex: number;
+    sourcePort: string;
+    target: string;
+    targetIndex: number;
+    targetPort: string;
+  }[];
 }
 
 /** One pure edge validator for projections and future admission. Each call is ONE candidate path.
  * A supplied binding must still identify an earlier, exactly compatible producer. */
 export function validatePortEdges(
   nodes: readonly PortNode[],
-  bindings: Readonly<Record<string, string>> = {},
+  bindings: Readonly<Record<string, number>> = {},
 ): StepPortGraph {
   const edges: StepPortGraph['edges'] = [];
-  type Producer = { producer: PortNode; output: StepPort };
-  const producers = new Map<string, { all: Producer[]; byId: Map<string, Producer[]> }>();
+  type Producer = { producer: PortNode; index: number; output: StepPort };
+  const producers = new Map<string, { all: Producer[]; byIndex: Map<number, Producer[]> }>();
   const contractKey = (port: { role: string; contract: { id: string; version: number } }) =>
     JSON.stringify([port.role, port.contract.id, port.contract.version]);
   // Walk once in run order: the index contains only earlier producers. Work is linear
   // in ports plus the candidate ids returned (an ambiguous result may itself be large).
-  const projected = nodes.map((node) => {
+  const projected = nodes.map((node, index) => {
     const inputs = node.inputs.map((input) => {
       const alternatives = input.alternatives ?? [input];
       const bucket = alternatives
         .map((alternative) => producers.get(contractKey(alternative)))
         .find((bucket) => bucket?.all.length);
       const candidates = bucket?.all ?? [];
-      const key = `${node.id}:${input.id}`;
+      const key = `${index}:${input.id}`;
       const bound = Object.hasOwn(bindings, key);
-      const selected = bound ? (bucket?.byId.get(bindings[key]!) ?? []) : candidates;
+      const selected = bound ? (bucket?.byIndex.get(bindings[key]!) ?? []) : candidates;
       const state: PortInputState =
         selected.length === 1
           ? 'wired'
@@ -64,24 +71,30 @@ export function validatePortEdges(
       if (state === 'wired')
         edges.push({
           source: selected[0]!.producer.id,
+          sourceIndex: selected[0]!.index,
           sourcePort: selected[0]!.output.id,
           target: node.id,
+          targetIndex: index,
           targetPort: input.id,
         });
-      return { ...input, state, candidates: [...(bucket?.byId.keys() ?? [])] };
+      return {
+        ...input,
+        state,
+        candidates: [...new Set(candidates.map((item) => item.producer.id))],
+      };
     });
     for (const output of node.outputs) {
       const key = contractKey(output);
       let bucket = producers.get(key);
       if (!bucket) {
-        bucket = { all: [], byId: new Map() };
+        bucket = { all: [], byIndex: new Map() };
         producers.set(key, bucket);
       }
-      const item = { producer: node, output };
+      const item = { producer: node, index, output };
       bucket.all.push(item);
-      const matches = bucket.byId.get(node.id) ?? [];
+      const matches = bucket.byIndex.get(index) ?? [];
       matches.push(item);
-      bucket.byId.set(node.id, matches);
+      bucket.byIndex.set(index, matches);
     }
     return { ...node, inputs };
   });
@@ -142,8 +155,12 @@ export function projectStepPorts(
   stepIds: readonly string[],
   opts: PortProjectionOptions = {},
 ): StepPortGraph {
-  const bindings: Record<string, string> = {};
-  const nodes = stepIds.map((id): PortNode => {
+  const bindings: Record<string, number> = {};
+  const positions = new Map<string, number>();
+  stepIds.forEach((id, index) => {
+    if (!positions.has(id)) positions.set(id, index);
+  });
+  const nodes = stepIds.map((id, index): PortNode => {
     const outputs: StepPort[] = [];
     for (const [roleId, registered] of Object.entries(STEP_ROLE_REGISTRY)) {
       const role = roleId as StepRoleId;
@@ -170,7 +187,7 @@ export function projectStepPorts(
     if (id === '09-gate-2-verify-approval') inputs.push(port(STEP_ROLES.codeAudit, 'audit'));
     for (const input of inputs) {
       const bound = opts.roleBindings?.[input.role];
-      if (bound) bindings[`${id}:${input.id}`] = bound.stepId;
+      if (bound) bindings[`${index}:${input.id}`] = positions.get(bound.stepId) ?? -1;
     }
     return { id, label: opts.labels?.get(id) ?? id, inputs, outputs };
   });
