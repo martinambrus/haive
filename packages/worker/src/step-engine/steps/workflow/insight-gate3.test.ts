@@ -43,6 +43,10 @@ const detected = {
 };
 beforeEach(() => {
   vi.spyOn(returns, 'pendingInsightApproval').mockResolvedValue(null);
+  vi.spyOn(loader, 'loadUnactedInsights').mockResolvedValue({
+    insights: [item('minor'), item('nit')],
+    omitted: 0,
+  });
 });
 afterEach(() => vi.restoreAllMocks());
 describe('PR5 gate-3 insight controls', () => {
@@ -277,4 +281,67 @@ it('complete reports retain full occurrence text and provenance in bounded deter
   expect(body).toContain('alias-b');
   expect(body).toContain('run-3');
   expect(body).toContain('superseded');
+});
+
+describe('gate-3 persisted choice bounds', () => {
+  it('clips display fields and provenance before persisting detect output', async () => {
+    const full = {
+      ...item('stable'),
+      legacyId: 'i-9',
+      title: 'T'.repeat(5000),
+      sourceRefs: Array.from({ length: 500 }, (_, n) => ({
+        kind: 'invocation' as const,
+        invocationId: `run-${n}`,
+        taskStepId: 'row',
+        stepId: '08c-code-review',
+        round: n,
+        superseded: false,
+      })),
+    };
+    vi.mocked(loader.loadUnactedInsights).mockResolvedValue({ insights: [full], omitted: 0 });
+    vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
+    vi.spyOn(gitWorkspace, 'requireUsableGit').mockResolvedValue(false);
+    vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(false);
+    vi.spyOn(auto, 'loadAutoHistory').mockResolvedValue({ claims: [], results: [] });
+    vi.spyOn(batches, 'loadInsightBatchRecords').mockResolvedValue([]);
+    vi.spyOn(captures, 'loadFixTestRecords').mockResolvedValue([]);
+    vi.spyOn(sites, 'loadTaskSimilarSites').mockResolvedValue({ sites: [], omitted: 0 });
+    vi.spyOn(rules, 'loadGateHouseRules').mockResolvedValue(null);
+    const d = await gate3CommitStep.detect!(ctx);
+    expect(Buffer.byteLength(JSON.stringify(d))).toBeLessThan(12000);
+    expect(d.insightChoices).toEqual([
+      {
+        id: 'stable',
+        sourceStep: 'review',
+        title: 'T'.repeat(200),
+        location: 'src/a.ts',
+        description: 'stable',
+      },
+    ]);
+    const intent = vi
+      .spyOn(batches, 'ensureInsightIntent')
+      .mockResolvedValue({ batchId: 'batch' } as never);
+    await gate3CommitStep.apply(ctx, {
+      detected: d,
+      formValues: { selectedInsights: ['stable'], commit: true },
+      llmOutput: null,
+    } as never);
+    expect(intent).toHaveBeenCalledWith(ctx, [full], 'gate3');
+  });
+  it('refuses a selected id no longer present in the inventory before any intent or git effect', async () => {
+    vi.mocked(loader.loadUnactedInsights).mockResolvedValue({ insights: [], omitted: 0 });
+    const intent = vi
+      .spyOn(batches, 'ensureInsightIntent')
+      .mockRejectedValue(new Error('must not persist'));
+    const run = vi.spyOn(git, 'gitRun').mockRejectedValue(new Error('must not run'));
+    await expect(
+      gate3CommitStep.apply(ctx, {
+        detected,
+        formValues: { selectedInsights: ['nit'], commit: true },
+        llmOutput: null,
+      } as never),
+    ).rejects.toThrow(/Stale or foreign insight selection/);
+    expect(intent).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
 });

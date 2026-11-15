@@ -7,7 +7,7 @@ import {
 } from './_insight-summary.js';
 import { ensureInsightIntent, selectOfferedInsights } from './_insight-batch.js';
 import { readInsightContinuation } from './_insight-continuation.js';
-import type { LoadedInsight, InsightSummary, InsightReviseContinuation } from '@haive/shared/step';
+import type { InsightSummary, InsightReviseContinuation } from '@haive/shared/step';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import {
   fixTestEditsRow,
@@ -93,7 +93,7 @@ interface CommitGateDetect {
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
-  insightChoices?: LoadedInsight[];
+  insightChoices?: Insight[];
   insightSummary?: InsightSummary;
   insightPage?: number;
   insightTotal?: number;
@@ -300,7 +300,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         });
     const insightSummary = await loadInsightSummary(ctx, inventory.insights, offset);
     const insightView = {
-      insightChoices: insights.insights,
+      // Use stable occurrence ids for choices; the legacy status row keeps positional ids.
+      insightChoices: gateInsights(insights.insights.map((i) => ({ ...i, legacyId: i.id }))),
       insightSummary,
       insightPage: offset,
       insightTotal: Math.max(unacted.length, insightSummary.totals.identities),
@@ -599,8 +600,14 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         }
       : {};
     await changeInsightPage(ctx, args.detected, args.formValues);
-    const selected = selectOfferedInsights(args.detected.insightChoices ?? [], args.formValues);
-    if (selected.length) {
+    const offered = selectOfferedInsights(args.detected.insightChoices ?? [], args.formValues);
+    if (offered.length) {
+      const inventory = await loadUnactedInsights(ctx.db, ctx.taskId, { includePicked: true });
+      ctx.throwIfCancelled();
+      // Never turn a disappeared id into an empty selection and fall through to Git.
+      const selected = selectOfferedInsights(inventory.insights, {
+        selectedInsights: offered.map((i) => i.id),
+      });
       const intent = await ensureInsightIntent(ctx, selected, 'gate3');
       return {
         ...summary,
