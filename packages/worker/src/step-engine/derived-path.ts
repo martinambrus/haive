@@ -73,7 +73,12 @@ export async function pinDerivedWorkflowPath(
       task.executionPath === null &&
       validateComposition(
         stepIds,
-        new Map(plan.composableEntries.map((entry) => [entry.stepId, entry])),
+        new Map(
+          (
+            plan.candidates.find((c) => c.executionPath === path)!.effectiveEntries ??
+            plan.composableEntries
+          ).map((entry) => [entry.stepId, entry]),
+        ),
         { requiresRepository: plan.requiresRepository },
       ).length > 0
     )
@@ -83,6 +88,8 @@ export async function pinDerivedWorkflowPath(
       taskId: task.id,
       runListSnapshot: stepIds,
       customSteps: parseCustomSteps(task.customSteps),
+      derivedRunPlan: plan,
+      executionPath: path,
     };
     const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry));
     if (missing.length) throw new UnresolvedStepError(missing);

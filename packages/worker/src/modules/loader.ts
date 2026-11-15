@@ -165,12 +165,20 @@ export function registerModuleSteps(
       if (def.reviseLoop) {
         throw new Error(`${named} uses reviseLoop, which cannot be composed yet`);
       }
-      if (emitsLoop(def) && composableEntry.loopTargetStepId !== FIX_LOOP_TARGET_STEP_ID) {
+      if (
+        (emitsLoop(def) ||
+          (def.replaces?.length && composableEntry.loopTargetStepId !== undefined)) &&
+        composableEntry.loopTargetStepId !== FIX_LOOP_TARGET_STEP_ID
+      ) {
         throw new Error(
           `${named} loops back to ${FIX_LOOP_TARGET_STEP_ID}; declare that as loopTargetStepId`,
         );
       }
-      if (!emitsLoop(def) && composableEntry.loopTargetStepId !== undefined) {
+      if (
+        !emitsLoop(def) &&
+        !def.replaces?.length &&
+        composableEntry.loopTargetStepId !== undefined
+      ) {
         throw new Error(`${named} declares a loop target but does not loop`);
       }
       return { ...composableEntry, stepId: namespaced(moduleId, composableEntry.stepId) };

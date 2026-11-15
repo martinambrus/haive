@@ -1,3 +1,5 @@
+import { rolePin, REVIEW, PRODUCER } from './replacement-fixtures.js';
+import { CODE_REVIEW_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { CODE_AUDIT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { validateSuccessfulStepOutput } from '../src/step-engine/step-output-contract.js';
 vi.mock('../src/step-engine/step-output-contract.js', async (original) => {
@@ -1390,6 +1392,24 @@ describe('successful output contract boundary', () => {
       def.fixLoop.evaluate.mock.invocationCallOrder[0]!,
     );
     expect(state.taskStepRow.output).toBe(value);
+  });
+  it('fails an actual pinned replacement mismatch before host routing or persistence', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', ...rolePin(2) };
+    const evaluate = vi.fn(() => null);
+    const def = {
+      ...makeStep({}),
+      metadata: { ...makeStep({}).metadata, id: PRODUCER },
+      outputContract: CODE_REVIEW_OUTPUT_CONTRACT,
+      replaces: [REVIEW] as const,
+      apply: async () => ({ privateValue: 'NEVER LOG' }),
+      fixLoop: { evaluate },
+    };
+    expect((await run(state, def)).status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toContain('step-output-contract-invalid');
+    expect(state.taskStepRow.errorMessage).not.toContain('NEVER LOG');
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(state.updates.some((u) => 'output' in u.patch || 'iterations' in u.patch)).toBe(false);
   });
   it('fails a rejected output before hooks or output writes, without fixLoopOnError routing', async () => {
     const state = freshState();

@@ -422,5 +422,45 @@
     "value": "@roles",
     "count": 1,
     "reason": "Admission allowlist, diagnostics and pinned effective-policy verification; no stored-output reads"
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "resolveTaskStep.role",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "resolveTaskStep.shouldRun",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "assertPinnedProducerSupport",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "assertPinnedCandidateSupport",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-runner.ts",
+    "symbol": "advanceStep.replacedRole",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Successful output validation selects only the pinned occupancy through readStepRole"
   }
 ]

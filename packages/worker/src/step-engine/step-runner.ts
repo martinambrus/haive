@@ -1,3 +1,4 @@
+import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
 import {
   validateSuccessfulStepOutput,
   StepOutputContractInvalidError,
@@ -3797,7 +3798,26 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (stepDef.outputContract) {
       await assertOwnsStep(db, current.id);
       throwIfCancelled();
-      validateSuccessfulStepOutput(stepDef, output, ctx.logger);
+      const taskPin = stepDef.replaces?.length
+        ? await db.query.tasks.findFirst({
+            where: eq(schema.tasks.id, taskId),
+            columns: { derivedRunPlan: true, executionPath: true, runListSnapshot: true },
+          })
+        : undefined;
+      const replacedRole =
+        taskPin?.derivedRunPlan == null
+          ? undefined
+          : Object.values(STEP_ROLES).find((role) =>
+              readStepRole(
+                taskPin,
+                role,
+                (binding) =>
+                  binding.state === 'active' &&
+                  binding.stepId === stepDef.metadata.id &&
+                  binding.stepId !== role,
+              ),
+            );
+      validateSuccessfulStepOutput(stepDef, output, ctx.logger, replacedRole);
     }
 
     // Curated per-step recap for the "What the agent did" panel. LLM steps that

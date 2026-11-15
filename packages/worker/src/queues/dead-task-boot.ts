@@ -13,11 +13,16 @@ import {
 } from '@haive/database';
 import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
-import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
+import {
+  PinnedStepSupportError,
+  stepRegistry,
+  type StepRegistry,
+} from '../step-engine/registry.js';
 import { TERMINAL_TASK_STATUSES } from '../step-engine/step-ownership.js';
 import { newWorkHeldUnderFence } from './_revive-check.js';
 import {
   parseCustomSteps,
+  assertPinnedCandidateSupport,
   resolveRunList,
   resolveTaskStep,
   taskTypeRuntimeFor,
@@ -77,6 +82,7 @@ export interface DeadTaskResolution {
   unresolved: string[];
   /** The step a static task is on when it is registered but not in its run list: its hand-off finds no successor. */
   outsideList: string | null;
+  supportReason?: string;
 }
 
 /** Pure: resolveTaskContext makes scratch workspaces and throws on a deleted repository. */
@@ -96,6 +102,21 @@ export function deadTaskResolution(
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
   if (strategy === 'derived') parseDerivedRunPlan(task.derivedRunPlan);
+  if (task.derivedRunPlan != null) {
+    const plan = parseDerivedRunPlan(task.derivedRunPlan);
+    if (plan.version === 2) {
+      try {
+        for (const candidate of plan.candidates.filter(
+          (c) => task.executionPath == null || c.executionPath === task.executionPath,
+        )) {
+          assertPinnedCandidateSupport(candidate, registry);
+        }
+      } catch (error) {
+        if (!(error instanceof PinnedStepSupportError)) throw error;
+        return { unresolved: [...error.ids], outsideList: null, supportReason: error.message };
+      }
+    }
+  }
   const scope = {
     taskId: task.id,
     workflowType: task.type as WorkflowType,
@@ -189,7 +210,13 @@ export async function reviveDeadTask(
       throw err;
     }
     const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
-    if (!current || (await currentIntegrationMissing(tx, current))) return null;
+    if (
+      !current ||
+      (current.derivedRunPlan != null &&
+        deadTaskResolution(current, 'derived').supportReason !== undefined) ||
+      (await currentIntegrationMissing(tx, current))
+    )
+      return null;
     if (await taskRootMergeBusy(tx, c.id)) {
       log.info({ taskId: c.id, reason: ROOT_MERGE_BUSY_MESSAGE }, 'dead task revival held');
       return 'held' as const;
@@ -414,7 +441,8 @@ export async function reconcileDeadTasks(
           c.id,
           integrationMissing
             ? 'A required integration provider is not installed. Ask an administrator to restore its module and restart the worker.'
-            : deadReasonFor(found.unresolved, found.outsideList ?? undefined),
+            : (found.supportReason ??
+                deadReasonFor(found.unresolved, found.outsideList ?? undefined)),
           {
             epoch: c.epoch,
             unresolved: found.unresolved,
