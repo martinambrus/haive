@@ -423,6 +423,36 @@ describe('automatic insight stages', () => {
     );
     expect(detected.unsafeIds).toEqual(['secret']);
   });
+  it('checks the real batch id at the exact classifier budget boundary before admission', async () => {
+    history.claims = [];
+    const realSize = auto.buildClassifierPrompt([one], undefined, batchId).length;
+    const detected = await detectAutoInsights(ctx, [one], '/repo', { inputChars: realSize - 1 });
+    expect(detected).toMatchObject({ mode: 'manual', stopReason: 'incomplete', candidates: [one] });
+    expect(auto.claimAutoRound).not.toHaveBeenCalled();
+  });
+  it('forwards injected input bounds to the dispatched prompt on both classifier attempts', async () => {
+    const build = vi.spyOn(auto, 'buildClassifierPrompt');
+    const inputChars = auto.buildClassifierPrompt([one], undefined, batchId).length;
+    build.mockClear();
+    expect(await startAutoClassification(ctx, state(), { inputChars })).toMatchObject([
+      { roleKey: 'triage' },
+    ]);
+    expect(build).toHaveBeenLastCalledWith([one], inputChars, batchId);
+    await expect(
+      finishAutoClassification(ctx, state(), [result(1, 'invalid')], false, { inputChars }),
+    ).rejects.toBeInstanceOf(MiningWaveError);
+    expect(build).toHaveBeenLastCalledWith([one], inputChars, batchId);
+  });
+  it('a smaller start-time input budget reoffers manually before claiming a round', async () => {
+    history.claims = [];
+    await expect(startAutoClassification(ctx, state(), { inputChars: 10 })).rejects.toMatchObject({
+      name: 'ReopenStepFormError',
+    });
+    expect(auto.claimAutoRound).not.toHaveBeenCalled();
+    expect(history.results).toMatchObject([
+      { complete: false, items: [{ id: one.id, class: 'unclassified' }] },
+    ]);
+  });
   it('input coverage over an injected budget falls back whole, without spending a classifier round', async () => {
     history.claims = [];
     expect(await detectAutoInsights(ctx, [one], '/repo', { inputChars: 10 })).toMatchObject({

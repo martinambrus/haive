@@ -8,7 +8,7 @@ import { fencedAgentBlock, REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-re
 import { upstreamKind, type DependencyPolicy } from './_dependency-policy.js';
 import { insightBatchId, loadInsightBatchRecords } from './_insight-batch.js';
 import { lockOwnedStep, StepSupersededError } from '../../step-ownership.js';
-import type { StepContext } from '../../step-definition.js';
+import { PromptBudgetExceededError, type StepContext } from '../../step-definition.js';
 
 export const INSIGHT_AUTO_ROUNDS = 3;
 export const INSIGHT_CLASSIFIER_INPUT_CHARS = 32000;
@@ -178,7 +178,9 @@ export function buildClassifierPrompt(
       '","items":[{"id":"<id>","class":"consequential|minor|nit","kind":"<kind>","reason":"<at most 400 characters>"}]}',
   ].join('\n');
   if (prompt.length > maxChars)
-    throw new Error('Insight classifier whole-input budget exceeded; manual selection required.');
+    throw new PromptBudgetExceededError(
+      'Insight classifier whole-input budget exceeded; manual selection required.',
+    );
   return prompt;
 }
 const inputSchema = z
@@ -319,7 +321,7 @@ export async function claimAutoRound(
     ]);
     const candidates = autoCandidates(insights, seen);
     if (!candidates.length) return null;
-    buildClassifierPrompt(candidates, limits.inputChars);
+    buildClassifierPrompt(candidates, limits.inputChars, batchId);
     const claim: AutoClaim = {
       version: 1,
       batchId,

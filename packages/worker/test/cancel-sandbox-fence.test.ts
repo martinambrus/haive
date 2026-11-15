@@ -1,3 +1,4 @@
+import { buildClassifierPrompt } from '../src/step-engine/steps/workflow/_insight-auto.js';
 import { startAutoClassification } from '../src/step-engine/steps/workflow/_insight-auto-flow.js';
 import {
   claimAutoRound,
@@ -19,6 +20,7 @@ import { lockOwnedStep } from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
+  insightBatchId,
   ensureInsightIntent,
   appendInsightBatch,
   recordInsightInvocation,
@@ -1878,6 +1880,19 @@ describe.skipIf(!url)('automatic insight admission on PostgreSQL', () => {
       claims: [{ ordinal: 1 }],
       results: [],
     });
+  });
+  it('an over-budget real batch id refuses before the claim commits', async () => {
+    const ctx = await seed();
+    const chosen = [insight('one')];
+    const realSize = buildClassifierPrompt(
+      chosen,
+      undefined,
+      insightBatchId(ctx.taskStepId, 0),
+    ).length;
+    await expect(claimAutoRound(ctx, chosen, { inputChars: realSize - 1 })).rejects.toThrow(
+      /budget/,
+    );
+    expect(await loadAutoHistory(db, ctx.taskId)).toEqual({ claims: [], results: [] });
   });
   it('publishes classification once before any editor and refuses an overtaken generation', async () => {
     const ctx = await seed();

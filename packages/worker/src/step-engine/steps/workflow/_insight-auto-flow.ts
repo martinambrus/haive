@@ -7,7 +7,11 @@ import { collapseToLine } from '../_untrusted-repo.js';
 import { code } from './_plan-ops.js';
 import type { LoadedInsight } from '@haive/shared/step';
 import type { StepContext, AgentMiningDispatch, AgentMiningResult } from '../../step-definition.js';
-import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
+import {
+  MiningWaveError,
+  ReopenStepFormError,
+  PromptBudgetExceededError,
+} from '../../step-definition.js';
 import type { InsightItemOutcome } from './_insight-batch.js';
 import { insightBatchId, loadInsightBatchRecords } from './_insight-batch.js';
 import { loadDependencyPolicy, type DependencyPolicy } from './_dependency-policy.js';
@@ -190,7 +194,7 @@ export async function detectAutoInsights(
       state.dependencyPolicy = undefined;
     }
     try {
-      buildClassifierPrompt(candidates, limits.inputChars);
+      buildClassifierPrompt(candidates, limits.inputChars, batchId);
     } catch {
       state.mode = 'manual';
       state.stopReason = 'incomplete';
@@ -219,13 +223,17 @@ export async function detectAutoInsights(
   }
   return state;
 }
-export function triageDispatch(claim: AutoClaim, attempt: 1 | 2): AgentMiningDispatch {
+export function triageDispatch(
+  claim: AutoClaim,
+  attempt: 1 | 2,
+  limits: InsightAutoLimits = {},
+): AgentMiningDispatch {
   return {
     agentId: classifierId(claim.batchId, attempt),
     agentTitle: 'Classify optional improvements',
     roleKey: 'triage',
     capabilities: [],
-    prompt: buildClassifierPrompt(claim.insights, undefined, claim.batchId),
+    prompt: buildClassifierPrompt(claim.insights, limits.inputChars, claim.batchId),
   };
 }
 export async function startAutoClassification(
@@ -234,9 +242,29 @@ export async function startAutoClassification(
   limits: InsightAutoLimits = {},
 ): Promise<AgentMiningDispatch[]> {
   if (state.mode !== 'classify') return [];
-  const claim = await claimAutoRound(ctx, state.candidates, limits);
-  ctx.throwIfCancelled();
-  return claim ? [triageDispatch(claim, 1)] : [];
+  const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
+  try {
+    // Exactly the dispatched prompt, including its real batch id, before admission.
+    buildClassifierPrompt(state.candidates, limits.inputChars, batchId);
+    const claim = await claimAutoRound(ctx, state.candidates, limits);
+    ctx.throwIfCancelled();
+    return claim ? [triageDispatch(claim, 1, limits)] : [];
+  } catch (err) {
+    if (!(err instanceof PromptBudgetExceededError)) throw err;
+    await saveAutoClassification(ctx, {
+      version: 1,
+      batchId,
+      sourceStepRowId: ctx.taskStepId,
+      generation: ctx.rerunGeneration ?? 0,
+      complete: false,
+      items: unclassified(state.candidates, false),
+      invocationIds: [],
+    });
+    throw new ReopenStepFormError(
+      'Classification input exceeds its budget. Select improvements manually.',
+      { notice: true },
+    );
+  }
 }
 export async function finishAutoClassification(
   ctx: StepContext,
@@ -278,7 +306,7 @@ export async function finishAutoClassification(
         )
       : null;
   if (!items && !second && first && !exhausted && first.status === 'done')
-    throw new MiningWaveError([triageDispatch(claim, 2)]);
+    throw new MiningWaveError([triageDispatch(claim, 2, limits)]);
   const decisions = items
     ? normalizeClassification(claim.insights, items, state.dependencyPolicy).map((i) =>
         state.unsafeIds?.includes(i.id)
