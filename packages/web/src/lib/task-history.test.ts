@@ -551,6 +551,22 @@ describe('implementation overview', () => {
     );
     expect(result.tone).toBe('warning');
   });
+  it('counts a bounded automatic batch from its whole-batch totals', () => {
+    const result = entry({
+      stepId: '08e-insights-triage',
+      output: {
+        version: 1,
+        implemented: true,
+        items: Array.from({ length: 30 }, (_, i) => ({ id: `i-${i}`, outcome: 'applied' })),
+        itemsOmitted: 2,
+        itemCounts: { applied: 31, already_handled: 0, not_applied: 0, unconfirmed: 1 },
+      },
+    });
+    expect(result.message).toBe(
+      'Agent report: 31 applied, 0 already handled, 0 not applied, 1 unconfirmed.',
+    );
+    expect(result.tone).toBe('warning');
+  });
   it('describes a fix pass concisely without reprinting the implementation recap', () => {
     const output = {
       filesTouched: ['a.php', 'b.php'],

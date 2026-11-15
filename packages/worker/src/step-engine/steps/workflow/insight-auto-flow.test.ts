@@ -672,6 +672,7 @@ describe('automatic insight stages', () => {
       expect(output).toMatchObject({
         selectedOmitted: 1,
         itemsOmitted: 1,
+        itemCounts: { applied: 31, already_handled: 0, not_applied: 0, unconfirmed: 0 },
         changesOmitted: 1,
         insightsFound: 31,
         skipped: 0,

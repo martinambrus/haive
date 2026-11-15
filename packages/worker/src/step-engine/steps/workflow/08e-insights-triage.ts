@@ -551,6 +551,13 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
             selectedOmitted: selected.length - INSIGHTS_AT_GATE,
             items: outcome.items.slice(0, INSIGHTS_AT_GATE),
             itemsOmitted: Math.max(0, outcome.items.length - INSIGHTS_AT_GATE),
+            // Whole-batch totals, so the bounded item list cannot hide a warning.
+            itemCounts: Object.fromEntries(
+              (['applied', 'already_handled', 'not_applied', 'unconfirmed'] as const).map((k) => [
+                k,
+                outcome.items.filter((i) => i.outcome === k).length,
+              ]),
+            ),
             changes: outcome.changes.slice(0, INSIGHTS_AT_GATE),
             changesOmitted: Math.max(0, outcome.changes.length - INSIGHTS_AT_GATE),
           }
