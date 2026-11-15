@@ -574,6 +574,22 @@ no database transaction spans git or file reads. `PreviousStepOutput`, `ReviewDi
 and `StepHostServices` are declared in the public contract entry, with no worker type imports.
 Fix-loop diagnosis and unacted-insight services remain deferred to the deep-analysis consumer.
 
+### Output contracts
+
+`@haive/shared/step-outputs` exposes frozen host references for `haive.code-review@1`
+and `haive.code-audit@1`, inferred `CodeReviewOutput`/`CodeAuditOutput` and `FileCoverage`
+types, exact-reference comparison and safe parsing. The Zod schemas stay private. Parsing
+preserves unknown properties at every object boundary and performs no coercion, defaults
+or transformations. `@haive/shared/step` re-exports the types only, retaining its runtime
+control-class isolation. A module uses `satisfies StepDefinition<Detect, CodeReviewOutput>`
+and declares `outputContract: {id: 'haive.code-review', version: 1}` on both the executable
+and its composable manifest entry. Boot rejects unknown references and disagreement.
+
+`replaces` declares capability for the two review roles only, with the matching host
+reference. It does not grant replacement admission: active replacements remain refused
+until role readers and pinned role routing ship. Existing catalog `entry` JSON holds
+these serializable declarations; no SQL migration is needed.
+
 ## Published-image installs
 
 An install that runs published images (`docker-compose.run.yml`, see
