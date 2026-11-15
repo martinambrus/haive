@@ -1070,3 +1070,43 @@ for (const policy of ['fail-step', 'record-and-continue'] as const) {
     },
   );
 }
+
+for (const policy of ['fail-step', 'record-and-continue']) {
+  for (const role of ['advisor', 'replanner']) {
+    it.each(['permission denied', PROVIDER_FATAL_HEADLINES.server_error])(
+      `F1 frees a superseded ${role} after Retry under ${policy}: %s`,
+      async (errorMessage) => {
+        const h = fixture([issue('A', failure)], true);
+        h.stepDef.dagExecute.failurePolicy = policy;
+        h.invocations.push({
+          id: 'old',
+          startedAt: new Date(),
+          endedAt: new Date(),
+          supersededAt: new Date(),
+          exitCode: 1,
+          errorMessage,
+        });
+        if (role === 'replanner') {
+          h.plan.replannerInvocationId = 'old';
+          h.rows[0]!.lastAdvisorAction = 'ESCALATE_TO_REPLAN';
+          expect((await h.escalate()).status).toBe('reloop');
+          expect(h.plan.replannerInvocationId).toBeNull();
+          expect(h.invocations[0]!.consumedAt).toBeInstanceOf(Date);
+        } else {
+          h.runs.push({
+            id: 'old-advice',
+            dagIssueId: 'A',
+            role: 'issue_advisor',
+            cliInvocationId: 'old',
+            consumedAt: null,
+          });
+        }
+        expect((await h.escalate()).status).toBe('waiting');
+        expect(h.enqueued).toHaveLength(1);
+        expect(h.enqueued[0]!.invocationId).not.toBe('old');
+        expect(h.rows[0]!.advisorInvocations).toBe(0);
+        expect(h.plan.replannerInvocations).toBe(0);
+      },
+    );
+  }
+}

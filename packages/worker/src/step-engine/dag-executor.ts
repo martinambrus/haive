@@ -1906,11 +1906,13 @@ interface EscalationArgs extends ReviewArgs {
 }
 
 function assertEscalationEnvironment(inv: typeof schema.cliInvocations.$inferSelect) {
+  // Retry supersedes the invocation but keeps the plan's pointer until re-entry frees it.
+  if (runNeverAnswered(inv)) return;
   const fault = dagEnvironmentHaltReason({ errorMessage: inv.errorMessage });
   if (fault || isProviderOutage(inv.errorMessage)) {
     throw new Error(`DAG required agent failed: ${fault ?? inv.errorMessage}`);
   }
-  if (!runNeverAnswered(inv) && classifyDagIssueFailure(inv) === 'transient') {
+  if (classifyDagIssueFailure(inv) === 'transient') {
     throw new Error(
       `DAG required agent interrupted (exit ${inv.exitCode ?? 'unknown'}); Retry to recover`,
     );
