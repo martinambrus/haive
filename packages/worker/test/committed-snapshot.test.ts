@@ -1,3 +1,5 @@
+import type { Database } from '@haive/database';
+import { withTaskScratchWorkspace } from '../src/repo/scratch-workspace.js';
 import { computeSecretMasks } from '../src/queues/cli-exec/secret-mask.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -8,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   issueCommittedSnapshot,
   resolveCommittedSnapshots,
+  resolveTaskCommittedSnapshots,
 } from '../src/repo/committed-snapshot.js';
 
 let root: string;
@@ -51,6 +54,57 @@ describe('owned committed snapshot', () => {
     await rm(resolved!.target.workerRoot, { recursive: true });
     resolved = await resolveCommittedSnapshots({ snapshotRef: ref }, options());
     expect(await readFile(join(resolved!.target.workerRoot, '.env'), 'utf8')).toBe(secret);
+  });
+  it('binds the descriptor to DB ownership and holds the scratch fence through dispatch reads', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const previous = process.env.REPO_STORAGE_ROOT;
+    process.env.REPO_STORAGE_ROOT = root;
+    const task = { userId: scope.userId, repositoryId: scope.repositoryId };
+    const repository = { userId: scope.userId, storagePath: repo, localPath: null };
+    const db = {
+      query: {
+        tasks: { findFirst: async () => task },
+        repositories: { findFirst: async () => repository },
+      },
+    } as unknown as Database;
+    let release!: () => void, entered!: () => void;
+    const enteredRead = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const holdRead = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const reader = resolveTaskCommittedSnapshots(
+        db,
+        scope.taskId,
+        { snapshotRef: ref },
+        async (view) => {
+          expect(view.target.tracked.has('.env')).toBe(true);
+          entered();
+          await holdRead;
+        },
+      );
+      await enteredRead;
+      let reaperEntered = false;
+      const reaper = withTaskScratchWorkspace(scope.userId, scope.taskId, async () => {
+        reaperEntered = true;
+      });
+      await Promise.resolve();
+      expect(reaperEntered).toBe(false);
+      release();
+      await reader;
+      await reaper;
+      expect(reaperEntered).toBe(true);
+      repository.userId = randomUUID();
+      await expect(
+        resolveTaskCommittedSnapshots(db, scope.taskId, { snapshotRef: ref }),
+      ).rejects.toThrow('SNAPSHOT_INVALID');
+    } finally {
+      release?.();
+      if (previous === undefined) delete process.env.REPO_STORAGE_ROOT;
+      else process.env.REPO_STORAGE_ROOT = previous;
+    }
   });
   it('keeps target and base distinct and refuses foreign scope, forged or missing inventory', async () => {
     const target = await issueCommittedSnapshot(commitOid, options());

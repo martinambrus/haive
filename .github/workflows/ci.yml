@@ -925,7 +925,7 @@ jobs:
         if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
-            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
+            sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/committed-snapshot.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
 
       - name: Module pin helper inside the worker image
         timeout-minutes: 3
@@ -938,6 +938,13 @@ jobs:
             --mount "type=bind,src=$pin_tmp,dst=$pin_tmp" \
             -e TMPDIR="$pin_tmp" -e MODULE_SOURCE_DOCKER_TEST=true \
             "$image" sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/module-source-pin.test.ts'
+
+      - name: Committed snapshot read-only mounts
+        timeout-minutes: 2
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
+        env:
+          SNAPSHOT_SANDBOX_TEST_IMAGE: haive-cli-sandbox:latest
+        run: pnpm --filter @haive/worker exec vitest run test/exec-core-boundary-mounts.test.ts
 
       - name: Dump service status
         if: always()
@@ -1135,6 +1142,13 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
+
+      - name: Committed snapshot read-only mounts
+        timeout-minutes: 2
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
+        env:
+          SNAPSHOT_SANDBOX_TEST_IMAGE: haive-cli-sandbox:latest
+        run: pnpm --filter @haive/worker exec vitest run test/exec-core-boundary-mounts.test.ts
 
       - name: Dump service status
         if: always()

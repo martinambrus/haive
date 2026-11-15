@@ -461,6 +461,20 @@ describe('selectForDispatch', () => {
   const select = (request: Parameters<typeof selectForDispatch>[2], k: ReturnType<typeof kb>) =>
     selectForDispatch({} as Database, 'task-1', request, undefined, k);
 
+  it('scopes snapshot rules from both inventories without reading a live checkout', async () => {
+    h.tree = new Error('must not read live tree');
+    const out = await selectForDispatch(
+      {} as Database,
+      'task-1',
+      { mode: 'review' },
+      undefined,
+      kb({ rules: [files(['target/**']), files(['base/**']), files(['live/**'])] }),
+      ['target/added.ts', 'base/deleted.ts'],
+    );
+    expect(out.entries).toHaveLength(2);
+    expect(h.treeCalls).toEqual([]);
+  });
+
   it('shows nothing and says the switch is off when it is', async () => {
     expect(await select({ mode: 'write' }, kb({ status: 'disabled' as const }))).toMatchObject({
       status: 'disabled',

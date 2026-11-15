@@ -68,6 +68,8 @@ const gatedFiles = testFiles(join(root, 'packages'))
 
 // These files already run with their guard's URL in independent CI steps.
 const exemptions = {
+  'packages/worker/test/exec-core-boundary-mounts.test.ts':
+    'smokes runs the snapshot mount control against the locally built sandbox image.',
   'packages/api/test/auth-throttle.test.ts': 'smokes runs the auth throttle Redis check.',
   'packages/shared/test/rag-sync-lock.test.ts': 'smokes runs the RAG sync lock Redis check.',
   'packages/shared/test/encryption-key-boot-redis.test.ts':

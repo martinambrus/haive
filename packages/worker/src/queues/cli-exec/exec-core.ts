@@ -1,3 +1,4 @@
+import { CommittedSnapshotError } from '../../repo/committed-snapshot.js';
 import { assertSnapshotOwner } from '../../plan/chat-snapshot.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { join } from 'node:path';
@@ -379,11 +380,11 @@ export async function executeByKind(
   deps: CliExecDeps,
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
-  // Fail before resolving a repository mount or touching its writable boundaries. P5a only
-  // persists/replays identities; a non-null pin must never run against the live checkout.
-  const refs = parseCommittedSnapshotRefs(payload);
-  if (refs.snapshotRef !== null) {
-    throw new Error('Committed snapshot execution is not enabled');
+  let refs: ReturnType<typeof parseCommittedSnapshotRefs>;
+  try {
+    refs = parseCommittedSnapshotRefs(payload);
+  } catch {
+    throw new CommittedSnapshotError();
   }
   // Resolve and persist the ACTUAL hard budget when this queued job starts. Keeping it on the
   // invocation makes the live terminal truthful across retry escalation and provider-specific
@@ -410,12 +411,9 @@ export async function executeByKind(
   // (payload.worktreeSubpath for a DAG/merge sibling, else the task's feature worktree)
   // so the agent cannot reach the repo-root checkout or any sibling worktree. The
   // worktree IS the mount root, so the container workdir is SANDBOX_WORKDIR.
-  const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
-    db,
-    payload.taskId,
-    payload.worktreeRel,
-  );
-  await ensureRepoMountWritable(repoMount);
+  const { repoMount, hasWorktree, hasRepo, workspaceKind, snapshots, baseMount } =
+    await resolveInvocationRepoMount(db, payload.taskId, payload.worktreeRel, refs);
+  if (workspaceKind !== 'snapshot') await ensureRepoMountWritable(repoMount);
   const sandboxWorkdir = SANDBOX_WORKDIR;
   // Empty-file masks hiding deny-listed secret files from the agent (Tier 1,
   // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
@@ -434,14 +432,26 @@ export async function executeByKind(
   // A worktree invocation gets the empty-file mask over its gitfile; one mounted at the
   // repository ROOT gets its real `.git` directory mounted back read-only. Same boundary, and the
   // two shapes are mutually exclusive by construction — see repoGitDataBoundary.
-  const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
+  const gitData =
+    workspaceKind === 'snapshot'
+      ? { mounts: [], masks: [] }
+      : await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
   const boundaryMounts = [
     ...gitData.mounts,
-    ...(await haiveDataBoundary(repoMount, { hasRepo })),
-    ...(await worktreesBoundary(repoMount, { hasWorktree, hasRepo })),
+    ...(workspaceKind === 'snapshot'
+      ? baseMount
+        ? [baseMount]
+        : []
+      : await haiveDataBoundary(repoMount, { hasRepo })),
+    ...(workspaceKind === 'snapshot'
+      ? []
+      : await worktreesBoundary(repoMount, { hasWorktree, hasRepo })),
   ];
   const maskFiles = [
-    ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
+    ...(await resolveSecretMasks(db, payload.taskId, repoMount, snapshots?.target.tracked)),
+    ...(baseMount
+      ? await resolveSecretMasks(db, payload.taskId, baseMount, snapshots?.base?.tracked)
+      : []),
     ...gitData.masks,
     ...(await resolveDdevGeneratedMasks(db, payload.taskId, repoMount)),
   ];
@@ -461,7 +471,10 @@ export async function executeByKind(
       }
       // The task's own uploads dir (read-only) so the agent can read attachments the
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
-      const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
+      const uploadsMount =
+        workspaceKind === 'snapshot'
+          ? null
+          : await resolveTaskUploadsMount(db, payload.taskId, repoMount);
       if (uploadsMount) authMounts.push(uploadsMount);
       authMounts.push(...boundaryMounts);
       // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
@@ -474,18 +487,22 @@ export async function executeByKind(
         payload.taskId,
         repoMount,
         (payload.spec as CliCommandSpec).pastedPersonaPaths ?? [],
+        snapshots?.target.tracked,
       );
       // Per-call agent isolation, decided at DISPATCH and carried on the spec — exec never reads the
       // switch, so a flip between the two cannot split this invocation's prompt from its mounts.
       // Appended to `authMounts` because that array already carries a non-auth entry (the uploads
       // mount) and `assertNoAuthVolumeNesting` checks only `kind: 'auth'` targets, so no new
       // parameter has to be threaded through executeCliSpec.
-      const agentMasks = await resolveAgentDefinitionMasks(
-        db,
-        payload.taskId,
-        repoMount,
-        payload.spec as CliCommandSpec,
-      );
+      const agentMasks =
+        workspaceKind === 'snapshot'
+          ? { mounts: [], records: [] }
+          : await resolveAgentDefinitionMasks(
+              db,
+              payload.taskId,
+              repoMount,
+              payload.spec as CliCommandSpec,
+            );
       authMounts.push(...agentMasks.mounts);
       // Filtered on a LOCAL binding, never on `maskFiles` itself: that array is built outside this
       // switch and the `subagent_sequential` case below consumes it unchanged, and the sub-agent
