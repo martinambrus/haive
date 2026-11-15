@@ -402,7 +402,7 @@ it.each([
   const taskId = '00000000-0000-4000-8000-0000000000b1';
   const userId = '00000000-0000-4000-8000-0000000000a1';
   fake.insert(schema.tasks, { id: taskId, userId, ...task });
-  const context = { ...ctx, taskId, userId, db: fake.db };
+  const context = { ...ctx, taskId, userId, db: fake.db as unknown as StepContext['db'] };
   vi.spyOn(previous, 'loadPreviousStepOutput').mockResolvedValue(null);
   vi.spyOn(gitWorkspace, 'requireUsableGit').mockResolvedValue(false);
   vi.spyOn(auto, 'insightAutoEnabled').mockResolvedValue(false);
@@ -416,6 +416,17 @@ it.each([
   expect(form!.fields.find((f) => f.id === 'selectedInsights')).toBeUndefined();
   expect(form!.infoSections?.some((s) => s.title === 'Insight summary')).toBe(true);
   expect(JSON.stringify(form)).not.toContain('Select improvements below');
+  const intent = vi
+    .spyOn(batches, 'ensureInsightIntent')
+    .mockRejectedValue(new Error('must not persist'));
+  await expect(
+    gate3CommitStep.apply(context, {
+      detected: { ...d, insightChoices: [item('nit')] },
+      formValues: { commit: true, selectedInsights: ['nit'] },
+      llmOutput: null,
+    } as never),
+  ).rejects.toThrow(/Insight triage is not in this task run list/);
+  expect(intent).not.toHaveBeenCalled();
   const run = vi.spyOn(git, 'gitRun').mockImplementation(async (_cwd, args) => ({
     code: 0,
     stdout: args.includes('rev-parse') ? 'sha' : '',
@@ -424,7 +435,7 @@ it.each([
   vi.spyOn(dependency, 'assertDependencyCommitSafe').mockResolvedValue(undefined);
   vi.spyOn(identity, 'resolveGitEnv').mockResolvedValue({});
   vi.spyOn(gitlinks, 'unregisteredGitlinks').mockResolvedValue([]);
-  vi.spyOn(commit, 'gitCommitStaged').mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+  vi.spyOn(commit, 'gitCommitStaged').mockResolvedValue(true);
   const out = await gate3CommitStep.apply(context, {
     detected: { ...d, hasGit: true },
     formValues: { commit: true, commitMessage: 'fix: change' },

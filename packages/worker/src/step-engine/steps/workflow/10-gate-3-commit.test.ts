@@ -51,7 +51,14 @@ function queuedDb(results: unknown[][]) {
   return {
     select: () => chain,
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: null, changedPaths: [] }) },
+      tasks: {
+        findFirst: async () => ({
+          type: 'workflow',
+          runListSnapshot: null,
+          repositoryId: null,
+          changedPaths: [],
+        }),
+      },
       users: { findFirst: async () => undefined },
     },
     update: () => ({ set: () => ({ where: async () => undefined }) }),

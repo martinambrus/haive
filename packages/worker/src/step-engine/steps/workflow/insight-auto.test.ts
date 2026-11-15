@@ -1,4 +1,4 @@
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { describe, expect, it } from 'vitest';
 import {
@@ -127,9 +127,7 @@ it('loads classification history by creation time then id, independent of insert
       },
     });
   }
-  expect((await loadAutoHistory(fake.db, taskId)).results.map((r) => r.batchId)).toEqual([
-    'batch-1',
-    'batch-2',
-    'batch-3',
-  ]);
+  expect(
+    (await loadAutoHistory(fake.db as unknown as Database, taskId)).results.map((r) => r.batchId),
+  ).toEqual(['batch-1', 'batch-2', 'batch-3']);
 });

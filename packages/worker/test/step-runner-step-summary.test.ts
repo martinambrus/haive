@@ -587,16 +587,20 @@ describe('stored sandbox-boundary failures', () => {
 });
 
 it('zero-insight gate3 keeps the asynchronous LLM recap and leaves the ledger for its completion', async () => {
+  const ledger = await import('../src/step-engine/task-ledger.js');
+  const recorded = vi.spyOn(ledger, 'recordLedgerEntry').mockResolvedValue(undefined);
   const checks = await import('../src/queues/insight-gate3-return.js');
   const latch = vi.spyOn(checks, 'pendingInsightApproval').mockResolvedValue(null);
   const { gate3CommitStep } = await import('../src/step-engine/steps/workflow/10-gate-3-commit.js');
   const { buildInsightSummary } =
     await import('../src/step-engine/steps/workflow/_insight-summary.js');
   const state = freshState({ summaryLlmEnabled: true });
+  state.cliInvocationRow!.parsedOutput = { commitMessage: 'fix: describe pending changes' };
   state.taskStepRow.stepId = gate3CommitStep.metadata.id;
   state.taskStepRow.formValues = { commit: false, selectedInsights: [] };
   state.taskStepRow.detectOutput = {
     hasGit: true,
+    dirtyFiles: 1,
     workspacePath: '/tmp',
     insightChoices: [],
     insightSummary: buildInsightSummary([], [], [], false),
@@ -625,5 +629,6 @@ it('zero-insight gate3 keeps the asynchronous LLM recap and leaves the ledger fo
     message: 'commit skipped',
   });
   expect(summaries(enqueued)).toHaveLength(1);
-  expect(state.inserts.filter((i) => i.table === 'task_ledger')).toEqual([]);
+  expect(recorded).not.toHaveBeenCalled();
+  recorded.mockRestore();
 });
