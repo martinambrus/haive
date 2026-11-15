@@ -3972,6 +3972,35 @@ describe('08e implementer dispatch and recovery', () => {
     });
     return state;
   }
+  it.each([
+    { exitCode: 0, errorMessage: null, status: 'done' },
+    { exitCode: 1, errorMessage: null, status: 'failed' },
+    { exitCode: 0, errorMessage: 'editor failed', status: 'failed' },
+    { exitCode: null, errorMessage: null, status: 'failed' },
+  ])(
+    'folds an ended legacy editor as $status (exit=$exitCode, error=$errorMessage)',
+    async ({ exitCode, errorMessage, status }) => {
+      const state = stateFor();
+      state.invocationRows = [
+        { id: 'legacy-run', prompt: 'edit', endedAt: new Date(), exitCode, errorMessage },
+      ];
+      const apply = vi.fn(async (_ctx, args: StepApplyArgs) => ({
+        status: args.agentMiningResults?.[0]?.status,
+      }));
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(
+        makeMockDb(state),
+        { ...insightsTriageStep, apply } as StepDefinition,
+        enqueued,
+      );
+      expect(result.status).toBe('done');
+      expect(apply).toHaveBeenCalledOnce();
+      expect(apply.mock.calls[0]![1].agentMiningResults).toEqual([
+        expect.objectContaining({ invocationId: 'legacy-run', status, errorMessage }),
+      ]);
+      expect(enqueued).toEqual([]);
+    },
+  );
   it('records invocation and begins repair capture before enqueue, using the implementer CLI preference', async () => {
     const state = stateFor();
     const db = makeMockDb(state);

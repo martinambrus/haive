@@ -1625,7 +1625,7 @@ async function resolveAgentMiningPhase(
         agentId: `implementer-${insightBatchId(current.id, current.rerunGeneration)}`,
         agentTitle: 'Legacy insight application',
         invocationId: legacy.id,
-        status: 'done',
+        status: legacy.exitCode === 0 && !legacy.errorMessage ? 'done' : 'failed',
         output: legacy.parsedOutput,
         rawOutput: legacy.rawOutput,
         errorMessage: legacy.errorMessage,
