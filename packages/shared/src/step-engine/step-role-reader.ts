@@ -59,14 +59,14 @@ export function readStepRole<T>(
 export function projectStepOutputRoles<T extends { stepId: string }>(
   task: RoleTaskPin,
   steps: readonly T[],
-): (T & { outputRoles: StepRoleId[] })[] {
+): (T & { outputRoles?: StepRoleId[] })[] {
   const bindings = Object.values(STEP_ROLES).map((role) =>
     readStepRole(task, role, (binding) => binding),
   );
-  return steps.map((step) => ({
-    ...step,
-    outputRoles: bindings
+  return steps.map((step) => {
+    const outputRoles = bindings
       .filter((b) => b.state === 'active' && b.stepId === step.stepId)
-      .map((b) => b.role),
-  }));
+      .map((b) => b.role);
+    return outputRoles.length ? { ...step, outputRoles } : { ...step };
+  });
 }

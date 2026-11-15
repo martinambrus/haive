@@ -156,7 +156,7 @@ describe('both owner-scoped role DTO surfaces', () => {
         task?: Record<string, unknown>;
       };
       expect(body.steps.find((s) => s.stepId === PRODUCER)?.outputRoles).toEqual([REVIEW]);
-      expect(body.steps.find((s) => s.stepId === REVIEW)?.outputRoles).toEqual([]);
+      expect(body.steps.find((s) => s.stepId === REVIEW)).not.toHaveProperty('outputRoles');
       if (body.task) expect(body.task).not.toHaveProperty('derivedRunPlan');
     },
   );

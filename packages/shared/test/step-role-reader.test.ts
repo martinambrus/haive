@@ -28,6 +28,10 @@ describe('one pinned role reader', () => {
       state: 'active',
     });
   });
+  it('leaves builtin non-role rows unchanged', () => {
+    const ordinary = { stepId: '07-phase-2-implement', title: 'Implement' };
+    expect(projectStepOutputRoles({}, [ordinary])).toEqual([ordinary]);
+  });
   it('keeps strict v1 identity on selected paths and does not rewrite pins', () => {
     const pin = rolePin(1);
     const before = JSON.stringify(pin);
@@ -65,8 +69,8 @@ describe('one pinned role reader', () => {
       ]),
     ).toEqual([
       { stepId: PRODUCER, outputRoles: [REVIEW] },
-      { stepId: REVIEW, outputRoles: [] },
-      { stepId: 'module.other.review', outputRoles: [] },
+      { stepId: REVIEW },
+      { stepId: 'module.other.review' },
     ]);
   });
   it.each([
