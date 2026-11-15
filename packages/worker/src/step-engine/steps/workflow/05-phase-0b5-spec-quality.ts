@@ -1,8 +1,9 @@
+import { SPEC_ROLES, SPEC_CHECKED_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { STEP_CLI_ROLES, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import {
@@ -90,11 +91,6 @@ export interface SpecQualityApply {
    *  states it in the iteration history. Optional: passes recorded before this
    *  existed carry none, and every reader must render without it. */
   amendmentDiscarded?: DiscardedAmendment;
-}
-
-interface PrePlanningOutput {
-  summary?: string;
-  spec?: string;
 }
 
 const QUALITY_DIMENSIONS = [
@@ -601,6 +597,7 @@ const SELF_REVIEW_FALLBACK = [
 ].join('\n');
 
 export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQualityApply> = {
+  outputContract: SPEC_CHECKED_OUTPUT_CONTRACT,
   metadata: {
     id: '05-phase-0b5-spec-quality',
     workflowType: 'workflow',
@@ -616,8 +613,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   },
 
   async detect(ctx: StepContext): Promise<SpecQualityDetect> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const output = (prev?.output as PrePlanningOutput | null) ?? {};
+    const output = legacyRoleOutput(await readRole(ctx, SPEC_ROLES.draft));
     const spec = output.spec ?? '';
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),

@@ -1,3 +1,4 @@
+import { SPEC_DRAFT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { readTextNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -360,6 +361,7 @@ async function recordTouchedPlanNodes(
 }
 
 export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanningApply> = {
+  outputContract: SPEC_DRAFT_OUTPUT_CONTRACT,
   metadata: {
     id: '04-phase-0b-pre-planning',
     workflowType: 'workflow',

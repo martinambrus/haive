@@ -50,6 +50,33 @@ describe('ungated step-role reader ratchet', () => {
       checkRoleReaderPins(roleReaderSites('packages/worker/src/negative.tsx', source), []).length,
     ).toBeGreaterThan(0);
   });
+  it.each([
+    'haive.spec.draft',
+    'haive.spec.checked',
+    'haive.spec.resolved',
+    '04-phase-0b-pre-planning',
+    '05-phase-0b5-spec-quality',
+    '05a-resolve-spec-warnings',
+  ])('pins registry spec id %s and its producer', (role) => {
+    expect(
+      checkRoleReaderPins(roleReaderSites('packages/worker/src/new.ts', `load(db,t,'${role}')`), [])
+        .length,
+    ).toBeGreaterThan(0);
+  });
+  it.each(['SPEC_ROLES', 'STEP_ROLE_REGISTRY', 'HOST_POLICY_STEP_ROLES'])(
+    'pins aliased registry table %s',
+    (table) => {
+      expect(
+        checkRoleReaderPins(
+          roleReaderSites(
+            'packages/worker/src/new.ts',
+            `import {${table} as roles} from 'outputs'; const r=roles.draft; load(r)`,
+          ),
+          [],
+        ).length,
+      ).toBeGreaterThan(0);
+    },
+  );
   it('collapses indentation and line-break whitespace in call contexts', () => {
     const file = 'packages/worker/src/negative.ts';
     expect(roleReaderSites(file, "loader\n  .read('08c-code-review')")).toEqual(

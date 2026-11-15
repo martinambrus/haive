@@ -1,3 +1,5 @@
+import { SPEC_ROLES, SPEC_RESOLVED_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { briefFromTaskMeta, hydrateTaskBrief } from './_spec-artifact.js';
 import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
@@ -72,8 +74,7 @@ function formatFinding(f: QualityFinding): string {
 }
 
 async function loadQuality(ctx: StepContext): Promise<SpecQualityOutput> {
-  const q = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-  return (q?.output as SpecQualityOutput | null) ?? {};
+  return legacyRoleOutput(await readRole(ctx, SPEC_ROLES.checked));
 }
 
 /** Findings from the broad spec auditor (04a). Merged with the narrow 05 findings
@@ -102,8 +103,7 @@ function specGuardFindings(spec: string): QualityFinding[] {
 
 /** Fallback spec body when 05 did not run (e.g. plan_tasklist): the 04 draft. */
 async function loadDraftSpec(ctx: StepContext): Promise<string> {
-  const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-  const out = (plan?.output as { spec?: string; summary?: string } | null) ?? {};
+  const out = legacyRoleOutput(await readRole(ctx, SPEC_ROLES.draft));
   return out.spec ?? out.summary ?? '';
 }
 
@@ -135,6 +135,7 @@ const FIX_RULES = [
 
 export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, ResolveWarningsApply> =
   {
+    outputContract: SPEC_RESOLVED_OUTPUT_CONTRACT,
     metadata: {
       id: '05a-resolve-spec-warnings',
       workflowType: 'workflow',

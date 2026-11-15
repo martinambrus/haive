@@ -1,4 +1,10 @@
 import {
+  SPEC_ROLES,
+  SPEC_DRAFT_OUTPUT_CONTRACT,
+  SPEC_CHECKED_OUTPUT_CONTRACT,
+  SPEC_RESOLVED_OUTPUT_CONTRACT,
+  type StepRoleId,
+  type StepOutputContractRef,
   CODE_REVIEW_OUTPUT_CONTRACT,
   CODE_AUDIT_OUTPUT_CONTRACT,
 } from '@haive/shared/step-outputs';
@@ -32,7 +38,17 @@ const EDITS_PRECEDE = [
   'rag-scope',
 ];
 
-export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
+/** Core-only port declarations; manifest/SDK ports arrive with v3 admission. */
+export type CoreComposableStepEntry = ComposableStepEntry & {
+  providesRoles?: readonly { role: StepRoleId; contract: StepOutputContractRef }[];
+  consumesRoles?: readonly {
+    input: string;
+    role: StepRoleId;
+    contract: StepOutputContractRef;
+    optional: boolean;
+  }[];
+};
+export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   {
     stepId: '01-declare-deps',
     agentAuthoredOutput: true,
@@ -343,6 +359,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '04-phase-0b-pre-planning',
+    outputContract: SPEC_DRAFT_OUTPUT_CONTRACT,
+    providesRoles: [{ role: SPEC_ROLES.draft, contract: SPEC_DRAFT_OUTPUT_CONTRACT }],
     label: 'Phase 0b: Pre-planning',
     group: 'spec',
     dispatchesCli: true,
@@ -362,6 +380,16 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '05-phase-0b5-spec-quality',
+    consumesRoles: [
+      {
+        input: 'draft',
+        role: SPEC_ROLES.draft,
+        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
+        optional: false,
+      },
+    ],
+    outputContract: SPEC_CHECKED_OUTPUT_CONTRACT,
+    providesRoles: [{ role: SPEC_ROLES.checked, contract: SPEC_CHECKED_OUTPUT_CONTRACT }],
     label: 'Phase 0b.5: Spec quality review',
     group: 'spec',
     dispatchesCli: true,
@@ -372,6 +400,22 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '05a-resolve-spec-warnings',
+    consumesRoles: [
+      {
+        input: 'checked',
+        role: SPEC_ROLES.checked,
+        contract: SPEC_CHECKED_OUTPUT_CONTRACT,
+        optional: true,
+      },
+      {
+        input: 'draft',
+        role: SPEC_ROLES.draft,
+        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
+        optional: true,
+      },
+    ],
+    outputContract: SPEC_RESOLVED_OUTPUT_CONTRACT,
+    providesRoles: [{ role: SPEC_ROLES.resolved, contract: SPEC_RESOLVED_OUTPUT_CONTRACT }],
     label: 'Resolve spec warnings',
     group: 'spec',
     dispatchesCli: true,
@@ -385,6 +429,26 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '06-gate-1-spec-approval',
+    consumesRoles: [
+      {
+        input: 'resolved',
+        role: SPEC_ROLES.resolved,
+        contract: SPEC_RESOLVED_OUTPUT_CONTRACT,
+        optional: true,
+      },
+      {
+        input: 'checked',
+        role: SPEC_ROLES.checked,
+        contract: SPEC_CHECKED_OUTPUT_CONTRACT,
+        optional: true,
+      },
+      {
+        input: 'draft',
+        role: SPEC_ROLES.draft,
+        contract: SPEC_DRAFT_OUTPUT_CONTRACT,
+        optional: true,
+      },
+    ],
     label: 'Gate 1: Spec approval',
     group: 'spec',
     dispatchesCli: false,

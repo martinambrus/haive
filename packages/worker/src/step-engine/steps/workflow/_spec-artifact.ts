@@ -6,7 +6,8 @@ import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, SPEC_VIEW_MODES, type SpecViewMode } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { condenseDocument } from '../_doc-view.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { SPEC_ROLES } from '@haive/shared/step-outputs';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { loadTaskMeta } from './_task-meta.js';
 
@@ -43,15 +44,29 @@ export const SPEC_ARTIFACT_RELPATH = '.haive/spec.md';
  *  Lifted from the copy that was duplicated verbatim across 07, 06b, 08c, 08e and the
  *  other spec consumers — they now all read through here. */
 export async function resolveApprovedSpec(ctx: StepContext): Promise<string> {
-  const [plan, quality, resolved] = await Promise.all([
-    loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning'),
-    loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality'),
-    loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings'),
+  const stages = await readSpecStages(ctx);
+  return effectiveSpec(stages);
+}
+
+/** Ordered host inputs; mixed spec authorship is never exposed to a generic quote token. */
+export const EFFECTIVE_SPEC_INPUTS = Object.freeze([
+  SPEC_ROLES.resolved,
+  SPEC_ROLES.checked,
+  SPEC_ROLES.draft,
+] as const);
+export async function readSpecStages(ctx: StepContext, maxRound?: number) {
+  const [resolved, checked, draft] = await Promise.all([
+    readRole(ctx, EFFECTIVE_SPEC_INPUTS[0], maxRound),
+    readRole(ctx, EFFECTIVE_SPEC_INPUTS[1], maxRound),
+    readRole(ctx, EFFECTIVE_SPEC_INPUTS[2], maxRound),
   ]);
+  return { resolved, checked, draft };
+}
+export function effectiveSpec(stages: Awaited<ReturnType<typeof readSpecStages>>): string {
   return (
-    ((resolved?.output as { spec?: string } | null)?.spec ??
-      (quality?.output as { spec?: string } | null)?.spec ??
-      (plan?.output as { spec?: string } | null)?.spec) ||
+    (legacyRoleOutput(stages.resolved).spec ??
+      legacyRoleOutput(stages.checked).spec ??
+      legacyRoleOutput(stages.draft).spec) ||
     ''
   );
 }

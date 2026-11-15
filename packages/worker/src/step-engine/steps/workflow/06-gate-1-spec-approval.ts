@@ -1,8 +1,9 @@
+import { legacyRoleOutput } from '../../read-role.js';
+import { readSpecStages } from './_spec-artifact.js';
 import type { FormSchema, InfoSection, PlanEdgeKind } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
 import { resolveTaskWorktreePath, writeSpecArtifact } from './_spec-artifact.js';
 import { codeBlock } from './_plan-ops.js';
@@ -39,12 +40,6 @@ interface SpecGateDetect {
 interface SpecGateApply {
   decision: 'approve' | 'reject';
   feedback: string;
-}
-
-interface PrePlanningOutput {
-  summary?: string;
-  spec?: string;
-  affectedComponents?: AffectedComponents;
 }
 
 /**
@@ -330,18 +325,17 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
   },
 
   async detect(ctx: StepContext): Promise<SpecGateDetect> {
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
-    const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
-    const resolvedOutput =
-      (resolved?.output as { spec?: string; scopeQuestions?: string[] } | null) ?? {};
+    const stages = await readSpecStages(ctx);
+    const planOutput = legacyRoleOutput(stages.draft);
+    const qualityOutput = legacyRoleOutput(stages.checked);
+    const resolvedOutput = legacyRoleOutput(stages.resolved);
     // Prefer the post-checkpoint spec (05a: user/agent warning fixes), then the
     // 05 amended body, then the original 04 spec/summary.
     const specBody =
       resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
-    const iterations = (quality?.iterations ?? []) as IterationEntry[];
+    const iterations = (
+      stages.checked.state === 'absent' ? [] : stages.checked.iterations
+    ) as IterationEntry[];
     const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
     const [task] = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
