@@ -1,7 +1,8 @@
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { resolvePreferredCli } from '../src/step-engine/step-runner.js';
 
 const USER = '11111111-1111-4111-8111-111111111111';
@@ -168,4 +169,35 @@ describe('resolvePreferredCli', () => {
     const out = await resolvePreferredCli(db, USER, STEP, TASK_CLI, PROVIDERS, 'default');
     expect(out.cliProviderId).toBe(SAVED_CLI);
   });
+});
+
+it('resolves a module dimension seat from its task choice while an unset seat inherits the step default', async () => {
+  const fake = createFakeDb({
+    taskStepCliChoices: schema.taskStepCliChoices,
+    taskStepCliTouched: schema.taskStepCliTouched,
+    userStepCliRolePreferences: schema.userStepCliRolePreferences,
+    userStepCliPreferences: schema.userStepCliPreferences,
+  });
+  const stepId = 'module.fx.analyze';
+  fake.insert(schema.userStepCliPreferences, {
+    userId: USER,
+    stepId,
+    cliProviderId: SAVED_CLI,
+    effortLevel: 'low',
+    explicit: true,
+  });
+  fake.insert(schema.taskStepCliChoices, {
+    taskId: TASK,
+    stepId,
+    role: 'security',
+    cliProviderId: PICKED_CLI,
+    effortLevel: 'high',
+  });
+  const db = fake.db as unknown as Database;
+  expect(
+    await resolvePreferredCli(db, USER, stepId, TASK_CLI, PROVIDERS, 'security', TASK, false),
+  ).toEqual({ cliProviderId: PICKED_CLI, effortLevel: 'high' });
+  expect(
+    await resolvePreferredCli(db, USER, stepId, TASK_CLI, PROVIDERS, 'coherence', TASK, false),
+  ).toEqual({ cliProviderId: SAVED_CLI, effortLevel: 'low' });
 });

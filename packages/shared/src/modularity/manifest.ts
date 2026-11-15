@@ -189,6 +189,30 @@ function isUnique(values: string[]): boolean {
   return new Set(values).size === values.length;
 }
 
+// The choice request accepts at most 32 characters. `default` and `fix:` are host slots;
+// prototype names cannot safely key the provider records the API sends to the browser.
+const miningSeatSchema = z
+  .object({
+    id: z
+      .string()
+      .max(32)
+      .regex(/^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*)*(?![\s\S])/)
+      .refine(
+        (id) => !['default', 'constructor', 'prototype'].includes(id) && !id.startsWith('fix:'),
+        'seat id is reserved',
+      ),
+    label: z.string().trim().min(1),
+  })
+  .strict();
+
+const miningSeatsSchema = z.record(
+  z.string(),
+  z
+    .array(miningSeatSchema)
+    .min(1)
+    .refine((seats) => isUnique(seats.map((seat) => seat.id)), 'seat ids must be unique'),
+);
+
 type IntegrationDeclarations = {
   id: string;
   integrations?: IntegrationProviderSpec[];
@@ -338,6 +362,8 @@ export const moduleManifestSchema = z
     globalSettings: moduleSettingsSchema.optional(),
     adminSettings: moduleSettingsSchema.optional(),
     composableSteps: z.array(composableStepEntrySchema).optional(),
+    /** Local exported agentMining step ids; the host adds module.<id>. to each key. */
+    miningSeats: miningSeatsSchema.optional(),
     taskTypes: z.array(taskTypeDefinitionSeedSchema).optional(),
     integrations: z.array(integrationProviderSpecSchema).optional(),
     categories: z.array(integrationCategorySpecSchema).optional(),
@@ -375,6 +401,22 @@ export const moduleManifestSchema = z
     path: ['taskTypes'],
   })
   .superRefine((m, ctx) => {
+    for (const localId of Object.keys(m.miningSeats ?? {})) {
+      const stored = `module.${m.id}.${localId}`;
+      const parsed = parseStepId(stored);
+      if (
+        parsed?.kind !== 'module' ||
+        parsed.moduleId !== m.id ||
+        parsed.localId !== localId ||
+        stored.length > STEP_ID_MAX_LENGTH
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `mining seats step "${localId}" must be a local step id fitting ${STEP_ID_MAX_LENGTH} characters after namespacing`,
+          path: ['miningSeats', localId],
+        });
+      }
+    }
     (m.taskTypes ?? []).forEach((seed, index) => {
       const fail = (message: string) =>
         ctx.addIssue({

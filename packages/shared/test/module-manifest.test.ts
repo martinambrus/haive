@@ -337,3 +337,51 @@ it.each(['\n', '\r', '\r\n', '\u2028', '\u2029'])(
     expect(moduleManifestSchema.safeParse({ ...manifest, id }).success).toBe(false);
   },
 );
+
+describe('module mining seat declarations', () => {
+  const seats = [
+    { id: 'security', label: 'Security' },
+    { id: 'refuter:impact', label: 'Impact' },
+  ];
+  it('retains local step keys and stable seat ids and labels; old manifests stay unchanged', () => {
+    const old = moduleManifestSchema.parse(manifest);
+    expect(old).not.toHaveProperty('miningSeats');
+    expect(
+      moduleManifestSchema.parse({ ...manifest, miningSeats: { analyze: seats } }),
+    ).toMatchObject({ miningSeats: { analyze: seats } });
+  });
+  it.each([
+    'module.acme.analyze',
+    'module.other.analyze',
+    'custom.mine.analyze',
+    '../analyze',
+    'analyze\n',
+    '_bad',
+  ])('rejects a non-local key %j', (key) => {
+    expect(ok({ ...manifest, miningSeats: { [key]: seats } })).toBe(false);
+  });
+  it.each([
+    'default',
+    'fix:2:default',
+    'constructor',
+    'prototype',
+    '__proto__',
+    '',
+    'Security',
+    'bad/seat',
+    'seat\n',
+    'a'.repeat(33),
+  ])('rejects invalid or reserved seat %j', (id) => {
+    expect(ok({ ...manifest, miningSeats: { analyze: [{ id, label: 'Seat' }] } })).toBe(false);
+  });
+  it('rejects duplicate seats, empty lists, blank labels and extra descriptor fields', () => {
+    for (const list of [
+      [seats[0], seats[0]],
+      [],
+      [{ id: 'security', label: ' ' }],
+      [{ id: 'security', label: 'Security', role: 'default' }],
+    ]) {
+      expect(ok({ ...manifest, miningSeats: { analyze: list } })).toBe(false);
+    }
+  });
+});

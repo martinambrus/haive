@@ -128,3 +128,47 @@ describe('the worker boot report', () => {
     expect(report.modules[1]!.taskTypes).toEqual({ seeded: [], conflicts: [] });
   });
 });
+
+describe('module mining seats at load', () => {
+  const seats = [{ id: 'security', label: 'Security' }];
+  function miningEntry(localId = 'analyze', mining = true): WorkerModuleEntry {
+    return {
+      packageName: '@haive/module-fx',
+      manifest: {
+        id: 'fx',
+        name: 'F',
+        version: '1',
+        schemaVersion: 1,
+        miningSeats: { analyze: seats },
+      },
+      steps: [{ ...step(localId), ...(mining ? { agentMining: {} } : {}) } as StepDefinition],
+    };
+  }
+  it('retains the declaration and namespaces its exported mining step', () => {
+    const [loaded] = load(miningEntry());
+    expect(loaded).toMatchObject({
+      stepIds: ['module.fx.analyze'],
+      manifest: { miningSeats: { analyze: seats } },
+    });
+  });
+  it('refuses a seat declaration for an unexported step', () => {
+    expect(() => load(miningEntry('other'))).toThrow(/Module fx.*analyze.*not one of its steps/);
+  });
+  it('refuses seats for an exported step without mining', () => {
+    expect(() => load(miningEntry('analyze', false))).toThrow(/Module fx.*analyze.*agentMining/);
+  });
+  it.each(['08c-code-review', 'module.gx.analyze', 'module.fx.analyze'])(
+    'cannot claim a core or namespaced step %s',
+    (id) => {
+      const entry = miningEntry();
+      entry.manifest = {
+        id: 'fx',
+        name: 'F',
+        version: '1',
+        schemaVersion: 1,
+        miningSeats: { [id]: seats },
+      };
+      expect(() => load(entry)).toThrow();
+    },
+  );
+});

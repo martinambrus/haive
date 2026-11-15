@@ -9,7 +9,6 @@ import {
   WORKTREE_SUBDIR,
   worktreeDirName,
   MODEL_HEALTH_STEP_IDS,
-  STEP_MINING_SEATS,
   resolveTaskCliProviderId,
   taskMayRunWithoutRepository,
   taskScratchSubpath,
@@ -30,6 +29,7 @@ import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../lib/audi
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
+import { resolveMiningSeats, type MiningSeatMap } from '../../modules/mining-seats.js';
 
 export const TASK_REPOSITORY_COLUMNS = {
   id: true,
@@ -129,6 +129,7 @@ async function loadStepCliPrefRows(
   flags: StepFlagMap,
   userId: string,
   stepIds: string[],
+  miningSeats: MiningSeatMap,
 ): Promise<StepCliPrefRows> {
   const out = emptyStepCliPrefRows();
   if (stepIds.length === 0) return out;
@@ -151,7 +152,7 @@ async function loadStepCliPrefRows(
 
   // Per-role prefs, only for steps that declare CLI roles or fan-out seats. Both kinds
   // live in the same (user, step, role) table, so one query serves both.
-  const roleStepIds = stepIds.filter((sid) => flags.get(sid)?.cliRoles ?? STEP_MINING_SEATS[sid]);
+  const roleStepIds = stepIds.filter((sid) => flags.get(sid)?.cliRoles ?? miningSeats[sid]);
   if (roleStepIds.length > 0) {
     const rolePrefs = await db
       .select()
@@ -277,7 +278,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
     cliRoles?: readonly CliRoleDescriptor[];
     cliRoleProviders?: Record<string, string | null>;
     cliRoleEfforts?: Record<string, string | null>;
-    /** Present only for fan-out steps (STEP_MINING_SEATS); drives the per-seat
+    /** Present only for fan-out steps (core or active module seats); drives the per-seat
      *  dropdowns. Deliberately a SEPARATE field from cliRoles: that one's presence and
      *  length carry loop semantics (loopPassesPerRound, isResumableStep), which a
      *  parallel fan-out must not inherit. */
@@ -287,11 +288,13 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
   })[]
 > {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
+  const miningSeats = await resolveMiningSeats(db);
   const { byStep, byStepEffort, roleByStep, roleEffortByStep } = await loadStepCliPrefRows(
     db,
     flags,
     userId,
     stepIds,
+    miningSeats,
   );
   // When the task opted out of saved per-step prefs (ignore_saved_step_clis), gate each
   // surfaced pref by its (step, role) marker; untouched steps fall back to the task provider.
@@ -316,7 +319,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
     : [];
   return steps.map((s) => {
     const roles = flags.get(s.stepId)?.cliRoles ?? undefined;
-    const seats = STEP_MINING_SEATS[s.stepId];
+    const seats = miningSeats[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
     const touchedRoles = touchedByStep.get(s.stepId);
@@ -421,7 +424,8 @@ export async function resolveCurrentStepCliProviderIds(
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, userId));
   const listed = new Set(providerRows.map((p) => p.id));
-  const prefs = await loadStepCliPrefRows(db, flags, userId, stepIds);
+  const miningSeats = await resolveMiningSeats(db);
+  const prefs = await loadStepCliPrefRows(db, flags, userId, stepIds, miningSeats);
   const touched = await loadTouchedRoles(
     db,
     tasks.filter((t) => t.ignoreSavedStepClis).map((t) => t.id),
@@ -464,7 +468,7 @@ export async function resolveCurrentStepCliProviderIds(
     push(stepDefault);
     // The step default is kept even when every seat is set: it is the fallthrough for a seat
     // the user never touched, and it runs a fan-out step's summary pass.
-    for (const seat of (stepId ? STEP_MINING_SEATS[stepId] : undefined) ?? []) {
+    for (const seat of (stepId ? miningSeats[stepId] : undefined) ?? []) {
       push(usable(slot(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
     }
     for (const role of (stepId ? flags.get(stepId)?.cliRoles : undefined) ?? []) {
