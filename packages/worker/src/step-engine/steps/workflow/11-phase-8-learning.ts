@@ -869,6 +869,9 @@ export function planLearningReconciliation(
     const deletion = deletionByOperation.get(operationId);
     if (!deletion || deletion.target.id !== e.targetId) continue;
     activeDeletions.add(operationId);
+    // The original target occupied this slug when the reviewer saw the plan.
+    // Keep it reserved after unlink so replacement inserts retain their staged ids.
+    taken.add(deletion.target.id);
     // Recover pre-apply membership even after unlink removed the last provenance.
     if (!onDiskTargets.has(deletion.target.id)) byId.set(deletion.target.id, deletion.target);
   }

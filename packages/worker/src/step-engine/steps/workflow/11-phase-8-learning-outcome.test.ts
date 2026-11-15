@@ -430,6 +430,45 @@ describe('learning filesystem replay', () => {
     expect(io.files.has(`${dir}/old.md`)).toBe(false);
   });
 
+  it.each([false, true])(
+    'retains the staged collision suffix after a crash between delete and insert (extra collision: %s)',
+    async (extraCollision) => {
+      const s = setup();
+      s.refuse();
+      (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'old' }, entry('old')];
+      if (extraCollision) io.files.set(`${dir}/old-2.md`, '# Unrelated collision');
+      const replacementId = extraCollision ? 'old-3' : 'old-2';
+      io.files.set(
+        `${drafts}/${replacementId}.md`,
+        '# Approved replacement\n\nHuman edit src/a.ts:99.',
+      );
+      io.failAt = `${dir}/${replacementId}.md`;
+      await expect(phase8LearningStep.apply(s.ctx, s.args)).rejects.toThrow('write refused');
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      io.failAt = '';
+      for (let replay = 0; replay < 5; replay++) {
+        await phase8LearningStep.apply(s.ctx, s.args);
+        expect(io.files.has(`${dir}/old.md`)).toBe(false);
+        expect(io.files.get(`${dir}/${replacementId}.md`)).toContain('Human edit src/a.ts:99.');
+        expect(io.files.has(`${dir}/old-4.md`)).toBe(false);
+        if (extraCollision) expect(io.files.get(`${dir}/old-2.md`)).toBe('# Unrelated collision');
+        else expect(io.files.has(`${dir}/old-3.md`)).toBe(false);
+      }
+      expect(s.rows.size).toBe(0);
+    },
+  );
+
+  it('keeps a cleared replacement draft excluded after deletion and replay', async () => {
+    const s = setup();
+    (s.args.llmOutput as any).entries = [{ op: 'delete', targetId: 'old' }, entry('old')];
+    io.files.set(`${drafts}/old-2.md`, '');
+    for (let replay = 0; replay < 5; replay++) {
+      await phase8LearningStep.apply(s.ctx, s.args);
+      expect(io.files.has(`${dir}/old.md`)).toBe(false);
+      expect(io.files.has(`${dir}/old-2.md`)).toBe(false);
+    }
+  });
+
   it('keeps identical insert entries distinct through replay', async () => {
     const s = setup();
     (s.args.llmOutput as any).entries = [entry('fresh'), entry('fresh')];
