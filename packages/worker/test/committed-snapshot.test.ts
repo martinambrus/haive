@@ -1,8 +1,9 @@
+import { computeSecretMasks } from '../src/queues/cli-exec/secret-mask.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   issueCommittedSnapshot,
@@ -84,6 +85,64 @@ describe('owned committed snapshot', () => {
     await expect(
       issueCommittedSnapshot(commitOid, { ...options(), limits: { [key]: value } }),
     ).rejects.toThrow('SNAPSHOT_INVALID');
+  });
+  it('keeps committed secrets visible and masks only denied additions using the host inventory', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const result = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!;
+    await writeFile(join(result.target.workerRoot, 'private.key'), randomBytes(24));
+    const verified = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!;
+    expect(
+      await computeSecretMasks(
+        verified.target.workerRoot,
+        {},
+        '/haive/workdir',
+        verified.target.tracked,
+      ),
+    ).toEqual([{ containerPath: '/haive/workdir/private.key', content: '' }]);
+    expect(
+      await computeSecretMasks(
+        verified.target.workerRoot,
+        { allow: ['private.key'] },
+        '/haive/workdir',
+        verified.target.tracked,
+      ),
+    ).toEqual([]);
+    expect(
+      await computeSecretMasks(
+        verified.target.workerRoot,
+        { denyExtend: ['nested/content'] },
+        '/haive/workdir',
+        verified.target.tracked,
+      ),
+    ).toEqual([{ containerPath: '/haive/workdir/private.key', content: '' }]);
+    await expect(
+      resolveCommittedSnapshots({ snapshotRef: { ...ref, treeOid: 'e'.repeat(40) } }, options()),
+    ).rejects.toThrow('SNAPSHOT_INVALID');
+  });
+  it('refuses missing inventory, modified tracked bytes and an intermediate symlink', async () => {
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const result = (await resolveCommittedSnapshots({ snapshotRef: ref }, options()))!;
+    const manifest = join(dirname(result.target.workerRoot), 'inventory.json');
+    await rm(manifest);
+    await expect(resolveCommittedSnapshots({ snapshotRef: ref }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+    const next = await issueCommittedSnapshot(commitOid, options());
+    const tree = (await resolveCommittedSnapshots({ snapshotRef: next }, options()))!.target
+      .workerRoot;
+    await chmod(join(tree, '.env'), 0o644);
+    await writeFile(join(tree, '.env'), randomBytes(24));
+    await expect(resolveCommittedSnapshots({ snapshotRef: next }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
+    const last = await issueCommittedSnapshot(commitOid, options());
+    const lastTree = (await resolveCommittedSnapshots({ snapshotRef: last }, options()))!.target
+      .workerRoot;
+    await rm(join(lastTree, 'nested'), { recursive: true });
+    await symlink(join(repo, 'nested'), join(lastTree, 'nested'));
+    await expect(resolveCommittedSnapshots({ snapshotRef: last }, options())).rejects.toThrow(
+      'SNAPSHOT_INVALID',
+    );
   });
   it('refuses traversal and a substituted tree symlink', async () => {
     const ref = await issueCommittedSnapshot(commitOid, options());
