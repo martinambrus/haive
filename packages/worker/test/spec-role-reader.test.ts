@@ -1,3 +1,8 @@
+import {
+  oldGateInputs,
+  oldQualityInputs,
+  oldWarningInputs,
+} from './fixtures/spec-ports/base-read-oracles.js';
 import { describe, expect, it, vi } from 'vitest';
 import * as specAdapters from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
@@ -13,14 +18,10 @@ import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../src/step-engine/read-role.js';
 import {
   resolveApprovedSpec,
-  readSpecStages,
   effectiveSpec,
 } from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import { loadPreviousStepOutput } from '../src/step-engine/steps/onboarding/_helpers.js';
-import {
-  gate1SpecApprovalStep,
-  buildSpecSummary,
-} from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
+import { gate1SpecApprovalStep } from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
 import { phase0bPrePlanningStep } from '../src/step-engine/steps/workflow/04-phase-0b-pre-planning.js';
 import { phase0b5SpecQualityStep } from '../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from '../src/step-engine/steps/workflow/05a-resolve-spec-warnings.js';
@@ -88,11 +89,11 @@ function fixture() {
   return { fake, ctx, put };
 }
 const oldSpec = async (ctx: StepContext, maxRound?: number) => {
-  const [draft, checked, resolved] = await Promise.all(
-    Object.values(SPEC_ROLES).map((role) =>
-      loadPreviousStepOutput(ctx.db, ctx.taskId, STEP_ROLE_REGISTRY[role].legacyStepId, maxRound),
-    ),
-  );
+  const [draft, checked, resolved] = await Promise.all([
+    loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning', maxRound),
+    loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality', maxRound),
+    loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings', maxRound),
+  ]);
   return (
     ((resolved?.output as { spec?: string } | null)?.spec ??
       (checked?.output as { spec?: string } | null)?.spec ??
@@ -188,6 +189,28 @@ const cases = [
     resolved: { scopeQuestions: ['question'] },
   },
   { name: 'old summary-only draft', draft: { summary: 'summary' }, checked: null, resolved: null },
+  {
+    name: 'null bodies with draft summary',
+    draft: { spec: null, summary: 'summary' },
+    checked: { spec: null },
+    resolved: { spec: null },
+  },
+  {
+    name: 'rich stage metadata',
+    draft: {
+      spec: 'draft',
+      summary: 'summary',
+      affectedComponents: { named: [], reached: [], truncated: null },
+    },
+    checked: {
+      spec: 'checked',
+      score: 8,
+      verdict: 'APPROVED',
+      findings: [{ severity: 'high', dimension: 'scope', comment: 'gap' }],
+      scopeQuestions: ['q'],
+    },
+    resolved: { spec: 'resolved', scopeQuestions: ['q', 'r'] },
+  },
 ];
 describe('effective spec equivalence', () => {
   it.each(cases)('$name', async ({ draft, checked, resolved }) => {
@@ -212,6 +235,9 @@ describe('effective spec equivalence', () => {
     };
     expect(effectiveSpec(stages)).toBe('resolved');
     expect(effectiveSpec(stages)).toBe(await oldSpec(ctx, 1));
+    expect(await gate1SpecApprovalStep.detect!(ctx)).toMatchObject(await oldGateInputs(ctx));
+    expect(await phase0b5SpecQualityStep.detect!(ctx)).toMatchObject(await oldQualityInputs(ctx));
+    expect(await resolveSpecWarningsStep.detect!(ctx)).toMatchObject(await oldWarningInputs(ctx));
   });
   it('uses the draft when a persisted 05 row is skipped with no output', async () => {
     const { ctx, put } = fixture();
@@ -235,22 +261,7 @@ describe('converted stage consumers use their original fallback operators', () =
     if (checked) put(SPEC_ROLES.checked, checked);
     if (resolved) put(SPEC_ROLES.resolved, resolved);
     const out = await gate1SpecApprovalStep.detect!(ctx);
-    const d = draft as { spec?: string; summary?: string } | null;
-    const c = checked as { spec?: string } | null;
-    const r = resolved as { spec?: string; scopeQuestions?: string[] } | null;
-    const body = r?.spec ?? c?.spec ?? d?.spec ?? d?.summary ?? '';
-    expect(out).toEqual({
-      scopeQuestions: r?.scopeQuestions ?? [],
-      specBody: body,
-      specSummary: buildSpecSummary(body),
-      qualityScore: null,
-      qualityVerdict: null,
-      qualityFindings: [],
-      iterationHistory: [],
-      exhaustedBudget: false,
-      affectedComponents: null,
-      repositoryId: null,
-    });
+    expect(out).toMatchObject(await oldGateInputs(ctx));
   });
   it('05a still falls back to the draft for an empty checked spec', async () => {
     const { ctx, put } = fixture();
@@ -276,6 +287,7 @@ describe('converted stage consumers use their original fallback operators', () =
       ],
     });
     put(SPEC_ROLES.resolved, { spec: 'resolved', scopeQuestions: ['q', 'r'] });
+    expect(await gate1SpecApprovalStep.detect!(ctx)).toMatchObject(await oldGateInputs(ctx));
     expect(await gate1SpecApprovalStep.detect!(ctx)).toMatchObject({
       specBody: 'resolved',
       qualityScore: 8,
@@ -290,19 +302,8 @@ describe('converted stage consumers use their original fallback operators', () =
     const { ctx, put } = fixture();
     if (draft) put(SPEC_ROLES.draft, draft);
     if (checked) put(SPEC_ROLES.checked, checked);
-    const d = draft as { spec?: string; summary?: string } | null;
-    const c = checked as { spec?: string } | null;
-    expect(await phase0b5SpecQualityStep.detect!(ctx)).toMatchObject({
-      spec: d?.spec ?? '',
-      specSummary: d?.summary ?? '',
-      specLength: (d?.spec ?? '').length,
-    });
-    expect(await resolveSpecWarningsStep.detect!(ctx)).toMatchObject({
-      spec: c?.spec || (d?.spec ?? d?.summary ?? ''),
-      findings: [],
-      blockingCount: 0,
-      advisoryCount: 0,
-    });
+    expect(await phase0b5SpecQualityStep.detect!(ctx)).toMatchObject(await oldQualityInputs(ctx));
+    expect(await resolveSpecWarningsStep.detect!(ctx)).toMatchObject(await oldWarningInputs(ctx));
   });
 });
 
