@@ -623,9 +623,9 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 9. #1166 Time tab grid went lg:grid-cols-6 -> 4, so 7 tiles lay out 4+3 (reflows existing tiles); pick a layout. LOW cosmetic.
 10. #1166 Plan page tile hint does not say a dash can also mean the selected class excludes plan work (card description does). LOW.
 
-### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+13)
+### T664 · FNF[postgres-v4-lows] · postgres.js v4 upgrade lows, after #1159 (+18)
 
-status: open (queued 2026-11-14 overnight: items 5 and 10; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: T655 run · priority: P3
+status: parked (items 5 and 10 resolved 2026-11-15 in #1200; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: T655 run · priority: P3
 
 1. Every in-repo `connect_timeout` / `connectTimeoutSeconds` is a positive constant (api rag.ts, tooling.ts, tooling-upgrades.ts, global-kb.ts; worker global-kb-context.ts, data-migrations.ts; database migrate/client.ts, cli-auth-lock.ts), and unset defaults to 30 s. Only a user DSN `connect_timeout=0` or env `PGCONNECT_TIMEOUT=0` disables the bound, and on v4 that means startup retries until the caller's own timeout. Refuse or clamp it in the user DSN guard. Low (admin-supplied DSN).
 2. `pg-startup-storm.test.ts` drain waits are bounded by count, not time; the end test restores real timers outside `finally`; one bound (15) is loose. Tests only.
@@ -640,10 +640,15 @@ status: open (queued 2026-11-14 overnight: items 5 and 10; the rest parked: dimi
 11. Third-party record: Node 26 `Socket.end` type mismatch in postgres.js v4 typings (worked around locally). Third-party, needs approval to report.
 12. Upgrade guidance for the next major lives in AGENTS.md; `smoke:pg-drop` and `pg-transaction-fence` must be re-run unpatched on any bump. Process note.
 13. E2E helpers were missed by the first `sql.array` inventory (packages/ only); a future inventory must include `tests/`. Process note.
+14. (#1200) The generic note shown for every global-KB failure has no test of its own. LOW.
+15. (#1200) The RAG playground says nothing when the global DSN is refused; results just lack global hits. LOW.
+16. (#1200) Admin copy for a refused global DSN could name the refused parameter. NIT.
+17. (#1200) A refused local (per-repository) DSN still answers 400/500 depending on path rather than one status. LOW.
+18. (#1200) The re-embed "rebuild" flag stays set after a refused DSN aborts it, so the next save retries. LOW.
 
 ### T662 · FNF[relink-reconcile-lows] · remote relink reconcile lows, after #1158 (+8)
 
-status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); owner 2026-11-14: items 1-3 relink races parked; item 4 (log a skipped fenced repository) is a cheap ride-along · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · priority: P3
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); owner 2026-11-14: items 1-3 relink races parked; item 4 resolved 2026-11-15 in #1200 · kind: fix · found: #1158 reviews and Codex bot 2026-11-14 · priority: P3
 
 1. The sweep's own reconcile is not a registered writer, and the relink route does not wait for an in-process writer before its Git writes (`api/lib/remote-reconcile.ts` `reconcileRemote` ~:110-150, `api/routes/repos.ts` relink). A reconcile whose database connection drops during its Git calls keeps writing the old remote after the row lock is released; a concurrent relink can commit and clear a newer remote first, leaving Git on the older one with no intent left. Needs a connection drop inside a few ms of Git calls plus a concurrent relink of the same repository; the next relink repairs it. Fix direction: register the reconcile callback as a writer through its settlement, and have the route await outstanding writers for the repository before its own Git writes. Codex bot P2 on cbb25ae10.
 2. Window between committing the intent and taking the writer fence in the route (the fence begins before the relink transaction, the intent row is written earlier); a sweep tick in between acts on a live request's intent on a folder import. The request answers 409 and a retry restores the origin.
@@ -852,9 +857,9 @@ Reviews in `.claude/tmp/codex-run/NRC-S/`.
 8. A preset's `appliedValues` can override values after a re-park.
 9. Owed live check: the gate UI picks a next-round CLI on a real escalation.
 
-### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+6)
+### T672 · FNF[learning-insert-replay] · step 11 insert replay writes a suffixed duplicate learning (+11)
 
-status: open (item 1 resolved 2026-11-15 in #1194; items 2-3 consequential, need durable deletion identity; the rest parked: diminishing returns) · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
+status: parked (item 1 resolved 2026-11-15 in #1194, items 2-3 in #1202; the rest parked: diminishing returns) · kind: fix · found: agent-memory P1.2 driver and review 2026-11-14 · priority: P3
 
 1. PRE-EXISTING, consequential. A re-run of step 11 apply re-reads existing learnings (`11-phase-8-learning.ts` ~:1722) and re-plans, so an insert already written is "taken" and `resolveInsertId` (~:763) returns `<id>-2`: a duplicate learning file, and the staged draft (keyed by the old id) is lost for the copy. Fix direction: make a replayed insert idempotent (match the already-written body or the reconcile event's attempt key) rather than suffixing.
 2. (#1194) PRE-EXISTING, consequential. An update then delete, or update then supersede, of a PRE-EXISTING learning resurrects it on replay: the delete leaves no identity on disk, so the replayed plan re-applies the update to a file it no longer finds (`11-phase-8-learning.ts` ~:861). Needs durable deletion identity (a tombstone or the reconcile event's attempt key); the two matrix rows are excluded in `11-phase-8-learning-outcome.test.ts` ~:315-318 with no `it.fails`.
@@ -862,6 +867,11 @@ status: open (item 1 resolved 2026-11-15 in #1194; items 2-3 consequential, need
 4. (#1194) `prepareForm` plans without an apply key (~:1347), so a replay that re-stages the form computes ids differently from apply; reachable only with a null invocation id (test bypass). LOW, parked.
 5. (#1194) No control for two identical entries in one proposal (the `index` key input) or a different task, round or step row. LOW, parked.
 6. (#1194) `parseLearningRecord` runs for every existing learning even without an operation id writer. Cost only. LOW, parked.
+7. (#1202) A sandboxed agent can write or delete `.haive/learning-deletions/` records in its worktree, forging or erasing deletion identity; apply reads them strictly but trusts their content. LOW.
+8. (#1202) The deletion record publish does not fsync the parent directory, so a power loss can drop a record written before unlink. LOW.
+9. (#1202) Records are never pruned until the worktree goes; with no worktree row they live in the repository workspace for good. LOW.
+10. (#1202) Learnings named `.md` or `..md` pass the relaxed id check; harmless but odd. NIT.
+11. (#1202) The repository-root fallback (no worktree row) is untested on real disk. LOW.
 
 ### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
 
@@ -2199,6 +2209,8 @@ All low unless marked.
 
 ## Done
 
+- Postgres DSN guard on save (#1200, 324dc1326): a user Postgres DSN carrying a refused file-reading or unsafe parameter is refused when saved; a refused global DSN degrades RAG search, re-embed and custom MCP to repository hits with a note instead of failing them; a parser test diffs postgres.js's option inventory so a new file-reading parameter fails CI; the relink sweep logs fenced and locked skips. T664 items 5 and 10, T662 item 4. Lows filed in T664.
+- Learning deletion identity (#1202, 3de12aa36): every delete in step 11 apply first writes an apply-keyed record under `.haive/learning-deletions/`, then unlinks, so a replay cannot resurrect an updated-then-deleted learning or lose a replacement draft's slug; records are read strictly. T672 items 2-3. Lows filed in T672.
 - Learning insert replay (#1194, 9ed6cd004): learning provenance records a stable, apply-keyed operation id; a replay of step 11 apply reuses the file its first run wrote (suffix and staged draft kept) and plans against the pre-apply state, so dropped operations stay dropped (an insert-then-delete no longer erases the learning). T672 item 1 (also T667 item 1).
 - Plan chat bound follow-ups (#1193, 587b868a7): budgeted dispatch again drops house rules then agent rules for an argv-only adapter (pre-#1178 contract, required plan chat included); an oversized original is kept durably in `plan_node_messages` in the same transaction as the edit-form park, ordered before its replacement; clarification, build and coverage folds retry unversioned conflicts up to three times and re-ask a stale agent version. T675 items 1, 3 and 10.
 - Derived task types PR 4 (#1191, af136c094): the web editor for derived types: "Duplicate and customize" on the built-in workflow (no write until save; other bases show the catalog's reason), an ordered changes editor with a read-only path preview, live shared validation plus a debounced server preview, split skipped/stale warnings, gate-removal warning, overlay-only saves, 403/409 handling. Prerequisite 3 complete. Browser-checked on the dev stack 2026-11-14. Lows filed as T679 items 14-19.
