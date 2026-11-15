@@ -102,16 +102,17 @@ async function dirtyWorktreeFiles(
           const head = await nestedRepositoryHead(
             worktreePath,
             entry.path,
-            signal || propagateResourceErrors
-              ? async (cwd, args, env, io) => {
-                  const result = await gitRun(cwd, args, env, { ...io, signal });
-                  if (propagateResourceErrors && isResourceLimitError({ code: result.noExit }))
-                    throw Object.assign(new Error('Git could not start due to a resource limit.'), {
-                      code: result.noExit,
-                    });
-                  return result;
-                }
-              : undefined,
+            async (cwd, args, env, io) => {
+              const result = await gitRun(cwd, ['--no-optional-locks', ...args], env, {
+                ...io,
+                signal,
+              });
+              if (propagateResourceErrors && isResourceLimitError({ code: result.noExit }))
+                throw Object.assign(new Error('Git could not start due to a resource limit.'), {
+                  code: result.noExit,
+                });
+              return result;
+            },
           );
           if (head)
             nestedRepositories[entry.path] = head.commit === null ? 'unborn' : 'with commits';
@@ -170,7 +171,7 @@ async function resolveDiffBase(
 ): Promise<string | null> {
   if (baseBranch) {
     try {
-      const { stdout } = await gitExec(['merge-base', 'HEAD', baseBranch], {
+      const { stdout } = await gitExec(['--no-optional-locks', 'merge-base', 'HEAD', baseBranch], {
         cwd: gitCwd,
         timeout,
         signal,
@@ -186,7 +187,11 @@ async function resolveDiffBase(
   }
   if (forkPointOnly) return null;
   try {
-    await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: gitCwd, timeout, signal });
+    await gitExec(['--no-optional-locks', 'rev-parse', '--verify', 'HEAD'], {
+      cwd: gitCwd,
+      timeout,
+      signal,
+    });
     return 'HEAD';
   } catch (err) {
     if (propagateResourceErrors && isResourceLimitError(err)) throw err;
@@ -229,6 +234,7 @@ async function readChangeDiff(
       // --no-renames keeps every path on its own diff entry, so a renamed file is annotated
       // under the name it now has on disk.
       [
+        '--no-optional-locks',
         '-c',
         'core.quotePath=false',
         'diff',
@@ -276,11 +282,14 @@ export async function readChangedPaths(
   );
   if (!base) return null;
   try {
-    const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
-      cwd: gitCwd,
-      timeout: options.timeoutMs,
-      signal: options.signal,
-    });
+    const { stdout } = await gitExec(
+      ['--no-optional-locks', 'diff', '--name-status', '-z', '--no-renames', base, '--'],
+      {
+        cwd: gitCwd,
+        timeout: options.timeoutMs,
+        signal: options.signal,
+      },
+    );
     const fields = stdout.split('\0');
     const paths: string[] = [];
     for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -317,7 +326,7 @@ async function readCommittedDeletions(
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
-      ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--'],
+      ['--no-optional-locks', 'diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--'],
       { cwd: gitCwd, signal: options.signal },
     );
     const fields = stdout.split('\0');

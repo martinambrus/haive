@@ -145,7 +145,7 @@ async function readBaseline(
 ): Promise<string | null> {
   const result = await gitRun(
     workspace,
-    existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath],
+    ['--no-optional-locks', ...(existenceOnly ? ['cat-file', '-e', refPath] : ['show', refPath])],
     undefined,
     { signal },
   );
@@ -155,9 +155,14 @@ async function readBaseline(
   if (gitGaveNoAnswer(result)) {
     throw new Error(`Cannot read ${description} at the repository baseline: git gave no answer.`);
   }
-  const presence = await gitRun(workspace, ['rev-parse', '-q', '--verify', refPath], undefined, {
-    signal,
-  });
+  const presence = await gitRun(
+    workspace,
+    ['--no-optional-locks', 'rev-parse', '-q', '--verify', refPath],
+    undefined,
+    {
+      signal,
+    },
+  );
   preserveResourceError(presence, propagateResourceErrors);
   if (presence.code === 1) return null;
   throw new Error(`Cannot read ${description} at the repository baseline: git read failed.`);
@@ -188,10 +193,10 @@ export async function loadDependencyPolicy(
   const baseBranch = worktree?.baseBranch;
   const gitCwd = options.gitCwd ?? workspace;
   const base = baseBranch
-    ? await gitRun(gitCwd, ['merge-base', 'HEAD', baseBranch], undefined, {
+    ? await gitRun(gitCwd, ['--no-optional-locks', 'merge-base', 'HEAD', baseBranch], undefined, {
         signal: options.signal,
       })
-    : await gitRun(gitCwd, ['rev-parse', '--verify', 'HEAD'], undefined, {
+    : await gitRun(gitCwd, ['--no-optional-locks', 'rev-parse', '--verify', 'HEAD'], undefined, {
         signal: options.signal,
       });
   preserveResourceError(base, options.propagateResourceErrors);
