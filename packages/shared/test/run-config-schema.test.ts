@@ -60,3 +60,40 @@ it('replaces the persisted hidden checkbox, including nested fields, once and ac
     expect(JSON.stringify(old)).toContain('visibleWhen');
   }
 });
+
+it('hides a visible checkbox again when automatic execution is switched off', () => {
+  const visible = {
+    id: 'autoActOnInsights',
+    type: 'checkbox',
+    label: 'Old',
+    default: true,
+  };
+  for (const fields of [
+    [visible],
+    [
+      {
+        id: 'advanced',
+        type: 'accordion',
+        items: [{ id: 'one', title: 'More', fields: [visible] }],
+      },
+    ],
+  ]) {
+    const old = { title: 'Run', fields } as FormSchema;
+    const before = structuredClone(old);
+    const off = upgradeRunConfigSchema('06-run-config', old, false)!;
+    expect(off).not.toBe(old);
+    expect(JSON.stringify(off)).toContain('"visibleWhen":{"field":"autoActOnInsights","in":[]}');
+    expect(JSON.stringify(off)).toContain('"default":false');
+    expect(old).toEqual(before);
+    expect(upgradeRunConfigSchema('06-run-config', off, false)).toBe(off);
+    // Switching it back on restores the visible field with a false default.
+    const on = upgradeRunConfigSchema('06-run-config', off)!;
+    expect(JSON.stringify(on)).not.toContain('visibleWhen');
+  }
+  const appended = upgradeRunConfigSchema('06-run-config', { title: 'Run', fields: [] }, false)!;
+  expect(appended.fields.at(-1)).toMatchObject({
+    id: 'autoActOnInsights',
+    default: false,
+    visibleWhen: { field: 'autoActOnInsights', in: [] },
+  });
+});
