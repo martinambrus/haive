@@ -54,6 +54,22 @@ The collector already sums each steered turn's `result.usage` (#1160); cost and 
 remain the last cumulative values. Several result events still mean incomplete request
 coverage: a reconciled run total alone does not independently prove each turn's inventory.
 
+The PR 3 contract is conservative: same-model excess has no assumed rate. The pure
+`unobservedSameModelPricingBlockers` helper (`cli-executor/request-usage.ts`) pins the
+extra blockers for its future tier pricer. Positive cache-write excess with null TTL
+buckets is `unknown-cache-ttl`; it never inherits the invocation's configured TTL.
+Null excess output is `unknown-output-usage`; positive observed excess output is
+`unknown-output-request-size`, because its request prompts are unobserved. Neither
+base rates nor observed main-request tiers can be assigned to that output by default.
+For a model with a tiered rate, any blocker keeps the whole computed invocation unpriced
+(`source: 'none'`, non-billable), including otherwise priceable observed requests; an untiered
+rate keeps today's path. Unknown usage or TTL forbids finite
+bounds; known output with unknown request size may have bounds only after PR 3 proves
+all required buckets and rates are known. No blocker is itself proof of a prompt tier:
+PR 3 must still decide it from complete evidence, including conservative aggregate
+bounds where applicable. This helper defines policy only; it does not change today's
+costs, snapshots, request coverage or statistics.
+
 Codex app-server uses the measured 0.154.0 notification shapes already covered by the
 session tests. They carry no stable request id and several requests share a turn, so the
 request identity uses the cumulative input/cache-read/cache-write/output watermark.
@@ -120,6 +136,19 @@ replacement and writes nothing. An `applyDesiredRows` failure returns a failed
 timeout through driver causes. The rolled-back batch preserves last-good prices and sync
 metadata. The job still refreshes FX and finishes `refresh_runs` with `ok: false` (subject to
 the result store's existing best-effort writes). This changes neither manual prices nor historical snapshots.
+
+A sync-settings read failure also returns `price:database` and skips price fetching:
+unreadable per-provider switches cannot establish permission to overwrite prices.
+Ollama discovery failures are returned under `price:ollama` like its page failures.
+Error-recording and post-apply sync-metadata write failures are logged and included as
+bounded, sanitized `price:database` errors without throwing. Error recording preserves
+the original feed failure and continues to the other providers. A metadata failure
+cannot undo an already committed price batch, and never claims that it did. The shared
+job still refreshes FX and records a completed failed result when its result store is
+available; failure of that best-effort store is logged as before. The sibling CLI,
+tool-version and OpenRouter catalog refreshers also catch and log failed error-recording
+writes, returning both the original source error and the sanitized recording error so
+the shared job can finish. Existing last-good catalog rows remain intact.
 
 `refresh_runs.result` includes the optional `unsupported` list. The shared `LatestRefresh`
 component displays each model and its reason for a completed stored or manual result,
