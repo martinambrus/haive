@@ -1,3 +1,4 @@
+import { dataRoleDraftIssues } from '@haive/shared/step-ports';
 import { builtinRunListStrategy } from '@haive/shared/run-list';
 import { createHash } from 'node:crypto';
 import { and, eq, inArray, notInArray, or, sql, type AnyColumn } from 'drizzle-orm';
@@ -98,6 +99,7 @@ async function seedModuleTaskTypes(
     description: seed.description ?? null,
     runListStrategy: seed.runListStrategy,
     stepIds: seed.stepIds,
+    dataRoleBindings: seed.dataRoleBindings ?? null,
     preAnswerDefaults: seed.preAnswerDefaults ?? {},
     stepLoopLimitDefaults: seed.stepLoopLimitDefaults ?? {},
     enabled: true,
@@ -114,6 +116,11 @@ async function seedModuleTaskTypes(
       return {
         slug: row.slug,
         issues: [
+          ...dataRoleDraftIssues(
+            [{ executionPath: null, stepIds }],
+            composables,
+            row.dataRoleBindings ?? [],
+          ),
           ...validateTaskTypeDefaults(
             {
               stepIds,
@@ -157,6 +164,7 @@ async function seedModuleTaskTypes(
         set: {
           runListStrategy: row.runListStrategy,
           stepIds: row.stepIds,
+          dataRoleBindings: row.dataRoleBindings,
           description: row.description,
           executionContract: row.executionContract,
           preAnswerDefaults: row.preAnswerDefaults,
@@ -171,6 +179,7 @@ async function seedModuleTaskTypes(
           changesAnyOf(
             schema.taskTypeDefinitions.runListStrategy,
             schema.taskTypeDefinitions.stepIds,
+            schema.taskTypeDefinitions.dataRoleBindings,
             schema.taskTypeDefinitions.description,
             schema.taskTypeDefinitions.executionContract,
             schema.taskTypeDefinitions.preAnswerDefaults,

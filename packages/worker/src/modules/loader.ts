@@ -68,7 +68,14 @@ export type LoadedWorkerModule = {
 export type ModuleTaskTypeOutcome = {
   seeded: string[];
   conflicts: { slug: string; heldBy: string }[];
-  invalid?: { slug: string; issues: (TaskTypeDefaultsIssue | ExecutionCompositionIssue)[] }[];
+  invalid?: {
+    slug: string;
+    issues: (
+      | TaskTypeDefaultsIssue
+      | ExecutionCompositionIssue
+      | { kind: 'invalid-data-role-binding'; stepId: string; input: string; message: string }
+    )[];
+  }[];
 };
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;
@@ -163,6 +170,15 @@ export function registerModuleSteps(
       }
     }
 
+    for (const [localId, def] of localDefs) {
+      if (
+        (def.providesRoles?.length || def.consumesRoles?.length) &&
+        !manifest.composableSteps?.some((e) => e.stepId === localId)
+      )
+        throw new Error(
+          `Module ${moduleId} role step ${localId} needs a matching composable declaration`,
+        );
+    }
     const composable = (manifest.composableSteps ?? []).map((composableEntry) => {
       const def = localDefs.get(composableEntry.stepId);
       if (!def) {

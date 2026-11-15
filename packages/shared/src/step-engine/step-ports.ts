@@ -1,6 +1,15 @@
 export * from './core-data-ports.js';
-import { SPEC_INPUTS } from './core-data-ports.js';
+import {
+  CORE_DATA_INPUTS,
+  SPEC_INPUTS,
+  dataPortNodes,
+  type DataRoleBindings,
+} from './core-data-ports.js';
+import type { DataRoleBindingsDraft, RolePortDeclarations } from './role-port-declarations.js';
+export type { DataRoleBindingsDraft } from './role-port-declarations.js';
 import { SPEC_ROLES, STEP_ROLES, STEP_ROLE_REGISTRY, type StepRoleId } from './output-contracts.js';
+
+export const MAX_DATA_PORT_STEPS = 256;
 
 /** Display metadata only. No schemas, policy hooks, output values or private module fields. */
 export interface StepPort {
@@ -43,7 +52,7 @@ export interface StepPortGraph {
  * A supplied binding must still identify an earlier, exactly compatible producer. */
 export function validatePortEdges(
   nodes: readonly PortNode[],
-  bindings: Readonly<Record<string, number>> = {},
+  bindings: Readonly<Record<string, number | null>> = {},
 ): StepPortGraph {
   const edges: StepPortGraph['edges'] = [];
   type Producer = { producer: PortNode; index: number; output: StepPort };
@@ -64,15 +73,19 @@ export function validatePortEdges(
       const candidates = bucket?.all ?? [];
       const key = `${index}:${input.id}`;
       const bound = Object.hasOwn(bindings, key);
-      const selected = bound ? (bucket?.byIndex.get(bindings[key]!) ?? []) : candidates;
+      const selected = bound ? (bucket?.byIndex.get(bindings[key] ?? -1) ?? []) : candidates;
       const state: PortInputState =
-        selected.length === 1
-          ? 'wired'
-          : selected.length > 1
-            ? 'ambiguous'
-            : input.optional && !bound
-              ? 'optional-absent'
-              : 'dangling';
+        bound && bindings[key] === null
+          ? input.optional
+            ? 'optional-absent'
+            : 'dangling'
+          : selected.length === 1
+            ? 'wired'
+            : selected.length > 1
+              ? 'ambiguous'
+              : input.optional && !bound
+                ? 'optional-absent'
+                : 'dangling';
       if (state === 'wired')
         edges.push({
           source: selected[0]!.producer.id,
@@ -115,30 +128,24 @@ const port = (role: StepRoleId, id: string = role): StepPort => ({
   optional: true,
 });
 
-/** Projection of existing core reads. Kept OUT of catalog entry/pin schemas: those remain v1/v2.
- * Spec declarations mirror composable-core; the adapter sites call _spec-artifact today.
- * This table does not declare SDK/module inputs or grant any runtime capability. */
-const effectiveSpecConsumers: ReadonlySet<string> = new Set([
-  '06-run-config',
-  '06b-sprint-planning',
-  '07-phase-2-implement',
-  '07a-code-simplify',
-  '07b-phase-4-validate',
-  '08a-browser-verify',
-  '08b-test-management',
-  STEP_ROLES.codeReview,
-  STEP_ROLES.codeAudit,
-  '08d-adversarial-qa',
-  '08e-insights-triage',
-  '11f-plan-reconcile',
-]);
-const reviewConsumers: ReadonlySet<string> = new Set([
-  '09-gate-2-verify-approval',
-  '11-phase-8-learning',
-]);
+/** Legacy display adapters derive their consumers from the same core input inventory.
+ * Editable drafts show individual inputs; no display metadata grants host policy. */
+const effectiveSpecConsumers = new Set(
+  Object.entries(SPEC_INPUTS)
+    .filter(([id, inputs]) => id !== '06-gate-1-spec-approval' && inputs.length === 3)
+    .map(([id]) => id),
+);
+const reviewConsumers = new Set(
+  Object.entries(CORE_DATA_INPUTS)
+    .filter(([, inputs]) => inputs.some((i) => i.input === 'review'))
+    .map(([id]) => id),
+);
 
 export interface PortProjectionOptions {
   labels?: ReadonlyMap<string, string>;
+  declarations?: ReadonlyMap<string, RolePortDeclarations>;
+  dataRoleBindings?: DataRoleBindingsDraft;
+  executionPath?: string | null;
   /** Existing v2 bindings only, already decoded/evaluated by the caller. */
   roleBindings?: Readonly<
     Record<string, { stepId: string; outputContract: { id: string; version: number } }>
@@ -148,6 +155,16 @@ export function projectStepPorts(
   stepIds: readonly string[],
   opts: PortProjectionOptions = {},
 ): StepPortGraph {
+  if (opts.declarations || opts.dataRoleBindings) {
+    const nodes = dataPortNodes(stepIds, opts.roleBindings, opts.declarations).map((n) => ({
+      ...n,
+      label: opts.labels?.get(n.id) ?? n.label,
+    }));
+    return validatePortEdges(
+      nodes,
+      portBindingIndexes(nodes, opts.dataRoleBindings ?? [], opts.executionPath ?? null),
+    );
+  }
   const bindings: Record<string, number> = {};
   const positions = new Map<string, number>();
   stepIds.forEach((id, index) => {
@@ -187,4 +204,93 @@ export function projectStepPorts(
     return { id, label: opts.labels?.get(id) ?? id, inputs, outputs };
   });
   return validatePortEdges(nodes, bindings);
+}
+
+export function bindPortInput(
+  bindings: DataRoleBindingsDraft,
+  executionPath: string | null,
+  consumerStepId: string,
+  input: string,
+  producerStepId: string,
+): DataRoleBindingsDraft {
+  const remaining = bindings.filter(
+    (b) =>
+      !(
+        b.executionPath === executionPath &&
+        b.consumerStepId === consumerStepId &&
+        b.input === input
+      ),
+  );
+  return producerStepId
+    ? [...remaining, { executionPath, consumerStepId, input, producerStepId }]
+    : remaining;
+}
+export function portBindingIndexes(
+  nodes: readonly PortNode[],
+  bindings: DataRoleBindingsDraft,
+  executionPath: string | null,
+): Record<string, number> {
+  const indexes: Record<string, number> = {};
+  for (const b of bindings.filter((b) => b.executionPath === executionPath)) {
+    const index = nodes.findIndex((n) => n.id === b.consumerStepId);
+    if (index < 0 || !nodes[index]!.inputs.some((i) => i.id === b.input))
+      throw new Error(`invalid-data-role-binding: ${b.consumerStepId}.${b.input}`);
+    indexes[`${index}:${b.input}`] = nodes.findIndex((n) => n.id === b.producerStepId);
+  }
+  return indexes;
+}
+
+/** Save and editor validation share the same graph; no fingerprint/plan is built for a preview. */
+export function dataRoleDraftIssues(
+  candidates: readonly {
+    executionPath: string | null;
+    stepIds: readonly string[];
+    roleBindings?: DataRoleBindings;
+  }[],
+  entries: ReadonlyMap<string, RolePortDeclarations>,
+  bindings: DataRoleBindingsDraft = [],
+  maxSteps = MAX_DATA_PORT_STEPS,
+): { kind: 'invalid-data-role-binding'; stepId: string; input: string; message: string }[] {
+  const issues: ReturnType<typeof dataRoleDraftIssues> = [];
+  const paths = new Set(candidates.map((c) => c.executionPath));
+  for (const b of bindings)
+    if (!paths.has(b.executionPath))
+      issues.push({
+        kind: 'invalid-data-role-binding',
+        stepId: b.consumerStepId,
+        input: b.input,
+        message: 'unknown candidate path',
+      });
+  for (const c of candidates) {
+    if (c.stepIds.length > maxSteps) {
+      issues.push({
+        kind: 'invalid-data-role-binding',
+        stepId: '',
+        input: '',
+        message: 'step-count exceeds admission limit',
+      });
+      continue;
+    }
+    try {
+      const nodes = dataPortNodes(c.stepIds, c.roleBindings, entries);
+      const graph = validatePortEdges(nodes, portBindingIndexes(nodes, bindings, c.executionPath));
+      for (const n of graph.nodes)
+        for (const i of n.inputs)
+          if (i.state === 'ambiguous' || i.state === 'dangling')
+            issues.push({
+              kind: 'invalid-data-role-binding',
+              stepId: n.id,
+              input: i.id,
+              message: `${c.executionPath ?? 'default'}: ${n.id}.${i.id}: ${i.state}`,
+            });
+    } catch {
+      issues.push({
+        kind: 'invalid-data-role-binding',
+        stepId: '',
+        input: '',
+        message: 'invalid declarations or producer choice',
+      });
+    }
+  }
+  return issues;
 }

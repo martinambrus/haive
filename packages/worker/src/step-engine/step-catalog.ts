@@ -26,11 +26,10 @@ export async function syncStepCatalog(
       const parsed = parseStepId(meta.id);
       const composables = parsed?.kind === 'module' ? moduleComposables : coreComposables;
       const entry = composables.get(meta.id);
-      if (entry) assertMatchingOutputDeclaration(def, entry);
+      if (entry) assertMatchingOutputDeclaration(def, entry, parsed?.kind === 'module');
       const composableRow = {
         composable: composables.has(meta.id),
-        // Core data ports live in the host table and separate v3 task pins.
-        // Persist exactly the existing entry vocabulary understood by older readers.
+        // Data declarations are references only; module executable parity was checked above.
         entry: entry ? composableStepEntrySchema.parse(entry) : null,
       };
       const row = {

@@ -1,4 +1,9 @@
-import { CODE_REVIEW_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
+import {
+  SPEC_ROLES,
+  STEP_ROLE_REGISTRY,
+  CODE_REVIEW_OUTPUT_CONTRACT,
+  STEP_ROLES,
+} from '@haive/shared/step-outputs';
 import { randomUUID } from 'node:crypto';
 import { asc, eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -210,6 +215,118 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         builtin('workflow', { runListStrategy: 'workflow_paths', stepIds: null, sortOrder: 1 }),
         builtin('plan_merge', { selectable: false, sortOrder: 2 }),
       ]);
+  });
+
+  it('saves a static chosen producer, pins it at the task INSERT and preserves it through definition edit and Retry', async () => {
+    h.add.mockResolvedValue(undefined);
+    const role = SPEC_ROLES.checked,
+      contract = STEP_ROLE_REGISTRY[role].contract;
+    const checker = 'module.acme.check',
+      consumer = 'module.acme.use';
+    const ids = ['05-phase-0b5-spec-quality', checker, consumer];
+    await db.insert(schema.modules).values({
+      moduleId: 'acme',
+      name: 'Acme',
+      installedVersion: '1',
+      packageName: '@haive/module-acme',
+      source: 'local',
+    });
+    await db
+      .insert(schema.stepCatalog)
+      .values([
+        catalogRow(ids[0]!, true, entry(ids[0]!)),
+        catalogRow(
+          checker,
+          true,
+          entry(checker, { providesRoles: [{ role, contract }] }),
+          'module:acme',
+        ),
+        catalogRow(
+          consumer,
+          true,
+          entry(consumer, { consumesRoles: [{ input: 'spec', role, contract, optional: false }] }),
+          'module:acme',
+        ),
+      ]);
+    h.flags.set(CUSTOM_KEY, true);
+    const choices = [
+      { executionPath: null, consumerStepId: consumer, input: 'spec', producerStepId: checker },
+    ];
+    expect(
+      (
+        await send(
+          'POST',
+          '/admin/task-types',
+          valid('tt-dangling', { stepIds: [consumer], requiresRepository: false }),
+        )
+      ).status,
+    ).toBe(400);
+    const rejected = await send(
+      'POST',
+      '/admin/task-types',
+      valid('tt-ports', { stepIds: ids, requiresRepository: false }),
+    );
+    expect(rejected.status).toBe(400);
+    expect(
+      (
+        await send(
+          'POST',
+          '/admin/task-types',
+          valid('tt-ports', { stepIds: ids, requiresRepository: false, dataRoleBindings: choices }),
+        )
+      ).status,
+    ).toBe(201);
+    expect((await row('tt-ports'))?.dataRoleBindings).toEqual(choices);
+    const created = await send('POST', '/tasks', { type: 'tt-ports', title: 'chosen ports' });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const [task] = await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-ports'));
+    const pin = task!.dataEdgePlan as {
+      candidates: { bindings: Record<string, { producerStepId: string }> }[];
+    };
+    expect(pin.candidates[0]!.bindings['2:spec']!.producerStepId).toBe(checker);
+    expect(
+      (
+        await send('PATCH', '/admin/task-types/tt-ports', {
+          dataRoleBindings: [{ ...choices[0]!, producerStepId: ids[0] }],
+        })
+      ).status,
+    ).toBe(200);
+    await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, task!.id));
+    expect((await send('POST', `/tasks/${task!.id}/action`, { action: 'retry' })).status).toBe(200);
+    expect(
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, task!.id)))[0]!.dataEdgePlan,
+    ).toEqual(pin);
+    h.add.mockClear();
+    vi.stubEnv('HAIVE_DATA_EDGE_ADMISSION_ENABLED', 'false');
+    try {
+      expect((await send('POST', '/tasks', { type: 'tt-ports', title: 'disabled' })).status).toBe(
+        503,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await db
+      .update(schema.stepCatalog)
+      .set({
+        entry: entry(consumer, {
+          consumesRoles: [
+            {
+              input: 'spec',
+              role,
+              contract: { ...contract, version: 2 } as never,
+              optional: false,
+            },
+          ],
+        }),
+      })
+      .where(eq(schema.stepCatalog.stepId, consumer));
+    expect((await send('POST', '/tasks', { type: 'tt-ports', title: 'incompatible' })).status).toBe(
+      409,
+    );
+    expect(
+      await db.select().from(schema.tasks).where(eq(schema.tasks.type, 'tt-ports')),
+    ).toHaveLength(1);
+    expect(h.add).not.toHaveBeenCalled();
   });
 
   describe('POST /admin/task-types', () => {
@@ -806,6 +923,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
 
   describe('editableFields', () => {
     const CUSTOM_FIELDS = [
+      'dataRoleBindings',
       'description',
       'displayName',
       'enabled',

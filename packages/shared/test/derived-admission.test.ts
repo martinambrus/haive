@@ -41,3 +41,39 @@ it('shares unchanged effective declarations instead of repeating them on every c
     );
   }
 });
+it.each([1, 2])(
+  'keeps v%s plans and fingerprints byte-identical when the catalog gains data declarations',
+  async (version) => {
+    const { SPEC_ROLES, STEP_ROLE_REGISTRY } =
+      await import('../src/step-engine/output-contracts.js');
+    const f = replacementAdmissionFixture();
+    const definition = { ...f.definition, changes: version === 1 ? [] : f.definition.changes };
+    const baseline = inspectDerivedDefinition(definition, f.base, f.catalog);
+    expect(baseline.plan?.version).toBe(version);
+    const entries = new Map(
+      [...f.catalog.composable].map(([id, e]) => [
+        id,
+        {
+          ...e,
+          providesRoles: [
+            { role: SPEC_ROLES.checked, contract: STEP_ROLE_REGISTRY[SPEC_ROLES.checked].contract },
+          ],
+          consumesRoles: [
+            {
+              input: 'spec',
+              role: SPEC_ROLES.draft,
+              contract: STEP_ROLE_REGISTRY[SPEC_ROLES.draft].contract,
+              optional: true,
+            },
+          ],
+        },
+      ]),
+    );
+    const enriched = inspectDerivedDefinition(definition, f.base, {
+      ...f.catalog,
+      composable: entries,
+    });
+    expect(JSON.stringify(enriched.plan)).toBe(JSON.stringify(baseline.plan));
+    expect(enriched.catalogFingerprint).toBe(baseline.catalogFingerprint);
+  },
+);

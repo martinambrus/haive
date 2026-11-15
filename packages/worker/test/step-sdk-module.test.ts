@@ -99,8 +99,14 @@ describe('compiled module step SDK consumer', () => {
     }
   });
 
-  it('calls all four host services through the compiled public-only fixture', async () => {
+  it('calls host services including typed role reads through the compiled public-only fixture', async () => {
     const host = {
+      loadRoleOutput: vi.fn(async () => ({
+        state: 'absent' as const,
+        role: 'haive.spec.checked',
+        contract: { id: 'haive.spec.checked', version: 1 },
+        producer: null,
+      })),
       loadUnactedInsights: vi.fn(async () => ({ insights: [], omitted: 0 })),
       loadPreviousStepOutput: vi.fn(async () => ({
         detect: null,
@@ -132,6 +138,8 @@ describe('compiled module step SDK consumer', () => {
       host,
     };
     const result = await reviewWithHost(ctx);
+    expect(result.role).toMatchObject({ state: 'absent', role: 'haive.spec.checked' });
+    expect(host.loadRoleOutput).toHaveBeenCalledWith('spec');
     expect(result.inventory).toEqual({ insights: [], omitted: 0 });
     expect(host.loadUnactedInsights).toHaveBeenCalledWith({ includePicked: true });
     expect(host.loadPreviousStepOutput).toHaveBeenCalledWith('01-worktree-setup');

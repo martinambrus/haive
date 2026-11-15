@@ -1,4 +1,5 @@
 import { assertExecutionContractSupported, ExecutionContractError } from './execution-contract.js';
+import { dataRoleBindingsSchema } from '../step-engine/role-port-declarations.js';
 import { z } from 'zod';
 import { type RunListStrategy } from '../step-engine/run-list.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
@@ -203,6 +204,7 @@ export const customTaskTypeCreateSchema = z
     displayName: z.string().min(1),
     description: z.string().optional(),
     stepIds: z.array(z.string().min(1)).min(1),
+    dataRoleBindings: dataRoleBindingsSchema.optional(),
     preAnswerDefaults: preAnswerDefaultsSchema.optional(),
     stepLoopLimitDefaults: stepLoopLimitsSchema,
     promptSteps: promptStepsSchema.optional(),

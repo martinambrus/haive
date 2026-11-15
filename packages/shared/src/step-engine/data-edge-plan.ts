@@ -1,10 +1,10 @@
 // Server-only pin codec. The browser-safe port declarations live in core-data-ports.
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { validatePortEdges, type PortNode } from './step-ports.js';
+import { MAX_DATA_PORT_STEPS, validatePortEdges, type PortNode } from './step-ports.js';
 import { executionPathSchema } from '../schemas/tasks.js';
 
-export const MAX_DATA_EDGE_STEPS = 256;
+export const MAX_DATA_EDGE_STEPS = MAX_DATA_PORT_STEPS;
 export class DataEdgePlanError extends Error {
   readonly code = 'invalid-data-edge-plan';
   constructor(reason = 'malformed or missing pin') {
@@ -70,13 +70,14 @@ export function buildDataEdgePlan(
   candidates: readonly {
     executionPath: DataEdgeCandidate['executionPath'];
     nodes: readonly PortNode[];
+    bindings?: Readonly<Record<string, number>>;
   }[],
   maxSteps = MAX_DATA_EDGE_STEPS,
 ): DataEdgePlan {
   const pinned = candidates.map((c) => {
     if (c.nodes.length > maxSteps)
       throw new DataEdgePlanError('step-count exceeds admission limit');
-    const graph = validatePortEdges(c.nodes);
+    const graph = validatePortEdges(c.nodes, c.bindings);
     const bindings: DataEdgeCandidate['bindings'] = {};
     graph.nodes.forEach((n, index) =>
       n.inputs.forEach((i) => {

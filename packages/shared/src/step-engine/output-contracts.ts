@@ -100,8 +100,9 @@ export function parseStepOutputContractRef(value: unknown): StepOutputContractRe
     : null;
 }
 
-/** Internal data-port lookup. Never use for executable declarations, manifests or v1/v2 pins. */
-function parseRegistryOutputContractRef(value: unknown): StepOutputContractRef | null {
+/** Exact data-role reference lookup. Executable outputContract/replaces and v1/v2 pins
+ * retain the restricted parseStepOutputContractRef gate. */
+export function parseRegistryOutputContractRef(value: unknown): StepOutputContractRef | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const ref = value as Record<string, unknown>;
   if (Object.keys(ref).length !== 2 || !Object.hasOwn(ref, 'id') || !Object.hasOwn(ref, 'version'))

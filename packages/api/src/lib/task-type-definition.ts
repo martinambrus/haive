@@ -4,8 +4,9 @@ import {
   DataEdgePlanError,
   MAX_DATA_EDGE_STEPS,
   type DataEdgePlan,
+  type DataEdgeCandidate,
 } from '@haive/shared/data-edge-plan';
-import { dataPortNodes } from '@haive/shared/step-ports';
+import { dataPortNodes, portBindingIndexes } from '@haive/shared/step-ports';
 import { catalogWorkflowBaseCandidates } from '@haive/shared/run-list';
 import { DerivedTaskAdmissionError, insightRequirementMessage } from './derived-errors.js';
 import { eq, inArray, sql } from 'drizzle-orm';
@@ -17,6 +18,7 @@ import {
   workflowTypeSchema,
 } from '@haive/shared';
 import {
+  dataRoleBindingsSchema,
   mergePromptStepCatalog,
   moduleIdsOfTaskType,
   parsePromptSteps,
@@ -316,21 +318,53 @@ export async function definitionForCreate(
     // As stored: the parsed copy drops a tool that no longer parses, which a task must still name.
     if (has(id)) customSteps[id] = def.promptSteps[key];
   }
+  if (
+    opts.locked &&
+    process.env.HAIVE_DATA_EDGE_ADMISSION_ENABLED === 'false' &&
+    (snapshot !== null || def.runListStrategy === 'workflow_paths' || derived)
+  )
+    throw new HttpError(
+      503,
+      'New data-edge task admission is disabled',
+      'data-edge-admission-disabled',
+    );
   let dataEdgePlan: DataEdgePlan | null = null;
   try {
-    if (derived?.plan) {
-      dataEdgePlan = buildDataEdgePlan(
-        'derived',
-        derived.plan.candidates.map((c) => ({
-          executionPath: c.executionPath,
-          nodes: dataPortNodes(c.stepIds, c.roleBindings),
-        })),
+    const parsedBindings = dataRoleBindingsSchema.safeParse(def.dataRoleBindings ?? []);
+    if (!parsedBindings.success) throw new DataEdgePlanError('invalid author bindings');
+    const bindings = parsedBindings.data;
+    const pinCandidates = (
+      selection: DataEdgePlan['selection'],
+      candidates: {
+        stepIds: readonly string[];
+        executionPath: DataEdgeCandidate['executionPath'];
+        roleBindings?: Parameters<typeof dataPortNodes>[1];
+      }[],
+    ) => {
+      const paths = new Set<string | null>(candidates.map((c) => c.executionPath));
+      if (bindings.some((b) => !paths.has(b.executionPath)))
+        throw new DataEdgePlanError('unknown author binding candidate');
+      return buildDataEdgePlan(
+        selection,
+        candidates.map((c) => {
+          try {
+            const nodes = dataPortNodes(c.stepIds, c.roleBindings, storedCatalog.composable);
+            return {
+              executionPath: c.executionPath,
+              nodes,
+              bindings: portBindingIndexes(nodes, bindings, c.executionPath),
+            };
+          } catch {
+            throw new DataEdgePlanError('invalid author binding or role declarations');
+          }
+        }),
       );
-    } else if (snapshot !== null) {
-      dataEdgePlan = buildDataEdgePlan('static', [
-        { executionPath: null, nodes: dataPortNodes(snapshot) },
-      ]);
-    } else if (def.runListStrategy === 'workflow_paths' && storedCatalog.synced) {
+    };
+    if (opts.locked && derived?.plan) {
+      dataEdgePlan = pinCandidates('derived', derived.plan.candidates);
+    } else if (opts.locked && snapshot !== null) {
+      dataEdgePlan = pinCandidates('static', [{ executionPath: null, stepIds: snapshot }]);
+    } else if (opts.locked && def.runListStrategy === 'workflow_paths' && storedCatalog.synced) {
       let candidates: ReturnType<typeof catalogWorkflowBaseCandidates>;
       try {
         candidates = catalogWorkflowBaseCandidates(
@@ -344,13 +378,7 @@ export async function definitionForCreate(
       } catch {
         throw new HttpError(409, 'The step catalog order is invalid', 'catalog-order-invalid');
       }
-      dataEdgePlan = buildDataEdgePlan(
-        'workflow',
-        candidates.map((c) => ({
-          executionPath: c.executionPath,
-          nodes: dataPortNodes(c.stepIds),
-        })),
-      );
+      dataEdgePlan = pinCandidates('workflow', candidates);
     }
   } catch (error) {
     if (error instanceof DataEdgePlanError) throw new HttpError(409, error.message, error.code);

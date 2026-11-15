@@ -4,6 +4,7 @@ import {
   freshInsightGate2Submission,
 } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
+import { assertRequiredRoleInputs } from './module-role-read.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
@@ -3343,6 +3344,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
     }
 
+    await assertRequiredRoleInputs(ctx, stepDef);
     let redetected = false;
     if (
       meta.providerSensitive === true &&
