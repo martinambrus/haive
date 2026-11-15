@@ -1,3 +1,4 @@
+import { composableStepEntrySchema } from '@haive/shared/modularity';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -56,7 +57,7 @@ describe.skipIf(!url)('step catalog sync on Postgres', () => {
     for (const r of list) {
       const entry = curated.get(r.stepId);
       expect(r.composable).toBe(entry !== undefined);
-      expect(r.entry).toEqual(entry ?? null);
+      expect(r.entry).toEqual(entry ? composableStepEntrySchema.parse(entry) : null);
     }
     expect(list.filter((r) => r.composable)).toHaveLength(curated.size);
   });
@@ -101,7 +102,9 @@ describe.skipIf(!url)('step catalog sync on Postgres', () => {
     await syncStepCatalog(db, stepRegistry);
     const after = byId(await rows());
     expect(after.get(curatedId)!.composable).toBe(true);
-    expect(after.get(curatedId)!.entry).toEqual(CORE_COMPOSABLE_STEPS[0]);
+    expect(after.get(curatedId)!.entry).toEqual(
+      composableStepEntrySchema.parse(CORE_COMPOSABLE_STEPS[0]),
+    );
     expect(after.get(otherId)!.composable).toBe(false);
     expect(after.get(otherId)!.entry).toBeNull();
   });

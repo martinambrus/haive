@@ -92,15 +92,7 @@
     "symbol": "<module>",
     "context": "TypeQuery",
     "value": "@roles",
-    "count": 2,
-    "reason": "Canonical host role vocabulary and exact contract selection."
-  },
-  {
-    "file": "packages/shared/src/step-engine/output-contracts.ts",
-    "symbol": "stepRoleOutputContract",
-    "context": "EqualsEqualsEqualsToken",
-    "value": "@roles",
-    "count": 1,
+    "count": 7,
     "reason": "Canonical host role vocabulary and exact contract selection."
   },
   {
@@ -425,14 +417,6 @@
   },
   {
     "file": "packages/worker/src/queues/run-list.ts",
-    "symbol": "resolveTaskStep.role",
-    "context": "Object.values",
-    "value": "@roles",
-    "count": 1,
-    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
-  },
-  {
-    "file": "packages/worker/src/queues/run-list.ts",
     "symbol": "resolveTaskStep.shouldRun",
     "context": "EqualsEqualsEqualsToken",
     "value": "@roles",
@@ -448,19 +432,803 @@
     "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
   },
   {
-    "file": "packages/worker/src/queues/run-list.ts",
-    "symbol": "assertPinnedCandidateSupport",
-    "context": "Object.values",
-    "value": "@roles",
-    "count": 1,
-    "reason": "Pinned executable support and host routing policy; physical role reads use readStepRole"
-  },
-  {
     "file": "packages/worker/src/step-engine/step-runner.ts",
     "symbol": "advanceStep.replacedRole",
     "context": "Object.values",
     "value": "@roles",
     "count": 1,
     "reason": "Successful output validation selects only the pinned occupancy through readStepRole"
+  },
+  {
+    "file": "packages/api/src/routes/tasks/_step-label.ts",
+    "symbol": "SPEC_REVISION_ENTRY_STEP_IDS",
+    "context": "Set",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical step identity in presentation, configuration or provenance; no spec-stage output selection."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PLAN_TASKLIST_EXTRA",
+    "context": "ArrayLiteralExpression",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PLAN_TASKLIST_EXTRA",
+    "context": "ArrayLiteralExpression",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PLAN_TASKLIST_EXTRA",
+    "context": "ArrayLiteralExpression",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/execution-paths.ts",
+    "symbol": "PATH_REQUIRED_TARGETS.'06-gate-1-spec-approval'",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_DRAFT_OUTPUT_CONTRACT.id",
+    "context": "Object.freeze",
+    "value": "haive.spec.draft",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_CHECKED_OUTPUT_CONTRACT.id",
+    "context": "Object.freeze",
+    "value": "haive.spec.checked",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_RESOLVED_OUTPUT_CONTRACT.id",
+    "context": "Object.freeze",
+    "value": "haive.spec.resolved",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_ROLES",
+    "context": "VariableDeclaration",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_ROLES.draft",
+    "context": "Object.freeze",
+    "value": "haive.spec.draft",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_ROLES.checked",
+    "context": "Object.freeze",
+    "value": "haive.spec.checked",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "SPEC_ROLES.resolved",
+    "context": "Object.freeze",
+    "value": "haive.spec.resolved",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY",
+    "context": "VariableDeclaration",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeReview]",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeReview].id",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeReview].legacyStepId",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeAudit]",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeAudit].id",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[STEP_ROLES.codeAudit].legacyStepId",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.draft]",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.draft].id",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.draft].legacyStepId",
+    "context": "Object.freeze",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.checked]",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.checked].id",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.checked].legacyStepId",
+    "context": "Object.freeze",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.resolved]",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.resolved].id",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "STEP_ROLE_REGISTRY.[SPEC_ROLES.resolved].legacyStepId",
+    "context": "Object.freeze",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "HOST_POLICY_STEP_ROLES",
+    "context": "VariableDeclaration",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "HOST_POLICY_STEP_ROLES",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "stepRoleOutputContract",
+    "context": "TypeQuery",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "stepRoleOutputContract",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "parseStepOutputContractRef",
+    "context": "HOST_POLICY_STEP_ROLES.some",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "parseStepOutputContractRef",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "parseRegistryOutputContractRef",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "outputValidators.'haive.spec.draft'",
+    "context": "Object.freeze",
+    "value": "haive.spec.draft",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "outputValidators.'haive.spec.checked'",
+    "context": "Object.freeze",
+    "value": "haive.spec.checked",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "outputValidators.'haive.spec.resolved'",
+    "context": "Object.freeze",
+    "value": "haive.spec.resolved",
+    "count": 1,
+    "reason": "Frozen host registry lookup and data validation; executable contract decoding remains review/audit-only."
+  },
+  {
+    "file": "packages/shared/src/step-engine/timing.ts",
+    "symbol": "TIME_CATEGORY_BY_STEP.'04-phase-0b-pre-planning'",
+    "context": "Object.freeze",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/timing.ts",
+    "symbol": "TIME_CATEGORY_BY_STEP.'05-phase-0b5-spec-quality'",
+    "context": "Object.freeze",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/timing.ts",
+    "symbol": "TIME_CATEGORY_BY_STEP.'05a-resolve-spec-warnings'",
+    "context": "Object.freeze",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "STEP_CLI_ROLES.'05-phase-0b5-spec-quality'",
+    "context": "PropertyAssignment",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "HOUSE_RULE_ROLES.'04-phase-0b-pre-planning'",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "HOUSE_RULE_ROLES.'05-phase-0b5-spec-quality'",
+    "context": "PropertyAssignment",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "HOUSE_RULE_ROLES.'05a-resolve-spec-warnings'",
+    "context": "PropertyAssignment",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "CLI_DISPATCH_STEPS.id",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "CLI_DISPATCH_STEPS.id",
+    "context": "PropertyAssignment",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/shared/src/step-engine/types.ts",
+    "symbol": "CLI_DISPATCH_STEPS.id",
+    "context": "PropertyAssignment",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Physical execution/form/CLI metadata remains canonical; data ports grant no control authority."
+  },
+  {
+    "file": "packages/web/src/app/(app)/tasks/[id]/page.tsx",
+    "symbol": "TaskDetailPage.roundLabels.isSpecRevision",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical step identity in presentation, configuration or provenance; no spec-stage output selection."
+  },
+  {
+    "file": "packages/web/src/lib/composition-test-catalog.ts",
+    "symbol": "TEST_ENTRIES.stepId",
+    "context": "entry",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical step identity in presentation, configuration or provenance; no spec-stage output selection."
+  },
+  {
+    "file": "packages/web/src/lib/composition-test-catalog.ts",
+    "symbol": "TEST_ENTRIES.stepId",
+    "context": "entry",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Physical step identity in presentation, configuration or provenance; no spec-stage output selection."
+  },
+  {
+    "file": "packages/worker/scripts/verify-amended-spec-guard.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js",
+    "count": 1,
+    "reason": "Static producer or registry import/export; no task output query."
+  },
+  {
+    "file": "packages/worker/scripts/verify-amended-spec-guard.ts",
+    "symbol": "rows",
+    "context": "TaggedTemplateExpression",
+    "value": "\n  with it as (\n    select ts.task_id, ts.round, i.ord,\n           (i.iv->'applyOutput'->>'source') as source,\n           coalesce(i.iv->'applyOutput'->>'spec','') as spec\n    from task_steps ts, jsonb_array_elements(ts.iterations) with ordinality as i(iv, ord)\n    where ts.step_id = '05-phase-0b5-spec-quality'\n  ), pairs as (\n    select task_id, round, ord, source, spec,\n           lag(spec) over (partition by task_id, round order by ord) as prev\n    from it\n  )\n  select coalesce(json_agg(json_build_object(\n           'task', left(task_id::text, 8), 'round', round, 'ord', ord,\n           'prev', prev, 'next', spec)), '[]'::json) as pairs\n  from pairs\n  where source = 'correct' and prev is not null and length(prev) > 0\n",
+    "count": 1,
+    "reason": "Physical step identity in presentation, configuration or provenance; no spec-stage output selection."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_04",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:SPEC_STEP_04",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_04",
+    "context": "VariableDeclaration",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_05",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:SPEC_STEP_05",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_05",
+    "context": "VariableDeclaration",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_05A",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:SPEC_STEP_05A",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "SPEC_STEP_05A",
+    "context": "VariableDeclaration",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "readTaskText.rows",
+    "context": "db.execute",
+    "value": "@role-alias:SPEC_STEP_04",
+    "count": 1,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "readTaskText.rows",
+    "context": "db.execute",
+    "value": "@role-alias:SPEC_STEP_05",
+    "count": 2,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/orchestrator/house-rules-dispatch.ts",
+    "symbol": "readTaskText.rows",
+    "context": "db.execute",
+    "value": "@role-alias:SPEC_STEP_05A",
+    "count": 2,
+    "reason": "Bounded SQL keeps highest-round-first, non-empty spec selection; it differs intentionally from the effective-spec adapter."
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "resolveTaskStep.role",
+    "context": "HOST_POLICY_STEP_ROLES.find",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Only registry entries with review/audit host policy enter pinned policy resolution."
+  },
+  {
+    "file": "packages/worker/src/queues/run-list.ts",
+    "symbol": "assertPinnedCandidateSupport",
+    "context": "ForOfStatement",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Only registry entries with review/audit host policy enter pinned policy resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.stepId",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.providesRoles.role",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 3,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.stepId",
+    "context": "PropertyAssignment",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.consumesRoles.role",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 6,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.stepId",
+    "context": "PropertyAssignment",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/composable-core.ts",
+    "symbol": "CORE_COMPOSABLE_STEPS.loopTargetStepId",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Core-only spec-stage provider/input metadata and physical composition identity; not serialized as executable spec contracts."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "<module>",
+    "context": "TypeQuery",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.entry",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.entry",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole",
+    "context": "BarBarToken",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole",
+    "context": "InKeyword",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.row",
+    "context": "loadPreviousStepOutput",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/read-role.ts",
+    "symbol": "readRole.contract",
+    "context": "PropertyAccessExpression",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Canonical spec-stage read through registry legacyStepId; host-policy roles are refused until pinned per-input resolution."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/04-phase-0b-pre-planning.ts",
+    "symbol": "phase0bPrePlanningStep.metadata.id",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical canonical identity for this step or its historical context; upstream spec data conversions are confined to declared stage consumers."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/04a-spec-audit.ts",
+    "symbol": "loadDraftSpec.plan",
+    "context": "loadPreviousStepOutput",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical canonical identity for this step or its historical context; upstream spec data conversions are confined to declared stage consumers."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05-phase-0b5-spec-quality.ts",
+    "symbol": "phase0b5SpecQualityStep.metadata.id",
+    "context": "PropertyAssignment",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "05 producer identity, CLI seat, own budget and own-step replay stay physical; only its upstream draft read uses the port."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05-phase-0b5-spec-quality.ts",
+    "symbol": "phase0b5SpecQualityStep.metadata.cliRoles",
+    "context": "ElementAccessExpression",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "05 producer identity, CLI seat, own budget and own-step replay stay physical; only its upstream draft read uses the port."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05-phase-0b5-spec-quality.ts",
+    "symbol": "phase0b5SpecQualityStep.detect.output",
+    "context": "readRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Spec-stage consumer: 05 projects the canonical draft while retaining tolerant spec/summary fields."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05-phase-0b5-spec-quality.ts",
+    "symbol": "phase0b5SpecQualityStep.detect.taskBudget",
+    "context": "ElementAccessExpression",
+    "value": "05-phase-0b5-spec-quality",
+    "count": 1,
+    "reason": "05 producer identity, CLI seat, own budget and own-step replay stay physical; only its upstream draft read uses the port."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05a-resolve-spec-warnings.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./05-phase-0b5-spec-quality.js",
+    "count": 1,
+    "reason": "Static producer or registry import/export; no task output query."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05a-resolve-spec-warnings.ts",
+    "symbol": "loadQuality",
+    "context": "readRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Spec-stage consumer: 05a projects checked findings and draft fallback; empty checked spec still uses the draft."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05a-resolve-spec-warnings.ts",
+    "symbol": "loadDraftSpec.out",
+    "context": "readRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Spec-stage consumer: 05a projects checked findings and draft fallback; empty checked spec still uses the draft."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/05a-resolve-spec-warnings.ts",
+    "symbol": "resolveSpecWarningsStep.metadata.id",
+    "context": "PropertyAssignment",
+    "value": "05a-resolve-spec-warnings",
+    "count": 1,
+    "reason": "05a own producer identity and write path stay physical; upstream draft and checked data use spec-stage ports."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/06-gate-1-spec-approval.ts",
+    "symbol": "gate1SpecApprovalStep.reviseLoop.evaluate.targetStepId",
+    "context": "PropertyAssignment",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Gate 1 spec-stage projection retains quality metadata and summary fallback; human revise targets stay physical."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/06b-sprint-planning.ts",
+    "symbol": "sprintPlanningStep.detect.plan",
+    "context": "loadPreviousStepOutput",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical canonical identity for this step or its historical context; upstream spec data conversions are confined to declared stage consumers."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/07-phase-2-implement.ts",
+    "symbol": "phase2ImplementStep.detect.plan",
+    "context": "loadPreviousStepOutput",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical canonical identity for this step or its historical context; upstream spec data conversions are confined to declared stage consumers."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_plan-impact.ts",
+    "symbol": "loadFromSpecOutput.row",
+    "context": "loadPreviousStepOutput",
+    "value": "04-phase-0b-pre-planning",
+    "count": 1,
+    "reason": "Physical canonical identity for this step or its historical context; upstream spec data conversions are confined to declared stage consumers."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts",
+    "symbol": "EFFECTIVE_SPEC_INPUTS",
+    "context": "Object.freeze",
+    "value": "@roles",
+    "count": 3,
+    "reason": "Effective-spec host adapter: canonical stage reads, ordered resolved/checked/draft precedence, nullish then empty-body semantics."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts",
+    "symbol": "readSpecStages.[resolved, checked, draft]",
+    "context": "readRole",
+    "value": "@roles",
+    "count": 3,
+    "reason": "Effective-spec host adapter: canonical stage reads, ordered resolved/checked/draft precedence, nullish then empty-body semantics."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts",
+    "symbol": "effectiveSpec.byRole.[SPEC_ROLES.resolved]",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Effective-spec host adapter: canonical stage reads, ordered resolved/checked/draft precedence, nullish then empty-body semantics."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts",
+    "symbol": "effectiveSpec.byRole.[SPEC_ROLES.checked]",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Effective-spec host adapter: canonical stage reads, ordered resolved/checked/draft precedence, nullish then empty-body semantics."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_spec-artifact.ts",
+    "symbol": "effectiveSpec.byRole.[SPEC_ROLES.draft]",
+    "context": "PropertyAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Effective-spec host adapter: canonical stage reads, ordered resolved/checked/draft precedence, nullish then empty-body semantics."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./04-phase-0b-pre-planning.js",
+    "count": 1,
+    "reason": "Static producer or registry import/export; no task output query."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./05-phase-0b5-spec-quality.js",
+    "count": 1,
+    "reason": "Static producer or registry import/export; no task output query."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
+    "symbol": "import",
+    "context": "import",
+    "value": "./05a-resolve-spec-warnings.js",
+    "count": 1,
+    "reason": "Static producer or registry import/export; no task output query."
   }
 ]

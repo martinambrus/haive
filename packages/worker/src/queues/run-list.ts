@@ -11,8 +11,9 @@ import { taskRunListIds, type RunListStrategy } from '@haive/shared/run-list';
 import {
   readStepRole,
   STEP_ROLES,
+  HOST_POLICY_STEP_ROLES,
   stepOutputContractsEqual,
-  type StepRoleId,
+  type LegacyStepRoleId as StepRoleId,
   type StepOutputContractRef,
 } from '@haive/shared/step-outputs';
 import { hasConflictingReplacementHooks } from '../step-engine/step-output-contract.js';
@@ -92,7 +93,7 @@ export function resolveTaskStep(
     const plan = parsedPlan ?? parseDerivedRunPlan(ctx.derivedRunPlan);
     if (plan.version !== 2) return def;
     if (ctx.executionPath == null) return def;
-    const role = Object.values(STEP_ROLES).find((role) =>
+    const role = HOST_POLICY_STEP_ROLES.find((role) =>
       readStepRole(
         ctx,
         role,
@@ -168,7 +169,7 @@ export function assertPinnedCandidateSupport(
   },
   registry: Pick<StepRegistry, 'get'> = stepRegistry,
 ): void {
-  for (const role of Object.values(STEP_ROLES)) {
+  for (const role of HOST_POLICY_STEP_ROLES) {
     const binding = candidate.roleBindings[role];
     if (binding)
       assertPinnedProducerSupport(binding.stepId, role, binding.outputContract, registry);

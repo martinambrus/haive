@@ -6,7 +6,8 @@ import { autoActOnInsightsField, INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/sh
 import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
 import { CONFIG_KEYS, configService, extractFormDefaults } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { readSpecStages } from './_spec-artifact.js';
+import { legacyRoleOutput } from '../../read-role.js';
 import { loadDeclaredVerifyCommands, resolveDdevWorkspace } from './_task-meta.js';
 import { codeBlock } from './_plan-ops.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
@@ -89,15 +90,6 @@ interface RunConfig {
   maxFixRounds: number;
   /** Review dimensions the reviewers score against for this task. */
   reviewDimensions: string[];
-}
-
-interface PrePlanningOutput {
-  summary?: string;
-  spec?: string;
-}
-
-interface SpecQualityOutput {
-  spec?: string;
 }
 
 /** What the form chose, falling back to the policy detect resolved.
@@ -217,12 +209,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
 
   async detect(ctx: StepContext): Promise<RunConfigDetect> {
     // Same spec precedence as gate-1: post-checkpoint (05a) → 05 amended → 04 draft.
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
-    const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
-    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
+    const stages = await readSpecStages(ctx);
+    const planOutput = legacyRoleOutput(stages.draft);
+    const qualityOutput = legacyRoleOutput(stages.checked);
+    const resolvedOutput = legacyRoleOutput(stages.resolved);
     const specBody =
       resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
 

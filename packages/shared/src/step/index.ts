@@ -1,6 +1,6 @@
 import type { CommittedSnapshotRef } from '../committed-snapshot.js';
 export type { CommittedSnapshotRef } from '../committed-snapshot.js';
-import type { StepOutputContractRef, StepRoleId } from '../step-engine/output-contracts.js';
+import type { StepOutputContractRef, LegacyStepRoleId } from '../step-engine/output-contracts.js';
 import type { Database } from '@haive/database';
 import type { logger } from '../logger/index.js';
 import type { FormSchema } from '../schemas/form.js';
@@ -20,7 +20,8 @@ export type { ComposableStepEntry } from '../modularity/contracts.js';
 
 export type {
   StepOutputContractRef,
-  StepRoleId,
+  LegacyStepRoleId,
+  LegacyStepRoleId as StepRoleId,
   CodeReviewOutput,
   CodeAuditOutput,
 } from '../step-engine/output-contracts.js';
@@ -616,7 +617,7 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   /** Exact immutable host output contract; the host supplies its validator. */
   readonly outputContract?: StepOutputContractRef;
   /** Declares role capability only. Replacement admission remains a separate host decision. */
-  readonly replaces?: readonly StepRoleId[];
+  readonly replaces?: readonly LegacyStepRoleId[];
   /** May edit deliverable code or tests, including through a fixer. Its successful/skip
    * hand-off compares validation snapshots when after 07b and before the commit gate.
    * Prompt steps with the file_write capability opt in.

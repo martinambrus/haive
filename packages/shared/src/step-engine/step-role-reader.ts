@@ -4,7 +4,11 @@ import {
   type DerivedRunPlan,
 } from '../modularity/derived-task-types.js';
 import { executionPathSchema } from '../schemas/tasks.js';
-import { STEP_ROLES, type StepRoleId, type StepOutputContractRef } from './output-contracts.js';
+import {
+  STEP_ROLES,
+  type LegacyStepRoleId,
+  type StepOutputContractRef,
+} from './output-contracts.js';
 export { STEP_ROLES } from './output-contracts.js';
 
 export interface RoleTaskPin {
@@ -15,7 +19,7 @@ export interface RoleTaskPin {
   runListStrategy?: string;
 }
 export interface RoleBinding {
-  role: StepRoleId;
+  role: LegacyStepRoleId;
   stepId: string | null;
   outputContract: StepOutputContractRef | null;
   state: 'active' | 'absent' | 'unselected';
@@ -24,7 +28,7 @@ export interface RoleBinding {
 /** The sole role resolution algorithm. It never consults a live definition or output shape. */
 export function readStepRole<T>(
   task: RoleTaskPin,
-  role: StepRoleId,
+  role: LegacyStepRoleId,
   read: (binding: RoleBinding) => T,
   /** Reuse only a plan already decoded for this task by the caller. */
   parsedPlan?: DerivedRunPlan,
@@ -65,7 +69,7 @@ export function readStepRole<T>(
 export function projectStepOutputRoles<T extends { stepId: string }>(
   task: RoleTaskPin,
   steps: readonly T[],
-): (T & { outputRoles?: StepRoleId[] })[] {
+): (T & { outputRoles?: LegacyStepRoleId[] })[] {
   const bindings = Object.values(STEP_ROLES).map((role) =>
     readStepRole(task, role, (binding) => binding),
   );

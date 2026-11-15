@@ -655,6 +655,15 @@ control-class isolation. A module uses `satisfies StepDefinition<Detect, CodeRev
 and declares `outputContract: {id: 'haive.code-review', version: 1}` on both the executable
 and its composable manifest entry. Boot rejects unknown references and disagreement.
 
+The frozen `STEP_ROLE_REGISTRY` also lists the canonical mixed-author spec ports
+`haive.spec.draft@1`, `haive.spec.checked@1` and `haive.spec.resolved@1`. Their data contracts
+preserve storage extensions while core readers project declared fields. They have no quote
+projection or executable host policy. Core-only port declarations do not expose SDK reads or
+manifest ports. Executable `outputContract` registration, manifest references, and v1/v2 plan
+entry decoding remain review/audit-only; spec output contracts are never serialized in catalog
+entries or pins. Existing v1/v2 role bindings and `replaces` remain limited to review and audit.
+No generic role prompt token is available.
+
 `replaces` declares capability for the two review roles only, with the matching host
 reference. It declares replacement capability; admission separately checks every candidate, exact contract equality, explicit role tokens, policy, producer uniqueness and final composition. Only the canonical review and audit roles are replaceable, in one hop. Existing catalog `entry` JSON holds
 these serializable declarations; no SQL migration is needed.

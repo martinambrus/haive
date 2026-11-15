@@ -1,4 +1,5 @@
 import ts from 'typescript';
+import { STEP_ROLE_REGISTRY } from '../src/step-engine/output-contracts.js';
 
 export interface ReaderSite {
   file: string;
@@ -10,7 +11,9 @@ export interface ReaderSite {
 export interface ReaderPin extends ReaderSite {
   reason: string;
 }
-const roles = ['08c-code-review', '08c2-code-audit'];
+const roles: string[] = [
+  ...new Set(Object.values(STEP_ROLE_REGISTRY).flatMap((entry) => [entry.id, entry.legacyStepId])),
+];
 
 /** Production scope is explicit; tests, fixtures and generated artifacts cannot hide a reader. */
 export function isRoleReaderSource(file: string): boolean {
@@ -71,7 +74,8 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
     true,
     file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
-  const aliases = new Set(['STEP_ROLES']);
+  const tableNames = ['STEP_ROLES', 'SPEC_ROLES', 'STEP_ROLE_REGISTRY', 'HOST_POLICY_STEP_ROLES'];
+  const aliases = new Set(tableNames);
   for (const statement of source.statements) {
     if (
       ts.isImportDeclaration(statement) &&
@@ -79,7 +83,7 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
       ts.isNamedImports(statement.importClause.namedBindings)
     ) {
       for (const spec of statement.importClause.namedBindings.elements)
-        if ((spec.propertyName?.text ?? spec.name.text) === 'STEP_ROLES')
+        if (tableNames.includes(spec.propertyName?.text ?? spec.name.text))
           aliases.add(spec.name.text);
     }
   }
@@ -90,7 +94,7 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
     ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
       ((ts.isIdentifier(node.expression) && aliases.has(node.expression.text)) ||
         (ts.isPropertyAccessExpression(node.expression) &&
-          node.expression.name.text === 'STEP_ROLES')));
+          tableNames.includes(node.expression.name.text))));
   function findAliases(node: ts.Node) {
     if (ts.isVariableDeclaration(node) && node.initializer) {
       if (ts.isIdentifier(node.name) && isRoleValue(node.initializer))

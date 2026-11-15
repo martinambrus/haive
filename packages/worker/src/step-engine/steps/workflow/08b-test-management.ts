@@ -16,7 +16,7 @@ import {
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadPlanImpactContext, planImpactBlock } from './_plan-impact.js';
-import { hydrateNoSpecBrief } from './_spec-artifact.js';
+import { hydrateNoSpecBrief, resolveApprovedSpec } from './_spec-artifact.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import {
@@ -783,14 +783,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         (await hasWorkspaceEntry(workspace, '.ddev/commands/web/playwright')));
     const ws = ddev ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath) : null;
 
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
-      ((resolved?.output as { spec?: string } | null)?.spec ??
-        (quality?.output as { spec?: string } | null)?.spec ??
-        (plan?.output as { spec?: string } | null)?.spec) ||
-      '';
+    const spec = await resolveApprovedSpec(ctx);
 
     const detected: TestManagementDetect = {
       workspacePath: workspace,

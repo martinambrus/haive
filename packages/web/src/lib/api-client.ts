@@ -1,4 +1,4 @@
-import type { StepRoleId } from '@haive/shared/step-outputs';
+import type { LegacyStepRoleId as StepRoleId } from '@haive/shared/step-outputs';
 import type {
   RepositoryErrorCode,
   TaskIntegrationChoice,
