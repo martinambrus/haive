@@ -222,16 +222,6 @@ describe.skipIf(!url)('derived triage pin on Postgres', () => {
 
   const installV2 = async () => {
     const plan = rolePlan(2);
-    plan.composableEntries.push(
-      ...[...prefix, REVIEW, AUDIT].map((id) => ({
-        stepId: id,
-        label: id,
-        group: 'test',
-        dispatchesCli: false,
-        requires: [],
-        provides: [],
-      })),
-    );
     const r = registry();
     const def = (id: string): StepDefinition => ({
       metadata: {

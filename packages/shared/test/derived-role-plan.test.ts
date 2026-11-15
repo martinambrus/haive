@@ -27,7 +27,7 @@ function effectivePin() {
     loopTargetStepId: '07-phase-2-implement',
     entailsWhen: [{ provided: 'review', entails: ['consumer'] }],
   };
-  plan.composableEntries.push(host);
+  plan.composableEntries = plan.composableEntries.map((e) => (e.stepId === REVIEW ? host : e));
   for (const c of plan.candidates) {
     c.effectiveEntries = c.stepIds.map((id) =>
       id === PRODUCER
@@ -49,6 +49,11 @@ function effectivePin() {
   }
   return plan;
 }
+it('refuses a role-bound candidate without pinned effective entries', () => {
+  const plan = effectivePin();
+  delete plan.candidates[0]!.effectiveEntries;
+  expect(() => parseDerivedRunPlan(plan)).toThrow('missing or malformed');
+});
 it('accepts a structurally valid pinned entry independent of today’s merge result', () => {
   const plan = effectivePin();
   const entry = plan.candidates[0]!.effectiveEntries!.find((e) => e.stepId === PRODUCER)!;

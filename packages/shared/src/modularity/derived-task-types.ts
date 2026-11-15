@@ -513,7 +513,7 @@ const v2PlanSchema = planSchema.extend({
       candidateSchema.extend({
         outcomes: z.array(outcomeSchema),
         compositionIssues: z.array(z.never()),
-        effectiveEntries: z.array(composableStepEntrySchema).optional(),
+        effectiveEntries: z.array(composableStepEntrySchema),
         roleBindings: z
           .object({
             [STEP_ROLES.codeReview]: producerSchema.optional(),

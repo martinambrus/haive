@@ -129,6 +129,7 @@ describe('one pinned role reader', () => {
     const c = plan.candidates.find((c) => c.executionPath === 'quick_bugfix')!;
     (c.stepIds as string[]).splice(0, c.stepIds.length, ...base.stepIds);
     c.roleBindings = {};
+    c.effectiveEntries = [];
     c.outcomes[0]!.outcome = 'path-absent';
     c.outcomes[0]!.reason = 'target-not-on-path';
     expect(
@@ -141,6 +142,14 @@ describe('one pinned role reader', () => {
       pin.derivedRunPlan as import('../src/modularity/derived-task-types.js').DerivedRunPlanV2;
     const changes = [{ insertAfter: PRODUCER, step: 'module.example.notes' }, { remove: PRODUCER }];
     plan.overlay.changes.push(...changes);
+    plan.composableEntries.push({
+      stepId: 'module.example.notes',
+      label: 'Notes',
+      group: 'test',
+      dispatchesCli: false,
+      requires: [],
+      provides: [],
+    });
     for (const c of plan.candidates) {
       c.outcomes.push(
         ...changes.map((change, i) => ({
@@ -152,6 +161,7 @@ describe('one pinned role reader', () => {
       );
       (c.stepIds as string[]).splice(c.stepIds.indexOf(PRODUCER), 1, 'module.example.notes');
       c.roleBindings = {};
+      c.effectiveEntries = [];
     }
     expect(resolve({ ...pin, runListSnapshot: plan.candidates[3]!.stepIds })).toMatchObject({
       state: 'absent',
