@@ -7,7 +7,10 @@ import {
 } from '../src/step-engine/steps/workflow/_insight-continuation.js';
 import type { InsightBatchRecord } from '../src/step-engine/steps/workflow/_insight-batch.js';
 import { resolveTaskStep } from '../src/queues/run-list.js';
-import { assertInsightRunList } from '../src/queues/insight-continuation.js';
+import {
+  assertInsightRunList,
+  assertInsightTaskSteps,
+} from '../src/queues/insight-continuation.js';
 import { validateComposition, evaluateDerivedTaskType } from '@haive/shared/modularity';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { keepForPath } from '../src/orchestrator/execution-paths.js';
@@ -267,4 +270,22 @@ it('stored admin/module/derived gate3 compositions without 08e remain valid', ()
       installedStepIds: new Set(catalog.keys()),
     }).issues,
   ).toEqual([]);
+});
+
+it('gate3 pick preflight requires gate2 before any editor or reset, while ordinary 08e keeps its contract', () => {
+  const ctx = {} as import('../src/queues/run-list.js').ResolvedTaskContext;
+  const ids = [
+    '08-phase-5-verify',
+    '08c-code-review',
+    '08e-insights-triage',
+    '09-gate-2-verify-approval',
+    '10-gate-3-commit',
+  ];
+  const steps = ids.map((id) => ({ metadata: { id } })) as StepDefinition[];
+  expect(() => assertInsightTaskSteps(ctx, steps, true)).not.toThrow();
+  const missing = steps.filter((s) => s.metadata.id !== '09-gate-2-verify-approval');
+  expect(() => assertInsightTaskSteps(ctx, missing, true)).toThrow(/gate.?2.*run list/i);
+  expect(() => assertInsightTaskSteps(ctx, missing)).not.toThrow();
+  const afterGate = [...missing, steps[3]!];
+  expect(() => assertInsightTaskSteps(ctx, afterGate, true)).toThrow(/run list/);
 });

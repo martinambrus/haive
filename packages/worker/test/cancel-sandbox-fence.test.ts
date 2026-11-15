@@ -1213,6 +1213,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     '08-phase-5-verify',
     '08c-code-review',
     '08e-insights-triage',
+    '09-gate-2-verify-approval',
     '10-gate-3-commit',
   ].map((id, index) => ({
     metadata: { id, index, workflowType: 'workflow' },
@@ -1241,7 +1242,9 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       .set({ currentStepId: source!.stepId, currentRound: 0 })
       .where(eq(schema.tasks.id, stepCtx.taskId));
     if (stale)
-      for (const def of routeSteps.slice(2))
+      for (const def of routeSteps
+        .slice(2)
+        .filter((s) => s.metadata.id !== '09-gate-2-verify-approval'))
         await db.insert(schema.taskSteps).values({
           taskId: stepCtx.taskId,
           stepId: def.metadata.id,
@@ -1289,7 +1292,9 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       .where(eq(schema.taskSteps.id, stepCtx.taskStepId))
       .returning();
     if (stale)
-      for (const def of routeSteps.slice(2))
+      for (const def of routeSteps
+        .slice(2)
+        .filter((s) => s.metadata.id !== '09-gate-2-verify-approval'))
         await db.insert(schema.taskSteps).values({
           taskId: stepCtx.taskId,
           stepId: def.metadata.id,
@@ -1379,7 +1384,9 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           .set({ status: 'done', output })
           .where(eq(schema.taskSteps.id, triage!.id))
           .returning();
-        for (const step of routeSteps.slice(2))
+        for (const step of routeSteps
+          .slice(2)
+          .filter((s) => s.metadata.id !== '09-gate-2-verify-approval'))
           await db.insert(schema.taskSteps).values({
             taskId: ctx.taskId,
             stepId: step.metadata.id,
@@ -1725,7 +1732,6 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       const { ctx, round } = await gateCheckRound();
       const ids = routeSteps.map((s) => s.metadata.id);
       if (extraCheck) ids.splice(ids.indexOf('08e-insights-triage') + 1, 0, '08c2-code-audit');
-      ids.splice(ids.indexOf('10-gate-3-commit'), 0, '09-gate-2-verify-approval');
       await db
         .update(schema.tasks)
         .set({ currentStepId: '08e-insights-triage', currentRound: round, runListSnapshot: ids })

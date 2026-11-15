@@ -18,7 +18,7 @@ import { validationSuccessor, VALIDATION_RECHECK_EVENT } from './validation-rech
 export class InsightRunListError extends Error {
   constructor() {
     super(
-      'Insight continuation requires verification, code review and insight triage in the run list. Repair the task type and Retry this step.',
+      'Insight continuation requires verification, code review and insight triage; gate-3 picks also require gate 2 before gate 3 in the run list. Repair the task type and Retry this step.',
     );
     this.name = 'InsightRunListError';
   }
@@ -46,12 +46,13 @@ export function assertInsightTaskSteps(
     binding.state === 'active' ? binding.stepId : null,
   );
   assertInsightRunList(steps, review);
-  if (
-    gate3 &&
-    steps.findIndex((s) => s.metadata.id === '10-gate-3-commit') <=
-      steps.findIndex((s) => s.metadata.id === '08e-insights-triage')
-  )
-    throw new InsightRunListError();
+  if (gate3) {
+    const index = (id: string) => steps.findIndex((s) => s.metadata.id === id);
+    const gate = index('10-gate-3-commit');
+    const approval = index('09-gate-2-verify-approval');
+    if (gate <= index('08e-insights-triage') || approval < 0 || approval >= gate)
+      throw new InsightRunListError();
+  }
 }
 
 export async function handoffInsightContinuation(
