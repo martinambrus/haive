@@ -165,7 +165,6 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
-  assertExecutionContractUsable(def.executionContract);
   // Preserve the availability precedence before evaluating a potentially stale overlay.
   if (def.runListStrategy === 'derived') {
     if (!def.enabled) throw new HttpError(403, `Task type ${slug} is disabled`);
@@ -275,6 +274,8 @@ export async function definitionForCreate(
           availability.reason,
         );
       case 'invalid-composition':
+        if (availability.issues?.some((issue) => issue.kind === 'invalid-execution-contract'))
+          assertExecutionContractUsable(def.executionContract);
         if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
