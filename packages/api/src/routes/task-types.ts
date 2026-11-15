@@ -1,3 +1,4 @@
+import { projectPortCandidates } from '../lib/step-port-projection.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, eq, sql } from 'drizzle-orm';
@@ -276,6 +277,72 @@ adminTaskTypeRoutes.post('/preview', async (c) => {
   });
   const { catalog: _catalog, base: _base, ...preview } = diagnostics;
   return c.json(preview, diagnostics.issues.length || diagnostics.defaultIssues.length ? 400 : 200);
+});
+
+/** Read-only draft projection; the existing create schemas bound and validate its shape.
+ * Port diagnostics are informational here; this route adds no save/admission rule. */
+adminTaskTypeRoutes.post('/ports', async (c) => {
+  const raw: unknown = await c.req.json();
+  const body =
+    (raw as { runListStrategy?: unknown } | null)?.runListStrategy === 'derived'
+      ? derivedTaskTypeCreateSchema.parse(raw)
+      : customTaskTypeCreateSchema.parse(raw);
+  const db = getDb();
+  const catalog = await loadCatalog(db);
+  if ('runListStrategy' in body) {
+    const base = await findDefinition(db, body.baseSlug);
+    const diagnostics = inspectDerivedDefinition(
+      {
+        ...body,
+        source: 'admin',
+        requiresRepository: body.requiresRepository ?? base?.requiresRepository ?? true,
+        promptSteps: body.promptSteps ?? {},
+        preAnswerDefaults: body.preAnswerDefaults ?? {},
+        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+      },
+      base,
+      catalog,
+      registeredCategoryIds(),
+    );
+    return c.json(projectPortCandidates(diagnostics.candidates, catalog));
+  }
+  const own = mergePromptStepCatalog(catalog, {
+    ...body,
+    source: 'admin',
+    promptSteps: body.promptSteps ?? {},
+  });
+  return c.json(projectPortCandidates([{ executionPath: null, stepIds: body.stepIds }], own));
+});
+
+adminTaskTypeRoutes.get('/:slug/ports', async (c) => {
+  const db = getDb();
+  const row = await findDefinition(db, c.req.param('slug'));
+  if (!row) throw new HttpError(404, 'Task type not found');
+  const catalog = await loadCatalog(db);
+  if (row.runListStrategy === 'derived' || row.runListStrategy === 'workflow_paths') {
+    const base = row.runListStrategy === 'derived' ? await findDefinition(db, row.baseSlug!) : row;
+    const diagnostics = inspectDerivedDefinition(
+      row.runListStrategy === 'derived'
+        ? row
+        : {
+            ...row,
+            source: 'admin',
+            runListStrategy: 'derived',
+            baseSlug: row.slug,
+            changes: [],
+          },
+      base,
+      catalog,
+      registeredCategoryIds(),
+    );
+    return c.json(projectPortCandidates(diagnostics.candidates, catalog));
+  }
+  return c.json(
+    projectPortCandidates(
+      [{ executionPath: null, stepIds: row.stepIds ?? [] }],
+      mergePromptStepCatalog(catalog, row),
+    ),
+  );
 });
 
 adminTaskTypeRoutes.get('/:slug', async (c) => {

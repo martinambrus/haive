@@ -1,6 +1,10 @@
+import { createFakeDb } from '@haive/database/testing';
+import type { StepPortProjection } from '@haive/shared/step-ports';
+import { replacementAdmissionFixture } from './derived-admission-fixtures.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
+  db: undefined as unknown,
   role: 'user',
   getDb: vi.fn(),
   write: vi.fn(),
@@ -12,6 +16,7 @@ const h = vi.hoisted(() => ({
 vi.mock('../src/db.js', () => ({
   getDb: () => {
     h.getDb();
+    if (h.db) return h.db;
     return {
       select: () => ({ from: (table: unknown) => rows(table) }),
       insert: h.write,
@@ -71,6 +76,7 @@ const send = (method: string, path: string, body?: unknown) =>
 
 beforeEach(() => {
   h.role = 'user';
+  h.db = undefined;
   h.getDb.mockClear();
   h.write.mockClear();
   h.defs = [];
@@ -287,4 +293,100 @@ describe('static authoring validation compatibility', () => {
       issues: [{ path: '', message: 'Unrecognized key: "changes"' }],
     });
   });
+});
+
+describe('read-only port projection', () => {
+  const ids = ['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality'];
+  const draft = { slug: 'ports', displayName: 'Ports', stepIds: ids, requiresRepository: true };
+  it('refuses a regular user before reading the catalog', async () => {
+    expect((await send('POST', '/admin/task-types/ports', draft)).status).toBe(403);
+    expect(h.getDb).not.toHaveBeenCalled();
+  });
+  it('projects a static unsaved draft without writing or exposing catalog extras', async () => {
+    h.role = 'admin';
+    h.catalog = ids.map((stepId) => ({
+      stepId,
+      source: 'core',
+      composable: false,
+      title: stepId,
+      entry: { private: 'secret' },
+    }));
+    const res = await send('POST', '/admin/task-types/ports', draft);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as StepPortProjection;
+    expect(body.candidates[0]!.graph.edges[0]).toMatchObject({ source: ids[0], target: ids[1] });
+    expect(JSON.stringify(body)).not.toMatch(/secret|hostPolicy|quoteProjection|outputValidators/);
+    expect(h.write).not.toHaveBeenCalled();
+  });
+  it('uses the stored type and returns 404 for an absent type', async () => {
+    h.role = 'admin';
+    h.defs = [{ ...draft, source: 'admin', runListStrategy: 'static' }];
+    const res = await send('GET', '/admin/task-types/ports/ports');
+    expect(res.status).toBe(200);
+    expect(
+      ((await res.json()) as StepPortProjection).candidates[0]!.graph.nodes.map(
+        (n: { id: string }) => n.id,
+      ),
+    ).toEqual(ids);
+    h.defs = [];
+    expect((await send('GET', '/admin/task-types/absent/ports')).status).toBe(404);
+  });
+});
+
+it('projects each derived draft candidate independently, including v2 bindings', async () => {
+  h.role = 'admin';
+  const { catalog, base, definition, payload } = replacementAdmissionFixture();
+  h.defs = [base];
+  h.catalog = [...catalog.composable.values()].map((entry) => ({
+    stepId: entry.stepId,
+    title: entry.label,
+    source: entry.stepId === payload ? 'module:acme' : 'core',
+    composable: true,
+    entry,
+    dispatchesCli: false,
+    ...catalog.orderedRows.find((row) => row.stepId === entry.stepId),
+  }));
+  const { source: _source, ...draft } = definition;
+  const res = await send('POST', '/admin/task-types/ports', { ...draft, displayName: 'Derived' });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as StepPortProjection;
+  expect(body.candidates.length).toBeGreaterThan(1);
+  expect(
+    body.candidates.some((c: { graph: { nodes: { id: string }[] } }) =>
+      c.graph.nodes.some((n) => n.id === payload),
+    ),
+  ).toBe(true);
+  expect(h.write).not.toHaveBeenCalled();
+});
+
+it('projects a stored derived type with the same candidate-local graph as its unsaved draft', async () => {
+  h.role = 'admin';
+  const fixture = replacementAdmissionFixture();
+  const fake = createFakeDb({
+    taskTypeDefinitions: schema.taskTypeDefinitions,
+    stepCatalog: schema.stepCatalog,
+  });
+  fake.insert(schema.taskTypeDefinitions, fixture.base);
+  fake.insert(schema.taskTypeDefinitions, fixture.definition);
+  for (const entry of fixture.catalog.composable.values()) {
+    fake.insert(schema.stepCatalog, {
+      stepId: entry.stepId,
+      source: entry.stepId === fixture.payload ? 'module:acme' : 'core',
+      title: entry.label,
+      composable: true,
+      entry,
+      dispatchesCli: false,
+      ...fixture.catalog.orderedRows.find((row) => row.stepId === entry.stepId),
+    });
+  }
+  h.db = fake.db;
+  const stored = await send('GET', `/admin/task-types/${fixture.definition.slug}/ports`);
+  const { source: _source, ...draft } = fixture.definition;
+  const unsaved = await send('POST', '/admin/task-types/ports', {
+    ...draft,
+    displayName: 'Derived',
+  });
+  expect(stored.status).toBe(200);
+  expect(unsaved.status).toBe(200);
+  expect(await stored.json()).toEqual(await unsaved.json());
 });
