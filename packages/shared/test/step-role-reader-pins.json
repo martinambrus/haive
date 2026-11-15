@@ -1678,5 +1678,37 @@
     "value": "@roles",
     "count": 1,
     "reason": "Validate successful module data output against its declared host contract without granting review/audit routing or replacement policy."
+  },
+  {
+    "file": "packages/shared/src/step-engine/role-port-declarations.ts",
+    "symbol": "dataOnly.entry",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
+  },
+  {
+    "file": "packages/shared/src/step-engine/role-port-declarations.ts",
+    "symbol": "dataOnly.entry",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
+  },
+  {
+    "file": "packages/shared/src/step-engine/role-port-declarations.ts",
+    "symbol": "dataOnly",
+    "context": "AmpersandAmpersandToken",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
+  },
+  {
+    "file": "packages/shared/src/step-engine/role-port-declarations.ts",
+    "symbol": "dataOnly",
+    "context": "InKeyword",
+    "value": "@role-alias:entry",
+    "count": 1,
+    "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
   }
 ]
