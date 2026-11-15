@@ -25,6 +25,7 @@ import { withTaskScratchWorkspace } from './scratch-workspace.js';
 export const SNAPSHOT_BASE_TARGET = '/haive/diff-base';
 export const SNAPSHOT_LIMITS = {
   maxBytes: 256 * 1024 * 1024,
+  maxInventoryBytes: 16 * 1024 * 1024,
   maxEntries: 50_000,
   maxDepth: 64,
   timeoutMs: 30_000,
@@ -139,12 +140,13 @@ const validPath = (name: string) =>
 
 function budget(opts: SnapshotOptions) {
   const limits = { ...SNAPSHOT_LIMITS, ...opts.limits };
+  const maxInventoryBytes = Math.min(limits.maxInventoryBytes, limits.maxEntries * 512);
   const deadline = Date.now() + limits.timeoutMs;
   const check = () => {
     if (Date.now() >= deadline) throw new CommittedSnapshotError();
   };
   check();
-  return { limits, check, signal: AbortSignal.timeout(limits.timeoutMs) };
+  return { limits, maxInventoryBytes, check, signal: AbortSignal.timeout(limits.timeoutMs) };
 }
 
 /** No checkout, archive filters, hooks, transport or ambient credentials. Git receives only a held
@@ -287,6 +289,7 @@ async function inventory(
     treeOid,
     entries,
   });
+  if (Buffer.byteLength(body) > b.maxInventoryBytes) throw new CommittedSnapshotError();
   return { treeOid, entries, body };
 }
 
@@ -504,7 +507,7 @@ export async function resolveCommittedSnapshots(
             const artifact = `${namespace}/${ref.inventoryId}`;
             const stored = await readFileNoFollow(anchor, `${artifact}/inventory.json`, {
               strict: true,
-              maxBytes: Math.min(16 * 1024 * 1024, b.limits.maxEntries * 512),
+              maxBytes: b.maxInventoryBytes,
             });
             if (!stored || stored.truncated || hash(stored.data) !== ref.inventorySha256)
               throw new CommittedSnapshotError();

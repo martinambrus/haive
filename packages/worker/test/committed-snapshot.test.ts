@@ -11,6 +11,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   writeFile,
   rm,
   symlink,
@@ -26,6 +27,7 @@ import {
   issueCommittedSnapshot,
   resolveCommittedSnapshots,
   resolveTaskCommittedSnapshots,
+  SNAPSHOT_LIMITS,
 } from '../src/repo/committed-snapshot.js';
 
 vi.mock('../src/repo/tool-spawn.js', async (original) => ({
@@ -63,6 +65,7 @@ beforeAll(async () => {
   await writeFile(join(repo, 'data.bin'), binary);
   await mkdir(join(repo, 'nested'));
   await writeFile(join(repo, 'nested', 'content'), 'pinned');
+  await writeFile(join(repo, 'nested', 'café'), 'unicode path');
   git('add', '.');
   git('commit', '-qm', 'fixture');
   commitOid = git('rev-parse', 'HEAD');
@@ -177,6 +180,28 @@ describe('owned committed snapshot', () => {
   ] as const)('fails the injected %s bound', async (key, value) => {
     await expect(
       issueCommittedSnapshot(commitOid, { ...options(), limits: { [key]: value } }),
+    ).rejects.toThrow('SNAPSHOT_INVALID');
+  });
+  it('refuses to issue an inventory above the resolver byte cap before publishing it', async () => {
+    expect(SNAPSHOT_LIMITS.maxInventoryBytes).toBe(16 * 1024 * 1024);
+    const ref = await issueCommittedSnapshot(commitOid, options());
+    const namespace = join(root, scope.userId, '_scratch', scope.taskId, 'committed-snapshots');
+    const body = await readFile(join(namespace, ref.inventoryId, 'inventory.json'), 'utf8');
+    const size = Buffer.byteLength(body);
+    expect(size).toBeGreaterThan(body.length);
+    const exact = { ...options(), limits: { maxInventoryBytes: size } };
+    const accepted = await issueCommittedSnapshot(commitOid, exact);
+    expect(await resolveCommittedSnapshots({ snapshotRef: accepted }, exact)).not.toBeNull();
+    const before = await readdir(namespace);
+    await expect(
+      issueCommittedSnapshot(commitOid, { ...options(), limits: { maxInventoryBytes: size - 1 } }),
+    ).rejects.toThrow('SNAPSHOT_INVALID');
+    expect(await readdir(namespace)).toEqual(before);
+    await expect(
+      resolveCommittedSnapshots(
+        { snapshotRef: accepted },
+        { ...options(), limits: { maxInventoryBytes: size - 1 } },
+      ),
     ).rejects.toThrow('SNAPSHOT_INVALID');
   });
   it("refuses extra files while retaining the masking helper's tracked-secret policy", async () => {
