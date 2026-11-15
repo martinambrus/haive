@@ -22,7 +22,12 @@ import {
   type SecretMaskPolicy,
 } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
-import { INSIGHTS_AT_GATE, insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import {
+  INSIGHTS_AT_GATE,
+  gateInsights,
+  insightsRow,
+  loadUnactedInsights,
+} from './_gate-insights.js';
 import {
   houseRulesRow,
   loadGateHouseRules,
@@ -282,7 +287,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
           : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
         similarSites: similar.sites,
         similarSitesOmitted: similar.omitted,
-        outOfScopeInsights: insights.insights,
+        outOfScopeInsights: gateInsights(insights.insights),
         outOfScopeInsightsOmitted: insights.omitted,
         houseRules,
       };
@@ -357,7 +362,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
-      outOfScopeInsights: insights.insights,
+      outOfScopeInsights: gateInsights(insights.insights),
       outOfScopeInsightsOmitted: insights.omitted,
       houseRules,
       unregisteredGitlinks: orphanGitlinks,

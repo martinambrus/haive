@@ -54,7 +54,12 @@ import { resolveScreenshotRoot, SCREENSHOT_MANIFEST_NAME } from './_screenshots.
 import type { FileCoverage } from './_impl-changes.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_similar-sites.js';
-import { INSIGHTS_AT_GATE, insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import {
+  INSIGHTS_AT_GATE,
+  gateInsights,
+  insightsRow,
+  loadUnactedInsights,
+} from './_gate-insights.js';
 import {
   REREAD_FAILED,
   houseRulesHoldApprove,
@@ -954,7 +959,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
-      outOfScopeInsights: insights.insights,
+      outOfScopeInsights: gateInsights(insights.insights),
       outOfScopeInsightsOmitted: insights.omitted,
       houseRules,
     };

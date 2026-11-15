@@ -44,8 +44,6 @@ export interface Insight {
   title: string;
   location: string;
   description: string;
-  /** Physical sources, absent on legacy persisted snapshots. */
-  sourceRefs?: InsightSourceRef[];
 }
 
 export type InsightSourceRef =
@@ -72,7 +70,11 @@ export interface InsightLoadOptions {
 }
 
 export interface LoadedInsight extends Insight {
-  /** Stable versioned hash of the complete case-insensitive title/location key. */
+  /** Original parser position for compatibility with persisted gate snapshots, before pick filtering. */
+  legacyId?: string;
+  /** Physical sources, attached only by the inventory loader. */
+  sourceRefs?: InsightSourceRef[];
+  /** Stable versioned hash of the complete case-insensitive title/location pair. */
   id: string;
   /** findingIdentity over the full location/title, before presentation clipping. */
   identity: string;

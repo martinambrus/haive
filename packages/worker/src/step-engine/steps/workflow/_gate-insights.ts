@@ -1,12 +1,26 @@
 import type { StatusSummaryItem } from '@haive/shared';
 import { collapseToLine } from '../_untrusted-repo.js';
-import type { Insight } from '@haive/shared/step';
+import type { Insight, LoadedInsight } from '@haive/shared/step';
 export { loadUnactedInsights } from './_insight-loader.js';
 import { code } from './_plan-ops.js';
 import { asPlainText } from './_similar-sites.js';
 
 export const INSIGHTS_AT_GATE = 30;
 const INSIGHT_FIELD_CHARS = 200;
+
+/** Persist only the legacy gate shape: bounded display fields, with the pre-filter parser id. */
+export function gateInsights(
+  insights: readonly (Insight & Pick<LoadedInsight, 'legacyId'>)[],
+): Insight[] {
+  const clip = (text: string): string => collapseToLine(text).slice(0, INSIGHT_FIELD_CHARS);
+  return insights.map((i) => ({
+    id: clip(i.legacyId ?? i.id),
+    sourceStep: clip(i.sourceStep),
+    title: clip(i.title),
+    location: clip(i.location),
+    description: clip(i.description),
+  }));
+}
 
 /** The gate row listing them, or null when there are none. `nextStep` says what this gate lets
  *  the person do about them. */

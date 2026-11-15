@@ -4,6 +4,7 @@ import { schema, type Database } from '@haive/database';
 import { reviewerOutputSchema } from '@haive/shared';
 import type {
   Insight,
+  LoadedInsight,
   InsightSourceRef,
   InsightLoadOptions,
   InsightLoadResult,
@@ -22,7 +23,12 @@ interface InsightOutput {
 const insightKey = (i: { title: string; location: string }): string =>
   `${i.title}::${i.location}`.toLowerCase();
 
-function addSourceRefs(insight: Insight, refs: readonly InsightSourceRef[] | undefined): void {
+type SourcedInsight = Insight & Pick<LoadedInsight, 'sourceRefs'>;
+
+function addSourceRefs(
+  insight: SourcedInsight,
+  refs: readonly InsightSourceRef[] | undefined,
+): void {
   if (!refs?.length) return;
   const target = (insight.sourceRefs ??= []);
   for (const ref of refs) {
@@ -33,9 +39,19 @@ function addSourceRefs(insight: Insight, refs: readonly InsightSourceRef[] | und
 
 /** The one parser for `## INSIGHTS` blocks. The legacy form keeps positional ids and its default
  *  cap; loadUnactedInsights projects stable occurrence ids over the uncapped records instead. */
-export function parseInsights(outputs: InsightOutput[], limit = 30): Insight[] {
-  const seen = new Map<string, Insight>();
-  const out: Insight[] = [];
+export function parseInsights(outputs: InsightOutput[], limit?: number): Insight[];
+export function parseInsights(
+  outputs: InsightOutput[],
+  limit: number,
+  options: { includeSourceRefs: true },
+): SourcedInsight[];
+export function parseInsights(
+  outputs: InsightOutput[],
+  limit = 30,
+  options = { includeSourceRefs: false },
+): SourcedInsight[] {
+  const seen = new Map<string, SourcedInsight>();
+  const out: SourcedInsight[] = [];
   for (const { stepId, raw, sourceRefs } of outputs) {
     if (!raw) continue;
     const sections = [...raw.matchAll(/##\s*INSIGHTS\b([\s\S]*?)(?=\n##\s|\n```|$)/gi)];
@@ -50,18 +66,18 @@ export function parseInsights(outputs: InsightOutput[], limit = 30): Insight[] {
       const key = insightKey({ title, location });
       const existing = seen.get(key);
       if (existing) {
-        addSourceRefs(existing, sourceRefs);
+        if (options.includeSourceRefs) addSourceRefs(existing, sourceRefs);
         continue;
       }
       if (out.length >= limit) continue;
-      const insight: Insight = {
+      const insight: SourcedInsight = {
         id: `i-${out.length + 1}`,
         sourceStep: stepId,
         title,
         location,
         description,
       };
-      addSourceRefs(insight, sourceRefs);
+      if (options.includeSourceRefs) addSourceRefs(insight, sourceRefs);
       seen.set(key, insight);
       out.push(insight);
     }
@@ -70,7 +86,7 @@ export function parseInsights(outputs: InsightOutput[], limit = 30): Insight[] {
   for (const output of outputs) {
     for (const alias of output.aliases ?? []) {
       const insight = seen.get(insightKey(alias));
-      if (insight) addSourceRefs(insight, output.sourceRefs);
+      if (insight && options.includeSourceRefs) addSourceRefs(insight, output.sourceRefs);
     }
   }
   return out;
@@ -169,6 +185,12 @@ export async function loadInsightOutputs(db: Database, taskId: string): Promise<
   return outputs;
 }
 
+/** Shared by the inventory and its host adapter; invalid options must fail before any reads. */
+export function validateInsightLimit(limit: number | undefined): void {
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0))
+    throw new RangeError('Insight limit must be a finite, safe, non-negative integer.');
+}
+
 /** Complete inventory, with selection projected from every legacy 08e snapshot before limiting. */
 export async function loadUnactedInsights(
   db: Database,
@@ -176,9 +198,10 @@ export async function loadUnactedInsights(
   options: InsightLoadOptions = {},
 ): Promise<InsightLoadResult> {
   const { limit, includePicked = false } = options;
-  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0))
-    throw new RangeError('Insight limit must be a finite, safe, non-negative integer.');
-  const all = parseInsights(await loadInsightOutputs(db, taskId), Number.POSITIVE_INFINITY);
+  validateInsightLimit(limit);
+  const all = parseInsights(await loadInsightOutputs(db, taskId), Number.POSITIVE_INFINITY, {
+    includeSourceRefs: true,
+  });
   const triage = await db
     .select({ output: schema.taskSteps.output })
     .from(schema.taskSteps)
@@ -202,7 +225,10 @@ export async function loadUnactedInsights(
       const key = insightKey(i);
       return {
         ...i,
-        id: `insight-v1-${createHash('sha256').update(key).digest('hex')}`,
+        legacyId: i.id,
+        id: `insight-v1-${createHash('sha256')
+          .update(JSON.stringify([i.title.toLowerCase(), i.location.toLowerCase()]))
+          .digest('hex')}`,
         identity: findingIdentity({ file: i.location, description: i.title }),
         picked: picked.has(key),
       };
