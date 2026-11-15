@@ -325,6 +325,21 @@ Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the 
 
 ## Successful output contracts
 
+`STEP_ROLE_REGISTRY` is frozen host-owned metadata: role id, exact contract id/version,
+cardinality, authorship and canonical legacy producer. Schemas and validators stay private;
+modules supply references, never validators. The review/audit physical role ids remain aliases,
+and their schemas and v1/v2 decoding are unchanged. Only entries carrying an existing host policy
+enter run-list replacement policy; a data port grants no routing or replacement authority.
+
+The spec ports are `haive.spec.draft@1` (04), `haive.spec.checked@1` (05), and
+`haive.spec.resolved@1` (05a). All three have mixed authorship and no quote projection. Their
+contracts declare the fields consumers use, including draft impact, quality findings/score and
+scope questions. Unknown storage fields survive validation; readers project declared fields.
+Core-only `providesRoles`/`consumesRoles` metadata does not add manifest/SDK ports, prompt tokens
+or replacement support. The spec definitions and serialized catalog entries have no
+`outputContract`; the runner's successful-output validation block therefore remains unchanged.
+The executable declaration, manifest and v1/v2 plan contract-ref gates accept review/audit only.
+
 The review and broad-audit definitions declare their immutable host output contract.
 After a successful apply return, the runner checks cancellation and ownership, then validates
 before summary extraction, loop hooks, routing and output writes. It persists the original
@@ -381,6 +396,29 @@ worker, api, web, database and web-kit source, worker scripts, root scripts and 
 source; ignored external-module files are not enumerated by git. The ungated scan adds about 3-4
 seconds to the shared test job and has an explicit 20-second cold-run timeout. It changes neither
 the gated-file count nor the configured CI time budgets.
+
+The worker's core `readRole(ctx, role, maxRound?)` accepts spec roles only and resolves their
+canonical legacy producer. It returns `ready`, `absent`, `not-ready` or `invalid`, with producer
+row id, physical step id, round, status and exact contract. Selection keeps the physical loader's
+newest-round ordering, no status predicate and no implicit round ceiling; an explicit ceiling is
+forwarded. Review/audit reads continue through `readStepRole` and the immutable v1/v2 task pin.
+Future per-input pins will change selection only for newly admitted tasks.
+
+Existing spec consumers use an explicit legacy projection even for invalid or non-done historical
+output. Readiness is diagnostic here, not a new gate. `EFFECTIVE_SPEC_INPUTS` drives the host
+adapter's resolved > checked > draft precedence, with `??` semantics followed by `|| ''`: an
+intentional empty resolved body never borrows an earlier spec. Gate 1 and run config retain their
+additional draft-summary fallback; 05a keeps its own `||` fallback. `resolveApprovedSpec`, test
+management, gate 1, run config, 05 and 05a use these adapters. Human decisions, revise targets and
+own-step replay remain physical.
+
+House-rules task-text SQL intentionally stays physical. It selects non-empty specs by highest
+round before stage precedence and caps text in SQL; the effective-spec adapter instead selects by
+stage before round and preserves empty strings. Replacing that bounded SQL would change behavior.
+No `{{role:}}` token is added; existing `{{step:}}` quotes cannot quote the mixed spec producers.
+Rollback of these registry/spec adapters is a clean code revert: no persisted pin or serialized
+catalog entry names a spec contract, so no migration or pin rewrite is needed. Retain the
+pre-existing v1/v2 support described below.
 
 Rollback stops new replacement creation and retains v2-capable readers and workers for every resumable v2 task. Never downgrade pins to v1 or revert runtime support underneath those tasks.
 
