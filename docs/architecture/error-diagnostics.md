@@ -347,9 +347,29 @@ from it keep their configured policy. Ordinary `sslmode` choices stay supported.
 
 The guard follows the driver's tail/authority split, last-@ userinfo rule, duplicate-query
 precedence and authority percent decoding; a WHATWG parse of the entire DSN is different.
-An already stored `ragConnectionString` is refused at use with a fixed message naming only
-the parameter; the row stays stored and there is no migration. Seed-host extraction returns
-null before constructing the driver for such a DSN. Change the configuration to resume use.
+The tooling form submission, the worker tooling apply and `PUT /global-kb/config` refuse
+these parameters before saving a user DSN. CLI provider configuration has no PostgreSQL DSN
+field, and install `DATABASE_URL` is outside this user-DSN policy. A refusal has stable code
+`user_postgres_dsn_refused` and names only the parameter. Save and typed Test responses ask
+for the parameter to be removed before trying again. Stored per-repo refusals point to
+onboarding step 04 (Tooling and infrastructure); stored global refusals point to an admin's
+Settings > Global KB. An unchanged refused DSN echoed to the config save is still refused,
+explicitly naming the saved setting; the page's blank DSN allows unrelated settings edits.
+Local RAG search, re-embed and retry preserve the typed failure as 400. The global search
+half stays isolated: both an ordinary outage and a refused global DSN return per-repo hits
+with an optional `note` in `/rag/search`. The refusal note names only the parameter and its
+admin repair location. The RAG MCP proxy displays that note with hits or an empty result;
+custom-MCP `rag-query` includes the same note in its bounded text response, including for
+global-only searches. Existing rows stay stored; there is no migration. Seed-host extraction
+still returns null before constructing the driver. Tooling saves never log the tooling
+object or its DSN.
+
+`postgres-option-coverage.test.ts` resolves the installed ESM parser and its own package
+manifest, compares returned options and consumed query selectors with the guard
+`USER_POSTGRES_DSN_KNOWN_OPTIONS` inventory, and detects certificate selectors removed
+before `sql.options` is returned. The installed version is diagnostic, not pinned: an
+unchanged inventory passes a version bump. An added parser option requires a guard security
+review; the simulated consumed `sslcrl` selector still fails the inventory comparison.
 
 Both catches in `POST /tooling/test-postgres` and the catch in `POST /global-kb/test-db` use
 `userPostgresErrorMessage`: fixed copy for refused parameters, connection refusal, DNS,

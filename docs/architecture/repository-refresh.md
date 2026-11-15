@@ -162,7 +162,11 @@ the next tick sees it again. A dropped database connection releases that lock
 before the request's Git writes finish, so the lock alone is not enough: a relink
 also holds an in-process writer fence from before its relink transaction until its Git
 writes and its own reconcile have settled, and the sweep passes over a fenced
-repository too. The fence is per API process, which matches the single API the
+repository too. A skipped repository emits an info log with `repositoryId` and
+`reason` (`fenced` or `locked`), at most once per repository per five minutes. A
+nonlocking MVCC read distinguishes a skipped locked row from a deleted row,
+which is not logged as locked. Expired log-rate entries are pruned each tick.
+The fence is per API process, which matches the single API the
 stack runs; process death ends both the writes and the fence. A repository
 without intent runs no Git. Repair
 errors warn and retry on a later rotation. The route's own reconcile after a

@@ -269,7 +269,12 @@ the digest and the enforced rows come from one connection with a 3 s connect tim
 `statement_timeout` set with `SET LOCAL` in each query's own transaction (a pooler would refuse a
 startup parameter) and a 6 s deadline that destroys the pool. MEASURED before: a store that accepts
 the connection and never answers stalled each dispatch 30,239 ms. The global half of `rag_search`
-takes the same three bounds and falls back to local-only results; its query embed runs BEFORE the
+takes the same three bounds and falls back to local-only results even when the global DSN
+is refused. The optional `/rag/search` `note` discloses global-store unavailability; a refused
+DSN names only the parameter and asks an admin to replace the string in Settings > Global KB.
+Both the RAG MCP proxy and custom-MCP `rag-query` display the note alongside retained hits
+(or an empty result), so a global refusal never becomes a whole-search 400 or custom-tool 500.
+Save paths still refuse the DSN. The query embed runs BEFORE the
 connection opens, since a cold embed model takes 4.6-42.8 s and would spend the deadline. A bounded
 connection runs with `fetch_types: false`, so a query binds an array as a `'{…}'` literal with an
 explicit cast: a JS array fails there with 22P02 (it silently zeroed `rag_search`'s identifier
