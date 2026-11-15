@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import { createDatabase, schema } from '../src/index.js';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -69,5 +71,67 @@ describe.skipIf(!url)('additive mining snapshot columns', () => {
       'snapshot_ref',
       'base_snapshot_ref',
     ]);
+  });
+  it('round trips both descriptor objects through Drizzle jsonb with generated owner identities', async () => {
+    const orm = createDatabase(url!);
+    let userId: string | undefined;
+    try {
+      const [user] = await orm
+        .insert(schema.users)
+        .values({
+          emailEncrypted: 'snapshot@test.invalid',
+          emailBlindIndex: randomBytes(32).toString('hex'),
+          passwordHash: randomBytes(32).toString('hex'),
+        })
+        .returning();
+      userId = user!.id;
+      const [repo] = await orm
+        .insert(schema.repositories)
+        .values({ userId, name: 'Snapshot fixture', source: 'blank' })
+        .returning();
+      const [task] = await orm
+        .insert(schema.tasks)
+        .values({ userId, repositoryId: repo!.id, type: 'workflow', title: 'Snapshot fixture' })
+        .returning();
+      const [step] = await orm
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: 'snapshot-fixture',
+          stepIndex: 0,
+          title: 'Snapshot fixture',
+        })
+        .returning();
+      const snapshotRef = {
+        version: 1,
+        userId,
+        repositoryId: repo!.id,
+        taskId: task!.id,
+        commitOid: 'a'.repeat(40),
+        treeOid: 'b'.repeat(40),
+        inventoryId: randomUUID(),
+        inventorySha256: 'c'.repeat(64),
+      };
+      const baseSnapshotRef = {
+        ...snapshotRef,
+        commitOid: 'd'.repeat(40),
+        treeOid: 'e'.repeat(40),
+        inventoryId: randomUUID(),
+      };
+      for (const id of [userId, repo!.id, task!.id])
+        expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      const [mining] = await orm
+        .insert(schema.taskStepAgentMinings)
+        .values({ taskStepId: step!.id, agentId: 'snapshot-fixture', snapshotRef, baseSnapshotRef })
+        .returning();
+      const read = await orm.query.taskStepAgentMinings.findFirst({
+        where: eq(schema.taskStepAgentMinings.id, mining!.id),
+      });
+      expect(read).toMatchObject({ snapshotRef, baseSnapshotRef });
+      expect(typeof read!.snapshotRef).toBe('object');
+    } finally {
+      if (userId) await orm.delete(schema.users).where(eq(schema.users.id, userId));
+      await orm.$client.end({ timeout: 5 });
+    }
   });
 });

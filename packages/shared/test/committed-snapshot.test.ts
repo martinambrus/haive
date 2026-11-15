@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   parseCommittedSnapshotRef,
@@ -17,6 +18,20 @@ const ref = {
 };
 
 describe('host-issued committed snapshot descriptor', () => {
+  it('accepts generated owner ids and rejects non-RFC sentinel owners', () => {
+    const owned = {
+      ...ref,
+      userId: randomUUID(),
+      repositoryId: randomUUID(),
+      taskId: randomUUID(),
+    };
+    expect(parseCommittedSnapshotRef(owned)).toEqual(owned);
+    for (const key of ['userId', 'repositoryId', 'taskId'] as const) {
+      expect(() =>
+        parseCommittedSnapshotRef({ ...owned, [key]: '00000000-0000-0000-0000-000000000001' }),
+      ).toThrow('Invalid committed snapshot');
+    }
+  });
   it('round trips strictly, without paths or mutable checkout names', () => {
     expect(parseCommittedSnapshotRef(JSON.parse(serializeCommittedSnapshotRef(ref)))).toEqual(ref);
     const sha256 = { ...ref, commitOid: 'd'.repeat(64), treeOid: 'e'.repeat(64) };
