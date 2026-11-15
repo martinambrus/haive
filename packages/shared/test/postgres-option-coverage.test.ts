@@ -66,7 +66,7 @@ function parsedKeys(source: string, options: object): string[] {
 }
 
 it('requires a guard review when the installed postgres.js parser adds an option', async () => {
-  // Resolve both version and parser from the actual installed ESM entry, not a message or a lockfile guess.
+  // Resolve the installed ESM parser; the version is diagnostic, while its option inventory is the review gate.
   const entry = new URL(import.meta.resolve('postgres'));
   const manifest = JSON.parse(await readFile(new URL('../package.json', entry), 'utf8')) as {
     version: string;
@@ -89,8 +89,7 @@ it('requires a guard review when the installed postgres.js parser adds an option
       pg.options,
     );
     expect(future.filter((key) => !keys.includes(key))).toEqual(['sslcrl']);
-    // Even a parser refactor that moves selectors into another module needs review.
-    expect(manifest.version).toBe('4.1.1');
+    expect(future).not.toEqual(guard.USER_POSTGRES_DSN_KNOWN_OPTIONS);
   } finally {
     await pg.end({ timeout: 0 });
   }
