@@ -39,11 +39,12 @@ test. `fix_loop` is written by nothing today and only its `targetStepId` is read
 
 On `tasks`: `type` is `text` (it was the `workflow_type` enum until 0193). `run_list_snapshot` pins
 static step IDs at creation; built-in dynamic strategies and legacy/unseeded tasks retain their
-existing null semantics. Derived tasks pin the full/null candidate initially and the chosen candidate
-at first triage. That derived-only, fenced selection is the sole snapshot UPDATE exception.
-`custom_steps` pins raw prompt definitions used by the snapshot (candidate union for derived tasks);
-`derived_run_plan` pins the derived v1 plan. Both remain INSERT-only. Definition edits and Retry never
-recompute existing task pins. `dead_at` / `dead_reason` mark a dead task.
+existing null semantics. Derived tasks pin the full/null candidate initially and the chosen
+candidate at first triage. That derived-only, fenced selection is the sole snapshot UPDATE
+exception. `custom_steps` pins raw prompt definitions used by the snapshot (candidate union for
+derived tasks); `derived_run_plan` pins the derived execution plan (new creation still writes v1).
+Both remain INSERT-only. Definition edits and Retry never recompute existing task pins. `dead_at` /
+`dead_reason` mark a dead task.
 
 **Derived storage (shipped in PR2).** Migration 0240 adds `derived` alone, committing the enum value
 before 0241 uses it. Migration 0241 appends `base_slug`, `changes` and nullable
@@ -255,13 +256,14 @@ Requirements describe inputs a step actually uses; optional report sections and 
 stay optional. Sprint planning accepts missing spec and gate-1 feedback; every spec producer and
 gate 1 precedes `sprint-plan` when present. Gate 2 accepts missing verification but still requires a
 worktree; verification precedes `verify-approved` when present. `04a-spec-audit` requires the draft
-spec and reports to `05a-resolve-spec-warnings`;
-`08c2-code-audit` requires a worktree and reports to gate 2. Neither audit loops. Adversarial QA also
-reports only; its human review and gate 2 restart at `07-phase-2-implement`, while business-requirements
-review revises at `03b-business-requirements`. None of those review gates closes the run.
-`06c-dag-execute` requires the sprint planner that writes its DAG rows; browser verification requires
-a runtime. Pre-sync and final RAG indexing have separate scope tokens. Consumers still read core
-outputs by their literal ids; these entries do not implement replacement roles or derived types.
+spec and reports to `05a-resolve-spec-warnings`; `08c2-code-audit` requires a worktree and reports
+to gate 2. Neither audit loops. Adversarial QA also reports only; its human review and gate 2
+restart at `07-phase-2-implement`, while business-requirements review revises at
+`03b-business-requirements`. None of those review gates closes the run. `06c-dag-execute` requires
+the sprint planner that writes its DAG rows; browser verification requires a runtime. Pre-sync and
+final RAG indexing have separate scope tokens. The review and broad-audit consumers resolve their
+output roles through the immutable task pin; other output reads still address physical step IDs.
+Declaring tokens alone grants no replacement role.
 
 A mode selector entails every execution route it can choose: `06b-sprint-planning` requires both
 `06c-dag-execute` and `07-phase-2-implement` later in the list, covering single-agent overrides and
@@ -307,6 +309,53 @@ The current shouldRun skip writes status and end time without writing output. Re
 rows and all stored readers retain their existing behavior; historical rows are neither
 validated as new writes nor migrated. Audit parsing stays report-only, including its current
 empty-findings fallback for unreadable replies.
+
+## Pinned output-role reads
+
+`@haive/shared/step-outputs` exports `STEP_ROLES`, `readStepRole(task, role, read)` and
+`projectStepOutputRoles`. This is the one role-resolution algorithm for worker queries and API
+projections. Builtin, static and no-plan tasks keep canonical identity reads. Derived v1 reads use
+identity only when the selected candidate contains the role. Before selection a role is unselected;
+a removed role is absent. Neither state borrows another candidate. Required missing/malformed pins,
+invalid paths and mismatched snapshots refuse with `invalid-derived-run-plan`, never a live-catalog
+or output-shape fallback.
+
+The strict dual decoder accepts unchanged v1 and a future v2 pin. V2 adds candidate-local
+`roleBindings: { [role]: { stepId, outputContract } }`; the existing `composableEntries` pin holds
+effective declarations and exact host contract references. The decoder replays pinned applied
+outcomes to verify surviving physical positions, one-hop contracts, binding removal, unique
+producers and canonical-role ambiguity. It does not re-run today's composition rules. Nothing
+creates v2 in this prerequisite; active replacement admission remains refused.
+
+The worker's previous-output loader accepts an explicit `{ role }` selector; string callers remain
+physical. It returns actual row identity/status and the newest round, even when reset, with an
+optional historical round ceiling. No producer or no row returns null for every selector. Skipped,
+pending and reset contracted rows retain their physical metadata but read as absent output; they
+show no review/audit row at gate 2 and impose no approval hold. Only a done contracted row reports
+`outputCompatible`: false means non-conforming output, which gate 2 discloses as incomplete and
+never recommends approving. A reset newest round never borrows output from an older completed round.
+Historical core output fields remain tolerant; no backfill runs. History findings, honored
+constraints and both prompt-guidance paths resolve the pinned producer while events, provenance,
+human/agent fencing and telemetry keep physical IDs. Gate 3 still reads gate 2's human decision and
+its gate-2-less house-rules fallback stays validator-only.
+
+Both owner-scoped task detail and steps/poll responses project optional `outputRoles` on step DTOs,
+retaining physical IDs/titles and stripping the full plan. Web history admits explicit role members
+while preserving status, CLI evidence, rounds and retry boundaries. Non-role rows omit
+`outputRoles`; role producers retain their physical IDs and titles. The ungated
+`step-role-source-scan.test.ts` pins remaining executable literals and role-table uses by
+file/symbol/context/value/count with reasons; stale pins and new raw readers fail. Its negative
+fixtures reject unapproved full role literals in equality predicates, SQL templates with
+substitutions, template heads/middles/tails, regexes, loader aliases/wrappers, collections, scalar
+aliases and TSX. Concatenated fragments and prefix tests are outside the scan: it performs no
+constant folding. Context whitespace is collapsed before matching pins. Scope includes shared,
+worker, api, web, database and web-kit source, worker scripts, root scripts and tracked module
+source; ignored external-module files are not enumerated by git. The ungated scan adds about 3-4
+seconds to the shared test job and has an explicit 20-second cold-run timeout. It changes neither
+the gated-file count nor the configured CI time budgets.
+
+Rollback before v2 creation is application-code revert in reverse commit order. Once later work
+admits v2 tasks, retain these readers for every task that could resume.
 
 ## Derived overlays (PR4 of 4)
 
