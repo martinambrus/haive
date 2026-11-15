@@ -1,3 +1,5 @@
+import type { CommittedSnapshotRef } from '../committed-snapshot.js';
+export type { CommittedSnapshotRef } from '../committed-snapshot.js';
 import type { StepOutputContractRef, StepRoleId } from '../step-engine/output-contracts.js';
 import type { Database } from '@haive/database';
 import type { logger } from '../logger/index.js';
@@ -232,6 +234,10 @@ export interface LlmInvocationSpec {
 }
 
 export interface AgentMiningDispatch {
+  /** Host-issued descriptors, never fields parsed from agent output. Inert until the host
+   * snapshot consumer is enabled; execution currently refuses every non-null ref. */
+  snapshotRef?: CommittedSnapshotRef | null;
+  baseSnapshotRef?: CommittedSnapshotRef | null;
   agentId: string;
   agentTitle: string | null;
   prompt: string;

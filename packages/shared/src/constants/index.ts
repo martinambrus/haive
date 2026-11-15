@@ -1,3 +1,4 @@
+import type { CommittedSnapshotRef } from '../committed-snapshot.js';
 import type { EnvelopeEncrypted } from '../crypto/index.js';
 import {
   CONTAINER_FAMILY,
@@ -597,6 +598,9 @@ export type CliExecInvocationKind =
   'cli' | 'subagent_native' | 'subagent_sequential' | 'agent_mining';
 
 export interface CliExecJobPayload {
+  /** Pinned host-issued identities. Non-null currently refuses execution (no consumer yet). */
+  snapshotRef?: CommittedSnapshotRef | null;
+  baseSnapshotRef?: CommittedSnapshotRef | null;
   invocationId: string;
   taskId: string;
   taskStepId: string | null;

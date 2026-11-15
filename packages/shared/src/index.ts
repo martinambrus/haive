@@ -19,3 +19,4 @@ export * from './task-scratch.js';
 export * from './task-worktree.js';
 export * from './merge-left-open.js';
 export * from './merge-dir-claim.js';
+export * from './committed-snapshot.js';
