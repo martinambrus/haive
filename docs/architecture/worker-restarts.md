@@ -941,3 +941,27 @@ and claims, including stored opt-ins, and disable new manual opt-ins. Keep capab
 workers until active version-1 batches and continuations settle. Retain spent claims
 and journal JSON. No schema migration is required; older workers cannot safely consume
 active automatic stages or checkpoint ownership references.
+
+## Gate-3 insight recovery
+
+A current-generation gate-3 `insight.batch` intent counts as durable work before done
+publication, as an 08e intent does. Boot preserves its approved snapshot and answers.
+The same source/generation/batch replays the handoff once; explicit Retry advances the
+generation without erasing history. The v1 continuation optionally carries `mode: gate3`
+and `stage: apply | checks`; unknown versions are refused. Apply-stage handoff targets
+fresh 08e; checks-stage handoff composes with validation and targets fresh verification.
+Both retain the atomic event/reset/pointer transaction and lost-enqueue recovery.
+Stop/Cancel/dead win; pause lets owned publication/handoff finish and holds fresh work.
+
+Required `insight.check` records preserve failure and new gate-2 approval outside
+resettable output. Source Retry cannot erase this task-wide approval requirement.
+The precommit guard applies even to an empty selection. Conditional quick gate 2 uses
+the latch in both its shouldRun wrapper and fresh pause/provider admission, so a pending
+approval cannot accidentally become a dormant skip. Report snapshots stay immutable
+per source generation and readable after completion.
+
+Rollback stops offering new gate-3 picks and automatic batches, then retains capable
+workers until active continuations and pending new gate forms are settled. Retain check
+latches, journals, report readers and compatible derived-pin readers for every resumable
+task. Reverting an executor underneath that state is unsafe. No schema migration needs
+reversal, and spent claims and attempt history are never reset.

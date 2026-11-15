@@ -587,11 +587,15 @@ a finite, safe, non-negative integer. The host adapter validates synchronously b
 or any identity read; the loader validates before source reads too. Zero returns
 nothing and counts every eligible record as omitted. Pick filtering precedes the limit, and
 `omitted` counts only eligible records that the limit cut. Full title, location and description
-stay in `LoadedInsight`; manual 08e and gate callers explicitly request 30, while automatic
+stay in `LoadedInsight`; gate 2 explicitly requests 30; manual 08e and gate 3 page
+complete inventories, while automatic
 08e loads the inventory without a count limit and enforces its classifier prompt budget. Before persistence, the shared gate
 projection keeps only `{id, sourceStep, title, location, description}`, collapses every field
-to one line and clips it to 200 characters. The stored entries keep their original positional
-`i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded. `insightsRow`
+to one line and clips it to 200 characters. The legacy status-row entries keep their original positional
+`i-N` ids (from the loader's `legacyId`, before pick filtering) and stay bounded.
+Gate-3 choice entries use the same clipped projection with stable occurrence ids,
+never raw identities or source-reference arrays. Apply reloads full records by the
+selected saved ids and refuses a disappeared id before recording an intent. `insightsRow`
 also clips for older parked snapshots. Unlimited inventory is not an unlimited prompt budget; report
 consumers must page or stream large results rather than put them in every task poll.
 Automatic 08e persists at most `INSIGHTS_AT_GATE` (30) inventory entries, candidates, decisions
@@ -1155,3 +1159,21 @@ module applies at the next upgrade or an explicit build of the one-shot above.
   `.<id>.tmp-*` stages are removed by the next pin of that id.
 - Deleting a source removes the row and its token but keeps its pinned folder; remove the folder
   by hand to drop the module from the next build.
+
+### Insight summary and conditional gate declarations
+
+`@haive/shared/step` exports the version-1 `InsightSummary` type alongside the four
+existing task-bound host services; there is no additional dispatch service. Summary
+copies are bounded and never serve as verified-repair telemetry or control state.
+The complete immutable `task.markdown_report` snapshot is paged through the owner-scoped
+report route, remains readable after completion, and uses the generic Markdown reader.
+Event polling pages its `items` array as well.
+
+Composable entries may explicitly declare `loopBeforeClose` for a branch chosen before
+a closing action, requiring `closes` and a loop target. Gate 3 uses it for human picks,
+with `loopTargetWhenPresent: true` so lists without 08e remain valid and summary-only.
+That conditional declaration requires a target, and when present its ordering and
+cross-barrier constraints still apply. Built-in boot path closure is unchanged.
+Default closing-barrier behavior and later cross-barrier loop refusal remain unchanged.
+Retain compatible readers/workers for resumable tasks carrying new declarations or
+insight continuations; never regenerate or downgrade their stored pins.

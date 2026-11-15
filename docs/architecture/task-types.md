@@ -971,8 +971,8 @@ lacks the required destinations refuses visibly rather than jumping off-list.
 
 Dormancy applies only to members added by the built-in path filter. Explicit stored
 snapshots, derived pins and admin/static lists keep their own listed step behavior.
-Derived overlays use the previous path membership: on quick, an `insertAfter` or `remove`
-against 08c remains path-absent. Their stored pins are never recomputed.
+Stored derived pins retain their original base membership. New derived bases include the
+conditional tail as described below; existing pins are never recomputed.
 
 08e now requires earlier verification (`08-phase-5-verify`) and review (`08c-code-review`,
 or its pinned replacement) as well as its existing worktree, with verification as its
@@ -981,3 +981,32 @@ unavailable when revalidated for new task creation; repair their composition bef
 creating another task. Existing tasks retain their immutable lists and fail the source
 step retryably if their destinations are incomplete. No data migration weakens the rule.
 The development install had no such stored types when checked by the session.
+
+## Gate-3 insight destinations
+
+Gate 3 declares 08e as a conditional revise target with `loopTargetWhenPresent: true`.
+Composition validates its ordering and closing barriers when 08e is present; absent
+08e does not create a missing-loop-target issue. Existing admin/module types and
+stored derived candidates without 08e remain valid. The boot-only built-in path
+closure still retains 08e; it never expands or validates a stored task list.
+08e's existing requirements order verification before code review. Gate 3 explicitly
+declares `loopBeforeClose: true`: its revise branch is
+chosen before the commit action. Ordinary closing-and-looping entries remain barriers,
+and later steps still cannot loop across a commit. The flag requires both a closing
+entry and a loop target. `loopTargetWhenPresent` also requires a declared target.
+
+New derived base candidates include the conditional insight tail, matching builtin
+runtime membership. Quick paths also include conditional gate 2 so a failed insight
+verify can receive a fresh approval. Runtime dormancy reads each stored derived base,
+not today's live membership: old pins stay unchanged, while explicit overlay inserts
+and replacements retain their listed behavior. New base membership makes those anchors
+reachable for new overlays. No existing pin is rewritten.
+
+Gate-3 detect resolves stored membership first: without 08e it offers no picks and
+retains summary access and the ordinary commit path, including pre-INS5 quick pins
+without gate 2. Apply rechecks membership before any picked intent can route to 08e.
+When a pick is offered, run-list preflight resolves the pinned review producer and
+ordered verify/review/08e/gate-3 destinations before dispatch or reset. It also requires
+gate 2 before gate 3, so a pick cannot edit and later park on a missing approval step.
+Incomplete pick paths fail visibly with Retry guidance. This conditional gate-3 branch
+does not weaken 08e's own admission requirements or rewrite existing task pins.

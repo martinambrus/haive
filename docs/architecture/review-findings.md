@@ -26,7 +26,7 @@ The canonical `findingFingerprint` implementation lives in
 ## Insight application journal
 
 `insight.batch` task events are required state, separate from review telemetry. Protocol
-and envelope version 1 record `manual_08e` or `auto_08e` intent, reservation, invocation and outcome stages.
+and envelope version 1 record `manual_08e`, `auto_08e` or `gate3` intent, reservation, invocation and outcome stages.
 The intent names the source step row, explicit rerun generation, stable occurrence ids and
 loader identities, and starts every selected item as unconfirmed. Each stage is deduplicated
 by batch/stage/generation while holding the owned source-row lock and the task owner/epoch
@@ -53,7 +53,7 @@ pointer under owned fences; neither is best-effort telemetry. Continuations neve
 review dispositions or report an item as verified merely because its writer said applied.
 The configured check tail returns to an owned 08e checkpoint. Manual applications end
 there without another selection; automatic applications refresh the inventory for the
-next bounded cohort. Gate-3 picks remain deferred.
+next bounded cohort. Gate-3 picks use the same journal and the gate-3 continuation mode described below.
 
 `insight.auto_round_started` is required protocol-v1 state. The owned source-row lock
 precedes a task-row lock, serializing task-wide admission and the event insert.
@@ -77,3 +77,30 @@ Only `unconfirmed` or a missing writer outcome holds new automatic work for insp
 Claims without results and eligible consequential results without a journal selection
 are reoffered manually after explicit Retry, with `pending_writer`; spending a classifier
 opportunity never silently settles an unwritten improvement.
+
+## Insight summary reports
+
+`InsightSummary` is a deterministic protocol-v1 projection of inventory, classifications
+and the required batch journal. Class is independent of outcome. Shifted aliases are
+grouped, every selected occurrence retains its attempt, legacy picks stay unconfirmed,
+and conflicting reports within one batch show mixed rather than an applied claim.
+Item, field, provenance and attempt display copies are bounded with explicit omissions.
+Neither the summary nor an agent's applied report writes a review disposition or claims
+that checks passed without evidence.
+
+For tasks with insight identities, gate-3 FormSchema sections show the summary and
+apply persists `findingsSummary`. Zero-identity tasks retain their existing LLM recap.
+Automatic history is loaded in `(created_at, id)` order; the summary uses the shared
+`INSIGHT_AUTO_ROUNDS` bound for both its stop reason and cap-reached item outcomes.
+A generic report link remains readable after completion, including quick paths without
+learning. Required `task.markdown_report` events hold complete immutable snapshots,
+one per source generation, written under source ownership and task owner/epoch/dead/
+terminal fences. Each insight and each attempt is a separate bounded report entry. Full original
+occurrence fields and every source reference follow in deterministic chunks of at
+most 2,000 source characters before escaping; clipped form copies do not replace
+complete report evidence.
+The owner-scoped `GET /tasks/:id/reports/:reportId` pages entries, and `/events` bounds
+its item copies too. Unsupported report payloads return typed HTTP 422 rather than
+an internal-server error. The generic reader renders every body through MarkdownView.
+`insight.page` and `task.markdown_report` stay available through the API and are hidden
+from the human Activity feed alongside insight batch records.
