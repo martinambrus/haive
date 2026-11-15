@@ -42,6 +42,7 @@ import {
   type DeadTaskBootDeps,
   type DeadTaskView,
 } from '../src/queues/dead-task-boot.js';
+import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import type { AdvanceStepResult } from '../src/step-engine/index.js';
@@ -866,6 +867,100 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       expect(defer).toHaveBeenCalledTimes(1);
       expect(await task(id)).toEqual(before);
       expect(await events(id, 'task.failed')).toHaveLength(0);
+    });
+
+    describe.each([TASK_JOB_NAMES.START, TASK_JOB_NAMES.ADVANCE_STEP])(
+      '%s execution refusal',
+      (name) => {
+        it.each([
+          {
+            version: 1,
+            guardedSpans: [
+              {
+                id: 'a',
+                firstStepId: A,
+                lastStepId: B,
+                predicateId: 'module.fx.planned',
+                args: {},
+              },
+            ],
+          },
+          { version: 1, guardedSpans: [], fixTarget: { stepId: A, capabilityVersion: 1 } },
+        ])(
+          'marks an unsupported execution pin dead exactly once and excludes stalled redrive',
+          async (executionContract) => {
+            const start = name === TASK_JOB_NAMES.START;
+            const id = await make({
+              status: start ? 'queued' : 'running',
+              currentStepId: start ? null : A,
+              repositoryId,
+              executionContract,
+            });
+            const before = await task(id);
+            const adds = h.adds.length;
+            const payload = {
+              taskId: id,
+              userId,
+              ...(start ? {} : { stepId: A, round: 0, epoch: 3 }),
+            };
+            await processTaskJob(job(name, payload));
+            const after = await task(id);
+            const reason =
+              'invalid-execution-contract: guarded spans or custom fix target not yet supported by this worker';
+            expect(after).toEqual({
+              ...before,
+              deadAt: expect.any(Date),
+              deadReason: reason,
+              updatedAt: expect.any(Date),
+            });
+            expect(await events(id)).toEqual([
+              expect.objectContaining({
+                eventType: 'task.dead',
+                payload: expect.objectContaining({ reason, epoch: 3, unresolved: [] }),
+              }),
+            ]);
+            expect(h.kills.filter((kill) => kill.taskId === id)).toHaveLength(1);
+            await processTaskJob(job(name, payload));
+            expect(await task(id)).toEqual(after);
+            expect(await events(id)).toHaveLength(1);
+            expect(h.kills.filter((kill) => kill.taskId === id)).toHaveLength(1);
+            const enqueue = vi.fn();
+            expect(
+              await redriveStalledTasks(
+                db,
+                {
+                  enqueueStart: enqueue,
+                  enqueueAdvance: enqueue,
+                  failTask: vi.fn(),
+                  queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                  queuedInvocationIds: async () => new Set(),
+                },
+                { staleMs: 0 },
+              ),
+            ).toBe(0);
+            expect(enqueue).not.toHaveBeenCalled();
+            expect(h.adds).toHaveLength(adds);
+            expect(after.executionContract).toEqual(executionContract);
+          },
+        );
+      },
+    );
+
+    it('keeps an unsupported execution pin dead at direct revival without remapping it', async () => {
+      const id = await makeDead({
+        repositoryId,
+        executionContract: {
+          version: 1,
+          guardedSpans: [],
+          fixTarget: { stepId: A, capabilityVersion: 1 },
+        },
+      });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+      expect(await reviveDeadTask(db, await view(id), deps)).toBeNull();
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
     });
 
     it('a stray START leaves a deferred created draft untouched', async () => {

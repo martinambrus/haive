@@ -59,6 +59,7 @@ it.each(['Stop/Resume', 'step Retry', 'full task Retry'] as const)(
       currentRound: 0,
       runListSnapshot: ids,
       dataEdgePlan: plan,
+      executionContract: { version: 1, guardedSpans: [] },
     });
     const step = fake.insert(schema.taskSteps, {
       taskId: TASK,
@@ -81,7 +82,13 @@ it.each(['Stop/Resume', 'step Retry', 'full task Retry'] as const)(
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action, round: 0 }),
       });
-    const unchanged = () => expect(fake.rows(schema.tasks)[0]!.dataEdgePlan).toEqual(plan);
+    const unchanged = () => {
+      expect(fake.rows(schema.tasks)[0]!.dataEdgePlan).toEqual(plan);
+      expect(fake.rows(schema.tasks)[0]!.executionContract).toEqual({
+        version: 1,
+        guardedSpans: [],
+      });
+    };
     fake.insert(schema.taskSteps, {
       taskId: TASK,
       stepId: ids[0],

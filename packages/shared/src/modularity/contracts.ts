@@ -1,3 +1,5 @@
+import { MODULE_ID_PATTERN_SOURCE } from './module-id.js';
+import { executionContractSchema, fixConsumerSchema } from './execution-contract.js';
 import { z } from 'zod';
 import {
   parseStepOutputContractRef,
@@ -5,6 +7,8 @@ import {
 } from '../step-engine/output-contracts.js';
 import { formSchemaSchema } from '../schemas/form.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
+
+export { MODULE_ID_MAX_LENGTH, MODULE_ID_PATTERN_SOURCE, MODULE_ID_PATTERN } from './module-id.js';
 
 export const MODULES_LOADED_WORKER_KEY = 'haive:modules:loaded:worker';
 export const MODULE_ACTIVATED_CHANNEL = 'haive:module-activated';
@@ -25,13 +29,8 @@ export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MODULE_TASK_TYPE_SLUG_PATTERN = /^([a-z0-9][a-z0-9-]*)__[a-z0-9][a-z0-9_-]*$/;
-// databaseName('module', id) must fit Postgres' 63-byte identifier under the longest install id:
-// 63 - 33 ('<32 chars>_') - 7 ('module_') = 23.
-export const MODULE_ID_MAX_LENGTH = 23;
-export const MODULE_ID_PATTERN_SOURCE = `[a-z0-9][a-z0-9-]{0,${MODULE_ID_MAX_LENGTH - 1}}`;
 /** HTML pattern attributes use the v flag, which requires escaping a literal hyphen. */
 export const MODULE_ID_HTML_PATTERN_SOURCE = MODULE_ID_PATTERN_SOURCE.replaceAll('-]', '\\-]');
-export const MODULE_ID_PATTERN = new RegExp(`^${MODULE_ID_PATTERN_SOURCE}$`);
 const MODULE_PACKAGE_PATTERN = new RegExp(
   `^(?:@haive/module-|@haive-module/)(${MODULE_ID_PATTERN_SOURCE})$`,
 );
@@ -192,6 +191,7 @@ export const composableStepEntrySchema = z
     paramFormSchema: formSchemaSchema.optional(),
     loopBudgetEditable: z.boolean().optional(),
     loopTargetStepId: stepIdSchema.optional(),
+    fixConsumer: fixConsumerSchema.optional(),
     closes: z.boolean().optional(),
     agentAuthoredOutput: z.boolean().optional(),
     outputContract: z
@@ -237,6 +237,7 @@ export const taskTypeDefinitionSeedSchema = z
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     stepLoopLimitDefaults: stepLoopLimitsSchema,
     sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
+    executionContract: executionContractSchema.optional(),
   })
   .refine(
     (s) =>

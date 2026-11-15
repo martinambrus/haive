@@ -53,6 +53,8 @@ export const taskTypeDefinitions = pgTable(
     /** Storage only. Shared depends on database, so importing its overlay type would create a cycle. */
     baseSlug: varchar('base_slug', { length: 128 }),
     changes: jsonb('changes').$type<unknown>(),
+    /** Immutable execution declaration; decoded by shared at every boundary. */
+    executionContract: jsonb('execution_contract').$type<unknown>(),
   },
   (table) => [
     check(

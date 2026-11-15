@@ -1,3 +1,4 @@
+import { assertExecutionContractUsable } from './execution-contract-admission.js';
 import {
   buildDataEdgePlan,
   DataEdgePlanError,
@@ -21,7 +22,9 @@ import {
   parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  type CompositionIssue,
+  type ExecutionCompositionIssue,
+  parseExecutionContract,
+  type ExecutionContract,
   type DerivedRunPlan,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
@@ -68,6 +71,7 @@ export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   derivedRunPlan?: DerivedRunPlan | null;
   dataEdgePlan?: DataEdgePlan | null;
+  executionContract?: ExecutionContract | null;
   candidateStepIds?: string[];
   warnings?: unknown[];
   /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
@@ -99,7 +103,7 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   restoresDatabase: false,
 });
 
-function describeIssue(issue: CompositionIssue): string {
+function describeIssue(issue: ExecutionCompositionIssue): string {
   return (
     insightRequirementMessage(issue) ??
     ('stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind)
@@ -270,6 +274,8 @@ export async function definitionForCreate(
           availability.reason,
         );
       case 'invalid-composition':
+        if (availability.issues?.some((issue) => issue.kind === 'invalid-execution-contract'))
+          assertExecutionContractUsable(def.executionContract);
         if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
@@ -352,6 +358,8 @@ export async function definitionForCreate(
   }
   return {
     dataEdgePlan,
+    executionContract:
+      def.executionContract == null ? null : parseExecutionContract(def.executionContract),
     runListSnapshot: snapshot === null ? null : [...snapshot],
     ...(derived
       ? {

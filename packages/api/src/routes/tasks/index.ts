@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { insightEventPage } from './_insight-event-page.js';
+import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
 import { projectTaskPorts } from '../../lib/step-port-projection.js';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { derivedTaskWarnings } from '@haive/shared/modularity';
@@ -329,7 +330,12 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where,
     // A task's pinned prompt steps can run to many KiB; no list reader needs them.
-    columns: { customSteps: false, derivedRunPlan: false, dataEdgePlan: false },
+    columns: {
+      customSteps: false,
+      derivedRunPlan: false,
+      dataEdgePlan: false,
+      executionContract: false,
+    },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -778,6 +784,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
         dataEdgePlan: locked.dataEdgePlan ?? null,
+        executionContract: locked.executionContract ?? null,
         derivedRunPlan: locked.derivedRunPlan
           ? {
               ...locked.derivedRunPlan,
@@ -907,7 +914,11 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (queued) await enqueueStart(task.id, userId);
 
-  const { dataEdgePlan: _dataEdgePlan, ...responseTask } = queued ?? task;
+  const {
+    dataEdgePlan: _dataEdgePlan,
+    executionContract: _executionContract,
+    ...responseTask
+  } = queued ?? task;
   return c.json(
     {
       task: responseTask,
@@ -1252,7 +1263,13 @@ taskRoutes.get('/:id', async (c) => {
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // Pins feed flags and warnings, but the page never reads their full bodies.
   const warnings = task.derivedRunPlan != null ? derivedTaskWarnings(task.derivedRunPlan) : null;
-  const { customSteps: _pinned, derivedRunPlan: _plan, dataEdgePlan: _edges, ...taskFields } = task;
+  const {
+    customSteps: _pinned,
+    derivedRunPlan: _plan,
+    dataEdgePlan: _edges,
+    executionContract: _execution,
+    ...taskFields
+  } = task;
   const providerRows =
     task.cliProviderId === null
       ? await db
@@ -1404,7 +1421,11 @@ taskRoutes.patch('/:id', async (c) => {
     }
   }
 
-  const responseTask = updated[0] && (({ dataEdgePlan: _dataEdgePlan, ...row }) => row)(updated[0]);
+  const responseTask =
+    updated[0] &&
+    (({ dataEdgePlan: _dataEdgePlan, executionContract: _executionContract, ...row }) => row)(
+      updated[0],
+    );
   return c.json({ task: responseTask });
 });
 
@@ -1514,6 +1535,7 @@ taskRoutes.post('/:id/action', async (c) => {
         return c.json({ ok: true, status: 'running' });
       }
       // A full restart from step 0 refuses pinned custom tools that would fail at their step.
+      assertExecutionContractUsable(task.executionContract);
       await assertCustomToolsUsable(db, task);
       // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
       // orchestrator refuses to advance any step while another one is still

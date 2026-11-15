@@ -1,7 +1,8 @@
+import { assertExecutionContractSupported, ExecutionContractError } from './execution-contract.js';
 import { z } from 'zod';
 import { type RunListStrategy } from '../step-engine/run-list.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
-import { validateComposition, type CompositionIssue } from './composition.js';
+import { validateComposition, type ExecutionCompositionIssue } from './composition.js';
 import { RESERVED_TASK_TYPE_SLUGS, parseStepId, type ComposableStepEntry } from './contracts.js';
 import { derivedChangesSchema } from './derived-changes.js';
 import { promptStepEntrySchema } from './prompt-steps.js';
@@ -62,6 +63,7 @@ export interface TaskTypeAvailabilityInput {
     runListStrategy: RunListStrategy;
     stepIds: readonly string[] | null;
     requiresRepository: boolean;
+    executionContract?: unknown;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
   // Null when no rows were read, which turns the module reasons off; a module with no row is missing.
@@ -80,7 +82,7 @@ export type TaskTypeAvailability =
       available: false;
       reason: TaskTypeUnavailableReason;
       missingStepIds?: string[];
-      issues?: CompositionIssue[];
+      issues?: ExecutionCompositionIssue[];
       modules?: TaskTypeModuleRef[];
     };
 
@@ -101,6 +103,20 @@ export function moduleIdsOfTaskType(
   return [...ids].sort();
 }
 
+function executionContractAvailability(raw: unknown): TaskTypeAvailability {
+  try {
+    assertExecutionContractSupported(raw);
+  } catch (error) {
+    if (!(error instanceof ExecutionContractError)) throw error;
+    return {
+      available: false,
+      reason: 'invalid-composition',
+      issues: [{ kind: 'invalid-execution-contract', reason: error.message }],
+    };
+  }
+  return { available: true };
+}
+
 export function resolveTaskTypeAvailability(
   input: TaskTypeAvailabilityInput,
 ): TaskTypeAvailability {
@@ -119,13 +135,14 @@ export function resolveTaskTypeAvailability(
       definition: {
         ...definition,
         runListStrategy: 'static',
+        executionContract: null,
         stepIds: [...(input.derived?.dependencyStepIds ?? input.derived?.stepIds ?? [])],
       },
       catalog: null,
     });
     if (!moduleAvailability.available) return moduleAvailability;
     return input.derived?.valid
-      ? { available: true }
+      ? executionContractAvailability(definition.executionContract)
       : { available: false, reason: 'invalid-composition' };
   }
   if (modules !== null) {
@@ -148,7 +165,7 @@ export function resolveTaskTypeAvailability(
     }
   }
   if (catalog === null || definition.runListStrategy !== 'static' || definition.stepIds === null) {
-    return { available: true };
+    return executionContractAvailability(definition.executionContract);
   }
   const missingSteps = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
   if (missingSteps.length > 0) {
@@ -165,7 +182,7 @@ export function resolveTaskTypeAvailability(
     });
     if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
   }
-  return { available: true };
+  return executionContractAvailability(definition.executionContract);
 }
 
 const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unknown()));

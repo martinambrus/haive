@@ -1,3 +1,4 @@
+import { ExecutionContractError } from '@haive/shared/modularity';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { isConditionalInsightStep } from './run-list.js';
 import {
@@ -331,6 +332,7 @@ async function resolveTaskContext(
     ...(await taskTypeRuntimeFor(db, task.type, task.derivedRunPlan)),
     derivedRunPlan: task.derivedRunPlan,
     dataEdgePlan: task.dataEdgePlan,
+    executionContract: task.executionContract,
     runListSnapshot: task.runListSnapshot ?? null,
     customSteps: parseCustomSteps(task.customSteps),
     deadAt: task.deadAt ?? null,
@@ -3127,15 +3129,18 @@ async function handleStartTask(
   try {
     steps = await buildRunList(ctx, db);
   } catch (err) {
-    if (!(err instanceof UnresolvedStepError)) throw err;
+    if (!(err instanceof UnresolvedStepError) && !(err instanceof ExecutionContractError))
+      throw err;
     // Before the claim, so a redelivered START on a task already running must not touch it.
     const marked = await markTaskDead(
       db,
       ctx.taskId,
-      err instanceof PinnedStepSupportError ? err.message : deadReasonFor(err.ids),
+      err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+        ? err.message
+        : deadReasonFor(err.ids),
       {
         epoch: ctx.orchestrationEpoch,
-        unresolved: err.ids,
+        unresolved: err instanceof UnresolvedStepError ? err.ids : [],
         statuses: STARTABLE_TASK_STATUSES,
       },
     );
@@ -5089,15 +5094,20 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       // when it read no epoch, since it cannot tell a Retry's newer generation from its own.
       const unclaimed = job.name === TASK_JOB_NAMES.START && !held.claimed;
       if (!unclaimed || epoch !== undefined) {
-        if (err instanceof UnresolvedStepError && epoch !== undefined) {
+        if (
+          (err instanceof UnresolvedStepError || err instanceof ExecutionContractError) &&
+          epoch !== undefined
+        ) {
           const { stepId, round } = job.data as TaskJobPayload;
           const dead = await markTaskDeadFromJob(
             db,
             taskId,
-            err instanceof PinnedStepSupportError ? err.message : deadReasonFor(err.ids),
+            err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+              ? err.message
+              : deadReasonFor(err.ids),
             {
               epoch,
-              unresolved: err.ids,
+              unresolved: err instanceof UnresolvedStepError ? err.ids : [],
               stepId,
               round,
             },

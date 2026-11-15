@@ -747,37 +747,53 @@ restored by reverting code.
 
 A task is **dead** when its current step requires an uninstalled integration provider, or its data
 names a step this install no longer registers: a module was removed, or a step its run list names
-went away (`UnresolvedStepError`). A third cause is a registered producer that cannot execute its pinned output contract or host role policy (`pinned-step-support-unavailable`). Dead is neither failed nor completed. `markTaskDead`
-(`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
-(`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and otherwise tears nothing down, so
-a revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
-(`api/src/lib/task-dead.ts`); Cancel stays.
+went away (`UnresolvedStepError`). A third cause is a registered producer that cannot execute its
+pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or
+malformed execution-contract pin is another cause (`invalid-execution-contract`); guards and custom
+fix targets remain unavailable in P6. Dead is neither failed nor completed. `markTaskDead`
+(`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends
+`task.dead` (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and
+otherwise tears nothing down, so a revive finds the task as it was. The api refuses every advancing
+action on a dead task with 409 `task_dead` (`api/src/lib/task-dead.ts`); Cancel stays.
 
-**What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the orphaned jobs are handed
-back and before orphaned steps are recovered; it checks every live task that has a run-list snapshot and marks one that
-names a missing step or lacks executable support for a pinned contract or host role policy. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
-snapshot (the dynamic types) is only ever marked at run time.
+**What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the
+orphaned jobs are handed back and before orphaned steps are recovered; it checks every live task
+that has a run-list snapshot and marks one that names a missing step, lacks executable support for a
+pinned output contract or host role policy, or carries an unsupported execution-contract pin. At run
+time the hand-off marks a task whose current or next step does not resolve. An
+`ExecutionContractError` from a worker START or ADVANCE is terminal too: START marks only a
+still-queued task at the epoch it read, and ADVANCE uses the held epoch and step-row fence of
+`markTaskDeadFromJob`. Both preserve the named reason, append one `task.dead` event and supersede
+open runs; their callers kill CLI sandboxes and resync project state after commit. Duplicate jobs
+write nothing and the stalled sweep excludes dead tasks. API create and first START refusals still
+write no task state, event or job. A task with no snapshot (the dynamic types) is only ever marked
+at run time.
 
 **What revives it.** Required integrations of the current step are re-resolved as well: a required
 `provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check
-inside its transaction, including for direct callers. `reviveDeadTask` also rechecks pinned producer contract and host role policy support inside that transaction; a registered but incompatible producer keeps the task dead, with no remap. A provider restored but deactivated can revive
-into the integration park. This uses only resolver state, never dead-reason copy or token refresh
-(see [Integrations](integrations.md#dispatch)). The same boot pass revives a dead task once what it
-was missing resolves again: a snapshot task when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current
-step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
-missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
-compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,
-an advance for a running one, none for a form that is still parked. It first takes the shared new-work fence and
-reads the state past the cache: while new work is held, or the state cannot be read, it writes nothing (the updater
-starts the target worker in maintenance, so a revived task would otherwise run during verify and commit). A boot pass
-that held a revival back, failed one (a thrown write or a refused enqueue it put back) or could not run at all retries
-the revival alone every 30 s (`retryHeldRevivals`), never the boot-only marking or run supersede, until a pass holds
-none back and fails none; shutdown stops it. A revival re-enters the same checkout admission as a Retry whatever status the dead
-task kept (`running` and `queued` included), excluding only the task itself from the sibling checks.
-A revival the repository's own state refuses for now (its root claim,
-a live upgrade or onboarding of the repository, or unanswered project-state conflicts) counts as held
-and is logged at info with that structural reason; a revival refused because the repository was
-deleted is permanent and keeps no timer running.
+inside its transaction, including for direct callers. `reviveDeadTask` also rechecks pinned producer
+contract, host role policy and execution-contract support inside that transaction; any unsupported
+pin keeps the task dead, with no remap. Execution-contract death uses the same boot revival once a
+capable worker supports the pin. A provider restored but deactivated can revive into the integration
+park. This uses only resolver state, never dead-reason copy or token refresh (see
+[Integrations](integrations.md#dispatch)). The same boot pass revives a dead task once what it was
+missing resolves again: a snapshot task when its whole run list does, a snapshot-less one when the
+step ids its last `task.dead` event named and its current step do. Judging a snapshot-less task by
+its current step alone revived one whose death named a step that was still missing, and its first
+job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
+compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start
+for a queued task, an advance for a running one, none for a form that is still parked. It first
+takes the shared new-work fence and reads the state past the cache: while new work is held, or the
+state cannot be read, it writes nothing (the updater starts the target worker in maintenance, so a
+revived task would otherwise run during verify and commit). A boot pass that held a revival back,
+failed one (a thrown write or a refused enqueue it put back) or could not run at all retries the
+revival alone every 30 s (`retryHeldRevivals`), never the boot-only marking or run supersede, until
+a pass holds none back and fails none; shutdown stops it. A revival re-enters the same checkout
+admission as a Retry whatever status the dead task kept (`running` and `queued` included), excluding
+only the task itself from the sibling checks. A revival the repository's own state refuses for now
+(its root claim, a live upgrade or onboarding of the repository, or unanswered project-state
+conflicts) counts as held and is logged at info with that structural reason; a revival refused
+because the repository was deleted is permanent and keeps no timer running.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
 the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands

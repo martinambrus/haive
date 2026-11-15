@@ -60,6 +60,99 @@ function definition(over: Record<string, unknown> = {}) {
 }
 
 describe('resolveTaskTypeAvailability', () => {
+  describe.each([
+    { version: 1, guardedSpans: [], fixTarget: { stepId: 'a', capabilityVersion: 1 } },
+    { version: 99 },
+  ])('execution contract availability precedence: %j', (executionContract) => {
+    const input = {
+      definition: definition({ source: 'admin', executionContract }),
+      switches: on,
+      catalog,
+      generic: true,
+      modules: noRows,
+    };
+    it.each([
+      ['disabled', { enabled: false }, on],
+      ['not-selectable', { selectable: false }, on],
+      ['custom-types-off', {}, { ...on, customEnabled: false }],
+      ['module-types-off', { source: 'module:fx' }, { ...on, moduleEnabled: false }],
+      ['module-missing', { source: 'module:fx' }, on],
+      ['missing-step', { stepIds: ['missing'] }, on],
+    ])('%s wins over the contract error', (reason, over, switches) => {
+      expect(
+        resolveTaskTypeAvailability({
+          ...input,
+          definition: { ...input.definition, ...over },
+          switches,
+        }),
+      ).toMatchObject({ available: false, reason });
+    });
+    it.each(['deactivated', 'draining'] as const)(
+      'module-%s wins over the contract error',
+      (state) => {
+        expect(
+          resolveTaskTypeAvailability({
+            ...input,
+            definition: { ...input.definition, stepIds: ['module.fx.report'] },
+            modules: new Map([['fx', moduleRow('Fx', { [state]: true })]]),
+          }),
+        ).toEqual({
+          available: false,
+          reason: `module-${state}`,
+          modules: [{ id: 'fx', name: 'Fx' }],
+        });
+      },
+    );
+    it('ordinary invalid composition wins over the contract error', () => {
+      expect(
+        resolveTaskTypeAvailability({
+          ...input,
+          definition: { ...input.definition, stepIds: ['c'] },
+        }),
+      ).toMatchObject({
+        available: false,
+        reason: 'invalid-composition',
+        issues: [expect.objectContaining({ kind: 'unmet-need' })],
+      });
+    });
+    it.each([catalog, null])(
+      'keeps the contract error once higher priority checks pass (%j)',
+      (catalog) => {
+        expect(resolveTaskTypeAvailability({ ...input, catalog })).toMatchObject({
+          available: false,
+          reason: 'invalid-composition',
+          issues: [
+            {
+              kind: 'invalid-execution-contract',
+              reason: expect.stringContaining('invalid-execution-contract'),
+            },
+          ],
+        });
+      },
+    );
+    it('checks derived module state and composition before the contract', () => {
+      const derivedInput = {
+        ...input,
+        definition: { ...input.definition, runListStrategy: 'derived' as const, stepIds: null },
+        derived: { valid: false, stepIds: ['module.fx.report'] },
+      };
+      expect(resolveTaskTypeAvailability(derivedInput)).toMatchObject({ reason: 'module-missing' });
+      const installed = { ...derivedInput, modules: new Map([['fx', moduleRow('Fx')]]) };
+      expect(resolveTaskTypeAvailability(installed)).toEqual({
+        available: false,
+        reason: 'invalid-composition',
+      });
+      expect(
+        resolveTaskTypeAvailability({
+          ...installed,
+          derived: { ...installed.derived, valid: true },
+        }),
+      ).toMatchObject({
+        issues: [{ kind: 'invalid-execution-contract', reason: expect.any(String) }],
+      });
+    });
+  });
+
   it('is available for a healthy admin type', () => {
     expect(
       resolveTaskTypeAvailability({

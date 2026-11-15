@@ -114,6 +114,38 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     await db.$client.end({ timeout: 5 });
   });
 
+  it.each([
+    ['disabled', { enabled: false }, 403, 'is disabled', undefined],
+    ['active contract', {}, 409, 'not yet supported by this worker', 'invalid-execution-contract'],
+  ] as const)(
+    'keeps %s admission priority with an unsupported contract',
+    async (_name, over, status, message, code) => {
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.delete(schema.stepCatalog);
+          await tx.insert(schema.stepCatalog).values(STEPS.map((id) => catalogRow(id)));
+          await tx.insert(schema.taskTypeDefinitions).values(
+            row('ttd-contract-priority', {
+              executionContract: {
+                version: 1,
+                guardedSpans: [],
+                fixTarget: { stepId: STEPS[0], capabilityVersion: 1 },
+              },
+              ...over,
+            }),
+          );
+          const error = await refusal(
+            definitionForCreate(tx, 'ttd-contract-priority', { generic: true, locked: true }),
+          );
+          expect(error.status).toBe(status);
+          expect(error.message).toContain(message);
+          if (code !== undefined) expect(error.code).toBe(code);
+          throw new Error('rollback-priority-control');
+        }),
+      ).rejects.toThrow('rollback-priority-control');
+    },
+  );
+
   it('copies the step list of a static type', async () => {
     expect(
       await definitionForCreate(db, 'ttd-static', { locked: false, generic: true }),

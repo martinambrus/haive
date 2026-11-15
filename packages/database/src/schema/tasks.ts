@@ -487,6 +487,8 @@ export const tasks = pgTable(
     autoActOnInsights: boolean('auto_act_on_insights').notNull().default(false),
     /** Immutable v3 consumer/input edges. Null keeps canonical legacy reads; never backfilled. */
     dataEdgePlan: jsonb('data_edge_plan').$type<unknown>(),
+    /** INSERT-only execution declaration. NULL retains legacy execution. */
+    executionContract: jsonb('execution_contract').$type<unknown>(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
@@ -673,6 +675,8 @@ export const taskSteps = pgTable(
     rerunGeneration: integer('rerun_generation').notNull().default(0),
     /** Disabled explicit CLI responsible for the current pending park; display copy is not state. */
     providerWaitProviderId: uuid('provider_wait_provider_id'),
+    /** Storage only until guarded execution ships; P6 never writes decisions. */
+    guardState: jsonb('guard_state').$type<unknown>(),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),

@@ -11,7 +11,7 @@ import {
   moduleManifestSchema,
   modulePackageId,
   type ComposableStepEntry,
-  type CompositionIssue,
+  type ExecutionCompositionIssue,
   type ModuleManifest,
   type ModuleRuntime,
   type ModuleSource,
@@ -62,12 +62,13 @@ export type LoadedWorkerModule = {
   manifest: ModuleManifest;
   stepIds: string[];
   composable: ComposableStepEntry[];
+  predicates?: ReadonlyMap<string, NonNullable<StepDefinition['guardPredicates']>[string]>;
 };
 
 export type ModuleTaskTypeOutcome = {
   seeded: string[];
   conflicts: { slug: string; heldBy: string }[];
-  invalid?: { slug: string; issues: (TaskTypeDefaultsIssue | CompositionIssue)[] }[];
+  invalid?: { slug: string; issues: (TaskTypeDefaultsIssue | ExecutionCompositionIssue)[] }[];
 };
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;
@@ -104,6 +105,7 @@ export function registerModuleSteps(
     const moduleId = manifest.id;
     const localDefs = new Map<string, StepDefinition>();
     const stepIds: string[] = [];
+    const predicates = new Map<string, NonNullable<StepDefinition['guardPredicates']>[string]>();
     for (const def of entry.steps ?? []) {
       const localId = def.metadata.id;
       if (!isCoreStepId(localId)) {
@@ -122,6 +124,19 @@ export function registerModuleSteps(
           }`,
           { cause: err },
         );
+      }
+      for (const [predicateId, predicate] of Object.entries(def.guardPredicates ?? {})) {
+        const id = namespaced(moduleId, predicateId);
+        if (
+          !isCoreStepId(predicateId) ||
+          predicates.has(id) ||
+          typeof predicate.evaluate !== 'function' ||
+          typeof predicate.argsSchema?.safeParse !== 'function'
+        )
+          throw new Error(
+            `Module ${moduleId} invalid or duplicate executable predicate ${predicateId}`,
+          );
+        predicates.set(id, predicate);
       }
       localDefs.set(localId, def);
       stepIds.push(id);
@@ -159,7 +174,10 @@ export function registerModuleSteps(
       try {
         assertMatchingOutputDeclaration(def, composableEntry);
       } catch (err) {
-        throw new Error(`${named} output declaration does not match its manifest`, { cause: err });
+        throw new Error(
+          `${named} output declaration does not match its manifest (${err instanceof Error ? err.message : 'invalid declaration'})`,
+          { cause: err },
+        );
       }
       // The runner still routes loop_back to the core implement step whatever a catalog entry says.
       if (def.reviseLoop) {
@@ -195,7 +213,14 @@ export function registerModuleSteps(
       }
     }
 
-    return { packageName: entry.packageName, source: entry.source, manifest, stepIds, composable };
+    return {
+      packageName: entry.packageName,
+      source: entry.source,
+      manifest,
+      stepIds,
+      composable,
+      predicates,
+    };
   });
 }
 

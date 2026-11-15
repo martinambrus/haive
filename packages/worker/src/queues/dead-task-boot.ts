@@ -1,5 +1,10 @@
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
-import { parseDerivedRunPlan, pinnedTaskStepIds } from '@haive/shared/modularity';
+import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  parseDerivedRunPlan,
+  pinnedTaskStepIds,
+} from '@haive/shared/modularity';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
@@ -96,6 +101,7 @@ export function deadTaskResolution(
     customSteps: unknown;
     derivedRunPlan?: unknown;
     dataEdgePlan?: unknown;
+    executionContract?: unknown;
     executionPath?: string | null;
     /** The step ids its last task.dead event named. */
     deathNamed?: readonly string[];
@@ -104,8 +110,11 @@ export function deadTaskResolution(
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
   try {
+    assertExecutionContractSupported(task.executionContract);
     assertDataEdgeSupport(task, registry);
   } catch (error) {
+    if (error instanceof ExecutionContractError)
+      return { unresolved: [], outsideList: null, supportReason: error.message };
     if (!(error instanceof PinnedStepSupportError)) throw error;
     return { unresolved: [...error.ids], outsideList: null, supportReason: error.message };
   }
@@ -220,7 +229,9 @@ export async function reviveDeadTask(
     const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
     if (
       !current ||
-      ((current.derivedRunPlan != null || current.dataEdgePlan != null) &&
+      ((current.derivedRunPlan != null ||
+        current.dataEdgePlan != null ||
+        current.executionContract != null) &&
         deadTaskResolution(current, current.derivedRunPlan != null ? 'derived' : 'static')
           .supportReason !== undefined) ||
       (await currentIntegrationMissing(tx, current))
@@ -340,6 +351,7 @@ const readCandidates = (db: Database | DbTx, extra: SQL | undefined) =>
       runListSnapshot: schema.tasks.runListSnapshot,
       derivedRunPlan: schema.tasks.derivedRunPlan,
       dataEdgePlan: schema.tasks.dataEdgePlan,
+      executionContract: schema.tasks.executionContract,
       executionPath: schema.tasks.executionPath,
       customSteps: schema.tasks.customSteps,
       deadAt: schema.tasks.deadAt,
@@ -359,7 +371,11 @@ async function judgeCandidate(db: Database, c: Candidate) {
   return {
     found,
     integrationMissing,
-    resolves: found.unresolved.length === 0 && found.outsideList === null && !integrationMissing,
+    resolves:
+      found.unresolved.length === 0 &&
+      found.outsideList === null &&
+      found.supportReason === undefined &&
+      !integrationMissing,
   };
 }
 

@@ -1,4 +1,10 @@
 import {
+  ExecutionContractError,
+  executionContractPaths,
+  parseExecutionContract,
+  type ExecutionPredicateDeclaration,
+} from './execution-contract.js';
+import {
   REPOSITORY_TOKEN,
   IMPLICIT_COMPOSITION_TOKENS,
   type ComposableStepEntry,
@@ -22,12 +28,69 @@ export type CompositionIssue =
   | { kind: 'loop-after-closing'; index: number; stepId: string; closingStepId: string }
   | { kind: 'empty' };
 
+export type ExecutionCompositionIssue =
+  CompositionIssue | { kind: 'invalid-execution-contract'; reason: string };
+type ExecutionCompositionOptions = {
+  requiresRepository?: boolean;
+  executionContract?: unknown;
+  predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
+  maxPredicates?: number;
+};
+
 export function validateComposition(
   stepIds: readonly string[],
   catalog: ReadonlyMap<string, ComposableStepEntry>,
-  opts: { requiresRepository?: boolean } = {},
-): CompositionIssue[] {
+  opts: ExecutionCompositionOptions & { executionContract: unknown },
+): ExecutionCompositionIssue[];
+export function validateComposition(
+  stepIds: readonly string[],
+  catalog: ReadonlyMap<string, ComposableStepEntry>,
+  opts?: { requiresRepository?: boolean },
+): CompositionIssue[];
+export function validateComposition(
+  stepIds: readonly string[],
+  catalog: ReadonlyMap<string, ComposableStepEntry>,
+  opts: ExecutionCompositionOptions = {},
+): ExecutionCompositionIssue[] {
   if (stepIds.length === 0) return [{ kind: 'empty' }];
+  if (opts.executionContract != null) {
+    try {
+      const contract = parseExecutionContract(opts.executionContract);
+      const paths = executionContractPaths(
+        stepIds,
+        catalog,
+        contract,
+        opts.predicates ?? new Map(),
+        opts.maxPredicates,
+      );
+      const effective = contract.fixTarget
+        ? new Map(
+            [...catalog].map(([id, entry]) => [
+              id,
+              entry.loopTargetStepId === '07-phase-2-implement'
+                ? { ...entry, loopTargetStepId: contract.fixTarget!.stepId }
+                : entry,
+            ]),
+          )
+        : catalog;
+      const all: CompositionIssue[] = [];
+      // Even mutually excluded duplicate ids would make the persisted run list ambiguous.
+      stepIds.forEach((stepId, index) => {
+        if (stepIds.indexOf(stepId) !== index) all.push({ kind: 'duplicate-step', stepId, index });
+      });
+      for (const path of paths) {
+        for (const issue of validateComposition(path, effective, {
+          requiresRepository: opts.requiresRepository,
+        })) {
+          all.push('index' in issue ? { ...issue, index: stepIds.indexOf(issue.stepId) } : issue);
+        }
+      }
+      return [...new Map(all.map((issue) => [JSON.stringify(issue), issue])).values()];
+    } catch (error) {
+      if (!(error instanceof ExecutionContractError)) throw error;
+      return [{ kind: 'invalid-execution-contract', reason: error.message }];
+    }
+  }
   const issues: CompositionIssue[] = [];
   const initial = opts.requiresRepository === false ? [] : [REPOSITORY_TOKEN];
   const provided = new Map<string, number>(initial.map((token) => [token, -1]));
