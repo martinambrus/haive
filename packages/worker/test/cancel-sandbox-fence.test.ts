@@ -1228,6 +1228,17 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       where: eq(schema.taskEvents.taskId, ctx.taskId),
     });
     expect(events.some((e) => e.eventType === 'fix_loop.started')).toBe(false);
+    expect(events.filter((e) => e.eventType === 'step.revise')).toMatchObject([
+      {
+        taskStepId: source.id,
+        payload: {
+          continuation,
+          sourceStepId: source.stepId,
+          targetStepId: '08-phase-5-verify',
+          round: 1,
+        },
+      },
+    ]);
     expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
   });
   it.each(['done', 'skipped', 'pending', 'failed', null] as const)(
@@ -1326,35 +1337,46 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     });
     expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
   });
-  it('event-write failure rolls back the pointer, reset, and epoch bump', async () => {
-    const { ctx, source, continuation } = await seedRoute(true);
-    await db.execute(
-      sql.raw(
-        `ALTER TABLE task_events ADD CONSTRAINT insight_route_test CHECK (task_id <> '${ctx.taskId}'::uuid OR event_type <> 'insight.continuation')`,
-      ),
-    );
-    try {
-      await expect(
-        handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
-      ).rejects.toMatchObject({ cause: { code: '23514' } });
+  it.each(['insight.continuation', 'step.revise'])(
+    '%s event-write failure rolls back the pointer, reset, and epoch bump',
+    async (eventType) => {
+      const { ctx, source, continuation } = await seedRoute(true);
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE task_events ADD CONSTRAINT insight_route_test CHECK (task_id <> '${ctx.taskId}'::uuid OR event_type <> '${eventType}')`,
+        ),
+      );
+      try {
+        await expect(
+          handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+        ).rejects.toMatchObject({ cause: { code: '23514' } });
+        expect(
+          await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
+        ).toMatchObject({ orchestrationEpoch: 0, currentRound: 0, currentStepId: source.stepId });
+        expect(
+          (
+            await db.query.taskSteps.findMany({
+              where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
+            })
+          ).every((r) => r.status === 'done' && r.rerunGeneration === 0),
+        ).toBe(true);
+        expect(await routeEvents(ctx.taskId)).toHaveLength(0);
+        expect(
+          await db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.eventType, 'step.revise'),
+            ),
+          }),
+        ).toHaveLength(0);
+      } finally {
+        await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_route_test`);
+      }
       expect(
-        await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
-      ).toMatchObject({ orchestrationEpoch: 0, currentRound: 0, currentStepId: source.stepId });
-      expect(
-        (
-          await db.query.taskSteps.findMany({
-            where: and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.round, 1)),
-          })
-        ).every((r) => r.status === 'done' && r.rerunGeneration === 0),
-      ).toBe(true);
-      expect(await routeEvents(ctx.taskId)).toHaveLength(0);
-    } finally {
-      await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_route_test`);
-    }
-    expect(
-      await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
-    ).not.toBeNull();
-  });
+        await handoffInsightContinuation(db, ctx, source, continuation, routeSteps),
+      ).not.toBeNull();
+    },
+  );
   it.each(['Stop', 'dead', 'Cancel', 'epoch', 'owner', 'Retry'])(
     'refuses %s arriving during snapshot await without a route or stale-row reset',
     async (kind) => {

@@ -162,13 +162,27 @@ export async function handoffInsightContinuation(
       const existing = events.find(
         (e) => readInsightContinuation(e.payload?.continuation).batchId === continuation.batchId,
       );
-      if (!existing)
+      if (!existing) {
         await tx.insert(schema.taskEvents).values({
           taskId: ctx.taskId,
           taskStepId: source.id,
           eventType: INSIGHT_CONTINUATION_EVENT,
           payload: { continuation, targetStepId: next.metadata.id },
         });
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: source.id,
+          eventType: 'step.revise',
+          payload: {
+            stepId: source.stepId,
+            sourceStepId: source.stepId,
+            targetStepId: INSIGHT_VERIFY,
+            round,
+            continuation,
+            endedAt: source.endedAt?.toISOString() ?? null,
+          },
+        });
+      }
       if (successor.recheck && !existing)
         await tx.insert(schema.taskEvents).values({
           taskId: ctx.taskId,
