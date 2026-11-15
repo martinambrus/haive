@@ -10,6 +10,12 @@ const stubs = vi.hoisted(() => ({
   boundaryError: null as Error | null,
   resumeStepIfLinked: vi.fn(async () => {}),
   recordLedgerEntry: vi.fn(async (..._args: unknown[]) => {}),
+  cleanupScratch: vi.fn(async (..._args: unknown[]) => false),
+}));
+
+vi.mock('../src/repo/scratch-workspace.js', async (original) => ({
+  ...(await original<object>()),
+  cleanupTaskScratchWorkspace: stubs.cleanupScratch,
 }));
 
 // Inject at the anchor open: fs-safe reaches this before any leaf lstat.
@@ -181,6 +187,7 @@ beforeEach(() => {
   stubs.executeByKind.mockReset();
   stubs.resumeStepIfLinked.mockReset();
   stubs.recordLedgerEntry.mockReset();
+  stubs.cleanupScratch.mockReset().mockResolvedValue(false);
 });
 
 describe('a cli run start', () => {
@@ -433,6 +440,21 @@ describe('a cli run of a dead task', () => {
 });
 
 describe('a cli run completion', () => {
+  it.each(['success', 'failure', 'redelivery'])(
+    'retries scratch cleanup after the last scan invocation (%s)',
+    async (mode) => {
+      const { db, writes } = fakeDb({ finalized: mode === 'redelivery' });
+      if (mode === 'failure') stubs.executeByKind.mockRejectedValue(new Error('scan failed'));
+      else stubs.executeByKind.mockResolvedValue(ok);
+      stubs.cleanupScratch.mockImplementation(async () => {
+        if (mode !== 'redelivery') expect(runWrites(writes).some((w) => w.set.endedAt)).toBe(true);
+        return false;
+      });
+      await handleCliExecJob(db, { ...base, kind: 'cli', taskStepId: null }).catch(() => undefined);
+      expect(stubs.cleanupScratch).toHaveBeenCalledWith(db, base.taskId);
+    },
+  );
+
   it('lands with its mining result in one transaction, on the row still linked to it', async () => {
     stubs.executeByKind.mockResolvedValue(ok);
     const { db, writes } = fakeDb({});

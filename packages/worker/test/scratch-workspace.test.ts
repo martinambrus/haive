@@ -1,7 +1,12 @@
-import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+
+const sandbox = vi.hoisted(() => ({ list: vi.fn(async (): Promise<string[] | null> => []) }));
+vi.mock('../src/sandbox/sandbox-kill.js', () => ({ listCliSandboxesForTask: sandbox.list }));
 import {
   taskMayRunWithoutRepository,
   taskScratchSubpath,
@@ -215,4 +220,243 @@ describe('ensureTaskScratchWorkspace', () => {
       }
     },
   );
+});
+
+describe('repository task scratch lifecycle', () => {
+  const TASK = '33333333-3333-4333-8333-333333333333';
+  let root: string;
+  let mod: typeof import('../src/repo/scratch-workspace.js');
+  const scratch = (user = 'u1', task = TASK) => path.join(root, user, '_scratch', task);
+  const task = (extra = {}) => ({
+    id: TASK,
+    userId: 'u1',
+    type: 'workflow',
+    repositoryId: 'repo',
+    status: 'completed',
+    deadAt: null,
+    pausedAt: null,
+    orchestrationEpoch: 1,
+    ...extra,
+  });
+  type Run = { summary?: boolean; startedAt?: Date; endedAt?: Date; supersededAt?: Date };
+  function database(current = task(), runs: Run[] = []) {
+    return {
+      query: {
+        tasks: { findFirst: vi.fn(async () => current) },
+        cliInvocations: {
+          findFirst: vi.fn(async ({ where }: { where: SQL }) => {
+            // Evaluate the live-run predicates the real query supplies, including the OLD
+            // summary-only restriction, so a missing scan guard actually fails on base.
+            const { sql } = new PgDialect().sqlToQuery(where);
+            return runs.find(
+              (run) =>
+                (!sql.includes('"summary_for_step_id" is not null') || run.summary) &&
+                (!sql.includes('"ended_at" is null') || !run.endedAt) &&
+                (!sql.includes('"superseded_at" is null') || !run.supersededAt),
+            );
+          }),
+        },
+      },
+    };
+  }
+  const dbArg = (db: ReturnType<typeof database>) => db as never;
+  function gate() {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'repo-scratch-'));
+    vi.resetModules();
+    vi.stubEnv('REPO_STORAGE_ROOT', root);
+    sandbox.list.mockReset().mockResolvedValue([]);
+    mod = await import('../src/repo/scratch-workspace.js');
+    await mkdir(scratch(), { recursive: true });
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it.each(['completed', 'cancelled'])(
+    'reaps only canonical scratch for a %s repository task',
+    async (status) => {
+      const repo = path.join(root, 'u1', 'repo');
+      await mkdir(repo);
+      await writeFile(path.join(repo, 'keep'), 'repository');
+      expect(await mod.cleanupTaskScratchWorkspace(dbArg(database(task({ status }))), TASK)).toBe(
+        true,
+      );
+      await expect(stat(scratch())).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(path.join(repo, 'keep'), 'utf8')).toBe('repository');
+    },
+  );
+
+  it.each([
+    { status: 'failed' },
+    { status: 'running' },
+    { status: 'waiting_user' },
+    { status: 'completed', deadAt: new Date() },
+    { status: 'cancelled', pausedAt: new Date() },
+  ])('retains recovery scratch for %j', async (extra) => {
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(database(task(extra))), TASK)).toBe(false);
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it.each([true, false])('defers queued and started invocations (summary: %s)', async (summary) => {
+    // Repo-less eligibility isolates the invocation guard from the repository widening.
+    const current = task({ repositoryId: null, type: 'kb_author' });
+    for (const startedAt of [undefined, new Date()]) {
+      expect(
+        await mod.cleanupTaskScratchWorkspace(
+          dbArg(database(current, [{ summary, startedAt }])),
+          TASK,
+        ),
+      ).toBe(false);
+      expect((await stat(scratch())).isDirectory()).toBe(true);
+    }
+  });
+
+  it.each([true, false])(
+    'does not wait for a superseded invocation (summary: %s)',
+    async (summary) => {
+      expect(
+        await mod.cleanupTaskScratchWorkspace(
+          dbArg(database(task(), [{ summary, supersededAt: new Date() }])),
+          TASK,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('retries deferred cleanup after the last invocation ends', async () => {
+    const runs: Run[] = [{ summary: true }, { summary: false }];
+    const db = database(task(), runs);
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), TASK)).toBe(false);
+    runs[0]!.endedAt = new Date();
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), TASK)).toBe(false);
+    runs[1]!.endedAt = new Date();
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), TASK)).toBe(true);
+  });
+
+  it('boot finishes an interrupted repository scratch reap', async () => {
+    await mod.sweepOrphanScratchWorkspaces(dbArg(database()));
+    await expect(stat(scratch())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each([null, ['still-running']])('requires a clean sandbox listing (%j)', async (listing) => {
+    sandbox.list.mockResolvedValue(listing);
+    const db = database(task({ repositoryId: null, type: 'kb_author' }));
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), TASK)).toBe(false);
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('rechecks settlement after the sandbox probe yields to Retry', async () => {
+    const current = task({ repositoryId: null, type: 'kb_author' });
+    const db = database(current);
+    sandbox.list.mockImplementationOnce(async () => {
+      current.status = 'running';
+      return [];
+    });
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), TASK)).toBe(false);
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('rechecks invocations admitted while the sandbox probe was pending', async () => {
+    const runs: Run[] = [];
+    sandbox.list.mockImplementationOnce(async () => {
+      runs.push({});
+      return [];
+    });
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(database(task(), runs)), TASK)).toBe(false);
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('a wrong-user boot entry never triggers removal of the owner tree', async () => {
+    await mkdir(scratch('u-wrong'), { recursive: true });
+    await rm(scratch(), { recursive: true });
+    // Only the wrong-user entry is enumerated. If it triggers cleanup by task id, the
+    // owner tree recreated during that read would be deleted despite not being visited.
+    const db = database(task({ repositoryId: null, type: 'kb_author' }));
+    db.query.tasks.findFirst.mockImplementation(async () => {
+      await mkdir(scratch(), { recursive: true });
+      return task({ repositoryId: null, type: 'kb_author' });
+    });
+    await mod.sweepOrphanScratchWorkspaces(dbArg(db));
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('skips invalid UUIDs and link entries, including missing-task links', async () => {
+    const outside = path.join(root, 'outside');
+    await mkdir(outside);
+    await writeFile(path.join(outside, 'keep'), 'keep');
+    await rm(scratch(), { recursive: true });
+    await symlink(outside, scratch());
+    await mkdir(scratch('u1', 'invalid'));
+    await symlink(outside, path.join(root, 'linked-user'));
+    const db = database();
+    await mod.sweepOrphanScratchWorkspaces(dbArg(db));
+    expect(db.query.tasks.findFirst).not.toHaveBeenCalled();
+    expect(await readFile(path.join(outside, 'keep'), 'utf8')).toBe('keep');
+  });
+
+  it('rejects noncanonical cleanup ids before querying or removing', async () => {
+    const db = database(task({ repositoryId: null, type: 'kb_author' }));
+    expect(await mod.cleanupTaskScratchWorkspace(dbArg(db), '../repo')).toBe(false);
+    expect(db.query.tasks.findFirst).not.toHaveBeenCalled();
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('waits for a snapshot acquisition, then rereads a Retry before admitting deletion', async () => {
+    const acquired = gate();
+    const release = gate();
+    const current = task({ repositoryId: null, type: 'kb_author' });
+    const db = database(current);
+    const withWorkspace = (
+      mod as typeof mod & {
+        withTaskScratchWorkspace: <T>(u: string, t: string, f: () => Promise<T>) => Promise<T>;
+      }
+    ).withTaskScratchWorkspace;
+    const reader = withWorkspace('u1', TASK, async () => {
+      acquired.release();
+      await release.promise;
+    });
+    await acquired.promise;
+    const reap = mod.cleanupTaskScratchWorkspace(dbArg(db), TASK);
+    current.status = 'running';
+    release.release();
+    await reader;
+    expect(await reap).toBe(false);
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
+
+  it('holds materialization behind deletion, then lets Retry recreate the tree', async () => {
+    const entered = gate();
+    const release = gate();
+    const safeFs = await import('@haive/shared/fs-safe');
+    const realRemove = safeFs.removeNoFollow;
+    vi.spyOn(safeFs, 'removeNoFollow').mockImplementationOnce(async (...args) => {
+      entered.release();
+      await release.promise;
+      return realRemove(...args);
+    });
+    const reap = mod.cleanupTaskScratchWorkspace(
+      dbArg(database(task({ repositoryId: null, type: 'kb_author' }))),
+      TASK,
+    );
+    await entered.promise;
+    const created = vi.fn();
+    const ensure = mod.ensureTaskScratchWorkspace('u1', TASK).then(created);
+    // A fence on another task must remain independent, and its completion provides a
+    // deterministic scheduling boundary without sleeps or elapsed-time assertions.
+    await mod.ensureTaskScratchWorkspace('u1', '44444444-4444-4444-8444-444444444444');
+    expect(created).not.toHaveBeenCalled();
+    release.release();
+    expect(await reap).toBe(true);
+    await ensure;
+    expect((await stat(scratch())).isDirectory()).toBe(true);
+  });
 });
