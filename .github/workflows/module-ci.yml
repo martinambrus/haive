@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       haive-ref:
-        description: Haive tag or full commit SHA; use the same ref as the workflow uses pin
+        description: Haive tag or full commit SHA; use the same ref the caller pins this workflow to
         required: true
         type: string
       node-version:
