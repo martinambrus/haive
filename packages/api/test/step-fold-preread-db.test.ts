@@ -621,14 +621,12 @@ describe.skipIf(!url)(
           status: 'pending',
           detectOutput: detected,
         });
-        await db
-          .insert(schema.taskEvents)
-          .values({
-            taskId,
-            taskStepId: row.id,
-            eventType: 'insight.check',
-            payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
-          });
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: row.id,
+          eventType: 'insight.check',
+          payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+        });
         const apply = vi.fn(gate.apply);
         const step = { ...gate, detect: undefined, prepareForm: undefined, apply };
         const params = {
