@@ -1,4 +1,8 @@
-import { DerivedRunPlanError, parseDerivedRunPlan } from '../modularity/derived-task-types.js';
+import {
+  DerivedRunPlanError,
+  parseDerivedRunPlan,
+  type DerivedRunPlan,
+} from '../modularity/derived-task-types.js';
 import { executionPathSchema } from '../schemas/tasks.js';
 import { STEP_ROLES, type StepRoleId, type StepOutputContractRef } from './output-contracts.js';
 export { STEP_ROLES } from './output-contracts.js';
@@ -22,11 +26,13 @@ export function readStepRole<T>(
   task: RoleTaskPin,
   role: StepRoleId,
   read: (binding: RoleBinding) => T,
+  /** Reuse only a plan already decoded for this task by the caller. */
+  parsedPlan?: DerivedRunPlan,
 ): T {
   if (task.derivedRunPlan == null && task.runListStrategy !== 'derived') {
     return read({ role, stepId: role, outputContract: null, state: 'active' });
   }
-  const plan = parseDerivedRunPlan(task.derivedRunPlan);
+  const plan = parsedPlan ?? parseDerivedRunPlan(task.derivedRunPlan);
   const path =
     task.executionPath == null ? null : executionPathSchema.safeParse(task.executionPath);
   if (path !== null && !path.success) throw new DerivedRunPlanError();

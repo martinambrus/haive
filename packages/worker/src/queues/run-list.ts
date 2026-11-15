@@ -1,7 +1,12 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
-import { parseStepId, parseDerivedRunPlan, type PromptStepEntry } from '@haive/shared/modularity';
+import {
+  parseStepId,
+  parseDerivedRunPlan,
+  type PromptStepEntry,
+  type DerivedRunPlan,
+} from '@haive/shared/modularity';
 import { taskRunListIds, type RunListStrategy } from '@haive/shared/run-list';
 import {
   readStepRole,
@@ -79,11 +84,12 @@ export function resolveTaskStep(
   ctx: TaskStepScope,
   stepId: string,
   registry: Pick<StepRegistry, 'get'> = stepRegistry,
+  parsedPlan?: DerivedRunPlan,
 ): StepDefinition | undefined {
   if (parseStepId(stepId)?.kind !== 'custom') {
     const def = registry.get(stepId);
     if (ctx.derivedRunPlan == null) return def;
-    const plan = parseDerivedRunPlan(ctx.derivedRunPlan);
+    const plan = parsedPlan ?? parseDerivedRunPlan(ctx.derivedRunPlan);
     if (plan.version !== 2) return def;
     if (ctx.executionPath == null) return def;
     const role = Object.values(STEP_ROLES).find((role) =>
@@ -92,10 +98,11 @@ export function resolveTaskStep(
         role,
         (binding) =>
           binding.state === 'active' && binding.stepId === stepId && binding.stepId !== role,
+        plan,
       ),
     );
     if (!role) return def;
-    const binding = readStepRole(ctx, role, (binding) => binding);
+    const binding = readStepRole(ctx, role, (binding) => binding, plan);
     const host = assertPinnedProducerSupport(stepId, role, binding.outputContract!, registry);
     // Only routing/skip policy crosses the binding: no seats, dispatch preferences or grants.
     return {
@@ -172,8 +179,9 @@ export function requireTaskStep(
   ctx: TaskStepScope,
   stepId: string,
   registry: Pick<StepRegistry, 'get'> = stepRegistry,
+  parsedPlan?: DerivedRunPlan,
 ): StepDefinition {
-  const def = resolveTaskStep(ctx, stepId, registry);
+  const def = resolveTaskStep(ctx, stepId, registry, parsedPlan);
   if (!def) throw new UnresolvedStepError([stepId]);
   return def;
 }
@@ -212,7 +220,9 @@ export async function buildRunList(
         assertPinnedCandidateSupport(candidate, stepRegistry);
       }
     }
-    return taskRunListIds(ctx, () => []).map((id) => requireTaskStep(ctx, id));
+    return taskRunListIds(ctx, () => [], undefined, plan).map((id) =>
+      requireTaskStep(ctx, id, stepRegistry, plan),
+    );
   }
   if (ctx.runListStrategy === 'run_app_modes') return buildRunAppRunList(ctx, db);
   if (ctx.runListStrategy === 'workflow_paths') {

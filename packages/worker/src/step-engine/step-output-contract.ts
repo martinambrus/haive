@@ -11,7 +11,10 @@ import type { StepDefinition } from './step-definition.js';
 
 type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces'> &
   Partial<
-    Pick<StepDefinition, 'fixLoop' | 'restartLoop' | 'reviseLoop' | 'loop' | 'fixLoopOnError'>
+    Pick<
+      StepDefinition,
+      'metadata' | 'fixLoop' | 'restartLoop' | 'reviseLoop' | 'loop' | 'fixLoopOnError'
+    >
   >;
 
 export function hasConflictingReplacementHooks(step: Declaration): boolean {
@@ -30,7 +33,10 @@ export function assertStepOutputDeclaration(step: Declaration): void {
     throw new Error('step-output-contract-unknown');
   }
   if (step.replaces === undefined) return;
-  if (step.replaces.length && hasConflictingReplacementHooks(step))
+  if (
+    step.replaces.length &&
+    (hasConflictingReplacementHooks(step) || step.metadata?.allowSkip === true)
+  )
     throw new Error('step-output-role-policy-incompatible');
   if (!Array.isArray(step.replaces) || new Set(step.replaces).size !== step.replaces.length) {
     throw new Error('step-output-role-invalid');

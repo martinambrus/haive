@@ -93,6 +93,12 @@ describe('pinned effective host role policy', () => {
     ).toBe(false);
     expect(ownShouldRun).not.toHaveBeenCalled();
   });
+  it('refuses replacement declarations that permit skipping', () => {
+    const own = replacement();
+    expect(() => registry({ ...own, metadata: { ...own.metadata, allowSkip: true } })).toThrow(
+      'step-output-role-policy-incompatible',
+    );
+  });
   it.each(['fixLoop', 'restartLoop', 'reviseLoop', 'loop', 'fixLoopOnError'])(
     'refuses conflicting %s at registration',
     (hook) => {
