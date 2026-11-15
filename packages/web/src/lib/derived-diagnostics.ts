@@ -27,8 +27,7 @@ export function describeDerivedProblem(issue: { kind: string; [key: string]: unk
     'replacement-target-forbidden':
       'Only code review and broad code audit can be replaced. Implementation, gates and the triage prefix are protected replacement targets.',
     'replacement-not-composable': 'This installed step has no composable declaration.',
-    'invalid-derived-run-plan':
-      'These changes cannot be replayed as a pinned run plan. Keep replacement steps, or remove the original role directly.',
+    'invalid-derived-run-plan': 'These changes cannot be replayed as a pinned run plan.',
     'replacement-not-declared':
       'This step does not declare this role in its replacement capabilities.',
     'replacement-contract-mismatch':

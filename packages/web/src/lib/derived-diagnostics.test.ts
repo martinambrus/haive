@@ -28,7 +28,7 @@ describe('replacement editor diagnostics', () => {
 });
 
 it('explains admission replay refusal', () => {
-  expect(describeDerivedProblem({ kind: 'invalid-derived-run-plan' })).toContain(
-    'cannot be replayed as a pinned run plan',
+  expect(describeDerivedProblem({ kind: 'invalid-derived-run-plan' })).toBe(
+    'These changes cannot be replayed as a pinned run plan. (invalid-derived-run-plan)',
   );
 });
