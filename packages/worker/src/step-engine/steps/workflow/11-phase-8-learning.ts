@@ -672,11 +672,12 @@ export async function readLearningDeletions(
   if (!/^[a-f0-9]{64}$/.test(applyId)) throw new Error('Invalid learning apply identity');
   const wa = workspaceAnchor(worktree);
   const rel = `${wa.prefix}${LEARNING_DELETIONS_DIR}/${applyId}`;
-  const files = await readdirNoFollow(wa.anchor, rel);
+  const files = await readdirNoFollow(wa.anchor, rel, { strict: true });
   const out: LearningDeletion[] = [];
   for (const file of files ?? []) {
-    if (!file.isFile() || !/^[a-f0-9]{64}\.json$/.test(file.name)) continue;
-    const body = await readTextNoFollow(wa.anchor, `${rel}/${file.name}`);
+    // Probe every record name so a symlink cannot hide intent as a missing record.
+    if (!/^[a-f0-9]{64}\.json$/.test(file.name)) continue;
+    const body = await readTextNoFollow(wa.anchor, `${rel}/${file.name}`, { strict: true });
     if (body === null) continue;
     // A damaged record must stop apply rather than silently resurrect a deleted target.
     const record = learningDeletionSchema.parse(JSON.parse(body));
