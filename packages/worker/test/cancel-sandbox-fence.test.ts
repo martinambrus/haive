@@ -1894,6 +1894,14 @@ describe.skipIf(!url)('automatic insight admission on PostgreSQL', () => {
     );
     expect(await loadAutoHistory(db, ctx.taskId)).toEqual({ claims: [], results: [] });
   });
+  it('reads a claim after the loader adds an unrelated input field', async () => {
+    const ctx = await seed();
+    const chosen = { ...insight('one'), futureLoaderField: { provenance: 'new' } };
+    await claimAutoRound(ctx, [chosen]);
+    const history = await loadAutoHistory(db, ctx.taskId);
+    expect(history.claims).toHaveLength(1);
+    expect(history.claims[0]?.insights).toEqual([insight('one')]);
+  });
   it('publishes classification once before any editor and refuses an overtaken generation', async () => {
     const ctx = await seed();
     const claim = (await claimAutoRound(ctx, [insight('one')]))!;

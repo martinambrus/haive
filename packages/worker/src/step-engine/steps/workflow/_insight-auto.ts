@@ -195,7 +195,8 @@ const inputSchema = z
     description: z.string(),
     sourceRefs: z.array(z.unknown()).optional(),
   })
-  .strict();
+  // Loader additions are data, not a new claim protocol. Keep the fields this reader needs.
+  .strip();
 const claimSchema = z
   .object({
     version: z.literal(1),
