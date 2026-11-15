@@ -41,7 +41,12 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { adminTaskTypeRoutes, taskTypeRoutes } from '../src/routes/task-types.js';
+import {
+  adminTaskTypeRoutes,
+  taskTypeRoutes,
+  portDraftSchema,
+  MAX_PORT_DRAFT_STEPS,
+} from '../src/routes/task-types.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -401,4 +406,16 @@ it('refuses port drafts above the fixed projection step cap before reading the c
   });
   expect(res.status).toBe(400);
   expect(h.getDb).not.toHaveBeenCalled();
+});
+
+it('checks the port-only bound at a small injected size and pins the production cap', () => {
+  expect(MAX_PORT_DRAFT_STEPS).toBe(256);
+  const draft = {
+    slug: 'ports',
+    displayName: 'Ports',
+    requiresRepository: true,
+    stepIds: ['a', 'b'],
+  };
+  expect(portDraftSchema(2).safeParse(draft).success).toBe(true);
+  expect(portDraftSchema(2).safeParse({ ...draft, stepIds: ['a', 'b', 'c'] }).success).toBe(false);
 });

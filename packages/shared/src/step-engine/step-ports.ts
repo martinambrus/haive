@@ -45,7 +45,10 @@ export function validatePortEdges(
 ): StepPortGraph {
   const edges: StepPortGraph['edges'] = [];
   type Producer = { producer: PortNode; index: number; output: StepPort };
-  const producers = new Map<string, { all: Producer[]; byIndex: Map<number, Producer[]> }>();
+  const producers = new Map<
+    string,
+    { all: Producer[]; byIndex: Map<number, Producer[]>; ids: Set<string> }
+  >();
   const contractKey = (port: { role: string; contract: { id: string; version: number } }) =>
     JSON.stringify([port.role, port.contract.id, port.contract.version]);
   // Walk once in run order: the index contains only earlier producers. Work is linear
@@ -80,18 +83,19 @@ export function validatePortEdges(
       return {
         ...input,
         state,
-        candidates: [...new Set(candidates.map((item) => item.producer.id))],
+        candidates: [...(bucket?.ids ?? [])],
       };
     });
     for (const output of node.outputs) {
       const key = contractKey(output);
       let bucket = producers.get(key);
       if (!bucket) {
-        bucket = { all: [], byIndex: new Map() };
+        bucket = { all: [], byIndex: new Map(), ids: new Set() };
         producers.set(key, bucket);
       }
       const item = { producer: node, index, output };
       bucket.all.push(item);
+      bucket.ids.add(node.id);
       const matches = bucket.byIndex.get(index) ?? [];
       matches.push(item);
       bucket.byIndex.set(index, matches);
