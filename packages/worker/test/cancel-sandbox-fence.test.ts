@@ -229,6 +229,38 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     },
   );
 
+  it('withholds an entire NUL-containing repair blob while preserving its measured hash', async () => {
+    const meta = await seed();
+    await beginFixTestCapture(db, meta);
+    const secret = randomBytes(24).toString('hex');
+    const content = `before\0\nTOKEN="${secret}"\nafter`;
+    await writeFile(join(meta.workspace, 'tests/a.test.ts'), content);
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId);
+    const hash = createHash('sha256').update(content).digest('hex');
+    const blob = await db.query.fixTestBlobs.findFirst({
+      where: and(
+        eq(schema.fixTestBlobs.taskId, meta.taskId),
+        eq(schema.fixTestBlobs.contentHash, hash),
+      ),
+    });
+    expect(blob?.content?.toString()).toBe('content withheld by secret policy.');
+    expect(blob?.content?.includes(Buffer.from(secret))).toBe(false);
+    const records = await loadFixTestRecords(db, meta.taskId);
+    expect(records[0]!.changes[0]!.afterHash).toBe(hash);
+    expect(JSON.stringify(records)).not.toContain(secret);
+    // Existing rows are rechecked at display too; do not wait for expiry to hide them.
+    await db
+      .update(schema.fixTestBlobs)
+      .set({ content: Buffer.from(content) })
+      .where(
+        and(eq(schema.fixTestBlobs.taskId, meta.taskId), eq(schema.fixTestBlobs.contentHash, hash)),
+      );
+    const legacy = JSON.stringify(await loadFixTestRecords(db, meta.taskId));
+    expect(legacy).not.toContain(secret);
+    expect(legacy).toContain('content withheld by secret policy.');
+  });
+
   it('keeps no content when a protected fixture moves to an allowed name', async () => {
     const meta = await seed();
     const secret = `TOKEN=${randomBytes(24).toString('hex')}`;

@@ -37,6 +37,11 @@ describe('committed-secret rules at evidence sinks', () => {
       `before\n${CREDENTIAL_WITHHELD}\n${CREDENTIAL_WITHHELD}`,
     );
   });
+  it('withholds NUL content entirely even when discovery skips it', () => {
+    const text = `before\0\nTOKEN="${randomBytes(24).toString('hex')}"\nafter`;
+    expect(scanTextForCredentials('fixture', text)).toEqual([]);
+    expect(redactCredentialText(text)).toBe(CREDENTIAL_WITHHELD);
+  });
   it('keeps non-secret content byte for byte, including placeholders and mixed endings', () => {
     const text = 'token = process.env.TOKEN;\r\nconst a = 1;\npassword="placeholder"\r\n';
     expect(redactCredentialText(text)).toBe(text);

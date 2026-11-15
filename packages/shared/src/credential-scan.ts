@@ -76,6 +76,8 @@ export function scanTextForCredentials(file: string, content: string): Credentia
  * through the corresponding end marker (or EOF for an unfinished key). */
 export const CREDENTIAL_WITHHELD = 'content withheld by secret policy.';
 export function redactCredentialText(content: string): string {
+  // Discovery skips binary text. Evidence sinks must never retain its unscanned bytes.
+  if (content.includes('\0')) return CREDENTIAL_WITHHELD;
   const lines = new Map<number, CredentialCandidate['kind']>();
   visitCredentials(content, (line, kind) => lines.set(line, kind));
   if (!lines.size) return content;
