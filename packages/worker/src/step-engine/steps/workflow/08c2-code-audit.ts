@@ -1,3 +1,4 @@
+import { CODE_AUDIT_OUTPUT_CONTRACT, type CodeAuditOutput } from '@haive/shared/step-outputs';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -13,12 +14,10 @@ import {
   collectImplementationFiles,
   fileCoverage,
   NO_CHANGE_SET_FALLBACK,
-  type FileCoverage,
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
-import type { ReviewSeverity } from '@haive/shared/review';
 import { recordReviewFindings } from './_review-findings.js';
 
 // 08c2 — broad code audit (report-only). A single one-shot auditor verifies the
@@ -38,21 +37,8 @@ interface CodeAuditDetect {
   implementationFiles: ImplementationFileSet;
 }
 
-interface AuditFinding {
-  severity: ReviewSeverity;
-  path?: string;
-  lines?: string;
-  issue?: string;
-  fix?: string;
-}
-
-interface CodeAuditApply {
-  audited: boolean;
-  findings: AuditFinding[];
-  /** How much of the change the auditor was actually given; null when the step replayed
-   *  a pre-coverage detect output. */
-  coverage: FileCoverage | null;
-}
+type AuditFinding = CodeAuditOutput['findings'][number];
+type CodeAuditApply = CodeAuditOutput;
 
 const AUDIT_RULES = [
   'You are a broad, independent CODE AUDITOR. Separate narrow reviewers already checked this',
@@ -112,6 +98,7 @@ export function parseCodeAuditFindings(raw: unknown): AuditFinding[] {
 }
 
 export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
+  outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
   metadata: {
     id: '08c2-code-audit',
     workflowType: 'workflow',

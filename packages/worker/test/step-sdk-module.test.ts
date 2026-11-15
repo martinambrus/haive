@@ -1,3 +1,4 @@
+import { CODE_AUDIT_OUTPUT_CONTRACT, safeParseStepOutput } from '@haive/shared/step-outputs';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -19,6 +20,7 @@ const require = createRequire(import.meta.url);
 let entries: typeof import('./fixtures/step-sdk/host.typecheck.js').entries;
 let reviewWithHost: typeof import('./fixtures/step-sdk/src/steps.js').reviewWithHost;
 let errors: typeof import('./fixtures/step-sdk/src/steps.js').errors;
+let contractedAudit: typeof import('./fixtures/step-sdk/src/steps.js').contractedAudit;
 let fixtureRoot: string | undefined;
 
 beforeAll(async () => {
@@ -46,7 +48,7 @@ beforeAll(async () => {
     entryPath,
     [
       "export { default as manifest } from '@haive/module-sdk-fixture/manifest';",
-      "export { default, errors, reviewWithHost } from '@haive/module-sdk-fixture/steps';",
+      "export { default, errors, reviewWithHost, contractedAudit } from '@haive/module-sdk-fixture/steps';",
     ].join('\n'),
   );
   const built = (await import(
@@ -59,6 +61,7 @@ beforeAll(async () => {
   ];
   errors = built.errors;
   reviewWithHost = built.reviewWithHost;
+  contractedAudit = built.contractedAudit;
 }, 30_000);
 
 afterAll(() => {
@@ -78,6 +81,16 @@ describe('compiled module step SDK consumer', () => {
       workflowType: 'module.sdk-fixture',
     });
     expect(() => registerModuleSteps(registry, entries)).toThrow('already registered');
+  });
+
+  it('consumes the immutable host contract and inferred output through compiled package exports', async () => {
+    expect(contractedAudit.outputContract).toBe(CODE_AUDIT_OUTPUT_CONTRACT);
+    expect(Object.isFrozen(contractedAudit.outputContract)).toBe(true);
+    const output = await contractedAudit.apply();
+    expect(safeParseStepOutput(contractedAudit.outputContract, output)).toEqual({
+      success: true,
+      data: output,
+    });
   });
 
   it('resolves all seven constructors to the worker objects through the compiled module', () => {

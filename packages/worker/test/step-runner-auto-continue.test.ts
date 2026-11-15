@@ -1,3 +1,9 @@
+import { CODE_AUDIT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { validateSuccessfulStepOutput } from '../src/step-engine/step-output-contract.js';
+vi.mock('../src/step-engine/step-output-contract.js', async (original) => {
+  const actual = await original<typeof import('../src/step-engine/step-output-contract.js')>();
+  return { ...actual, validateSuccessfulStepOutput: vi.fn(actual.validateSuccessfulStepOutput) };
+});
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
@@ -102,10 +108,17 @@ function makeMockDb(state: MockState): Database {
                   ? [state.invocation]
                   : [],
             }),
-            for: async () =>
-              tableName === 'tasks' && taskFenceHolds(cond, state.taskRow)
+            for: async () => {
+              if (tableName === 'task_steps') {
+                return refusedByRowGuard(cond, state.taskStepRow.status) ||
+                  state.taskStepRow.status === 'failed'
+                  ? []
+                  : [{ id: state.taskStepRow.id }];
+              }
+              return tableName === 'tasks' && taskFenceHolds(cond, state.taskRow)
                 ? [{ id: state.taskRow!.id }]
-                : [],
+                : [];
+            },
           }),
         };
       },
@@ -1355,3 +1368,145 @@ it.each(['submitted', 'saved', 'pre_answer'] as const)(
     });
   },
 );
+
+describe('successful output contract boundary', () => {
+  afterEach(() => vi.mocked(validateSuccessfulStepOutput).mockClear());
+  function contracted(): StepDefinition {
+    return { ...makeStep({}), outputContract: CODE_AUDIT_OUTPUT_CONTRACT };
+  }
+  it('validates before loop/routing, and persists the original output without stripping extensions', async () => {
+    const state = freshState();
+    const value = { audited: true, findings: [], coverage: null, extra: { preserved: true } };
+    const def = {
+      ...contracted(),
+      apply: async () => value,
+      fixLoop: { evaluate: vi.fn(() => null) },
+    };
+    const result = await run(state, def);
+    expect(result.status).toBe('done');
+    expect(validateSuccessfulStepOutput).toHaveBeenCalledOnce();
+    expect(vi.mocked(validateSuccessfulStepOutput).mock.invocationCallOrder[0]).toBeLessThan(
+      def.fixLoop.evaluate.mock.invocationCallOrder[0]!,
+    );
+    expect(state.taskStepRow.output).toBe(value);
+  });
+  it('fails a rejected output before hooks or output writes, without fixLoopOnError routing', async () => {
+    const state = freshState();
+    const { StepOutputContractInvalidError } =
+      await import('../src/step-engine/step-output-contract.js');
+    vi.mocked(validateSuccessfulStepOutput).mockImplementationOnce(() => {
+      throw new StepOutputContractInvalidError(CODE_AUDIT_OUTPUT_CONTRACT, 'cfg-step', ['audited']);
+    });
+    const evaluate = vi.fn(() => null);
+    const shouldContinue = vi.fn(async () => false);
+    const def = {
+      ...contracted(),
+      fixLoop: { evaluate },
+      fixLoopOnError: true,
+      loop: { maxIterations: 1, shouldContinue },
+    };
+    const result = await run(state, def);
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toContain('step-output-contract-invalid');
+    expect(state.updates.some((u) => 'output' in u.patch || 'iterations' in u.patch)).toBe(false);
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(shouldContinue).not.toHaveBeenCalled();
+  });
+  it.each(['done', 'skipped'] as const)(
+    'does not validate historical %s outputs',
+    async (status) => {
+      const state = freshState();
+      const legacy = { old: true };
+      Object.assign(state.taskStepRow, { status, output: legacy });
+      expect((await run(state, contracted())).status).toBe(status);
+      expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+      expect(state.taskStepRow.output).toBe(legacy);
+    },
+  );
+  it('does not manufacture or validate an output on shouldRun skip', async () => {
+    const state = freshState();
+    const apply = vi.fn(async () => ({}));
+    const def = { ...contracted(), shouldRun: () => false, apply };
+    expect((await run(state, def)).status).toBe('skipped');
+    expect(state.taskStepRow.output).toBeNull();
+    expect(state.updates.some((u) => 'output' in u.patch)).toBe(false);
+    expect(apply).not.toHaveBeenCalled();
+    expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+  });
+  it('does not validate a parked form or a reopen continuation throw', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: false };
+    const def = {
+      ...contracted(),
+      form: () => QUESTION_FORM,
+      apply: async () => {
+        throw new ReopenStepFormError();
+      },
+    };
+    expect((await run(state, def)).status).toBe('waiting_form');
+    expect((await run(state, def, { action: 'update' })).status).toBe('waiting_form');
+    expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+  });
+});
+
+describe('contract checks preserve pass ownership and continuation semantics', () => {
+  afterEach(() => {
+    vi.mocked(validateSuccessfulStepOutput).mockClear();
+    vi.useRealTimers();
+  });
+  const output = { audited: true, findings: [], coverage: null };
+  const def = (): StepDefinition => ({
+    ...makeStep({}),
+    outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+    apply: async () => output,
+  });
+  it.each(['pending', 'skipped', 'failed'] as const)(
+    'a %s takeover during apply wins before contract diagnostics',
+    async (status) => {
+      const state = freshState();
+      const step = {
+        ...def(),
+        apply: async () => {
+          state.taskStepRow.status = status;
+          return { invalid: true };
+        },
+      };
+      expect((await run(state, step)).status).toBe('superseded');
+      expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+      expect(state.updates.some((u) => 'output' in u.patch)).toBe(false);
+    },
+  );
+  it('validates the successful return of a waiting_cli continuation', async () => {
+    const state = freshState();
+    Object.assign(state.taskStepRow, { status: 'waiting_cli', detectOutput: { ok: true } });
+    expect((await run(state, def())).status).toBe('done');
+    expect(validateSuccessfulStepOutput).toHaveBeenCalledOnce();
+    expect(state.taskStepRow.output).toBe(output);
+  });
+  it('a Cancel observed during apply wins before contract diagnostics', async () => {
+    vi.useFakeTimers();
+    const state = freshState();
+    state.taskRow = { id: 'task-1', status: 'running' };
+    const step = {
+      ...def(),
+      apply: async () => {
+        state.taskRow!.status = 'cancelled';
+        await vi.advanceTimersByTimeAsync(2000);
+        return { invalid: true };
+      },
+    };
+    expect((await run(state, step)).status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toBe('task cancelled by user');
+    expect(validateSuccessfulStepOutput).not.toHaveBeenCalled();
+  });
+  it('persists a builtin drifted output even with a live contract declaration', async () => {
+    const state = freshState();
+    const step = def();
+    step.metadata.id = '08c2-code-audit';
+    const value = { legacyDrift: true };
+    step.apply = async () => value;
+    expect((await run(state, step)).status).toBe('done');
+    expect(validateSuccessfulStepOutput).toHaveBeenCalledOnce();
+    expect(state.taskStepRow.output).toBe(value);
+  });
+});

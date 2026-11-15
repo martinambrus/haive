@@ -1,3 +1,4 @@
+import { CODE_REVIEW_OUTPUT_CONTRACT, safeParseStepOutput } from '@haive/shared/step-outputs';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -126,12 +127,20 @@ function runReview(
   isFinalMiningAttempt?: boolean,
   miningWaveExhausted = true,
 ) {
-  return codeReviewStep.apply(fakeCtx, {
-    detected: { spec: 'the spec', implementationFiles: [], debtBlock: '', level: 'none' },
-    agentMiningResults: results,
-    isFinalMiningAttempt,
-    miningWaveExhausted,
-  } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+  return codeReviewStep
+    .apply(fakeCtx, {
+      detected: { spec: 'the spec', implementationFiles: [], debtBlock: '', level: 'none' },
+      agentMiningResults: results,
+      isFinalMiningAttempt,
+      miningWaveExhausted,
+    } as unknown as Parameters<typeof codeReviewStep.apply>[1])
+    .then((output) => {
+      expect(safeParseStepOutput(CODE_REVIEW_OUTPUT_CONTRACT, output)).toEqual({
+        success: true,
+        data: output,
+      });
+      return output;
+    });
 }
 
 describe('refuterTitle', () => {

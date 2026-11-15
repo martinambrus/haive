@@ -1,3 +1,4 @@
+import { assertMatchingOutputDeclaration } from '../step-engine/step-output-contract.js';
 import type { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -134,6 +135,11 @@ export function registerModuleSteps(
         );
       }
       const named = `Module ${moduleId} composable step "${composableEntry.stepId}"`;
+      try {
+        assertMatchingOutputDeclaration(def, composableEntry);
+      } catch (err) {
+        throw new Error(`${named} output declaration does not match its manifest`, { cause: err });
+      }
       // The runner still routes loop_back to the core implement step whatever a catalog entry says.
       if (def.reviseLoop) {
         throw new Error(`${named} uses reviseLoop, which cannot be composed yet`);

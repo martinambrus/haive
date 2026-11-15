@@ -1,3 +1,4 @@
+import type { StepOutputContractRef, StepRoleId } from '../step-engine/output-contracts.js';
 import type { Database } from '@haive/database';
 import type { logger } from '../logger/index.js';
 import type { FormSchema } from '../schemas/form.js';
@@ -14,6 +15,13 @@ export type {
 } from '../step-engine/types.js';
 export type { TaskStatus } from '../types/index.js';
 export type { ComposableStepEntry } from '../modularity/contracts.js';
+
+export type {
+  StepOutputContractRef,
+  StepRoleId,
+  CodeReviewOutput,
+  CodeAuditOutput,
+} from '../step-engine/output-contracts.js';
 
 /** Immutable plan read carried by an owned dispatch into its sandbox. */
 export interface ChatPlanRead {
@@ -596,6 +604,10 @@ export interface StepLoopSpec<TApply = unknown> {
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
+  /** Exact immutable host output contract; the host supplies its validator. */
+  readonly outputContract?: StepOutputContractRef;
+  /** Declares role capability only. Replacement admission remains a separate host decision. */
+  readonly replaces?: readonly StepRoleId[];
   /** May edit deliverable code or tests, including through a fixer. Its successful/skip
    * hand-off compares validation snapshots when after 07b and before the commit gate.
    * Prompt steps with the file_write capability opt in.

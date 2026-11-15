@@ -291,6 +291,23 @@ upcoming-CLI list, completion release) read the snapshot. Step flags come from `
 Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the run list: always on
 `run_app`, and on a snapshot task when the composition stays as valid without it.
 
+## Successful output contracts
+
+The review and broad-audit definitions declare their immutable host output contract.
+After a successful apply return, the runner checks cancellation and ownership, then validates
+before summary extraction, loop hooks, routing and output writes. It persists the original
+return value. Built-in mismatches log a pino warning containing the contract and bounded
+issue paths, never values, and keep the existing live-task behavior. Only a producer occupying
+a replaced role through a pinned host binding may fail `step-output-contract-invalid`;
+that failure never routes through `fixLoopOnError`. The hard-failure helper is directly tested
+but no replacement is admitted in this prerequisite.
+
+A continuation throw, parked form or skipped step has no new successful output to validate.
+The current shouldRun skip writes status and end time without writing output. Recovered done
+rows and all stored readers retain their existing behavior; historical rows are neither
+validated as new writes nor migrated. Audit parsing stays report-only, including its current
+empty-findings fallback for unreadable replies.
+
 ## Derived overlays (PR4 of 4)
 
 Derived types are admin-authored overlays of the built-in workflow. The API and worker support
