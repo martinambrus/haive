@@ -139,6 +139,13 @@ export function registerModuleSteps(
           `Module ${moduleId} mining seats step "${localId}" must export agentMining`,
         );
       }
+      const roleIds = new Set((def.metadata.cliRoles ?? []).map((role) => role.id));
+      const shared = manifest.miningSeats![localId]!.find((seat) => roleIds.has(seat.id));
+      if (shared) {
+        throw new Error(
+          `Module ${moduleId} mining seats step "${localId}" reuses cliRoles id "${shared.id}"`,
+        );
+      }
     }
 
     const composable = (manifest.composableSteps ?? []).map((composableEntry) => {

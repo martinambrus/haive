@@ -157,6 +157,17 @@ describe('module mining seats at load', () => {
   it('refuses seats for an exported step without mining', () => {
     expect(() => load(miningEntry('analyze', false))).toThrow(/Module fx.*analyze.*agentMining/);
   });
+  it('refuses a seat id that is also one of the step cliRoles ids', () => {
+    const entry = miningEntry();
+    const [def] = entry.steps!;
+    entry.steps = [
+      {
+        ...def,
+        metadata: { ...def!.metadata, cliRoles: [{ id: 'security', label: 'Security' }] },
+      } as StepDefinition,
+    ];
+    expect(() => load(entry)).toThrow(/Module fx.*analyze.*reuses cliRoles id "security"/);
+  });
   it.each(['08c-code-review', 'module.gx.analyze', 'module.fx.analyze'])(
     'cannot claim a core or namespaced step %s',
     (id) => {
