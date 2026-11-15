@@ -1631,6 +1631,21 @@ for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const)
   });
 }
 
+it('DGL-1 a refused replanner consumes its invocation before writing issues, matching Retry', async () => {
+  const h = auxiliaryHarness('replanner');
+  await h.fold(
+    auxiliaryFault('refused', { errorMessage: PROVIDER_FATAL_HEADLINES.content_filter }),
+  );
+  const invocationWrite = h.operations.findIndex(
+    (o) => o.kind === 'write' && o.table === schema.cliInvocations,
+  );
+  const issueWrite = h.operations.findIndex(
+    (o) => o.kind === 'write' && o.table === schema.taskDagIssues,
+  );
+  expect(invocationWrite).toBeGreaterThanOrEqual(0);
+  expect(issueWrite).toBeGreaterThan(invocationWrite);
+});
+
 it('DAGP-2 a refused replanner records affected issues and never resends', async () => {
   const h = auxiliaryHarness('replanner');
   h.rows.push(issue('D', { resolution: 'approved' }));

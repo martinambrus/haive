@@ -2729,15 +2729,16 @@ async function applyReplannerDecision(
   const out: ReplannerOutput = refused
     ? { action: 'ABORT', reasoning: inv.errorMessage!, skip_downstream: [], new_levels: [] }
     : parseReplanner(inv, recordsFailures(ea.stepDef));
-  if (refused) {
-    for (const issue of failed) {
-      await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
-    }
-  }
   await ea.db
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
     .where(eq(schema.cliInvocations.id, inv.id));
+  if (refused) {
+    // Retry supersedes invocations before resetting issues; keep the same lock order.
+    for (const issue of failed) {
+      await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
+    }
+  }
   await ea.db
     .update(schema.taskDagPlans)
     .set({
