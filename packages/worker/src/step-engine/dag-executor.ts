@@ -1609,7 +1609,10 @@ export async function ingestReviewRun(
     return;
   }
 
-  await checkAuxiliaryEnvironment(ra, run.role as AuxiliaryRole, inv);
+  // A structured result remains usable when the process is killed after printing it.
+  const verdict = run.role === 'reviewer' ? parseReviewerOutput(inv) : null;
+  if (!recordsFailures(ra.stepDef) || !(run.role === 'reviewer' ? verdict : fixed.parsed))
+    await checkAuxiliaryEnvironment(ra, run.role as AuxiliaryRole, inv);
 
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
@@ -1654,7 +1657,7 @@ export async function ingestReviewRun(
     return;
   }
   const reviewPreparation =
-    recordsFailures(ra.stepDef) && run.role === 'reviewer' && !parseReviewerOutput(inv)
+    recordsFailures(ra.stepDef) && run.role === 'reviewer' && !verdict
       ? await prepareReviewAgent(
           ra,
           issue,
@@ -1667,7 +1670,6 @@ export async function ingestReviewRun(
   await consume();
 
   if (run.role === 'reviewer') {
-    const verdict = parseReviewerOutput(inv);
     if (!verdict) {
       // A killed/orphaned reviewer never produced a verdict — re-run it (bounded by the
       // reviewer's OWN transient budget, separate from the coder's), the same crash-resume
@@ -3392,6 +3394,8 @@ export async function resolveDagPhase(
           continue;
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
+        const result = parseCoderResult(inv);
+        let validFixResult = false;
         // Advisor-started fix coders first re-enter here while their issue is running.
         // Check them before section C's ordinary coder redispatch can consume the fault.
         if (recordsFailures(stepDef)) {
@@ -3406,14 +3410,14 @@ export async function resolveDagPhase(
               ),
             )
             .limit(1);
-          if (fixRun)
+          validFixResult = !!fixRun && result.parsed;
+          if (fixRun && !result.parsed)
             await checkAuxiliaryEnvironment(
               { db, current, level: curLevel, stepDef },
               'coder',
               inv,
             );
         }
-        const result = parseCoderResult(inv);
         // A refusal fails the issue whatever partial result the coder printed before it.
         const refused =
           inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
@@ -3423,7 +3427,7 @@ export async function resolveDagPhase(
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
         // finished, so re-running it — bounded by the coder's own infra_retries — honours
         // the DAG's crash-resume contract instead of freezing the level on a transient event.
-        if (result.outcome === 'failed_unrecoverable') {
+        if (result.outcome === 'failed_unrecoverable' && !validFixResult) {
           const cls = classifyDagIssueFailure({
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,

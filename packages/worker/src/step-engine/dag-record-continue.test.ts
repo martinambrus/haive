@@ -1869,3 +1869,58 @@ it.each([false, true])(
     expect(h.enqueued).toHaveLength(1);
   },
 );
+
+for (const role of ['reviewer', 'coder'] as const) {
+  it.each([
+    { exitCode: 137, errorMessage: null },
+    { exitCode: 143, errorMessage: 'CLI process exceeded its time budget' },
+    { exitCode: 1, errorMessage: 'permission denied' },
+  ])(`DAGP-F5 ${role} uses a valid result before process failure: %j`, async (signal) => {
+    const h = auxiliaryHarness(role);
+    const output =
+      role === 'reviewer'
+        ? { verdict: 'approve', criteria_results: [], issues: [] }
+        : { issue_id: 'A', outcome: 'completed', files_modified: ['a.ts'] };
+    await h.fold(
+      auxiliaryFault('result-then-kill', {
+        ...signal,
+        rawOutput: '```json\n' + JSON.stringify(output) + '\n```',
+      }),
+    );
+    expect(h.runs[0]!.consumedAt).toBeInstanceOf(Date);
+    expect(h.plan.escalationLog ?? []).toEqual([]);
+    if (role === 'reviewer') expect(h.rows[0]!.resolution).toBe('approved');
+    else expect(h.enqueued).toHaveLength(1); // Re-review the fix, rather than reject its output.
+  });
+}
+
+for (const outcome of ['completed', 'failed_unrecoverable'] as const) {
+  it.each([
+    { exitCode: 137, errorMessage: null },
+    { exitCode: 143, errorMessage: 'CLI process exceeded its time budget' },
+  ])(
+    `DAGP-F5 advisor-started fix coder uses its valid ${outcome} result in section C: %j`,
+    async (signal) => {
+      const h = fixture([issue('A', { outcome: 'running', cliInvocationId: 'fix' })], true);
+      h.invocations.push(
+        auxiliaryFault('fix', {
+          ...signal,
+          parsedOutput: { issue_id: 'A', outcome, files_modified: ['a.ts'] },
+        }),
+      );
+      h.runs.push({
+        id: 'fix-run',
+        dagIssueId: 'A',
+        role: 'coder',
+        cliInvocationId: 'fix',
+        consumedAt: null,
+      });
+      await h.run();
+      expect(h.rows[0]!.outcome).toBe(outcome);
+      expect(h.invocations[0]!.consumedAt).toBeInstanceOf(Date);
+      expect(h.plan.escalationLog ?? []).toEqual([]);
+      expect(h.rows[0]!.infraRetries).toBe(0);
+      expect(h.step.cliTimeoutLearnedMs).toBeUndefined();
+    },
+  );
+}
