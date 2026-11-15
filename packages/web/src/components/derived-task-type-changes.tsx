@@ -125,9 +125,8 @@ export function DerivedTaskTypeChanges({
                 { value: 'insertAfter', label: 'Insert after' },
                 {
                   value: 'replace',
-                  label: 'Replace',
-                  description:
-                    'Only steps declaring this role and its output contract can replace it',
+                  label:
+                    'Replace — Only steps declaring this role and its output contract can replace it',
                 },
               ],
             },

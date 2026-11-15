@@ -155,9 +155,10 @@ describe('derived editor', () => {
         onChange={vi.fn()}
       />,
     );
-    expect(screen.getByRole('option', { name: 'Replace' })).toBeTruthy();
     expect(
-      screen.getByText(/Only steps declaring this role and its output contract can replace it/),
+      screen.getByRole('option', {
+        name: 'Replace — Only steps declaring this role and its output contract can replace it',
+      }),
     ).toBeTruthy();
     expect(
       screen.getByText(/Expected: haive.code-review@1. Actual: haive.code-review@1/),
