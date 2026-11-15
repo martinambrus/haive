@@ -125,8 +125,14 @@ export async function composeUp(
   ctx: ComposeContext,
   env: NodeJS.ProcessEnv,
   services: string[] = [],
+  options: { removeOrphans?: boolean } = {},
 ): Promise<void> {
-  await runCompose(ctx, env, ['up', '-d', ...services]);
+  await runCompose(ctx, env, [
+    'up',
+    '-d',
+    ...(options.removeOrphans ? ['--remove-orphans'] : []),
+    ...services,
+  ]);
 }
 
 /** Stop services WITHOUT `-v`. Never `-v`: several volumes are globally named and shared with any

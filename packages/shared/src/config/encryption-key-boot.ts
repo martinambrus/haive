@@ -24,19 +24,34 @@ const DISCARD_SETTING = 'HAIVE_DISCARD_UNREADABLE_SECRETS';
  * User email/phone use the config key directly; the other envelopes depend on master_kek,
  * which is itself a system secret encrypted with the config key. */
 async function encryptedRowCounts(db: Pick<Database, 'execute'>): Promise<Record<string, number>> {
+  // The updater can boot before 0192 creates integration storage. Missing tables hold no
+  // ciphertext; every present table must still be inventoried, and a failed read still refuses.
+  const [tables] = await db.execute<{ providers: boolean; connections: boolean }>(sql`
+    select to_regclass('integration_provider_configs') is not null as providers,
+           to_regclass('integration_connections') is not null as connections
+  `);
+  // Only an explicit absence skips a table; an empty capability result keeps the old inventory.
   const rows = await db.execute<{ source: string; count: string }>(sql`
     select 'system_secrets' as source, count(*) as count from ${schema.systemSecrets}
     union all select 'users', count(*) from ${schema.users}
     union all select 'user_secrets', count(*) from ${schema.userSecrets}
     union all select 'cli_provider_secrets', count(*) from ${schema.cliProviderSecrets}
     union all select 'repo_credentials', count(*) from ${schema.repoCredentials}
-    union all select 'integration_provider_configs', count(*) from ${schema.integrationProviderConfigs}
+    ${
+      tables?.providers !== false
+        ? sql`union all select 'integration_provider_configs', count(*) from ${schema.integrationProviderConfigs}
       where ${schema.integrationProviderConfigs.oauthClientSecretEncrypted} is not null
-         or ${schema.integrationProviderConfigs.encryptedDek} is not null
-    union all select 'integration_connections', count(*) from ${schema.integrationConnections}
+         or ${schema.integrationProviderConfigs.encryptedDek} is not null`
+        : sql``
+    }
+    ${
+      tables?.connections !== false
+        ? sql`union all select 'integration_connections', count(*) from ${schema.integrationConnections}
       where ${schema.integrationConnections.accessTokenEncrypted} is not null
          or ${schema.integrationConnections.refreshTokenEncrypted} is not null
-         or ${schema.integrationConnections.encryptedDek} is not null
+         or ${schema.integrationConnections.encryptedDek} is not null`
+        : sql``
+    }
   `);
   return Object.fromEntries(rows.map((row) => [row.source, Number(row.count)]));
 }

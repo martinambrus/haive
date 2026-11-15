@@ -100,8 +100,10 @@ class RedisFake extends EventEmitter {
 function database(counts: Record<string, number> = {}) {
   const audit = new Map<string, Record<string, unknown>>();
   const state = { counts: { ...counts }, failAudit: false };
-  const execute = vi.fn(async (_query: SQL) =>
-    SOURCES.map((source) => ({ source, count: String(state.counts[source] ?? 0) })),
+  const execute = vi.fn(async (query: SQL) =>
+    new PgDialect().sqlToQuery(query).sql.includes('to_regclass')
+      ? [{ providers: true, connections: true }]
+      : SOURCES.map((source) => ({ source, count: String(state.counts[source] ?? 0) })),
   );
   const remove = vi.fn(async () => {
     state.counts.system_secrets = 0;
@@ -156,6 +158,16 @@ afterEach(async () => {
 });
 
 describe('boot encryption key safety', () => {
+  it('still inventories ciphertext when the catalog returns no capability row', async () => {
+    const { db, execute } = database({ system_secrets: 1 });
+    execute.mockResolvedValueOnce([]);
+    await expect(boot(service(), db)).rejects.toThrow('1 encrypted rows exist');
+    const inventory = new PgDialect().sqlToQuery(execute.mock.calls[1]![0]).sql;
+    expect(inventory).toContain('integration_provider_configs');
+    expect(inventory).toContain('integration_connections');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it.each(SOURCES)('refuses a missing key with ciphertext in %s', async (source) => {
     const fixture = database({ [source]: 1 });
     await expect(boot(service(), fixture.db)).rejects.toThrow(
@@ -201,7 +213,7 @@ describe('boot encryption key safety', () => {
     await boot(svc, fixture.db);
     expect(await svc.getEncryptionKey()).toMatch(/^[0-9a-f]{64}$/);
     expect(fixture.audit.size).toBe(0);
-    const query = new PgDialect().sqlToQuery(fixture.execute.mock.calls[0]![0]);
+    const query = new PgDialect().sqlToQuery(fixture.execute.mock.calls[1]![0]);
     for (const source of SOURCES) expect(query.sql).toContain(`"${source}"`);
     expect(query.sql).toContain('is not null');
   });
@@ -211,9 +223,11 @@ describe('boot encryption key safety', () => {
     async (count) => {
       const client = {
         options: { parsers: {}, serializers: {} },
-        unsafe: vi.fn(async (_query: string, _params: unknown[]) => [
-          { source: 'system_secrets', count: String(count) },
-        ]),
+        unsafe: vi.fn(async (query: string, _params: unknown[]) =>
+          query.includes('to_regclass')
+            ? [{ providers: true, connections: true }]
+            : [{ source: 'system_secrets', count: String(count) }],
+        ),
         begin: vi.fn(),
       };
       const source = encryptionKeyBootDatabase(client as unknown as Sql);
@@ -223,8 +237,8 @@ describe('boot encryption key safety', () => {
         await boot(svc, () => source);
         expect(await svc.getEncryptionKey()).toMatch(/^[0-9a-f]{64}$/);
       }
-      expect(client.unsafe).toHaveBeenCalledTimes(1);
-      for (const table of SOURCES) expect(client.unsafe.mock.calls[0]![0]).toContain(`"${table}"`);
+      expect(client.unsafe).toHaveBeenCalledTimes(2);
+      for (const table of SOURCES) expect(client.unsafe.mock.calls[1]![0]).toContain(`"${table}"`);
       expect(client.begin).not.toHaveBeenCalled();
     },
   );
@@ -232,6 +246,7 @@ describe('boot encryption key safety', () => {
   it('adopts a key published while the database inventory was being read', async () => {
     const fixture = database({ system_secrets: 3 });
     const key = 'ef'.repeat(32);
+    fixture.execute.mockResolvedValueOnce([{ providers: true, connections: true }]);
     fixture.execute.mockImplementationOnce(async () => {
       redis.store.set(CONFIG_KEYS.ENCRYPTION_KEY, key);
       return [{ source: 'system_secrets', count: '3' }];

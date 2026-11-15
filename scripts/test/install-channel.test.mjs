@@ -124,6 +124,14 @@ function approvedPublicSecrets(lang, text) {
     assert.ok(text.includes(before), `baseline contains ${before}`);
     text = text.replace(before, after);
   }
+  // Recovery still needs a deliberately selected updater image, including on an old install.
+  const before = lang === 'sh' ? ' >&2; exit 2; }' : '"; exit 2 }';
+  const after =
+    lang === 'sh'
+      ? ' >&2; echo "For recovery, use --version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run\'s journal record); it selects the updater image." >&2; exit 2; }'
+      : '"; Write-Host "For recovery, use -Version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run\'s journal record); it selects the updater image."; exit 2 }';
+  assert.ok(text.includes(before), 'baseline contains the upgrade version refusal');
+  text = text.replace(before, after);
   return text;
 }
 function fixture(
@@ -389,6 +397,59 @@ for (const lang of ['sh', 'ps1']) {
       channel: publicInstall ? 'public' : 'customer',
       bundle: { files: hashes, env: [], known: [] },
     };
+    check(
+      `generated upgrade explains the version needed for recovery (public=${publicInstall})`,
+      () => {
+        const f = fixture(lang, { publicInstall, data });
+        try {
+          const installed = f.install();
+          assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+          const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), ['upgrade']);
+          assert.equal(r.status, 2, r.stdout + r.stderr);
+          assert.match(r.stdout + r.stderr, /recovery.*interrupted upgrade target.*updater image/i);
+          assert.match(r.stdout + r.stderr, /upgrade_runs\.to_version/);
+          assert.ok(
+            !f
+              .calls()
+              .split('\n')
+              .some((line) => line.includes('\trun\t')),
+          );
+        } finally {
+          f.clean();
+        }
+      },
+    );
+    check(`force install replaces linked helpers safely (public=${publicInstall})`, () => {
+      const f = fixture(lang, { publicInstall, data });
+      try {
+        mkdirSync(f.dir);
+        const names = lang === 'sh' ? ['haive', 'uninstall.sh'] : ['haive.ps1', 'uninstall.ps1'];
+        const outside = names.map((name) => join(f.root, `outside-${name}`));
+        for (const [index, name] of names.entries()) {
+          writeFileSync(outside[index], `operator file ${index}`, { mode: 0o600 });
+          symlinkSync(outside[index], join(f.dir, name));
+        }
+        const envTarget = join(f.root, 'outside-env');
+        if (lang === 'sh') symlinkSync(envTarget, join(f.dir, '.env'));
+        const before = outside.map((path) => ({
+          bytes: readFileSync(path),
+          mode: statSync(path).mode,
+        }));
+        const r = f.install([f.flag('force')]);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.ok(!existsSync(envTarget), 'dangling env target stays absent');
+        assert.ok(lstatSync(join(f.dir, '.env')).isFile());
+        for (const [index, name] of names.entries()) {
+          assert.deepEqual(readFileSync(outside[index]), before[index].bytes, name);
+          assert.equal(statSync(outside[index]).mode, before[index].mode, name);
+          assert.ok(lstatSync(join(f.dir, name)).isFile(), name);
+          if (lang === 'sh') assert.equal(statSync(join(f.dir, name)).mode & 0o777, 0o700);
+        }
+        assert.ok(!readdirSync(f.dir).some((name) => name.startsWith('.haive-install.')));
+      } finally {
+        f.clean();
+      }
+    });
     check(`force install replaces linked bundle entries (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data });
       try {
@@ -426,10 +487,16 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
-    if (publicInstall)
-      for (const name of ['.haive-bundle.json', 'docker-compose.yml'])
-        for (const linked of [false, true])
-          check(`force install refuses a bundle directory (${name}, linked=${linked})`, () => {
+    for (const name of [
+      '.haive-bundle.json',
+      'docker-compose.yml',
+      '.env',
+      ...(lang === 'sh' ? ['haive', 'uninstall.sh'] : ['haive.ps1', 'uninstall.ps1']),
+    ])
+      for (const linked of [false, true])
+        check(
+          `force install refuses a bundle directory (${name}, linked=${linked}, public=${publicInstall})`,
+          () => {
             const f = fixture(lang, { publicInstall, data });
             try {
               mkdirSync(f.dir);
@@ -440,7 +507,16 @@ for (const lang of ['sh', 'ps1']) {
               const before = statSync(target);
               const r = f.install([f.flag('force')]);
               assert.notEqual(r.status, 0, r.stdout + r.stderr);
-              assert.match(r.stdout + r.stderr, /bundle destination is a directory/);
+              assert.match(
+                r.stdout + r.stderr,
+                lang === 'ps1' && name === '.env'
+                  ? /already holds a Haive install/
+                  : /bundle destination is a directory/,
+              );
+              assert.ok(
+                !existsSync(join(f.dir, 'docker-compose.run.yml')),
+                'refuse before placing any bundle file',
+              );
               assert.deepEqual(readdirSync(target), ['operator-file']);
               assert.equal(readFileSync(join(target, 'operator-file'), 'utf8'), 'keep');
               assert.equal(statSync(target).mode, before.mode);
@@ -448,7 +524,8 @@ for (const lang of ['sh', 'ps1']) {
             } finally {
               f.clean();
             }
-          });
+          },
+        );
     check(`bundle record contains only installed verified files (public=${publicInstall})`, () => {
       const f = fixture(lang, { publicInstall, data, fail: 'record-chown' });
       try {
@@ -494,6 +571,10 @@ for (const lang of ['sh', 'ps1']) {
             } else {
               assert.notEqual(r.status, 0);
               assert.match(r.stdout + r.stderr, /cannot set bundle record owner/);
+              assert.ok(
+                !existsSync(join(f.dir, 'docker-compose.yml')),
+                'refuse before placing the compose bundle',
+              );
               assert.ok(!existsSync(join(f.dir, '.env')));
             }
           } finally {
@@ -698,13 +779,17 @@ command() (
         f.clean();
       }
     });
-  check('empty Mailpit password stops before writing env', () => {
+  check('empty Mailpit password stops before writing install files', () => {
     const f = fixture(lang, { publicInstall: true, fail: 'mailpit-secret' });
     try {
       const r = f.install();
       assert.notEqual(r.status, 0, 'empty Mailpit password must refuse installation');
       assert.match(`${r.stdout}${r.stderr}`, /could not generate secrets/i);
       assert.ok(!existsSync(join(f.dir, '.env')), 'no env with an empty Mailpit password');
+      assert.ok(
+        !existsSync(join(f.dir, 'docker-compose.yml')),
+        'no partial bundle after secret refusal',
+      );
     } finally {
       f.clean();
     }

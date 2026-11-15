@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { sql } from 'drizzle-orm';
 import { encrypt, encryptEmail, envelopeEncrypt, envelopeDecrypt } from '../src/crypto/index.js';
 import {
   encryptionKeyBootDatabase,
@@ -69,6 +70,31 @@ describe.skipIf(!url)('boot encryption key database boundary', () => {
     expect(await state.getKey()).toBeNull();
     expect(await db.select().from(schema.systemSecrets)).toHaveLength(1);
     expect(await db.select().from(schema.auditEvents)).toHaveLength(0);
+  });
+
+  it('inventories a pre-0192 schema without integration tables before updater migration', async () => {
+    vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '');
+    const state = store();
+    await db.transaction(async (tx) => {
+      for (const name of [
+        'system_secrets',
+        'users',
+        'user_secrets',
+        'cli_provider_secrets',
+        'repo_credentials',
+      ]) {
+        await tx.execute(
+          sql`CREATE TEMP TABLE ${sql.identifier(name)} (LIKE public.${sql.identifier(name)} INCLUDING DEFAULTS) ON COMMIT DROP`,
+        );
+      }
+      await tx.execute(sql`INSERT INTO pg_temp.system_secrets SELECT * FROM public.system_secrets`);
+      await tx.execute(sql`SET LOCAL search_path TO pg_temp`);
+      await expect(generateBootEncryptionKey(tx, state)).rejects.toThrow(
+        'Refusing to generate an encryption key: 1 encrypted rows',
+      );
+      expect(state.publishPending).not.toHaveBeenCalled();
+    });
+    expect(await db.select().from(schema.systemSecrets)).toHaveLength(1);
   });
 
   it('concurrent discard commits one audit, clears system secrets and retains bad envelopes', async () => {

@@ -605,6 +605,20 @@ if ($hasReleaseBundle) {
   $record = [ordered]@{ version = $pinned; files = $hashes } | ConvertTo-Json -Depth 10 -Compress
   [IO.File]::WriteAllText((Join-Path $bundleDir '.haive-bundle.json'), $record + "`n", (New-Object Text.UTF8Encoding($false)))
 }
+# Refuse known destination conflicts before placing any part of the bundle.
+$placedFiles = @($installedFiles)
+if ($hasReleaseBundle) { $placedFiles += '.haive-bundle.json' }
+foreach ($name in ($placedFiles + @('.env', 'haive.ps1', 'uninstall.ps1'))) {
+  if ([IO.Directory]::Exists((Join-Path $Dir $name))) { throw "bundle destination is a directory: $name" }
+}
+# Generate and validate secrets before the first destination write too.
+if (-not (Test-Path (Join-Path $Dir '.env'))) {
+  $key  = New-HexSecret 32
+  $jwt  = New-HexSecret 32
+  $pgpw = New-HexSecret 16
+  $mailpitUiPassword = New-HexSecret 24
+  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
 Push-Location $Dir
 # Stage on the destination filesystem. Rename replaces a link instead of writing through it.
@@ -617,7 +631,6 @@ function Place-BundleFile([string]$name) {
 }
 foreach ($name in $installedFiles) {
   Copy-Item -LiteralPath (Join-Path $bundleDir $name) -Destination (Join-Path $bundleStage $name)
-  Place-BundleFile $name
 }
 if ($hasReleaseBundle) {
   $recordPath = Join-Path $bundleStage '.haive-bundle.json'
@@ -637,10 +650,9 @@ if ($hasReleaseBundle) {
     }
     if ((Invoke-Native chmod @('644', $recordPath)).ExitCode -ne 0) { throw 'cannot set bundle record mode' }
   }
-  Place-BundleFile '.haive-bundle.json'
 }
-Remove-Item -LiteralPath $bundleStage -Force
-$bundleStage = $null
+# Ownership checks can refuse too, so finish them before the first destination file changes.
+foreach ($name in $placedFiles) { Place-BundleFile $name }
 
 $webPort     = Get-FreePort 3000
 $apiPort     = Get-FreePort ($webPort + 1)
@@ -650,12 +662,6 @@ Write-Note "ports             web $webPort, api $apiPort, mail $mailpitPort"
 $envPath = Join-Path $Dir '.env'
 $channelEnvCreated = $false
 if (-not (Test-Path $envPath)) {
-  $key  = New-HexSecret 32
-  $jwt  = New-HexSecret 32
-  $pgpw = New-HexSecret 16
-  $mailpitUiPassword = New-HexSecret 24
-  if (-not $key -or -not $jwt -or -not $pgpw -or -not $mailpitUiPassword) { Die "could not generate secrets. Nothing was installed." }
-
   # HOST_REPO_ROOT is written EXPLICITLY and this is the one Windows-specific hard requirement.
   # docker-compose.yml defaults that mount to ${HOME}, and PowerShell does not set HOME as an
   # ENVIRONMENT variable ($HOME is a shell variable, which Compose cannot see). MEASURED: the
@@ -697,7 +703,8 @@ if (-not (Test-Path $envPath)) {
   # LF, not CRLF, and written without a BOM: compose reads this file itself and a stray carriage
   # return lands inside the VALUE of the last variable on every line.
   if ($Channel -cne 'public') { $channelEnvCreated = $true }
-  [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText((Join-Path $bundleStage '.env'), ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  Place-BundleFile '.env'
   Write-Note "secrets           generated (.env)"
 }
 
@@ -754,7 +761,7 @@ switch ($Command) {
   'ps'      { docker compose @files ps }
   'version' { $e = Get-DotEnv; Invoke-RestMethod "http://localhost:$($e['HAIVE_API_PORT'])/version" | ConvertTo-Json }
   'upgrade' {
-    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v> [--replace-modified-bundle]"; exit 2 }
+    if (-not $Version) { Write-Host "usage: .\haive.ps1 upgrade -Version <v> [--replace-modified-bundle]"; Write-Host "For recovery, use -Version with the interrupted upgrade target (upgrade_runs.to_version in the interrupted run's journal record); it selects the updater image."; exit 2 }
     $e = Get-DotEnv
     $v = $Version -replace '^v',''
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
@@ -817,7 +824,8 @@ switch ($Command) {
       '--version', $v,
 '@)
 }
-[System.IO.File]::WriteAllText((Join-Path $Dir 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $bundleStage 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
+Place-BundleFile 'haive.ps1'
 
 # Uninstall deliberately does NOT use `down -v`. Five volumes in docker-compose.yml carry an
 # explicit global name, so they are shared with any other Haive on this machine and `-v` would
@@ -1034,7 +1042,10 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.docker')) {
 # `down` first
 '@)
 }
-[System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $bundleStage 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
+Place-BundleFile 'uninstall.ps1'
+Remove-Item -LiteralPath $bundleStage -Force
+$bundleStage = $null
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
 
 if ($NoStart) {

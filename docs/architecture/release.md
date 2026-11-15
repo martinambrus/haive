@@ -198,7 +198,9 @@ fetching a new release. Recovery constructs its context from journal data withou
 synthetic release manifest: a missing journalled `migrationHead` cannot block it, because rollback
 and forward commit do not repeat the health gate. A crash between file renames therefore restores
 the old bytes and finishes rollback. A failed restore leaves the run running for the next invocation
-to retry. Once the
+to retry. Launch recovery with `./haive upgrade --version <interrupted-target>` (PowerShell:
+`.\haive.ps1 upgrade -Version <interrupted-target>`). The helper needs that version to choose the
+updater image even though journal recovery needs no fetched manifest. Once the
 journal phase is `commit`, recovery finishes forward and keeps the new files, because destructive
 data migrations may already have run. This pivot is unchanged.
 
@@ -214,7 +216,9 @@ and its saved edits are no longer needed, manually delete that run's
 Failed commits and rollbacks retain their backup and staging. A pruning failure emits
 `bundle-prune-failed` with `safeErrorMessage(err)` and keeps the successful commit; remaining
 prunable files may be cleaned by a later successful bundle upgrade.
-No compose call adds `--remove-orphans`; removed services remain a separate follow-up.
+Rollback alone adds `--remove-orphans` when bringing up the restored bundle, removing services
+introduced by the failed target. Forward deployment and the snapshot restart retain their existing
+Compose arguments; services removed by a forward release remain a separate follow-up.
 Both installers fetch the chosen release's manifest once: public installs download the GitHub
 Release asset, and channel installs read it from the authenticated release image. When it declares
 `bundle.files`, they require the allowlisted base/run hashes and verify every fetched compose file,
@@ -230,6 +234,12 @@ before any bundle download, and a legacy release does not need either.
 After verification, the installers write `<install>/.haive-bundle.json` as
 `{ "version": "<version>", "files": { "<installed name>": "sha256:<hex>" } }`, with the install
 directory's owner/group and mode 0644 on POSIX; Windows inherits the install directory's ACL.
+Both installers check every bundle destination for a directory and stage the complete bundle,
+including record ownership and mode checks, before placing the first bundle file. They validate
+generated secrets before the first destination write as well. Generated host
+helpers and a newly generated `.env` use the same destination-filesystem stage and rename writer,
+so a pre-existing link is replaced without writing or changing permissions on its target. Existing
+regular `.env` files retain the installer's existing reinstall refusal.
 The record contains no secrets and covers only installed files, so the updater classifies a fresh
 install as pristine. A release without `bundle` retains the legacy install behavior and writes no
 record; the updater later classifies it as `legacy-known` or `legacy-unknown` using the target's
@@ -372,6 +382,13 @@ it. The admin page disables the three state buttons, and says which run holds th
 `POST /admin/maintenance/upgrade` read the journal through the same helpers (`listUpgradeRuns`,
 `findLiveUpgradeRun`) and fail the same way: a missing table reads as no run, and any other failed
 read answers 500, so a read that failed never enables the start buttons and never starts an updater.
+
+Draining runs against the source release's schema before migration. The counter detects
+`tasks.dead_at` in the catalog and excludes dead tasks only when that column exists (0197); older
+schemas count every task in the selected live statuses. Its repositories, bundles and provider
+columns all exist in the first release baseline. If configuration boot needs its encrypted-row
+inventory, it detects the integration tables added in 0192 and counts only those present; failed
+reads still refuse key generation. The journal is created independently of migrations.
 
 The updater creates the journal table itself, at every start: `ensureJournal` runs
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table

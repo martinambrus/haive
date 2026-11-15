@@ -116,8 +116,10 @@ forever, one warn per attempt, instead of crash-looping.
 the db and runs after `waitForDatabaseReady`. When neither Redis nor `CONFIG_ENCRYPTION_KEY` holds a
 usable key, `generateBootEncryptionKey` (`config/encryption-key-boot.ts`) counts ciphertext rows in
 `system_secrets`, `users`, `user_secrets`, `cli_provider_secrets`, `repo_credentials`,
-`integration_provider_configs` and `integration_connections`. None (a first install, since no migration
-seeds those tables): it generates the key as before. Any: boot exits 1 naming the cause, whether
+`integration_provider_configs` and `integration_connections` (the integration tables are counted only
+when present; the updater may boot before migration 0192 creates them). An empty capability result
+keeps the full inventory, and a failed read still refuses key generation. None (a first install,
+since no migration seeds those tables): it generates the key as before. Any: boot exits 1 naming the cause, whether
 `CONFIG_ENCRYPTION_KEY` is unset or set but invalid, and asks for the original key back. A lost Redis
 volume with no env key used to mint a new key with a warn and orphan every secret. The last resort is
 `HAIVE_DISCARD_UNREADABLE_SECRETS=1` (exactly `1`; api and worker): boot deletes every `system_secrets` row (master key,

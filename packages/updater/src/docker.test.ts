@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile, type ChildProcess } from 'node:child_process';
-import { buildOwnModules, redactSecrets, resolveImageSettings } from './docker.js';
+import { buildOwnModules, composeUp, redactSecrets, resolveImageSettings } from './docker.js';
 
 const builderExec = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({
@@ -9,6 +9,27 @@ vi.mock('node:child_process', () => ({
 afterEach(() => {
   vi.resetAllMocks();
   vi.unstubAllEnvs();
+});
+
+it('removes orphan services only when rollback requests it', async () => {
+  builderExec.mockResolvedValue({ stdout: '' });
+  const ctx = { dir: '/install', files: ['docker-compose.yml', 'docker-compose.run.yml'] };
+  await composeUp(ctx, {});
+  await composeUp(ctx, {}, [], { removeOrphans: true });
+  const commands = builderExec.mock.calls.map((call) => call[1]);
+  expect(commands).toEqual([
+    ['compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.run.yml', 'up', '-d'],
+    [
+      'compose',
+      '-f',
+      'docker-compose.yml',
+      '-f',
+      'docker-compose.run.yml',
+      'up',
+      '-d',
+      '--remove-orphans',
+    ],
+  ]);
 });
 
 describe('redactSecrets', () => {

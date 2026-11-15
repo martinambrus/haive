@@ -163,12 +163,13 @@ If the updater itself dies mid-swap, the next `haive upgrade` finds the run in t
    - Controls: `scripts/test/install-manifest.test.mjs` and `install-channel.test.mjs` cover hash refusal, selected overlays, record content/owner/mode and legacy absence in both installers, plus shellcheck in CI's pinned invocation.
 
 ## Verification
-- **Unit and DB suites** per PR, as above; CI rows at ci.yml:592-600.
+- **Unit and DB suites** per PR, as above; CI rows at ci.yml:592-600. Include the updater's pre-migration counter against a schema without 0197's task columns, plus its current-schema dead-task and background-job controls.
 - **Two-install upgrade check** on throwaway installs only. Use install ids `t648a` and `t648b`, directories under the session scratchpad, ports from `free_port`, and never touch `haive-*`.
-  1. Install the newest published release (0.2.0) twice with `install.sh --version 0.2.0 --dir ... --id t648a|t648b`.
+  1. Install the newest published release (0.2.0) twice with `install.sh --version 0.2.0 --dir ... --install-id t648a|t648b --no-start`. Assign distinct free ports before starting, or boot serially through each install's own `./haive up`; two unstarted installs can select the same free ports.
   2. On t648b, delete the `MAILPIT_UI_PASSWORD` line from `.env` and edit one comment in `docker-compose.run.yml`.
-  3. Cut an rc tag from the branch, or publish a test channel to a local `registry:3` with `publish-channel.mjs`.
-  4. **t648a:** `./haive upgrade --version <rc>` exits 0.
+  3. Prepare a local test channel with `build-channel.mjs` and `publish-channel.mjs` against a throwaway `registry:3`. Use a final local `vX.Y.Z` tag: the channel builder refuses prerelease tags. With an empty entitlement list, it pulls stock web at the exact target version, so first build and publish that stock web from the target tree, including its `modules.generated.json`; an old 0.2.0 image is not a substitute. Stage the complete stock release matrix at that version too: channel publication omits the stock updater, gate and proxy repositories required by the bundle. The stock `HAIVE_REGISTRY` and channel `HAIVE_CHANNEL_REGISTRY` may use separate local prefixes.
+     Adapt only the scratch installs' helpers and `.env` for the local channel: select its manifest with `--manifest-image <local-channel-release-ref>` plus `--version <test-version>`, set channel settings, mount an appropriate Docker config and pass `DOCKER_CONFIG` to the updater. Put Docker options before its image and updater options after it. Keep all three previous api/worker/web image pins available for rollback. Use named, noninteractive throwaway updater containers and retain their logs; a timed-out Docker client alone does not prove its container stopped.
+  4. **t648a:** `./haive upgrade --version <test-version>` exits 0.
      - `sha256sum` of the bundle equals the manifest.
      - `.haive-bundle.json` is present.
      - `ollama-gate` is running.
@@ -179,16 +180,16 @@ If the updater itself dies mid-swap, the next `haive upgrade` finds the run in t
   5. **t648b:** exits 3 with `bundle-modified`, and a preflight attempt row exists.
      - `.env` and the files are byte-identical to before.
      - Rerun with `--replace-modified-bundle`: exits 0, the edited file is in `previous/`, `MAILPIT_UI_PASSWORD` is present and non-empty, and the mailpit UI requires login.
-  6. **Rollback:** on a fresh t648a, force a verify failure (a target manifest with a wrong `migrationHead`, via a local channel). The files and pins equal the pre-run hashes, and the generated key remains.
-  7. **Crash-resume:** `docker kill` the updater after the `verify-start` event, then run `./haive upgrade` again. The rollback restores the files.
-  8. **Cleanup:** each install's own `./uninstall.sh`.
+  6. **Rollback:** on a fresh t648a, force a verify failure (a target manifest with a wrong `migrationHead`, via a local channel). Expect exit 5 after successful rollback. The files and pins equal the pre-run hashes, the generated key remains, and services added only by the target release are gone. A rollback from draining does not satisfy this verification-failure check.
+  7. **Crash-resume:** `docker kill` the named updater after the `verify-start` event, then run `./haive upgrade --version <test-version>` again. The rollback restores the files. The updater recovers its target from the journal without fetching a new manifest, but the generated helper still requires the interrupted upgrade's target version to select the updater image; it now says so when the version is omitted. Defaulting to the old installed image could launch an updater that cannot recover the interrupted bundle swap.
+  8. **Cleanup:** each install's own `./uninstall.sh --yes --purge`, then remove the check's registry, auxiliary resources, local-only image refs, scratch files and temporary tag. Confirm zero test-owned resources remain; shared upstream image caches are retained.
 
 ## Risks
 - **No signatures.** The bundle trust equals today's manifest trust (registry repository or TLS). A compromised registry could already ship images, so the swap adds no new exposure; cosign is a follow-up.
 - **The updater runs as root** on a bind-mounted host directory. Every file it creates must copy owner and mode from the file it replaces or from the install directory, or the operator ends up with root-owned files.
 - **`.env` is edited by the updater while the api reads it** (the api does not re-read it). The atomic rename avoids a torn read. An operator editing `.env` at the same moment can lose their edit; the lock does not cover humans.
 - **Compose across versions.** The new bundle is validated with the updater image's compose version, but the host helper uses the host's version. `!reset` already needs compose 2.24 or later. The host and updater minimum, Compose 2.24, is documented in release.md.
-- **Removed services** become orphans: `compose up` does not remove them. Do not add `--remove-orphans` in this task; record it as a follow-up.
+- **Removed services** on a forward upgrade remain a follow-up. Rollback alone adds `--remove-orphans` after restoring the old bundle, so services introduced by the failed target do not remain running.
 - **`known` hash list.** Any hand-patched release, including hotfix tags that rewrote a file, makes a legacy install read as `legacy-unknown` and refused. The flag is the way out, and the refusal message must name it.
 - **Hardcoded file names** in the generated `./haive` helper and `uninstall.sh` mean a future bundle cannot add a file. The allowlist enforces that until a helper-refresh task exists.
 - **Generated keys stay after a rollback.** This is intended and documented in the release, module and sandbox operator guidance.
