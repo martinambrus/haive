@@ -1,3 +1,4 @@
+import { buildClassifierPrompt } from './workflow/_insight-auto.js';
 import { describe, expect, it, vi } from 'vitest';
 import { buildInsightPrompt } from './workflow/08e-insights-triage.js';
 
@@ -338,6 +339,23 @@ const SEQUENCE_PLAN = [
 );
 
 const NAMED_PROMPT_BUILDERS: PromptSource[] = [
+  {
+    label: '08e-insights-triage classifier',
+    exportKey: 'step-engine/steps/workflow/_insight-auto.ts#buildClassifierPrompt',
+    build: () =>
+      buildClassifierPrompt([
+        {
+          id: 'one',
+          legacyId: 'i-1',
+          identity: 'a.ts::one',
+          picked: false,
+          sourceStep: 'review',
+          title: 'One',
+          location: 'a.ts',
+          description: 'Detail',
+        },
+      ]),
+  },
   {
     label: '08e-insights-triage buildInsightPrompt',
     exportKey: 'step-engine/steps/workflow/08e-insights-triage.ts#buildInsightPrompt',
@@ -1419,6 +1437,7 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   '08e-insights-triage': {
     // Select the editor arm: an unknown proxy field is truthy and would select the checkpoint.
     insightCheckpoint: null,
+    auto: undefined,
     insights: [
       {
         id: 'insight-v1-one',
@@ -1849,7 +1868,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(220);
+    ).toBe(221);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 

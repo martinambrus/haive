@@ -1,3 +1,4 @@
+import { insightAutoEnabled } from '../step-engine/steps/workflow/_insight-auto.js';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { isConditionalInsightStep } from './run-list.js';
 import {
@@ -3590,8 +3591,8 @@ async function handleAdvanceStep(
   // Refuse an old/custom pin before allowing its human selection to dispatch an editor.
   if (
     payload.stepId === '08e-insights-triage' &&
-    Array.isArray(formValues?.selectedInsights) &&
-    formValues.selectedInsights.length > 0
+    ((Array.isArray(formValues?.selectedInsights) && formValues.selectedInsights.length > 0) ||
+      (await insightAutoEnabled(db, ctx.taskId)))
   ) {
     try {
       assertInsightSelection(ctx, runList, payload.stepId, formValues);
@@ -4088,7 +4089,7 @@ export function bootRecoveryAction(row: {
 
 /** Whether a step has agent work a reset would throw away: a finished loop pass, an agent row, or
  *  a run of its own that nothing has superseded. */
-async function hasCliWork(
+export async function hasCliWork(
   db: Database,
   taskStepId: string,
   iterationCount: number,
@@ -4111,8 +4112,13 @@ async function hasCliWork(
       .where(
         and(
           eq(schema.taskEvents.taskStepId, taskStepId),
-          eq(schema.taskEvents.eventType, 'insight.batch'),
-          sql`${schema.taskEvents.payload}->>'stage' = 'intent'`,
+          or(
+            and(
+              eq(schema.taskEvents.eventType, 'insight.batch'),
+              sql`${schema.taskEvents.payload}->>'stage' = 'intent'`,
+            ),
+            eq(schema.taskEvents.eventType, 'insight.auto_round_started'),
+          ),
           sql`${schema.taskEvents.payload}->>'generation' = ${schema.taskSteps.rerunGeneration}::text`,
         ),
       )

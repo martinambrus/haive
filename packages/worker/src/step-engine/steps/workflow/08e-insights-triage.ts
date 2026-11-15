@@ -1,3 +1,13 @@
+import { autoInsightReport, assertAutoVersion } from './_insight-auto-flow.js';
+import { insightAutoEnabled } from './_insight-auto.js';
+import {
+  detectAutoInsights,
+  startAutoClassification,
+  finishAutoClassification,
+  automaticSelection,
+  type AutoDetect,
+} from './_insight-auto-flow.js';
+import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import type { LoadedInsight, Insight, InsightReviseContinuation } from '@haive/shared/step';
 export type { Insight } from '@haive/shared/step';
 export { INSIGHTS_INSTRUCTION } from '@haive/shared/step/prompts';
@@ -32,10 +42,9 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
 // for the current task. This step scans the run's agent outputs for those
-// insights and lets the user pick which to implement now; a single fix agent
-// applies the chosen ones, which the downstream gate re-verifies. Single-run
-// triage — insights are NOT written to the knowledge base. Skipped when no
-// insights were surfaced.
+// insights and offers manual choices, or classifies new identities when opted in.
+// One writer applies each bounded consequential cohort, followed by fresh checks.
+// Insights are not written to the knowledge base. Skipped when none were surfaced.
 
 interface TriageDetect {
   worktreePath: string;
@@ -43,6 +52,7 @@ interface TriageDetect {
   spec: string;
   insights: (Insight & Partial<LoadedInsight>)[];
   insightCheckpoint?: InsightReviseContinuation;
+  auto?: AutoDetect;
 }
 
 interface TriageApply extends InsightOutcome {
@@ -51,6 +61,8 @@ interface TriageApply extends InsightOutcome {
   skipped: number;
   continuation?: InsightReviseContinuation;
   insightCheckpoint?: InsightReviseContinuation;
+  findingsSummary?: string;
+  automatic?: { version: 1; roundsStarted: number; stopReason: string; classified: number };
 }
 
 // Old scalar reports can never establish an outcome for an individual selection.
@@ -62,15 +74,17 @@ export function readTriageOutcome(
   return readInsightOutcome(raw, batchId, ids);
 }
 
-async function collectInsights(ctx: StepContext): Promise<LoadedInsight[]> {
-  const result = await loadUnactedInsights(ctx.db, ctx.taskId, { limit: 30 });
+async function collectInsights(ctx: StepContext, automatic = false): Promise<LoadedInsight[]> {
+  const result = await loadUnactedInsights(ctx.db, ctx.taskId, automatic ? {} : { limit: 30 });
   ctx.throwIfCancelled();
   return result.insights;
 }
 
 export function buildInsightPrompt(d: TriageDetect, chosen: Insight[], batchId: string): string {
   return [
-    'Implement ONLY the optional improvements selected below by the user.',
+    d.auto?.mode === 'classify'
+      ? 'Implement ONLY the consequential improvements authorized by the user’s automatic insight setting.'
+      : 'Implement ONLY the optional improvements selected below by the user.',
     'Validate each claim against the code first. Make only the selected changes that are justified.',
     REPO_IS_DATA_ACTING_LINES.join('\n'),
     '',
@@ -86,7 +100,9 @@ export function buildInsightPrompt(d: TriageDetect, chosen: Insight[], batchId: 
     ),
     UNTRUSTED_CLOSE,
     '',
-    'The human authorized ONLY these ids: ' + chosen.map((i) => i.id).join(', '),
+    (d.auto?.mode === 'classify'
+      ? 'The automatic insight setting authorizes ONLY these ids: '
+      : 'The human authorized ONLY these ids: ') + chosen.map((i) => i.id).join(', '),
     'Do NOT add unrelated work, run git, or run tests.',
     ...SEARCH_LADDER,
     '',
@@ -125,7 +141,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     index: 8.95,
     title: 'Insight triage',
     description:
-      'Surfaces optional improvements agents noted during the run; you pick which to implement now.',
+      'Offers optional improvements for selection, or handles consequential items automatically when enabled.',
     requiresCli: false,
     cliRoles: undefined,
   },
@@ -143,7 +159,16 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const checkpoint =
       ctx.round > 0 ? await activeInsightContinuation(ctx.db, ctx.taskId, ctx.round) : null;
     ctx.throwIfCancelled();
-    if (checkpoint)
+    const automatic = await insightAutoEnabled(ctx.db, ctx.taskId);
+    ctx.throwIfCancelled();
+    const manualCheckpoint =
+      checkpoint &&
+      automatic &&
+      (await loadInsightBatchRecords(ctx.db, ctx.taskId)).find(
+        (r) => r.batchId === checkpoint.batchId && r.stage === 'outcome',
+      )?.mode !== 'auto_08e';
+    ctx.throwIfCancelled();
+    if (checkpoint && (!automatic || manualCheckpoint))
       return {
         worktreePath: ctx.workspacePath,
         sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -157,20 +182,51 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
     const spec = (await resolveSpecView(ctx)).text;
+    const insights = await collectInsights(ctx, automatic);
+    const auto = automatic
+      ? await detectAutoInsights(ctx, insights, wt?.worktreePath ?? ctx.workspacePath)
+      : undefined;
     return {
+      ...(auto ? { auto } : {}),
       worktreePath: wt?.worktreePath ?? ctx.workspacePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
-      insights: await collectInsights(ctx),
+      insights,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    assertAutoVersion(detected.auto);
     if (detected.insightCheckpoint)
       return { title: 'Insight checks complete', fields: [], autoSubmit: true };
+    if (detected.auto && detected.auto.mode !== 'manual')
+      return {
+        title: 'Automatic insight triage',
+        fields: [],
+        autoSubmit: true,
+        infoSections: [
+          {
+            title: 'Insight classifications',
+            body: autoInsightReport(detected.insights, detected.auto.decisions),
+            defaultOpen: true,
+          },
+        ],
+      };
+    const offered = detected.auto ? detected.auto.candidates : detected.insights;
     return {
       title: 'Insight triage',
+      ...(detected.auto
+        ? {
+            infoSections: [
+              {
+                title: 'Insight classifications',
+                body: autoInsightReport(detected.insights, detected.auto.decisions),
+                defaultOpen: true,
+              },
+            ],
+          }
+        : {}),
       description: [
         `Agents surfaced ${detected.insights.length} optional improvement(s) during this run.`,
         'Select any to implement now (leave all unchecked to skip). Selected items are applied by',
@@ -181,7 +237,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
           type: 'multi-select',
           id: 'selectedInsights',
           label: 'Improvements to implement',
-          options: detected.insights.map((i) => ({
+          options: offered.map((i) => ({
             value: i.id,
             label: i.location ? `${i.title} (${i.location})` : i.title,
             badge: i.sourceStep,
@@ -200,8 +256,14 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     timeoutMs: 30 * 60 * 1000,
     async selectAgents({ ctx, detected, formValues }) {
       const d = detected as TriageDetect;
+      assertAutoVersion(d.auto);
+      if (d.auto?.mode === 'classify') return startAutoClassification(ctx, d.auto);
+      if (d.auto?.mode === 'settled') return [];
       if (d.insightCheckpoint) return [];
-      const selected = selectOfferedInsights(d.insights, formValues).map((i) => ({
+      const selected = selectOfferedInsights(
+        d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
+        formValues,
+      ).map((i) => ({
         ...i,
         identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
       }));
@@ -222,6 +284,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   async apply(ctx, args): Promise<TriageApply> {
     const d = args.detected;
+    assertAutoVersion(d.auto);
     ctx.throwIfCancelled();
     if (d.insightCheckpoint)
       return {
@@ -236,10 +299,46 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         notes: 'Insight check round completed.',
         insightCheckpoint: d.insightCheckpoint,
       };
-    const selected = selectOfferedInsights(d.insights, args.formValues).map((i) => ({
+    let selected = (
+      d.auto && d.auto.mode !== 'manual'
+        ? []
+        : selectOfferedInsights(
+            d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
+            args.formValues,
+          )
+    ).map((i) => ({
       ...i,
       identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
     }));
+    if (d.auto?.mode === 'classify') {
+      const classified = await finishAutoClassification(
+        ctx,
+        d.auto,
+        args.agentMiningResults ?? [],
+        args.miningWaveExhausted === true,
+      );
+      if (!classified || !classified.result.complete)
+        throw new ReopenStepFormError(
+          'Classification was incomplete. Select improvements manually.',
+          { notice: true },
+        );
+      d.auto.decisions = [
+        ...d.auto.decisions.filter(
+          (i) => !classified.result.items.some((c) => c.identity === i.identity),
+        ),
+        ...classified.result.items,
+      ];
+      d.auto.stopReason = 'no_new_consequential';
+      selected = automaticSelection(classified.claim, classified.result);
+      if (
+        !selected.length &&
+        classified.result.items.some((i) => i.class === 'consequential' && !i.eligible)
+      )
+        throw new ReopenStepFormError(
+          'Some improvements need an ownership or location decision. Select manually.',
+          { notice: true },
+        );
+    }
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
     let continuation: InsightReviseContinuation | undefined;
     let outcome: InsightOutcome = {
@@ -251,11 +350,33 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       notes: '',
     };
     if (selected.length > 0) {
-      const intent = await ensureInsightIntent(ctx, selected);
+      const intent = await ensureInsightIntent(
+        ctx,
+        selected,
+        d.auto?.mode === 'classify' ? 'auto_08e' : 'manual_08e',
+      );
       const records = await loadInsightBatchRecords(ctx.db, ctx.taskId);
       ctx.throwIfCancelled();
       const settled = records.find((r) => r.batchId === batchId && r.stage === 'outcome');
       const result = args.agentMiningResults?.find((r) => r.agentId === `implementer-${batchId}`);
+      if (
+        d.auto &&
+        !settled &&
+        !result &&
+        !records.some((r) => r.batchId === batchId && r.stage === 'invocation') &&
+        !args.miningWaveExhausted
+      ) {
+        await hydrateNoSpecBrief(ctx, d);
+        ctx.throwIfCancelled();
+        throw new MiningWaveError([
+          {
+            agentId: `implementer-${batchId}`,
+            agentTitle: 'Implement consequential improvements',
+            roleKey: 'implementer',
+            prompt: buildInsightPrompt(d, intent.selected, batchId),
+          },
+        ]);
+      }
       outcome = settled
         ? {
             version: 1,
@@ -294,6 +415,18 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       'insight triage complete',
     );
     return {
+      ...(d.auto
+        ? {
+            findingsSummary: autoInsightReport(d.insights, d.auto.decisions, outcome.items),
+            automatic: {
+              version: 1 as const,
+              roundsStarted:
+                d.auto.roundsStarted + (d.auto.claim ? 0 : d.auto.mode === 'classify' ? 1 : 0),
+              stopReason: d.auto.stopReason,
+              classified: d.auto.decisions.length,
+            },
+          }
+        : {}),
       insightsFound: d.insights.length,
       selected,
       skipped: d.insights.length - selected.length,

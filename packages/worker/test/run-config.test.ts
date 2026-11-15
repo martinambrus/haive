@@ -653,7 +653,7 @@ it.each([undefined, false, true])(
       });
       expect(out.autoActOnInsights).toBe(preset !== false);
       expect(fake.rows(schema.tasks).find((row) => row.id === taskId)!.autoActOnInsights).toBe(
-        preset === true,
+        preset !== false,
       );
     } finally {
       config.mockRestore();

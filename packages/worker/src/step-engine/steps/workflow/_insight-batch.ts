@@ -138,7 +138,7 @@ const journalSchema = z
   .object({
     version: z.literal(1),
     protocolVersion: z.literal(1),
-    mode: z.literal('manual_08e'),
+    mode: z.enum(['manual_08e', 'auto_08e']),
     batchId: z.string(),
     sourceStepRowId: z.string(),
     generation: z.number().int().nonnegative(),
@@ -219,7 +219,7 @@ export async function appendInsightBatch(
     )
       throw new StepSupersededError(ctx.taskStepId);
     const [task] = await tx
-      .select({ id: schema.tasks.id })
+      .select({ id: schema.tasks.id, pausedAt: schema.tasks.pausedAt })
       .from(schema.tasks)
       .where(
         and(
@@ -240,6 +240,8 @@ export async function appendInsightBatch(
         r.generation === record.generation,
     );
     if (existing) return existing;
+    if (record.mode === 'auto_08e' && record.stage === 'intent' && task.pausedAt)
+      throw new StepSupersededError(ctx.taskStepId);
     const checked = readInsightBatchRecord(record);
     await tx.insert(schema.taskEvents).values({
       taskId: ctx.taskId,
@@ -256,12 +258,13 @@ export async function appendInsightBatch(
 export async function ensureInsightIntent(
   ctx: StepContext,
   selected: LoadedInsight[],
+  mode: InsightBatchRecord['mode'] = 'manual_08e',
 ): Promise<InsightBatchRecord> {
   const generation = ctx.rerunGeneration ?? 0;
   const record: InsightBatchRecord = {
     version: 1,
     protocolVersion: 1,
-    mode: 'manual_08e',
+    mode,
     batchId: insightBatchId(ctx.taskStepId, generation),
     sourceStepRowId: ctx.taskStepId,
     generation,

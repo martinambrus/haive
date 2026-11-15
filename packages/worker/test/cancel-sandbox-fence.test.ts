@@ -1,3 +1,9 @@
+import {
+  claimAutoRound,
+  loadAutoHistory,
+  saveAutoClassification,
+} from '../src/step-engine/steps/workflow/_insight-auto.js';
+import { hasCliWork } from '../src/queues/task-queue.js';
 import { handoffInsightContinuation } from '../src/queues/insight-continuation.js';
 import {
   activeInsightContinuation,
@@ -1686,5 +1692,232 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     expect(
       await publishInsightStep(ctx, { status: 'done', output: { continuation } }),
     ).toMatchObject({ status: 'done', rerunGeneration: 0, output: { continuation } });
+  });
+});
+
+describe.skipIf(!url)('automatic insight admission on PostgreSQL', () => {
+  let db: Database;
+  const userId = randomUUID();
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+  });
+  afterAll(async () => {
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await db.$client.end({ timeout: 5 });
+  });
+  const insight = (name: string) => ({
+    id: name,
+    identity: `a.ts::${name}`,
+    legacyId: name,
+    picked: false,
+    sourceStep: 'review',
+    title: name,
+    location: 'a.ts',
+    description: 'detail',
+  });
+  async function seed() {
+    const [task] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: 'workflow',
+        title: 'auto',
+        status: 'running',
+        autoActOnInsights: true,
+        currentStepId: '08e-insights-triage',
+        currentRound: 0,
+      })
+      .returning();
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task!.id,
+        stepId: '08e-insights-triage',
+        stepIndex: 8.95,
+        title: 'Insights',
+        status: 'running',
+        round: 0,
+      })
+      .returning();
+    return {
+      db,
+      taskId: task!.id,
+      taskStepId: step!.id,
+      userId,
+      round: 0,
+      epoch: 0,
+      rerunGeneration: 0,
+      throwIfCancelled() {},
+    } as StepContext;
+  }
+  it('serializes duplicate advances, preserves a pre-reservation claim at boot and rolls back a refused event', async () => {
+    const ctx = await seed();
+    const [a, b] = await Promise.all([
+      claimAutoRound(ctx, [insight('one')]),
+      claimAutoRound(ctx, [insight('one')]),
+    ]);
+    expect(a).toEqual(b);
+    expect((await loadAutoHistory(db, ctx.taskId)).claims).toHaveLength(1);
+    expect(await hasCliWork(db, ctx.taskStepId, 0, '08e-insights-triage')).toBe(true);
+    const other = await seed();
+    await db.execute(
+      sql.raw(
+        `ALTER TABLE task_events ADD CONSTRAINT ins4_reject CHECK (task_id <> '${other.taskId}'::uuid OR event_type <> 'insight.auto_round_started')`,
+      ),
+    );
+    try {
+      await expect(claimAutoRound(other, [insight('one')])).rejects.toMatchObject({
+        cause: { code: '23514' },
+      });
+    } finally {
+      await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT ins4_reject`);
+    }
+    expect((await loadAutoHistory(db, other.taskId)).claims).toEqual([]);
+  });
+  it('survives Retry, Resume, done replay and epoch takeover, with an injectable cap', async () => {
+    let ctx = await seed();
+    const first = await claimAutoRound(ctx, [insight('one')], { rounds: 2 });
+    await db
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    ctx = { ...ctx, epoch: 1 };
+    expect(await claimAutoRound(ctx, [insight('one')], { rounds: 2 })).toEqual(first);
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'done' })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    expect(await claimAutoRound(ctx, [insight('one')], { rounds: 2 })).toEqual(first);
+    const reset = await resetStepAndDownstream(db, ctx.taskId, '08e-insights-triage', 0, 1);
+    if (!reset || reset === 'superseded') throw new Error('reset overtaken');
+    ctx = { ...ctx, epoch: reset.newEpoch, rerunGeneration: 1 };
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running' })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    expect(await claimAutoRound(ctx, [insight('one')], { rounds: 2 })).toBeNull();
+    const second = await claimAutoRound(ctx, [insight('two')], { rounds: 2 });
+    expect(second?.ordinal).toBe(2);
+    const reset2 = await resetStepAndDownstream(
+      db,
+      ctx.taskId,
+      '08e-insights-triage',
+      0,
+      ctx.epoch!,
+    );
+    if (!reset2 || reset2 === 'superseded') throw new Error('reset overtaken');
+    ctx = { ...ctx, epoch: reset2.newEpoch, rerunGeneration: 2 };
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running' })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    expect(await claimAutoRound(ctx, [insight('three')], { rounds: 2 })).toBeNull();
+    expect((await loadAutoHistory(db, ctx.taskId)).claims).toHaveLength(2);
+  });
+  it.each(['OFF', 'pause', 'Stop', 'Cancel', 'dead', 'owner', 'epoch', 'pointer'] as const)(
+    'refuses new work under %s',
+    async (kind) => {
+      const ctx = await seed();
+      const patch =
+        kind === 'OFF'
+          ? { autoActOnInsights: false }
+          : kind === 'pause'
+            ? { pausedAt: new Date() }
+            : kind === 'Stop'
+              ? { status: 'failed' as const }
+              : kind === 'Cancel'
+                ? { status: 'cancelled' as const }
+                : kind === 'dead'
+                  ? { deadAt: new Date() }
+                  : kind === 'epoch'
+                    ? { orchestrationEpoch: 1 }
+                    : kind === 'pointer'
+                      ? { currentStepId: 'other' }
+                      : {};
+      await db
+        .update(schema.tasks)
+        .set({ ...patch, updatedAt: new Date() })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      if (kind === 'owner') ctx.userId = randomUUID();
+      if (kind === 'OFF' || kind === 'pause')
+        expect(await claimAutoRound(ctx, [insight('one')])).toBeNull();
+      else
+        await expect(claimAutoRound(ctx, [insight('one')])).rejects.toMatchObject({
+          name: 'StepSupersededError',
+        });
+      expect((await loadAutoHistory(db, ctx.taskId)).claims).toEqual([]);
+    },
+  );
+  it('publishes classification once before any editor and refuses an overtaken generation', async () => {
+    const ctx = await seed();
+    const claim = (await claimAutoRound(ctx, [insight('one')]))!;
+    const record = {
+      version: 1 as const,
+      batchId: claim.batchId,
+      sourceStepRowId: ctx.taskStepId,
+      generation: 0,
+      complete: true,
+      items: [
+        {
+          id: 'one',
+          identity: 'a.ts::one',
+          class: 'nit' as const,
+          kind: 'correctness' as const,
+          eligible: true,
+          outcome: 'left_minor' as const,
+          reason: 'style',
+        },
+      ],
+      invocationIds: [],
+    };
+    await Promise.all([saveAutoClassification(ctx, record), saveAutoClassification(ctx, record)]);
+    expect((await loadAutoHistory(db, ctx.taskId)).results).toEqual([record]);
+    await db
+      .update(schema.taskSteps)
+      .set({ rerunGeneration: 1 })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await expect(saveAutoClassification(ctx, record)).rejects.toMatchObject({
+      name: 'StepSupersededError',
+    });
+  });
+  it('replays an automatic done-row continuation without another claim or writer intent', async () => {
+    const ctx = await seed();
+    const chosen = [insight('one')];
+    const claim = (await claimAutoRound(ctx, chosen))!;
+    const intent = await ensureInsightIntent(ctx, chosen, 'auto_08e');
+    expect(intent.batchId).toBe(claim.batchId);
+    const outcome = await appendInsightBatch(ctx, {
+      ...intent,
+      stage: 'outcome',
+      items: [
+        { id: 'one', outcome: 'applied', changes: ['Changed code'], reason: 'Reported by writer' },
+      ],
+    });
+    const continuation = continuationForOutcome(outcome, ctx.round)!;
+    const source = await publishInsightStep(ctx, {
+      status: 'done',
+      endedAt: new Date(),
+      output: { version: 1, continuation },
+    });
+    const [first, again] = await Promise.all([
+      finishedStepResult(db, ctx.taskId, insightsTriageStep, source),
+      finishedStepResult(db, ctx.taskId, insightsTriageStep, source),
+    ]);
+    expect(first).toMatchObject({
+      status: 'revise',
+      targetStepId: '08-phase-5-verify',
+      continuation,
+    });
+    expect(again).toEqual(first);
+    expect((await loadAutoHistory(db, ctx.taskId)).claims).toHaveLength(1);
+    expect(
+      (await loadInsightBatchRecords(db, ctx.taskId)).filter((r) => r.stage === 'intent'),
+    ).toHaveLength(1);
   });
 });

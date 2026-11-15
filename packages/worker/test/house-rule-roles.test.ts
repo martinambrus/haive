@@ -107,7 +107,7 @@ describe('house rule roles', () => {
       '08a-browser-verify': { fixer: 'write' },
       '08b-test-management': { default: 'write' },
       '08c-code-review': { 'peer-reviewer': 'review' },
-      '08e-insights-triage': { default: 'write', implementer: 'write' },
+      '08e-insights-triage': { default: 'write', implementer: 'write', triage: 'review' },
     });
   });
 
@@ -123,6 +123,7 @@ describe('house rule roles', () => {
       '08c-code-review/peer-reviewer',
       '08e-insights-triage/default',
       '08e-insights-triage/implementer',
+      '08e-insights-triage/triage',
     ]);
     const seats = STEP_MINING_SEATS['08c-code-review']!.map((seat) => seat.id);
     expect(seats).toContain('peer-reviewer');

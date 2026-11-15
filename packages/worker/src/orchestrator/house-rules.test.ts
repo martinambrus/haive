@@ -224,7 +224,9 @@ describe('houseRulesFor', () => {
       for (const seat of ['default', 'peer-reviewer', ...seats.map((s) => s.id)]) {
         if (stepId === '08e-insights-triage' && ['default', 'implementer'].includes(seat)) {
           expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toEqual({ mode: 'write' });
-        } else expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toBeUndefined();
+        } else if (stepId === '08e-insights-triage' && seat === 'triage')
+          expect(houseRulesFor(stepId, seat)).toEqual({ mode: 'review' });
+        else expect(houseRulesFor(stepId, seat), `${stepId}/${seat}`).toBeUndefined();
       }
     }
     for (const stepId of [

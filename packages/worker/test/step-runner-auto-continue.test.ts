@@ -1685,7 +1685,7 @@ it('upgrades a persisted 06 schema in a schema-only write while retaining saved 
 });
 
 it.each(['answer', 'preset'] as const)(
-  'resolves an unavailable insight switch from a worker-validated %s',
+  'accepts the now-visible insight switch from a worker-validated %s',
   async (source) => {
     const state = freshState();
     state.taskStepRow.stepId = '06-run-config';
@@ -1719,11 +1719,11 @@ it.each(['answer', 'preset'] as const)(
       source === 'answer' ? { autoActOnInsights: true } : undefined,
     );
     expect(result.status).toBe('done');
-    expect(state.taskStepRow.output).toMatchObject({ autoActOnInsights: source === 'preset' });
+    expect(state.taskStepRow.output).toMatchObject({ autoActOnInsights: true });
     expect(
       state.updates.find((u) => u.table === 'tasks' && 'autoActOnInsights' in u.patch)?.patch
         .autoActOnInsights,
-    ).toBe(source === 'preset');
+    ).toBe(true);
     if (source === 'preset')
       expect(state.taskStepRow.formSchema).toMatchObject({ fields: [{ default: true }] });
   },

@@ -1,3 +1,4 @@
+import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
@@ -1795,6 +1796,7 @@ async function resolveAgentMiningPhase(
     const fatalAgent = existing.find(
       (r) =>
         r.status === 'failed' &&
+        !(stepDef.metadata.id === INSIGHT_STEP && classifierPolicy(r.agentId)) &&
         // The first 08e outage fails visibly and arms the allowance watch. On either Resume
         // path, fold the failed writer through apply into the batch's unconfirmed outcome:
         // it may have edited and cannot be retried in this generation. The in-memory request
@@ -1911,6 +1913,11 @@ async function resolveAgentMiningPhase(
   }
 
   if (!params.providers || !params.deps) {
+    if (
+      stepDef.metadata.id === INSIGHT_STEP &&
+      (detected as { auto?: { mode: string } }).auto?.mode === 'classify'
+    )
+      return { resolved: true, results: [], newResults: [], current };
     // Only an empty manual selection can finish without editor dependencies. Validate
     // the saved selection before calling selectAgents, which may write a batch intent.
     if (
@@ -1953,7 +1960,7 @@ async function resolveAgentMiningPhase(
       agentTitle: d.agentTitle,
       status: 'done',
       output: null,
-      rawOutput: null,
+      rawOutput: syntheticInsightReply(d, detected),
       errorMessage: null,
     }));
     return { resolved: true, results, newResults: results, current };
@@ -2018,6 +2025,21 @@ async function resolveAgentMiningPhase(
         ),
       );
     if (live.length === 0) {
+      if (
+        stepDef.metadata.id === INSIGHT_STEP &&
+        dispatches.every((d) => classifierPolicy(d.agentId))
+      )
+        return resolveAgentMiningPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          true,
+        );
       const rows = await db
         .select({
           agentId: schema.taskStepAgentMinings.agentId,
@@ -2214,6 +2236,46 @@ export async function holdReopenedForm(
   });
 }
 
+/** Test bypass remains synthetic through every wave, including the writer. */
+function syntheticInsightReply(dispatch: AgentMiningDispatch, detected: unknown): string | null {
+  const d = detected as {
+    auto?: {
+      candidates: { id: string }[];
+      decisions?: { id: string; class: string; eligible: boolean }[];
+    };
+    insights: { id: string }[];
+  };
+  if (!d.auto) return null;
+  const classifier = classifierPolicy(dispatch.agentId);
+  const ids = classifier
+    ? d.auto.candidates.map((i) => i.id)
+    : (d.auto.decisions ?? [])
+        .filter((i) => i.class === 'consequential' && i.eligible)
+        .map((i) => i.id);
+  return classifier
+    ? JSON.stringify({
+        version: 1,
+        batchId: dispatch.agentId.slice('triage-'.length, -2),
+        items: ids.map((id) => ({
+          id,
+          class: 'consequential',
+          kind: 'correctness',
+          reason: 'Synthetic classifier',
+        })),
+      })
+    : JSON.stringify({
+        version: 1,
+        batchId: dispatch.agentId.slice('implementer-'.length),
+        items: ids.map((id) => ({
+          id,
+          outcome: 'applied',
+          changes: ['Synthetic improvement'],
+          reason: 'Test bypass',
+        })),
+        notes: '',
+      });
+}
+
 /** Rows per reservation statement; each carries a whole prompt. */
 const RESERVE_CHUNK = 50;
 
@@ -2271,11 +2333,12 @@ async function reserveMiningAgents(
     await assertOwnsStep(tx, taskStepId);
     if (stepId === INSIGHT_STEP) {
       for (const row of rows)
-        await recordInsightReservation(
-          { ...ctx, db: tx as unknown as Database },
-          row.agentId,
-          row.id,
-        );
+        if (!classifierPolicy(row.agentId))
+          await recordInsightReservation(
+            { ...ctx, db: tx as unknown as Database },
+            row.agentId,
+            row.id,
+          );
     }
     return rows;
   });
@@ -2421,7 +2484,11 @@ async function dispatchMiningAgents(
     let enqueued = 0;
     for (const dispatch of dispatches) {
       ctx.throwIfCancelled();
-      const toolProfile = snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
+      const classifier =
+        stepDef.metadata.id === INSIGHT_STEP ? classifierPolicy(dispatch.agentId) : null;
+      const toolProfile = classifier
+        ? 'none'
+        : snapshotToolProfile(dispatch.snapshotRef != null, spec.toolProfile);
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
       if (refusal !== null) {
@@ -2456,6 +2523,21 @@ async function dispatchMiningAgents(
             providers: params.providers!,
             preferredProviderId,
             steeringRequested,
+            ...(classifier
+              ? {
+                  promptBudget: {
+                    maxChars: classifier.inputChars,
+                    outputReserveChars: 0,
+                    repack: (maxChars: number) => {
+                      if (prompt.length > maxChars)
+                        throw new PromptBudgetExceededError(
+                          'Insight classifier input including dispatch additions exceeds its budget.',
+                        );
+                      return prompt;
+                    },
+                  },
+                }
+              : {}),
             input: {
               kind: 'prompt',
               prompt,
@@ -2479,11 +2561,20 @@ async function dispatchMiningAgents(
               cwd: params.workspacePath,
               effortLevel: preferredEffort ?? undefined,
               disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+              ...(classifier ? { disableTools: true } : {}),
             },
           },
           snapshotCache,
         );
       } catch (err) {
+        if (classifier && err instanceof PromptBudgetExceededError) {
+          await refuse(
+            dispatch,
+            target,
+            'Insight classification input budget exceeded; manual selection required.',
+          );
+          continue;
+        }
         if (!(err instanceof ProviderBuildError)) throw err;
         buildFailure = `cannot build a command for ${err.providerName}: ${err.message}`;
       }
@@ -2563,12 +2654,9 @@ async function dispatchMiningAgents(
           .where(eq(schema.cliInvocations.id, target.cliInvocationId));
       }
 
-      const budget = await resolveMiningTimeoutMs(
-        current,
-        spec.timeoutMs,
-        target.timeoutAttempts,
-        learnedMs,
-      );
+      const budget = classifier
+        ? { timeoutMs: classifier.timeoutMs, timeoutSource: 'declared' }
+        : await resolveMiningTimeoutMs(current, spec.timeoutMs, target.timeoutAttempts, learnedMs);
       await stampLearnedTimeout(db, current.id, budget.timeoutMs);
       if (budget.timeoutMs !== spec.timeoutMs) {
         ctx.logger.info(
@@ -2583,7 +2671,7 @@ async function dispatchMiningAgents(
           'mining agent dispatched with a non-declared timeout budget',
         );
       }
-      if (stepDef.metadata.id === INSIGHT_STEP) {
+      if (stepDef.metadata.id === INSIGHT_STEP && !classifier) {
         await recordInsightInvocation(ctx, dispatch.agentId, target.id, invRow.id);
         ctx.throwIfCancelled();
         await beginFixTestCapture(db, {
@@ -3841,6 +3929,18 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           params.deps &&
           applyArgs.miningWaveExhausted !== true
         ) {
+          if (meta.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+            const synthetic: AgentMiningResult[] = applyErr.dispatches.map((d) => ({
+              agentId: d.agentId,
+              agentTitle: d.agentTitle,
+              status: 'done',
+              output: null,
+              rawOutput: syntheticInsightReply(d, detected),
+              errorMessage: null,
+            }));
+            applyArgs.agentMiningResults = [...(applyArgs.agentMiningResults ?? []), ...synthetic];
+            continue;
+          }
           // Mark every row apply() has just folded, BEFORE the wave's fresh rows
           // exist: the next apply() pass asks for the unconsumed set via
           // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref

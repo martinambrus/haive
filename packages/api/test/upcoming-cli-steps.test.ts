@@ -83,6 +83,9 @@ describe('buildUpcomingCliSteps', () => {
     expect(browser?.cliRoles?.map((r) => r.id)).toEqual(['tester', 'fixer']);
     expect(browser?.miningSeats).toBeUndefined();
 
+    const insight = out.find((s) => s.stepId === '08e-insights-triage');
+    expect(insight?.miningSeats?.map((s) => s.id)).toEqual(['triage', 'implementer']);
+    expect(insight?.cliRoles).toBeUndefined();
     const review = out.find((s) => s.stepId === '08c-code-review');
     expect(review?.miningSeats?.map((r) => r.id)).toContain('security-code-reviewer');
     // Fan-out seats must NOT surface as cliRoles: that field's length is loopPassesPerRound.
