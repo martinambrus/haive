@@ -905,7 +905,7 @@ Reviews in `.claude/tmp/codex-run/RPR-S/` (review-1.md, review-2.md).
 4. The fence-versus-removal test relies on completion order rather than an injected barrier (`worker/test/scratch-workspace.test.ts` ~:485).
 5. The owner and epoch admission rechecks have no dedicated controls (only status is exercised).
 
-### T683 · FNF[committed-snapshot] · committed snapshot mount lows, after #1210 (+6)
+### T683 · FNF[committed-snapshot] · committed snapshot mount lows, after #1210 (+8)
 
 status: parked: diminishing returns (2026-11-15, owner rule: trivial lows park; resume on a user report, a measured failure, a production snapshot issuer or a related change) · kind: fix · found: #1210 reviews · priority: P4
 
@@ -917,6 +917,9 @@ Reviews in `.claude/tmp/codex-run/P5B-S/` (review-1a.md, review-1b.md, review-2.
 4. `scripts/test/ci-gated-list.test.mjs` ~:200-209 hardcodes `SNAPSHOT_SANDBOX_TEST_IMAGE` instead of deriving it from the test's guard via `gatedEnvironment`; a renamed guard leaves the CI step green and the control skipped. Also the `module-source-pin` exemption still says "smokes" though it runs in `compose-boot` (PRE-EXISTING wording).
 5. The `dispatch failed before the agent was queued:` prefix is written in `step-runner.ts` ~:2508 and matched in `committed-snapshot.ts` ~:44 as two literals; a shared constant would make the pair explicit (the writer test pins it today).
 6. No production snapshot issuer exists yet, and each issue creates a new inventory and tree that stays until the task scratch is reaped (`committed-snapshot.ts` ~:437, `scratch-workspace.ts` ~:140); re-issuing on a re-offer can leave unused artifacts, and a crash mid-rebuild leaves a `stage-*`/`incomplete-*` directory until then. Decide reuse/collection when the issuer lands.
+
+7. No test sets setuid, setgid or sticky on a tracked file, though the `& 0o7777` mode check refuses them (`committed-snapshot.ts` ~:384); coverage only.
+8. `{ ...SNAPSHOT_LIMITS, ...opts.limits }` (~:142) turns an explicit `undefined` limit into `NaN`, which never refuses; no production caller passes `limits` (theoretical, same for every limit).
 
 ### T684 · Agent isolation for committed-snapshot dispatch (owner decision)
 
@@ -2254,6 +2257,7 @@ All low unless marked.
 
 ## Done
 
+- Committed snapshot mounts (#1210, 103075277): mining agents with a snapshot ref run against an immutable host-owned view verified before reservation and before execution (one held-fd `git cat-file --batch-command` child, shallow clones supported, alternates/links/gitlinks/`.git`/extra files refused, exact 0444/0555 modes, inventory cap shared by issue and resolve); budget starts after the scratch lock; snapshot agents get `rag_only`, no git MCP, no LSP; transient DB faults rethrown; failures fail the step. Every ref is NULL in production until an issuer lands. Lows T683; isolation decision T684.
 - Insight auto-action switch (#1212, 863a369bf): `tasks.auto_act_on_insights` (migration 0243, default false) written by 06; remembered only from the owner's last completed task on the same repository and type; hidden and inert (`INSIGHT_AUTO_ACTION_AVAILABLE` false, answers clamp to false, only an explicit type preset records true); parked 06 forms upgraded idempotently; 06 no longer writes the empty 08e pre-answer, so insight choices park under auto-continue. T681 PR2. PR4 must replace the already-persisted hidden field when the switch becomes available; `loadLastCompletedFormValues` (step-runner ~:244) still orders NULL `completed_at` first (PRE-EXISTING, minor).
 - Shared insight loader (#1209, 7c10887b1): `_insight-loader.ts` owns the parser and source loader; `loadUnactedInsights` (unlimited by default, picked filtered before the limit, exact omissions, `findingIdentity` before clipping, stable occurrence ids, additive `sourceRefs`); both gates persist through one bounded projection byte-identical to base; task-bound host service `ctx.host.loadUnactedInsights`. T681 PR1 and DPA P2.
 - Credential redaction in repair evidence (#1204, 2d3e62822): stored test-edit content and every gate artifact that serves diff or file text (gate-3, run-app, learning incl. extra files, KB commit, external KB) run through the committed-secret scanner and are rechecked when served; NUL and invalid-UTF-8 blobs are withheld whole; a pass that can no longer finish taints the task while an ended pass whose owner can still finish keeps its evidence; one exported marker; a change hidden by redaction shows a notice. T670 items 1 and 3. Lows filed in T670. Deploy note: api and worker crashed on the new shared export before libs finished; `pnpm docker restart worker` and `api` fixed it.
