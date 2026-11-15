@@ -679,6 +679,15 @@ Creation writes v2 only when a candidate applies a replacement, and pins effecti
 
 Rollback stops new replacement creation and keeps v2-capable readers and workers for resumable v2 tasks. Never downgrade those pins.
 
+The read-only step canvas displays a selected v2 replacement's review/audit ports from
+its decoded candidate binding. Before path selection, task history clears replacement
+bindings and labels the null-path graph as candidate-only. It returns only public
+role/contract/authorship metadata and edges, never module-private entry fields, output
+values, contract schemas or host policy hooks. Declaring replacement capability alone
+does not create a runtime data edge. The graph adds no manifest ports, SDK service,
+prompt token or new replacement role; existing catalog entry and plan vocabularies
+remain unchanged.
+
 ### Fan-out seats
 
 A module may declare optional `miningSeats` in its manifest, keyed by local exported
