@@ -52,6 +52,10 @@ beforeEach(() => {
   });
   step.mockResolvedValue({ taskId: 'task', round: 2 });
   vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+    id: 'row',
+    stepId: '01-worktree-setup',
+    status: 'done',
+    round: 0,
     detect: null,
     output: { worktreePath: '/repo/.haive/worktrees/task' },
     iterations: [],
@@ -183,6 +187,10 @@ it.each(['EMFILE', 'ENFILE'])(
   'propagates git spawn %s through the actual host collector',
   async (code) => {
     vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+      id: 'row',
+      stepId: '01-worktree-setup',
+      status: 'done',
+      round: 0,
       detect: null,
       output: { baseBranch: 'base', filesTouched: ['a'] },
       iterations: [],

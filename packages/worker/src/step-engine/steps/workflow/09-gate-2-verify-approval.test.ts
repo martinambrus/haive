@@ -1,3 +1,8 @@
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { CODE_AUDIT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { rolePin, PRODUCER, AUDIT } from '../../../../test/step-role-fixtures.js';
+import type { DerivedRunPlanV2 } from '@haive/shared/modularity';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
@@ -15,7 +20,12 @@ const m = vi.hoisted(() => ({
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
-  loadPreviousStepOutput: m.loadPreviousStepOutput,
+  loadPreviousStepOutput: (
+    db: unknown,
+    task: string,
+    step: string | { role: string },
+    ...rest: unknown[]
+  ) => m.loadPreviousStepOutput(db, task, typeof step === 'string' ? step : step.role, ...rest),
 }));
 vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../env-replicate/_shared.js')>()),
@@ -1603,6 +1613,128 @@ describe('gate-2 verification results read from 08', () => {
     m.loadGateHouseRules.mockReset().mockResolvedValue(null);
     m.changeFingerprint.mockReset().mockResolvedValue(null);
   });
+
+  it('detects both pinned physical producers through the actual loader', async () => {
+    const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const pin = rolePin();
+    const plan = pin.derivedRunPlan as DerivedRunPlanV2;
+    const auditId = 'module.example.audit';
+    const change = { replace: AUDIT, with: auditId };
+    plan.overlay.changes.push(change);
+    plan.composableEntries.push({
+      stepId: auditId,
+      label: 'Audit',
+      group: 'review',
+      dispatchesCli: true,
+      requires: [],
+      provides: ['code-audit'],
+      replaces: [AUDIT],
+      outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+    });
+    for (const c of plan.candidates) {
+      c.outcomes.push({ operationIndex: 1, change, outcome: 'applied', reason: 'change-applied' });
+      (c.stepIds as string[]).splice(c.stepIds.indexOf(AUDIT), 1, auditId);
+      c.roleBindings[AUDIT] = { stepId: auditId, outputContract: CODE_AUDIT_OUTPUT_CONTRACT };
+    }
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      reviewFindings: schema.reviewFindings,
+    });
+    fake.insert(schema.tasks, { id: taskId, ...pin });
+    fake.insert(schema.taskSteps, {
+      taskId,
+      stepId: PRODUCER,
+      round: 1,
+      status: 'done',
+      output: {
+        reviewed: true,
+        peer: {
+          verdict: 'REQUEST_CHANGES',
+          findings: [{ severity: 'high', issue: 'actual replacement finding', path: 'a.ts' }],
+          positives: [],
+        },
+        security: { verdict: 'SAFE', findings: [] },
+        extraLenses: [],
+        blocking: true,
+        reviewIncomplete: false,
+        advisoryVerdict: false,
+        coverage: null,
+        refutedCount: 0,
+        counts: { peer: 1, securityCriticalHigh: 0 },
+        recurringNote: '',
+      },
+    });
+    fake.insert(schema.taskSteps, {
+      taskId,
+      stepId: auditId,
+      round: 1,
+      status: 'done',
+      output: {
+        audited: true,
+        findings: [{ severity: 'low', issue: 'actual audit observation' }],
+        coverage: null,
+      },
+    });
+    const actual = await vi.importActual<typeof import('../onboarding/_helpers.js')>(
+      '../onboarding/_helpers.js',
+    );
+    m.loadPreviousStepOutput.mockImplementation((db, task, role) =>
+      actual.loadPreviousStepOutput(
+        db,
+        task,
+        role === '08c-code-review'
+          ? { role: '08c-code-review' }
+          : role === '08c2-code-audit'
+            ? { role: '08c2-code-audit' }
+            : role,
+      ),
+    );
+    const detected = await gate2VerifyApprovalStep.detect!({
+      taskId,
+      repoPath: '/repos/u/r',
+      logger: { info: vi.fn(), warn: vi.fn() },
+      db: fake.db,
+      round: 1,
+    } as never);
+    expect(detected.codeReview?.blocking).toBe(true);
+    expect(detected.codeReview?.peerFindings.join(' ')).toContain('actual replacement finding');
+    expect(detected.codeAudit?.findings.join(' ')).toContain('actual audit observation');
+  });
+
+  it.each(['08c-code-review', '08c2-code-audit'])(
+    'shows malformed replacement %s as incomplete without a default approval',
+    async (role) => {
+      m.loadPreviousStepOutput.mockImplementation(
+        async (_db: unknown, _task: unknown, id: string) =>
+          id === '08-phase-5-verify'
+            ? {
+                output: {
+                  test: passedRun,
+                  lint: passedRun,
+                  typecheck: passedRun,
+                  passed: true,
+                  runtimeSmoke: null,
+                },
+              }
+            : id === role
+              ? {
+                  output: { reviewed: true, audited: true, peer: { findings: 'malformed' } },
+                  outputCompatible: false,
+                  stepId: 'module.example.review',
+                }
+              : null,
+      );
+      const detected = await gate2VerifyApprovalStep.detect!(ctx);
+      const form = gate2VerifyApprovalStep.form!(ctx, detected)!;
+      expect((form.fields.find((f) => f.id === 'decision') as { default?: string })?.default).toBe(
+        'reject',
+      );
+      expect(JSON.stringify(form.statusSummary)).toContain(
+        role === '08c-code-review' ? 'unreviewed' : 'INCOMPLETE',
+      );
+    },
+  );
 
   it('flags a slot 08 found no runner for only when configs were declined', async () => {
     const withDetect = (detect: Record<string, unknown>) =>

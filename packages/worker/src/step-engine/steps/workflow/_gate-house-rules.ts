@@ -1,3 +1,4 @@
+import { STEP_ROLES } from '@haive/shared/step-outputs';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StatusSummaryItem } from '@haive/shared';
@@ -241,7 +242,8 @@ async function validationCheck(db: Database, taskId: string): Promise<Check | nu
 }
 
 async function codeReviewCheck(db: Database, taskId: string): Promise<Check | null> {
-  const review = await loadPreviousStepOutput(db, taskId, '08c-code-review');
+  const review = await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview });
+  if (review?.outputCompatible === false) return null;
   const output = (review?.output ?? {}) as Record<string, unknown>;
   const stamp = await stampNamedBy(db, output.peerInvocationId);
   if (stamp === null) return null;

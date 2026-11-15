@@ -424,6 +424,7 @@ describe('gate directive authority', () => {
  *  resolves to a scripted event list. detectFixLoopOscillation only reads `payload`. */
 function eventsDb(events: { payload: Record<string, unknown> }[]): Database {
   return {
+    query: { tasks: { findFirst: async () => ({ type: 'workflow' }) } },
     select: () => ({
       from: () => ({ where: () => ({ orderBy: async () => events }) }),
     }),

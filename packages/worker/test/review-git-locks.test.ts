@@ -37,6 +37,10 @@ beforeEach(async () => {
   const worktree = join(root, 'worktree');
   await writeFile(join(worktree, 'a'), 'new\n');
   vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+    id: 'row',
+    stepId: '01-worktree-setup',
+    status: 'done',
+    round: 0,
     detect: null,
     output: { baseBranch: 'base', filesTouched: ['a'] },
     iterations: [],
@@ -134,6 +138,10 @@ it.each(['review-diff', 'host-collector', 'built-in'])(
 
 it('disables optional locks on HEAD fallbacks without a recorded base', async () => {
   vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+    id: 'row',
+    stepId: '01-worktree-setup',
+    status: 'done',
+    round: 0,
     detect: null,
     output: { filesTouched: ['a'] },
     iterations: [],

@@ -1,3 +1,5 @@
+import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
+import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { asc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -45,7 +47,7 @@ const DIAGNOSIS_COUNT: Record<DigestTier, number> = { low: 1, medium: 3, high: 1
 const SOFT_FINDING_CAP: Record<DigestTier, number> = { low: 4, medium: 12, high: 40 };
 
 /** Steps whose `output` carries severity-bearing findings. */
-const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08c-code-review', '08d-adversarial-qa']);
+const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08d-adversarial-qa']);
 
 interface Finding {
   severity: ReviewSeverity;
@@ -64,6 +66,13 @@ function asArray(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
 }
 
+function asRecords(v: unknown): Record<string, unknown>[] {
+  return asArray(v).filter(
+    (item): item is Record<string, unknown> =>
+      item !== null && typeof item === 'object' && !Array.isArray(item),
+  );
+}
+
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
@@ -75,7 +84,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
   const out: Finding[] = [];
 
   if (stepId === '07b-phase-4-validate') {
-    for (const it of asArray(o.issues)) {
+    for (const it of asRecords(o.issues)) {
       const i = it as Record<string, unknown>;
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
@@ -85,10 +94,10 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '07b-validate',
       });
     }
-  } else if (stepId === '08c-code-review') {
+  } else if (stepId === STEP_ROLES.codeReview) {
     // `refuted` findings are skipped throughout: a refuter disproved them against the
     // code, so they are not evidence of anything the next task should learn from.
-    for (const it of asArray((o.peer as Record<string, unknown> | undefined)?.findings)) {
+    for (const it of asRecords((o.peer as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       if (i.refuted === true) continue;
       out.push({
@@ -99,7 +108,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '08c-peer',
       });
     }
-    for (const it of asArray((o.security as Record<string, unknown> | undefined)?.findings)) {
+    for (const it of asRecords((o.security as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       if (i.refuted === true) continue;
       // Normalized here too, not only at parse: this also reads rows written before
@@ -113,9 +122,9 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '08c-security',
       });
     }
-    for (const lens of asArray(o.extraLenses)) {
+    for (const lens of asRecords(o.extraLenses)) {
       const l = lens as Record<string, unknown>;
-      for (const it of asArray(l.findings)) {
+      for (const it of asRecords(l.findings)) {
         const i = it as Record<string, unknown>;
         if (i.refuted === true) continue;
         out.push({
@@ -128,7 +137,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       }
     }
   } else if (stepId === '08d-adversarial-qa') {
-    for (const it of asArray(o.findings)) {
+    for (const it of asRecords(o.findings)) {
       const i = it as Record<string, unknown>;
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
@@ -155,7 +164,7 @@ function extractRuntimeErrors(stepId: string, output: unknown): string[] {
   } else if (stepId === '08a-browser-verify') {
     for (const e of asArray(o.consoleErrors).slice(0, 5)) out.push(`console: ${clip(str(e), 300)}`);
     for (const e of asArray(o.networkErrors).slice(0, 5)) out.push(`network: ${clip(str(e), 300)}`);
-    for (const f of asArray(o.failures).slice(0, 5)) {
+    for (const f of asRecords(o.failures).slice(0, 5)) {
       const ff = f as Record<string, unknown>;
       out.push(`browser-test: ${clip(str(ff.description), 300)}`);
     }
@@ -196,14 +205,16 @@ export async function buildTaskHistoryDigest(
     .from(schema.taskEvents)
     .where(eq(schema.taskEvents.taskId, taskId))
     .orderBy(asc(schema.taskEvents.createdAt));
-  return renderTaskHistoryDigest(steps, events);
+  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId));
 }
 
 /** Pure renderer (exported for unit tests) over already-fetched step + event rows. */
 export function renderTaskHistoryDigest(
   steps: DigestStepInput[],
   events: DigestEventInput[],
+  task: RoleTaskPin = {},
 ): TaskHistoryDigest {
+  const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const maxRound = steps.reduce((m, s) => Math.max(m, s.round ?? 0), 0);
   const fixLoopEvents = events.filter((e) => e.eventType === 'fix_loop.requested');
   const fixLoopCount = fixLoopEvents.length;
@@ -214,7 +225,8 @@ export function renderTaskHistoryDigest(
   const findings: Finding[] = [];
   const runtimeErrors: string[] = [];
   for (const s of steps) {
-    if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
+    if (s.stepId === reviewId) findings.push(...extractFindings(STEP_ROLES.codeReview, s.output));
+    else if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
     runtimeErrors.push(...extractRuntimeErrors(s.stepId, s.output));
   }
   const findingCount = findings.length;

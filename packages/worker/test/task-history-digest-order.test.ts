@@ -19,7 +19,10 @@ async function capture(): Promise<string[]> {
       },
     }),
   };
-  const db = { select: () => ({ from: () => rows }) } as unknown as Database;
+  const db = {
+    query: { tasks: { findFirst: async () => ({ type: 'workflow' }) } },
+    select: () => ({ from: () => rows }),
+  } as unknown as Database;
   await buildTaskHistoryDigest(db, 'task-1');
   return orders;
 }

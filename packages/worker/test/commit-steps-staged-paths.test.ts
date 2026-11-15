@@ -41,7 +41,7 @@ vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal
     ...original,
     loadPreviousStepOutput: (...args: Parameters<typeof original.loadPreviousStepOutput>) => {
       if (stepOutputs.current === null) return original.loadPreviousStepOutput(...args);
-      const row = stepOutputs.current[args[2]];
+      const row = stepOutputs.current[typeof args[2] === 'string' ? args[2] : args[2].role];
       return Promise.resolve(
         row ? { detect: row.detect ?? null, output: row.output ?? null, iterations: [] } : null,
       );
