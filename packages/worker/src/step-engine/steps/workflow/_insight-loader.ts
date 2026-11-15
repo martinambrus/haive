@@ -9,6 +9,7 @@ import type {
   InsightLoadOptions,
   InsightLoadResult,
 } from '@haive/shared/step';
+import { loadInsightBatchRecords } from './_insight-batch.js';
 import { collapseToLine } from '../_untrusted-repo.js';
 
 interface InsightOutput {
@@ -208,8 +209,20 @@ export async function loadUnactedInsights(
     .where(
       and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '08e-insights-triage')),
     );
+  const journal = await loadInsightBatchRecords(db, taskId);
+  const acted = new Set<string>();
+  for (const record of journal) {
+    if (record.stage !== 'outcome') continue;
+    for (const item of record.items) {
+      if (item.outcome !== 'applied' && item.outcome !== 'already_handled') continue;
+      const selected = record.selected.find((i) => i.id === item.id);
+      if (selected) acted.add(selected.identity);
+    }
+  }
   const picked = new Set<string>();
   for (const row of triage) {
+    // New attempts derive picked/acted from the durable journal, including after Retry.
+    if ((row.output as { version?: unknown } | null)?.version === 1) continue;
     const selected = (row.output as { selected?: unknown } | null)?.selected;
     if (!Array.isArray(selected)) continue;
     for (const value of selected) {
@@ -230,7 +243,8 @@ export async function loadUnactedInsights(
           .update(JSON.stringify([i.title.toLowerCase(), i.location.toLowerCase()]))
           .digest('hex')}`,
         identity: findingIdentity({ file: i.location, description: i.title }),
-        picked: picked.has(key),
+        picked:
+          picked.has(key) || acted.has(findingIdentity({ file: i.location, description: i.title })),
       };
     })
     .filter((i) => includePicked || !i.picked);
