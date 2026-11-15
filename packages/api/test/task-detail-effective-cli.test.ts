@@ -170,6 +170,23 @@ describe('both owner-scoped role DTO surfaces', () => {
       expect((await app.request(`/${TASK}${suffix}`)).status).toBe(404);
     },
   );
+  it.each(['', '/steps'])(
+    'looks up a derived definition and refuses its missing plan on %s',
+    async (suffix) => {
+      const fake = setup(OWN, null, { type: 'custom-derived', derivedRunPlan: null });
+      fake.insert(schema.taskTypeDefinitions, {
+        slug: 'custom-derived',
+        displayName: 'Derived',
+        source: 'admin',
+        runListStrategy: 'derived',
+        baseSlug: 'workflow',
+        changes: [],
+      });
+      const response = await app.request(`/${TASK}${suffix}`);
+      expect(response.status).toBe(409);
+      expect(JSON.stringify(await response.json())).toContain('invalid-derived-run-plan');
+    },
+  );
   it.each(['', '/steps'])('refuses an owned malformed pin on %s by name', async (suffix) => {
     setup(OWN, null, { derivedRunPlan: { version: 2 } });
     const res = await app.request(`/${TASK}${suffix}`);
