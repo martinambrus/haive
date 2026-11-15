@@ -690,7 +690,7 @@ Measured 2026-11-14, evidence in `.claude/tmp/codex-run/DP0/` (`notes.md`, `benc
 
 The step SDK seam (prerequisite 2) continues regardless, because deep analysis needs it.
 
-### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191, #1208 and #1211 (+31)
+### T679 · FNF[derived-types] · derived task type evaluator lows and PR3 decisions, after #1186, #1190, #1191, #1208 and #1211 (+32)
 
 status: parked (items 1-6 resolved 2026-11-14 in #1190 (96b261c5d); items 10 and 11 resolved 2026-11-15 in #1195; the rest parked: diminishing returns (2026-11-14)) · kind: fix · found: #1186 and DT2 reviews 2026-11-14 · priority: P3 (resolve inside derived types PR3)
 
@@ -727,6 +727,7 @@ Reviews in `.claude/tmp/codex-run/DTY-S/review-1.md` and `DT2-S/review-1.md`.
 29. The role source scan walks the tree three times; fold into one pass (DP4R review-2 B-5, low).
 30. Contract reference formatting is duplicated in two places (DP4R review-2 B-6, low).
 31. Parse-count test title overclaims what it pins (DP4R review-3 L1, coverage); `llm.skipIf` kept by design (L2); one dead guard remains (L3).
+32. (related first-party, PRE-EXISTING, low; from the port canvas review) `POST /admin/task-types/preview` and create accept unbounded `stepIds` (`shared/src/modularity/task-types.ts` ~:186 has no `.max`); the ports route now caps drafts at `MAX_PORT_DRAFT_STEPS` (256). Apply the same named bound to preview and create.
 
 ### T678 · FNF[step-sdk] · step SDK seam lows, after #1184 and #1188 (+13)
 
@@ -933,7 +934,7 @@ status: in progress (approved 2026-11-15; PR1 DONE #1214 f6fc8fb0e; PR2 canvas i
 
 Plan: `docs/plans/typed-step-ports.md` (archived when PR1 starts; session copy `~/.claude/plans/tranquil-hugging-willow.md`). Analysis: `.claude/tmp/codex-run/ROLE-S/codex-1/design.md` + `edge-index.md`. Owner decisions 2026-11-15: ports carry data only (no loop/skip/gate/commit power); spec is a stage chain (04 draft, 05 checked, 05a resolved) plus an effective-spec host adapter; node canvas (`@xyflow/react`) from the first UI PR; spec chain is the first port. PRs: 1 registry + spec chain (xhigh); 2 read-only canvas (high; CSP check); 3 universal v3 per-consumer pins, nullable task column (xhigh; after INS3b); 4 module/SDK/prompt ports + canvas binding (xhigh); 5 discovery/requirements/implementation summary (high); 6 checks and advisory results (xhigh); 7 optional fan-in. Physical step-id reads stay for gate forms, worktree/runtime, receipts/side effects, replay, migrations, insight inventory.
 
-For PR3 (from #1214 review-2): (1) the declaration parity control only checks declarations that exist; before pins bind from them, assert every spec role has exactly one provider with `stepId === legacyStepId`, pin input names and `optional` flags in one table, and decide whether 06-run-config and 08b declare `consumesRoles` (they read spec stages but declare none). (2) Add 08c and a module producer to `spec-port-catalog.test.ts` asserting `outputContract`/`replaces` survive catalog sync; add an `assertStepOutputDeclaration` throw case for a spec ref. (3) `readRole` error text says "host-policy" for an unregistered role too.
+For PR3 (from #1214 review-2): (1) the declaration parity control only checks declarations that exist; before pins bind from them, assert every spec role has exactly one provider with `stepId === legacyStepId`, pin input names and `optional` flags in one table, and decide whether 06-run-config and 08b declare `consumesRoles` (they read spec stages but declare none). (2) Add 08c and a module producer to `spec-port-catalog.test.ts` asserting `outputContract`/`replaces` survive catalog sync; add an `assertStepOutputDeclaration` throw case for a spec ref. (3) `readRole` error text says "host-policy" for an unregistered role too. (4) From the canvas PR review: `validatePortEdges` copies every earlier producer id into each input's `candidates` (O(consumers x producers)); admission must bound its own step count, since the `/ports` cap does not cover it. Its `bindings` argument is now keyed by run position. (5) Low, UX: the task-history canvas is 650 px high and sits above the step cards, so an approval form moves below it.
 
 ### T684 · Agent isolation for committed-snapshot dispatch (owner decision)
 
