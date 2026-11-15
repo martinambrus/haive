@@ -1,3 +1,4 @@
+import gateFixture from '../../../../test/fixtures/insight-gate-base.json' with { type: 'json' };
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -535,6 +536,47 @@ describe('10-gate-3-commit detect', () => {
 });
 
 describe('10-gate-3-commit out-of-scope insights', () => {
+  it.each([false, true])('persists the base insight bytes (git: %s)', async (hasGit) => {
+    const repo = hasGit ? await seedRepo() : await tmp('gate3-insight-');
+    const detected = await gate3CommitStep.detect!(
+      mkCtx(repo, [[], [], [], [], gateFixture.outputs, [], gateFixture.triage]),
+    );
+    expect(JSON.stringify(detected.outOfScopeInsights)).toBe(
+      JSON.stringify(gateFixture.expectedInsights),
+    );
+    expect(detected.outOfScopeInsightsOmitted).toBe(0);
+  });
+
+  it('bounds every persisted insight field and drops inventory metadata', async () => {
+    const repo = await tmp('gate3-insight-');
+    const long = 'x'.repeat(2499) + '\u0085' + 'y'.repeat(2500);
+    const noted = { stepId: long, raw: `## INSIGHTS\n- INSIGHT: ${long} | ${long} | ${long}` };
+    const detected = await gate3CommitStep.detect!(mkCtx(repo, [[], [], [], [], [noted], [], []]));
+    expect(detected.outOfScopeInsights).toEqual([
+      {
+        id: 'i-1',
+        sourceStep: 'x'.repeat(200),
+        title: 'x'.repeat(200),
+        location: 'x'.repeat(200),
+        description: 'x'.repeat(200),
+      },
+    ]);
+  });
+
+  it('stores only 30 of 31 insights and counts the omitted record', async () => {
+    const repo = await tmp('gate3-insight-');
+    const noted = {
+      stepId: 'review',
+      raw: [
+        '## INSIGHTS',
+        ...Array.from({ length: 31 }, (_, n) => `- INSIGHT: Idea ${n} | f${n}.ts`),
+      ].join('\n'),
+    };
+    const detected = await gate3CommitStep.detect!(mkCtx(repo, [[], [], [], [], [noted], [], []]));
+    expect(detected.outOfScopeInsights).toHaveLength(30);
+    expect(detected.outOfScopeInsightsOmitted).toBe(1);
+  });
+
   const noted = {
     stepId: '07-phase-2-implement',
     raw: '## INSIGHTS\n- INSIGHT: Cache lookup | x.ts:1 | hot path\n',

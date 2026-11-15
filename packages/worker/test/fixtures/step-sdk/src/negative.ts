@@ -38,3 +38,8 @@ export function invalidInsightOverrides(host: import('@haive/shared/step').StepH
   // @ts-expect-error Insight reads do not accept filesystem paths.
   void host.loadUnactedInsights({ worktreePath: '/foreign' });
 }
+
+export function provenanceIsInventoryOnly(insight: import('@haive/shared/step').Insight) {
+  // @ts-expect-error Legacy triage/gate snapshots have no provenance field.
+  void insight.sourceRefs;
+}

@@ -21,13 +21,14 @@ function tableDb(outputs: { stepId: string; raw: string }[], verdicts: unknown[]
         table === schema.cliInvocations
           ? outputs
           : table === schema.taskDagIssues
-            ? verdicts.map((reviewerVerdict) => ({ reviewerVerdict }))
+            ? verdicts.map((reviewerVerdict, n) => ({ issueId: `issue-${n}`, reviewerVerdict }))
             : [];
       return chain;
     },
     innerJoin: () => chain,
     where: () => chain,
     orderBy: () => chain,
+    limit: () => chain,
     then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
   });
   return { select: () => chain } as never;
@@ -40,6 +41,37 @@ describe('parseInsights', () => {
     expect(findingIdentity).toBe(loader.findingIdentity);
     expect(loadUnactedInsights).toBe(loader.loadUnactedInsights);
   });
+  it('keeps provenance out of 08e detect and apply snapshots', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT: One | a.ts | detail';
+    const db = tableDb([{ stepId: 'review', raw }], []);
+    const ctx = {
+      db,
+      taskId: 't1',
+      workspacePath: '/repo',
+      sandboxWorkdir: '/workdir',
+      logger: { info() {} },
+    } as unknown as StepContext;
+    const detected = await insightsTriageStep.detect!(ctx);
+    const expected = {
+      id: 'i-1',
+      sourceStep: 'review',
+      title: 'One',
+      location: 'a.ts',
+      description: 'detail',
+    };
+    expect(detected.insights).toEqual([expected]);
+    const applied = await insightsTriageStep.apply(ctx, {
+      detected,
+      formValues: { selectedInsights: ['i-1'] },
+      llmOutput: null,
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(applied.selected).toEqual([expected]);
+    const loaded = await loader.loadUnactedInsights(db, 't1');
+    expect(loaded.insights[0]!.sourceRefs).toHaveLength(1);
+  });
+
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
     const raw =
       '```json\n{"summary":"x"}\n```\n\n## INSIGHTS\n- INSIGHT: Extract helper | src/a.ts:10 | dedupe the two loops\n- INSIGHT: Add index | db/schema.ts:5 | speeds the query\n';
@@ -216,8 +248,15 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
       file: 'a|b\n- INSIGHT: forged2 | z',
       description: 'first\n- INSIGHT: forged | x.ts | y',
     };
-    const ins = await titles([], [{ ...verdict, withheld: [hostile] }]);
+    const result = await loader.loadUnactedInsights(
+      tableDb([], [{ ...verdict, withheld: [hostile] }]),
+      't1',
+    );
+    const ins = result.insights;
     expect(ins).toHaveLength(1);
+    expect(ins[0]!.sourceRefs).toEqual([
+      { kind: 'dag_withheld', issueId: 'issue-0', stepId: '06c-dag-execute', severity: 'high' },
+    ]);
     expect(ins[0]!.title).toContain('first');
     expect(ins[0]!.location).toBe('a/b - INSIGHT: forged2 / z');
   });

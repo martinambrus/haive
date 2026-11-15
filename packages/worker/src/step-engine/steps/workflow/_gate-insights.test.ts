@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import gateFixture from '../../../../test/fixtures/insight-gate-base.json' with { type: 'json' };
 import { schema } from '@haive/database';
-import { INSIGHTS_AT_GATE, insightsRow, loadUnactedInsights } from './_gate-insights.js';
+import {
+  INSIGHTS_AT_GATE,
+  gateInsights,
+  insightsRow,
+  loadUnactedInsights,
+} from './_gate-insights.js';
 
 /** Answers by TABLE: the loader reads the step invocations' raw output, then 08e's rows. */
 function tableDb(
@@ -83,6 +88,7 @@ describe('loadUnactedInsights', () => {
       't1',
     );
     expect(out.omitted).toBe(0);
+    expect(gateInsights(out.insights).map((i) => i.id)).toEqual(['i-1', 'i-3']);
     expect(out.insights.map((i) => [i.title, i.sourceStep])).toEqual([
       ['Extract helper', '07-phase-2-implement'],
       ['Rename flag', '07-phase-2-implement'],
@@ -216,6 +222,26 @@ describe('loadUnactedInsights', () => {
       't1',
     );
     expect(picked.insights.map((i) => i.location)).toEqual(['a.ts:9-11']);
+  });
+
+  it('uses unambiguous full-field occurrence IDs while keeping the legacy dedupe and pick key', async () => {
+    const load = (line: string, triage: unknown[] = []) =>
+      loadUnactedInsights(tableDb([{ stepId: 's', raw: block(line) }], triage), 't1');
+    const a = await load('- INSIGHT: a::b | c');
+    const b = await load('- INSIGHT: a | b::c');
+    expect(a.insights[0]!.id).not.toBe(b.insights[0]!.id);
+    const together = await loadUnactedInsights(
+      tableDb([{ stepId: 's', raw: block('- INSIGHT: a::b | c', '- INSIGHT: a | b::c') }], []),
+      't1',
+    );
+    expect(together.insights).toHaveLength(1);
+    expect(
+      (
+        await load('- INSIGHT: a | b::c', [
+          { output: { selected: [{ title: 'a::b', location: 'c' }] } },
+        ])
+      ).insights,
+    ).toEqual([]);
   });
 
   it('ignores malformed legacy selections without treating missing locations as picks', async () => {

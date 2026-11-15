@@ -248,6 +248,26 @@ function insightContext() {
   };
 }
 
+it.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '1'])(
+  'synchronously rejects invalid limit %s before hostCall or identity reads',
+  (limit) => {
+    const f = insightContext();
+    const cancelled = vi.fn();
+    f.context.throwIfCancelled = cancelled;
+    // A bad binding must not mask invalid options.
+    task.mockResolvedValue(undefined);
+    const host = createStepHostServices(f.context);
+    expect(() => {
+      const pending = host.loadUnactedInsights({ limit } as never);
+      void pending.catch(() => {});
+    }).toThrow(RangeError);
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(task).not.toHaveBeenCalled();
+    expect(step).not.toHaveBeenCalled();
+    expect(f.select).not.toHaveBeenCalled();
+  },
+);
+
 it('loads insight inventory without a worktree, forwarding options to the bound task only', async () => {
   const f = insightContext();
   // First read contains source output; later rows lack a selected array.
