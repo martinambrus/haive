@@ -1,3 +1,5 @@
+import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
+import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { asc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -45,7 +47,7 @@ const DIAGNOSIS_COUNT: Record<DigestTier, number> = { low: 1, medium: 3, high: 1
 const SOFT_FINDING_CAP: Record<DigestTier, number> = { low: 4, medium: 12, high: 40 };
 
 /** Steps whose `output` carries severity-bearing findings. */
-const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08c-code-review', '08d-adversarial-qa']);
+const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08d-adversarial-qa']);
 
 interface Finding {
   severity: ReviewSeverity;
@@ -85,7 +87,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
         source: '07b-validate',
       });
     }
-  } else if (stepId === '08c-code-review') {
+  } else if (stepId === STEP_ROLES.codeReview) {
     // `refuted` findings are skipped throughout: a refuter disproved them against the
     // code, so they are not evidence of anything the next task should learn from.
     for (const it of asArray((o.peer as Record<string, unknown> | undefined)?.findings)) {
@@ -196,14 +198,16 @@ export async function buildTaskHistoryDigest(
     .from(schema.taskEvents)
     .where(eq(schema.taskEvents.taskId, taskId))
     .orderBy(asc(schema.taskEvents.createdAt));
-  return renderTaskHistoryDigest(steps, events);
+  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId));
 }
 
 /** Pure renderer (exported for unit tests) over already-fetched step + event rows. */
 export function renderTaskHistoryDigest(
   steps: DigestStepInput[],
   events: DigestEventInput[],
+  task: RoleTaskPin,
 ): TaskHistoryDigest {
+  const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const maxRound = steps.reduce((m, s) => Math.max(m, s.round ?? 0), 0);
   const fixLoopEvents = events.filter((e) => e.eventType === 'fix_loop.requested');
   const fixLoopCount = fixLoopEvents.length;
@@ -214,7 +218,8 @@ export function renderTaskHistoryDigest(
   const findings: Finding[] = [];
   const runtimeErrors: string[] = [];
   for (const s of steps) {
-    if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
+    if (s.stepId === reviewId) findings.push(...extractFindings(STEP_ROLES.codeReview, s.output));
+    else if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
     runtimeErrors.push(...extractRuntimeErrors(s.stepId, s.output));
   }
   const findingCount = findings.length;

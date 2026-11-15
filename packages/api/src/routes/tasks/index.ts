@@ -1,3 +1,4 @@
+import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { derivedTaskWarnings } from '@haive/shared/modularity';
 import { assertTaskRootMergeIdle } from '../../lib/root-merge-busy.js';
 import { recordTaskModuleAdmissions } from '@haive/shared/modularity-server';
@@ -1175,7 +1176,11 @@ taskRoutes.get('/:id', async (c) => {
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
   const withActiveRole = await enrichStepsWithActiveRole(db, flags, id, withStats);
   const withAgentCounts = await enrichStepsWithAgentCounts(db, id, withActiveRole);
-  const steps = enrichStepsWithCliUsage(flags, withAgentCounts);
+  const steps = await projectTaskStepOutputRoles(
+    db,
+    task,
+    enrichStepsWithCliUsage(flags, withAgentCounts),
+  );
   const active = await findActiveCliInvocation(db, id);
   const providerBreakdown = await sumTaskProviderBreakdown(db, id);
   // Costs are stored in USD (what every vendor bills); this is the rate the UI formats

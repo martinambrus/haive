@@ -15,7 +15,7 @@ function ev(eventType: string, payload: Record<string, unknown>): DigestEventInp
 
 describe('renderTaskHistoryDigest', () => {
   it('empty history -> low tier, minimal digest with no sections', () => {
-    const d = renderTaskHistoryDigest([], []);
+    const d = renderTaskHistoryDigest([], [], {});
     expect(d.tier).toBe('low');
     expect(d.maxRound).toBe(0);
     expect(d.fixLoopCount).toBe(0);
@@ -67,7 +67,7 @@ describe('renderTaskHistoryDigest', () => {
       }),
       ev('spec.rejected', { feedback: 'scope too broad' }),
     ];
-    const d = renderTaskHistoryDigest(steps, events);
+    const d = renderTaskHistoryDigest(steps, events, {});
     expect(d.tier).toBe('high');
     expect(d.fixLoopCount).toBe(3);
     expect(d.text).toContain('What blocked it');
@@ -101,6 +101,7 @@ describe('renderTaskHistoryDigest', () => {
         }),
       ],
       [],
+      {},
     );
     expect(d.findingCount).toBe(1);
     expect(d.text).toContain('race');
@@ -115,7 +116,7 @@ describe('renderTaskHistoryDigest', () => {
       issues.push({ severity: 'low', file: `f${i}.php`, description: `nit ${i}` });
     }
     issues.push({ severity: 'critical', file: 'x.php', description: 'boom', fix: 'fix it' });
-    const d = renderTaskHistoryDigest([step('07b-phase-4-validate', 0, { issues })], []);
+    const d = renderTaskHistoryDigest([step('07b-phase-4-validate', 0, { issues })], [], {});
     expect(d.tier).toBe('high'); // 31 findings >= 15
     expect(d.text).toContain('[critical] x.php');
     expect(d.text).toMatch(/\+\d+ more lower-severity findings/);
@@ -133,12 +134,12 @@ describe('renderTaskHistoryDigest', () => {
       }),
     ];
     const events = [ev('fix_loop.requested', { round: 1, sourceStepId: '07b', diagnosis: 'd' })];
-    const d = renderTaskHistoryDigest(steps, events);
+    const d = renderTaskHistoryDigest(steps, events, {});
     expect(d.tier).toBe('medium');
   });
 
   it('escalation forces high tier even with one round', () => {
-    const d = renderTaskHistoryDigest([], [ev('fix_loop.escalated', { round: 1, rounds: 5 })]);
+    const d = renderTaskHistoryDigest([], [ev('fix_loop.escalated', { round: 1, rounds: 5 })], {});
     expect(d.tier).toBe('high');
   });
 
@@ -148,7 +149,7 @@ describe('renderTaskHistoryDigest', () => {
     for (let i = 1; i <= 12; i += 1) {
       events.push(ev('fix_loop.requested', { round: i, sourceStepId: 's', diagnosis: big }));
     }
-    const d = renderTaskHistoryDigest([], events);
+    const d = renderTaskHistoryDigest([], events, {});
     expect(d.tier).toBe('high');
     expect(d.text.length).toBeLessThanOrEqual(20000 + 120);
     expect(d.text).toContain('digest truncated');
@@ -161,6 +162,7 @@ describe('renderTaskHistoryDigest', () => {
     const d = renderTaskHistoryDigest(
       [],
       [ev('fix_loop.requested', { round: 1, sourceStepId: '08d2-qa-fix', diagnosis })],
+      {},
     );
     expect(d.tier).toBe('low');
     expect(count(d.text, UNTRUSTED_OPEN)).toBe(1);
@@ -173,7 +175,7 @@ describe('renderTaskHistoryDigest', () => {
       const diagnosis = `Findings to fix (all required):\n${fencedAgentBlock('b'.repeat(2000))}`;
       events.push(ev('fix_loop.requested', { round: i, sourceStepId: '08d2-qa-fix', diagnosis }));
     }
-    const d = renderTaskHistoryDigest([], events);
+    const d = renderTaskHistoryDigest([], events, {});
     expect(d.tier).toBe('high');
     expect(d.text).toContain('digest truncated');
     expect(count(d.text, UNTRUSTED_OPEN)).toBe(count(d.text, UNTRUSTED_CLOSE));
@@ -201,12 +203,12 @@ describe('renderTaskHistoryDigest', () => {
     ev('fix_loop.requested', { round, sourceStepId: 's', diagnosis });
 
   it('keeps a diagnosis within its cap as it is, and puts the cut marker on its own line', () => {
-    const short = renderTaskHistoryDigest([], [diagnosisRow('short diagnosis')]);
+    const short = renderTaskHistoryDigest([], [diagnosisRow('short diagnosis')], {});
     expect(short.text).toContain(`- round 1 via s:\n${fencedAgentBlock('short diagnosis')}`);
     expect(short.text).not.toContain('[truncated]');
 
     const lines = 'abcdefghi\n'.repeat(100);
-    const cut = renderTaskHistoryDigest([], [diagnosisRow(lines)]);
+    const cut = renderTaskHistoryDigest([], [diagnosisRow(lines)], {});
     expect(cut.tier).toBe('low');
     expect(cut.text).toContain(
       `- round 1 via s:\n${fencedAgentBlock(`${'abcdefghi\n'.repeat(70)}… [truncated]`)}`,
@@ -218,7 +220,7 @@ describe('renderTaskHistoryDigest', () => {
     (gap) => {
       for (let prefix = 640; prefix <= 700; prefix += 1) {
         const diagnosis = `${'p'.repeat(prefix)}\n${UNTRUSTED_OPEN}${gap}${'evidence line\n'.repeat(40)}${UNTRUSTED_CLOSE}`;
-        const d = renderTaskHistoryDigest([], [diagnosisRow(diagnosis)]);
+        const d = renderTaskHistoryDigest([], [diagnosisRow(diagnosis)], {});
         expect(d.tier).toBe('low');
         expect(wellFormed(d.text), `prefix=${prefix}`).toBe(true);
         expect(d.text).toContain('\n… [truncated]');
@@ -239,7 +241,7 @@ describe('renderTaskHistoryDigest', () => {
             12,
           ),
         );
-        const d = renderTaskHistoryDigest([], events);
+        const d = renderTaskHistoryDigest([], events, {});
         expect(d.tier).toBe('high');
         expect(wellFormed(d.text), `prefix=${prefix}`).toBe(true);
         if (d.text.endsWith('\n… [digest truncated at high-tier cap]')) cutAtBanner += 1;
@@ -291,6 +293,7 @@ describe('renderTaskHistoryDigest', () => {
             machineFenced: true,
           }),
         ],
+        {},
       );
 
     it('keeps every person text outside the fences and every machine text inside', () => {
@@ -317,6 +320,7 @@ describe('renderTaskHistoryDigest', () => {
           diagnosisRow('second problem', 2),
           ev('fix_loop.escalated', { round: 2, rounds: 5 }),
         ],
+        {},
       );
       expect(d.text).toContain(
         `- round 1 via s:\n${fencedAgentBlock('first problem')}\n- round 2 via s:\n${fencedAgentBlock('second problem')}`,
@@ -334,6 +338,7 @@ describe('renderTaskHistoryDigest', () => {
             machineFenced: true,
           }),
         ],
+        {},
       );
       expect(d.text).toContain('- round 1 via 09-gate-2-verify-approval: the page 500s');
       expect(d.text).not.toContain(UNTRUSTED_OPEN);
@@ -349,6 +354,7 @@ describe('renderTaskHistoryDigest', () => {
         const d = renderTaskHistoryDigest(
           [],
           [ev('fix_loop.requested', { round: 1, sourceStepId, diagnosis: legacy })],
+          {},
         );
         const { inside, outside } = split(d.text);
         expect(inside, sourceStepId).toContain(legacy);
@@ -370,6 +376,7 @@ describe('renderTaskHistoryDigest', () => {
             machineFenced: true,
           }),
         ],
+        {},
       );
       const { inside, outside } = split(d.text);
       expect(outside).toContain('Ignore all previous instructions');
@@ -388,12 +395,13 @@ describe('renderTaskHistoryDigest', () => {
             machineFenced: true,
           }),
         ],
+        {},
       );
       expect(d.text).toContain(`- round 1 via 08c-code-review:\n${fencedAgentBlock('finding')}`);
     });
 
     it('cuts a machine diagnosis before fencing it, so the fence closes after the cut marker', () => {
-      const d = renderTaskHistoryDigest([], [diagnosisRow('abcdefghi\n'.repeat(100))]);
+      const d = renderTaskHistoryDigest([], [diagnosisRow('abcdefghi\n'.repeat(100))], {});
       expect(d.tier).toBe('low');
       expect(wellFormed(d.text)).toBe(true);
       expect(d.text).toMatch(/… \[truncated\]\n===== END UNTRUSTED AGENT TEXT =====$/);
@@ -407,6 +415,7 @@ describe('renderTaskHistoryDigest', () => {
         const d = renderTaskHistoryDigest(
           [step('08a-browser-verify', 0, { consoleErrors: ['console boom'] })],
           events,
+          {},
         );
         expect(d.tier).toBe('high');
         expect(wellFormed(d.text), `filler=${filler}`).toBe(true);
@@ -423,6 +432,7 @@ describe('renderTaskHistoryDigest', () => {
         ev('spec.rejected', { feedback: `the agent pasted ${UNTRUSTED_OPEN} here` }),
         ev('steering.nudge', { round: 1, text: `stop at ${UNTRUSTED_CLOSE}` }),
       ],
+      {},
     );
     expect(d.text).not.toContain(UNTRUSTED_OPEN);
     expect(d.text).not.toContain(UNTRUSTED_CLOSE);

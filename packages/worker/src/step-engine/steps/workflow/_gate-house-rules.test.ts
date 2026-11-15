@@ -1,3 +1,4 @@
+import { rolePin, PRODUCER } from '../../../../test/step-role-fixtures.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -190,9 +191,11 @@ describe('parseRuleConflicts', () => {
 /** Seeds the two tables the loader reads, through a db that evaluates `where`. */
 function world() {
   const fake = createFakeDb({
+    tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
   });
+  fake.insert(schema.tasks, { id: TASK, type: 'workflow' });
   const db = fake.db as unknown as Database;
   const step07b = (output: unknown, round = 0) =>
     fake.insert(schema.taskSteps, { taskId: TASK, stepId: '07b-phase-4-validate', round, output });
@@ -1820,5 +1823,58 @@ describe('houseRulesRow', () => {
 describe('houseRulesHoldApprove', () => {
   it.each(TABLE)('%s', (_name, d, _status, _label, holds) => {
     expect(houseRulesHoldApprove(d)).toBe(holds);
+  });
+});
+
+describe('pinned replacement rule evidence', () => {
+  // A conforming code-review output, so only the row status decides what the reader sees.
+  const output = {
+    reviewed: true,
+    peer: { verdict: 'APPROVE', findings: [], positives: [] },
+    security: { verdict: 'SAFE', findings: [] },
+    extraLenses: [],
+    blocking: false,
+    reviewIncomplete: false,
+    advisoryVerdict: false,
+    coverage: null,
+    refutedCount: 0,
+    counts: { peer: 0, securityCriticalHigh: 0 },
+    recurringNote: '',
+    peerInvocationId: OTHER,
+  };
+
+  it('reads the actual producer invocation and never grants enforcement from an absent stamp', async () => {
+    const w = world();
+    w.fake.patch(schema.tasks, TASK, rolePin());
+    w.fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: PRODUCER,
+      round: 1,
+      status: 'done',
+      output,
+    });
+    expect(await loadGateHouseRules(w.db, TASK, { withCodeReview: true })).toBeNull();
+    w.invocation(
+      OTHER,
+      stamp({ entries: [entry(RULE_A, 'Rule from the actual invocation', ALWAYS)] }),
+    );
+    const rules = await loadGateHouseRules(w.db, TASK, { withCodeReview: true });
+    expect(rules?.entries).toHaveLength(1);
+    expect(rules?.entries[0]?.title).toBe('Rule from the actual invocation');
+    // Gate 3's gate-2-less fallback remains the validator alone.
+    expect(await loadGateHouseRules(w.db, TASK)).toBeNull();
+  });
+
+  it('reads no rules from a replacement producer row that did not finish', async () => {
+    for (const status of ['done', 'skipped', 'pending', 'failed']) {
+      const w = world();
+      w.fake.patch(schema.tasks, TASK, rolePin());
+      w.fake.insert(schema.taskSteps, { taskId: TASK, stepId: PRODUCER, round: 1, status, output });
+      w.invocation(OTHER, stamp({ entries: [entry(RULE_A, 'Unfinished producer rule', ALWAYS)] }));
+      const rules = await loadGateHouseRules(w.db, TASK, { withCodeReview: true });
+      // The same output yields the rule only from a finished row.
+      if (status === 'done') expect(rules?.entries).toHaveLength(1);
+      else expect(rules).toBeNull();
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
 import { createHash } from 'node:crypto';
 import type { StepGuidanceCause } from '@haive/database';
 
@@ -93,14 +94,21 @@ export function promptDefectFingerprint(stepId: string, cause: string, guidance:
 const GUIDANCE_TARGET: Record<string, string> = {
   '07b-phase-4-validate': '07-phase-2-implement',
   '08a-browser-verify': '07-phase-2-implement',
-  '08c-code-review': '07-phase-2-implement',
   '08d-adversarial-qa': '07-phase-2-implement',
 };
 
 /** The step whose prompt guidance from `sourceStep` is appended to, or null when
  *  the reporting step has no registered target (an unknown step id — never store
  *  guidance we cannot place). */
-export function guidanceTargetStep(sourceStep: string): string | null {
+export function guidanceTargetStep(sourceStep: string, task: RoleTaskPin): string | null {
+  return guidanceTargetForReview(
+    sourceStep,
+    readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId),
+  );
+}
+
+function guidanceTargetForReview(sourceStep: string, reviewId: string | null): string | null {
+  if (reviewId === sourceStep) return '07-phase-2-implement';
   return GUIDANCE_TARGET[sourceStep] ?? null;
 }
 
@@ -109,12 +117,16 @@ export function guidanceTargetStep(sourceStep: string): string | null {
  *  so it terminates at the next heading or fence. Deduped by fingerprint, capped.
  *  Lines whose cause is not one of the three offered are DROPPED — a model that
  *  invents a category has not answered the question. */
-export function parsePromptDefects(outputs: { stepId: string; raw: string }[]): PromptDefect[] {
+export function parsePromptDefects(
+  outputs: { stepId: string; raw: string }[],
+  task: RoleTaskPin,
+): PromptDefect[] {
+  const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const seen = new Set<string>();
   const out: PromptDefect[] = [];
   for (const { stepId, raw } of outputs) {
     if (!raw) continue;
-    const target = guidanceTargetStep(stepId);
+    const target = guidanceTargetForReview(stepId, reviewId);
     if (!target) continue;
     const m = /##\s*PROMPT-DEFECT\b([\s\S]*?)(?:\n##\s|\n```|$)/i.exec(raw);
     if (!m) continue;

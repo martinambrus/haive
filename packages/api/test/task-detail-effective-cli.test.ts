@@ -51,6 +51,7 @@ vi.mock('../src/routes/tasks/_call-log.js', async (importOriginal) => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
+import { rolePin, REVIEW, PRODUCER } from './step-role-fixtures.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -83,7 +84,7 @@ function routeDb(db: FakeDbHandle) {
   };
 }
 
-function setup(cliProviderId: string | null, providers: Rows[] | null) {
+function setup(cliProviderId: string | null, providers: Rows[] | null, task: Rows = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
@@ -103,9 +104,11 @@ function setup(cliProviderId: string | null, providers: Rows[] | null) {
     currentRound: 0,
     orchestrationEpoch: 3,
     cliProviderId,
+    ...task,
   });
   for (const p of providers ?? []) fake.insert(schema.cliProviders, { name: 'codex', ...p });
   h.db = routeDb(fake.db);
+  return fake;
 }
 
 async function effective(): Promise<string | null | undefined> {
@@ -136,5 +139,58 @@ describe('GET /tasks/:id effectiveCliProviderId', () => {
   it('is null when a task with no CLI has no enabled provider to default to', async () => {
     setup(null, [provider(OLDEST, 1, false)]);
     expect(await effective()).toBeNull();
+  });
+});
+
+describe('both owner-scoped role DTO surfaces', () => {
+  it.each(['', '/steps'])(
+    'projects the frozen producer on %s without leaking the plan',
+    async (suffix) => {
+      const fake = setup(OWN, null, rolePin());
+      for (const stepId of [PRODUCER, REVIEW])
+        fake.insert(schema.taskSteps, { taskId: TASK, stepId });
+      const response = await app.request(`/${TASK}${suffix}`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        steps: { stepId: string; outputRoles?: string[] }[];
+        task?: Record<string, unknown>;
+      };
+      expect(body.steps.find((s) => s.stepId === PRODUCER)?.outputRoles).toEqual([REVIEW]);
+      expect(body.steps.find((s) => s.stepId === REVIEW)).not.toHaveProperty('outputRoles');
+      if (body.task) expect(body.task).not.toHaveProperty('derivedRunPlan');
+    },
+  );
+  it.each(['', '/steps'])(
+    'checks ownership before decoding a malformed plan on %s',
+    async (suffix) => {
+      setup(OWN, null, {
+        userId: '00000000-0000-4000-8000-0000000000ff',
+        derivedRunPlan: { version: 2 },
+      });
+      expect((await app.request(`/${TASK}${suffix}`)).status).toBe(404);
+    },
+  );
+  it.each(['', '/steps'])(
+    'looks up a derived definition and refuses its missing plan on %s',
+    async (suffix) => {
+      const fake = setup(OWN, null, { type: 'custom-derived', derivedRunPlan: null });
+      fake.insert(schema.taskTypeDefinitions, {
+        slug: 'custom-derived',
+        displayName: 'Derived',
+        source: 'admin',
+        runListStrategy: 'derived',
+        baseSlug: 'workflow',
+        changes: [],
+      });
+      const response = await app.request(`/${TASK}${suffix}`);
+      expect(response.status).toBe(409);
+      expect(JSON.stringify(await response.json())).toContain('invalid-derived-run-plan');
+    },
+  );
+  it.each(['', '/steps'])('refuses an owned malformed pin on %s by name', async (suffix) => {
+    setup(OWN, null, { derivedRunPlan: { version: 2 } });
+    const res = await app.request(`/${TASK}${suffix}`);
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(await res.json())).toContain('invalid-derived-run-plan');
   });
 });

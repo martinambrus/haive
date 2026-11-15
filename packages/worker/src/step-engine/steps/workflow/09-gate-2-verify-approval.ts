@@ -1,3 +1,4 @@
+import { STEP_ROLES, type CodeReviewOutput } from '@haive/shared/step-outputs';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import {
   fixTestEditsRow,
@@ -203,7 +204,7 @@ interface VerifyGateDetect {
     positives: string[];
   } | null;
   /** Phase 6b broad code audit (08c2) result — advisory; null when it didn't run. */
-  codeAudit: { findings: string[]; coverage: FileCoverage | null } | null;
+  codeAudit: { findings: string[]; coverage: FileCoverage | null; incomplete?: boolean } | null;
   /** Phase 7 adversarial QA result (null when the step didn't run). */
   adversarial: {
     level: string;
@@ -287,59 +288,42 @@ interface Phase8dOutput {
   }[];
 }
 
-interface Phase8cOutput {
-  reviewed?: boolean;
-  blocking?: boolean;
-  /** Absent on rows written before 08c reported it; treated as false (a review that
-   *  predates the flag either completed or already surfaced its own findings). */
-  reviewIncomplete?: boolean;
-  /** A reviewer requested changes with no critical/high finding behind it. Absent on rows
-   *  written before 08c reported it — those blocked on the verdict instead, so the gate
-   *  already defaulted to reject. */
-  advisoryVerdict?: boolean;
-  coverage?: CoverageOutput;
-  peer?: {
-    verdict?: string;
-    findings?: {
-      upstream?: UpstreamKind | null;
-      severity?: string;
-      path?: string;
-      lines?: string;
-      issue?: string;
-      fix?: string;
-      rule?: string;
-      refuted?: boolean;
-    }[];
-    positives?: string[];
-  };
-  security?: {
-    verdict?: string;
-    findings?: {
-      upstream?: UpstreamKind | null;
-      severity?: string;
-      in_scope?: unknown;
-      path?: string;
-      line?: string | number;
-      issue?: string;
-      attack?: string;
-      fix?: string;
-      refuted?: boolean;
-    }[];
-  };
-  extraLenses?: {
-    id?: string;
-    title?: string;
-    verdict?: string;
-    findings?: {
-      upstream?: UpstreamKind | null;
-      severity?: string;
-      path?: string;
-      lines?: string;
-      issue?: string;
-      fix?: string;
-      refuted?: boolean;
-    }[];
-  }[];
+/** Legacy rows may predate any declared field. New successful writes use the full host type. */
+type StoredPartial<T> = T extends readonly (infer V)[]
+  ? StoredPartial<V>[]
+  : T extends object
+    ? { [K in keyof T]?: StoredPartial<T[K]> }
+    : T;
+type Phase8cOutput = StoredPartial<CodeReviewOutput>;
+function storedRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function storedRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((v) => v !== null && typeof v === 'object' && !Array.isArray(v))
+    : [];
+}
+function storedReviewOutput(value: unknown): Phase8cOutput {
+  const o = storedRecord(value),
+    peer = storedRecord(o.peer),
+    security = storedRecord(o.security);
+  return {
+    ...o,
+    peer: {
+      ...peer,
+      findings: storedRecords(peer.findings),
+      positives: Array.isArray(peer.positives)
+        ? peer.positives.filter((v) => typeof v === 'string')
+        : [],
+    },
+    security: { ...security, findings: storedRecords(security.findings) },
+    extraLenses: storedRecords(o.extraLenses).map((l) => ({
+      ...l,
+      findings: storedRecords(l.findings),
+    })),
+  } as Phase8cOutput;
 }
 
 /** Prefix marking a finding a refuter disproved (08c's refutation pass). Advisory only. */
@@ -718,8 +702,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
 
     // Phase 6 code review: peer + security verdicts, blocking on
     // REQUEST_CHANGES / VULNERABLE / critical-high security findings.
-    const phase8c = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08c-code-review');
-    const pc = phase8c?.output as Phase8cOutput | null;
+    const phase8c = await loadPreviousStepOutput(ctx.db, ctx.taskId, {
+      role: STEP_ROLES.codeReview,
+    });
+    const pc = storedReviewOutput(
+      phase8c?.outputCompatible === false
+        ? { reviewed: true, reviewIncomplete: true }
+        : phase8c?.output,
+    );
     let codeReview: VerifyGateDetect['codeReview'] = null;
     // Earlier rounds only — this round's own rows must not make every finding look repeated.
     const recurrence = await loadFindingRecurrence(ctx, ctx.round);
@@ -742,7 +732,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         advisoryVerdict: pc.advisoryVerdict === true || upstreamObservations,
         upstreamObservations,
         unknownOwnership,
-        coverage: readCoverage(pc.coverage),
+        coverage: readCoverage(pc.coverage ?? undefined),
         // A refuted finding is shown, not hidden: a refuter disproved it, and the human
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
@@ -762,8 +752,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     }
 
     // Phase 6b broad code audit (08c2): advisory findings surfaced for the human.
-    const phase8c2 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08c2-code-audit');
-    const pc2 = phase8c2?.output as {
+    const phase8c2 = await loadPreviousStepOutput(ctx.db, ctx.taskId, {
+      role: STEP_ROLES.codeAudit,
+    });
+    const pc2 = (
+      phase8c2?.outputCompatible === false ? { audited: true, findings: [] } : phase8c2?.output
+    ) as {
       audited?: boolean;
       findings?: {
         severity?: string;
@@ -777,7 +771,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     let codeAudit: VerifyGateDetect['codeAudit'] = null;
     if (pc2?.audited) {
       codeAudit = {
-        findings: (pc2.findings ?? []).map((f) =>
+        ...(phase8c2?.outputCompatible === false ? { incomplete: true } : {}),
+        findings: storedRecords(pc2.findings).map((f) =>
           `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         coverage: readCoverage(pc2.coverage),
@@ -1345,7 +1340,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // Rendered when the audit found something OR when it was handed only part of the
     // change: "no findings" over an unseen remainder is exactly the claim to disclose.
     const caCoverage = cAudit ? coverageNote(cAudit.coverage) : '';
-    if (cAudit && (cAudit.findings.length > 0 || caCoverage)) {
+    if (cAudit && (cAudit.findings.length > 0 || caCoverage || cAudit.incomplete)) {
       const body = [
         ...(cAudit.findings.length > 0
           ? ['## Findings', ...cAudit.findings.map((f) => `- ${f}`)]
@@ -1357,10 +1352,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         // Report-only step: it never gates, so a partial audit stays advisory rather than
         // holding the gate. The disclosure is the point, not a status change.
         status: 'info',
-        statusLabel: caCoverage ? 'PARTIAL' : 'ADVISORY',
-        detail: caCoverage
-          ? `${cAudit.findings.length} finding(s); ${caCoverage}`
-          : `${cAudit.findings.length} finding(s)`,
+        statusLabel: cAudit.incomplete ? 'INCOMPLETE' : caCoverage ? 'PARTIAL' : 'ADVISORY',
+        detail: cAudit.incomplete
+          ? 'The audit output could not be read; this audit is incomplete.'
+          : caCoverage
+            ? `${cAudit.findings.length} finding(s); ${caCoverage}`
+            : `${cAudit.findings.length} finding(s)`,
         body,
         defaultOpen: false,
       });
@@ -1501,6 +1498,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             testsOk &&
             browserOk &&
             codeReviewOk &&
+            !cAudit?.incomplete &&
             adversarialOk &&
             runtimeSmokeOk &&
             houseRulesOk

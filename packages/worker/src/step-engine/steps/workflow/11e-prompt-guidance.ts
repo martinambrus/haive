@@ -1,3 +1,5 @@
+import type { RoleTaskPin } from '@haive/shared/step-outputs';
+import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepGuidanceCause } from '@haive/database';
@@ -74,13 +76,16 @@ interface GuidanceApply {
 /** Parse every CLI invocation this task made, from the four capture steps.
  *  Same query shape as 08e's collectInsights — the block rides on output that was
  *  already produced and stored, so this costs one SELECT and no tokens. */
-async function collectDefects(ctx: StepContext): Promise<PromptDefect[]> {
+async function collectDefects(ctx: StepContext, task: RoleTaskPin): Promise<PromptDefect[]> {
   const rows = await ctx.db
     .select({ stepId: schema.taskSteps.stepId, raw: schema.cliInvocations.rawOutput })
     .from(schema.cliInvocations)
     .innerJoin(schema.taskSteps, eq(schema.cliInvocations.taskStepId, schema.taskSteps.id))
     .where(eq(schema.cliInvocations.taskId, ctx.taskId));
-  return parsePromptDefects(rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' })));
+  return parsePromptDefects(
+    rows.map((r) => ({ stepId: r.stepId, raw: r.raw ?? '' })),
+    task,
+  );
 }
 
 /** Existing rows for these fingerprints, restricted to the scopes this repo can see:
@@ -131,12 +136,13 @@ export interface ExistingGuidanceRow {
 export function filterCandidates(
   defects: PromptDefect[],
   existing: ExistingGuidanceRow[],
+  task: RoleTaskPin,
 ): GuidanceCandidate[] {
   const out: GuidanceCandidate[] = [];
   for (const d of defects) {
     const rows = existing.filter((r) => r.fingerprint === d.fingerprint);
     if (rows.some((r) => r.status === 'rejected')) continue;
-    const targetStep = guidanceTargetStep(d.sourceStep);
+    const targetStep = guidanceTargetStep(d.sourceStep, task);
     if (!targetStep) continue;
     const disposition: GuidanceDisposition =
       d.cause === 'task_description_defect'
@@ -156,7 +162,8 @@ export function filterCandidates(
 
 /** Candidates for this task: parsed, tombstone-filtered, occurrence-annotated. */
 async function buildCandidates(ctx: StepContext): Promise<GuidanceCandidate[]> {
-  const defects = await collectDefects(ctx);
+  const task = await loadRoleTaskPin(ctx.db, ctx.taskId);
+  const defects = await collectDefects(ctx, task);
   if (defects.length === 0) return [];
   const repositoryId = await loadRepositoryId(ctx);
   const existing = await loadExisting(
@@ -164,7 +171,7 @@ async function buildCandidates(ctx: StepContext): Promise<GuidanceCandidate[]> {
     repositoryId,
     defects.map((d) => d.fingerprint),
   );
-  return filterCandidates(defects, existing);
+  return filterCandidates(defects, existing, task);
 }
 
 const CAUSE_LABEL: Record<StepGuidanceCause, string> = {

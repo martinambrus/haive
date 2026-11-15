@@ -1,4 +1,12 @@
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { CODE_AUDIT_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
+import { rolePin, PRODUCER, AUDIT } from '../../../../test/step-role-fixtures.js';
+import type { DerivedRunPlanV2 } from '@haive/shared/modularity';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+type StepSelector = string | { role: string };
+const selectorId = (step: StepSelector) => (typeof step === 'string' ? step : step.role);
 
 const m = vi.hoisted(() => ({
   loadPreviousStepOutput: vi.fn(),
@@ -15,7 +23,12 @@ const m = vi.hoisted(() => ({
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
-  loadPreviousStepOutput: m.loadPreviousStepOutput,
+  loadPreviousStepOutput: (
+    db: unknown,
+    task: string,
+    step: string | { role: string },
+    ...rest: unknown[]
+  ) => m.loadPreviousStepOutput(db, task, step, ...rest),
 }));
 vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../env-replicate/_shared.js')>()),
@@ -1264,8 +1277,8 @@ describe('gate-2 validation row: how much of the change the validator was given'
     const { output: stored, iterations } = stored07b[which];
     const output = { ...stored, ...extra };
     m.loadPreviousStepOutput.mockImplementation(
-      async (_db: unknown, _task: unknown, id: string) => {
-        if (id === '08-phase-5-verify') {
+      async (_db: unknown, _task: unknown, id: StepSelector) => {
+        if (selectorId(id) === '08-phase-5-verify') {
           return {
             output: {
               test: passedRun,
@@ -1276,7 +1289,7 @@ describe('gate-2 validation row: how much of the change the validator was given'
             },
           };
         }
-        if (id === '07b-phase-4-validate') {
+        if (selectorId(id) === '07b-phase-4-validate') {
           return {
             output: coverage === undefined ? output : { ...output, changedFilesCoverage: coverage },
             iterations,
@@ -1455,8 +1468,8 @@ describe('gate-2 coverage rows: a scan that failed behind the list', () => {
     const given = (step: Step, key: string) =>
       coverage[step] === undefined ? {} : { [key]: coverage[step] };
     m.loadPreviousStepOutput.mockImplementation(
-      async (_db: unknown, _task: unknown, id: string) => {
-        switch (id) {
+      async (_db: unknown, _task: unknown, id: StepSelector) => {
+        switch (selectorId(id)) {
           case '08-phase-5-verify':
             return {
               output: {
@@ -1586,10 +1599,11 @@ describe('gate-2 verification results read from 08', () => {
   const passedRun = { ran: true, passed: true, command: 'pnpm run check', output: '' };
 
   function stored(lint: unknown, others: unknown = skipped): void {
-    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
-      id === '08-phase-5-verify'
-        ? { output: { test: others, lint, typecheck: others, passed: true, runtimeSmoke: null } }
-        : null,
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: StepSelector) =>
+        selectorId(id) === '08-phase-5-verify'
+          ? { output: { test: others, lint, typecheck: others, passed: true, runtimeSmoke: null } }
+          : null,
     );
   }
 
@@ -1604,11 +1618,177 @@ describe('gate-2 verification results read from 08', () => {
     m.changeFingerprint.mockReset().mockResolvedValue(null);
   });
 
+  it.each(['done', 'skipped audit', 'reset review', 'no row'])(
+    'detects pinned physical producers through the actual loader: %s',
+    async (state) => {
+      const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
+      const pin = rolePin();
+      const plan = pin.derivedRunPlan as DerivedRunPlanV2;
+      const auditId = 'module.example.audit';
+      const change = { replace: AUDIT, with: auditId };
+      plan.overlay.changes.push(change);
+      plan.composableEntries.push({
+        stepId: auditId,
+        label: 'Audit',
+        group: 'review',
+        dispatchesCli: true,
+        requires: [],
+        provides: ['code-audit'],
+        replaces: [AUDIT],
+        outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+      });
+      for (const c of plan.candidates) {
+        c.outcomes.push({
+          operationIndex: 1,
+          change,
+          outcome: 'applied',
+          reason: 'change-applied',
+        });
+        (c.stepIds as string[]).splice(c.stepIds.indexOf(AUDIT), 1, auditId);
+        c.roleBindings[AUDIT] = {
+          stepId: auditId,
+          outputContract: CODE_AUDIT_OUTPUT_CONTRACT,
+        };
+      }
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskSteps: schema.taskSteps,
+        reviewFindings: schema.reviewFindings,
+      });
+      fake.insert(schema.tasks, { id: taskId, ...pin });
+      if (state !== 'no row')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: PRODUCER,
+          round: 1,
+          status: 'done',
+          output: {
+            reviewed: true,
+            peer: {
+              verdict: 'REQUEST_CHANGES',
+              findings: [{ severity: 'high', issue: 'actual replacement finding', path: 'a.ts' }],
+              positives: [],
+            },
+            security: { verdict: 'SAFE', findings: [] },
+            extraLenses: [],
+            blocking: true,
+            reviewIncomplete: false,
+            advisoryVerdict: false,
+            coverage: null,
+            refutedCount: 0,
+            counts: { peer: 1, securityCriticalHigh: 0 },
+            recurringNote: '',
+          },
+        });
+      if (state !== 'no row')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: auditId,
+          round: 1,
+          status: 'done',
+          output: {
+            audited: true,
+            findings: [{ severity: 'low', issue: 'actual audit observation' }],
+            coverage: null,
+          },
+        });
+      if (state === 'skipped audit')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: auditId,
+          round: 2,
+          status: 'skipped',
+          output: null,
+        });
+      if (state === 'reset review')
+        fake.insert(schema.taskSteps, {
+          taskId,
+          stepId: PRODUCER,
+          round: 2,
+          status: 'pending',
+          output: null,
+        });
+      const actual = await vi.importActual<typeof import('../onboarding/_helpers.js')>(
+        '../onboarding/_helpers.js',
+      );
+      m.loadPreviousStepOutput.mockImplementation(actual.loadPreviousStepOutput);
+      m.loadPreviousStepOutput.mockClear();
+      const detected = await gate2VerifyApprovalStep.detect!({
+        taskId,
+        repoPath: '/repos/u/r',
+        logger: { info: vi.fn(), warn: vi.fn() },
+        db: fake.db,
+        round: 1,
+      } as never);
+      expect(m.loadPreviousStepOutput).toHaveBeenCalledWith(fake.db, taskId, {
+        role: STEP_ROLES.codeReview,
+      });
+      expect(m.loadPreviousStepOutput).toHaveBeenCalledWith(fake.db, taskId, {
+        role: STEP_ROLES.codeAudit,
+      });
+      if (state === 'reset review' || state === 'no row') expect(detected.codeReview).toBeNull();
+      else {
+        expect(detected.codeReview?.blocking).toBe(true);
+        expect(detected.codeReview?.peerFindings.join(' ')).toContain('actual replacement finding');
+      }
+      if (state === 'skipped audit' || state === 'no row') expect(detected.codeAudit).toBeNull();
+      else expect(detected.codeAudit?.findings.join(' ')).toContain('actual audit observation');
+      if (state !== 'done') {
+        // Isolate these rows' approval effect from the deliberately blocking review and absent 08.
+        const form = gate2VerifyApprovalStep.form!({} as never, {
+          ...detected,
+          allPassed: true,
+          verify: { test: passedRun, lint: passedRun, typecheck: passedRun },
+          codeReview: state === 'skipped audit' ? null : detected.codeReview,
+        })!;
+        expect(JSON.stringify(form.statusSummary)).not.toContain('INCOMPLETE');
+        expect(JSON.stringify(form.statusSummary)).not.toContain('unreviewed');
+        expect((form.fields.find((f) => f.id === 'decision') as { default?: string }).default).toBe(
+          'approve',
+        );
+      }
+    },
+  );
+
+  it.each(['08c-code-review', '08c2-code-audit'])(
+    'shows malformed replacement %s as incomplete without a default approval',
+    async (role) => {
+      m.loadPreviousStepOutput.mockImplementation(
+        async (_db: unknown, _task: unknown, id: StepSelector) =>
+          selectorId(id) === '08-phase-5-verify'
+            ? {
+                output: {
+                  test: passedRun,
+                  lint: passedRun,
+                  typecheck: passedRun,
+                  passed: true,
+                  runtimeSmoke: null,
+                },
+              }
+            : selectorId(id) === role
+              ? {
+                  output: { reviewed: true, audited: true, peer: { findings: 'malformed' } },
+                  outputCompatible: false,
+                  stepId: 'module.example.review',
+                }
+              : null,
+      );
+      const detected = await gate2VerifyApprovalStep.detect!(ctx);
+      const form = gate2VerifyApprovalStep.form!(ctx, detected)!;
+      expect((form.fields.find((f) => f.id === 'decision') as { default?: string })?.default).toBe(
+        'reject',
+      );
+      expect(JSON.stringify(form.statusSummary)).toContain(
+        role === '08c-code-review' ? 'unreviewed' : 'INCOMPLETE',
+      );
+    },
+  );
+
   it('flags a slot 08 found no runner for only when configs were declined', async () => {
     const withDetect = (detect: Record<string, unknown>) =>
       m.loadPreviousStepOutput.mockImplementation(
-        async (_db: unknown, _task: unknown, id: string) =>
-          id === '08-phase-5-verify'
+        async (_db: unknown, _task: unknown, id: StepSelector) =>
+          selectorId(id) === '08-phase-5-verify'
             ? { detect, output: { lint: passedRun, passed: true, runtimeSmoke: null } }
             : null,
       );
@@ -1625,19 +1805,20 @@ describe('gate-2 verification results read from 08', () => {
   });
 
   it('does not count a slot turned off on purpose as one with no runner', async () => {
-    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
-      id === '08-phase-5-verify'
-        ? {
-            detect: {
-              test: null,
-              lint: { label: 'l' },
-              typecheck: { label: 'c' },
-              declinedConfigs: ['sub/phpunit.xml'],
-              offSlots: ['test'],
-            },
-            output: { lint: passedRun, passed: true, runtimeSmoke: null },
-          }
-        : null,
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: StepSelector) =>
+        selectorId(id) === '08-phase-5-verify'
+          ? {
+              detect: {
+                test: null,
+                lint: { label: 'l' },
+                typecheck: { label: 'c' },
+                declinedConfigs: ['sub/phpunit.xml'],
+                offSlots: ['test'],
+              },
+              output: { lint: passedRun, passed: true, runtimeSmoke: null },
+            }
+          : null,
     );
     const d = await gate2VerifyApprovalStep.detect!(ctx);
     expect(d.slotWithoutRunner).toBeUndefined();
@@ -1649,8 +1830,8 @@ describe('gate-2 verification results read from 08', () => {
   it('reads the declared and turned-off slots from 08, and nothing when there are none', async () => {
     const withDetect = (detect: Record<string, unknown>) =>
       m.loadPreviousStepOutput.mockImplementation(
-        async (_db: unknown, _task: unknown, id: string) =>
-          id === '08-phase-5-verify'
+        async (_db: unknown, _task: unknown, id: StepSelector) =>
+          selectorId(id) === '08-phase-5-verify'
             ? { detect, output: { lint: passedRun, passed: true, runtimeSmoke: null } }
             : null,
       );
@@ -1697,9 +1878,10 @@ describe('gate-2 verification results read from 08', () => {
     const digest = 'f'.repeat(64);
     m.changeFingerprint.mockResolvedValue(digest);
     m.loadPreviousStepOutput.mockImplementation(
-      async (_db: unknown, _task: unknown, id: string) => {
-        if (id === '08-phase-5-verify') return { output: { passed: true, runtimeSmoke: null } };
-        if (id === '01-worktree-setup') {
+      async (_db: unknown, _task: unknown, id: StepSelector) => {
+        if (selectorId(id) === '08-phase-5-verify')
+          return { output: { passed: true, runtimeSmoke: null } };
+        if (selectorId(id) === '01-worktree-setup') {
           return { output: { worktreePath: '/repos/u/r/.haive/worktrees/t', baseBranch: 'main' } };
         }
         return null;
@@ -1715,8 +1897,11 @@ describe('gate-2 verification results read from 08', () => {
   });
 
   it('has no fingerprint of the change to offer when 01-worktree-setup made no worktree', async () => {
-    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
-      id === '08-phase-5-verify' ? { output: { passed: true, runtimeSmoke: null } } : null,
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: StepSelector) =>
+        selectorId(id) === '08-phase-5-verify'
+          ? { output: { passed: true, runtimeSmoke: null } }
+          : null,
     );
     await gate2VerifyApprovalStep.detect!(ctx);
     const options = m.loadGateHouseRules.mock.calls.at(-1)![2] as {
@@ -1728,11 +1913,11 @@ describe('gate-2 verification results read from 08', () => {
 
   it('names the rule on a peer finding that carries one, and writes the others as it always did', async () => {
     m.loadPreviousStepOutput.mockImplementation(
-      async (_db: unknown, _task: unknown, id: string) => {
-        if (id === '08-phase-5-verify') {
+      async (_db: unknown, _task: unknown, id: StepSelector) => {
+        if (selectorId(id) === '08-phase-5-verify') {
           return { output: { test: passedRun, passed: true, runtimeSmoke: null } };
         }
-        if (id !== '08c-code-review') return null;
+        if (selectorId(id) !== '08c-code-review') return null;
         return {
           output: {
             reviewed: true,
@@ -1803,8 +1988,8 @@ describe('gate-2 verification results read from 08', () => {
     'reads a stored 403 with passed:%s as an uncertain gate row',
     async (passed) => {
       m.loadPreviousStepOutput.mockImplementation(
-        async (_db: unknown, _task: unknown, id: string) =>
-          id === '08-phase-5-verify'
+        async (_db: unknown, _task: unknown, id: StepSelector) =>
+          selectorId(id) === '08-phase-5-verify'
             ? {
                 output: {
                   test: passedRun,
@@ -1906,20 +2091,21 @@ describe('gate-2 shows a long validator report from both ends', () => {
   });
 
   async function shown(report: string | undefined, reportChars?: number) {
-    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
-      id === '07b-phase-4-validate'
-        ? {
-            output: {
-              verdict: 'ISSUES_FOUND',
-              summary: 'two problems',
-              issues: [],
-              dimensions: [],
-              ...(report === undefined ? {} : { report }),
-              ...(reportChars === undefined ? {} : { reportChars }),
-            },
-            iterations: [],
-          }
-        : null,
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _task: unknown, id: StepSelector) =>
+        selectorId(id) === '07b-phase-4-validate'
+          ? {
+              output: {
+                verdict: 'ISSUES_FOUND',
+                summary: 'two problems',
+                issues: [],
+                dimensions: [],
+                ...(report === undefined ? {} : { report }),
+                ...(reportChars === undefined ? {} : { reportChars }),
+              },
+              iterations: [],
+            }
+          : null,
     );
     const detected = await gate2VerifyApprovalStep.detect!(ctx);
     const row = (gate2VerifyApprovalStep.form!(ctx, detected)!.statusSummary ?? []).find(
@@ -2130,10 +2316,11 @@ describe('gate-2 says when it cuts a check output or the smoke excerpt', () => {
   });
 
   const testsRow = async (test: Record<string, unknown>) => {
-    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _t: unknown, id: string) =>
-      id === '08-phase-5-verify'
-        ? { output: { test, lint: green, typecheck: green, passed: false, runtimeSmoke: null } }
-        : null,
+    m.loadPreviousStepOutput.mockImplementation(
+      async (_db: unknown, _t: unknown, id: StepSelector) =>
+        selectorId(id) === '08-phase-5-verify'
+          ? { output: { test, lint: green, typecheck: green, passed: false, runtimeSmoke: null } }
+          : null,
     );
     const detected = await gate2VerifyApprovalStep.detect!(ctx);
     const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;

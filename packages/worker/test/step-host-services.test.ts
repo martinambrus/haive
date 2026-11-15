@@ -52,6 +52,10 @@ beforeEach(() => {
   });
   step.mockResolvedValue({ taskId: 'task', round: 2 });
   vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+    id: 'row',
+    stepId: '01-worktree-setup',
+    status: 'done',
+    round: 0,
     detect: null,
     output: { worktreePath: '/repo/.haive/worktrees/task' },
     iterations: [],
@@ -66,7 +70,11 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 it('adapts the existing previous-output helper with the captured round bound', async () => {
   const host = createStepHostServices(ctx);
-  await host.loadPreviousStepOutput('previous');
+  expect(await host.loadPreviousStepOutput('previous')).toEqual({
+    detect: null,
+    output: { worktreePath: '/repo/.haive/worktrees/task' },
+    iterations: [],
+  });
   expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
 });
 it.each([
@@ -183,6 +191,10 @@ it.each(['EMFILE', 'ENFILE'])(
   'propagates git spawn %s through the actual host collector',
   async (code) => {
     vi.mocked(loadPreviousStepOutput).mockResolvedValue({
+      id: 'row',
+      stepId: '01-worktree-setup',
+      status: 'done',
+      round: 0,
       detect: null,
       output: { baseBranch: 'base', filesTouched: ['a'] },
       iterations: [],

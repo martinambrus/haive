@@ -1,3 +1,10 @@
+import {
+  readStepRole,
+  safeParseStepOutput,
+  type StepRoleId,
+  type RoleBinding,
+} from '@haive/shared/step-outputs';
+import { loadRoleTaskPin } from '../../role-task-pin.js';
 import path from 'node:path';
 import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
@@ -221,12 +228,34 @@ export function skillTargetRefusalNote(
   );
 }
 
+/** Read the newest physical row (optionally at or below maxRound).
+ * String selectors stay physical; role selectors resolve the immutable task pin.
+ * No producer or no row returns null for every selector, including contracted roles.
+ * A contracted row that is not done retains its identity/status but reads as absent output;
+ * only a done contracted row reports outputCompatible, false for non-conforming output.
+ * Core/uncontracted rows keep their historical tolerant output semantics. */
 export async function loadPreviousStepOutput(
   db: Database,
   taskId: string,
-  stepId: string,
+  step: string | { role: StepRoleId },
   maxRound?: number,
-): Promise<{ detect: unknown; output: unknown; iterations: unknown[] } | null> {
+): Promise<{
+  id: string | null;
+  stepId: string;
+  status: string | null;
+  round: number | null;
+  detect: unknown;
+  output: unknown;
+  iterations: unknown[];
+  roleBinding?: RoleBinding;
+  outputCompatible?: boolean;
+} | null> {
+  const binding =
+    typeof step === 'string'
+      ? undefined
+      : readStepRole(await loadRoleTaskPin(db, taskId), step.role, (b) => b);
+  const stepId = typeof step === 'string' ? step : binding?.stepId;
+  if (!stepId) return null;
   const rows = await db
     .select()
     .from(schema.taskSteps)
@@ -245,8 +274,20 @@ export async function loadPreviousStepOutput(
   const row = rows[0];
   if (!row) return null;
   return {
+    id: row.id,
+    stepId: row.stepId,
+    status: row.status,
+    round: row.round,
+    ...(binding
+      ? {
+          roleBinding: binding,
+          ...(binding.outputContract && row.status === 'done'
+            ? { outputCompatible: safeParseStepOutput(binding.outputContract, row.output).success }
+            : {}),
+        }
+      : {}),
     detect: row.detectOutput,
-    output: row.output,
+    output: binding?.outputContract && row.status !== 'done' ? null : row.output,
     iterations: (row.iterations ?? []) as unknown[],
   };
 }

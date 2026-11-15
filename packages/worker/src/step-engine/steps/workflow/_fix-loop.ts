@@ -1,3 +1,5 @@
+import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
+import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
@@ -785,7 +787,6 @@ const HONORED_CONSTRAINT_SOURCES = new Set([
   '07c-ddev-reconcile',
   '08-phase-5-verify',
   '08a-browser-verify',
-  '08c-code-review',
   '09-gate-2-verify-approval',
   FIX_LOOP_GATE_SOURCE,
 ]);
@@ -821,6 +822,11 @@ const HONORED_MACHINE_INTRO =
  *  ignore the very work it is validating. Returns '' on the original pass or when none exist. */
 export async function loadHonoredConstraints(ctx: StepContext): Promise<string> {
   if (ctx.round <= 0) return '';
+  const reviewId = readStepRole(
+    await loadRoleTaskPin(ctx.db, ctx.taskId),
+    STEP_ROLES.codeReview,
+    (b) => b.stepId,
+  );
   const rows = await ctx.db
     .select()
     .from(schema.taskEvents)
@@ -845,7 +851,7 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     const p = r.payload as Payload | null;
     if (!p?.sourceStepId || typeof p.round !== 'number') continue;
     if (p.round > ctx.round) continue;
-    if (!HONORED_CONSTRAINT_SOURCES.has(p.sourceStepId)) continue;
+    if (!HONORED_CONSTRAINT_SOURCES.has(p.sourceStepId) && p.sourceStepId !== reviewId) continue;
     if (!latestPerSource.has(p.sourceStepId)) {
       const text = (p.diagnosis ?? '').trim();
       const human = isFencedPersonRequest(p);

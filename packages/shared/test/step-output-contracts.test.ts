@@ -21,7 +21,10 @@ describe('host output contracts', () => {
     expect(Object.keys(contracts).sort()).toEqual([
       'CODE_AUDIT_OUTPUT_CONTRACT',
       'CODE_REVIEW_OUTPUT_CONTRACT',
+      'STEP_ROLES',
       'parseStepOutputContractRef',
+      'projectStepOutputRoles',
+      'readStepRole',
       'safeParseStepOutput',
       'stepOutputContractsEqual',
       'stepRoleOutputContract',

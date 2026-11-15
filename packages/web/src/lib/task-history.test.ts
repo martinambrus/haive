@@ -575,3 +575,49 @@ describe('implementation overview', () => {
     });
   });
 });
+
+describe('projected output roles', () => {
+  const moduleStep = {
+    stepId: 'module.example.review',
+    title: 'Extended review',
+    output: {
+      reviewed: true,
+      blocking: false,
+      peer: { verdict: 'APPROVE', findings: [] },
+      security: { verdict: 'SECURE', findings: [] },
+      extraLenses: [],
+    },
+  };
+  it('admits an explicit review role and preserves physical identity and title', () => {
+    expect(
+      buildTaskHistory([step({ ...moduleStep, outputRoles: ['08c-code-review'] })])[0],
+    ).toMatchObject({ id: 'implement-round-3', title: 'Extended review', round: 3 });
+    expect(buildTaskHistory([step(moduleStep)])).toEqual([]);
+  });
+  it('retains CLI evidence, status, round, retry and actual event matching rules', () => {
+    expect(
+      buildTaskHistory([
+        step({ ...moduleStep, outputRoles: ['08c-code-review'], cliInvocationCount: 0 }),
+      ]),
+    ).toEqual([]);
+    expect(
+      buildTaskHistory([
+        step({ ...moduleStep, outputRoles: ['08c-code-review'], status: 'pending' }),
+      ]),
+    ).toEqual([]);
+    const entries = buildTaskHistory(
+      [
+        step({
+          ...moduleStep,
+          outputRoles: ['08c-code-review'],
+          startedAt: '2026-10-05T12:32:32Z',
+        }),
+      ],
+      [fixEvent()],
+    );
+    expect(entries[0]).toMatchObject({
+      tone: 'success',
+      message: 'All reviewers approved; no issues found.',
+    });
+  });
+});

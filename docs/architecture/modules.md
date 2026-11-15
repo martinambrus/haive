@@ -624,6 +624,16 @@ reference. It does not grant replacement admission: active replacements remain r
 until role readers and pinned role routing ship. Existing catalog `entry` JSON holds
 these serializable declarations; no SQL migration is needed.
 
+The same portable entry exports `readStepRole` and the DTO role projector. A future v2 task
+binds a role to its physical producer and exact contract on each candidate; readers use that
+pin, never live module metadata or a review-looking output. Module lifecycle changes and
+catalog edits do not remap a task. Worker output reads, house-rule stamps, learning and prompt
+guidance preserve physical invocation/event/source identity. Both task API surfaces project
+`outputRoles` after checking ownership; browser code receives no full plan.
+
+This reader prerequisite only decodes v2. Creation still emits v1 and refuses replacements;
+activation of admission and pinned host finalization belongs to the next prerequisite.
+
 ### Fan-out seats
 
 A module may declare optional `miningSeats` in its manifest, keyed by local exported

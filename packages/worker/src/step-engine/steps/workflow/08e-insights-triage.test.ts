@@ -161,6 +161,14 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
   const titles = async (outputs: { stepId: string; raw: string }[], verdicts: unknown[]) =>
     parseInsights(await loadInsightOutputs(tableDb(outputs, verdicts), 't1'));
 
+  it('retains a replacement invocation raw INSIGHTS block and its physical source', async () => {
+    const stepId = 'module.example.review';
+    const raw = '## INSIGHTS\n- INSIGHT: Extract helper | util.ts:3 | dedupe\n';
+    const outputs = await loadInsightOutputs(tableDb([{ stepId, raw }], []), 't1');
+    expect(outputs).toContainEqual({ stepId, raw });
+    expect(parseInsights(outputs)[0]?.sourceStep).toBe(stepId);
+  });
+
   it('turns a withheld finding into one insight although the reply has no INSIGHTS block', async () => {
     const ins = await titles([], [verdict]);
     expect(ins).toHaveLength(1);
