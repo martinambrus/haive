@@ -70,7 +70,11 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 it('adapts the existing previous-output helper with the captured round bound', async () => {
   const host = createStepHostServices(ctx);
-  await host.loadPreviousStepOutput('previous');
+  expect(await host.loadPreviousStepOutput('previous')).toEqual({
+    detect: null,
+    output: { worktreePath: '/repo/.haive/worktrees/task' },
+    iterations: [],
+  });
   expect(loadPreviousStepOutput).toHaveBeenCalledWith(ctx.db, 'task', 'previous', 2);
 });
 it.each([

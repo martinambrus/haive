@@ -91,7 +91,14 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     loadPreviousStepOutput(stepId) {
       return hostCall(ctx, async () => {
         await verifyIdentity();
-        return loadPreviousStepOutput(ctx.db, ctx.taskId, stepId, ctx.round);
+        const previous = await loadPreviousStepOutput(ctx.db, ctx.taskId, stepId, ctx.round);
+        return previous === null
+          ? null
+          : {
+              detect: previous.detect,
+              output: previous.output,
+              iterations: previous.iterations,
+            };
       });
     },
     collectImplementationFiles(worktreePath) {
