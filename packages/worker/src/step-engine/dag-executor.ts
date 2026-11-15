@@ -2116,7 +2116,10 @@ export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): Ad
       };
 }
 
-export function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): ReplannerOutput {
+export function parseReplanner(
+  inv: typeof schema.cliInvocations.$inferSelect,
+  requireDecision = false,
+): ReplannerOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -2124,14 +2127,18 @@ export function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): 
     c = b ? safeJsonParse(b) : null;
   }
   const p = replannerOutputSchema.safeParse(c);
-  return p.success
-    ? p.data
-    : {
-        action: 'ABORT',
-        reasoning: 'replanner returned no valid structured decision',
-        skip_downstream: [],
-        new_levels: [],
-      };
+  if (p.success) return p.data;
+  if (requireDecision) {
+    throw new Error(
+      'DAG required replanner returned no valid structured decision; Retry to recover',
+    );
+  }
+  return {
+    action: 'ABORT',
+    reasoning: 'replanner returned no valid structured decision',
+    skip_downstream: [],
+    new_levels: [],
+  };
 }
 
 async function escalateIssueToReplan(
@@ -2507,7 +2514,7 @@ async function applyReplannerDecision(
   inv: typeof schema.cliInvocations.$inferSelect,
   failed: DagIssueRow[],
 ): Promise<'continue' | 'abort'> {
-  const out = parseReplanner(inv);
+  const out = parseReplanner(inv, recordsFailures(ea.stepDef));
   await ea.db
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })

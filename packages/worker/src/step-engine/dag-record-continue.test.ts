@@ -1359,3 +1359,61 @@ it('F7 counts split parents separately from their delivered and failed children'
       .reduce((sum, [, count]) => sum + count, 0),
   ).toBe(counts.total);
 });
+
+for (const policy of [undefined, 'fail-step', 'record-and-continue']) {
+  it.each([
+    { parsedOutput: null, rawOutput: 'no structured reply' },
+    { parsedOutput: { action: 'UNKNOWN' }, rawOutput: null },
+    { parsedOutput: {}, rawOutput: null },
+  ])(`F9 malformed replanner under ${policy}: %j`, async (output) => {
+    const h = fixture([issue('A', { ...failure, lastAdvisorAction: 'ESCALATE_TO_REPLAN' })], true);
+    h.stepDef.dagExecute.failurePolicy = policy as string;
+    h.plan.replannerInvocationId = 'malformed';
+    h.invocations.push({
+      id: 'malformed',
+      startedAt: new Date(),
+      endedAt: new Date(),
+      exitCode: 0,
+      errorMessage: null,
+      ...output,
+    });
+    if (policy === 'record-and-continue') {
+      await expect(h.escalate()).rejects.toThrow(/replanner.*no valid structured decision/i);
+      expect(h.plan.replannerInvocationId).toBe('malformed');
+      expect(h.plan.replannerInvocations).toBe(0);
+      expect(h.invocations[0]!.consumedAt).toBeUndefined();
+      expect(h.rows[0]!.concerns).toBe('');
+      // A user Retry can replace this hard-faulted run using the free-slot path.
+      h.invocations[0]!.supersededAt = new Date();
+      expect((await h.escalate()).status).toBe('reloop');
+      expect((await h.escalate()).status).toBe('waiting');
+      expect(h.enqueued).toHaveLength(1);
+    } else {
+      const result = await h.escalate();
+      expect(result.status).toBe('aborted');
+      expect(result.error).toBe('DAG aborted by replanner at level 0: A');
+      expect(h.plan.replannerInvocations).toBe(1);
+    }
+    expect(h.checkpoints).toEqual([]);
+  });
+}
+
+it('F9 keeps explicit structured ABORT recordable even with fallback-like reasoning', async () => {
+  const h = fixture([issue('A', failure)], true);
+  h.plan.replannerInvocationId = 'decline';
+  h.invocations.push({
+    id: 'decline',
+    startedAt: new Date(),
+    endedAt: new Date(),
+    exitCode: 0,
+    parsedOutput: {
+      action: 'ABORT',
+      reasoning: 'replanner returned no valid structured decision',
+      skip_downstream: [],
+      new_levels: [],
+    },
+  });
+  expect((await h.run()).resolved).toBe(true);
+  expect(h.rows[0]!.concerns).toContain(DAG_FINAL_FAILURE_MARKER);
+  expect(h.plan.replannerInvocations).toBe(1);
+});
