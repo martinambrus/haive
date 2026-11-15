@@ -29,6 +29,25 @@ describe('manual insight batch contract', () => {
   it('attributes exactly the selected set', () => {
     expect(read(report())).toMatchObject({ implemented: true, items: report().items });
   });
+  it('accepts a strictly valid whole unfenced report', () => {
+    expect(read(` \n${JSON.stringify(report())}\n `).items).toEqual(report().items);
+  });
+  it.each([
+    ['unfenced report missing its final brace', () => JSON.stringify(report()).slice(0, -1)],
+    [
+      'fenced truncated report',
+      () => `\`\`\`json\n${JSON.stringify(report()).slice(0, -1)}\n\`\`\``,
+    ],
+    [
+      'repairable quoted example before invalid final text',
+      () => `Example: ${JSON.stringify(report()).slice(0, -1)}\nFinal report: unavailable`,
+    ],
+  ] as const)('leaves every item unconfirmed for %s', (_label, raw) => {
+    const out = read(raw());
+    expect(out.items.map((i) => [i.id, i.outcome])).toEqual(ids.map((id) => [id, 'unconfirmed']));
+    expect(out.implemented).toBe(false);
+    expect(out.changes).toEqual([]);
+  });
   it.each(['extra', 'missing', 'duplicate', 'empty changes', 'foreign batch', 'unknown version'])(
     'refuses %s',
     (kind) => {

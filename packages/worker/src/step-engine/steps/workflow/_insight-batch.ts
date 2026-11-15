@@ -7,7 +7,6 @@ import { logger } from '@haive/shared';
 import type { Insight, LoadedInsight } from '@haive/shared/step';
 import type { StepContext } from '../../step-definition.js';
 import { lockOwnedStep, StepSupersededError } from '../../step-ownership.js';
-import { parseAgentJson } from './_agent-json.js';
 
 export const INSIGHT_BATCH_EVENT = 'insight.batch';
 export const INSIGHT_STEP = '08e-insights-triage';
@@ -48,26 +47,22 @@ export function readInsightOutcome(
     const final = scanFences(raw.split('\n'))
       .filter((f) => f.lang.toLowerCase() === 'json')
       .at(-1);
-    if (final) {
-      // An invalid final fence must not fall back to an earlier quoted example or be
-      // repaired into a success after an editor may already have changed the tree.
-      try {
-        raw = final.close === null ? null : JSON.parse(final.content.join('\n'));
-      } catch {
-        raw = null;
-      }
+    // Neither a final fence nor a whole unfenced reply may be repaired into success
+    // after an editor may already have changed the tree. Never extract quoted examples.
+    try {
+      raw = final
+        ? final.close === null
+          ? null
+          : JSON.parse(final.content.join('\n'))
+        : JSON.parse(raw.trim());
+    } catch {
+      raw = null;
     }
   }
   // Select the final report-shaped envelope BEFORE validation. An invalid final answer must
   // never fall back to an earlier example that happened to validate.
-  const candidate = parseAgentJson(raw, (c) =>
-    c &&
-    typeof c === 'object' &&
-    !Array.isArray(c) &&
-    ('batchId' in c || 'items' in c || 'version' in c)
-      ? (c as Record<string, unknown>)
-      : null,
-  );
+  const candidate =
+    raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
   const parsed = reportSchema.safeParse(candidate);
   const valid =
     parsed.success &&
