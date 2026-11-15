@@ -682,16 +682,16 @@ Before P7 lifts the fence (from the P6 review, `EXC-S/review-1.md`): (1) API ref
 
 ### T688 · FNF[dag-partial-2] · opt-in DAG hardening lows, after T686 (+6)
 
-status: open (all items should land with the first workflow that opts into `record-and-continue`, i.e. DPA P6) · kind: fix · found: T686 review-2 2026-11-15 · priority: P3
+status: open (items 1-6 DONE #1221 e741a2fbb; the lows below remain, all opt-in only) · kind: fix · found: #1221 review-1/2 2026-11-15 · priority: P3
 
-Review in `.claude/tmp/codex-run/DAGP-S/review-2.md`. All opt-in only; the default policy is unaffected.
+Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The default `fail-step` policy is unaffected.
 
-1. LOW, REGRESSION: a replanner content refusal writes the issue rows before the invocation row (`worker/src/step-engine/dag-executor.ts` ~:2732-2740), the reverse of Retry's order (`queues/_step-reset.ts` ~:93-121), so a Retry overlapping that ingest can deadlock (rolled back, a second Retry recovers). Fix: move the `consumedAt` update above the `setResolution` loop; assert the order in the control.
-2. LOW, REGRESSION: `validFixResult` is computed before `refused` (~:3422 vs :3431), so a content-refused advisor-started fix coder that printed a valid result keeps its own `concerns` text instead of the refusal note. Fix: `validFixResult = parsed && !refused`.
-3. Fixed in #1219 before merge (section C clears the coder streak on a valid result). Replaced by: LOW, PRE-EXISTING: refusals and the streak differ by role. The advisor (~:2431-2436) and replanner (~:2715) clear the streak on a content refusal; coder and reviewer neither count nor clear. Fix: pick one rule for all four roles and state it in fix-loop.md.
-4. LOW, coverage: no control for a truncated result plus a kill (the parser refuses it, `_fenced-json.ts`); add one per role.
-5. LOW: `prepareReviewAgent` and `issueChangeSet` run before branches that may not dispatch (~:1659, :1887), so a missing provider throws instead of recording the issue's own failure; the prompt and change set are built twice.
-6. INFO: under opt-in, a persistently failing MCP server is an interruption (never counted), so only a person stops its Retry loop, and the thrown text omits the underlying message.
+1. LOW, coverage: no control pins a blocked reviewer whose recovery budget is spent (the exhausted stalled branch records `review stalled`, `worker/src/step-engine/dag-executor.ts` ~:1930-1937; no test asserts that string). fix-loop.md now states the qualifier.
+2. LOW, PRE-EXISTING: advisor (~:2408), replanner (~:2909) and the advisor-started fix coder (section C ~:3441) check the environment before the refusal, so a refusal whose provider detail matches `ENVIRONMENT_FAILURE_RE` counts as a hard fault; reviewer and level coder handle the refusal first (~:1607). Fix: move the refusal test above the environment check in those three places.
+3. LOW: a refused fix coder that printed a valid result writes Haive's refusal note into the task ledger (`recordLedgerEntry` ~:3604-3611); later agents read it as a finding. Parity with the level coder.
+4. LOW, coverage: the DGL-4 truncation controls for advisor and replanner cannot discriminate (the kill throws before any parse).
+5. LOW, maintenance: `retryReviewer` (~:1666-1669) duplicates the two dispatch-branch predicates (~:1698, :1720); a drift restores the consume-before-throw hazard. Fix: one shared helper.
+6. NIT, docs: fix-loop.md "advisor, replanner and fix coder" means the section-C advisor-started fix coder; "path-scrubbed" covers only worker storage and host repo roots.
 
 ### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+18)
 
