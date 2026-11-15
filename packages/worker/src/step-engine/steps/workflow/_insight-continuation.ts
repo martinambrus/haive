@@ -17,6 +17,13 @@ const continuationSchema = z
     round: z.number().int().positive(),
   })
   .strict();
+const checkpointSchema = z
+  .object({
+    stepRowId: z.string().min(1),
+    round: z.number().int().positive(),
+    generation: z.number().int().nonnegative(),
+  })
+  .strict();
 export function readInsightContinuation(value: unknown): InsightReviseContinuation {
   if ((value as { version?: unknown } | null)?.version !== 1)
     throw new Error('Unsupported insight continuation protocol version.');
@@ -68,12 +75,17 @@ export async function activeInsightContinuation(
       ),
     });
     if (!source || source.rerunGeneration !== continuation.generation) continue;
+    // Publication records which checkpoint this route reached. A verification Retry can
+    // leave an older pending row behind when a fix round moves the forward walk on.
+    const owned =
+      event.payload?.checkpoint == null ? null : checkpointSchema.parse(event.payload.checkpoint);
     const checkpoint = await db.query.taskSteps.findFirst({
       where: and(
         eq(schema.taskSteps.taskId, taskId),
         eq(schema.taskSteps.stepId, '08e-insights-triage'),
-        gte(schema.taskSteps.round, continuation.round),
-        lte(schema.taskSteps.round, round),
+        ...(owned
+          ? [eq(schema.taskSteps.id, owned.stepRowId), eq(schema.taskSteps.round, owned.round)]
+          : [gte(schema.taskSteps.round, continuation.round), lte(schema.taskSteps.round, round)]),
       ),
       orderBy: [asc(schema.taskSteps.round)],
     });
@@ -114,6 +126,38 @@ export async function publishInsightStep(
       .for('share');
     if (!task) throw new StepSupersededError(ctx.taskStepId);
     ctx.throwIfCancelled();
+    const checkpoint = (patch.output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint;
+    if (checkpoint) {
+      const continuation = readInsightContinuation(checkpoint);
+      const events = await tx.query.taskEvents.findMany({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.eventType, INSIGHT_CONTINUATION_EVENT),
+        ),
+      });
+      const event = events.find(
+        (e) =>
+          JSON.stringify(readInsightContinuation(e.payload?.continuation)) ===
+          JSON.stringify(continuation),
+      );
+      if (!event || source.round < continuation.round)
+        throw new Error('Insight checkpoint has no matching continuation handoff.');
+      // Keep the exact row identity across Retry, which resets output and increments
+      // generation. Its current status, including pending after Retry, decides closure.
+      await tx
+        .update(schema.taskEvents)
+        .set({
+          payload: {
+            ...event.payload,
+            checkpoint: {
+              stepRowId: source.id,
+              round: source.round,
+              generation: source.rerunGeneration,
+            },
+          },
+        })
+        .where(eq(schema.taskEvents.id, event.id));
+    }
     return updateOwnedStep(tx, ctx.taskStepId, patch);
   });
 }

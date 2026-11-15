@@ -4123,7 +4123,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // The row is still done; handleResult turns loop_back into a new round at implement and
     // revise into a reset of its target.
     const finalize = (patch: UpdatePatch) =>
-      meta.id === INSIGHT_STEP && (output as { continuation?: unknown } | null)?.continuation
+      meta.id === INSIGHT_STEP &&
+      ((output as { continuation?: unknown } | null)?.continuation ||
+        (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
         ? publishInsightStep(ctx, patch)
         : updateRow(db, current.id, patch);
     const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);

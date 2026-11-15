@@ -6,7 +6,7 @@ import {
 } from '../src/step-engine/steps/workflow/_insight-continuation.js';
 import * as specArtifacts from '../src/step-engine/steps/workflow/_spec-artifact.js';
 import * as validationSnapshots from '../src/step-engine/steps/workflow/_validation-snapshot.js';
-import { finishedStepResult } from '../src/step-engine/step-runner.js';
+import { advanceStep, finishedStepResult } from '../src/step-engine/step-runner.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { lockOwnedStep } from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
@@ -42,6 +42,13 @@ import {
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
 import { gitExec } from '../src/repo/git-exec.js';
 import { captureTestImage } from '../src/step-engine/steps/workflow/_fix-test-edits.js';
+
+// Real checkpoint completion takes the mining barrier, whose browser cleanup must stay off Docker.
+vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  closeExtraBrowserTabs: async () => null,
+  restoreBrowserWindow: async () => null,
+}));
 
 const url = process.env.CANCEL_FENCE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/cancel_fence_test'))
@@ -1306,6 +1313,140 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     },
   );
+  it('settles the owned checkpoint after verification Retry abandons an earlier pending checkpoint', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+    const [verify] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: '08-phase-5-verify',
+        stepIndex: 8,
+        runSeq: 2,
+        title: 'Verify',
+        status: 'done',
+        round: 1,
+      })
+      .returning();
+    const settleCheckpoint = async (round: number, epoch: number) => {
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        stepDef: insightsTriageStep,
+        repoPath: '/repo',
+        workspacePath: '/repo',
+        cliProviderId: null,
+        round,
+        epoch,
+        runSeq: 4,
+        moduleDeactivation: null,
+      });
+      expect(result.status).toBe('done');
+      expect(result.row.output).toMatchObject({ batchId: continuation.batchId, items: [] });
+      return result.row;
+    };
+    await settleCheckpoint(1, 0);
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toBeNull();
+    // Retry verification while gate 2 waits: the checkpoint reopens in the same round.
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: '09-gate-2-verify-approval' })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    expect(await resetStepAndDownstream(db, ctx.taskId, verify!.stepId, 1, 0)).toMatchObject({
+      newEpoch: 1,
+    });
+    expect(await activeInsightContinuation(db, ctx.taskId, 1)).toEqual(continuation);
+    // Verification starts a fix round. Its forward walk never revisits round 1.
+    await db.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      eventType: 'fix_loop.started',
+      payload: { sourceStepId: verify!.stepId, round: 2 },
+    });
+    const owned = await settleCheckpoint(2, 1);
+    expect(
+      await db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, ctx.taskId),
+          eq(schema.taskSteps.stepId, source.stepId),
+          eq(schema.taskSteps.round, 1),
+        ),
+      }),
+    ).toMatchObject({ status: 'pending', rerunGeneration: 1 });
+    expect(await activeInsightContinuation(db, ctx.taskId, 2)).toBeNull();
+    // A later gate-2 reject must offer new insights, not another empty checkpoint.
+    await db.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      eventType: 'fix_loop.requested',
+      payload: { sourceStepId: '09-gate-2-verify-approval', round: 3 },
+    });
+    await db.insert(schema.cliInvocations).values({
+      taskId: ctx.taskId,
+      taskStepId: source.id,
+      mode: 'cli',
+      prompt: 'review',
+      rawOutput: '## INSIGHTS\n- INSIGHT: Fresh improvement | fresh.ts | Detail',
+    });
+    const spec = vi
+      .spyOn(specArtifacts, 'resolveSpecView')
+      .mockResolvedValue({ text: '' } as never);
+    try {
+      const laterCtx = { db, taskId: ctx.taskId, round: 3, throwIfCancelled() {} } as StepContext;
+      const detected = await insightsTriageStep.detect!(laterCtx);
+      expect(detected.insightCheckpoint).toBeUndefined();
+      expect(insightsTriageStep.form!(laterCtx, detected, null)).toMatchObject({
+        fields: [{ id: 'selectedInsights', options: [{ label: 'Fresh improvement (fresh.ts)' }] }],
+      });
+    } finally {
+      spec.mockRestore();
+    }
+    // Retry of the actual owned checkpoint still reopens that continuation.
+    expect(await resetStepAndDownstream(db, ctx.taskId, owned.stepId, 2, 1)).toMatchObject({
+      newEpoch: 2,
+    });
+    expect(await activeInsightContinuation(db, ctx.taskId, 2)).toEqual(continuation);
+  });
+  it('rolls checkpoint publication back if its required ownership write fails', async () => {
+    const { ctx, source, continuation } = await seedRoute();
+    await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+    const [checkpoint] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: ctx.taskId,
+        stepId: source.stepId,
+        stepIndex: 8.95,
+        title: 'Checkpoint',
+        status: 'running',
+        round: 1,
+      })
+      .returning();
+    await db.execute(
+      sql.raw(`ALTER TABLE task_events ADD CONSTRAINT insight_checkpoint_test
+      CHECK (task_id <> '${ctx.taskId}'::uuid OR NOT (payload ? 'checkpoint'))`),
+    );
+    try {
+      await expect(
+        publishInsightStep(
+          {
+            db,
+            taskId: ctx.taskId,
+            taskStepId: checkpoint!.id,
+            userId,
+            epoch: 0,
+            rerunGeneration: 0,
+            throwIfCancelled() {},
+          } as StepContext,
+          { status: 'done', output: { insightCheckpoint: continuation } },
+        ),
+      ).rejects.toThrow();
+      expect(
+        await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, checkpoint!.id) }),
+      ).toMatchObject({ status: 'running', output: null });
+      expect((await routeEvents(ctx.taskId))[0]?.payload).not.toHaveProperty('checkpoint');
+    } finally {
+      await db.execute(sql`ALTER TABLE task_events DROP CONSTRAINT insight_checkpoint_test`);
+    }
+  });
   it('boot epoch recovery preserves the batch, and downstream Retry retains the active route', async () => {
     const { ctx, source, continuation } = await seedRoute();
     await db

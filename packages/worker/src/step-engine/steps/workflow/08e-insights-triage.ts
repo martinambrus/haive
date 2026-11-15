@@ -50,6 +50,7 @@ interface TriageApply extends InsightOutcome {
   selected: LoadedInsight[];
   skipped: number;
   continuation?: InsightReviseContinuation;
+  insightCheckpoint?: InsightReviseContinuation;
 }
 
 // Old scalar reports can never establish an outcome for an individual selection.
@@ -233,6 +234,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         implemented: false,
         changes: [],
         notes: 'Insight check round completed.',
+        insightCheckpoint: d.insightCheckpoint,
       };
     const selected = selectOfferedInsights(d.insights, args.formValues).map((i) => ({
       ...i,
