@@ -1,7 +1,7 @@
 import {
   readStepRole,
   safeParseStepOutput,
-  type StepRoleId,
+  type LegacyStepRoleId as StepRoleId,
   type RoleBinding,
 } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';

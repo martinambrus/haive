@@ -4,7 +4,7 @@ import {
   stepOutputContractsEqual,
   stepRoleOutputContract,
   type StepOutputContractRef,
-  type StepRoleId,
+  type LegacyStepRoleId as StepRoleId,
 } from '@haive/shared/step-outputs';
 import type { ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepDefinition } from './step-definition.js';

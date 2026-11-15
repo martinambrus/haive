@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   STEP_ROLES,
-  type StepRoleId,
+  type LegacyStepRoleId as StepRoleId,
   type StepOutputContractRef,
   stepRoleOutputContract,
   stepOutputContractsEqual,

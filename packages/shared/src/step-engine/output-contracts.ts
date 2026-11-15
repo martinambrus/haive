@@ -10,16 +10,84 @@ export const CODE_AUDIT_OUTPUT_CONTRACT = Object.freeze({
   id: 'haive.code-audit',
   version: 1,
 } as const);
-export type StepOutputContractRef =
-  typeof CODE_REVIEW_OUTPUT_CONTRACT | typeof CODE_AUDIT_OUTPUT_CONTRACT;
+export const SPEC_DRAFT_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.spec.draft',
+  version: 1,
+} as const);
+export const SPEC_CHECKED_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.spec.checked',
+  version: 1,
+} as const);
+export const SPEC_RESOLVED_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.spec.resolved',
+  version: 1,
+} as const);
+
+/** Frozen v1/v2 aliases. Do not extend this set: those pins support review/audit only. */
 export const STEP_ROLES = Object.freeze({
   codeReview: '08c-code-review',
   codeAudit: '08c2-code-audit',
 } as const);
-export type StepRoleId = (typeof STEP_ROLES)[keyof typeof STEP_ROLES];
+export type LegacyStepRoleId = (typeof STEP_ROLES)[keyof typeof STEP_ROLES];
+export const SPEC_ROLES = Object.freeze({
+  draft: 'haive.spec.draft',
+  checked: 'haive.spec.checked',
+  resolved: 'haive.spec.resolved',
+} as const);
 
-export function stepRoleOutputContract(role: StepRoleId): StepOutputContractRef {
-  return role === STEP_ROLES.codeReview ? CODE_REVIEW_OUTPUT_CONTRACT : CODE_AUDIT_OUTPUT_CONTRACT;
+/** Host-owned data ports. A port grants no routing, replacement or quotation authority.
+ * Physical review/audit role ids remain aliases for the exact original contracts. */
+export const STEP_ROLE_REGISTRY = Object.freeze({
+  [STEP_ROLES.codeReview]: Object.freeze({
+    id: STEP_ROLES.codeReview,
+    contract: CODE_REVIEW_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'agent',
+    legacyStepId: STEP_ROLES.codeReview,
+    hostPolicy: 'code-review',
+  } as const),
+  [STEP_ROLES.codeAudit]: Object.freeze({
+    id: STEP_ROLES.codeAudit,
+    contract: CODE_AUDIT_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'agent',
+    legacyStepId: STEP_ROLES.codeAudit,
+    hostPolicy: 'code-audit',
+  } as const),
+  [SPEC_ROLES.draft]: Object.freeze({
+    id: SPEC_ROLES.draft,
+    contract: SPEC_DRAFT_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '04-phase-0b-pre-planning',
+  } as const),
+  [SPEC_ROLES.checked]: Object.freeze({
+    id: SPEC_ROLES.checked,
+    contract: SPEC_CHECKED_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '05-phase-0b5-spec-quality',
+  } as const),
+  [SPEC_ROLES.resolved]: Object.freeze({
+    id: SPEC_ROLES.resolved,
+    contract: SPEC_RESOLVED_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '05a-resolve-spec-warnings',
+  } as const),
+});
+export type StepRoleId = keyof typeof STEP_ROLE_REGISTRY;
+export type StepOutputContractRef = (typeof STEP_ROLE_REGISTRY)[StepRoleId]['contract'];
+/** The ONLY ports with executable host policy. New data roles must never enter that branch. */
+export const HOST_POLICY_STEP_ROLES: readonly LegacyStepRoleId[] = Object.freeze(
+  Object.values(STEP_ROLE_REGISTRY)
+    .filter((entry) => 'hostPolicy' in entry)
+    .map((entry) => entry.id as LegacyStepRoleId),
+);
+export function stepRoleOutputContract<R extends StepRoleId>(
+  role: R,
+): (typeof STEP_ROLE_REGISTRY)[R]['contract'] {
+  return STEP_ROLE_REGISTRY[role].contract;
 }
 
 /** Exact id + version, with no module-supplied validator or compatibility assertion. */
@@ -28,10 +96,11 @@ export function parseStepOutputContractRef(value: unknown): StepOutputContractRe
   const ref = value as Record<string, unknown>;
   if (Object.keys(ref).length !== 2 || !Object.hasOwn(ref, 'id') || !Object.hasOwn(ref, 'version'))
     return null;
-  if (ref.version !== 1) return null;
-  if (ref.id === CODE_REVIEW_OUTPUT_CONTRACT.id) return CODE_REVIEW_OUTPUT_CONTRACT;
-  if (ref.id === CODE_AUDIT_OUTPUT_CONTRACT.id) return CODE_AUDIT_OUTPUT_CONTRACT;
-  return null;
+  return (
+    Object.values(STEP_ROLE_REGISTRY).find(
+      ({ contract }) => contract.id === ref.id && contract.version === ref.version,
+    )?.contract ?? null
+  );
 }
 
 export function stepOutputContractsEqual(expected: unknown, actual: unknown): boolean {
@@ -39,7 +108,7 @@ export function stepOutputContractsEqual(expected: unknown, actual: unknown): bo
   return ref !== null && ref === parseStepOutputContractRef(actual);
 }
 
-// Schemas and registry stay private: publishing a Zod object would let a consumer mutate its
+// Schemas and validator registry stay private: publishing a Zod object would let a consumer mutate its
 // internals for every producer. Passthrough applies at EVERY object boundary. No defaults,
 // coercion or transformations: successful validation never rewrites the persisted value.
 // Unknown extension keys survive parsing but are not declared fields for TypeScript's
@@ -150,9 +219,116 @@ const codeAuditOutputSchema = z
 export type CodeReviewOutput = ContractShape<z.infer<typeof codeReviewOutputSchema>>;
 export type CodeAuditOutput = ContractShape<z.infer<typeof codeAuditOutputSchema>>;
 
-type OutputFor<C extends StepOutputContractRef> = C extends typeof CODE_REVIEW_OUTPUT_CONTRACT
-  ? CodeReviewOutput
-  : CodeAuditOutput;
+// Minimum consumer fields only. Unknown storage extensions survive validation; no defaults
+// or coercion. Optional fields accommodate rows written before those fields were introduced.
+const specFindingSchema = z
+  .object({
+    dimension: z.string().optional(),
+    severity: z.string().optional(),
+    comment: z.string().optional(),
+  })
+  .passthrough();
+const affectedComponentsSchema = z
+  .object({
+    named: z.array(
+      z
+        .object({ id: z.string(), title: z.string(), parentTitle: z.string().nullable() })
+        .passthrough(),
+    ),
+    reached: z.array(
+      z
+        .object({
+          id: z.string(),
+          title: z.string(),
+          depth: z.number(),
+          via: z.string(),
+          reversed: z.boolean().optional(),
+        })
+        .passthrough(),
+    ),
+    truncated: z
+      .object({ reason: z.enum(['depth', 'nodes']), limit: z.number() })
+      .passthrough()
+      .nullable(),
+    diagrams: z
+      .array(
+        z.object({ depth: z.number(), mermaid: z.string(), omitted: z.number() }).passthrough(),
+      )
+      .optional(),
+    namedOmitted: z.number().optional(),
+  })
+  .passthrough();
+const specDraftOutputSchema = z
+  .object({
+    spec: z.string(),
+    summary: z.string().optional(),
+    affectedComponents: affectedComponentsSchema.optional(),
+  })
+  .passthrough();
+const specCheckedOutputSchema = z
+  .object({
+    spec: z.string(),
+    verdict: z.string().optional(),
+    score: z.number().optional(),
+    findings: z.array(specFindingSchema).optional(),
+    scopeQuestions: z.array(z.string()).optional(),
+    amendmentDiscarded: z
+      .object({
+        amendedLength: z.number().optional(),
+        currentLength: z.number().optional(),
+        headings: z.number().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+const specResolvedOutputSchema = z
+  .object({ spec: z.string(), scopeQuestions: z.array(z.string()).optional() })
+  .passthrough();
+export type SpecDraftOutput = ContractShape<z.infer<typeof specDraftOutputSchema>>;
+export type SpecCheckedOutput = ContractShape<z.infer<typeof specCheckedOutputSchema>>;
+export type SpecResolvedOutput = ContractShape<z.infer<typeof specResolvedOutputSchema>>;
+
+const outputValidators = Object.freeze({
+  'haive.code-review': codeReviewOutputSchema,
+  'haive.code-audit': codeAuditOutputSchema,
+  'haive.spec.draft': specDraftOutputSchema,
+  'haive.spec.checked': specCheckedOutputSchema,
+  'haive.spec.resolved': specResolvedOutputSchema,
+});
+export type OutputFor<C extends StepOutputContractRef> = ContractShape<
+  z.infer<(typeof outputValidators)[C['id']]>
+>;
+export type RoleOutput<R extends StepRoleId> = OutputFor<
+  (typeof STEP_ROLE_REGISTRY)[R]['contract']
+>;
+
+/** Explicit legacy read projection: do not expose storage extensions to port consumers.
+ * Does not validate or rewrite malformed historical fields; readiness is reported separately. */
+export function projectRoleOutput<R extends StepRoleId>(
+  role: R,
+  value: unknown,
+): Partial<RoleOutput<R>> | null {
+  if (value == null) return null;
+  const validator = outputValidators[stepRoleOutputContract(role).id];
+  return projectDeclared(value, validator) as Partial<RoleOutput<R>>;
+}
+function projectDeclared(value: unknown, validator: z.ZodType): unknown {
+  if (value == null) return value;
+  if (validator instanceof z.ZodOptional || validator instanceof z.ZodNullable)
+    return projectDeclared(value, validator.unwrap() as z.ZodType);
+  if (validator instanceof z.ZodObject && typeof value === 'object' && !Array.isArray(value)) {
+    const input = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(validator.shape)
+        .filter(([key]) => Object.hasOwn(input, key))
+        .map(([key, field]) => [key, projectDeclared(input[key], field as z.ZodType)]),
+    );
+  }
+  if (validator instanceof z.ZodArray && Array.isArray(value))
+    return value.map((item) => projectDeclared(item, validator.element as z.ZodType));
+  return value;
+}
 type OutputParseResult<T> =
   { success: true; data: T } | { success: false; issuePaths: readonly string[] };
 
@@ -169,8 +345,7 @@ export function safeParseStepOutput<C extends StepOutputContractRef>(
 ): OutputParseResult<OutputFor<C>> {
   const registered = parseStepOutputContractRef(ref);
   if (!registered) return { success: false, issuePaths: ['$contract'] };
-  const validator =
-    registered === CODE_REVIEW_OUTPUT_CONTRACT ? codeReviewOutputSchema : codeAuditOutputSchema;
+  const validator = outputValidators[registered.id];
   const result = validator.safeParse(value);
   if (result.success) return { success: true, data: result.data as OutputFor<C> };
   return {

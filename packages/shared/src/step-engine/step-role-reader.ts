@@ -4,7 +4,12 @@ import {
   type DerivedRunPlan,
 } from '../modularity/derived-task-types.js';
 import { executionPathSchema } from '../schemas/tasks.js';
-import { STEP_ROLES, type StepRoleId, type StepOutputContractRef } from './output-contracts.js';
+import {
+  STEP_ROLES,
+  type StepRoleId,
+  type LegacyStepRoleId,
+  type StepOutputContractRef,
+} from './output-contracts.js';
 export { STEP_ROLES } from './output-contracts.js';
 
 export interface RoleTaskPin {
@@ -47,7 +52,9 @@ export function readStepRole<T>(
   if (path === null) return read({ role, stepId: null, outputContract: null, state: 'unselected' });
   const producer =
     plan.version === 2
-      ? plan.candidates.find((c) => c.executionPath === path.data)!.roleBindings[role]
+      ? plan.candidates.find((c) => c.executionPath === path.data)!.roleBindings[
+          role as LegacyStepRoleId
+        ]
       : undefined;
   return read(
     producer
