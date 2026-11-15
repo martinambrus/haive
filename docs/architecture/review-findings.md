@@ -42,3 +42,14 @@ items unacted so they are offered again. Selecting such an item still fails at t
 intent write while the unreadable record remains; only an empty submit passes. Reports describe agent
 claims, never verified repairs, and never write `review_findings` dispositions. The journal
 survives output-clearing Retry; an intent without a settled report remains unconfirmed.
+
+## Insight continuation state
+
+A nonempty settled manual outcome containing an applied report can authorize a v1
+`insight_revise` continuation. Its source row, generation, batch and fresh check round
+are persisted in the output/routing verdict and required `insight.continuation` event.
+The event and any `validation.recheck_requested` return address commit with the task
+pointer under owned fences; neither is best-effort telemetry. Continuations never alter
+review dispositions or report an item as verified merely because its writer said applied.
+The configured check tail ends at a non-writing 08e checkpoint; remaining/new insights
+are left for later gate choices. Automatic classification and gate-3 picks remain unavailable.

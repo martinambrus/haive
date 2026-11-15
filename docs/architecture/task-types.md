@@ -839,3 +839,32 @@ tasks are listed in the task list like any other task (a product decision).
 17. Egress: every resolved address checked at connect time, c-ares, no redirect, one deadline.
 18. Drafts: a positive key list, parity with the create route's shared validation stages (a taken slug
     is a draft warning, a 409 at create), and no surface, rules, egress or repository for the drafter.
+
+## Conditional insight tail on shorter workflow paths
+
+The physical `08c-code-review` and `08e-insights-triage` steps are reachable on
+`quick_bugfix`, and 08e is reachable on `plan_tasklist` (whose code review already ran).
+Newly added visits skip unless an insight continuation is active; an existing plan-tasklist
+code review keeps its normal behavior. Dormant visits bypass new-work pause/provider holds
+and dispatch nothing. Thus ordinary work and decisions remain unchanged, with only the
+new conditional skipped cards added to those run lists. An active route runs fresh review
+and the automatic 08e checkpoint. Existing snapshots are never rewritten.
+
+The composable 08e entry requires earlier verification/review tokens and a verify loop
+target. Runtime preflight checks ordered verification, the pinned code-review producer,
+and triage before a nonempty selection can dispatch an editor, and again before handoff.
+A standalone module declaration is not a pinned replacement role. An old/custom pin that
+lacks the required destinations refuses visibly rather than jumping off-list.
+
+Dormancy applies only to members added by the built-in path filter. Explicit stored
+snapshots, derived pins and admin/static lists keep their own listed step behavior.
+Derived overlays use the previous path membership: on quick, an `insertAfter` or `remove`
+against 08c remains path-absent. Their stored pins are never recomputed.
+
+08e now requires earlier verification (`08-phase-5-verify`) and review (`08c-code-review`,
+or its pinned replacement) as well as its existing worktree, with verification as its
+revise target. Stored admin/module/derived types missing these requirements become
+unavailable when revalidated for new task creation; repair their composition before
+creating another task. Existing tasks retain their immutable lists and fail the source
+step retryably if their destinations are incomplete. No data migration weakens the rule.
+The development install had no such stored types when checked by the session.

@@ -477,3 +477,22 @@ is considered. Independent work proceeds.
 No migration is needed. Rollback first disables new opt-ins and retains a capable
 executor while partial tasks can resume; retain the outcome rows and markers for
 reporting. An older executor must not reinterpret checkpointed partial levels.
+
+## Manual insight check rounds
+
+A nonempty manual 08e batch with at least one journal-reported `applied` item returns a
+version-1 `insight_revise` continuation through `reviseLoop` to 08. Empty selections and
+batches without an applied report retain the ordinary successor, including ordinary late-editor
+revalidation for uncertain edits. A claim of application is not a claim that checks passed.
+
+The insight handoff invokes the same validation snapshot decision as other late editors. A
+moved tree starts fresh 07c/07b rows with `resumeStepId = 08-phase-5-verify`; an unchanged
+tree starts fresh 08 directly. The configured forward tail includes a fresh code review and
+returns to an automatic, non-writing 08e checkpoint. That checkpoint does not ask for a
+second manual selection. Every existing downstream row in the target round is invalidated,
+even when Retry changes a previous direct-verify route into a validation route whose target
+has no row yet. Runtime recheck bounds and return-address handling remain unchanged.
+
+Insight rounds write no `fix_loop.started` and do not consume `maxFixRounds`. A blocking
+check inside an insight round still enters the ordinary implementation fix loop and spends
+one of its own allowances. Neither journal history nor spent fix allowances are reset.

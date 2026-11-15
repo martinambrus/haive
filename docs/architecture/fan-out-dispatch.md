@@ -142,8 +142,10 @@ allowance watch under the existing outage policy. On manual or automatic Resume,
 writer folds through its normal apply and outcome journal as unconfirmed, without another
 writer in that generation. Committed-snapshot failures retain their barrier refusal.
 
-**Manual insight application uses the `implementer` mining seat.** 08e keeps its ordinary
-successor and has no revise continuation in this phase. The seat uses the existing task,
+**Manual insight application uses the `implementer` mining seat.** A settled nonempty batch
+with an applied report revises through fresh validation when needed, verification, review and
+the configured tail to a non-writing 08e checkpoint. Other batches keep their ordinary successor.
+The seat uses the existing task,
 step, saved-seat and default-provider resolution and declares file-writing capabilities,
 `rag_only` and a 30-minute timeout. Empty selection sends nothing. The saved offered
 snapshot binds every selected occurrence id; a legacy positional id is resolved only in its
