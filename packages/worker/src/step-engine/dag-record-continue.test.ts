@@ -194,6 +194,7 @@ function fixture(rows: Row[], review = false) {
   ]);
   let fault: ((table: unknown, patch: Row) => void) | undefined;
   const checkpoints: string[] = [];
+  const operations: { kind: 'lock' | 'write'; table: unknown }[] = [];
   const db: any = {
     transaction: async (fn: any) => {
       const snapshot = [...tables].map(([t, rs]) => [t, structuredClone(rs)] as const);
@@ -240,12 +241,14 @@ function fixture(rows: Row[], review = false) {
             take = n;
             return c;
           },
-          for: async () =>
-            table === schema.taskSteps
+          for: async () => {
+            operations.push({ kind: 'lock', table });
+            return table === schema.taskSteps
               ? ['pending', 'failed', 'skipped'].includes(step.status)
                 ? []
                 : [{ id: 'step' }]
-              : (tables.get(table) ?? []).filter((r) => matches(cond, r)).map((r) => ({ ...r })),
+              : (tables.get(table) ?? []).filter((r) => matches(cond, r)).map((r) => ({ ...r }));
+          },
           then: (ok: any, no: any) =>
             Promise.resolve(
               (tables.get(table) ?? [])
@@ -273,6 +276,7 @@ function fixture(rows: Row[], review = false) {
         where: (cond: unknown) => {
           const apply = () => {
             fault?.(table, patch);
+            operations.push({ kind: 'write', table });
             if (
               table === schema.taskSteps &&
               ['pending', 'failed', 'skipped'].includes(step.status)
@@ -345,6 +349,7 @@ function fixture(rows: Row[], review = false) {
     runs,
     events,
     checkpoints,
+    operations,
     stepDef,
     enqueued,
     params,
@@ -1791,3 +1796,30 @@ for (const role of ['issue_advisor', 'replanner', 'reviewer', 'coder'] as const)
     expect(h.enqueued).toHaveLength(1);
   });
 }
+
+it.each(['CONTINUE', 'ABORT'])(
+  'DAGP-F2 replanner %s writes issues and invocation before locking the step to clear its streak',
+  async (action) => {
+    const h = auxiliaryHarness('replanner');
+    await expect(h.fold(auxiliaryFault('first'))).rejects.toThrow(/DAG required/);
+    h.operations.length = 0;
+    await h.fold(
+      auxiliaryFault('valid', {
+        exitCode: 0,
+        errorMessage: null,
+        parsedOutput: { action, reasoning: 'proceed' },
+      }),
+    );
+    const stepLock = h.operations.findIndex(
+      (o) => o.kind === 'lock' && o.table === schema.taskSteps,
+    );
+    for (const table of [schema.cliInvocations, schema.taskDagIssues]) {
+      const writes = h.operations.flatMap((o, i) =>
+        o.kind === 'write' && o.table === table ? [i] : [],
+      );
+      expect(writes.length).toBeGreaterThan(0);
+      expect(Math.max(...writes)).toBeLessThan(stepLock);
+    }
+    expect(h.plan.escalationLog).toEqual([]);
+  },
+);

@@ -2651,6 +2651,8 @@ async function ingestReplanner(
     }
     return ea.db.transaction(async (tx) => {
       const action = await applyReplannerDecision({ ...ea, db: tx }, inv, failed);
+      // All issue/run writes precede the step lock, matching Retry's lock order.
+      await updateAuxiliaryFault({ ...ea, db: tx }, 'replanner', inv, false);
       await assertOwnsStep(tx, ea.current.id);
       return action;
     });
@@ -2667,7 +2669,6 @@ async function applyReplannerDecision(
   const out: ReplannerOutput = refused
     ? { action: 'ABORT', reasoning: inv.errorMessage!, skip_downstream: [], new_levels: [] }
     : parseReplanner(inv, recordsFailures(ea.stepDef));
-  await updateAuxiliaryFault(ea, 'replanner', inv, false);
   if (refused) {
     for (const issue of failed) {
       await setResolution(ea.db, issue, 'failed_unrecoverable', inv.errorMessage!);
