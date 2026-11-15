@@ -994,6 +994,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       'step defaults',
       'saved synthetic answer',
       'job answer',
+      'persisted preset schema',
     ].flatMap((source) => [[source, true] as const, [source, false] as const]),
   )('INS5 fresh approval: %s (latched=%s)', async (source, latched) => {
     const ctx = await seed();
@@ -1061,19 +1062,27 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
         fields: [
           {
             id: 'decision',
-            type: 'select',
+            type: 'radio',
             label: 'Decision',
             required: true,
             options: [
               { value: 'approve', label: 'Approve' },
               { value: 'reject', label: 'Reject' },
             ],
-            default: 'approve',
+            default: latched ? 'reject' : 'approve',
           },
         ],
       }),
       apply,
     };
+    if (source === 'persisted preset schema') {
+      const oldForm = step.form!(ctx, {}, null)!;
+      oldForm.fields[0]!.default = 'approve';
+      await db
+        .update(schema.taskSteps)
+        .set({ formSchema: oldForm })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    }
     // A prior task's answer is read only with a matching repository and type.
     if (source === 'prior-task reuse') {
       const [repo] = await db
@@ -1126,12 +1135,15 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     try {
       const result = await advanceStep(params);
       if (!latched) {
-        expect(result.status).toBe(source === 'autoContinue' ? 'waiting_form' : 'done');
+        expect(result.status).toBe(
+          ['autoContinue', 'persisted preset schema'].includes(source) ? 'waiting_form' : 'done',
+        );
         expect(
           (result.row.formSchema as { fields: { default?: unknown }[] }).fields[0]!.default,
         ).toBe('approve');
         expect(await pendingInsightApproval(db, ctx.taskId)).toBeNull();
-        if (source !== 'autoContinue') expect(apply).toHaveBeenCalledOnce();
+        if (!['autoContinue', 'persisted preset schema'].includes(source))
+          expect(apply).toHaveBeenCalledOnce();
         return;
       }
       expect(result.status).toBe('waiting_form');
@@ -1139,7 +1151,8 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       expect(result.row.waitingStartedAt).not.toBeNull();
       expect(
         (result.row.formSchema as { fields: { default?: unknown }[] }).fields[0]!.default,
-      ).toBeUndefined();
+      ).toBe('reject');
+      expect((result.row.formSchema as { autoSubmit?: boolean }).autoSubmit).toBe(false);
       expect(apply).not.toHaveBeenCalled();
       expect(await pendingInsightApproval(db, ctx.taskId)).toBe('failed-batch');
       await expect(

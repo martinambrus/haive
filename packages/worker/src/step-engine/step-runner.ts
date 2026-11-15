@@ -3544,7 +3544,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       persistedSchema = safeExistingSchema;
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
-    if (!persistedSchema && stepDef.form) {
+    // A parked schema may have been built by an older worker with a preset overlay.
+    // Rebuild an unanswered latched form from detect so its own recommendations win.
+    if (
+      (!persistedSchema || (insightApprovalRequired && !insightHumanSubmission)) &&
+      stepDef.form
+    ) {
       // Post-llm / pre-form seam: let the step produce any artifact the form's
       // web viewer will reference (form() itself is sync). Awaited once, here,
       // only when the form is first built.
@@ -3565,15 +3570,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
 
     if (insightApprovalRequired && persistedSchema) {
-      // Remove an old/preset approve default too: an omitted decision must not be
-      // expanded into consent when this refreshed form is submitted.
-      persistedSchema = {
-        ...persistedSchema,
-        autoSubmit: false,
-        fields: persistedSchema.fields.map((field) =>
-          field.id === 'decision' ? { ...field, default: undefined } : field,
-        ),
-      };
+      // Keep the form's evidence-based defaults; only an attested owner submit
+      // may apply them. Task/type presets and prior-task reuse stay suppressed.
+      persistedSchema = { ...persistedSchema, autoSubmit: false };
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 
