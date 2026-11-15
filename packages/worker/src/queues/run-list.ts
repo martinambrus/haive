@@ -117,7 +117,7 @@ export function resolveTaskStep(
           ? async (context) =>
               (await host.shouldRun!(context)) &&
               (!def!.shouldRun || (await def!.shouldRun(context)))
-          : def!.shouldRun,
+          : host.shouldRun,
     };
   }
   const entry = ctx.customSteps?.[stepId];

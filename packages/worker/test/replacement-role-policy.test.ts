@@ -35,6 +35,15 @@ function registry(def: StepDefinition = replacement()) {
   return r;
 }
 describe('pinned effective host role policy', () => {
+  it('uses the host review run decision even when the replacement would skip', async () => {
+    const ownShouldRun = vi.fn(() => false);
+    const own = { ...replacement(), shouldRun: ownShouldRun };
+    const effective = resolveTaskStep(rolePin(2), PRODUCER, registry(own))!;
+    const context = {} as Parameters<NonNullable<StepDefinition['shouldRun']>>[0];
+    expect(effective.shouldRun ? await effective.shouldRun(context) : true).toBe(true);
+    expect(ownShouldRun).not.toHaveBeenCalled();
+    expect(resolveTaskStep({}, PRODUCER, registry(own))!.shouldRun).toBe(ownShouldRun);
+  });
   it('inherits the canonical review evaluator, preserves physical identity and no dispatch seats', () => {
     const own = replacement();
     const r = registry(own);
@@ -92,6 +101,25 @@ describe('pinned effective host role policy', () => {
       } as never),
     ).toBe(false);
     expect(ownShouldRun).not.toHaveBeenCalled();
+    const broadContext = {
+      taskId: 'task',
+      db: {
+        query: { tasks: { findFirst: async () => ({ broadAudit: true }) } },
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              orderBy: () => ({
+                limit: async () => [{ output: { worktreePath: '/workspace' } }],
+              }),
+            }),
+          }),
+        }),
+      },
+    } as never;
+    expect(await effective.shouldRun!(broadContext)).toBe(true);
+    ownShouldRun.mockReturnValue(false);
+    expect(await effective.shouldRun!(broadContext)).toBe(false);
+    expect(ownShouldRun).toHaveBeenCalledTimes(2);
   });
   it('refuses replacement declarations that permit skipping', () => {
     const own = replacement();

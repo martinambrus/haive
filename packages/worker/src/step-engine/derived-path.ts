@@ -92,7 +92,7 @@ export async function pinDerivedWorkflowPath(
       derivedRunPlan: plan,
       executionPath: path,
     };
-    const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry));
+    const missing = stepIds.filter((id) => !resolveTaskStep(scope, id, registry, plan));
     if (missing.length) throw new UnresolvedStepError(missing);
     if (task.executionPath !== null) {
       return { path, broadAudit: task.broadAudit }; // A crash after this commit reuses the exact pin and event.
