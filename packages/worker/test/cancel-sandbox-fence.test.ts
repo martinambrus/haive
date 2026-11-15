@@ -949,6 +949,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       'intent',
       'invocation',
       'outcome',
+      'reservation',
     ]);
     await expect(
       recordInsightInvocation(ctx, `implementer-${a.batchId}`, 'other', 'other'),
