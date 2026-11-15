@@ -242,7 +242,7 @@ describe('repository task scratch lifecycle', () => {
   function database(current: ReturnType<typeof task> | undefined = task(), runs: Run[] = []) {
     return {
       query: {
-        tasks: { findFirst: vi.fn(async () => current) },
+        tasks: { findFirst: vi.fn(async (): Promise<typeof current | undefined> => current) },
         cliInvocations: {
           findFirst: vi.fn(async ({ where }: { where: SQL }) => {
             // Evaluate the live-run predicates the real query supplies, including the OLD
