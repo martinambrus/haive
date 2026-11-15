@@ -683,7 +683,7 @@ Review in `.claude/tmp/codex-run/DAGP-S/review-2.md`. All opt-in only; the defau
 5. LOW: `prepareReviewAgent` and `issueChangeSet` run before branches that may not dispatch (~:1659, :1887), so a missing provider throws instead of recording the issue's own failure; the prompt and change set are built twice.
 6. INFO: under opt-in, a persistently failing MCP server is an interruption (never counted), so only a person stops its Retry loop, and the thrown text omits the underlying message.
 
-### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+17)
+### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+18)
 
 status: open (lows; bundle with the next insight-loop change or park) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
@@ -706,6 +706,7 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 15. NIT: `GET /tasks/:id/events?insightOffset=N` reports `<key>Omitted` as entries outside the page (before it, at an offset), with no total or has-more field; no API test asserts it at an offset or a 400 for a bad offset (`api/src/routes/tasks/_insight-event-page.ts` ~:27).
 16. LOW: `AutoDetect.dependencyPolicy` (`withheldPaths`, `workspaceRoots`, `ownedPaths`) is persisted unbounded in the polled 08e detect output; persisted insights keep full descriptions with no per-item clip. Bound with the same reload approach if sizes matter (measure first).
 17. NIT: `syntheticInsightReply` (`step-runner.ts` ~:2255-2267, test bypass only) reads the bounded detect copy.
+18. LOW, from #1218 review-8: `loadDependencyPolicy` reads `baseBranch` from the retained 01 output (`worker/src/step-engine/steps/workflow/_dependency-policy.ts` ~:181-190); when that output is gone it falls back to `rev-parse HEAD`, which in the worktree may already hold the task's own commits. Fix: read the base from the durable task columns, or fail closed without it as `review-diff.ts` ~:277-280 does.
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
