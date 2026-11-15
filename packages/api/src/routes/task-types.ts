@@ -13,6 +13,8 @@ import {
   mergePromptStepCatalog,
   parsePromptSteps,
   publicTaskTypeSchema,
+  promptStepEntrySchema,
+  promptStepId,
   resolveTaskTypeAvailability,
   taskTypeUpdateSchema,
   validateComposition,
@@ -282,22 +284,62 @@ adminTaskTypeRoutes.post('/preview', async (c) => {
 // Largest stock path is 58 steps (full workflow plus environment prelude).
 // 256 leaves over four times that size for custom drafts. Only projection is capped.
 export const MAX_PORT_DRAFT_STEPS = 256;
+// Only identity/labels affect prompt ports today; templates, tools, defaults and
+// other execution/save constraints are deliberately outside this read-only boundary.
+const portDraftFields = z.object({
+  slug: z.string(),
+  promptSteps: z
+    .record(
+      z.string(),
+      promptStepEntrySchema.pick({ slug: true }).extend({
+        title: z.string().optional(),
+      }),
+    )
+    .optional(),
+  requiresRepository: z.boolean().optional(),
+});
 export function portDraftSchema(maxSteps = MAX_PORT_DRAFT_STEPS) {
-  return customTaskTypeCreateSchema.extend({
-    stepIds: customTaskTypeCreateSchema.shape.stepIds.max(maxSteps),
+  return portDraftFields.extend({
+    stepIds: z.array(z.string().min(1)).max(maxSteps),
   });
 }
+const derivedPortDraftSchema = portDraftFields.extend({
+  runListStrategy: z.literal('derived'),
+  baseSlug: derivedTaskTypeCreateSchema.shape.baseSlug,
+  changes: derivedTaskTypeCreateSchema.shape.changes,
+});
 
-/** Read-only draft projection; the existing create schemas validate its shape.
- * Port diagnostics are informational here; this route adds no save/admission rule. */
+/** Draft-only prompt declarations: no executable prompt is parsed or synthesized. */
+function portDraftCatalog(catalog: Catalog, body: z.infer<typeof portDraftFields>): Catalog {
+  const own = {
+    ...catalog,
+    stepIds: new Set(catalog.stepIds),
+    composable: new Map(catalog.composable),
+  };
+  for (const entry of Object.values(body.promptSteps ?? {})) {
+    const stepId = promptStepId(body.slug, entry.slug);
+    own.stepIds.add(stepId);
+    own.composable.set(stepId, {
+      stepId,
+      label: entry.title || stepId,
+      group: 'build',
+      dispatchesCli: true,
+      requires: [],
+      provides: [],
+    });
+  }
+  return own;
+}
+
+/** Port diagnostics are informational; unfinished drafts need not satisfy save/admission rules. */
 adminTaskTypeRoutes.post('/ports', async (c) => {
   const raw: unknown = await c.req.json();
   const body =
     (raw as { runListStrategy?: unknown } | null)?.runListStrategy === 'derived'
-      ? derivedTaskTypeCreateSchema.parse(raw)
+      ? derivedPortDraftSchema.parse(raw)
       : portDraftSchema().parse(raw);
   const db = getDb();
-  const catalog = await loadCatalog(db);
+  const catalog = portDraftCatalog(await loadCatalog(db), body);
   if ('runListStrategy' in body) {
     const base = await findDefinition(db, body.baseSlug);
     const diagnostics = inspectDerivedDefinition(
@@ -305,22 +347,16 @@ adminTaskTypeRoutes.post('/ports', async (c) => {
         ...body,
         source: 'admin',
         requiresRepository: body.requiresRepository ?? base?.requiresRepository ?? true,
-        promptSteps: body.promptSteps ?? {},
-        preAnswerDefaults: body.preAnswerDefaults ?? {},
-        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+        promptSteps: {},
+        preAnswerDefaults: {},
+        stepLoopLimitDefaults: {},
       },
       base,
       catalog,
-      registeredCategoryIds(),
     );
     return c.json(projectPortCandidates(diagnostics.candidates, catalog));
   }
-  const own = mergePromptStepCatalog(catalog, {
-    ...body,
-    source: 'admin',
-    promptSteps: body.promptSteps ?? {},
-  });
-  return c.json(projectPortCandidates([{ executionPath: null, stepIds: body.stepIds }], own));
+  return c.json(projectPortCandidates([{ executionPath: null, stepIds: body.stepIds }], catalog));
 });
 
 adminTaskTypeRoutes.get('/:slug/ports', async (c) => {

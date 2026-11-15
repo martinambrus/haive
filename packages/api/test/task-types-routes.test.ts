@@ -419,3 +419,58 @@ it('checks the port-only bound at a small injected size and pins the production 
   expect(portDraftSchema(2).safeParse(draft).success).toBe(true);
   expect(portDraftSchema(2).safeParse({ ...draft, stepIds: ['a', 'b', 'c'] }).success).toBe(false);
 });
+
+it.each(
+  ['static', 'derived'].flatMap((strategy) =>
+    [false, true].map((otherInvalidFields) => ({ strategy, otherInvalidFields })),
+  ),
+)(
+  'projects an unfinished $strategy prompt draft (other save-only errors: $otherInvalidFields)',
+  async ({ strategy, otherInvalidFields }) => {
+    h.role = 'admin';
+    const fixture = replacementAdmissionFixture();
+    h.defs = [fixture.base];
+    h.catalog = [...fixture.catalog.composable.values()].map((entry) => ({
+      stepId: entry.stepId,
+      title: entry.label,
+      source: 'core',
+      composable: true,
+      entry,
+      ...fixture.catalog.orderedRows.find((row) => row.stepId === entry.stepId),
+    }));
+    const id = 'custom.ports.prompt';
+    const response = await send('POST', '/admin/task-types/ports', {
+      slug: 'ports',
+      displayName: otherInvalidFields ? '' : 'Ports',
+      promptSteps: {
+        prompt: {
+          slug: 'prompt',
+          title: 'Unfinished prompt',
+          template: '',
+          timeoutMs: otherInvalidFields ? 0 : 60_000,
+          tools: otherInvalidFields ? [{}] : [],
+        },
+      },
+      ...(otherInvalidFields ? { preAnswerDefaults: { unused: 'unfinished' } } : {}),
+      ...(strategy === 'static'
+        ? { stepIds: [id], requiresRepository: true }
+        : {
+            runListStrategy: 'derived',
+            baseSlug: 'workflow',
+            changes: [{ insertAfter: '00-triage', step: id }],
+          }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as StepPortProjection;
+    expect(body.candidates.length).toBeGreaterThan(0);
+    for (const candidate of body.candidates) {
+      expect(candidate.graph.nodes).toContainEqual({
+        id,
+        label: 'Unfinished prompt',
+        inputs: [],
+        outputs: [],
+      });
+    }
+    expect(h.write).not.toHaveBeenCalled();
+  },
+);
