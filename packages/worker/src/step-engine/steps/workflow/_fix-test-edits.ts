@@ -390,7 +390,10 @@ export function compareTestImages(
               : []),
             `--- ${a ? path : '/dev/null'}`,
             `+++ ${b ? path : '/dev/null'}`,
-            diff?.patch ?? '',
+            diff?.patch ||
+              (a && b && a.mode === b.mode && left.equals(right)
+                ? `${CREDENTIAL_WITHHELD} The change lies inside withheld text; hashes retained.`
+                : ''),
           ].join('\n');
     const bounded = cutPatch(patch, Math.max(0, bytes), Math.max(0, lines));
     bytes -= Buffer.byteLength(bounded.patch);
