@@ -1,0 +1,24 @@
+# Copy to .github/workflows/ci.yml in the module repository.
+# Replace BOTH HAIVE_REF placeholders with the same full SHA containing module-ci.yml
+# (or a later tag containing it). v0.2.0 predates the dev-install feature.
+# Replace MODULE_ID with the package's id. It needs ./manifest plus build/typecheck/test scripts.
+# CI checks out modules/<id>, then uses #1179's ignored external-modules/<id> dev tree.
+# Local equivalent, from a disposable haive checkout at that ref:
+#   git clone <module-url> modules/<id>
+#   bash scripts/module-ci.sh <id> <haive-ref>
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: martinambrus/haive/.github/workflows/module-ci.yml@HAIVE_REF
+    with:
+      module-id: MODULE_ID
+      haive-ref: HAIVE_REF
+      # node-version: '26'

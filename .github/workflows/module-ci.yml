@@ -1,0 +1,71 @@
+name: Module CI
+
+on:
+  workflow_call:
+    inputs:
+      module-id:
+        description: Module id (1-23 lowercase letters, digits or dashes)
+        required: true
+        type: string
+      haive-ref:
+        description: Haive tag or full commit SHA; use the same ref as the workflow uses pin
+        required: true
+        type: string
+      node-version:
+        description: Node.js version
+        required: false
+        type: string
+        default: '26'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout public haive
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: martinambrus/haive
+          ref: ${{ inputs.haive-ref }}
+          path: haive
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Validate inputs before constructing the module checkout path
+        working-directory: haive
+        env:
+          MODULE_ID: ${{ inputs.module-id }}
+          HAIVE_REF: ${{ inputs.haive-ref }}
+        run: |
+          if [[ ! -f scripts/module-ci.sh ]]; then
+            echo 'module-ci: haive-ref lacks module CI / the external-module dev install (#1179); choose a newer full SHA or tag (v0.2.0 is too old)' >&2
+            exit 1
+          fi
+          bash scripts/module-ci.sh "$MODULE_ID" "$HAIVE_REF" --check
+
+      - name: Checkout caller module with its own read token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          token: ${{ github.token }}
+          path: haive/modules/${{ inputs.module-id }}
+          persist-credentials: false
+
+      - name: Install, build, typecheck, test and prove the haive tree stays clean
+        working-directory: haive
+        env:
+          MODULE_ID: ${{ inputs.module-id }}
+          HAIVE_REF: ${{ inputs.haive-ref }}
+        run: bash scripts/module-ci.sh "$MODULE_ID" "$HAIVE_REF"
