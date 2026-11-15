@@ -285,6 +285,93 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     expect(blobs).toHaveLength(0);
   });
 
+  it.each(['superseded', 'stopped', 'failed'] as const)(
+    'taints a %s repair before the next pass can retain moved content',
+    async (terminal) => {
+      const meta = await seed();
+      // An opaque moved value intentionally has no scanner shape: terminal taint is
+      // independent of content redaction and protects unknown credential formats too.
+      const secret = randomBytes(24).toString('hex');
+      await writeFile(join(meta.workspace, 'tests/.env.test'), secret);
+      await beginFixTestCapture(db, meta);
+      await rm(join(meta.workspace, 'tests/.env.test'));
+      await writeFile(join(meta.workspace, 'tests/config.json'), secret);
+      await db
+        .update(schema.cliInvocations)
+        .set({
+          ...(terminal !== 'failed' ? { supersededAt: new Date() } : {}),
+          ...(terminal !== 'superseded'
+            ? { endedAt: new Date(), exitCode: terminal === 'failed' ? 1 : 137 }
+            : {}),
+        })
+        .where(eq(schema.cliInvocations.id, meta.invocationId));
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'failed' })
+        .where(eq(schema.taskSteps.id, meta.taskStepId));
+      await db
+        .update(schema.tasks)
+        .set({ status: 'failed', orchestrationEpoch: 1 })
+        .where(eq(schema.tasks.id, meta.taskId));
+      // The old pass is never handed back to resolveLlmPhase after Stop/Retry.
+      await db
+        .update(schema.tasks)
+        .set({ status: 'running' })
+        .where(eq(schema.tasks.id, meta.taskId));
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'waiting_cli' })
+        .where(eq(schema.taskSteps.id, meta.taskStepId));
+      const [next] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId: meta.taskId,
+          taskStepId: meta.taskStepId,
+          mode: 'cli',
+          prompt: 'next',
+        })
+        .returning();
+      await beginFixTestCapture(db, { ...meta, invocationId: next!.id, pass: 2, epoch: 1 });
+      await writeFile(join(meta.workspace, 'tests/config.json'), `${secret} edited`);
+      await end(next!.id);
+      await finishFixTestCapture(db, next!.id);
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, meta.taskId),
+      });
+      const closed = events.find(
+        (e) => e.eventType === FIX_TEST_AFTER && e.payload?.invocationId === meta.invocationId,
+      );
+      expect(closed?.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
+      const blobs = await db
+        .select()
+        .from(schema.fixTestBlobs)
+        .where(
+          and(
+            eq(schema.fixTestBlobs.taskId, meta.taskId),
+            isNull(schema.fixTestBlobs.manifestGzip),
+          ),
+        );
+      expect(blobs).toHaveLength(0);
+      expect(JSON.stringify(await loadFixTestRecords(db, meta.taskId))).not.toContain(secret);
+    },
+  );
+
+  it('taints an unmeasurable after capture even without a known protected endpoint', async () => {
+    const meta = await seed();
+    await beginFixTestCapture(db, meta);
+    await end(meta.invocationId);
+    await finishFixTestCapture(db, meta.invocationId, {
+      capture: async () => ({ state: 'not captured', reason: 'Injected unreadable directory.' }),
+    });
+    const after = await db.query.taskEvents.findFirst({
+      where: and(
+        eq(schema.taskEvents.taskId, meta.taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_AFTER),
+      ),
+    });
+    expect(after?.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
+  });
+
   it('does not publish a complete after-image when cancellation wins during capture', async () => {
     const meta = await seed();
     await beginFixTestCapture(db, meta);
@@ -326,7 +413,8 @@ describe.skipIf(!url)('repair evidence shares the invocation ownership fence, on
     const events = await db.query.taskEvents.findMany({
       where: eq(schema.taskEvents.taskId, meta.taskId),
     });
-    expect(events.map((e) => e.eventType)).toEqual([FIX_TEST_BEFORE]);
+    expect(events.map((e) => e.eventType)).toEqual([FIX_TEST_BEFORE, FIX_TEST_AFTER]);
+    expect(events[1]!.payload).toMatchObject({ state: 'not captured', protectedChanged: true });
   });
 
   it('marks a storage refusal and an interrupted invocation as not captured', async () => {

@@ -313,11 +313,68 @@ async function retain(tx: Tx, taskId: string, files: TestFile[], options: Captur
   }
 }
 
+/** A Stop/Retry can make the runner stop selecting a pass entirely. Its durable
+ * before reference must still close, without requiring current step ownership or
+ * reading a workspace that now belongs to another pass. Only an unavailable,
+ * task-tainting record may be appended this way; no task/step state is changed. */
+async function closeTerminalCapture(db: Database, taskId: string, invocationId: string) {
+  let closed = false;
+  await db.transaction(async (tx) => {
+    const [run] = await tx
+      .select({
+        endedAt: schema.cliInvocations.endedAt,
+        supersededAt: schema.cliInvocations.supersededAt,
+      })
+      .from(schema.cliInvocations)
+      .where(
+        and(eq(schema.cliInvocations.id, invocationId), eq(schema.cliInvocations.taskId, taskId)),
+      )
+      .for('no key update');
+    if (!run || (!run.endedAt && !run.supersededAt)) return;
+    const before = await stored(tx, taskId, invocationId, FIX_TEST_BEFORE);
+    if (!before || (await stored(tx, taskId, invocationId, FIX_TEST_AFTER))) return;
+    const image: TestImage = {
+      state: 'not captured',
+      reason: 'Invocation ended without a settled repair capture.',
+    };
+    const ref = fixTestManifestReference(before.payload as unknown as Reference, image);
+    await retainManifest(tx, taskId, image, ref.manifestHash!);
+    await tx.insert(schema.taskEvents).values({
+      taskId,
+      taskStepId: before.taskStepId,
+      eventType: FIX_TEST_AFTER,
+      payload: { ...ref, beforeEventId: before.id, protectedChanged: true },
+    });
+    closed = true;
+  });
+  if (closed) forget(invocationId);
+}
+
+async function closeTerminalCaptures(db: Database, taskId: string, except?: string) {
+  const unfinished = await db
+    .select({ invocationId: sql<string>`${schema.taskEvents.payload}->>'invocationId'` })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, FIX_TEST_BEFORE),
+        sql`not exists (select 1 from task_events settled
+        where settled.task_id = ${schema.taskEvents.taskId} and settled.event_type = ${FIX_TEST_AFTER}
+        and settled.payload->>'invocationId' = ${schema.taskEvents.payload}->>'invocationId')`,
+      ),
+    );
+  for (const ref of unfinished) {
+    if (ref.invocationId && ref.invocationId !== except)
+      await closeTerminalCapture(db, taskId, ref.invocationId);
+  }
+}
+
 export async function beginFixTestCapture(
   db: Database,
   meta: CaptureMeta,
   options: CaptureOptions = {},
 ): Promise<void> {
+  await closeTerminalCaptures(db, meta.taskId, meta.invocationId);
   if (await stored(db, meta.taskId, meta.invocationId, FIX_TEST_BEFORE)) return;
   const image = await capture(db, meta, options);
   await db.transaction(async (tx) => {
@@ -396,9 +453,11 @@ export async function finishFixTestCapture(
       old.get(p)?.status === 'content withheld' || next.get(p)?.status === 'content withheld';
     // A protected path in the change under any status may have moved its bytes to an allowed
     // name (a rename shows as delete + add), so the whole op keeps no content, as gate 3 does.
-    // An uncaptured before image hides a moved source, so it counts as a protected change.
+    // An incomplete endpoint can hide a moved source or destination, so it taints the task.
     const protectedChanged =
-      left.state !== 'captured' || changed.some((p) => withheld(p) || finishDeniesPath(p));
+      left.state !== 'captured' ||
+      after.state !== 'captured' ||
+      changed.some((p) => withheld(p) || finishDeniesPath(p));
     // The moved bytes are an ordinary file's before-image in every later pass, so the task
     // stays without content once any pass has changed a protected path.
     const [tainted] = await tx
@@ -441,6 +500,8 @@ export async function finishFixTestCapture(
       },
     });
   });
+  // If Stop/Retry won the ownership lock, publish only the unavailable taint.
+  await closeTerminalCapture(db, run.taskId, invocationId);
   forget(invocationId);
 }
 
@@ -451,6 +512,7 @@ export async function loadFixTestRecords(
   limit = FIX_TEST_RECORD_LIMIT,
   options: { patches?: boolean } = {},
 ): Promise<FixTestRecord[]> {
+  await closeTerminalCaptures(db, taskId);
   const starts = await db
     .select()
     .from(schema.taskEvents)

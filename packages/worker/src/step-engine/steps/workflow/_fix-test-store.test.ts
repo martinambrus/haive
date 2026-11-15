@@ -33,6 +33,7 @@ function fixture(
   const a = fixTestManifestReference(meta, before);
   const b = fixTestManifestReference(meta, after);
   const replies: unknown[][] = [
+    [], // No unfinished terminal passes need reconciliation.
     [{ id: 'before', payload: a }],
     [{ id: 'after', payload: b }],
     [
