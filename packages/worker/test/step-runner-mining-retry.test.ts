@@ -3976,6 +3976,25 @@ describe('08e implementer dispatch and recovery', () => {
     });
     return state;
   }
+  it('fails the first provider-outage pass without a Resume marker, preserving the outage text', async () => {
+    const outage = `${PROVIDER_FATAL_HEADLINES.rate_limit}: 429`;
+    const writer = miningRow(`implementer-${batchId}`, 1, {
+      status: 'failed',
+      errorMessage: outage,
+      rawOutput: null,
+      userRetryRequestedAt: null,
+    });
+    const state = stateFor([writer]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), insightsTriageStep, enqueued);
+
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toBe(outage);
+    expect(state.taskStepRow).toMatchObject({ status: 'failed', errorMessage: outage });
+    expect(records.some((r) => r.stage === 'outcome')).toBe(false);
+    expect(enqueued).toEqual([]);
+    expect(state.inserts.filter((i) => i.table === 'cli_invocations')).toEqual([]);
+  });
   it.each(['manual Resume', 'automatic Resume'])(
     'settles a provider-outage writer through apply after %s, and permits a new generation on Retry',
     async (entry) => {
