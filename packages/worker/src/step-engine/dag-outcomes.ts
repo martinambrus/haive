@@ -60,6 +60,7 @@ export async function loadDagOutcomeCounts(db: Database, taskId: string) {
     : [];
   const counts = {
     total: issues.length,
+    split: 0,
     merged: 0,
     failed: 0,
     refused: 0,
@@ -69,7 +70,8 @@ export async function loadDagOutcomeCounts(db: Database, taskId: string) {
     unconfirmed: 0,
   };
   for (const i of issues) {
-    if ((i.mergeStatus === 'clean' || i.mergeStatus === 'resolved') && i.mergedAt !== null)
+    if (i.resolution === 'split') counts.split++;
+    else if ((i.mergeStatus === 'clean' || i.mergeStatus === 'resolved') && i.mergedAt !== null)
       counts.merged++;
     else if (issueBlocked(i)) counts.blocked++;
     else if (issueNoChange(i)) counts.noChange++;

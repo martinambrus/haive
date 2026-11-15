@@ -869,6 +869,7 @@ it('real git leaves a no-change branch unmerged while a sibling commit lands onc
     expect(h.checkpoints).toEqual(['level-0']);
     expect(await loadDagOutcomeCounts(h.db, 'task')).toEqual({
       total: 2,
+      split: 0,
       merged: 1,
       noChange: 1,
       failed: 0,
@@ -1330,4 +1331,31 @@ it('F6 keeps a split parent available when all children merged', async () => {
   expect(h.rows[2]!.outcome).toBe('running');
   expect(issueBlocked(h.rows[2] as never)).toBe(false);
   expect(h.enqueued).toHaveLength(1);
+});
+
+it('F7 counts split parents separately from their delivered and failed children', async () => {
+  const h = fixture([
+    issue('A', { ...failure, resolution: 'split' }),
+    issue('A-S1', { ...failure, resolution: 'split', parentIssueId: 'A' }),
+    issue('A-S1-S1', { ...failure, parentIssueId: 'A-S1', concerns: DAG_FINAL_FAILURE_MARKER }),
+    issue('A-S2', { parentIssueId: 'A', mergeStatus: 'clean', mergedAt: new Date() }),
+    issue('D', { mergeStatus: 'resolved', mergedAt: new Date() }),
+  ]);
+  const counts = await loadDagOutcomeCounts(h.db, 'task');
+  expect(counts).toEqual({
+    total: 5,
+    split: 2,
+    merged: 2,
+    failed: 1,
+    refused: 0,
+    blocked: 0,
+    noChange: 0,
+    skipped: 0,
+    unconfirmed: 0,
+  });
+  expect(
+    Object.entries(counts)
+      .filter(([key]) => key !== 'total')
+      .reduce((sum, [, count]) => sum + count, 0),
+  ).toBe(counts.total);
 });
