@@ -1577,3 +1577,48 @@ it('upgrades a persisted 06 schema in a schema-only write while retaining saved 
   expect(state.taskStepRow.formValues).toEqual({ simplifyCode: false });
   expect(old.fields).toHaveLength(1);
 });
+
+it.each(['answer', 'preset'] as const)(
+  'resolves an unavailable insight switch from a worker-validated %s',
+  async (source) => {
+    const state = freshState();
+    state.taskStepRow.stepId = '06-run-config';
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: source === 'preset' ? { '06-run-config': { autoActOnInsights: true } } : {},
+    };
+    const def = {
+      ...makeStep({}),
+      metadata: runConfigStep.metadata,
+      preserveOmittedFormFields: runConfigStep.preserveOmittedFormFields,
+      form: () =>
+        ({
+          title: 'Run',
+          fields: [
+            {
+              id: 'autoActOnInsights',
+              type: 'checkbox',
+              label: 'Auto',
+              default: false,
+              visibleWhen: { field: 'autoActOnInsights', in: [] },
+            },
+          ],
+        }) as FormSchema,
+      apply: runConfigStep.apply,
+    } as StepDefinition;
+    const result = await run(
+      state,
+      def,
+      source === 'answer' ? { autoActOnInsights: true } : undefined,
+    );
+    expect(result.status).toBe('done');
+    expect(state.taskStepRow.output).toMatchObject({ autoActOnInsights: source === 'preset' });
+    expect(
+      state.updates.find((u) => u.table === 'tasks' && 'autoActOnInsights' in u.patch)?.patch
+        .autoActOnInsights,
+    ).toBe(source === 'preset');
+    if (source === 'preset')
+      expect(state.taskStepRow.formSchema).toMatchObject({ fields: [{ default: true }] });
+  },
+);

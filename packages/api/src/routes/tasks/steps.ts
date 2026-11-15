@@ -1,5 +1,9 @@
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
-import { upgradeRunConfigSchema, normalizeStepFormValues } from '@haive/shared/schemas';
+import {
+  INSIGHT_AUTO_ACTION_AVAILABLE,
+  upgradeRunConfigSchema,
+  normalizeStepFormValues,
+} from '@haive/shared/schemas';
 import { validateFormValues, type FormSchema } from '@haive/shared';
 import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
@@ -939,6 +943,9 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     const validated = validateFormValues(submitSchema, body.values);
     if (!validated.success) throw new HttpError(400, validated.issues.join('; '));
     submittedValues = { ...body.values, autoActOnInsights: validated.data.autoActOnInsights };
+  }
+  if (stepId === '06-run-config' && !INSIGHT_AUTO_ACTION_AVAILABLE) {
+    submittedValues = { ...submittedValues, autoActOnInsights: false };
   }
   const normalized = normalizeStepFormValues(stepId, submittedValues);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));

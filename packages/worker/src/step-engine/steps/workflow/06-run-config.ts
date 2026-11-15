@@ -2,7 +2,7 @@ import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { autoActOnInsightsField } from '@haive/shared/schemas';
+import { autoActOnInsightsField, INSIGHT_AUTO_ACTION_AVAILABLE } from '@haive/shared/schemas';
 import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
 import { CONFIG_KEYS, configService, extractFormDefaults } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -186,10 +186,20 @@ function resolveAutoActOnInsights(
   preset: Record<string, unknown> | undefined,
   remembered: unknown,
 ): boolean {
-  if (Object.hasOwn(answers, 'autoActOnInsights')) return answers.autoActOnInsights === true;
+  if (Object.hasOwn(answers, 'autoActOnInsights')) {
+    if (answers.autoActOnInsights !== true) return false;
+    // Auto-submission carries the type preset as an answer too. Until execution
+    // ships, only that explicit preset can authorize true; a manual API save is false.
+    return (
+      INSIGHT_AUTO_ACTION_AVAILABLE ||
+      (preset != null &&
+        Object.hasOwn(preset, 'autoActOnInsights') &&
+        preset.autoActOnInsights === true)
+    );
+  }
   if (preset && Object.hasOwn(preset, 'autoActOnInsights'))
     return preset.autoActOnInsights === true;
-  return remembered === true;
+  return INSIGHT_AUTO_ACTION_AVAILABLE && remembered === true;
 }
 
 export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {

@@ -76,3 +76,57 @@ it('displays a parked 06 upgrade without rewriting saved answers, recommendation
   });
   expect(fake.rows(schema.taskSteps)[0]!.iterations).toEqual(original.iterations);
 });
+
+it('stores and queues false when a parked 06 receives true before automatic execution ships', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  const userId = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const taskId = 'aaaaaaaa-0000-4000-8000-000000000002';
+  fake.insert(schema.tasks, {
+    id: taskId,
+    userId,
+    type: 'workflow',
+    status: 'waiting_user',
+    preAnswers: { '06-run-config': { autoActOnInsights: true } },
+  });
+  fake.insert(schema.taskSteps, {
+    taskId,
+    stepId: '06-run-config',
+    round: 0,
+    status: 'waiting_form',
+    idleMs: 0,
+    waitingStartedAt: fake.now(),
+    formSchema: {
+      title: 'Run',
+      fields: [
+        {
+          id: 'autoActOnInsights',
+          type: 'checkbox',
+          label: 'Auto',
+          default: true,
+          visibleWhen: { field: 'autoActOnInsights', in: [] },
+        },
+      ],
+    },
+  });
+  h.db = fake.db;
+  h.add.mockReset().mockResolvedValue(undefined);
+  const app = new Hono<AppEnv>();
+  app.use('*', async (c, next) => {
+    c.set('userId', userId);
+    await next();
+  });
+  app.route('/', stepRoutes);
+  app.onError(errorHandler);
+  const res = await app.request(`/${taskId}/steps/06-run-config/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { autoActOnInsights: true } }),
+  });
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskSteps)[0]!.formValues).toEqual({ autoActOnInsights: false });
+  expect(h.add.mock.calls[0]?.[1]).toMatchObject({ formValues: { autoActOnInsights: false } });
+});
