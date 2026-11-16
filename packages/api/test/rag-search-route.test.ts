@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 const DIMS = 8;
 const LOCAL_OLLAMA = 'http://local-ollama.test';
@@ -28,6 +30,7 @@ const h = vi.hoisted(() => ({
   >(),
   realStore: false,
   connectionString: '',
+  invocation: vi.fn(),
   localOpenOptions: [] as unknown[],
   localStatements: [] as string[],
   localTx: {} as { unsafe: (statement: string) => Promise<unknown[]> },
@@ -282,6 +285,7 @@ beforeEach(() => {
   h.recorded = [];
   h.db = {
     query: {
+      cliInvocations: { findFirst: h.invocation },
       tasks: {
         findFirst: async () => ({ title: 'Add a feature', description: null, metadata: {} }),
       },
@@ -296,6 +300,7 @@ beforeEach(() => {
     }),
   };
   h.localEmbed = { vector: Array(DIMS).fill(0.1) };
+  h.invocation.mockReset();
   h.globalEmbed = { vector: Array(DIMS).fill(0.2) };
   h.localHits = [hit('src/session.ts', 'code', 0.05)];
   h.globalHits = [hit('global_kb/cookies-11111111.md', 'kb', 0.04)];
@@ -709,6 +714,105 @@ describe('RAG result snapshots', () => {
     await executeRagSearch('task-1', 'session cookies', 5);
     expect(h.recorded).toEqual([]);
   });
+});
+
+describe('RAG invocation attribution security', () => {
+  const taskId = randomUUID();
+  const stepId = randomUUID();
+  const a = randomUUID();
+  const b = randomUUID();
+  const live = (id = a) => ({
+    id,
+    taskId,
+    taskStepId: stepId,
+    startedAt: new Date(),
+    endedAt: null,
+    supersededAt: null,
+    step: { id: stepId, taskId },
+  });
+  const call = (
+    claims: { taskStepId?: string; cliInvocationId?: string } = {},
+    body: Record<string, unknown> = {},
+  ) =>
+    app.request('/rag/search', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${signTaskToken({ aud: 'rag', taskId, ...claims }, SECRET)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ query: 'cookies', ...body }),
+    });
+  const bound = (id = a) => ({ taskStepId: stepId, cliInvocationId: id });
+
+  it('ignores a forged invocation id with a shared task token and logs explicit unknown', async () => {
+    h.invocation.mockResolvedValue(live(b));
+    expect((await call({}, { cliInvocationId: b, invocationId: b })).status).toBe(200);
+    expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: null })]);
+    expect(h.invocation).not.toHaveBeenCalled();
+  });
+
+  const keyedInvocations = (...rows: ReturnType<typeof live>[]) => {
+    const byId = new Map<string, ReturnType<typeof live>>(rows.map((row) => [row.id, row]));
+    h.invocation.mockImplementation(async ({ where }: { where: SQL }) => {
+      const lookup = new PgDialect().sqlToQuery(where);
+      expect(lookup.sql).toBe('"cli_invocations"."id" = $1');
+      return byId.get(lookup.params[0] as string);
+    });
+  };
+
+  it('attributes a credential for A only to A even when the body claims B', async () => {
+    keyedInvocations(live(a), live(b));
+    expect((await call(bound(), { cliInvocationId: b, invocationId: b })).status).toBe(200);
+    expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: a })]);
+  });
+
+  it.each([
+    ['ended', () => ({ ...live(), endedAt: new Date() })],
+    ['superseded', () => ({ ...live(), supersededAt: new Date() })],
+    ['not started', () => ({ ...live(), startedAt: null })],
+    ['wrong task', () => ({ ...live(), taskId: randomUUID() })],
+    ['wrong step', () => ({ ...live(), taskStepId: randomUUID() })],
+    [
+      'step owned by another task',
+      () => ({ ...live(), step: { id: stepId, taskId: randomUUID() } }),
+    ],
+    ['missing step', () => ({ ...live(), step: null })],
+    ['missing invocation', () => undefined],
+    ['different invocation', () => live(b)],
+  ])('logs unknown and still retrieves for %s proof', async (_name, row) => {
+    h.invocation.mockResolvedValue(row());
+    const response = await call(bound());
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { hits: unknown[] }).hits).not.toHaveLength(0);
+    expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: null })]);
+  });
+
+  it('keeps concurrent fan-out invocations distinct', async () => {
+    keyedInvocations(live(a), live(b));
+    const responses = await Promise.all([call(bound(a)), call(bound(b))]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+    expect(h.recorded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ cliInvocationId: a }),
+        expect.objectContaining({ cliInvocationId: b }),
+      ]),
+    );
+  });
+
+  it('logs unknown if the attribution lookup is unavailable', async () => {
+    h.invocation.mockRejectedValue(new Error('lookup unavailable'));
+    expect((await call(bound())).status).toBe(200);
+    expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: null })]);
+  });
+
+  it.each([{ cliInvocationId: a }, { taskStepId: stepId }])(
+    'requires both signed binding claims: %j',
+    async (claims) => {
+      expect((await call(claims)).status).toBe(200);
+      expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: null })]);
+      expect(h.invocation).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('executeRagSearch: the scope', () => {

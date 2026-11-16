@@ -14,6 +14,17 @@ expansion stay identical. Playground runs do not insert telemetry or affect a
 step's statistics. They search the current index and settings, so a rerun is
 shown separately from the original response.
 
+## RAG query attribution
+
+Agent query logs carry nullable `cli_invocation_id` (migration 0247). Only a signed
+`rag` bearer naming the task, step row and invocation can establish it. At request
+admission the API verifies the invocation and step belong to that task, the run
+has started, and it is neither ended nor superseded. A missing binding, unavailable
+ownership check or stale invocation still permits retrieval but stores NULL,
+explicitly unknown. Historical rows stay NULL; body-supplied invocation ids and
+time-window candidates never establish attribution. Existing time-window statistics
+and usage review keep their current semantics; this column records credential proof.
+
 Migration 0180 adds `rag_query_log.result_hits`, saved after merging and expansion.
 NULL means the response was not captured; `[]` means a captured zero-hit response.
 Each hit carries `ranks` (`dense`, `fts`, `ident`): its rank in each ranker's

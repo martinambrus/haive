@@ -1,7 +1,7 @@
 # What Anthropic's agent-memory research offers Haive: close the learning loop, measure it, then consolidate
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). **P1.2 implemented** (2026-11-14): bounded learning origin/update records excluded from excerpts and indexed content; see the same topic. P1.3 remains not started. P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
+> **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). **P1.2 implemented** (2026-11-14): bounded learning origin/update records excluded from excerpts and indexed content; see the same topic. RAG invocation attribution is implemented; see [RAG query attribution](../architecture/rag-playground.md#rag-query-attribution). P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
 > Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
 > Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
 > Fix the step 11 defects that keep the loop from closing (P0), add the records the next benchmark
@@ -98,6 +98,10 @@ Each adds a record and changes no behaviour, so none needs analysis first. Durab
    invocation, so per-step and per-model use must be joined by time window, which is ambiguous
    during a fan-out. Check first whether the rag MCP server can know the invocation that called it;
    if it cannot cheaply, keep the time-window join and say so in P2's report.
+   Implementation: the existing signed task-token claims bind RAG credentials to one
+   invocation through a run-private file. The API verifies task/step ownership and
+   liveness before recording nullable `cli_invocation_id`; legacy or unprovable
+   identity remains NULL. Existing time-window consumers are unchanged.
 
 **Record contract for P1.** Use one versioned reconcile event per apply attempt, keyed by task,
 step row, round and invocation; a crash/retry must not double-count it. Record proposed, parsed,

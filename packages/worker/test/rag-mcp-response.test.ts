@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { randomBytes } from 'node:crypto';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { formatRagHits, type RagSearchHit } from '@haive/shared/rag';
 import { formatRagResponse, RAG_MCP_SERVER_JS } from '../src/sandbox/rag-mcp-server.js';
@@ -45,22 +49,43 @@ describe('RAG MCP response formatting', () => {
 });
 
 describe('standalone RAG MCP response', () => {
-  it('returns hits and an availability note from the generated script', async () => {
+  it.each([
+    { delivery: 'file', status: 200 },
+    { delivery: 'legacy env', status: 200 },
+    { delivery: 'file', status: 401 },
+    { delivery: 'file', status: 403 },
+    { delivery: 'file', status: 500 },
+    { delivery: 'legacy env', status: 401 },
+    { delivery: 'unreadable file', status: 200 },
+    { delivery: 'file without env', status: 401 },
+    { delivery: 'file with rejected fallback', status: 401 },
+  ])('handles $delivery with HTTP $status', async ({ delivery, status }) => {
+    const envToken = randomBytes(32).toString('hex');
+    const fileToken = randomBytes(32).toString('hex');
+    const directory = await mkdtemp(join(tmpdir(), 'haive-rag-proxy-'));
+    const script = join(directory, 'haive-rag-mcp.mjs');
+    await writeFile(script, RAG_MCP_SERVER_JS);
+    const hasFile = delivery.startsWith('file');
+    if (hasFile) await writeFile(join(directory, 'haive-rag.token'), fileToken);
+    if (delivery === 'unreadable file') await mkdir(join(directory, 'haive-rag.token'));
+    const fallback = hasFile && status === 401 && delivery !== 'file without env';
+    const succeeds = status === 200 || (fallback && delivery !== 'file with rejected fallback');
     const requests: string[] = [];
     const server = createServer((req, res) => {
       requests.push(`${req.method} ${req.url} ${req.headers.authorization}`);
       req.resume();
+      res.statusCode = fallback && requests.length === 2 && succeeds ? 200 : status;
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ hits, note }));
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     const port = (server.address() as { port: number }).port;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', RAG_MCP_SERVER_JS], {
+    const child = spawn(process.execPath, [script], {
       env: {
         ...process.env,
         RAG_API_URL: `http://127.0.0.1:${port}`,
-        RAG_TASK_TOKEN: 'fixture-token',
+        RAG_TASK_TOKEN: delivery === 'file without env' ? '' : envToken,
         HAIVE_LSP_AVAILABLE: '0',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -85,15 +110,34 @@ describe('standalone RAG MCP response', () => {
       );
       const [code] = await closed;
       expect(code, stderr).toBe(0);
-      expect(requests).toEqual(['POST /rag/search Bearer fixture-token']);
+      expect(requests).toEqual([
+        `POST /rag/search Bearer ${hasFile ? fileToken : envToken}`,
+        ...(fallback ? [`POST /rag/search Bearer ${envToken}`] : []),
+      ]);
       expect(JSON.parse(stdout).result).toEqual({
-        content: [{ type: 'text', text: note + '\n\n' + formattedHits }],
-        isError: false,
+        content: [
+          {
+            type: 'text',
+            text: succeeds
+              ? note + '\n\n' + formattedHits
+              : expect.stringContaining(`rag_search HTTP ${status}`),
+          },
+        ],
+        isError: !succeeds,
       });
+      if (delivery === 'unreadable file') {
+        expect(stderr.trim().split('\n')).toHaveLength(1);
+        expect(stderr).toContain('haive-rag: could not read invocation token file');
+        expect(stderr).not.toContain(envToken);
+        expect(stderr).not.toContain(fileToken);
+      } else {
+        expect(stderr).toBe('');
+      }
     } finally {
       child.kill();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

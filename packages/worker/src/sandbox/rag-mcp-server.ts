@@ -19,18 +19,28 @@ export function formatRagResponse(
  *  source of that file. The server is a dependency-free Node ESM script that
  *  speaks MCP over stdio (newline-delimited JSON-RPC) and proxies the single
  *  `rag_search` tool to the Haive API. It holds NO database credentials — only
- *  the API URL and a task-scoped token injected via env. This keeps DB access
+ *  the API URL and a task bearer, bound to the invocation in a run-private file
+ *  when available (legacy env-only credentials remain task-scoped). This keeps DB access
  *  and embedding server-side and works for internal/external/ddev rag DBs
  *  uniformly. */
 export const RAG_MCP_SERVER_PATH = '/haive/haive-rag-mcp.mjs';
+export const RAG_MCP_TOKEN_PATH = '/haive/haive-rag.token';
 
 export const RAG_MCP_SERVER_JS = String.raw`#!/usr/bin/env node
 // Haive RAG MCP server (auto-generated, do not edit). Dependency-free stdio
 // MCP proxy: exposes one tool, rag_search, forwarding to the Haive API.
 import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
 
 const API_URL = process.env.RAG_API_URL || '';
-const TOKEN = process.env.RAG_TASK_TOKEN || '';
+// A shared MCP config can name only a task token. The file is private to this run,
+// so a sibling cannot replace this file or name an invocation without its token.
+let runToken = '';
+try { runToken = readFileSync(new URL('haive-rag.token', import.meta.url), 'utf8').trim(); } catch (e) {
+  if (e?.code !== 'ENOENT') process.stderr.write('haive-rag: could not read invocation token file; using task token.\n');
+}
+const TASK_TOKEN = process.env.RAG_TASK_TOKEN || '';
+const TOKEN = runToken || TASK_TOKEN;
 const LSP_AVAILABLE = process.env.HAIVE_LSP_AVAILABLE === '1';
 const PROTOCOL_VERSION = '2024-11-05';
 const GROUNDING_TOOLS = LSP_AVAILABLE ? 'LSP + grep' : 'grep + direct file reads';
@@ -74,12 +84,18 @@ async function ragSearch(args) {
   if (Number.isInteger(args?.top_k)) body.top_k = args.top_k;
   let resp;
   try {
-    resp = await fetch(API_URL.replace(/\/$/, '') + '/rag/search', {
+    const request = (token) => fetch(API_URL.replace(/\/$/, '') + '/rag/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
+    resp = await request(TOKEN);
+    if (resp.status === 401 && runToken && TASK_TOKEN && TASK_TOKEN !== runToken) {
+      await resp.body?.cancel().catch(() => {});
+      // A task credential preserves retrieval but cannot prove invocation attribution.
+      resp = await request(TASK_TOKEN);
+    }
   } catch (e) {
     return { isError: true, text: 'rag_search request failed: ' + (e?.message || String(e)) };
   }

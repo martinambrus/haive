@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -81,7 +81,7 @@ import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
 import type { GuardReason } from '@haive/shared/egress';
 
-const SECRET = 'custom-mcp-route-test-secret';
+const SECRET = randomBytes(32).toString('hex');
 const USER = '00000000-0000-4000-8000-0000000000e1';
 const USER_EMAIL_INDEX = 'custom-mcp-test-user';
 const TYPE = 'cmcp-type';
@@ -1782,6 +1782,61 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
       await db.delete(schema.tasks).where(eq(schema.tasks.id, fx.taskId));
       expect(await rowsFor()).toEqual([]);
     });
+  });
+
+  describe('RAG attribution through the real relational query', () => {
+    it.each(['live', 'ended', 'superseded', 'foreign-step', 'wrong-step', 'not-started'] as const)(
+      'records credential proof only for a live owned invocation: %s',
+      async (state) => {
+        let invocationStep = fx.stepA;
+        if (state === 'foreign-step' || state === 'wrong-step') {
+          const foreignTask = await createTask(null);
+          const [foreignStep] = await db
+            .insert(schema.taskSteps)
+            .values({
+              taskId: foreignTask,
+              stepId: STEP_CORE,
+              stepIndex: 1,
+              title: 'Foreign step',
+              status: 'waiting_cli',
+            })
+            .returning();
+          invocationStep = foreignStep!.id;
+        }
+        await db
+          .update(schema.cliInvocations)
+          .set({
+            taskStepId: invocationStep,
+            startedAt: state === 'not-started' ? null : new Date(),
+            endedAt: state === 'ended' ? new Date() : null,
+            supersededAt: state === 'superseded' ? new Date() : null,
+          })
+          .where(eq(schema.cliInvocations.id, fx.invA));
+        const token = signTaskToken(
+          {
+            aud: 'rag',
+            taskId: fx.taskId,
+            cliInvocationId: fx.invA,
+            // A matching foreign-step claim exercises the joined step's task ownership.
+            taskStepId: state === 'foreign-step' ? invocationStep : fx.stepA,
+          },
+          SECRET,
+        );
+        const res = await app.request('/rag/search', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({ query: 'cookies', cliInvocationId: fx.invB }),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ hits: [] });
+        const rows = await db
+          .select()
+          .from(schema.ragQueryLog)
+          .where(eq(schema.ragQueryLog.taskId, fx.taskId));
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.cliInvocationId).toBe(state === 'live' ? fx.invA : null);
+      },
+    );
   });
 
   describe('the audience', () => {

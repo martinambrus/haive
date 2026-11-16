@@ -537,6 +537,24 @@ reaper, once half its expiry has passed, so a shell kept open for days still pus
 reads only that file, and the route takes only this token: the env fallback and the older two-part
 token keyed with the raw secret went once the last of them had expired.
 
+RAG execution uses the existing signed step/invocation claims too. The worker puts
+that bearer in `/haive/haive-rag.token`, one run-private read-only extra file beside
+the MCP script, using the same delivery as custom and integration tokens. It keeps
+the default 24-hour lifetime, including when sequential sub-steps each receive a full
+timeout; server-side liveness checks bound attribution. All MCP configuration
+delivery modes still carry only the shared task bearer in their env. The RAG proxy
+prefers its own token file. A concurrent agent cannot replace that mounted file or
+name an invocation for which it holds no token. The token file protects against
+body-supplied ids and file replacement, not against a writer of shared task-volume
+configuration, which picks the command the CLI launches in the other run's container
+and so can read that run's token or change its env fallback. The token grants only
+the task authority that writer already holds. A run without a step keeps a task-only token and logs unknown attribution.
+Legacy env-only proxies remain query-compatible and unknown. On a 401 from the
+file token, the proxy retries once with the env task token, preserving retrieval
+with unknown attribution. A missing file uses the env token directly; other read
+failures also emit one stderr diagnostic. No new token type, audience or tool
+argument is used.
+
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
 worker decrypts it for that probe only. It resolves no active provider secrets, mounts no shared
