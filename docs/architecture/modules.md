@@ -627,6 +627,11 @@ prove a verified repair. The acted-insight projection skips unreadable or unknow
 journal records with a payload-free warning and re-offers those items. Write and replay paths
 continue to refuse them. Fix-loop diagnosis remains deferred to the deep-analysis consumer.
 
+A step that repeats agent calls through `llm.completePreForm` bounds its own passes (throwing
+fails the step), records each result keyed by the persisted invocation id before returning
+`continueRequested`, and rebuilds the next pass from its own store in `prepare`, since Retry clears
+`detect_output`.
+
 ### Core-row writes
 
 `ctx.db` is trusted-module authority over the core database, not a database permission
