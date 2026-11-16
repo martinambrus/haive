@@ -108,3 +108,20 @@ export async function worktreesHoldingBranch(
   }
   return holders;
 }
+
+/** A locked registration survives prune even when its directory is gone. */
+export async function isWorktreeLocked(repoPath: string, worktreePath: string): Promise<boolean> {
+  const list = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+  if (list.code !== 0) {
+    throw new Error(
+      `git worktree list failed in ${repoPath}: ${(list.stderr || list.stdout).trim().slice(0, 500)}`,
+    );
+  }
+  let listedPath = '';
+  for (const field of list.stdout.split('\0')) {
+    if (field.startsWith('worktree ')) listedPath = field.slice(9);
+    if (listedPath === worktreePath && (field === 'locked' || field.startsWith('locked ')))
+      return true;
+  }
+  return false;
+}

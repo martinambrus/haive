@@ -856,6 +856,19 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     removes: ['worktree'],
   },
   {
+    stepId: '12-no-change-cleanup',
+    closes: true,
+    label: 'No-change worktree cleanup',
+    group: 'finish',
+    dispatchesCli: false,
+    requires: [
+      needWorktree,
+      { needs: 'clean-tree', reason: 'Refuses to remove any uncommitted work.' },
+    ],
+    provides: ['cleaned'],
+    removes: ['worktree'],
+  },
+  {
     stepId: '13-pr-wait',
     closes: true,
     label: 'Pull request',

@@ -125,6 +125,10 @@ describe('releaseTaskWorktree on completion', () => {
     expect(await release('review_only', [...CUSTOM, '12-worktree-cleanup'])).toBe(false);
   });
 
+  it('leaves a custom type with no-change cleanup to that step', async () => {
+    expect(await release('review_only', ['01-worktree-setup', '12-no-change-cleanup'])).toBe(false);
+  });
+
   it('leaves a custom type with no worktree alone', async () => {
     expect(await release('review_only', ['07-phase-2-implement'])).toBe(false);
     expect(await release('review_only', null)).toBe(false);

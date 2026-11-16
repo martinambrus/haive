@@ -209,6 +209,7 @@ import {
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
+import { discardNoChangeCleanupDirectories } from '../step-engine/steps/core/12-no-change-cleanup.js';
 import { undoLeftMerge, recordUndoFailure } from '../step-engine/undo-left-merge.js';
 import {
   StepSupersededError,
@@ -1271,7 +1272,8 @@ export async function releaseTaskWorktree(
     completed.type !== 'run_app' &&
     completed.type !== 'workflow' &&
     runList.includes('01-worktree-setup') &&
-    !runList.includes('12-worktree-cleanup');
+    !runList.includes('12-worktree-cleanup') &&
+    !runList.includes('12-no-change-cleanup');
   let removeWorktree = reason === 'cancelled' || completed?.type === 'run_app';
   if (customWithoutCleanup) {
     removeWorktree = !(await worktreeMayHoldWork(completed?.worktreePath ?? null, taskId));
@@ -4790,6 +4792,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
   if (sandboxesGone) {
+    await discardNoChangeCleanupDirectories(db, payload.taskId);
     await recordLeftOpenMerges(db, payload.taskId);
     await releaseTaskMergeClaims(db, payload.taskId);
     await discardPlanMerge(db, payload.taskId);
