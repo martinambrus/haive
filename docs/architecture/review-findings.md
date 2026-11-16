@@ -51,6 +51,22 @@ items unacted so they are offered again. Selecting such an item still fails at t
 intent write while the unreadable record remains; only an empty submit passes. Reports describe agent
 claims, never verified repairs, and never write `review_findings` dispositions. The journal
 survives output-clearing Retry; an intent without a settled report remains unconfirmed.
+Gate-3 intents additionally store bounded host evidence as
+`worktreeBeforeDigest: { sha256, incomplete }`. SHA-256 binds sorted path/stamp pairs;
+each stamp already binds the file hash, kind and executable bits. No per-file map is
+written to new journal records. Historical maps are accepted for recovery and stripped
+before any new publication; their old writer-local equality cannot authorize a shortcut.
+The API also omits historical maps from browser event copies without rewriting storage.
+The comparison baseline is the continuation's original gate-3 intent, captured before
+any 08e writer pass. Retry of 08e never replaces it with that writer attempt's own start.
+Outcomes record `worktreeUnchanged` after a complete digest comparison of the final Git
+deliverables, including dirty/untracked files, deletions, type and executable-bit changes.
+Ignored runtime artifacts are excluded. Missing or incomplete evidence is unknown,
+never proof of no edits. An entirely `not_applied` batch with that host proof takes its
+ordinary successor and records the structural `checksSkipped` reason
+`all_not_applied_unchanged` in step output. The required outcome journal preserves the
+decision across a lost done write. Any applied, uncertain or changed outcome retains the
+checks continuation.
 
 ## Insight continuation state
 

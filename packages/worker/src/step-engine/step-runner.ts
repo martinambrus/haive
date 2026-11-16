@@ -2,7 +2,8 @@ import { finalizeCanonicalCheckResult } from './check-result-output.js';
 import {
   recordGate3Check,
   pendingInsightApproval,
-  freshInsightGate2Submission,
+  freshInsightGateSubmission,
+  insightGate3ReviewRequired,
 } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
@@ -3515,10 +3516,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
     const insightApprovalRequired =
-      meta.id === '09-gate-2-verify-approval' &&
-      (await pendingInsightApproval(db, taskId)) !== null;
+      (meta.id === '09-gate-2-verify-approval' &&
+        (await pendingInsightApproval(db, taskId)) !== null) ||
+      (meta.id === '10-gate-3-commit' && (await insightGate3ReviewRequired(db, current)));
     const insightHumanSubmission =
-      insightApprovalRequired && (await freshInsightGate2Submission(db, params.userId, current));
+      insightApprovalRequired && (await freshInsightGateSubmission(db, params.userId, current));
     // A queue payload is delivery, never proof of a person. Only the submit route's
     // atomic saved answer/event can satisfy the failed-insight approval requirement.
     if (insightApprovalRequired && !insightHumanSubmission && current.formValues) {
@@ -3577,6 +3579,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // Keep the form's evidence-based defaults; only an attested owner submit
       // may apply them. Task/type presets and prior-task reuse stay suppressed.
       persistedSchema = { ...persistedSchema, autoSubmit: false };
+      if (meta.id === '10-gate-3-commit' && !insightHumanSubmission) {
+        persistedSchema = {
+          ...persistedSchema,
+          fields: [
+            {
+              type: 'note',
+              id: 'reopenedFormNotice',
+              label: 'Review before continuing',
+              body: 'The changes were refreshed after your review. Review them and confirm whether to commit.',
+              variant: 'warning',
+            },
+            ...persistedSchema.fields.filter((field) => field.id !== 'reopenedFormNotice'),
+          ],
+        };
+      }
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 

@@ -14,6 +14,7 @@ import {
 import { validateComposition, evaluateDerivedTaskType } from '@haive/shared/modularity';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { keepForPath } from '../src/orchestrator/execution-paths.js';
+import { insightGate3ReviewRequired } from '../src/queues/insight-gate3-return.js';
 const route = {
   version: 1,
   kind: 'insight_revise',
@@ -22,6 +23,26 @@ const route = {
   generation: 2,
   round: 3,
 } as const;
+
+it('holds the regenerated gate across later check rounds until a gate3 pass settles it', async () => {
+  const approval = { version: 1, batchId: 'batch', kind: 'gate2_approved', round: 2 };
+  const latest = vi.fn().mockResolvedValue({ payload: approval });
+  const settled = vi.fn().mockResolvedValue(undefined);
+  const db = {
+    query: { taskEvents: { findFirst: latest }, taskSteps: { findFirst: settled } },
+  } as unknown as Database;
+  const row = {
+    taskId: 'task',
+    round: 4,
+  } as typeof import('@haive/database').schema.taskSteps.$inferSelect;
+  expect(await insightGate3ReviewRequired(db, row)).toBe(true);
+  settled.mockResolvedValue({ status: 'done' });
+  expect(await insightGate3ReviewRequired(db, row)).toBe(false);
+  latest.mockResolvedValue(undefined);
+  expect(await insightGate3ReviewRequired(db, row)).toBe(false);
+  latest.mockResolvedValue({ payload: { ...approval, round: undefined } });
+  await expect(insightGate3ReviewRequired(db, row)).rejects.toThrow(/approval round/);
+});
 const outcome = (result: string) =>
   ({
     version: 1,
@@ -62,6 +83,39 @@ describe('insight continuation identity and reachability', () => {
       expect(continuationForOutcome(outcome(result), 2)).toBeUndefined();
     expect(continuationForOutcome({ ...outcome('applied'), selected: [] }, 2)).toBeUndefined();
     expect(continuationForOutcome({ ...outcome('applied'), stage: 'intent' }, 2)).toBeUndefined();
+  });
+  it('skips gate3 checks only for a wholly declined batch with host proof of unchanged files', () => {
+    const declined = {
+      ...outcome('not_applied'),
+      mode: 'gate3' as const,
+      worktreeUnchanged: true,
+      items: [{ id: 'one', outcome: 'not_applied' as const, changes: [], reason: '' }],
+    };
+    expect(continuationForOutcome(declined, 2)).toBeUndefined();
+    expect(continuationForOutcome({ ...declined, worktreeUnchanged: false }, 2)).toMatchObject({
+      mode: 'gate3',
+      stage: 'checks',
+    });
+    expect(continuationForOutcome({ ...declined, worktreeUnchanged: undefined }, 2)).toBeDefined();
+    expect(
+      continuationForOutcome(
+        {
+          ...declined,
+          items: [
+            ...declined.items,
+            { id: 'two', outcome: 'applied', changes: ['edit'], reason: '' },
+          ],
+        },
+        2,
+      ),
+    ).toBeDefined();
+    for (const result of ['already_handled', 'unconfirmed'] as const)
+      expect(
+        continuationForOutcome(
+          { ...declined, items: [{ ...declined.items[0]!, outcome: result }] },
+          2,
+        ),
+      ).toBeDefined();
   });
   it('refuses unknown event versions explicitly', async () => {
     await expect(activeInsightContinuation(database({ version: 2 }), 'task', 3)).rejects.toThrow(

@@ -43,10 +43,12 @@ import {
 import {
   activeInsightContinuation,
   continuationForOutcome,
+  gate3ChecksSkipped,
   readInsightContinuation,
 } from './_insight-continuation.js';
 import { hydrateNoSpecBrief, resolveSpecView, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { readValidationSnapshot, validationSnapshotDigest } from './_validation-snapshot.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
@@ -76,6 +78,7 @@ interface TriageApply extends InsightOutcome {
   insightCheckpoint?: InsightReviseContinuation;
   findingsSummary?: string;
   automatic?: { version: 1; roundsStarted: number; stopReason: string; classified: number };
+  checksSkipped?: { reason: 'all_not_applied_unchanged'; batchId: string };
 }
 
 // Old scalar reports can never establish an outcome for an individual selection.
@@ -502,6 +505,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     }
     const batchId = insightBatchId(ctx.taskStepId, ctx.rerunGeneration ?? 0);
     let continuation: InsightReviseContinuation | undefined;
+    let checksSkipped: TriageApply['checksSkipped'];
     let outcome: InsightOutcome = {
       version: 1,
       batchId,
@@ -552,6 +556,18 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
             batchId,
             selected.map((i) => i.id),
           );
+      // The gate's original intent predates EVERY writer attempt, including an interrupted
+      // generation. An 08e Retry must never adopt unchecked edits as its baseline.
+      const baseline = d.gate3Request
+        ? records.find(
+            (r) =>
+              r.batchId === d.gate3Request!.batchId && r.stage === 'intent' && r.mode === 'gate3',
+          )?.worktreeBeforeDigest
+        : undefined;
+      const after =
+        intent.mode === 'gate3' && outcome.items.every((i) => i.outcome === 'not_applied')
+          ? validationSnapshotDigest(await readValidationSnapshot(ctx, { requireComplete: true }))
+          : null;
       const saved = await appendInsightBatch(ctx, {
         ...intent,
         stage: 'outcome',
@@ -560,8 +576,19 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         invocationId: result?.invocationId ?? null,
         miningId:
           records.find((r) => r.batchId === batchId && r.stage === 'invocation')?.miningId ?? null,
+        ...(intent.mode === 'gate3'
+          ? {
+              worktreeUnchanged:
+                baseline?.incomplete === false &&
+                baseline.sha256 != null &&
+                after?.incomplete === false &&
+                baseline.sha256 === after.sha256,
+            }
+          : {}),
       });
       continuation = continuationForOutcome(saved, ctx.round);
+      if (gate3ChecksSkipped(saved))
+        checksSkipped = { reason: 'all_not_applied_unchanged', batchId: saved.batchId };
       outcome = {
         ...outcome,
         items: saved.items,
@@ -631,6 +658,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
           }
         : {}),
       ...(continuation ? { continuation } : {}),
+      ...(checksSkipped ? { checksSkipped } : {}),
       ...(d.insightCheckpoint ? { insightCheckpoint: d.insightCheckpoint } : {}),
     };
   },

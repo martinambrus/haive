@@ -1278,6 +1278,559 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     }
   });
+  it.each(
+    [
+      'task preset',
+      'type default',
+      'prior reuse',
+      'form autoSubmit',
+      'step defaults',
+      'saved synthetic',
+      'queue answer',
+      'persisted schema',
+    ].flatMap((source) => [[source, true] as const, [source, false] as const]),
+  )('gate3 refreshed approval: %s (cycle=%s)', async (source, cycle) => {
+    const ctx = await seed();
+    const gateId = '10-gate-3-commit';
+    const preset = { [gateId]: { commit: true, commitMessage: 'preset message' } };
+    let type = 'workflow';
+    let preAnswers = source === 'task preset' ? preset : {};
+    if (source === 'type default') {
+      type = `g3i-${randomUUID()}`;
+      const [definition] = await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: 'Commit preset',
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [gateId],
+          preAnswerDefaults: preset,
+        })
+        .returning();
+      preAnswers = definition!.preAnswerDefaults!;
+    }
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'commit preset',
+        source: 'blank',
+        storagePath: '/unused',
+        localPath: '/unused',
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({
+        type,
+        repositoryId: repo!.id,
+        currentStepId: gateId,
+        currentRound: 0,
+        autoContinue: source !== 'form autoSubmit',
+        preAnswers,
+      })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await db
+      .update(schema.taskSteps)
+      .set({
+        stepId: gateId,
+        status: 'pending',
+        detectOutput: {},
+        formValues: source === 'saved synthetic' ? { commit: true } : null,
+      })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    if (cycle) {
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        eventType: 'insight.check',
+        payload: { version: 1, batchId: 'picked', kind: 'verify_failed', round: 0 },
+      });
+      const [approval] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '09-gate-2-verify-approval',
+          stepIndex: 9,
+          title: 'Approval',
+          status: 'done',
+          formValues: { decision: 'approve' },
+          output: { decision: 'approve' },
+        })
+        .returning();
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: approval!.id,
+        eventType: 'step.form_submitted',
+        payload: { userId, generation: 0, decision: 'approve' },
+      });
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: approval!.stepId })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId, orchestrationEpoch: 0 } as ResolvedTaskContext,
+        approval!,
+        'gate2_approved',
+      );
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: gateId })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      expect(await pendingInsightApproval(db, ctx.taskId)).toBeNull();
+    }
+    if (source === 'prior reuse') {
+      const [prior] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: repo!.id,
+          type,
+          title: 'prior',
+          status: 'completed',
+          completedAt: new Date(),
+        })
+        .returning();
+      await db.insert(schema.taskSteps).values({
+        taskId: prior!.id,
+        stepId: gateId,
+        stepIndex: 10,
+        title: 'Commit',
+        status: 'done',
+        formValues: { commit: true },
+      });
+    }
+    const apply = vi.fn(async () => ({ committed: true }));
+    const reconcile = vi.fn((_ctx, _detected, values) => values);
+    const step: StepDefinition = {
+      metadata: {
+        id: gateId,
+        index: 10,
+        workflowType: 'workflow',
+        title: 'Commit',
+        description: '',
+        requiresCli: false,
+        reuseLastCompletedFormValues: source === 'prior reuse',
+        autoSubmitDefaults: source === 'step defaults',
+      },
+      reconcileReusedFormValues: reconcile,
+      form: () => ({
+        title: 'Commit',
+        autoSubmit: source === 'form autoSubmit',
+        fields: [
+          { id: 'commit', type: 'checkbox', label: 'Commit', default: true },
+          { id: 'commitMessage', type: 'textarea', label: 'Message', default: 'fresh message' },
+        ],
+      }),
+      apply,
+    };
+    if (source === 'persisted schema')
+      await db
+        .update(schema.taskSteps)
+        .set({
+          formSchema: { ...step.form!(ctx, {}, null), autoSubmit: true },
+        })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    const params = {
+      db,
+      taskId: ctx.taskId,
+      userId,
+      repoPath: '/unused',
+      workspacePath: '/unused',
+      cliProviderId: null,
+      stepDef: step,
+      epoch: 0,
+      round: 0,
+      moduleDeactivation: null,
+      ...(source === 'queue answer' ? { formValues: { commit: true } } : {}),
+    };
+    try {
+      const result = await advanceStep(params);
+      expect(result.status).toBe(cycle ? 'waiting_form' : 'done');
+      if (!cycle) {
+        expect(apply).toHaveBeenCalledOnce();
+        return;
+      }
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(result.row.formSchema).toMatchObject({
+        autoSubmit: false,
+        fields: expect.arrayContaining([
+          expect.objectContaining({ id: 'commit', default: true }),
+          expect.objectContaining({ id: 'commitMessage', default: 'fresh message' }),
+          expect.objectContaining({ id: 'reopenedFormNotice', type: 'note', variant: 'warning' }),
+        ]),
+      });
+      expect(apply).not.toHaveBeenCalled();
+      expect(reconcile).not.toHaveBeenCalled();
+      // Resume and boot re-entry use the persisted waiting_form row. Retry resets it.
+      for (const reentry of ['Resume', 'boot', 'Retry']) {
+        let epoch = 0;
+        if (reentry === 'Retry') {
+          const reset = await resetStepAndDownstream(db, ctx.taskId, gateId, 0, 0);
+          if (reset && reset !== 'superseded') epoch = reset.newEpoch;
+        }
+        const parked = await advanceStep({ ...params, epoch });
+        expect(parked.status, reentry).toBe('waiting_form');
+        expect(parked.row.waitingStartedAt, reentry).not.toBeNull();
+        expect(apply, reentry).not.toHaveBeenCalled();
+      }
+      const row = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, ctx.taskStepId),
+      });
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskSteps)
+          .set({ formValues: { commit: true }, waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, row!.id));
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: row!.id,
+          eventType: 'step.form_submitted',
+          payload: {
+            stepId: gateId,
+            fieldCount: 1,
+            userId,
+            generation: row!.rerunGeneration,
+            commit: true,
+          },
+        });
+      });
+      expect(await advanceStep({ ...params, epoch: 1 })).toMatchObject({ status: 'done' });
+      expect(apply).toHaveBeenCalledOnce();
+    } finally {
+      if (source === 'type default') {
+        await db.delete(schema.tasks).where(eq(schema.tasks.type, type));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    }
+  });
+  it.each(['wrong user', 'wrong generation', 'commit mismatch', 'older submission'])(
+    'gate3 stays parked with invalid human evidence: %s',
+    async (kind) => {
+      const ctx = await seed();
+      const gateId = '10-gate-3-commit';
+      await db
+        .update(schema.tasks)
+        .set({
+          currentStepId: gateId,
+          currentRound: 0,
+          autoContinue: true,
+          preAnswers: { [gateId]: { commit: true } },
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      await db
+        .update(schema.taskSteps)
+        .set({
+          stepId: gateId,
+          status: 'waiting_form',
+          detectOutput: {},
+          formValues: { commit: true },
+          waitingStartedAt: null,
+        })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const approvedAt = new Date('2026-01-02T00:00:00Z');
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        eventType: 'insight.check',
+        createdAt: approvedAt,
+        payload: { version: 1, batchId: 'picked', kind: 'gate2_approved', round: 0 },
+      });
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: ctx.taskStepId,
+        eventType: 'step.form_submitted',
+        createdAt: new Date(
+          kind === 'older submission' ? '2026-01-01T00:00:00Z' : '2026-01-03T00:00:00Z',
+        ),
+        payload: {
+          userId: kind === 'wrong user' ? randomUUID() : userId,
+          generation: kind === 'wrong generation' ? 1 : 0,
+          commit: kind !== 'commit mismatch',
+        },
+      });
+      const apply = vi.fn(async () => ({ committed: true }));
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        repoPath: '/unused',
+        workspacePath: '/unused',
+        cliProviderId: null,
+        epoch: 0,
+        round: 0,
+        moduleDeactivation: null,
+        formValues: { commit: true },
+        stepDef: {
+          metadata: {
+            id: gateId,
+            index: 10,
+            workflowType: 'workflow',
+            title: 'Commit',
+            description: '',
+            requiresCli: false,
+            autoSubmitDefaults: true,
+          },
+          form: () => ({
+            title: 'Commit',
+            autoSubmit: true,
+            fields: [{ id: 'commit', type: 'checkbox', label: 'Commit', default: true }],
+          }),
+          apply,
+        },
+      });
+      expect(result.status).toBe('waiting_form');
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(apply).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'declined',
+    'justified',
+    'touched',
+    'mixed',
+    'unconfirmed',
+    'unreadable',
+    'missing baseline',
+    'legacy baseline',
+    'incomplete baseline',
+  ])('gate3 decline routing checks the actual tree: %s', async (kind) => {
+    const ctx = await seed();
+    const workspace = await mkdtemp(join(tmpdir(), 'g3i-outcome-'));
+    try {
+      await gitExec(['init'], { cwd: workspace });
+      await writeFile(join(workspace, 'a.ts'), 'base');
+      await gitExec(['add', '.'], { cwd: workspace });
+      await gitExec(
+        ['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-m', 'base'],
+        { cwd: workspace },
+      );
+      await writeFile(join(workspace, 'a.ts'), 'pending approved changes');
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: '01-worktree-setup',
+        stepIndex: 1,
+        title: 'Setup',
+        status: 'done',
+        output: { worktreePath: workspace },
+      });
+      const picks = kind === 'mixed' ? [...selected, { ...selected[0]!, id: 'two' }] : selected;
+      const [gate] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '10-gate-3-commit',
+          stepIndex: 10,
+          title: 'Commit',
+          status: 'running',
+          round: 0,
+        })
+        .returning();
+      const baseline = await ensureInsightIntent({ ...ctx, taskStepId: gate!.id }, picks, 'gate3');
+      const intent = await ensureInsightIntent(ctx, picks, 'gate3');
+      if (kind === 'missing baseline') {
+        await db
+          .delete(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.taskStepId, gate!.id),
+            ),
+          );
+      } else if (kind === 'legacy baseline' || kind === 'incomplete baseline') {
+        const { worktreeBeforeDigest: _digest, ...legacy } = baseline;
+        await db
+          .update(schema.taskEvents)
+          .set({
+            payload: {
+              ...legacy,
+              ...(kind === 'legacy baseline'
+                ? { worktreeBefore: { 'a.ts': 'legacy' } }
+                : { worktreeBeforeDigest: { sha256: null, incomplete: true } }),
+            },
+          })
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.taskStepId, gate!.id),
+            ),
+          );
+      }
+
+      if (kind === 'touched')
+        await writeFile(join(workspace, 'a.ts'), 'partial edit despite decline');
+      const snapshot =
+        kind === 'unreadable'
+          ? vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null)
+          : null;
+      let output;
+      try {
+        output = await insightsTriageStep.apply(
+          { ...ctx, workspacePath: workspace, logger: { info() {} } } as unknown as StepContext,
+          {
+            detected: {
+              worktreePath: workspace,
+              sandboxWorktreePath: '/ws',
+              spec: '',
+              insights: picks,
+              gate3Request: {
+                version: 1,
+                kind: 'insight_revise',
+                batchId: baseline.batchId,
+                sourceStepRow: gate!.id,
+                generation: 0,
+                round: 1,
+                mode: 'gate3',
+                stage: 'apply',
+              },
+            },
+            formValues: {},
+            llmOutput:
+              kind === 'unconfirmed'
+                ? 'invalid'
+                : {
+                    version: 1,
+                    batchId: intent.batchId,
+                    items: picks.map((i, n) => ({
+                      id: i.id,
+                      outcome: n === 1 ? 'applied' : 'not_applied',
+                      changes: n === 1 ? ['edit'] : [],
+                      reason: kind === 'justified' ? 'Outside scope' : '',
+                    })),
+                    notes: '',
+                  },
+            iteration: 0,
+            previousIterations: [],
+          },
+        );
+      } finally {
+        snapshot?.mockRestore();
+      }
+      if (['declined', 'justified'].includes(kind)) {
+        expect(output.continuation).toBeUndefined();
+        expect(insightsTriageStep.reviseLoop!.evaluate(output)).toBeNull();
+        expect(output).toMatchObject({
+          checksSkipped: { reason: 'all_not_applied_unchanged', batchId: intent.batchId },
+        });
+        const replay = (await loadInsightBatchRecords(db, ctx.taskId)).find(
+          (r) => r.stage === 'outcome',
+        )!;
+        expect(continuationForOutcome(replay, 0)).toBeUndefined();
+      } else expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+  it('gate3 writer crash then 08e Retry cannot skip checks on the first pass edits', async () => {
+    const ctx = await seed();
+    ctx.round = 1;
+    await db
+      .update(schema.taskSteps)
+      .set({ round: 1 })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: '08e-insights-triage', currentRound: 1 })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    const snapshot = vi
+      .spyOn(validationSnapshots, 'readValidationSnapshot')
+      .mockResolvedValue({ 'a.ts': 'approved' });
+    try {
+      const [gate] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '10-gate-3-commit',
+          stepIndex: 10,
+          title: 'Commit',
+          status: 'running',
+          round: 0,
+        })
+        .returning();
+      const baseline = await ensureInsightIntent(
+        { ...ctx, taskStepId: gate!.id, round: 0 },
+        selected,
+        'gate3',
+      );
+      const first = await ensureInsightIntent(ctx, selected, 'gate3');
+      await recordInsightInvocation(
+        ctx,
+        `implementer-${first.batchId}`,
+        'first-mining',
+        'first-run',
+      );
+      // Writer pass 1 edits, then crashes before publishing any outcome.
+      snapshot.mockResolvedValue({ 'a.ts': 'unchecked first pass edits' });
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done' })
+        .where(eq(schema.taskSteps.id, gate!.id));
+      await resetStepAndDownstream(db, ctx.taskId, '08e-insights-triage', 1, 0);
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'running' })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const retry = {
+        ...ctx,
+        rerunGeneration: 1,
+        epoch: 1,
+        logger: { info() {} },
+      } as unknown as StepContext;
+      const second = await ensureInsightIntent(retry, selected, 'gate3');
+      // Writer pass 2 declines every item and touches nothing.
+      const output = await insightsTriageStep.apply(retry, {
+        detected: {
+          worktreePath: '/repo',
+          sandboxWorktreePath: '/ws',
+          spec: '',
+          insights: selected,
+          gate3Request: {
+            version: 1,
+            kind: 'insight_revise',
+            mode: 'gate3',
+            stage: 'apply',
+            batchId: baseline.batchId,
+            sourceStepRow: gate!.id,
+            generation: 0,
+            round: 1,
+          },
+        },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: {
+          version: 1,
+          batchId: second.batchId,
+          notes: '',
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: '' }],
+        },
+      });
+      expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
+      expect(output.checksSkipped).toBeUndefined();
+      const journal = await loadInsightBatchRecords(db, ctx.taskId);
+      const raw = await db.query.taskEvents.findMany({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.eventType, 'insight.batch'),
+        ),
+      });
+      for (const row of raw) {
+        expect(row.payload).not.toHaveProperty('worktreeBefore');
+        expect(JSON.stringify(row.payload?.worktreeBeforeDigest).length).toBeLessThan(110);
+      }
+
+      expect(journal.some((r) => r.batchId === first.batchId && r.stage === 'outcome')).toBe(false);
+      expect(
+        journal.find((r) => r.batchId === second.batchId && r.stage === 'outcome'),
+      ).toMatchObject({ worktreeUnchanged: false });
+    } finally {
+      snapshot.mockRestore();
+    }
+  });
   it('deduplicates concurrent stages under the source-row lock', async () => {
     const ctx = await seed();
     const [a, b] = await Promise.all([
@@ -2027,6 +2580,94 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     },
   );
+  it('all-not-applied gate3 batch advances straight to the refreshed gate without dispatching checks', async () => {
+    const snapshot = vi
+      .spyOn(validationSnapshots, 'readValidationSnapshot')
+      .mockResolvedValue({ 'a.ts': 'same' });
+    try {
+      const { ctx, source, continuation } = await seedGatePick();
+      const route = await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+      const [triage] = await db
+        .update(schema.taskSteps)
+        .set({ status: 'running' })
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, ctx.taskId),
+            eq(schema.taskSteps.stepId, '08e-insights-triage'),
+            eq(schema.taskSteps.round, route!.round),
+          ),
+        )
+        .returning();
+      const stepCtx = {
+        db,
+        taskId: ctx.taskId,
+        userId,
+        taskStepId: triage!.id,
+        round: route!.round,
+        rerunGeneration: triage!.rerunGeneration,
+        epoch: route!.epoch,
+        throwIfCancelled() {},
+        logger: { info() {} },
+      } as unknown as StepContext;
+      const intent = await ensureInsightIntent(stepCtx, selected, 'gate3');
+      const output = await insightsTriageStep.apply(stepCtx, {
+        detected: {
+          worktreePath: '/repo',
+          sandboxWorktreePath: '/ws',
+          spec: '',
+          insights: selected,
+          gate3Request: continuation,
+        },
+        formValues: {},
+        llmOutput: {
+          version: 1,
+          batchId: intent.batchId,
+          notes: '',
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: '' }],
+        },
+        iteration: 0,
+        previousIterations: [],
+      });
+      const done = await publishInsightStep(stepCtx, {
+        status: 'done',
+        output,
+        endedAt: new Date(),
+      });
+      const ids = routeSteps.map((s) => s.metadata.id);
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot: ids })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      registerStepsOnce();
+      testQueue.jobs = [];
+      await handleResult(
+        db,
+        {
+          ...ctx,
+          workflowType: 'workflow',
+          runListStrategy: 'static',
+          runListSnapshot: ids,
+          currentStepId: triage!.stepId,
+          currentRound: route!.round,
+          orchestrationEpoch: route!.epoch,
+        } as ResolvedTaskContext,
+        triage!.stepId,
+        { status: 'done', row: done, output },
+      );
+      expect(testQueue.jobs).toMatchObject([{ stepId: '10-gate-3-commit', round: route!.round }]);
+      expect(output).toMatchObject({ checksSkipped: { reason: 'all_not_applied_unchanged' } });
+      expect(await activeInsightContinuation(db, ctx.taskId, route!.round)).toBeNull();
+      expect(
+        await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
+      ).toMatchObject({
+        currentStepId: '10-gate-3-commit',
+        currentRound: route!.round,
+      });
+    } finally {
+      snapshot.mockRestore();
+      await closeTaskQueue();
+    }
+  });
   it.each([false, true])(
     'PR5 actual checkpoint preserves configured safety steps and skips only gate2 (extra check=%s)',
     async (extraCheck) => {

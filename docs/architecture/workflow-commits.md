@@ -119,7 +119,16 @@ unusable output: without a usable suggestion the form offers manual entry, never
 suggestion when the field is absent, and rejects an explicitly blank message before staging.
 The optional fallback also applies when the worker supplies an empty or entirely disabled
 provider list and dispatch returns no invocation; required LLM steps still fail in that case.
-The user can still skip committing. Step-runner retains the invocation through form submission
+The user can still skip committing. After failed picked-insight checks receive a human
+gate-2 re-approval, the regenerated gate 3 must park for a new human answer. The runner
+uses the existing latched approval guard to ignore every preset and auto-submit source,
+including prior-task reuse, while keeping the freshly computed form defaults. The submit
+route attests owner, generation and explicit commit choice atomically with the answer;
+only matching evidence newer than the re-approval can advance that pass. Retry, Resume
+and boot re-entry keep an unanswered form parked. A warning note explains that the
+refreshed changes need review and a new commit decision. Ordinary gates retain their existing
+preset behavior.
+Step-runner retains the invocation through form submission
 and recovery using its existing pre-form lifecycle.
 
 The gate tests cover real git changes, message overrides, output validation, containment and

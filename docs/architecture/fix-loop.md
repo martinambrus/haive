@@ -570,12 +570,25 @@ With zero insight identities, detect and apply omit `insightSummary` and
 recap and ledger path remain in use, including on legacy zero-summary snapshots.
 
 A nonempty pick records a required `gate3` intent and a v1 `insight_revise` continuation
-with `mode: gate3`, `stage: apply`, before any Git operation. Fresh 08e uses only that
+with `mode: gate3`, `stage: apply`, before any staging or commit. Fresh 08e uses only that
 persisted selection and bypasses classification and its usual form. Before any pick
 starts editing, preflight requires ordered verify/review/08e destinations, gate 3 after
 08e, and gate 2 before gate 3 so a failed verify can obtain a fresh approval. Its outcome hands
 off with `stage: checks` through the existing validation recheck and fresh 08/review
-tail, including uncertain/declined writer outcomes. The owned checkpoint skips only
+tail, including uncertain writer outcomes and declined outcomes whose worktree changed
+or could not be read completely. An all-`not_applied` batch skips that check continuation
+only when host digests from the original gate-3 intent and after the writer match.
+The gate-3 intent precedes every 08e writer pass; an 08e Retry keeps that baseline rather
+than accepting edits from an interrupted pass as already checked. The journal stores
+`worktreeBeforeDigest: { sha256, incomplete }` and `worktreeUnchanged`; step output records
+`checksSkipped: { reason: 'all_not_applied_unchanged', batchId }`. A decline's reason may
+be blank. A writer's report alone cannot prove no edits: the outcome model permits a
+`not_applied` item with changes and does not roll files back. Any applied or unconfirmed
+item retains checks. Missing or legacy digests, incomplete snapshots, truncated file reads and nested
+checkout directories cannot prove equality and retain checks too. Complete snapshots
+force `--ignore-submodules=none` on both status and fork-point path reads: a repository
+may hide a changed gitlink with `ignore=all` even though staging includes that move.
+The owned checkpoint skips only
 gate 2 when verification never failed; configured checks on either side still run.
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
 reused, and empty selection retains the existing staging and commit path.
@@ -596,6 +609,15 @@ owned row/task fence before `gate2_approved` is written. Gate 2 without a latch 
 existing behavior. This task-wide latch survives
 Retry of the original request/source independently of continuation validity. Gate-3
 apply checks it before navigation, picks or Git and revises to gate 2 while pending.
+After that human gate-2 re-approval, the regenerated gate 3 uses the same runner approval
+guard: no task/type preset, prior-task reuse, saved synthetic answer, queue answer or
+auto-submit variant can apply it. It keeps computed defaults and parks with
+`waiting_started_at`. Its answer requires the authenticated owner's matching
+`step.form_submitted` event for the row and generation, newer than `gate2_approved`.
+The requirement survives Retry, Resume and boot takeover until the gate-3 pass completes;
+a configured late editor introducing another round between the gates does not clear it.
+A warning note in the form explains that the refreshed changes need a new commit decision.
+Gate 3 without that re-approval retains ordinary auto-continue behavior.
 A pinned list without that destination refuses instead of running off-list. The quick
 path now has a dormant gate 2 activated by the same latch. Insight work itself spends
 no fix round; actual blocking checks retain the ordinary fix loop and cap.

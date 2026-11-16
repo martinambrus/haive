@@ -18,7 +18,9 @@ export function insightEventPage(
             ? ['selected', 'items']
             : [];
   if (!payload) return payload;
-  let page = payload;
+  // Historical journals may predate bounded digest evidence. Browser copies never need maps.
+  const { worktreeBefore: _legacySnapshot, ...boundedBatch } = payload;
+  let page = eventType === 'insight.batch' ? boundedBatch : payload;
   for (const key of fields) {
     const entries = payload[key];
     if (!Array.isArray(entries) || (!offset && entries.length <= limit)) continue;
