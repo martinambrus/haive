@@ -1096,7 +1096,7 @@ Reviews in `.claude/tmp/codex-run/P6-S/` (review-2.md, review-6/review.md, revie
 
 ### T669 · External modules: private repositories and a dev install that leaves haive clean
 
-status: open · kind: feature · found: owner decision 2026-11-14 (#1174) · priority: P2
+status: done 2026-11-16 · kind: feature · found: owner decision 2026-11-14 (#1174) · priority: P2
 
 Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-analysis (`docs/plans/kind-riding-dream.md`) modules, which are the first external modules and live in private repositories.
 
@@ -1104,7 +1104,7 @@ Prerequisite for the translator (`docs/plans/translator-module.md`) and deep-ana
 2. DONE 2026-11-14 #1179 (bd7217c8a). Core: a dev install of an external module (cloned into `modules/<id>/`, then `pnpm module add <id>`) leaves nothing in a haive commit. Today `modules/` is tracked and `pnpm module add` edits tracked `package.json` files and `pnpm-lock.yaml`. Design choice: ignore the folder and keep the dependency entries out of tracked files.
 3. DONE 2026-11-14 #1179: `scripts/check-public-modules.mjs` against root `public-modules.json` (install/runtime wiring only; prose and test fixtures exempt). Owed: the first Dependabot lockfile PR after #1179 keeps `pnpmfileChecksum` (a lock without it fails frozen installs).
 4. DONE 2026-11-15 #1199: reusable `.github/workflows/module-ci.yml` + `scripts/module-ci.sh` + caller template `scripts/templates/module-repo-ci.yml`; v0.2.0 predates #1179, so callers pin a main SHA until the next tag. Open low: the clean-tree check cannot see changes to gitignored files. Was: Module CI template: check out haive at a pinned release tag, place the module at `modules/<id>/`, build and test there (core packages are unpublished, `pnpm.overrides` pins them to `workspace:*`).
-5. Release path check: a restricted `@haive-module/<id>` publish to GitHub Packages, the vendor channel build, and a git install source with a token, each exercised once end to end with a stub module.
+5. DONE 2026-11-16 #1235 (ec3c7f4a0): `npm pack` manifest identity checks for registry installs, legacy-tag preflight and TS7016 hint in the channel build; all three paths exercised live with a stub module (org `haive-module`), stub repo and package deleted after. Was: Release path check: a restricted `@haive-module/<id>` publish to GitHub Packages, the vendor channel build, and a git install source with a token, each exercised once end to end with a stub module.
 
 ### T663 · FNF[plan-canvas-smoke-lows] · plan-canvas smoke check lows, after #1161 (+4)
 
@@ -2429,6 +2429,8 @@ All low unless marked.
 - Updater reads the release bundle, T648 PR 4 (#1181): before an upgrade the updater fetches and hash-checks the release's compose bundle, refuses a modified or unreadable bundle with a typed refusal, refuses plain-http manifests when a bundle is present, and generates missing `hex` `.env` keys atomically; a required key written as a variable reference refuses (`env-key-interpolated`). Lows filed in T674.
 
 - External module dev install, T669 items 2-3 (#1179): private modules cloned into ignored `external-modules/` install through `.pnpmfile.cjs` with a local lockfile, leaving tracked manifests and `pnpm-lock.yaml` unchanged; `pnpm module lock` refreshes the public lock; CI refuses install wiring that names a module missing from `public-modules.json`. Lows filed as T676.
+
+- External module release paths, T669 item 5 (#1235): registry installs verify the packed manifest's name and version, the channel build refuses a legacy tag with entitlements and explains a missing-declarations TS7016; restricted publish, vendor channel build and private git install each passed live once.
 
 - Bounded plan chat, AIDE² P4 (#1178): plan chat sends the answered turn plus the newest earlier turns that fit, reads the plan from a versioned per-turn snapshot outside the tracked tree (removed after the run, reaped at boot), and a plan write retries a version conflict from a fresh read. Lows filed as T675.
 
