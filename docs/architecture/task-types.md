@@ -814,13 +814,27 @@ pause Resume refuse unsupported pins before clearing a standing hold.
 An unsupported or malformed pin returns 409 `invalid-execution-contract`
 before any row reset, answer/event write, sandbox kill or job enqueue.
 Lifting the global pause succeeds for ordinary work while leaving unsupported
-tasks held: an existing per-task pause keeps its timestamp; a task held only
-by the global switch receives an audited administrator pause before the switch
-is released. An already-off switch leaves task rows and pause evidence unchanged.
+tasks held: an existing per-task pause keeps its timestamp; normally a task held
+only by the global switch receives an audited administrator pause before the
+switch is released. Before borrowing the configuration save's connection or taking
+its advisory lock, the lift reads the stored switch and commits each hold in its
+own compare-and-set transaction with its pause event and audit row. This prevents
+a lock owner from waiting for a second connection while concurrent saves fill the pool.
+An already-off switch leaves task rows and pause evidence unchanged. A concurrent
+switch-off or a later lift failure can leave extra holds on unsupported tasks.
+The configuration save returns the previous values it read under its own lock,
+which also supply the audit's `from`. If the pre-read said off but the locked
+previous value was on, the lift runs the same hold pass once after the save,
+outside the configuration transaction. This narrows, but does not close, the gap:
+a task the worker starts between the save and its hold is stopped by the worker's
+fence and marked dead rather than held.
 Each task hold has the same 30-second lock timeout as the configuration save;
-a lock timeout answers 503 and leaves the global switch on. Earlier committed
-holds remain if a later hold or configuration write fails. The response lists
-`skippedTasks` with task id, refusal code and reason when any were held back.
+a lock timeout answers 503. A failure before the configuration write leaves the
+global switch unchanged. A failed post-save pass leaves the switch off without
+holds; turn the switch on and lift it again to re-run the holds.
+Earlier committed holds remain if a later hold or configuration write fails.
+The response lists `skippedTasks` with task id, refusal code and reason when any
+were held back.
 The worker's existing boot and duplicate-advance fence remains authoritative
 for already queued work. Stop, Cancel and step Abort
 remain available; NULL and explicit empty execution contracts retain their
