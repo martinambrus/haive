@@ -138,7 +138,7 @@ const reportSchema = z.object({
   ),
 });
 
-export function assessRagUsage(input: RagUsageInput, output: unknown) {
+export function assessRagUsage(input: RagUsageInput, output: unknown, skipReason?: string) {
   const report = parseAgentJson(output, (candidate) => {
     const parsed = reportSchema.safeParse(candidate);
     return parsed.success ? parsed.data : null;
@@ -147,7 +147,7 @@ export function assessRagUsage(input: RagUsageInput, output: unknown) {
   return input.queries.map((query) => {
     const unknown = {
       status: 'unknown' as const,
-      reason: 'The available agent record does not establish usage.',
+      reason: skipReason ?? 'The available agent record does not establish usage.',
       evidence: [],
       assessedAt: now,
     };
@@ -188,8 +188,13 @@ export function assessRagUsage(input: RagUsageInput, output: unknown) {
   });
 }
 
-export async function saveRagUsage(ctx: StepContext, input: RagUsageInput, output: unknown) {
-  const assessments = assessRagUsage(boundRagUsageInput(input), output);
+export async function saveRagUsage(
+  ctx: StepContext,
+  input: RagUsageInput,
+  output: unknown,
+  skipReason?: string,
+) {
+  const assessments = assessRagUsage(boundRagUsageInput(input), output, skipReason);
   ctx.throwIfCancelled();
   const assessedAt = new Date().toISOString();
   // Every query gets a result even if its evidence did not fit the checkpoint.
@@ -199,7 +204,7 @@ export async function saveRagUsage(ctx: StepContext, input: RagUsageInput, outpu
     .set({
       usageAssessment: {
         status: 'unknown',
-        reason: 'The available agent record does not establish usage.',
+        reason: skipReason ?? 'The available agent record does not establish usage.',
         evidence: [],
         assessedAt,
       },

@@ -11,12 +11,18 @@ import { eq } from 'drizzle-orm';
 import type { StepContext } from '../../step-definition.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import { prWaitStep } from './13-pr-wait.js';
+import {
+  resolveInvocationUsesWorktreeGitBoundary,
+  resolveInvocationWorkerTree,
+} from '../../../repo/worktree-git-boundary.js';
+import { WorktreeRemovedError } from '../../../repo/task-worktree.js';
 
 describe('finalization RAG review', () => {
   function setup() {
     const taskId = randomUUID();
     const queryId = randomUUID();
     const fake = createFakeDb({
+      repositories: schema.repositories,
       tasks: schema.tasks,
       ragQueryLog: schema.ragQueryLog,
       taskSteps: schema.taskSteps,
@@ -73,6 +79,121 @@ describe('finalization RAG review', () => {
     };
     return { fake, ctx, detected };
   }
+  it.each([
+    { present: false, pending: false },
+    { present: true, pending: false },
+    { present: true, pending: true },
+  ])('classifiable review after cleanup: %j', async ({ present, pending }) => {
+    const { fake, ctx, detected } = setup();
+    const repoPath = await mkdtemp(path.join(tmpdir(), 'pr-wait-review-'));
+    const branch = 'feature/review';
+    const worktreePath = path.join(repoPath, '.haive/worktrees/feature-review');
+    try {
+      if (present) await mkdir(worktreePath, { recursive: true });
+      const repositoryId = randomUUID();
+      fake.insert(schema.repositories, {
+        id: repositoryId,
+        userId: randomUUID(),
+        name: 'Fixture',
+        source: 'clone',
+        storagePath: null,
+        localPath: repoPath,
+      });
+      await fake.db
+        .update(schema.tasks)
+        .set({
+          repositoryId,
+          worktreeBranch: branch,
+          worktreePath,
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      const at = new Date();
+      await fake.db
+        .update(schema.ragQueryLog)
+        .set({
+          hitCount: 1,
+          createdAt: at,
+          resultHits: [{ sourcePath: 'src/session.ts', content: 'Cookie implementation' }],
+        })
+        .where(eq(schema.ragQueryLog.taskId, ctx.taskId));
+      const invocationId = randomUUID();
+      const quote = 'I used src/session.ts to implement secure cookies.';
+      fake.insert(schema.cliInvocations, {
+        id: invocationId,
+        taskId: ctx.taskId,
+        taskStepId: randomUUID(),
+        mode: 'cli',
+        prompt: 'Fixture',
+        startedAt: new Date(at.getTime() - 1000),
+        endedAt: new Date(at.getTime() + 1000),
+        cleanTranscript: { segments: [{ kind: 'model', at: at.getTime() + 500, text: quote }] },
+      });
+      const d = { ...detected, pending, worktreePath, branchName: branch, ragUsage: undefined };
+      // Follow the runner's prepare -> dispatch -> apply seam. Any dispatch here must
+      // resolve the same boundary as a real invocation; it cannot fall back to root.
+      expect(prWaitStep.llm!.skipIf!({ detected: d, formValues: {} })).toBe(false);
+      const prepared = await prWaitStep.llm!.prepare!({ ctx, detected: d, formValues: {} });
+      const dispatch = vi.fn(async () => {
+        expect(await resolveInvocationUsesWorktreeGitBoundary(ctx.db, ctx.taskId)).toBe(true);
+        expect(await resolveInvocationWorkerTree(ctx.db, ctx.taskId)).toMatch(
+          /\/\.haive\/worktrees\/feature-review$/,
+        );
+        return {
+          assessments: [
+            {
+              queryId: fake.rows(schema.ragQueryLog)[0]!.id,
+              status: 'used',
+              reason: 'Explicit use',
+              evidence: [{ invocationId, quote }],
+            },
+          ],
+        };
+      });
+      const output = prepared === false ? null : await dispatch();
+      const checkpoint = fake.rows(schema.taskSteps)[0]!.detectOutput;
+      if (present) {
+        expect(prepared).toBeUndefined();
+        expect(dispatch).toHaveBeenCalledOnce();
+      } else {
+        expect(prepared).toBe(false);
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(checkpoint).toMatchObject({
+          ragUsageSkipReason: expect.stringMatching(/worktree.*removed/i),
+        });
+        // The ordinary agent's guard is unchanged even though finalization skips it.
+        await expect(
+          resolveInvocationUsesWorktreeGitBoundary(ctx.db, ctx.taskId),
+        ).rejects.toBeInstanceOf(WorktreeRemovedError);
+        await expect(resolveInvocationWorkerTree(ctx.db, ctx.taskId)).rejects.toBeInstanceOf(
+          WorktreeRemovedError,
+        );
+      }
+      // Pending PR finalization's filesystem behavior is covered below with real git.
+      const applied = await prWaitStep.apply!(ctx, {
+        detected: { ...d, pending: false },
+        formValues: {},
+        llmOutput: output,
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(applied).toEqual({
+        finalized: false,
+        removed: false,
+        message: 'no pull request; nothing to wait for',
+      });
+      expect(fake.rows(schema.ragQueryLog)[0]!.usageAssessment).toMatchObject(
+        present
+          ? { status: 'used', reason: 'Explicit use' }
+          : {
+              status: 'unknown',
+              reason: expect.stringMatching(/worktree.*removed/i),
+              evidence: [],
+            },
+      );
+    } finally {
+      await rm(repoPath, { recursive: true, force: true });
+    }
+  });
   it('assesses zero-hit queries on the path without a PR or a model call', async () => {
     const { fake, ctx, detected } = setup();
     expect(prWaitStep.llm!.skipIf!({ detected, formValues: {} })).toBe(true);
