@@ -22,7 +22,14 @@ export function canonicalCheckResult(
   if (role === CHECK_RESULT_ROLES.validation) {
     const exhaustedBudget = iterations.some((v) => record(v).exhaustedBudget === true);
     const c = record(o.changedFilesCoverage);
+    // A model can pair VALID with advisory issues or a failed dimension. Keep
+    // its stored verdict/routing, but never claim an unqualified role pass.
+    const contradictory =
+      o.verdict === 'VALID' &&
+      ((Array.isArray(o.issues) && o.issues.length > 0) ||
+        (Array.isArray(o.dimensions) && o.dimensions.some((d) => record(d).status === 'FAIL')));
     const incomplete =
+      contradictory ||
       exhaustedBudget ||
       o.verdict === 'UNPARSEABLE' ||
       o.converged === false ||

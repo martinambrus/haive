@@ -63,3 +63,12 @@ it('distinguishes declined commands from runners that could not execute', () => 
     ),
   ).toMatchObject({ resultStatus: 'not-run' });
 });
+
+it('retains a validator verdict paired with advisory findings without declaring a role pass', () => {
+  const value = { verdict: 'VALID', issues: [{ severity: 'low', description: 'advisory' }] };
+  expect(finalizeCanonicalCheckResult('07b-phase-4-validate', value, {}, [])).toMatchObject({
+    ...value,
+    resultStatus: 'incomplete',
+    exhaustedBudget: false,
+  });
+});
