@@ -6,12 +6,13 @@ vi.mock('../src/step-engine/step-output-contract.js', async (original) => {
   const actual = await original<typeof import('../src/step-engine/step-output-contract.js')>();
   return { ...actual, validateSuccessfulStepOutput: vi.fn(actual.validateSuccessfulStepOutput) };
 });
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
+import { configService, FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
+import * as dispatcher from '../src/orchestrator/dispatcher.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import { ReopenStepFormError, type StepDefinition } from '../src/step-engine/step-definition.js';
@@ -29,6 +30,8 @@ interface MockState {
   taskRow: Record<string, unknown> | null;
   updates: { table: string; patch: Record<string, unknown> }[];
   invocation?: Record<string, unknown>;
+  invocations?: Record<string, unknown>[];
+  beforeWrite?: (table: string, patch: Record<string, unknown>) => void;
 }
 
 function tableNameOf(table: unknown): string {
@@ -79,6 +82,10 @@ function taskFenceHolds(cond: unknown, task: Record<string, unknown> | null): bo
   );
 }
 
+function persistedRow(state: MockState) {
+  return { ...state.taskStepRow, detectOutput: structuredClone(state.taskStepRow.detectOutput) };
+}
+
 function makeMockDb(state: MockState): Database {
   let nextId = 1;
   const db = {
@@ -99,15 +106,25 @@ function makeMockDb(state: MockState): Database {
         const tableName = tableNameOf(table);
         return {
           where: (cond: unknown) => ({
+            then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
             limit: async () => {
               if (tableName === 'task_steps') {
-                return state.taskStepRow.id ? [state.taskStepRow] : [];
+                return state.taskStepRow.id ? [persistedRow(state)] : [];
               }
-              return [];
+              return tableName === 'cli_invocations' &&
+                state.invocation &&
+                state.invocation.endedAt === null &&
+                !state.invocation.supersededAt
+                ? [state.invocation]
+                : [];
             },
             orderBy: () => ({
+              then: (resolve: (value: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
               limit: async () =>
-                tableName === 'cli_invocations' && state.invocation && !state.invocation.consumedAt
+                tableName === 'cli_invocations' &&
+                state.invocation &&
+                !state.invocation.consumedAt &&
+                !state.invocation.supersededAt
                   ? [state.invocation]
                   : [],
             }),
@@ -131,7 +148,15 @@ function makeMockDb(state: MockState): Database {
       return {
         values: (v: Record<string, unknown>) => ({
           returning: async () => {
-            const row = { id: `mock-${nextId++}`, createdAt: new Date(), ...v };
+            const row = {
+              id: `mock-${state.invocations ? state.invocations.length + 1 : nextId++}`,
+              createdAt: new Date(),
+              ...v,
+            };
+            if (tableName === 'cli_invocations' && state.invocations) {
+              state.invocation = { ...row, endedAt: null };
+              state.invocations.push(state.invocation);
+            }
             if (tableName === 'task_steps') {
               state.taskStepRow = { ...state.taskStepRow, ...row };
             }
@@ -147,7 +172,12 @@ function makeMockDb(state: MockState): Database {
         set: (v: Record<string, unknown>) => ({
           where: (cond: unknown) => {
             const write = (): unknown[] => {
-              if (tableName === 'task_steps' && refusedByRowGuard(cond, state.taskStepRow.status)) {
+              state.beforeWrite?.(tableName, v);
+              if (
+                tableName === 'task_steps' &&
+                (refusedByRowGuard(cond, state.taskStepRow.status) ||
+                  state.taskStepRow.status === 'failed')
+              ) {
                 return [];
               }
               if (
@@ -160,8 +190,12 @@ function makeMockDb(state: MockState): Database {
               if (tableName === 'cli_invocations' && state.invocation)
                 Object.assign(state.invocation, v);
               if (tableName === 'task_steps') {
-                state.taskStepRow = { ...state.taskStepRow, ...v };
-                return [state.taskStepRow];
+                state.taskStepRow = {
+                  ...state.taskStepRow,
+                  ...v,
+                  ...('detectOutput' in v ? { detectOutput: structuredClone(v.detectOutput) } : {}),
+                };
+                return [persistedRow(state)];
               }
               return [];
             };
@@ -181,6 +215,9 @@ function makeMockDb(state: MockState): Database {
     },
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
+      userStepCliRolePreferences: { findFirst: async () => undefined },
+      taskStepCliTouched: { findFirst: async () => undefined },
+      taskAttachments: { findMany: async () => [] },
       taskStepCliChoices: { findFirst: async () => undefined },
       tasks: {
         findFirst: async () => state.taskRow ?? undefined,
@@ -244,7 +281,12 @@ function makeStep(opts: StepOpts): StepDefinition {
   return def;
 }
 
-function run(state: MockState, stepDef: StepDefinition, formValues?: Record<string, unknown>) {
+function run(
+  state: MockState,
+  stepDef: StepDefinition,
+  formValues?: Record<string, unknown>,
+  dispatch: Pick<Parameters<typeof advanceStep>[0], 'providers' | 'deps' | 'epoch'> = {},
+) {
   return advanceStep({
     db: makeMockDb(state),
     taskId: 'task-1',
@@ -254,6 +296,7 @@ function run(state: MockState, stepDef: StepDefinition, formValues?: Record<stri
     cliProviderId: null,
     stepDef,
     ...(formValues ? { formValues } : {}),
+    ...dispatch,
   });
 }
 
@@ -361,6 +404,205 @@ describe('pre-form report completion', () => {
     expect((await run(state, def)).status).toBe('waiting_cli');
     expect(followup.consumedAt).toBeNull();
     expect(form).not.toHaveBeenCalled();
+  });
+});
+
+describe('pre-form continuation dispatch and recovery', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    vi.spyOn(configService, 'get').mockResolvedValue(null);
+    vi.spyOn(dispatcher, 'resolveTaskDispatch').mockResolvedValue({
+      mode: 'cli',
+      providerId: 'provider',
+      invocation: { kind: 'cli', spec: {} },
+    } as unknown as Awaited<ReturnType<typeof dispatcher.resolveTaskDispatch>>);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  // The journal models the consumer's independent durable store; each advance
+  // rebuilds its DB/context and reads serialized detection, never a closure cursor.
+  function sequence(limit = 52) {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      status: 'running',
+      orchestrationEpoch: 0,
+      autoContinue: false,
+      summaryLlmEnabled: false,
+    };
+    state.invocations = [];
+    const accepted = new Map<string, number>();
+    state.beforeWrite = (table, patch) => {
+      if (table === 'cli_invocations' && patch.consumedAt)
+        expect(accepted.has(state.invocation!.id as string)).toBe(true);
+    };
+    const form = vi.fn(() => ZERO_FIELD_FORM);
+    const def = makeStep({ form });
+    def.detect = vi.fn(async () => ({ pass: 0 }));
+    def.llm = {
+      preForm: true,
+      requiredCapabilities: [],
+      buildPrompt: ({ detected }) => JSON.stringify(detected),
+      prepare: async ({ detected }) => {
+        (detected as { pass: number }).pass = accepted.size;
+      },
+      completePreForm: async ({ detected, llmInvocationId, llmOutput }) => {
+        expect(llmInvocationId).toBe(state.invocation!.id);
+        expect(state.invocation!.consumedAt).toBeUndefined();
+        const pass = (detected as { pass: number }).pass;
+        expect(JSON.parse(llmOutput as string)).toEqual({ pass });
+        if (!accepted.has(llmInvocationId!)) {
+          expect(pass).toBe(accepted.size);
+          accepted.set(llmInvocationId!, pass);
+        }
+        return { llmOutput: { accepted: accepted.size }, continueRequested: accepted.size < limit };
+      },
+    };
+    const enqueue = vi.fn(async () => {
+      expect(state.taskStepRow.detectOutput).toEqual({ pass: accepted.size });
+      expect(
+        state
+          .invocations!.slice(0, -1)
+          .every((r) => accepted.has(r.id as string) && (r.consumedAt || r.supersededAt)),
+      ).toBe(true);
+    });
+    const advance = () =>
+      run(state, def, undefined, {
+        providers: [],
+        deps: { enqueueCliInvocation: enqueue },
+        epoch: state.taskRow!.orchestrationEpoch as number,
+      });
+    const finish = () =>
+      Object.assign(state.invocation!, {
+        endedAt: new Date(),
+        exitCode: 0,
+        rawOutput: JSON.stringify(state.taskStepRow.detectOutput),
+      });
+    return { state, accepted, def, form, enqueue, advance, finish };
+  }
+
+  it('completes 52 distinct passes, records acceptance before consume and never dispatches twice on a duplicate advance', async () => {
+    const h = sequence();
+    expect((await h.advance()).status).toBe('waiting_cli');
+    for (let pass = 0; pass < 52; pass++) {
+      expect((await h.advance()).status).toBe('waiting_cli');
+      expect(h.enqueue).toHaveBeenCalledTimes(pass + 1);
+      expect(h.form).not.toHaveBeenCalled();
+      h.finish();
+      expect((await h.advance()).status).toBe(pass === 51 ? 'waiting_form' : 'waiting_cli');
+    }
+    expect(h.accepted.size).toBe(52);
+    expect(new Set(h.state.invocations!.map((r) => r.id)).size).toBe(52);
+    expect(h.def.detect).toHaveBeenCalledOnce();
+    expect(h.state.taskStepRow.iterations).toBeNull();
+    expect(h.form).toHaveBeenCalledOnce();
+    h.state.taskStepRow.formValues = {};
+    expect((await h.advance()).status).toBe('done');
+    expect(h.enqueue).toHaveBeenCalledTimes(52);
+    expect(h.state.taskStepRow.output).toMatchObject({ applied: true });
+  });
+
+  it.each(['result', 'accepted', 'consumed'] as const)(
+    'restarts after %s without losing or charging a pass twice',
+    async (point) => {
+      const h = sequence(3);
+      await h.advance();
+      h.finish();
+      if (point !== 'result') {
+        let snapshot: ReturnType<typeof structuredClone>;
+        const beforeWrite = h.state.beforeWrite;
+        h.state.beforeWrite = (table, patch) => {
+          beforeWrite?.(table, patch);
+          const consume = table === 'cli_invocations' && patch.consumedAt;
+          const nextPrepare = table === 'task_steps' && patch.detectOutput;
+          if ((point === 'accepted' && consume) || (point === 'consumed' && nextPrepare)) {
+            snapshot = {
+              row: persistedRow(h.state),
+              invocation: { ...h.state.invocation },
+            };
+            throw new Error('simulated process death');
+          }
+        };
+        await h.advance(); // Discard the dying process's catch writes at the crash cut.
+        const saved = snapshot as {
+          row: Record<string, unknown>;
+          invocation: Record<string, unknown>;
+        };
+        expect(saved).toBeDefined();
+        h.state.taskStepRow = saved.row;
+        h.state.invocation = saved.invocation;
+        h.state.invocations![0] = saved.invocation;
+        delete h.state.beforeWrite;
+      }
+      h.state.taskStepRow.detectOutput = structuredClone(h.state.taskStepRow.detectOutput);
+      expect((await h.advance()).status).toBe('waiting_cli');
+      expect(h.enqueue).toHaveBeenCalledTimes(2);
+      expect(h.accepted.size).toBe(1);
+      expect(h.state.taskStepRow.detectOutput).toEqual({ pass: 1 });
+      h.finish();
+      expect((await h.advance()).status).toBe('waiting_cli');
+      h.finish();
+      expect((await h.advance()).status).toBe('waiting_form');
+      expect([...h.accepted.values()]).toEqual([0, 1, 2]);
+      expect(h.enqueue).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each(['Stop', 'Retry', 'Cancel'] as const)(
+    '%s overtakes completion before the next dispatch',
+    async (action) => {
+      const h = sequence(3);
+      await h.advance();
+      h.finish();
+      const complete = h.def.llm!.completePreForm!;
+      h.def.llm!.completePreForm = async (args) => {
+        const result = await complete(args);
+        if (action === 'Cancel') h.state.taskRow!.status = 'cancelled';
+        else if (action === 'Stop') {
+          h.state.taskRow!.status = 'failed';
+          h.state.taskStepRow.status = 'failed';
+        } else {
+          h.state.taskRow!.orchestrationEpoch = 1;
+          h.state.taskStepRow.status = 'pending';
+          h.state.taskStepRow.detectOutput = null;
+        }
+        await vi.advanceTimersByTimeAsync(2000);
+        return result;
+      };
+      expect((await h.advance()).status).toBe(action === 'Cancel' ? 'failed' : 'superseded');
+      expect(h.enqueue).toHaveBeenCalledOnce();
+      expect(h.state.invocation!.consumedAt).toBeUndefined();
+      if (action === 'Retry') {
+        h.def.llm!.completePreForm = complete;
+        h.state.invocation!.supersededAt = new Date();
+        expect((await h.advance()).status).toBe('waiting_cli');
+        expect(h.state.taskStepRow.detectOutput).toEqual({ pass: 1 });
+        expect(h.enqueue).toHaveBeenCalledTimes(2);
+        expect(h.accepted.size).toBe(1);
+      }
+    },
+  );
+
+  it('fails cleanly when the consumer throws at its injected ceiling', async () => {
+    const h = sequence(3);
+    await h.advance();
+    h.finish();
+    const complete = h.def.llm!.completePreForm!;
+    h.def.llm!.completePreForm = async (args) => {
+      const result = await complete(args);
+      if (h.accepted.size >= 1) throw new Error('Consumer pass ceiling reached');
+      return result;
+    };
+    expect((await h.advance()).status).toBe('failed');
+    expect(h.state.taskStepRow.errorMessage).toBe('Consumer pass ceiling reached');
+    expect(h.enqueue).toHaveBeenCalledOnce();
+    expect(h.form).not.toHaveBeenCalled();
   });
 });
 
