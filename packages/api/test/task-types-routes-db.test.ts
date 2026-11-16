@@ -254,20 +254,57 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         ).status,
       ).toBe(400);
       expect(await row(slug)).toBeUndefined();
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug,
+        displayName: slug,
+        source: 'admin',
+        stepIds,
+        promptSteps: { produce },
+        requiresRepository: true,
+        runListStrategy: 'static',
+      });
+      await expect(
+        db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, slug))).toEqual([]);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['tokens', 'structured'])(
+    '[PRT4B] refuses %s with an unsynced catalog before task creation',
+    async (mode) => {
+      h.flags.set(CUSTOM_KEY, true);
+      await db.delete(schema.stepCatalog);
+      const slug = 'tt-role-unsynced';
+      const role = mode === 'structured' ? TEST_PROMPT_ROLE : STEP_ROLES.codeAudit;
+      const contract = STEP_ROLE_REGISTRY[role].contract;
+      const use = {
+        slug: 'use',
+        title: 'Use',
+        template: mode === 'tokens' ? '{{role:report}}' : 'Produce',
+        timeoutMs: 60000,
+        ...(mode === 'tokens'
+          ? { consumesRoles: [{ input: 'report', role, contract, optional: true }] }
+          : { outputMode: 'structured', providesRoles: [{ role, contract }] }),
+      };
       await db
         .insert(schema.taskTypeDefinitions)
         .values({
           slug,
           displayName: slug,
           source: 'admin',
-          stepIds,
-          promptSteps: { produce },
-          requiresRepository: true,
+          stepIds: [`custom.${slug}.use`],
+          promptSteps: { use },
+          requiresRepository: false,
           runListStrategy: 'static',
         });
       await expect(
         db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
-      ).rejects.toMatchObject({ status: 409 });
+      ).rejects.toMatchObject({ status: 409, code: 'prompt-role-catalog-unsynced' });
+      expect((await send('POST', '/tasks', { type: slug, title: 'Refuse early' })).status).toBe(
+        409,
+      );
       expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, slug))).toEqual([]);
       expect(h.add).not.toHaveBeenCalled();
     },

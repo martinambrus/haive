@@ -315,6 +315,12 @@ export async function definitionForCreate(
       }).filter((p) => p.kind.startsWith('role-'));
       if (problems.length)
         throw new HttpError(409, problems.map((p) => p.message).join(' '), 'invalid-composition');
+      if (!catalog)
+        throw new HttpError(
+          409,
+          'Prompt roles require a synced step catalog; retry after worker catalog sync.',
+          'prompt-role-catalog-unsynced',
+        );
     }
   // Prompt steps stay with admin rows; every other trait is shared by module and admin rows.
   const promptEntries =
