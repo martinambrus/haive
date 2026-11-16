@@ -4710,5 +4710,13 @@
     "value": "@roles",
     "count": 2,
     "reason": "History retains distinct QA and review findings from one bound producer while preserving canonical legacy deduplication."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08d-adversarial-qa.ts",
+    "symbol": "adversarialQaStep.consumesRoles",
+    "context": "ElementAccessExpression",
+    "value": "08d-adversarial-qa",
+    "count": 1,
+    "reason": "Canonical executable browser/QA consumer declaration matches its serialized optional input; binding changes data only."
   }
 ]

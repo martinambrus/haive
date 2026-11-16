@@ -1,3 +1,4 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
@@ -162,6 +163,7 @@ export function formatWaiverLedgerEntry(round: number, waived: QaFinding[]): str
 }
 
 export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['08d2-adversarial-qa-review'],
   metadata: {
     id: '08d2-adversarial-qa-review',
     workflowType: 'workflow',

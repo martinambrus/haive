@@ -1,3 +1,4 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -906,6 +907,7 @@ export function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): str
 }
 
 export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['08d-adversarial-qa'],
   providesRoles: [
     {
       role: CHECK_RESULT_ROLES.adversarialQa,
