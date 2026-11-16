@@ -91,17 +91,29 @@ export const CHECK_RESULT_INPUTS: Readonly<Record<string, readonly DataInput[]>>
     input('validation', CHECK_RESULT_ROLES.validation),
     input('verify', CHECK_RESULT_ROLES.verify),
     input('test-management', CHECK_RESULT_ROLES.testManagement),
+    input('browser', CHECK_RESULT_ROLES.browser),
+    input('adversarial-qa', CHECK_RESULT_ROLES.adversarialQa),
   ]),
   '10-gate-3-commit': Object.freeze([input('validation', CHECK_RESULT_ROLES.validation)]),
   '11-phase-8-learning': Object.freeze([
     input('validation', CHECK_RESULT_ROLES.validation),
     input('verify', CHECK_RESULT_ROLES.verify),
+    input('browser', CHECK_RESULT_ROLES.browser),
+    input('adversarial-qa', CHECK_RESULT_ROLES.adversarialQa),
   ]),
+  '08d2-adversarial-qa-review': Object.freeze([
+    input('adversarial-qa', CHECK_RESULT_ROLES.adversarialQa),
+  ]),
+  '08d-adversarial-qa': Object.freeze([input('browser', CHECK_RESULT_ROLES.browser)]),
   '08-phase-5-verify': Object.freeze([input('test-management', CHECK_RESULT_ROLES.testManagement)]),
 });
 export const CORE_DATA_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
   ...CORE_STAGE_INPUTS,
   ...CHECK_RESULT_INPUTS,
+  '08d-adversarial-qa': Object.freeze([
+    ...SPEC_INPUTS['08d-adversarial-qa']!,
+    ...CHECK_RESULT_INPUTS['08d-adversarial-qa']!,
+  ]),
   '09-gate-2-verify-approval': Object.freeze([
     ...CHECK_RESULT_INPUTS['09-gate-2-verify-approval']!,
     ...reviewInputs,

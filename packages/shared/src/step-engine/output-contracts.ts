@@ -43,6 +43,8 @@ export const CHECK_RESULT_ROLES = Object.freeze({
   validation: 'haive.validation',
   verify: 'haive.verify',
   testManagement: 'haive.test-management',
+  browser: 'haive.browser-verification',
+  adversarialQa: 'haive.adversarial-qa',
 } as const);
 export const VALIDATION_OUTPUT_CONTRACT = Object.freeze({
   id: CHECK_RESULT_ROLES.validation,
@@ -54,6 +56,14 @@ export const VERIFY_OUTPUT_CONTRACT = Object.freeze({
 } as const);
 export const TEST_MANAGEMENT_OUTPUT_CONTRACT = Object.freeze({
   id: CHECK_RESULT_ROLES.testManagement,
+  version: 1,
+} as const);
+export const BROWSER_VERIFICATION_OUTPUT_CONTRACT = Object.freeze({
+  id: CHECK_RESULT_ROLES.browser,
+  version: 1,
+} as const);
+export const ADVERSARIAL_QA_OUTPUT_CONTRACT = Object.freeze({
+  id: CHECK_RESULT_ROLES.adversarialQa,
   version: 1,
 } as const);
 export type CheckResultRole = (typeof CHECK_RESULT_ROLES)[keyof typeof CHECK_RESULT_ROLES];
@@ -122,6 +132,20 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     cardinality: 'one',
     authorship: 'mixed',
     legacyStepId: '08b-test-management',
+  } as const),
+  [CHECK_RESULT_ROLES.browser]: Object.freeze({
+    id: CHECK_RESULT_ROLES.browser,
+    contract: BROWSER_VERIFICATION_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '08a-browser-verify',
+  } as const),
+  [CHECK_RESULT_ROLES.adversarialQa]: Object.freeze({
+    id: CHECK_RESULT_ROLES.adversarialQa,
+    contract: ADVERSARIAL_QA_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '08d-adversarial-qa',
   } as const),
   // 07's salvage/bypass stubs and the DAG compatibility adapter write host text.
   // Module producers cannot strengthen this whole-role authorship guarantee.
@@ -611,11 +635,143 @@ const testManagementOutputSchema = z
         message: 'test-management status must match its nullable test verdict',
       });
   });
+const browserVerificationOutputSchema = z
+  .object({
+    resultStatus: z.enum(['passed', 'failed', 'manual', 'skipped', 'incomplete', 'not-run']),
+    ran: z.boolean(),
+    skipped: z.boolean(),
+    method: z.enum(['headless', 'interactive', 'direct', 'mcp', 'manual', 'skip']),
+    passed: z.boolean(),
+    failures: z.array(
+      z.object({ description: z.string(), evidence: z.string().optional() }).passthrough(),
+    ),
+    visualVerdict: z.string().nullable(),
+    checklistMarkdown: z.string().nullable(),
+    verificationIncomplete: z.boolean().optional(),
+    appUrl: z.string().nullable(),
+    appLogin: z
+      .object({ attempted: z.boolean(), ok: z.boolean(), reason: z.string() })
+      .passthrough()
+      .optional(),
+    consoleErrors: z.array(z.string()),
+    networkErrors: z.array(z.string()),
+  })
+  .passthrough()
+  .superRefine((o, ctx) => {
+    const tested =
+      o.ran && !o.skipped && ['mcp', 'interactive', 'headless', 'direct'].includes(o.method);
+    if (
+      o.resultStatus === 'passed' &&
+      (!tested ||
+        !o.passed ||
+        o.failures.length > 0 ||
+        o.verificationIncomplete === true ||
+        o.visualVerdict === 'UNSTYLED')
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'passing browser verification requires complete executed evidence',
+      });
+    if (o.resultStatus === 'failed' && (!tested || o.passed))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'failed browser verification requires an executed failure',
+      });
+    if (
+      o.resultStatus === 'manual' &&
+      (!o.ran ||
+        o.skipped ||
+        o.method !== 'manual' ||
+        !o.checklistMarkdown ||
+        o.verificationIncomplete === true)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'manual requires a prepared checklist',
+      });
+  });
+const adversarialQaOutputSchema = z
+  .object({
+    resultStatus: z.enum(['findings', 'clean', 'incomplete', 'skipped', 'not-run']),
+    ran: z.boolean(),
+    level: z.enum(['poc', 'standard', 'enterprise']).nullable(),
+    blocking: z.boolean(),
+    qaIncomplete: z.boolean(),
+    coverage: coverageSchema.nullable(),
+    counts: z
+      .object({
+        critical: z.number().int().nonnegative(),
+        high: z.number().int().nonnegative(),
+        total: z.number().int().nonnegative(),
+      })
+      .passthrough(),
+    findings: z.array(
+      z
+        .object({
+          severity: z.enum(REVIEW_SEVERITIES),
+          category: z.string().optional(),
+          location: z.string().optional(),
+          impact: z.string().optional(),
+          fix: z.string().optional(),
+          verification: z
+            .enum(['reproduced', 'not_reproduced', 'unverified', 'untestable'])
+            .optional(),
+          fingerprints: z.array(z.string()).optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough()
+  .superRefine((o, ctx) => {
+    const partial =
+      o.qaIncomplete ||
+      o.coverage?.scanFailed ||
+      o.coverage?.truncated ||
+      (o.coverage && o.coverage.listed < o.coverage.total);
+    if (
+      (o.resultStatus === 'clean' || o.resultStatus === 'findings') &&
+      (!o.ran ||
+        !o.level ||
+        partial ||
+        (o.resultStatus === 'clean'
+          ? o.findings.length > 0 || o.blocking
+          : o.findings.length === 0))
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'completed QA requires complete executed evidence matching its findings',
+      });
+    if (
+      o.counts.total !== o.findings.length ||
+      o.counts.critical !== o.findings.filter((f) => f.severity === 'critical').length ||
+      o.counts.high !== o.findings.filter((f) => f.severity === 'high').length
+    )
+      ctx.addIssue({ code: 'custom', path: ['counts'], message: 'QA counts must match findings' });
+    const blocking = o.findings.some(
+      (f) => ['critical', 'high'].includes(f.severity) && f.verification !== 'not_reproduced',
+    );
+    if (o.blocking !== blocking)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['blocking'],
+        message: 'QA blocking must retain unrefuted critical/high findings',
+      });
+  });
+export type BrowserVerificationOutput = ContractShape<
+  z.infer<typeof browserVerificationOutputSchema>
+>;
+export type AdversarialQaOutput = ContractShape<z.infer<typeof adversarialQaOutputSchema>>;
 export type ValidationOutput = ContractShape<z.infer<typeof validationOutputSchema>>;
 export type VerifyResultOutput = ContractShape<z.infer<typeof verifyOutputSchema>>;
 export type TestManagementOutput = ContractShape<z.infer<typeof testManagementOutputSchema>>;
 
 const outputValidators = Object.freeze({
+  'haive.browser-verification': browserVerificationOutputSchema,
+  'haive.adversarial-qa': adversarialQaOutputSchema,
   'haive.validation': validationOutputSchema,
   'haive.verify': verifyOutputSchema,
   'haive.test-management': testManagementOutputSchema,
