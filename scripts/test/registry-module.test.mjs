@@ -31,6 +31,7 @@ for (const identity of ['matching', 'different']) {
           if (cmd === 'pnpm') return { stdout: '' };
           if (cmd === 'npm') {
             assert.ok(args.includes('--ignore-scripts'));
+            assert.equal(options.cwd, dir);
             scratch = args.at(-1);
             assert.equal(options.env.NPM_CONFIG_USERCONFIG, '/private/npmrc');
             assert.equal(options.env.npm_config_cache, join(scratch, 'cache'));

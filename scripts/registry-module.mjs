@@ -12,7 +12,8 @@ export async function registryModuleExports(spec, { command, cwd, env }) {
     const packed = await command(
       'npm',
       ['pack', spec, '--ignore-scripts', '--json', '--pack-destination', scratch],
-      { cwd: scratch, env: { ...env, npm_config_cache: join(scratch, 'cache') } },
+      // Keep the caller's project .npmrc scope mapping while writing only to scratch.
+      { cwd, env: { ...env, npm_config_cache: join(scratch, 'cache') } },
     );
     const files = JSON.parse(packed.stdout);
     const file = files?.length === 1 ? files[0]?.filename : undefined;
