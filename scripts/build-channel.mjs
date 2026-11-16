@@ -22,6 +22,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
 const BUILD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const COMMAND_KILL_GRACE_MS = 30_000;
+export const COMMAND_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 const USAGE =
   'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]';
 const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -66,6 +67,7 @@ export function capture(command, args, options) {
       timeout,
       signal: abortSignal,
       killGrace = COMMAND_KILL_GRACE_MS,
+      maxBuffer = COMMAND_MAX_BUFFER_BYTES,
       ...spawnOptions
     } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -93,8 +95,20 @@ export function capture(command, args, options) {
     let size = 0;
     const collect = (chunks) => (chunk) => {
       size += chunk.length;
-      if (size > 32 * 1024 * 1024) {
-        stop(new Error('command output exceeded 32 MiB'));
+      if (size > maxBuffer) {
+        // Stop consuming both pipes immediately, including output during the kill grace.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        stop(
+          Object.assign(
+            new Error(
+              maxBuffer === COMMAND_MAX_BUFFER_BYTES
+                ? 'command output exceeded 32 MiB'
+                : `command output exceeded ${maxBuffer} bytes`,
+            ),
+            { code: 'ENOBUFS' },
+          ),
+        );
       } else chunks.push(chunk);
     };
     if (onOutput) {
@@ -282,6 +296,7 @@ export async function run(
           : '';
         throw new Error(
           `${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}${hint}`,
+          { cause: result.error },
         );
       }
       return result;

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { capture } from '../build-channel.mjs';
 import {
   REGISTRY_MODULE_MAX_MANIFEST_BYTES,
   REGISTRY_MODULE_MAX_PACK_BYTES,
@@ -149,6 +150,45 @@ test('pins the production pack limit to 100 MiB', () => {
 
 test('pins the production manifest limit to 1 MiB', () => {
   assert.equal(REGISTRY_MODULE_MAX_MANIFEST_BYTES, 1024 * 1024);
+});
+
+test('oversized tar manifest stops capture at an injected limit and keeps the manifest error', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'registry-module-cap-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'package'));
+  writeFileSync(
+    join(dir, 'package/package.json'),
+    JSON.stringify({ description: 'x'.repeat(4096) }),
+  );
+  const maxManifestBytes = 128;
+  let scratch;
+  let captured;
+  await assert.rejects(
+    registryModuleExports('@haive-module/demo@1.0.0', {
+      cwd: dir,
+      env: { PATH: process.env.PATH },
+      maxManifestBytes,
+      command: async (cmd, args, options) => {
+        if (cmd === 'pnpm') return { stdout: '' };
+        if (cmd === 'npm') {
+          scratch = args.at(-1);
+          assert.equal(
+            spawnSync('tar', ['-czf', join(scratch, 'demo.tgz'), '-C', dir, 'package']).status,
+            0,
+          );
+          return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
+        }
+        assert.equal(options.maxBuffer, maxManifestBytes);
+        captured = await capture(cmd, args, { ...options, timeout: 1000, killGrace: 10 });
+        if (captured.error) throw new Error('tar failed', { cause: captured.error });
+        return captured;
+      },
+    }),
+    /packed module manifest exceeds 1 MiB: @haive-module\/demo@1\.0\.0/,
+  );
+  assert.equal(captured.error.code, 'ENOBUFS');
+  assert.ok(Buffer.byteLength(captured.stdout) <= maxManifestBytes);
+  assert.equal(existsSync(scratch), false);
 });
 
 for (const oversized of [false, true]) {

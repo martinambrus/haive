@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { run } from '../build-channel.mjs';
+import { COMMAND_MAX_BUFFER_BYTES, run } from '../build-channel.mjs';
 import { parseExpect } from '../channel-gate.mjs';
 
 const TOKEN = 't351-secret-that-must-never-be-printed';
@@ -127,12 +127,15 @@ function fixture(t, config = {}) {
     }
     if (cmd === 'npm') return ok(JSON.stringify([{ filename: 'demo.tgz', size: 256 }]));
     if (cmd === 'tar' && args.includes('package/package.json'))
-      return ok(
-        JSON.stringify({
-          name: '@haive-module/demo',
-          version: '1.0.0',
-          exports: { './manifest': './dist/manifest.js', './web': './dist/web.js' },
-        }),
+      return (
+        config.manifestResult ??
+        ok(
+          JSON.stringify({
+            name: '@haive-module/demo',
+            version: '1.0.0',
+            exports: { './manifest': './dist/manifest.js', './web': './dist/web.js' },
+          }),
+        )
       );
     if (cmd === 'tar') {
       const tree = args[args.indexOf('-C') + 1];
@@ -846,6 +849,8 @@ test('GitHub metadata without exports reads the tarball and builds its web part'
   const pack = f.calls.find((c) => c.cmd === 'npm');
   assert.ok(pack.args.includes('--ignore-scripts'));
   assert.equal(existsSync(pack.args.at(-1)), false);
+  const manifest = f.calls.find((c) => c.cmd === 'tar' && c.args.includes('package/package.json'));
+  assert.equal(manifest.options.maxBuffer, 1024 * 1024);
   assert.ok(
     f.calls.some(
       (c) =>
@@ -854,6 +859,56 @@ test('GitHub metadata without exports reads the tarball and builds its web part'
         c.args.includes(join(f.scratch, 'tree/packages/web/Dockerfile')),
     ),
   );
+});
+
+test('manifest capture overflow keeps the manifest limit diagnostic in a channel build', async (t) => {
+  const f = fixture(t, {
+    modules: ['@haive-module/demo@1.0.0'],
+    emptyMetadata: true,
+    manifestResult: {
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('overflow'), { code: 'ENOBUFS' }),
+    },
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.logs.join('\n'), /packed module manifest exceeds 1 MiB/);
+  assert.ok(!f.calls.some((c) => c.cmd === 'docker' && c.args[0] === 'buildx'));
+});
+
+test('pins the default command capture limit to 32 MiB', () => {
+  assert.equal(COMMAND_MAX_BUFFER_BYTES, 32 * 1024 * 1024);
+});
+
+test('default capture enforces a per-command byte cap and stops reading after overflow', async (t) => {
+  const { capture } = await import('../build-channel.mjs');
+  let child;
+  let pipesClosedOnStop = false;
+  const original = ChildProcess.prototype.spawn;
+  const kill = ChildProcess.prototype.kill;
+  t.mock.method(ChildProcess.prototype, 'spawn', function (options) {
+    const result = original.call(this, options);
+    child = this;
+    return result;
+  });
+  t.mock.method(ChildProcess.prototype, 'kill', function (signal) {
+    pipesClosedOnStop = this.stdout.destroyed && this.stderr.destroyed;
+    return kill.call(this, signal);
+  });
+  const maxBuffer = 128;
+  const result = await capture(process.execPath, ['-e', "process.stdout.write('x'.repeat(4096))"], {
+    maxBuffer,
+    timeout: 1000,
+    killGrace: 10,
+  });
+  assert.equal(result.error?.code, 'ENOBUFS');
+  assert.ok(Buffer.byteLength(result.stdout) <= maxBuffer);
+  assert.ok(child.stdout.bytesRead > maxBuffer);
+  assert.ok(child.stdout.bytesRead <= maxBuffer + 64 * 1024, 'at most one pipe chunk of slack');
+  assert.equal(pipesClosedOnStop, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
 });
 
 test('split tokens are scrubbed while build output streams', async (t) => {
@@ -1265,16 +1320,23 @@ for (const trigger of ['overflow', 'abort', 'timeout']) {
           '-e',
           `
             process.on('SIGTERM', () => { ${cooperative ? 'process.exit(0);' : ''} });
-            process.stdout.write(${trigger === 'overflow' ? "Buffer.alloc(33 * 1024 * 1024, 'x')" : "'ready\\n'"});
+            // Closing the capture pipes must not turn an ignored SIGTERM into an EPIPE exit.
+            process.stdout.on('error', () => {});
+            process.stdout.write(${trigger === 'overflow' ? "Buffer.alloc(4096, 'x')" : "'ready\\n'"});
             setInterval(() => {}, 1000);
           `,
         ],
-        { timeout: trigger === 'timeout' ? 1000 : 0, killGrace: 200, signal: controller.signal },
+        {
+          timeout: trigger === 'timeout' ? 1000 : 0,
+          killGrace: 200,
+          signal: controller.signal,
+          ...(trigger === 'overflow' ? { maxBuffer: 128 } : {}),
+        },
       );
       assert.equal(watch.fired, false, 'capture did not close before the watchdog');
       assert.equal(result.timedOut, trigger === 'timeout');
       if (trigger === 'overflow')
-        assert.match(result.error?.message ?? '', /output exceeded 32 MiB/);
+        assert.match(result.error?.message ?? '', /output exceeded 128 bytes/);
       if (trigger === 'abort') assert.ok(result.error, 'aborting must report a failure');
       if (cooperative) {
         assert.equal(result.status, 0);

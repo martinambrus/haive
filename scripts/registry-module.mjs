@@ -35,18 +35,25 @@ export async function registryModuleExports(
       throw new Error(`could not identify the packed module ${spec}`);
     if (!Number.isSafeInteger(files[0].size) || files[0].size > maxPackBytes)
       throw new Error(`packed module exceeds size limit (${maxPackBytes} bytes): ${spec}`);
-    const manifest = await command(
-      'tar',
-      [
-        '--occurrence=1',
-        '--no-wildcards',
-        '-xzOf',
-        join(scratch, file),
-        '--',
-        'package/package.json',
-      ],
-      { cwd: scratch, env: { PATH: env.PATH, LANG: env.LANG } },
-    );
+    let manifest;
+    try {
+      manifest = await command(
+        'tar',
+        [
+          '--occurrence=1',
+          '--no-wildcards',
+          '-xzOf',
+          join(scratch, file),
+          '--',
+          'package/package.json',
+        ],
+        { cwd: scratch, env: { PATH: env.PATH, LANG: env.LANG }, maxBuffer: maxManifestBytes },
+      );
+    } catch (error) {
+      if (error.code === 'ENOBUFS' || error.cause?.code === 'ENOBUFS')
+        throw new Error(`packed module manifest exceeds 1 MiB: ${spec}`);
+      throw error;
+    }
     if (Buffer.byteLength(manifest.stdout) > maxManifestBytes)
       throw new Error(`packed module manifest exceeds 1 MiB: ${spec}`);
     if (!manifest.stdout.trim())

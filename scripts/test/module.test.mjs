@@ -308,6 +308,41 @@ describe('module add @haive-module/<id>@<version>', () => {
     assert.match(out.stdout, /Loaded/);
   });
 
+  it('gives tar its own capture cap and preserves the manifest limit error', (t) => {
+    const tree = makeTree(t);
+    const preload = join(tree.root, 'scripts', 'cap-preload.mjs');
+    const log = join(tree.root, 'scripts', 'cap-call.json');
+    writeFileSync(
+      preload,
+      `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { writeFileSync } from 'node:fs';
+const original = childProcess.spawnSync;
+childProcess.spawnSync = (cmd, args, options) => {
+  if (cmd === 'tar' && args.includes('-xzOf')) {
+    writeFileSync(${JSON.stringify(log)}, JSON.stringify({ maxBuffer: options.maxBuffer }));
+    return original(cmd, args, { ...options, maxBuffer: 64 });
+  }
+  return original(cmd, args, options);
+};
+syncBuiltinESMExports();
+`,
+    );
+    const before = tree.snapshot();
+    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+      NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+      STUB_PNPM_VIEW: '',
+      STUB_NPM_EXPORTS: viewOf(['./manifest']),
+    });
+    assert.equal(out.status, 1, out.stderr);
+    assert.match(out.stderr, /packed module manifest exceeds 1 MiB: @haive-module\/foo@1\.0\.0/);
+    assert.equal(JSON.parse(readFileSync(log, 'utf8')).maxBuffer, 1024 * 1024);
+    assert.deepEqual(tree.snapshot(), before);
+    assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
+    assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
+  });
+
   for (const [cmd, marker] of [
     ['pnpm', 'view'],
     ['npm', 'pack'],

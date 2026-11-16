@@ -111,12 +111,13 @@ if (registry === null) {
           const result = spawnSync(cmd, args, {
             ...options,
             encoding: 'utf8',
-            maxBuffer: 2 * 1024 * 1024,
+            maxBuffer: options.maxBuffer ?? 2 * 1024 * 1024,
             timeout: REGISTRY_COMMAND_TIMEOUT_MS,
           });
           if (result.status !== 0 || result.error)
             throw new Error(
               `${cmd} ${args.join(' ')} failed: ${result.error?.message ?? result.stderr}`,
+              { cause: result.error },
             );
           return result;
         },
