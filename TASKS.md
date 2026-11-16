@@ -661,7 +661,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T681 · Insight loop: act on consequential insights during the task, and pick insights at gate 3
 
-status: in progress (plan approved 2026-11-15, docs/plans/insight-loop.md, five PRs: PR1 shared loader DONE #1209 7c10887b1; PR2 switch DONE #1212 863a369bf (hidden, inert until PR4); PR3 split into 3a journal + 3b routing, 3a DONE #1213 7f87aa3b4, 3b DONE #1215 9fe71a666; PR4 DONE #1218 56ff28e48 (automatic mode, opt-in at run config); PR5 next: gate-3 multi-select must offer every remaining insight, minor/nit included) (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
+status: DONE (plan docs/plans/insight-loop.md, five PRs: PR1 shared loader #1209 7c10887b1; PR2 switch #1212 863a369bf; PR3a journal #1213 7f87aa3b4, PR3b routing #1215 9fe71a666; PR4 automatic mode #1218 56ff28e48; PR5 gate-3 picks, summary report and owner-only gate-2 re-approval #1223 e64a83f33; remaining lows in T687) (OWNER DECISIONS 2026-11-14: separate triage agent classifies; 3 automatic rounds; gate 3 picks go apply -> 08 verify -> 08c review -> gate 3; build after the current overnight queue, plan first in plan mode) · kind: feature · found: owner request 2026-11-14 · priority: P2
 
 Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INSTRUCTION`); DAG reviewers' withheld findings join them (`loadInsightOutputs`). Step `08e-insights-triage` shows them once as a multi-select and one agent applies the picks; gates 2 and 3 list the unpicked rest as plain text (`_gate-insights.ts`; gate 3 says "needs a follow-up task"). An `Insight` has no severity, and nothing loops.
 
@@ -699,7 +699,7 @@ Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The defa
 5. LOW, maintenance: `retryReviewer` (~:1666-1669) duplicates the two dispatch-branch predicates (~:1698, :1720); a drift restores the consume-before-throw hazard. Fix: one shared helper.
 6. NIT, docs: fix-loop.md "advisor, replanner and fix coder" means the section-C advisor-started fix coder; "path-scrubbed" covers only worker storage and host repo roots.
 
-### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+18)
+### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+29)
 
 status: open (lows; bundle with the next insight-loop change or park) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
@@ -723,6 +723,17 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 16. LOW: `AutoDetect.dependencyPolicy` (`withheldPaths`, `workspaceRoots`, `ownedPaths`) is persisted unbounded in the polled 08e detect output; persisted insights keep full descriptions with no per-item clip. Bound with the same reload approach if sizes matter (measure first).
 17. NIT: `syntheticInsightReply` (`step-runner.ts` ~:2255-2267, test bypass only) reads the bounded detect copy.
 18. LOW, from #1218 review-8: `loadDependencyPolicy` reads `baseBranch` from the retained 01 output (`worker/src/step-engine/steps/workflow/_dependency-policy.ts` ~:181-190); when that output is gone it falls back to `rev-parse HEAD`, which in the worktree may already hold the task's own commits. Fix: read the base from the durable task columns, or fail closed without it as `review-diff.ts` ~:277-280 does.
+19. LOW, from #1223 (reviews in `.claude/tmp/codex-run/INS5-S/`, review-4/5 and codex-4/5 last.txt): after a human gate-2 re-approval clears the insight latch, the regenerated gate 3 still accepts a preset `commit` (task pre-answers, type defaults, prior-task reuse), so the refreshed diff can commit without a look. Decide whether a picked-insight cycle should force gate 3 to park like the latched gate 2.
+20. LOW: the manual 08e fallback accepts a non-empty preset selection (prior-task reuse drops unknown ids, so reach is narrow).
+21. LOW: the module loader does not reject `loopTargetWhenPresent` / `loopBeforeClose` on module entries, and `effectiveReplacementEntry` (`shared/.../derived-task-types.ts` ~:176) spreads a replacement entry's flag onto a role-owned loop target; a trusted module can skip `missing-loop-target` (fails at loop time by name). Reject both flags for module entries.
+22. LOW: gate 3 offers the pick field when 08e is present but gate 2 is absent, then refuses every submit with the run-list error (`_gate-insights.ts` ~:74); gate the offer on gate 2 too.
+23. COVERAGE: no test of `validateComposition` with a live execution contract AND `loopTargetWhenPresent`; no control through the real submit route followed by the worker for the owner-attested approval; detect paging tests mock `insightPageOffset`.
+24. LOW: `continuationForOutcome` returns the checks stage for a gate-3 batch even when every pick was `not_applied` (full 08 + 08c for no change). Owner question whether to short-circuit.
+25. LOW: the persisted `insightSummary` is bounded but large (30 items x 30 refs x 30 attempts, stored in detect and apply output); no ceiling test. Choices are bounded separately.
+26. LOW: summary and choices page on different units (identities vs occurrences), so page 2 can show summary rows for other items; nothing dropped.
+27. LOW: a worker pass holding an older row snapshot can re-park a latched gate 2 after the owner's submit (lost click, safe direction); the owner marker payload `{userId, generation, decision}` is duplicated in steps.ts, insight-gate3-return.ts and tests without a shared type (drift fails closed).
+28. NIT: two `composable-core.test.ts` titles (~:202, ~:213) say "requires" while asserting `[]`; composer copy (~:609-613) and the type-draft prompt (~:264-266) still describe the gate-3 loop as unconditional; dead `{limit: INSIGHTS_AT_GATE}` branch in `collectInsights` (08e ~:89-97); report back link unstyled; no `/events` paging test for `task.markdown_report`.
+29. LOW: `gate2_approved` is recorded before the gate-2 row is written done (`step-runner.ts` ~:4264); a Stop or Retry in between leaves the latch cleared on a real human approval. Narrow.
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
