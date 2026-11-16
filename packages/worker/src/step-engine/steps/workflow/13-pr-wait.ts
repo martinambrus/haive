@@ -8,7 +8,7 @@ import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { killTaskDdevRunners } from '../../../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../../../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../../../sandbox/ide-runner.js';
-import { WorktreeRemovedError } from '../../../repo/task-worktree.js';
+import { WorktreeNotDirectoryError, WorktreeRemovedError } from '../../../repo/task-worktree.js';
 import { resolveInvocationUsesWorktreeGitBoundary } from '../../../repo/worktree-git-boundary.js';
 import {
   buildRagUsagePrompt,
@@ -148,8 +148,15 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
           await resolveInvocationUsesWorktreeGitBoundary(ctx.db, ctx.taskId);
         } catch (err) {
           ctx.throwIfCancelled();
-          if (!(err instanceof WorktreeRemovedError)) throw err;
-          d.ragUsageSkipReason = 'RAG usage review skipped because the task worktree was removed.';
+          if (err instanceof WorktreeRemovedError) {
+            d.ragUsageSkipReason =
+              'RAG usage review skipped because the task worktree was removed.';
+          } else if (err instanceof WorktreeNotDirectoryError) {
+            d.ragUsageSkipReason =
+              'RAG usage review skipped because the task worktree path is not a directory.';
+          } else {
+            throw err;
+          }
         }
       }
       // A PR can remain open while agents do more work. Preserve this refreshed

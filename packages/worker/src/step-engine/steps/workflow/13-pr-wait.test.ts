@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -15,7 +15,7 @@ import {
   resolveInvocationUsesWorktreeGitBoundary,
   resolveInvocationWorkerTree,
 } from '../../../repo/worktree-git-boundary.js';
-import { WorktreeRemovedError } from '../../../repo/task-worktree.js';
+import { WorktreeNotDirectoryError, WorktreeRemovedError } from '../../../repo/task-worktree.js';
 
 describe('finalization RAG review', () => {
   function setup() {
@@ -80,16 +80,29 @@ describe('finalization RAG review', () => {
     return { fake, ctx, detected };
   }
   it.each([
-    { present: false, pending: false },
-    { present: true, pending: false },
-    { present: true, pending: true },
-  ])('classifiable review after cleanup: %j', async ({ present, pending }) => {
+    { tree: 'removed', pending: false },
+    { tree: 'removed', pending: true },
+    { tree: 'file', pending: false },
+    { tree: 'symlink', pending: false },
+    { tree: 'present', pending: false },
+    { tree: 'present', pending: true },
+  ])('classifiable review after cleanup: %j', async ({ tree, pending }) => {
     const { fake, ctx, detected } = setup();
     const repoPath = await mkdtemp(path.join(tmpdir(), 'pr-wait-review-'));
     const branch = 'feature/review';
     const worktreePath = path.join(repoPath, '.haive/worktrees/feature-review');
+    const present = tree === 'present';
+    const skipReason =
+      tree === 'removed'
+        ? 'RAG usage review skipped because the task worktree was removed.'
+        : 'RAG usage review skipped because the task worktree path is not a directory.';
     try {
       if (present) await mkdir(worktreePath, { recursive: true });
+      if (tree === 'file' || tree === 'symlink') {
+        await mkdir(path.dirname(worktreePath), { recursive: true });
+        if (tree === 'file') await writeFile(worktreePath, 'not a worktree');
+        else await symlink(repoPath, worktreePath);
+      }
       const repositoryId = randomUUID();
       fake.insert(schema.repositories, {
         id: repositoryId,
@@ -116,6 +129,13 @@ describe('finalization RAG review', () => {
           resultHits: [{ sourcePath: 'src/session.ts', content: 'Cookie implementation' }],
         })
         .where(eq(schema.ragQueryLog.taskId, ctx.taskId));
+      const zeroHit = fake.insert(schema.ragQueryLog, {
+        id: randomUUID(),
+        taskId: ctx.taskId,
+        query: 'no matching source',
+        hitCount: 0,
+        resultHits: [],
+      });
       const invocationId = randomUUID();
       const quote = 'I used src/session.ts to implement secure cookies.';
       fake.insert(schema.cliInvocations, {
@@ -128,7 +148,14 @@ describe('finalization RAG review', () => {
         endedAt: new Date(at.getTime() + 1000),
         cleanTranscript: { segments: [{ kind: 'model', at: at.getTime() + 500, text: quote }] },
       });
-      const d = { ...detected, pending, worktreePath, branchName: branch, ragUsage: undefined };
+      const d = {
+        ...detected,
+        pending,
+        worktreePath,
+        branchName: branch,
+        ragUsage: undefined,
+        ragUsageSkipReason: 'stale reason from an earlier skipped review',
+      };
       // Follow the runner's prepare -> dispatch -> apply seam. Any dispatch here must
       // resolve the same boundary as a real invocation; it cannot fall back to root.
       expect(prWaitStep.llm!.skipIf!({ detected: d, formValues: {} })).toBe(false);
@@ -154,18 +181,21 @@ describe('finalization RAG review', () => {
       if (present) {
         expect(prepared).toBeUndefined();
         expect(dispatch).toHaveBeenCalledOnce();
+        expect(d.ragUsageSkipReason).toBeUndefined();
+        expect(checkpoint).not.toHaveProperty('ragUsageSkipReason');
       } else {
         expect(prepared).toBe(false);
         expect(dispatch).not.toHaveBeenCalled();
         expect(checkpoint).toMatchObject({
-          ragUsageSkipReason: expect.stringMatching(/worktree.*removed/i),
+          ragUsageSkipReason: skipReason,
         });
         // The ordinary agent's guard is unchanged even though finalization skips it.
+        const guardError = tree === 'removed' ? WorktreeRemovedError : WorktreeNotDirectoryError;
         await expect(
           resolveInvocationUsesWorktreeGitBoundary(ctx.db, ctx.taskId),
-        ).rejects.toBeInstanceOf(WorktreeRemovedError);
+        ).rejects.toBeInstanceOf(guardError);
         await expect(resolveInvocationWorkerTree(ctx.db, ctx.taskId)).rejects.toBeInstanceOf(
-          WorktreeRemovedError,
+          guardError,
         );
       }
       // Pending PR finalization's filesystem behavior is covered below with real git.
@@ -186,10 +216,13 @@ describe('finalization RAG review', () => {
           ? { status: 'used', reason: 'Explicit use' }
           : {
               status: 'unknown',
-              reason: expect.stringMatching(/worktree.*removed/i),
+              reason: skipReason,
               evidence: [],
             },
       );
+      expect(
+        fake.rows(schema.ragQueryLog).find((row) => row.id === zeroHit.id)!.usageAssessment,
+      ).toMatchObject({ status: 'unused', reason: 'No results were returned.', evidence: [] });
     } finally {
       await rm(repoPath, { recursive: true, force: true });
     }

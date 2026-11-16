@@ -199,12 +199,13 @@ export async function saveRagUsage(
   const assessedAt = new Date().toISOString();
   // Every query gets a result even if its evidence did not fit the checkpoint.
   // These defaults require neither bodies nor transcript data to be persisted.
+  // Only the selected assessments below carry a classifier skip reason.
   await ctx.db
     .update(schema.ragQueryLog)
     .set({
       usageAssessment: {
         status: 'unknown',
-        reason: skipReason ?? 'The available agent record does not establish usage.',
+        reason: 'The available agent record does not establish usage.',
         evidence: [],
         assessedAt,
       },
