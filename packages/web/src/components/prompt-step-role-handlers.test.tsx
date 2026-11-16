@@ -49,6 +49,11 @@ it('inserts and renames role tokens and toggles structured mode with an empty in
   fire.type(controls(view.tree(), /^role input 1 name$/i)[0]!, 'result');
   view.draw();
   expect(entry.template).toBe('Read\n{{role:result}}\n');
+  fire.type(controls(view.tree(), /^role input 1 name$/i)[0]!, '');
+  view.draw();
+  fire.type(controls(view.tree(), /^role input 1 name$/i)[0]!, 'renamed');
+  view.draw();
+  expect(entry.template).toBe('Read\n{{role:renamed}}\n');
   fire.check(controls(view.tree(), /^structured output$/i)[0]!, true);
   view.draw();
   expect(entry.outputMode).toBe('structured');

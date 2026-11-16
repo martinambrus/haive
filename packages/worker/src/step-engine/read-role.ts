@@ -161,7 +161,7 @@ export async function readDataRole(
   if (required && (!row || row.status !== 'done'))
     throw new DataEdgePlanError(`${inputName}: required input not ready`);
   if (!row) return { state: 'absent', role, contract, producer: null };
-  const output = row.stepId.startsWith('custom.')
+  const output = producerStepId.startsWith('custom.')
     ? promptRoleOutputValue(row.output, role, contract)
     : row.output;
   const common = {

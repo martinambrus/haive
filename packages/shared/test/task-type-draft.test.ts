@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
+vi.mock('../src/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../src/step-engine/output-contracts.js')>(),
+  );
+});
+import { describe, expect, it, vi } from 'vitest';
 import { STEP_ROLES, SPEC_ROLES, STEP_ROLE_REGISTRY } from '../src/step-engine/output-contracts.js';
 import {
   PROMPT_STEP_DRAFTABLE_KEYS,
@@ -153,8 +160,8 @@ const KINDS: Record<KindOf, Reach> = {
       withStep({
         providesRoles: [
           {
-            role: STEP_ROLES.codeAudit,
-            contract: STEP_ROLE_REGISTRY[STEP_ROLES.codeAudit].contract,
+            role: TEST_PROMPT_ROLE,
+            contract: STEP_ROLE_REGISTRY[TEST_PROMPT_ROLE].contract,
           },
         ],
       }),

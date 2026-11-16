@@ -28,6 +28,8 @@ describe('host output contracts', () => {
       'SPEC_ROLES',
       'STEP_ROLES',
       'STEP_ROLE_REGISTRY',
+      'isPromptProvidableRole',
+      'isQuotableRole',
       'parseRegistryOutputContractRef',
       'parseStepOutputContractRef',
       'projectRoleOutput',
@@ -35,6 +37,7 @@ describe('host output contracts', () => {
       'readStepRole',
       'safeParseStepOutput',
       'stepOutputContractsEqual',
+      'stepOutputJsonSchema',
       'stepRoleOutputContract',
     ]);
     expect(Object.isFrozen(review)).toBe(true);

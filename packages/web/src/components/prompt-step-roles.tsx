@@ -29,7 +29,7 @@ export function PromptStepRoles({
     onChange({
       ...entry,
       consumesRoles: inputs.map((i, n) => (n === index ? { ...i, ...patch } : i)),
-      ...(patch.input && patch.input !== inputs[index]?.input
+      ...(patch.input !== undefined && patch.input !== inputs[index]?.input
         ? {
             template: entry.template.replaceAll(
               `{{role:${inputs[index]!.input}}}`,

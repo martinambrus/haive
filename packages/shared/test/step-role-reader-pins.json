@@ -1806,5 +1806,13 @@
     "value": "@roles",
     "count": 1,
     "reason": "Host-owned authoring catalog lists exact role contracts and quotation eligibility; grants no host control policy."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isPromptProvidableRole",
+    "context": "InKeyword",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Registry-driven prompt provider eligibility excludes every host-policy role after the agent-only projection check; no producer-name exception."
   }
 ]

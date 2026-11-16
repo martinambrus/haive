@@ -231,6 +231,14 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     async (role) => {
       h.flags.set(CUSTOM_KEY, true);
       const slug = 'tt-role-refused';
+      // Keep both core consumers installed: refusal must come from role authority, not missing steps.
+      await db
+        .insert(schema.stepCatalog)
+        .values(
+          ['07-phase-2-implement', '09-gate-2-verify-approval'].map((id) =>
+            catalogRow(id, true, entry(id)),
+          ),
+        );
       const produce = {
         slug: 'produce',
         title: 'Produce',
@@ -259,15 +267,13 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
           producerStepId: stepIds[0]!,
         },
       ];
-      expect(
-        (
-          await send(
-            'POST',
-            '/admin/task-types',
-            valid(slug, { stepIds, promptSteps: { produce }, dataRoleBindings }),
-          )
-        ).status,
-      ).toBe(400);
+      const saved = await send(
+        'POST',
+        '/admin/task-types',
+        valid(slug, { stepIds, promptSteps: { produce }, dataRoleBindings }),
+      );
+      expect(saved.status).toBe(400);
+      expect(await saved.json()).toMatchObject({ error: 'Validation failed' });
       expect(await row(slug)).toBeUndefined();
       await db.insert(schema.taskTypeDefinitions).values({
         slug,
