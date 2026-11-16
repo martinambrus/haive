@@ -1,3 +1,10 @@
+import {
+  CHECK_RESULT_ROLES,
+  STEP_ROLE_REGISTRY,
+  safeParseStepOutput,
+} from '@haive/shared/step-outputs';
+import { checkResultHistoryProducer } from '../../read-check-result.js';
+import type { StepContext } from '../../step-definition.js';
 import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { asc, eq, sql } from 'drizzle-orm';
@@ -47,7 +54,7 @@ const DIAGNOSIS_COUNT: Record<DigestTier, number> = { low: 1, medium: 3, high: 1
 const SOFT_FINDING_CAP: Record<DigestTier, number> = { low: 4, medium: 12, high: 40 };
 
 /** Steps whose `output` carries severity-bearing findings. */
-const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08d-adversarial-qa']);
+const FINDING_STEP_IDS = new Set(['08d-adversarial-qa']);
 
 interface Finding {
   severity: ReviewSeverity;
@@ -169,6 +176,7 @@ function extractRuntimeErrors(stepId: string, output: unknown): string[] {
  *  the task: per-round diagnoses, findings (by severity), human gate reactions,
  *  and runtime/browser errors. */
 export interface DigestStepInput {
+  status?: string;
   stepId: string;
   round: number;
   output: unknown;
@@ -183,6 +191,7 @@ export interface DigestEventInput {
 export async function buildTaskHistoryDigest(
   db: Database,
   taskId: string,
+  consumer?: Pick<StepContext, 'round'>,
 ): Promise<TaskHistoryDigest> {
   const steps = await db
     .select()
@@ -198,7 +207,7 @@ export async function buildTaskHistoryDigest(
     .from(schema.taskEvents)
     .where(eq(schema.taskEvents.taskId, taskId))
     .orderBy(asc(schema.taskEvents.createdAt));
-  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId));
+  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId), consumer?.round);
 }
 
 /** Pure renderer (exported for unit tests) over already-fetched step + event rows. */
@@ -206,8 +215,24 @@ export function renderTaskHistoryDigest(
   steps: DigestStepInput[],
   events: DigestEventInput[],
   task: RoleTaskPin,
+  maxCheckRound?: number,
 ): TaskHistoryDigest {
   const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
+  const validationId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.validation);
+  const verifyId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.verify);
+  const checkOutput = (
+    s: DigestStepInput,
+    role: typeof CHECK_RESULT_ROLES.validation | typeof CHECK_RESULT_ROLES.verify,
+  ) => {
+    if (s.stepId === STEP_ROLE_REGISTRY[role].legacyStepId) return s.output;
+    if (
+      (maxCheckRound !== undefined && s.round > maxCheckRound) ||
+      (s.status !== undefined && s.status !== 'done')
+    )
+      return null;
+    const parsed = safeParseStepOutput(STEP_ROLE_REGISTRY[role].contract, s.output);
+    return parsed.success ? parsed.data : null;
+  };
   const maxRound = steps.reduce((m, s) => Math.max(m, s.round ?? 0), 0);
   const fixLoopEvents = events.filter((e) => e.eventType === 'fix_loop.requested');
   const fixLoopCount = fixLoopEvents.length;
@@ -219,8 +244,23 @@ export function renderTaskHistoryDigest(
   const runtimeErrors: string[] = [];
   for (const s of steps) {
     if (s.stepId === reviewId) findings.push(...extractFindings(STEP_ROLES.codeReview, s.output));
+    else if (s.stepId === validationId)
+      findings.push(
+        ...extractFindings(
+          STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.validation].legacyStepId,
+          checkOutput(s, CHECK_RESULT_ROLES.validation),
+        ),
+      );
     else if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
-    runtimeErrors.push(...extractRuntimeErrors(s.stepId, s.output));
+    if (s.stepId === verifyId)
+      runtimeErrors.push(
+        ...extractRuntimeErrors(
+          STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.verify].legacyStepId,
+          checkOutput(s, CHECK_RESULT_ROLES.verify),
+        ),
+      );
+    else if (s.stepId !== STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.verify].legacyStepId)
+      runtimeErrors.push(...extractRuntimeErrors(s.stepId, s.output));
   }
   const findingCount = findings.length;
 
