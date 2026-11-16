@@ -806,6 +806,26 @@ refuses while support is still missing (see [Worker restarts](worker-restarts.md
 Main task responses omit the full contract. Admin create/PATCH and creator
 drafts expose no contract authoring.
 
+The API also checks the immutable execution pin before task Retry at a step
+(including direct helper callers), step Retry, Resume, Skip or AI Retry, form
+or clarification submission, and step CLI changes. Turning on auto-continue
+while a task awaits an answer uses the same refusal. Owner and administrator
+pause Resume refuse unsupported pins before clearing a standing hold.
+An unsupported or malformed pin returns 409 `invalid-execution-contract`
+before any row reset, answer/event write, sandbox kill or job enqueue.
+Lifting the global pause succeeds for ordinary work while leaving unsupported
+tasks held: an existing per-task pause keeps its timestamp; a task held only
+by the global switch receives an audited administrator pause before the switch
+is released. An already-off switch leaves task rows and pause evidence unchanged.
+Each task hold has the same 30-second lock timeout as the configuration save;
+a lock timeout answers 503 and leaves the global switch on. Earlier committed
+holds remain if a later hold or configuration write fails. The response lists
+`skippedTasks` with task id, refusal code and reason when any were held back.
+The worker's existing boot and duplicate-advance fence remains authoritative
+for already queued work. Stop, Cancel and step Abort
+remain available; NULL and explicit empty execution contracts retain their
+existing behavior. This adds no guard evaluation, skip writer or custom fix execution.
+
 Rollback stops creation of contract-bearing types and retains nullable columns,
 the applied migration and every immutable pin. Never erase or remap a pin to
 make rollback appear safe; once P7/P8 admit active pins, retain capable workers
