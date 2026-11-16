@@ -2065,14 +2065,6 @@
   },
   {
     "file": "packages/shared/src/step-engine/step-ports.ts",
-    "symbol": "projectStepPorts.nodes",
-    "context": "ExclamationEqualsEqualsToken",
-    "value": "03b2-humanize-requirements",
-    "count": 1,
-    "reason": "Display-only effective-requirements adapter and direct humanizer draft port; admission pins the separate stages."
-  },
-  {
-    "file": "packages/shared/src/step-engine/step-ports.ts",
     "symbol": "projectStepPorts.nodes.alternatives.contract",
     "context": "EFFECTIVE_REQUIREMENTS_ROLES.map",
     "value": "@roles",
@@ -2438,5 +2430,13 @@
     "value": "./03b2-humanize-requirements.js",
     "count": 1,
     "reason": "Registers canonical physical step implementations; no output read."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/type-draft/_type-draft.ts",
+    "symbol": "buildDraftPrompt.providableRoles",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Creator provider guidance derives eligible role ids from the host registry; grants no host control policy."
   }
 ]
