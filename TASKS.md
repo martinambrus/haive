@@ -678,9 +678,16 @@ While an invocation runs, `token_usage` has no model identity yet; `resolveInvoc
 
 ### T692 · No-PR workflow fails at 13-pr-wait: the RAG usage review dispatches after cleanup removed the worktree
 
-status: open · kind: fix · found: capped real workflow run 2026-11-16 · priority: P1
+status: done 2026-11-16 (#1231: 13 skips the review on a removed or non-directory worktree and records why; the guard is unchanged) · kind: fix · found: capped real workflow run 2026-11-16 · priority: P1
 
 A full workflow whose `12-worktree-cleanup` ran `remove_only` (no PR) parks `13-pr-wait` with `pending:false`; the empty-form submit then enters its optional RAG usage-review LLM phase, and `resolveTaskDispatchOnTree` (`orchestrator/dispatcher.ts` ~:386) -> `resolveInvocationUsesWorktreeGitBoundary` -> `resolveTaskWorktree` (`repo/task-worktree.ts` ~:78) throws `WorktreeRemovedError` ("The worktree for branch ... was removed, so this task has no workspace to open."). The step fails before any invocation row, so the task ends `failed` after its work was committed. The guard is right to refuse the main checkout; the review has `disableTools: true` and needs no workspace. Expected per rag-playground.md (finalization review is non-blocking): the review runs without a worktree, or is skipped with a recorded reason, and the task completes. Repro: task `f7ecd064-...` on the dev install (only occurrence so far; earlier capped runs never reached 13). Check every other post-cleanup step with an LLM phase for the same dispatch.
+
+Left from #1231 reviews (lows, parked under the owner rule):
+
+1. On the PR path, the per-step recap after 13's own finalize can record a failed "Step summary" invocation once the worktree is gone (`step-runner.ts` ~:4654); the task completes.
+2. "Retry with AI" on a failed 12 or 13 whose worktree is gone fails again (`resolveAiFixPhase`, `step-runner.ts` ~:1468): the guard working, the action just unavailable.
+3. A custom prompt step that needs only the repository token can be placed after 12 and would hit the same guard; check the composition validator.
+4. Optional LLM dispatch errors other than a prompt-budget overflow still fail the step (`step-runner.ts` ~:1198-1202).
 
 ### T691 · Owner's `gpt-5.5` codex provider rows fail with model_not_found; transport pin regex too broad
 
