@@ -10,6 +10,7 @@ import {
 import type { StoredPromptStep } from '@/lib/api-client';
 import type { PromptStepIssue } from '@/lib/composition-messages';
 import {
+  type PromptRoleInputRename,
   PROMPT_STEP_TIMEOUT_MAX_MINUTES,
   PROMPT_STEP_TIMEOUT_MIN_MINUTES,
 } from '@/lib/prompt-step-editing';
@@ -20,6 +21,7 @@ import {
   type IntegrationCategoryOption,
 } from '@/components/prompt-step-integrations';
 import { PromptStepTools } from '@/components/prompt-step-tools';
+import { PromptStepRoles } from '@/components/prompt-step-roles';
 
 const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
   tool_use: 'Can use tools',
@@ -28,7 +30,7 @@ const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
 };
 
 const tokenHelp = (withFields: boolean) =>
-  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{agent:<id>}}\` \`{{integration:<id>.account}}\`. A \`{{step:<id>}}\` token must be alone on its line.`;
+  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{role:<input>}}\` \`{{agent:<id>}}\` \`{{integration:<id>.account}}\`. A \`{{step:<id>}}\` or \`{{role:<input>}}\` token must be alone on its line.`;
 
 const NO_ISSUES: readonly PromptStepIssue[] = [];
 
@@ -38,7 +40,7 @@ interface PromptStepEditorProps {
   issues?: readonly PromptStepIssue[];
   disabled?: boolean;
   integrationCategories?: readonly IntegrationCategoryOption[];
-  onChange: (entry: PromptStepEntry) => void;
+  onChange: (entry: PromptStepEntry, rename?: PromptRoleInputRename) => void;
   onRemove: () => void;
 }
 
@@ -100,6 +102,7 @@ export function PromptStepEditor({
           className="text-xs text-neutral-500"
         />
       </div>
+      <PromptStepRoles entry={entry} disabled={disabled} onChange={onChange} />
       <fieldset className="flex flex-wrap gap-x-4 gap-y-1">
         <legend className="mb-1 text-xs text-neutral-400">Capabilities</legend>
         {PROMPT_STEP_CAPABILITIES.map((capability) => (

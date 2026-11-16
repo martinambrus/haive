@@ -18,6 +18,7 @@ import {
 } from '@haive/shared/step-outputs';
 import type { StepContext } from './step-definition.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
+import { promptRoleOutputValue } from './prompt-role-output.js';
 
 type Producer<R extends StepRoleId> = {
   role: R;
@@ -160,15 +161,18 @@ export async function readDataRole(
   if (required && (!row || row.status !== 'done'))
     throw new DataEdgePlanError(`${inputName}: required input not ready`);
   if (!row) return { state: 'absent', role, contract, producer: null };
+  const output = producerStepId.startsWith('custom.')
+    ? promptRoleOutputValue(row.output, role, contract)
+    : row.output;
   const common = {
     role,
     contract,
     producer: { rowId: row.id, stepId: row.stepId, round: row.round, status: row.status },
     iterations: row.iterations,
-    legacyOutput: pinned && row.status !== 'done' ? null : projectRoleOutput(role, row.output),
+    legacyOutput: pinned && row.status !== 'done' ? null : projectRoleOutput(role, output),
   };
   if (row.status !== 'done') return { ...common, state: 'not-ready' };
-  const result = safeParseStepOutput(contract, row.output);
+  const result = safeParseStepOutput(contract, output);
   if (!result.success) {
     if (required) throw new DataEdgePlanError(`${inputName}: required input invalid`);
     return { ...common, state: 'invalid', issuePaths: result.issuePaths };

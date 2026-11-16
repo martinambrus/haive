@@ -1,5 +1,6 @@
 import { parseDataEdgePlan, selectDataEdgeCandidate } from '@haive/shared/data-edge-plan';
 import { STEP_ROLE_REGISTRY, type StepRoleId } from '@haive/shared/step-outputs';
+import { parsePinnedCustomSteps } from '@haive/shared/modularity';
 import { CORE_COMPOSABLE_STEPS } from './composable-core.js';
 import { PinnedStepSupportError, type StepRegistry } from './registry.js';
 
@@ -9,11 +10,13 @@ export function assertDataEdgeSupport(
     dataEdgePlan?: unknown;
     executionPath?: string | null;
     runListSnapshot?: readonly string[] | null;
+    customSteps?: unknown;
   },
   registry: Pick<StepRegistry, 'get'>,
 ): void {
   if (task.dataEdgePlan == null) return;
   const plan = parseDataEdgePlan(task.dataEdgePlan);
+  const custom = parsePinnedCustomSteps(task.customSteps);
   const selected = selectDataEdgeCandidate({ ...task, dataEdgePlan: task.dataEdgePlan }, plan);
   const candidates =
     plan.selection === 'derived' && task.executionPath == null ? plan.candidates : [selected];
@@ -21,7 +24,13 @@ export function assertDataEdgeSupport(
     for (const b of Object.values(candidate.bindings)) {
       if (!b) continue;
       const role = STEP_ROLE_REGISTRY[b.role as StepRoleId];
-      const def = registry.get(b.producerStepId);
+      const prompt = custom[b.producerStepId];
+      const def = prompt
+        ? {
+            outputContract: undefined,
+            providesRoles: prompt.outputMode === 'structured' ? prompt.providesRoles : undefined,
+          }
+        : registry.get(b.producerStepId);
       if (
         !Object.hasOwn(STEP_ROLE_REGISTRY, b.role) ||
         !def ||

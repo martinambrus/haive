@@ -1710,5 +1710,109 @@
     "value": "@role-alias:entry",
     "count": 1,
     "reason": "Reject host-policy roles from module data declarations; reads registry policy metadata, never step output."
+  },
+  {
+    "file": "packages/web/src/components/prompt-step-roles.tsx",
+    "symbol": "roles",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Role authoring selects exact host-owned references and agent-only input projections; no executable policy is serialized."
+  },
+  {
+    "file": "packages/web/src/components/prompt-step-roles.tsx",
+    "symbol": "PromptStepRoles.contract",
+    "context": "update",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Role authoring selects exact host-owned references and agent-only input projections; no executable policy is serialized."
+  },
+  {
+    "file": "packages/web/src/components/prompt-step-roles.tsx",
+    "symbol": "PromptStepRoles.providesRoles.contract",
+    "context": "onChange",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Role authoring selects exact host-owned references and agent-only input projections; no executable policy is serialized."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs.registered",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:registered",
+    "count": 1,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs.registered",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/worker/src/step-engine/prompt-role-input.ts",
+    "symbol": "loadPromptRoleInputs",
+    "context": "ExclamationEqualsEqualsToken",
+    "value": "@role-alias:registered",
+    "count": 2,
+    "reason": "Checks the exact pinned prompt input contract before canonical/v3 role reading; never chooses a live definition producer."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "Object.hasOwn",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole.quoteEntry",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:quoteEntry",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole.quoteEntry",
+    "context": "ElementAccessExpression",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@role-alias:quoteEntry",
+    "count": 2,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isQuotableRole",
+    "context": "InKeyword",
+    "value": "@role-alias:quoteEntry",
+    "count": 1,
+    "reason": "Host-owned agent-only quote projection allowlist; unknown and mixed roles cannot be quoted."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/type-draft/_type-draft.ts",
+    "symbol": "buildDraftPrompt",
+    "context": "Object.values",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Host-owned authoring catalog lists exact role contracts and quotation eligibility; grants no host control policy."
+  },
+  {
+    "file": "packages/shared/src/step-engine/output-contracts.ts",
+    "symbol": "isPromptProvidableRole",
+    "context": "InKeyword",
+    "value": "@roles",
+    "count": 1,
+    "reason": "Registry-driven prompt provider eligibility excludes every host-policy role after the agent-only projection check; no producer-name exception."
   }
 ]

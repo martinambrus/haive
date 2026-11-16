@@ -65,6 +65,15 @@ from the selected CLI's markdown agent dir, else any markdown agent dir, else `.
 same way, from the CLI that step resolves to (`resolvePreferredCli`), and records `agent_persona.unresolved` per id it
 cannot read. It is a warning only: the read at dispatch decides, against the tree the step actually mounts.
 
+**ROLE QUOTES KEEP THE SAME AUTHORITY BOUNDARY.** `{{role:<input>}}` is own-line and
+single-pass like a step quote. Save, admission and render require an explicit agent-only
+registry projection; spec stages and other human/mixed roles need host adapters. Project
+only declared contract fields, including nested objects, before applying the shared
+step/role quote budget. Unknown passthrough fields carry no authorship promise. The
+final prompt fences the projected text with `fencedAgentBlock` and neutralises dynamic
+persona markers. A substituted token stays literal. Required inputs are refreshed through
+the immutable consumer pin immediately before dispatch, including detect replay.
+
 **FENCE AGENT PROSE CARRIED INTO ANOTHER PROMPT.** `fencedAgentBlock` wraps a block between
 `UNTRUSTED_OPEN`/`CLOSE` and runs `fenceSafe`, which collapses any run of four or more `=` —
 keyed on the run rather than either banner's wording, so a reworded banner cannot reopen the

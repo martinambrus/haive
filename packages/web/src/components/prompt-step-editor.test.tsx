@@ -26,7 +26,8 @@ describe('PromptStepEditor', () => {
   });
 
   it("lists the three capabilities with the entry's ticked", () => {
-    expect(html.match(/type="checkbox"/g)).toHaveLength(3);
+    const capabilities = html.slice(html.indexOf('<legend class="mb-1'));
+    expect(capabilities.match(/type="checkbox"/g)).toHaveLength(3);
     expect(html.match(/checked=""/g)).toHaveLength(1);
     expect(html).toContain('Can use tools');
     expect(html).toContain('Can write files');
@@ -67,7 +68,7 @@ describe('PromptStepEditor', () => {
       <PromptStepEditor entry={entry} disabled onChange={noop} onRemove={noop} />,
     );
     const controls = off.match(/<(button|input|textarea)\b[^>]*>/g) ?? [];
-    expect(controls.length).toBe(9);
+    expect(controls.length).toBe(11);
     for (const tag of controls) expect(tag).toContain('disabled=""');
   });
 });

@@ -677,7 +677,9 @@ name another module's or core's physical step. Static seeds can carry `dataRoleB
 limited to their own listed steps. Unchanged seeds retain their timestamps. Executable `outputContract` registration and v1/v2 replacement decoding remain
 review/audit-only. Data role references are serialized in catalog entries and v3 pins
 through the separate declaration schema. Existing v1/v2 role bindings and `replaces` remain limited to review and audit.
-No generic role prompt token is available. `ctx.host.loadRoleOutput(input)` resolves
+Prompt steps now expose own-line agent-only role tokens and host-parsed structured
+outputs (see [Task types](task-types.md#prompt-template-steps)); these do not widen module
+manifest or executable role authority. `ctx.host.loadRoleOutput(input)` resolves
 the exact v3 consumer input under the captured identity and round ceiling, with cancellation
 checks. It returns ready, absent, unselected, not-ready or invalid and bounded provenance.
 Required unreadable inputs fail by name before dispatch, including after a detect replay.
@@ -711,7 +713,7 @@ bindings and labels the null-path graph as candidate-only. It returns only publi
 role/contract/authorship metadata and edges, never module-private entry fields, output
 values, contract schemas or host policy hooks. Declaring replacement capability alone
 does not create a runtime data edge. The task history graph stays read-only. Authoring graphs expose module data ports and
-connections, while prompt tokens and additional replacement roles remain unsupported.
+connections and prompt data ports. Additional replacement roles remain unsupported.
 
 ### Execution declarations (P6; unavailable at runtime)
 

@@ -215,7 +215,9 @@ edit or remove an applied migration.
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →
 `module-missing` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes
 before `missing-step` so a removed module is named instead of "a step is not installed". Without a
-synced catalog the step and composition checks are skipped for existing strategies; derived admission
+synced catalog the step and composition checks are skipped for existing strategies, except prompt
+steps using role declarations/tokens or structured mode: these refuse admission with 409
+`prompt-role-catalog-unsynced` before any task is written. Derived admission
 requires a coherent synced catalog. Over HTTP: disabled, not selectable and the
 switches are 403; the module reasons, a missing step and a bad composition are 409 naming what is wrong.
 The switch over reasons ends in an exhaustive `never`, so a new reason cannot fall through to a create.
@@ -348,7 +350,9 @@ contracts declare the fields consumers use, including draft impact, quality find
 scope questions. Unknown storage fields survive validation; readers project declared fields.
 `providesRoles`/`consumesRoles` are also module executable and manifest declarations, checked
 for exact host contract references and boot parity. A data declaration grants no replacement
-policy. Prompt role tokens and structured prompt output remain separate work. The spec definitions and serialized catalog entries have no
+policy. Prompt steps consume agent-only quote projections through named role tokens and may provide only
+agent-only data roles through host-parsed structured output; roles carrying host policy or mixed/human
+authorship are refused, so no production role is providable by a prompt step yet. The spec definitions and serialized catalog entries have no
 `outputContract`. After a successful apply, the runner also validates every declared
 `providesRoles` output, including core, module and prompt producers. A data-contract
 mismatch fails the producer visibly before summaries and routing, even with
@@ -434,7 +438,8 @@ own-step replay remain physical.
 House-rules task-text SQL intentionally stays physical. It selects non-empty specs by highest
 round before stage precedence and caps text in SQL; the effective-spec adapter instead selects by
 stage before round and preserves empty strings. Replacing that bounded SQL would change behavior.
-No `{{role:}}` token is added; existing `{{step:}}` quotes cannot quote the mixed spec producers.
+Prompt steps have named `{{role:<input>}}` tokens for agent-only projections; neither role tokens nor
+existing `{{step:}}` quotes can quote the mixed spec producers.
 The original PR1 registry/spec adapters introduced no persisted spec pin or serialized catalog
 reference. With v3 admission now available, follow the v3 rollback policy below and retain the
 pre-existing v1/v2 support described below.
@@ -465,7 +470,8 @@ Task list, detail, create and PATCH responses omit the full `dataEdgePlan`.
 Spec stage inputs are independently optional; the host's effective-spec adapter keeps
 resolved > checked > draft precedence, including intentional empty bodies. 06-run-config
 and 08b declare the same inputs they read. Module declarations enter the same edge validator;
-prompt role tokens are not supported yet.
+prompt declarations enter it too. Required prompt inputs are re-read before dispatch, including
+a replayed detect snapshot; Retry and definition edits retain the pinned producer.
 A present v3 binding is authoritative: the read uses the pinned producer and the
 consumer's current-round ceiling, selecting the newest row before testing status.
 A non-done pinned row cannot expose stale successful output. A done but schema-invalid
@@ -763,7 +769,7 @@ existing CSP without a policy change.
 An admin type may carry prompt steps (`prompt_steps`, keyed by the step slug; never on built-in or
 module rows). Each is `{slug, title (≤512), description?, template (≤16 KiB), paramFormSchema?,
 capabilities (tool_use, file_write, vision), tools (≤8), integrations? (≤8), timeoutMs (60 s–30 min),
-agentPool '*'}`. No field can turn agent rules, the MCP surface or tools off: a prompt step gets agent
+agentPool '*', consumesRoles?, providesRoles?, outputMode?: 'structured'}`. No field can turn agent rules, the MCP surface or tools off: a prompt step gets agent
 rules whenever the install's agent-rules switch is on, and always gets the containment lines.
 
 **Pinned raw, parsed per tool and per requirement.** `custom_steps` holds the entries as stored; readers
@@ -775,12 +781,13 @@ while the step survives. A whole-entry parse would drop the step when a release 
 most 256), never from a registry: a registry keyed by id cannot hold two versions of one id for two
 tasks, and a template saved after boot is unknown to it. Detect reads the task title and description and
 the output of the latest done row of every quoted step at a round no later than the current one (a
-retried older round could otherwise quote its future). Apply stores the reply read back from
-`cli_invocations` by invocation id, so a later quote sees the exact reply.
+retried older round could otherwise quote its future). Raw-mode apply stores the reply read back
+from `cli_invocations` by invocation id, so a later quote sees the exact reply. Structured mode stores
+only the validated role payload; physical step quotes and history render its contract/data as JSON.
 
 **Tokens:** `{{task.title}}`, `{{task.description}}`, `{{field:<id>}}`, `{{agent:<id>}}`,
-`{{step:<stepId>}}`, `{{integration:<id>.account}}`. The renderer makes one pass and never rescans a
-value; a value mid-line is collapsed to one line, and a `{{step:}}` quote must sit on its own line.
+`{{step:<stepId>}}`, `{{role:<input>}}`, `{{integration:<id>.account}}`. The renderer makes one pass and never rescans a
+value; a value mid-line is collapsed to one line, and step/role quotes must sit on their own line.
 Quoted step output is fenced; field values, the title, the description and account texts are not.
 Every value is capped: each quote or other value at most 16 KiB, all quotes 64 KiB, all other values
 (account texts included, each occurrence counted) 64 KiB, and a cut value's `[truncated: …]` notice
@@ -788,7 +795,12 @@ counts inside its share. Any `[[HAIVE_` overlapping a value and any leading `<ha
 forge a marker or a preamble block. The save check (`validatePromptStep`, `checkPromptSteps`) refuses
 unknown tokens, undeclared fields, a persona or a file-writing step on a repo-less type, a step quote
 that is not earlier, not on its own line or not quotable, reserved markers, a missing or orphan entry,
-and the size and range limits. A step is quotable only when its stored output is purely agent-authored
+undeclared, inline/nested or non-agent-only role inputs, invalid role/contract versions,
+structured mode without exactly one providable role, role providers without structured mode,
+providers carrying host policy or human/mixed authorship, and the size and range limits.
+Required role edges must have one earlier compatible producer or an explicit author binding;
+dangling or ambiguous edges refuse Save. These role checks also run for creator drafts,
+stored-definition admission and worker execution. A step is quotable only when its stored output is purely agent-authored
 (a catalog entry, core or module, marked `agentAuthoredOutput`, or another prompt step of the type): a
 quote is fenced as
 untrusted agent text, and fencing a person's words (gate feedback, a typed command) would tell the next
@@ -800,6 +812,54 @@ has no findings channel. Personas, house rules for prompt steps and the start-ti
 [Prompt containment](prompt-containment.md) and [Global knowledge base](global-kb.md): only the
 step's own template ids resolve, dispatch fails closed on a missing persona, and the start check only
 records `agent_persona.unresolved` (a persona may exist only on the base branch).
+
+**Role inputs and structured output.** A prompt input is
+`{input, role, contract: {id, version}, optional}`. The own-line token names `input`, not a
+physical producer or role id. Inline and nested role tokens are refused at save, admission
+and render. Only registry entries with `authorship: 'agent'` and the explicit agent-only
+`quoteProjection` qualify. Unknown, human and mixed roles are refused even when a stored
+entry bypassed Save. Successful reads project declared fields at every object boundary;
+passthrough storage keys and iterations never become quoted text. Quotes use the same
+16 KiB per-occurrence and 64 KiB combined step/role budget, fencing and persona-marker
+neutralisation as step quotes. Detect and pre-dispatch refresh persist only projected quote
+text capped at 16 KiB per input, with bounded metadata, never a full duplicate role body. Older
+detect snapshots containing role data remain readable. House-rules path text excludes both kinds of quote.
+
+A prompt step can provide only a registry role with no `hostPolicy`, `authorship: agent`
+and an explicit agent-only `quoteProjection`. Review, audit and all spec stages are refused
+at save, draft validation, admission and execution; module seeds cannot contain prompt steps.
+Today no production role qualifies. Positive controls register an agent-only
+role through test mocks, never in the production registry. A prompt step can provide exactly
+one eligible role with `outputMode: 'structured'` and
+`providesRoles: [{role, contract: {id, version}}]`. Haive appends a fresh host-owned JSON
+schema and requires a strict JSON envelope `{contract: {id, version}, data}` with no prose
+or fences. The host parses the recorded raw reply itself, not the CLI's repaired/extracted
+parse. Before parsing, the UTF-8 reply must fit the 256 KiB limit (injectable in tests).
+Oversized valid JSON, missing text, an unavailable/wrong version or invalid data raises
+`StepOutputContractInvalidError`, visibly fails the producer and cannot route to 07.
+Structured `task_steps.output` stores only `roleOutput: {role, contract, data}` once,
+without duplicate `raw` or `parsed` bodies. Successful-output validation and role readers
+use the same unwrapping helper, checking the envelope role and exact contract before
+validating its data. Core and module producers still validate their direct payloads.
+Role readers revalidate that payload; physical step quotes and history serialize its
+contract/data envelope. The invocation retains its existing CLI capture. Raw-mode output remains `{raw, parsed}` and cannot provide roles.
+
+Both arrays are data declarations: they grant no `replaces`, executable `outputContract`,
+review/audit policy, seat, persona, skip or fix-loop authority. Module declarations retain
+their separate restrictions. Admission and the canvas use the merged prompt catalog,
+including producer choices. The existing editor authors inputs and optionality, inserts
+own-line tokens and rewrites matching `{{role:}}` tokens when an input is renamed.
+The parent editor moves that step's author bindings to the new input name on every
+candidate path, preserving their producers. A target name that already has an input or
+binding is refused visibly without changing either declaration or binding.
+Structured mode starts with no provided-role selection; the select lists only eligible roles.
+With none registered, the toggle and select are disabled with an explanation.
+Mode/declaration edits count as unsaved.
+Creator drafts retain these keys and validate data edges with the same shared validator.
+
+No migration or task-pin rewrite is needed. Rollback stops admission of feature-bearing
+types and retains capable readers/workers while their tasks can resume; do not erase
+`custom_steps`, role payloads or v3 pins to permit an older worker to run them.
 
 **Integrations.** A prompt step may declare up to 8 integration requirements `{id, category, access,
 optional?}`, pinned with the step and read per requirement like its tools. The save check refuses an id
@@ -929,9 +989,13 @@ tasks are listed in the task list like any other task (a product decision).
   draft gets one automatic repair pass. Its only database write is task events — nothing is saved to
   `task_type_definitions` until an admin presses Save in the editor.
 - **What a draft may carry** is a positive list: `PROMPT_STEP_DRAFTABLE_KEYS` (slug, title, template,
-  capabilities, timeoutMs) and the top-level keys slug, display name, description, requires repository,
+  capabilities, timeoutMs, consumesRoles, providesRoles, outputMode) and the top-level keys slug,
+  display name, description, requires repository,
   step ids, prompt steps and loop limits. So tools, agent pool, param forms, integrations, switches and
-  presets never come from a draft. `validateTaskTypeDraft` runs the create route's shared validation
+  presets never come from a draft. Role keys are optional. The creator prompt identifies
+  providable roles and warns that core producers may be implicit: multiple earlier producers
+  cause ambiguity, and drafts cannot carry `dataRoleBindings`. The admin can resolve a choice
+  in the editor. `validateTaskTypeDraft` runs the create route's shared validation
   stages in its order and returns the same issues; a parity test drives the drafter and the shared
   validator over the same fixtures. A taken slug, a built-in's included, is only a `slug-taken` warning
   on a draft, while `POST /admin/task-types` refuses it with 409 before those stages, so a warned

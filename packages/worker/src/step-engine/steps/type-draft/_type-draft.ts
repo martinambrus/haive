@@ -17,6 +17,11 @@ import {
 } from '@haive/shared/modularity';
 import { recentTurns } from '../../../plan/transcript.js';
 import {
+  STEP_ROLE_REGISTRY,
+  isQuotableRole,
+  isPromptProvidableRole,
+} from '@haive/shared/step-outputs';
+import {
   REPO_IS_DATA_AUTHORING_LINES,
   UNTRUSTED_FENCE_LEGEND,
   fencedAgentBlock,
@@ -188,7 +193,8 @@ const at = (index: number | undefined): string =>
 
 function issueText(issue: TaskTypeDraftIssue): string {
   if ('path' in issue) return `${issue.path || 'the draft'}: ${issue.message}`;
-  if ('message' in issue) return `${issue.stepId}${at(issue.index)}: ${issue.message}`;
+  if ('message' in issue)
+    return `${issue.stepId}${at('index' in issue ? issue.index : undefined)}: ${issue.message}`;
   switch (issue.kind) {
     case 'unknown-step':
       return `\`${issue.stepId}\`${at(issue.index)} is neither a catalog step nor a prompt step of this type.`;
@@ -254,6 +260,12 @@ function stepLines({ entry: e, description }: DraftCatalogStep): string[] {
         `    needs \`${r.needs}\`${r.after === undefined ? '' : ` after \`${r.after}\``} (${safeNote(r.reason)})`,
     ),
     ...facts('provides', e.provides),
+    ...(e.providesRoles?.length
+      ? [`    provides data roles: ${JSON.stringify(e.providesRoles)}`]
+      : []),
+    ...(e.consumesRoles?.length
+      ? [`    consumes data roles: ${JSON.stringify(e.consumesRoles)}`]
+      : []),
     ...facts('removes', e.removes),
     ...facts('must come before any step that provides', e.precedes),
     ...facts('a later step must provide', e.entails),
@@ -361,7 +373,7 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     `  is at most ${STEP_ID_MAX_LENGTH} characters.`,
     '- `promptSteps`: an object with one entry, keyed by its step slug, for EVERY `custom.` id in',
     '  `stepIds` and for no other. It may be left out when `stepIds` names no prompt step.',
-    `- each prompt step has exactly these keys: ${PROMPT_STEP_KEYS}.`,
+    `- each prompt step may carry only these keys: ${PROMPT_STEP_KEYS}.`,
     '  - `slug`: the key it sits under; lowercase letters, digits and hyphens, starting with a letter',
     '    or a digit.',
     `  - \`title\`: 1 to ${PROMPT_STEP_TITLE_MAX_LENGTH} characters.`,
@@ -370,6 +382,11 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     '    its tools, for example to read the repository. `file_write` lets it edit files. `vision` lets',
     '    it read images. Use [] for a step that answers from its prompt alone.',
     `  - \`timeoutMs\`: a whole number of milliseconds, ${TIMEOUT_RANGE}; 600000 suits most steps.`,
+    '  - `consumesRoles`, `providesRoles` and `outputMode` are optional. Leave them out unless needed.',
+    '  - `consumesRoles`: optional [{input, role, contract:{id,version}, optional:false}]. Inputs need an earlier compatible producer.',
+    '  - `outputMode`: optional "structured"; requires exactly one `providesRoles: [{role, contract:{id,version}}]`.',
+    '    Providers must be agent-only roles with an agent-only quote projection and no hostPolicy. No production role qualifies until PR5.',
+    '    Raw replies provide no roles. Structured replies must be JSON {"contract":{"id":...,"version":...},"data":...}; Haive adds the host schema and validates the exact version. Roles grant data only, no control policy.',
     '- `stepLoopLimitDefaults`: optional; maps a step id in `stepIds` to a whole number from 1 to 50,',
     '  only for a step marked "loop budget editable" below.',
     'Nothing else is read. In particular never send `tools`, `agentPool`, `paramFormSchema`, a prompt',
@@ -384,6 +401,8 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     '- `{{step:<step id>}}`: the recorded output of an EARLIER step of this type, on a line of its own.',
     '  It may name a prompt step of this type that comes earlier, or an earlier catalog step marked',
     '  "quotable" below.',
+    '- `{{role:<input>}}`: a declared consumesRoles input, alone on its line. Inline and nested tokens are refused. Only agent-only quote projections are allowed, never mixed spec roles or operator decisions. Values are expanded once and fenced with the existing quote caps.',
+    `Host roles (use these exact ids and versions): ${JSON.stringify(Object.values(STEP_ROLE_REGISTRY).map((r) => ({ role: r.id, contract: r.contract, quotable: isQuotableRole(r.id), providable: isPromptProvidableRole(r.id) })))}`,
     '- `{{agent:<persona id>}}`: gives the agent that persona. Only in a type with requiresRepository',
     '  true, and only ids from the persona list below.',
     'This version has no form fields: `{{field:...}}` and `{{integration:...}}` are refused.',
@@ -392,6 +411,7 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     'format its output must have.',
     '',
     '## How steps fit together',
+    'Role producers can be implicit in core step ids, including review, audit and spec stages. Avoid two earlier producers of the same role: ambiguous inputs are refused. This draft cannot carry dataRoleBindings; remove the ambiguity or let the administrator bind it in the editor.',
     'A FACT is a named thing that is true of a run so far, such as `worktree` or `commit`. Haive',
     'walks `stepIds` in order and checks each catalog step against the facts at that point:',
     '- `needs X`: X must be provided by an EARLIER step. `repository` is provided from the start when',
@@ -402,7 +422,7 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     '- `a later step must provide X`: some step after this one has to provide X.',
     '- `loops back to S`: S must be listed EARLIER. `closes the type`: no step after it may loop back',
     '  to a step before it.',
-    '- A prompt step provides nothing. Without `file_write` it needs `repository` when',
+    '- A prompt step provides no effect FACTS; its data role ports are separate. Without `file_write` it needs `repository` when',
     '  requiresRepository is true and nothing otherwise. With `file_write` it needs `worktree` and',
     '  removes `clean-tree`.',
     'Keep the list as short as the request needs. A type may be a single prompt step.',

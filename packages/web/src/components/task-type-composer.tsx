@@ -46,6 +46,7 @@ import {
   takenPromptSlugs,
   withPromptStepEntries,
   type PromptSteps,
+  type PromptRoleInputRename,
 } from '@/lib/prompt-step-editing';
 import { slugProblem } from '@/lib/task-type-form';
 import { dropIntentFromY } from '@/lib/sidebar-tree';
@@ -80,7 +81,10 @@ interface TaskTypeComposerProps {
   serverPromptIssues?: PromptStepIssue[];
   integrationInfo?: ComposerIntegrationInfo;
   onRefreshIntegrationInfo?: () => void;
-  onPromptStepsChange?: (promptSteps: PromptSteps) => void;
+  onPromptStepsChange?: (
+    promptSteps: PromptSteps,
+    rename?: PromptRoleInputRename & { stepId: string },
+  ) => void;
   onStepIdsChange: (stepIds: string[]) => void;
   onLoopLimitsChange: (limits: Record<string, number>) => void;
 }
@@ -712,7 +716,12 @@ export function TaskTypeComposer({
                       issues={toolRowIssues}
                       integrationCategories={integrationCategories}
                       disabled={disabled}
-                      onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
+                      onChange={(next, rename) =>
+                        prompt.set(
+                          { ...promptSteps, [promptEntry.slug]: next },
+                          rename ? { ...rename, stepId } : undefined,
+                        )
+                      }
                       onRemove={() => remove(index)}
                     />
                   )}

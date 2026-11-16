@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { readStepRole, projectStepOutputRoles } from '../src/step-engine/step-role-reader.js';
 import { moduleManifestSchema } from '../src/modularity/manifest.js';
-import { parsePromptTemplate } from '../src/modularity/prompt-steps.js';
+import { validatePromptStep } from '../src/modularity/prompt-steps.js';
 import {
   STEP_ROLE_REGISTRY,
   SPEC_ROLES,
@@ -60,9 +60,21 @@ describe('host spec registry and frozen old plans', () => {
       ).toBe(expected.projection);
     }
   });
-  it('adds no generic role prompt token', () => {
+  it('keeps mixed spec roles unavailable to generic prompt quotation', () => {
     for (const role of Object.values(SPEC_ROLES)) {
-      expect(parsePromptTemplate('{{role:' + role + '}}').ok).toBe(false);
+      expect(
+        validatePromptStep(
+          {
+            template: '{{role:spec}}',
+            timeoutMs: 60000,
+            capabilities: [],
+            consumesRoles: [
+              { input: 'spec', role, contract: stepRoleOutputContract(role), optional: false },
+            ],
+          },
+          { typeSlug: 'demo', requiresRepository: false, stepIdsBefore: [] },
+        ).map((p) => p.kind),
+      ).toContain('role-token-not-quotable');
     }
   });
   it('keeps v1/v2 fixture bytes and refuses spec bindings and replacements', () => {

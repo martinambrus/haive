@@ -1,5 +1,6 @@
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { isCustomStepId, type ComposableStepEntry } from './contracts.js';
+import { dataRoleDraftIssues } from '../step-engine/step-ports.js';
 import {
   derivePromptStepComposable,
   parsePromptStepEntry,
@@ -136,6 +137,9 @@ export const PROMPT_STEP_DRAFTABLE_KEYS = [
   'template',
   'capabilities',
   'timeoutMs',
+  'consumesRoles',
+  'providesRoles',
+  'outputMode',
 ] as const;
 
 const TASK_TYPE_DRAFT_KEYS: readonly string[] = [
@@ -199,7 +203,11 @@ export type TaskTypeDraftWarning =
 
 /** A schema failure is {path, message} as the error handler returns it; the rest are the stages' own issues. */
 export type TaskTypeDraftIssue =
-  { path: string; message: string } | PromptStepIssue | CompositionIssue | TaskTypeDefaultsIssue;
+  | { path: string; message: string }
+  | PromptStepIssue
+  | CompositionIssue
+  | TaskTypeDefaultsIssue
+  | ReturnType<typeof dataRoleDraftIssues>[number];
 
 function personaWarnings(
   typeSlug: string,
@@ -267,6 +275,16 @@ export function validateTaskTypeDraft(
     requiresRepository: body.requiresRepository,
   });
   if (issues.length > 0) return { issues, warnings };
+  const edgeIssues = dataRoleDraftIssues(
+    [{ executionPath: null, stepIds: body.stepIds }],
+    composable,
+    body.dataRoleBindings,
+  );
+  if (edgeIssues.length)
+    return {
+      issues: edgeIssues,
+      warnings,
+    };
   return { issues: validateTaskTypeDefaults(body, composable), warnings };
 }
 

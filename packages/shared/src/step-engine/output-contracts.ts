@@ -45,6 +45,7 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     contract: CODE_REVIEW_OUTPUT_CONTRACT,
     cardinality: 'one',
     authorship: 'agent',
+    quoteProjection: 'agent',
     legacyStepId: STEP_ROLES.codeReview,
     hostPolicy: 'code-review',
   } as const),
@@ -53,6 +54,7 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     contract: CODE_AUDIT_OUTPUT_CONTRACT,
     cardinality: 'one',
     authorship: 'agent',
+    quoteProjection: 'agent',
     legacyStepId: STEP_ROLES.codeAudit,
     hostPolicy: 'code-audit',
   } as const),
@@ -313,6 +315,30 @@ export type OutputFor<C extends StepOutputContractRef> = ContractShape<
 export type RoleOutput<R extends StepRoleId> = OutputFor<
   (typeof STEP_ROLE_REGISTRY)[R]['contract']
 >;
+
+/** Only the declared fields of an explicitly agent-only projection may be quoted.
+ * Passthrough storage keys carry no authorship guarantee. */
+export function isQuotableRole(role: unknown): role is StepRoleId {
+  if (typeof role !== 'string' || !Object.hasOwn(STEP_ROLE_REGISTRY, role)) return false;
+  const quoteEntry = STEP_ROLE_REGISTRY[role as StepRoleId];
+  return (
+    quoteEntry.authorship === 'agent' &&
+    'quoteProjection' in quoteEntry &&
+    quoteEntry.quoteProjection === 'agent'
+  );
+}
+
+/** Prompt producers must carry neither host policy nor human/mixed authorship. */
+export function isPromptProvidableRole(role: unknown): role is StepRoleId {
+  return isQuotableRole(role) && !('hostPolicy' in STEP_ROLE_REGISTRY[role]);
+}
+
+/** A fresh JSON schema, never the mutable validator instance. */
+export function stepOutputJsonSchema(ref: StepOutputContractRef): Record<string, unknown> {
+  const registered = parseRegistryOutputContractRef(ref);
+  if (!registered) throw new Error('unknown host data contract');
+  return z.toJSONSchema(outputValidators[registered.id]);
+}
 
 /** Explicit legacy read projection: do not expose storage extensions to port consumers.
  * Does not validate or rewrite malformed historical fields; readiness is reported separately. */

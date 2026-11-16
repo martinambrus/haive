@@ -1063,9 +1063,18 @@ const SCANNED_PROMPT_EXPORTS = [
  * waves, then dag-executor's direct dispatches were each found one review at a time.
  */
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
+  'step-engine/prompt-role-input.ts#loadPromptRoleInputs':
+    'loads pinned role data and bounded quote text; the custom prompt builder fences and renders it',
+  'step-engine/prompt-role-output.ts#parsePromptRoleOutput':
+    'a host parser of an agent reply, never a dispatched prompt',
+  'step-engine/prompt-role-output.ts#promptRoleOutputValue':
+    'unwraps a stored validated role payload for a data reader; builds no prompt',
+  'step-engine/prompt-role-output.ts#PROMPT_ROLE_REPLY_MAX_BYTES':
+    'a byte limit for a structured reply, not text',
+
   'step-engine/steps/workflow/_plan-ops.ts#boundedPlanWriterPrompt':
     'shared bounded assembly, already scanned through both 11f and 01f registry builders',
-  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUT_CAP_BYTES':
+  'step-engine/prompt-output-text.ts#PROMPT_STEP_OUTPUT_CAP_BYTES':
     'a byte limit for an earlier step output, not text',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
     'a byte limit for all quoted step outputs together, not text',

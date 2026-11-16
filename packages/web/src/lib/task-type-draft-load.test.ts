@@ -171,7 +171,12 @@ describe('loadDraftIntoEditor', () => {
       { creating: true, slug: 't' },
     );
     expect(Object.keys(next.promptSteps.b ?? {}).sort()).toEqual(
-      [...PROMPT_STEP_DRAFTABLE_KEYS, 'tools'].sort(),
+      [
+        ...PROMPT_STEP_DRAFTABLE_KEYS.filter(
+          (k) => !['consumesRoles', 'providesRoles', 'outputMode'].includes(k),
+        ),
+        'tools',
+      ].sort(),
     );
   });
 

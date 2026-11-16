@@ -5,10 +5,20 @@ import {
   isCustomStepId,
   parsePromptTemplate,
   renderPromptTemplate,
+  validatePromptStep,
   type IntegrationRequirement,
   type ParsedPromptStepEntry,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
+import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
+import {
+  isQuotableRole,
+  projectRoleOutput,
+  safeParseStepOutput,
+  stepOutputJsonSchema,
+} from '@haive/shared/step-outputs';
+import { loadPromptRoleInputs, type PromptRoleRead } from '../../prompt-role-input.js';
+import { parsePromptRoleOutput } from '../../prompt-role-output.js';
 import type { StepDefinition } from '../../step-definition.js';
 import {
   REPO_IS_DATA_ACTING_LINES,
@@ -17,7 +27,8 @@ import {
   fencedAgentBlock,
 } from '../_untrusted-repo.js';
 
-export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
+import { capStepOutput, PROMPT_STEP_OUTPUT_CAP_BYTES } from '../../prompt-output-text.js';
+export { capStepOutput, PROMPT_STEP_OUTPUT_CAP_BYTES } from '../../prompt-output-text.js';
 /** Every quoted step output in one prompt together, however often the template repeats a token. */
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
 /** Every field, title, description and account text in one prompt together, the same way. */
@@ -32,28 +43,30 @@ export interface PromptStepDetect {
   taskDescription: string;
   /** Output text of each step the template names, latest done round; null when it has none. */
   stepOutputs: Record<string, string | null>;
+  roleOutputs?: Record<string, PromptRoleRead>;
 }
 
 export interface PromptStepOutput {
-  raw: string;
-  parsed: unknown;
+  raw?: string;
+  parsed?: unknown;
+  roleOutput?: ReturnType<typeof parsePromptRoleOutput>;
 }
 
-export function capStepOutput(text: string, cap: number = PROMPT_STEP_OUTPUT_CAP_BYTES): string {
-  const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= cap) return text;
-  const notice = (shown: number): string =>
-    `\n[truncated: ${bytes.length - shown} more bytes not shown]`;
-  // notice(0) holds the most digits any notice can, so the head always leaves room for its own.
-  const room = Math.max(cap - Buffer.byteLength(notice(0)), 0);
-  const head = bytes.subarray(0, room).toString('utf8').replace(/�+$/, '');
-  return head + notice(Buffer.byteLength(head));
+function assertPromptRoles(entry: PromptStepEntry): void {
+  const problems = validatePromptStep(entry, {
+    typeSlug: 'runtime',
+    requiresRepository: true,
+    stepIdsBefore: [],
+  }).filter((p) => p.kind.startsWith('role-'));
+  if (problems.length) throw new DataEdgePlanError(problems.map((p) => p.message).join(' '));
 }
 
 function stepOutputText(output: unknown, stepId: string): string {
   if (typeof output === 'string') return output;
   if (isCustomStepId(stepId) && typeof output === 'object' && output !== null) {
-    const { raw, parsed } = output as { raw?: unknown; parsed?: unknown };
+    const { raw, parsed, roleOutput } = output as PromptStepOutput;
+    if (roleOutput)
+      return JSON.stringify({ contract: roleOutput.contract, data: roleOutput.data }, null, 2);
     if (typeof raw === 'string' && parsed !== undefined) return raw;
   }
   return JSON.stringify(output, null, 2) ?? '';
@@ -93,8 +106,10 @@ function renderTemplate(
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
   const steps: Record<string, string> = Object.create(null) as Record<string, string>;
   const accounts: Record<string, string> = Object.create(null) as Record<string, string>;
+  const roles: Record<string, string> = Object.create(null) as Record<string, string>;
+  assertPromptRoles(entry);
   const tokens = templateTokens(entry.template);
-  const quotes = tokens.filter((token) => token.kind === 'step').length;
+  const quotes = tokens.filter((token) => token.kind === 'step' || token.kind === 'role').length;
   const perQuote = Math.min(
     PROMPT_STEP_OUTPUT_CAP_BYTES,
     Math.floor(PROMPT_STEP_OUTPUTS_BUDGET_BYTES / Math.max(quotes, 1)),
@@ -125,15 +140,51 @@ function renderTemplate(
             typeof output === 'string' ? capStepOutput(output, perQuote) : NO_STEP_OUTPUT,
           );
     }
+    if (token.kind === 'role') {
+      if (Object.hasOwn(roles, token.id)) continue;
+      const input = entry.consumesRoles?.find((i) => i.input === token.id);
+      const read = detected.roleOutputs?.[token.id];
+      if (!input || !isQuotableRole(input.role))
+        throw new DataEdgePlanError(`${token.id}: role is not quotable`);
+      if (
+        read &&
+        (read.role !== input.role ||
+          read.contract.id !== input.contract.id ||
+          read.contract.version !== input.contract.version)
+      )
+        throw new DataEdgePlanError(`${token.id}: role contract mismatch`);
+      if (quote && !input.optional && read?.state !== 'ready')
+        throw new DataEdgePlanError(`${token.id}: required input ${read?.state ?? 'absent'}`);
+      // Old detect snapshots may still contain data; new snapshots retain bounded quote text only.
+      const ready =
+        read?.state === 'ready' && 'data' in read
+          ? safeParseStepOutput(input.contract, read.data)
+          : null;
+      if (ready && !ready.success)
+        throw new DataEdgePlanError(`${token.id}: required input invalid`);
+      roles[token.id] = !quote
+        ? ''
+        : fencedAgentBlock(
+            read?.state === 'ready' && 'text' in read
+              ? capStepOutput(read.text, perQuote)
+              : ready?.success
+                ? capStepOutput(
+                    JSON.stringify(projectRoleOutput(input.role, ready.data), null, 2) ?? '',
+                    perQuote,
+                  )
+                : `(no ready output for input ${token.id}: ${read?.state ?? 'absent'})`,
+          );
+    }
   }
   const rendered = renderPromptTemplate(entry.template, {
     fields,
     taskTitle: capStepOutput(text(detected.taskTitle), perValue),
     taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
+    roles,
     integrations: accounts,
   });
-  return { rendered, quoted: Object.keys(steps).length > 0 };
+  return { rendered, quoted: Object.keys(steps).length > 0 || Object.keys(roles).length > 0 };
 }
 
 function buildPrompt(
@@ -152,9 +203,22 @@ function buildPrompt(
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
     : REPO_IS_DATA_ANSWER_LINES;
-  return [...(quoted ? [...UNTRUSTED_FENCE_LEGEND, ''] : []), rendered, '', ...containment].join(
-    '\n',
-  );
+  const provided = entry.outputMode === 'structured' ? entry.providesRoles?.[0] : undefined;
+  const outputInstructions = provided
+    ? [
+        '',
+        'Return exactly one JSON object with keys "contract" and "data", without prose or code fences.',
+        `The contract must be ${JSON.stringify(provided.contract)}.`,
+        `The data must satisfy this host-owned JSON schema: ${JSON.stringify(stepOutputJsonSchema(provided.contract))}`,
+      ]
+    : [];
+  return [
+    ...(quoted ? [...UNTRUSTED_FENCE_LEGEND, ''] : []),
+    rendered,
+    ...outputInstructions,
+    '',
+    ...containment,
+  ].join('\n');
 }
 
 const entries = new WeakMap<object, ParsedPromptStepEntry>();
@@ -207,8 +271,13 @@ export function buildPromptStep(
   stepId: string,
   entry: ParsedPromptStepEntry,
   index: number,
+  limits: { structuredReplyMaxBytes?: number } = {},
 ): StepDefinition<PromptStepDetect, PromptStepOutput> {
   const def: StepDefinition<PromptStepDetect, PromptStepOutput> = {
+    ...(entry.consumesRoles ? { consumesRoles: entry.consumesRoles } : {}),
+    ...(entry.outputMode === 'structured' && entry.providesRoles
+      ? { providesRoles: entry.providesRoles }
+      : {}),
     editsCodeOrTests: entry.capabilities.includes('file_write'),
     metadata: {
       id: stepId,
@@ -221,6 +290,7 @@ export function buildPromptStep(
     },
 
     async detect(ctx): Promise<PromptStepDetect> {
+      assertPromptRoles(entry);
       const [task] = await ctx.db
         .select({ title: schema.tasks.title, description: schema.tasks.description })
         .from(schema.tasks)
@@ -251,12 +321,33 @@ export function buildPromptStep(
         taskTitle: task?.title ?? '',
         taskDescription: task?.description ?? '',
         stepOutputs,
+        ...(entry.consumesRoles?.length || entry.template.includes('{{role:')
+          ? { roleOutputs: await loadPromptRoleInputs(ctx, stepId, entry) }
+          : {}),
       };
     },
 
     form: () => entry.paramFormSchema ?? null,
 
     llm: {
+      ...(entry.consumesRoles?.length || entry.template.includes('{{role:')
+        ? {
+            prepare: async ({
+              ctx,
+              detected,
+            }: {
+              ctx: import('../../step-definition.js').StepContext;
+              detected: unknown;
+            }) => {
+              assertPromptRoles(entry);
+              (detected as PromptStepDetect).roleOutputs = await loadPromptRoleInputs(
+                ctx,
+                stepId,
+                entry,
+              );
+            },
+          }
+        : {}),
       requiredCapabilities: entry.capabilities,
       timeoutMs: entry.timeoutMs,
       ...(entry.agentPool ? { agentPool: entry.agentPool } : {}),
@@ -266,6 +357,17 @@ export function buildPromptStep(
     },
 
     async apply(ctx, args): Promise<PromptStepOutput> {
+      assertPromptRoles(entry);
+      const finish = (output: PromptStepOutput): PromptStepOutput => {
+        const provided = entry.outputMode === 'structured' ? entry.providesRoles?.[0] : undefined;
+        return provided
+          ? {
+              roleOutput: parsePromptRoleOutput(output.raw ?? '', provided, stepId, {
+                maxBytes: limits.structuredReplyMaxBytes,
+              }),
+            }
+          : output;
+      };
       // The runner hands apply the parsed value when the reply was JSON; the stored reply is
       // what a later {{step:}} quotes, so it is read back exactly as the CLI sent it.
       if (args.llmInvocationId) {
@@ -278,19 +380,26 @@ export function buildPromptStep(
           .where(eq(schema.cliInvocations.id, args.llmInvocationId))
           .limit(1);
         if (invocation?.rawOutput !== null && invocation?.rawOutput !== undefined) {
-          return { raw: invocation.rawOutput, parsed: invocation.parsedOutput ?? null };
+          return finish({ raw: invocation.rawOutput, parsed: invocation.parsedOutput ?? null });
         }
+      }
+      if (entry.outputMode === 'structured' && args.llmInvocationId) {
+        // Missing recorded text must not fall back to a repaired CLI parse.
+        return finish({ raw: '' });
       }
       const out = args.llmOutput;
       if (typeof out === 'string') {
+        if (entry.outputMode === 'structured') return finish({ raw: out });
+        let parsed: unknown = null;
         try {
-          return { raw: out, parsed: JSON.parse(out) as unknown };
+          parsed = JSON.parse(out) as unknown;
         } catch {
-          return { raw: out, parsed: null };
+          /* Raw mode permits prose; structured mode rejects it in finish. */
         }
+        return finish({ raw: out, parsed });
       }
-      if (out === null || out === undefined) return { raw: '', parsed: null };
-      return { raw: JSON.stringify(out) ?? '', parsed: out };
+      if (out === null || out === undefined) return finish({ raw: '', parsed: null });
+      return finish({ raw: JSON.stringify(out) ?? '', parsed: out });
     },
   };
   entries.set(def, entry);
