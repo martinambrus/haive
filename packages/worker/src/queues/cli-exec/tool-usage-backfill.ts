@@ -22,9 +22,10 @@ import { isElidedStreamLog } from './stream-log-buffer.js';
  * Runs at boot as a convergent data migration with a time budget (a large install converges
  * over a few boots instead of holding one boot for the whole rewrite), and from
  * `scripts/backfill-tool-usage.ts` for a one-shot full run. Idempotent by construction: it
- * selects unexamined tool usage and missing/older reads versions. Every examined row gets
- * a versioned terminal reads coverage state, including unobservable transcripts, so a
- * re-run finds nothing. Existing tool counters, assignment and source facts are preserved. */
+ * selects unexamined tool usage and missing/older reads versions. Missing reads get a
+ * versioned terminal coverage state even without a transcript. An older version is kept
+ * when its transcript is unavailable; only replayable versions are upgraded, so a re-run
+ * finds nothing after successful writes. Existing counters, assignment and source survive. */
 
 const log = logger.child({ module: 'tool-usage-backfill' });
 
@@ -122,8 +123,8 @@ export interface ToolUsageBackfillResult {
  *  Keyset-paged on `(ended_at, id)` in BOTH modes, so a dry run cannot spin on rows it never
  *  writes and an apply run does not depend on the predicate shrinking underneath it. The write
  *  compares against the selected tool_usage and pending version: any concurrent change wins.
- *  A row whose transcript throws is logged with its id and skipped — it stays pending and visible,
- *  which is a bug signal rather than a data state, since every input path here is defensive. */
+ *  A row whose replay or update throws is logged with its id and skipped — it stays pending
+ *  and visible, a bug signal rather than a data state, since input paths here are defensive. */
 export async function backfillToolUsage(
   db: Database,
   opts: ToolUsageBackfillOptions,
@@ -141,13 +142,14 @@ export async function backfillToolUsage(
     budgetExhausted: false,
   };
   const inv = schema.cliInvocations;
-  // jsonb null, absent keys and unversioned/older records all converge to a terminal
-  // versioned record, including paths whose transcript is unavailable.
+  // Missing or malformed reads converge even without a transcript. Keep a versioned
+  // record if its transcript was swept: an upgrade cannot reconstruct that evidence.
   const needsReads = or(
     isNull(inv.toolUsage),
     sql`jsonb_typeof(${inv.toolUsage}->'reads') IS DISTINCT FROM 'object'`,
     sql`CASE WHEN jsonb_typeof(${inv.toolUsage}->'reads'->'version') = 'number'
       THEN (${inv.toolUsage}->'reads'->>'version')::numeric < ${READ_EXPOSURE_VERSION}
+        AND ${inv.streamLog} is not null
       ELSE true END`,
   );
   const base = and(needsReads, isNotNull(inv.endedAt));
@@ -159,6 +161,7 @@ export async function backfillToolUsage(
   // zone-less ISO form is.
   let cursor: { endedAt: string; id: string } | null = null;
 
+  let firstPageEmpty = false;
   for (;;) {
     if (Date.now() - startedAt > opts.budgetMs) {
       result.budgetExhausted = true;
@@ -184,42 +187,49 @@ export async function backfillToolUsage(
       )
       .orderBy(desc(inv.endedAt), desc(inv.id))
       .limit(opts.batchSize);
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      firstPageEmpty = cursor === null;
+      break;
+    }
 
     for (const row of rows) {
       cursor = { endedAt: timestampLiteral(row.endedAt as Date), id: row.id };
-      let usage: InvocationToolUsage;
       try {
-        usage = toolUsageFromStreamLog(row.providerName ?? null, row.streamLog, workdir);
+        const usage = toolUsageFromStreamLog(row.providerName ?? null, row.streamLog, workdir);
+        result.examined += 1;
+        result[usage.coverage] += 1;
+        const proposed = row.toolUsage == null ? usage : { ...row.toolUsage, reads: usage.reads };
+        opts.onRow?.(row.id, row.providerName ?? null, proposed);
+        if (!opts.apply) continue;
+        const written = await db
+          .update(inv)
+          .set({ toolUsage: proposed })
+          .where(
+            and(
+              eq(inv.id, row.id),
+              needsReads,
+              row.toolUsage == null
+                ? or(isNull(inv.toolUsage), sql`${inv.toolUsage} = 'null'::jsonb`)
+                : eq(inv.toolUsage, row.toolUsage),
+            ),
+          )
+          .returning({ id: inv.id });
+        result.written += written.length;
       } catch (err) {
-        log.error({ err, invocationId: row.id }, 'tool usage backfill could not read a transcript');
+        log.error(
+          { err, invocationId: row.id },
+          'tool usage backfill could not replay or update a row',
+        );
         continue;
       }
-      result.examined += 1;
-      result[usage.coverage] += 1;
-      const proposed = row.toolUsage == null ? usage : { ...row.toolUsage, reads: usage.reads };
-      opts.onRow?.(row.id, row.providerName ?? null, proposed);
-      if (!opts.apply) continue;
-      const written = await db
-        .update(inv)
-        .set({ toolUsage: proposed })
-        .where(
-          and(
-            eq(inv.id, row.id),
-            needsReads,
-            row.toolUsage == null
-              ? or(isNull(inv.toolUsage), sql`${inv.toolUsage} = 'null'::jsonb`)
-              : eq(inv.toolUsage, row.toolUsage),
-          ),
-        )
-        .returning({ id: inv.id });
-      result.written += written.length;
     }
   }
 
-  const [pending] = await db.select({ n: count() }).from(inv).where(base);
-  // A dry run wrote nothing, so what it examined still matches the selection.
-  result.remaining = Math.max(0, Number(pending?.n ?? 0) - (opts.apply ? 0 : result.examined));
+  if (!firstPageEmpty) {
+    const [pending] = await db.select({ n: count() }).from(inv).where(base);
+    // A dry run wrote nothing, so what it examined still matches the selection.
+    result.remaining = Math.max(0, Number(pending?.n ?? 0) - (opts.apply ? 0 : result.examined));
+  }
   result.elapsedMs = Date.now() - startedAt;
   return result;
 }

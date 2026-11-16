@@ -1,7 +1,12 @@
-import type { InvocationReadExposure, ReadExposureCount } from '@haive/shared';
+import {
+  WORKTREE_SUBDIR,
+  type InvocationReadExposure,
+  type ReadExposureCount,
+} from '@haive/shared';
 
 export const READ_EXPOSURE_VERSION = 1;
 export const READ_EXPOSURE_FILE_LIMIT = 50;
+export const READ_EXPOSURE_PATH_LIMIT = 1024;
 
 type Paths = string[] | 'unattributed' | null;
 type Target = { kind: 'file'; path: string } | { kind: 'outside' | 'multiFile' | 'unattributed' };
@@ -9,6 +14,9 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 const empty = (): ReadExposureCount => ({ reads: 0, chars: 0, weightedChars: 0 });
 const record = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
+const worktreeSegments = WORKTREE_SUBDIR.split('/');
+const safePath = (path: string, limit: number): boolean =>
+  path.length <= limit && !path.includes('\u0000') && path.isWellFormed();
 
 /** Lexical only. No filesystem access, shell evaluation, glob expansion or cwd guessing. */
 export function normalizeReadPath(raw: string, workdir: string | null): string | null {
@@ -22,7 +30,7 @@ export function normalizeReadPath(raw: string, workdir: string | null): string |
     return parts;
   };
   let path = raw.trim();
-  if (!path) return null;
+  if (!path || path.startsWith('~')) return null;
   let parts = resolve(path);
   if (path.startsWith('/')) {
     if (workdir === null) return null;
@@ -31,7 +39,11 @@ export function normalizeReadPath(raw: string, workdir: string | null): string |
     parts = parts.slice(root.length);
   }
   if (parts[0] === '..') return null;
-  if (parts[0] === '.haive' && parts[1] === 'worktrees' && parts.length > 3) parts = parts.slice(3);
+  if (
+    worktreeSegments.every((p, i) => parts[i] === p) &&
+    parts.length > worktreeSegments.length + 1
+  )
+    parts = parts.slice(worktreeSegments.length + 1);
   path = parts.join('/');
   return path || null;
 }
@@ -88,13 +100,17 @@ export function readerCommandPaths(command: unknown): Paths {
   }
   if (quote) return 'unattributed';
   if (active) tokens.push(token);
+  if (tokens.some((t) => t.startsWith('~'))) return 'unattributed';
   const segments: string[][] = [[]];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (['>', '>>', '<', '<<'].includes(t)) {
       const current = segments.at(-1)!;
       if (/^\d+$/.test(current.at(-1) ?? '')) current.pop();
-      if (!tokens[++i] || tokens[i] === '&') return 'unattributed';
+      if (t === '>' && tokens[i + 1] === '&') {
+        if (!/^(?:\d+|-)$/.test(tokens[i + 2] ?? '')) return 'unattributed';
+        i += 2;
+      } else if (!tokens[++i] || tokens[i] === '&') return 'unattributed';
     } else if (['&&', ';'].includes(t)) segments.push([]);
     else if (['&', '||', '|'].includes(t)) return 'unattributed';
     else segments.at(-1)!.push(t);
@@ -156,10 +172,17 @@ function textChars(content: unknown): number {
   );
 }
 
-export function createReadExposure(opts: { workdir: string | null; readFileLimit?: number }) {
+export function createReadExposure(opts: {
+  workdir: string | null;
+  readFileLimit?: number;
+  readPathLimit?: number;
+}) {
   const limit = opts.readFileLimit ?? READ_EXPOSURE_FILE_LIMIT;
+  const pathLimit = opts.readPathLimit ?? READ_EXPOSURE_PATH_LIMIT;
   if (!Number.isInteger(limit) || limit < 0)
     throw new Error('readFileLimit must be a nonnegative integer');
+  if (!Number.isInteger(pathLimit) || pathLimit < 0)
+    throw new Error('readPathLimit must be a nonnegative integer');
   const calls = new Map<string, { tool: string; target: Target | null }>();
   const resultsSeen = new Set<string>();
   const messages = new Set<string>();
@@ -203,7 +226,11 @@ export function createReadExposure(opts: { workdir: string | null; readFileLimit
     tool(id: string, tool: string, paths: Paths) {
       observable = true;
       let target: Target | null = null;
-      if (paths === 'unattributed') target = { kind: 'unattributed' };
+      if (
+        paths === 'unattributed' ||
+        (Array.isArray(paths) && paths.some((p) => !safePath(p, pathLimit)))
+      )
+        target = { kind: 'unattributed' };
       else if (paths?.length) {
         const normalized = paths.map((p) => normalizeReadPath(p, opts.workdir));
         // Multiple paths share one output. Mixed inside/outside output cannot be

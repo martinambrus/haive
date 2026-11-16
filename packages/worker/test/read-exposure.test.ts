@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { createStreamJsonCollector } from '../src/queues/cli-exec/stream.js';
 import { createCodexJsonlCollector } from '../src/cli-executor/codex-jsonl.js';
-import { READ_EXPOSURE_FILE_LIMIT } from '../src/cli-executor/read-exposure.js';
+import {
+  READ_EXPOSURE_FILE_LIMIT,
+  READ_EXPOSURE_PATH_LIMIT,
+} from '../src/cli-executor/read-exposure.js';
 import { createToolUsageTally } from '../src/cli-executor/tool-usage.js';
 import { toolUsageFromStreamLog } from '../src/queues/cli-exec/tool-usage-backfill.js';
 import { createStreamLogBuffer } from '../src/queues/cli-exec/stream-log-buffer.js';
@@ -62,6 +65,9 @@ describe('read exposure', () => {
   it.each([
     'sed -n 1,20p src/a.ts',
     'cat src/a.ts 2>/dev/null',
+    'cat src/a.ts 2>&1',
+    'sed -n 1,20p src/a.ts 1>&2',
+    'cat src/a.ts >&-',
     'head -n 4 src/a.ts',
     'tail -10 src/a.ts',
     'nl src/a.ts',
@@ -106,6 +112,9 @@ describe('read exposure', () => {
   it.each([
     'cat "$file"',
     'cat *.ts',
+    'cat ~/.claude/skills/x/SKILL.md',
+    'cat "~/.codex/skills/x/SKILL.md"',
+    'cat src/a.ts > ~/out',
     'cat src/a.ts | head -5',
     'echo cat src/a.ts',
     'python -c "print(1)"',
@@ -115,6 +124,71 @@ describe('read exposure', () => {
       unattributed: { chars: command.startsWith('python ') ? 0 : 4 },
       fileReads: { chars: 0 },
     });
+  });
+
+  it.each(['Read', 'mcp__filesystem__read_text_file'])(
+    'keeps home-relative %s paths outside',
+    (name) => {
+      expect(
+        read(one(name, { file_path: '~/.claude/skills/x/SKILL.md', path: '~/.codex/config' })),
+      ).toMatchObject({
+        files: [],
+        outside: { chars: 4 },
+        fileReads: { chars: 0 },
+      });
+    },
+  );
+
+  it.each(['a\u0000b.ts', 'x\ud83d.ts', 'x\udc00.ts', 'a'.repeat(1025)])(
+    'keeps unsafe or oversized paths unattributed: %j',
+    (path) => {
+      for (const [name, input] of [
+        ['Read', { file_path: path }],
+        ['mcp__filesystem__read_text_file', { path }],
+        ['Bash', { command: `cat '${path}'` }],
+      ] as const) {
+        expect(read(one(name, input))).toMatchObject({
+          files: [],
+          unattributed: { chars: 4 },
+          outside: { chars: 0 },
+          fileReads: { chars: 0 },
+        });
+      }
+    },
+  );
+
+  it('accepts paired surrogates and the path length boundary', () => {
+    for (const path of ['src/\ud83d\ude00.ts', 'a'.repeat(1024)])
+      expect(read(one('Read', { file_path: path })).files[0]?.path).toBe(path);
+  });
+
+  it('bounds path lengths with a small injectable limit', () => {
+    expect(READ_EXPOSURE_PATH_LIMIT).toBe(1024);
+    const tally = createToolUsageTally({ workdir: root, readPathLimit: 4 });
+    for (const event of [
+      assistant('a', [use('t', 'Read', { file_path: 'ab.ts' })]),
+      result('t', 'abcd'),
+      assistant('b'),
+    ])
+      tally.claudeEvent(event);
+    expect(tally.finalize('stream').reads).toMatchObject({
+      files: [],
+      unattributed: { chars: 4, weightedChars: 4 },
+    });
+  });
+
+  it('excludes only fully angle-bracketed placeholder models from turns', () => {
+    const events: unknown[] = one('Read', { file_path: 'a.ts' });
+    events.splice(
+      2,
+      0,
+      {
+        ...assistant('synthetic'),
+        message: { id: 'synthetic', content: [], model: '<synthetic>' },
+      },
+      { ...assistant('real'), message: { id: 'real', content: [], model: '<model' } },
+    );
+    expect(read(events)).toMatchObject({ turns: 3, fileReads: { weightedChars: 8 } });
   });
 
   it('ends exposure at compaction and deduplicates messages, blocks, results and boundaries', () => {

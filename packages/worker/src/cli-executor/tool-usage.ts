@@ -247,6 +247,7 @@ export interface ToolUsageTally {
 export function createToolUsageTally(opts: {
   workdir: string | null;
   readFileLimit?: number;
+  readPathLimit?: number;
 }): ToolUsageTally {
   const exposure = createReadExposure(opts);
   const seenCalls = new Set<string>();
@@ -447,7 +448,7 @@ export function createToolUsageTally(opts: {
       const content = message && Array.isArray(message.content) ? message.content : [];
       if (event.type === 'assistant') {
         // Synthetic messages are CLI-authored errors, not model requests.
-        if (typeof message?.model === 'string' && message.model.startsWith('<')) return;
+        if (typeof message?.model === 'string' && /^<.*>$/.test(message.model)) return;
         exposure.assistant(message?.id, key);
         for (const block of content) {
           if (isRecord(block) && block.type === 'tool_use' && typeof block.name === 'string')
