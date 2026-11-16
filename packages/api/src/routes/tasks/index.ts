@@ -1368,11 +1368,26 @@ taskRoutes.patch('/:id', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, currentStepId: true, currentRound: true, deadAt: true },
+    columns: {
+      id: true,
+      status: true,
+      currentStepId: true,
+      currentRound: true,
+      deadAt: true,
+      executionContract: true,
+    },
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = {};
+  if (
+    body.autoContinue === true &&
+    task.status === 'waiting_user' &&
+    task.currentStepId &&
+    !isTaskDead(task)
+  ) {
+    assertExecutionContractUsable(task.executionContract);
+  }
   if (body.title !== undefined) patch.title = body.title;
   if (body.autoContinue !== undefined) patch.autoContinue = body.autoContinue;
 
@@ -1511,6 +1526,7 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
+      assertExecutionContractUsable(task.executionContract);
       // Retry lifts only the hold it read, and never an administrator's; it still revives the task,
       // since a refusal would leave its owner nothing to do until an administrator acts.
       const liftPause = task.pausedAt
@@ -1536,7 +1552,6 @@ taskRoutes.post('/:id/action', async (c) => {
         return c.json({ ok: true, status: 'running' });
       }
       // A full restart from step 0 refuses pinned custom tools that would fail at their step.
-      assertExecutionContractUsable(task.executionContract);
       await assertCustomToolsUsable(db, task);
       // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
       // orchestrator refuses to advance any step while another one is still
@@ -1641,6 +1656,7 @@ taskRoutes.post('/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
+      assertExecutionContractUsable(task.executionContract);
       const resumed = await db.transaction(async (tx) => {
         await assertTaskRootMergeIdle(tx, id);
         // Only the resume that changes the row is recorded.

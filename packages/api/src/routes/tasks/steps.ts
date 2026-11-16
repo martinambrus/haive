@@ -1,4 +1,5 @@
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
+import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
 import {
   INSIGHT_AUTO_ACTION_AVAILABLE,
   upgradeRunConfigSchema,
@@ -480,6 +481,13 @@ export async function retryTaskAtStep(
   target: typeof schema.taskSteps.$inferSelect,
   opts: { liftPause?: { read: Date; role: string | undefined; actorUserId: string } } = {},
 ): Promise<{ epoch: number }> {
+  // The immutable task pin is authoritative even for callers outside the action route.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { executionContract: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  assertExecutionContractUsable(task.executionContract);
   const rows = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
   const downstream = rows.filter(
     (r) =>
@@ -904,12 +912,20 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, type: true, repositoryId: true, deadAt: true },
+    columns: {
+      id: true,
+      status: true,
+      type: true,
+      repositoryId: true,
+      deadAt: true,
+      executionContract: true,
+    },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   // The answer reopens a failed task, which is new work.
   if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
+  assertExecutionContractUsable(task.executionContract);
   // Answering a failed upgrade's form revives it, which the index refuses; this names the live one.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
     await refuseBesideLiveUpgrade(db, task.repositoryId);
@@ -1044,12 +1060,13 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, deadAt: true },
+    columns: { id: true, status: true, deadAt: true, executionContract: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   // The answer reopens a failed task, which is new work.
   if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
+  assertExecutionContractUsable(task.executionContract);
 
   const stepRows = await db
     .select()
@@ -1130,6 +1147,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   if (body.action !== 'abort') {
     await assertNewWorkAllowed();
     refuseDeadTask(task);
+    assertExecutionContractUsable(task.executionContract);
   }
 
   // Act on the round the caller named. A fix-loop step recurs once per round
@@ -2129,6 +2147,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       // stamped on the re-advance below so a later task retry can invalidate it
       orchestrationEpoch: true,
       deadAt: true,
+      executionContract: true,
     },
   });
   if (!task) throw new HttpError(404, 'Task not found');
@@ -2136,6 +2155,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     throw new HttpError(409, `Cannot change provider for ${task.status} task`);
   }
   refuseDeadTask(task);
+  assertExecutionContractUsable(task.executionContract);
 
   // Act on the caller's round, latest as fallback (see the action endpoint):
   // a looped step recurs once per round; don't grab an arbitrary (round-0) row.

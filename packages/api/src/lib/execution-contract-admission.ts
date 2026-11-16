@@ -1,7 +1,7 @@
 import { assertExecutionContractSupported, ExecutionContractError } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 
-/** Both creation and START refuse a promise this worker cannot yet execute. */
+/** Creation and API re-entry refuse a promise this worker cannot yet execute. */
 export function assertExecutionContractUsable(raw: unknown): void {
   try {
     assertExecutionContractSupported(raw);
