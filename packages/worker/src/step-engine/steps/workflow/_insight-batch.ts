@@ -7,6 +7,7 @@ import { logger } from '@haive/shared';
 import type { Insight, LoadedInsight } from '@haive/shared/step';
 import type { StepContext } from '../../step-definition.js';
 import { lockOwnedStep, StepSupersededError } from '../../step-ownership.js';
+import { readValidationSnapshot } from './_validation-snapshot.js';
 
 export const INSIGHT_BATCH_EVENT = 'insight.batch';
 export const INSIGHT_STEP = '08e-insights-triage';
@@ -148,6 +149,9 @@ const journalSchema = z
     notes: z.string(),
     miningId: z.string().nullable(),
     invocationId: z.string().nullable(),
+    // Host evidence only. Legacy/missing/incomplete snapshots never authorize skipping checks.
+    worktreeBefore: z.record(z.string(), z.string()).nullable().optional(),
+    worktreeUnchanged: z.boolean().optional(),
   })
   .strict();
 export type InsightBatchRecord = z.infer<typeof journalSchema>;
@@ -287,6 +291,9 @@ export async function ensureInsightIntent(
     notes: '',
     miningId: null,
     invocationId: null,
+    ...(mode === 'gate3'
+      ? { worktreeBefore: await readValidationSnapshot(ctx, { requireComplete: true }) }
+      : {}),
   };
   const saved = await appendInsightBatch(ctx, record);
   if (

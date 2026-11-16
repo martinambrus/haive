@@ -268,6 +268,7 @@ export async function readChangedPaths(
     signal?: AbortSignal;
     propagateResourceErrors?: boolean;
     gitCwd?: string;
+    ignoreSubmodules?: 'none';
   } = {},
 ): Promise<string[] | null> {
   const gitCwd = options.gitCwd ?? worktreePath;
@@ -283,7 +284,16 @@ export async function readChangedPaths(
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
-      ['--no-optional-locks', 'diff', '--name-status', '-z', '--no-renames', base, '--'],
+      [
+        '--no-optional-locks',
+        'diff',
+        '--name-status',
+        '-z',
+        '--no-renames',
+        ...(options.ignoreSubmodules === 'none' ? ['--ignore-submodules=none'] : []),
+        base,
+        '--',
+      ],
       {
         cwd: gitCwd,
         timeout: options.timeoutMs,

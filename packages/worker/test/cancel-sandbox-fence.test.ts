@@ -1504,6 +1504,95 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     }
   });
+  it.each(['declined', 'justified', 'touched', 'mixed', 'unconfirmed', 'unreadable'])(
+    'gate3 decline routing checks the actual tree: %s',
+    async (kind) => {
+      const ctx = await seed();
+      const workspace = await mkdtemp(join(tmpdir(), 'g3i-outcome-'));
+      try {
+        await gitExec(['init'], { cwd: workspace });
+        await writeFile(join(workspace, 'a.ts'), 'base');
+        await gitExec(['add', '.'], { cwd: workspace });
+        await gitExec(
+          ['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-m', 'base'],
+          { cwd: workspace },
+        );
+        await writeFile(join(workspace, 'a.ts'), 'pending approved changes');
+        await db.insert(schema.taskSteps).values({
+          taskId: ctx.taskId,
+          stepId: '01-worktree-setup',
+          stepIndex: 1,
+          title: 'Setup',
+          status: 'done',
+          output: { worktreePath: workspace },
+        });
+        const picks = kind === 'mixed' ? [...selected, { ...selected[0]!, id: 'two' }] : selected;
+        const intent = await ensureInsightIntent(ctx, picks, 'gate3');
+        if (kind === 'touched')
+          await writeFile(join(workspace, 'a.ts'), 'partial edit despite decline');
+        const snapshot =
+          kind === 'unreadable'
+            ? vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null)
+            : null;
+        let output;
+        try {
+          output = await insightsTriageStep.apply(
+            { ...ctx, workspacePath: workspace, logger: { info() {} } } as unknown as StepContext,
+            {
+              detected: {
+                worktreePath: workspace,
+                sandboxWorktreePath: '/ws',
+                spec: '',
+                insights: picks,
+                gate3Request: {
+                  version: 1,
+                  kind: 'insight_revise',
+                  batchId: 'pick',
+                  sourceStepRow: 'gate',
+                  generation: 0,
+                  round: 1,
+                  mode: 'gate3',
+                  stage: 'apply',
+                },
+              },
+              formValues: {},
+              llmOutput:
+                kind === 'unconfirmed'
+                  ? 'invalid'
+                  : {
+                      version: 1,
+                      batchId: intent.batchId,
+                      items: picks.map((i, n) => ({
+                        id: i.id,
+                        outcome: n === 1 ? 'applied' : 'not_applied',
+                        changes: n === 1 ? ['edit'] : [],
+                        reason: kind === 'justified' ? 'Outside scope' : '',
+                      })),
+                      notes: '',
+                    },
+              iteration: 0,
+              previousIterations: [],
+            },
+          );
+        } finally {
+          snapshot?.mockRestore();
+        }
+        if (['declined', 'justified'].includes(kind)) {
+          expect(output.continuation).toBeUndefined();
+          expect(insightsTriageStep.reviseLoop!.evaluate(output)).toBeNull();
+          expect(output).toMatchObject({
+            checksSkipped: { reason: 'all_not_applied_unchanged', batchId: intent.batchId },
+          });
+          const replay = (await loadInsightBatchRecords(db, ctx.taskId)).find(
+            (r) => r.stage === 'outcome',
+          )!;
+          expect(continuationForOutcome(replay, 0)).toBeUndefined();
+        } else expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
+      } finally {
+        await rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
   it('deduplicates concurrent stages under the source-row lock', async () => {
     const ctx = await seed();
     const [a, b] = await Promise.all([
@@ -2253,6 +2342,94 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     },
   );
+  it('all-not-applied gate3 batch advances straight to the refreshed gate without dispatching checks', async () => {
+    const snapshot = vi
+      .spyOn(validationSnapshots, 'readValidationSnapshot')
+      .mockResolvedValue({ 'a.ts': 'same' });
+    try {
+      const { ctx, source, continuation } = await seedGatePick();
+      const route = await handoffInsightContinuation(db, ctx, source, continuation, routeSteps);
+      const [triage] = await db
+        .update(schema.taskSteps)
+        .set({ status: 'running' })
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, ctx.taskId),
+            eq(schema.taskSteps.stepId, '08e-insights-triage'),
+            eq(schema.taskSteps.round, route!.round),
+          ),
+        )
+        .returning();
+      const stepCtx = {
+        db,
+        taskId: ctx.taskId,
+        userId,
+        taskStepId: triage!.id,
+        round: route!.round,
+        rerunGeneration: triage!.rerunGeneration,
+        epoch: route!.epoch,
+        throwIfCancelled() {},
+        logger: { info() {} },
+      } as unknown as StepContext;
+      const intent = await ensureInsightIntent(stepCtx, selected, 'gate3');
+      const output = await insightsTriageStep.apply(stepCtx, {
+        detected: {
+          worktreePath: '/repo',
+          sandboxWorktreePath: '/ws',
+          spec: '',
+          insights: selected,
+          gate3Request: continuation,
+        },
+        formValues: {},
+        llmOutput: {
+          version: 1,
+          batchId: intent.batchId,
+          notes: '',
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: '' }],
+        },
+        iteration: 0,
+        previousIterations: [],
+      });
+      const done = await publishInsightStep(stepCtx, {
+        status: 'done',
+        output,
+        endedAt: new Date(),
+      });
+      const ids = routeSteps.map((s) => s.metadata.id);
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot: ids })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      registerStepsOnce();
+      testQueue.jobs = [];
+      await handleResult(
+        db,
+        {
+          ...ctx,
+          workflowType: 'workflow',
+          runListStrategy: 'static',
+          runListSnapshot: ids,
+          currentStepId: triage!.stepId,
+          currentRound: route!.round,
+          orchestrationEpoch: route!.epoch,
+        } as ResolvedTaskContext,
+        triage!.stepId,
+        { status: 'done', row: done, output },
+      );
+      expect(testQueue.jobs).toMatchObject([{ stepId: '10-gate-3-commit', round: route!.round }]);
+      expect(output).toMatchObject({ checksSkipped: { reason: 'all_not_applied_unchanged' } });
+      expect(await activeInsightContinuation(db, ctx.taskId, route!.round)).toBeNull();
+      expect(
+        await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) }),
+      ).toMatchObject({
+        currentStepId: '10-gate-3-commit',
+        currentRound: route!.round,
+      });
+    } finally {
+      snapshot.mockRestore();
+      await closeTaskQueue();
+    }
+  });
   it.each([false, true])(
     'PR5 actual checkpoint preserves configured safety steps and skips only gate2 (extra check=%s)',
     async (extraCheck) => {

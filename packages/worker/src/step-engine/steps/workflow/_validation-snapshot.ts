@@ -17,10 +17,11 @@ export type ValidationSnapshot = Record<string, string>;
 
 export async function readValidationSnapshot(
   ctx: Pick<StepContext, 'db' | 'taskId'>,
+  options: { requireComplete?: boolean; maxFileBytes?: number } = {},
 ): Promise<ValidationSnapshot | null> {
   // Retry the complete bounded read once: a transient Git/FS failure proves no equality.
   for (let attempt = 0; attempt < 2; attempt++) {
-    const snapshot = await readValidationSnapshotOnce(ctx);
+    const snapshot = await readValidationSnapshotOnce(ctx, options);
     if (snapshot !== null) return snapshot;
   }
   return null;
@@ -28,12 +29,18 @@ export async function readValidationSnapshot(
 
 async function readValidationSnapshotOnce(
   ctx: Pick<StepContext, 'db' | 'taskId'>,
+  options: { requireComplete?: boolean; maxFileBytes?: number },
 ): Promise<ValidationSnapshot | null> {
   try {
     const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const made = setup?.output as { worktreePath?: string; baseBranch?: string } | null;
     if (!made?.worktreePath) return null;
-    const files = await readChangedFiles(made.worktreePath, made.baseBranch ?? null);
+    const files = await readChangedFiles(
+      made.worktreePath,
+      made.baseBranch ?? null,
+      undefined,
+      options.requireComplete ? { ignoreSubmodules: 'none' } : undefined,
+    );
     if (files === null) return null;
     const { anchor, prefix } = workspaceAnchor(made.worktreePath);
     const snapshot: ValidationSnapshot = Object.create(null);
@@ -44,10 +51,10 @@ async function readValidationSnapshotOnce(
       hash.update(JSON.stringify([entry?.kind ?? 'absent', (entry?.stats.mode ?? 0) & 0o111]));
       if (entry?.kind === 'file') {
         const read = await readFileNoFollow(anchor, rel, {
-          maxBytes: FINGERPRINT_READ_BYTES,
+          maxBytes: options.maxFileBytes ?? FINGERPRINT_READ_BYTES,
           strict: true,
         });
-        if (read === null) return null;
+        if (read === null || (options.requireComplete && read.truncated)) return null;
         // Same bound as changeFingerprint: size plus prefix permits large deliverables.
         hash.update(JSON.stringify(read.size));
         hash.update(read.data);
@@ -56,6 +63,8 @@ async function readValidationSnapshotOnce(
         if (target === null) return null;
         hash.update(target);
       } else if (entry?.kind === 'directory') {
+        // A nested checkout's HEAD does not prove its files are unchanged.
+        if (options.requireComplete) return null;
         const nested = await nestedRepositoryHead(made.worktreePath, file.replace(/\/$/, ''));
         if (nested === null) return null;
         hash.update(JSON.stringify(nested));

@@ -38,15 +38,81 @@ async function checkout() {
     round: 0,
     output: { worktreePath: dir, baseBranch: 'main' },
   });
-  const read = () =>
-    readValidationSnapshot({
-      db: fake.db as unknown as Database,
-      taskId: '00000000-0000-4000-8000-000000000001',
-    });
+  const read = (options?: Parameters<typeof readValidationSnapshot>[1]) =>
+    readValidationSnapshot(
+      {
+        db: fake.db as unknown as Database,
+        taskId: '00000000-0000-4000-8000-000000000001',
+      },
+      options,
+    );
   return { dir, git, read };
 }
 
 describe('the final changes affected since validation', () => {
+  it('requires complete bytes to prove unchanged, retaining bounded-prefix validation otherwise', async () => {
+    const w = await checkout();
+    await writeFile(path.join(w.dir, 'app.ts'), 'abcd');
+    expect(await w.read({ requireComplete: true, maxFileBytes: 4 })).not.toBeNull();
+    await writeFile(path.join(w.dir, 'app.ts'), 'abcdX');
+    expect(await w.read({ requireComplete: true, maxFileBytes: 4 })).toBeNull();
+    expect(await w.read({ maxFileBytes: 4 })).not.toBeNull();
+  });
+  it('cannot prove equality from a nested checkout HEAD alone', async () => {
+    const w = await checkout();
+    w.git('init', '-q', 'nested');
+    await writeFile(path.join(w.dir, 'nested', 'app.ts'), 'nested edits');
+    expect(await w.read()).not.toBeNull();
+    expect(await w.read({ requireComplete: true })).toBeNull();
+  });
+  it('does not hide a staged gitlink move behind submodule ignore=all', async () => {
+    const w = await checkout();
+    w.git('init', '-q', 'nested');
+    await writeFile(path.join(w.dir, 'nested', 'app.ts'), 'nested base');
+    w.git('-C', 'nested', 'add', '.');
+    w.git(
+      '-C',
+      'nested',
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@local',
+      'commit',
+      '-qm',
+      'base',
+    );
+    await writeFile(
+      path.join(w.dir, '.gitmodules'),
+      '[submodule "nested"]\n path = nested\n url = ./nested\n',
+    );
+    w.git('add', '-A');
+    w.git('commit', '-qm', 'existing submodule');
+    w.git('branch', '-f', 'main', 'HEAD');
+    w.git('config', 'submodule.nested.ignore', 'all');
+    await writeFile(path.join(w.dir, 'app.ts'), 'pending reviewed changes');
+    expect(await w.read({ requireComplete: true })).not.toBeNull();
+    await writeFile(path.join(w.dir, 'nested', 'app.ts'), 'nested changed');
+    w.git('-C', 'nested', 'add', '.');
+    w.git(
+      '-C',
+      'nested',
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@local',
+      'commit',
+      '-qm',
+      'changed',
+    );
+    expect(w.git('status', '--porcelain').toString()).not.toContain('nested');
+    expect(await w.read({ requireComplete: true })).toBeNull();
+    w.git('add', '-A');
+    expect(w.git('diff', '--cached', '--raw', '--ignore-submodules=none').toString()).toContain(
+      '160000',
+    );
+    w.git('commit', '-qm', 'recorded gitlink change');
+    expect(await w.read({ requireComplete: true })).toBeNull();
+  });
   it('includes committed DAG changes and dirty edits without changing the real index', async () => {
     const w = await checkout();
     w.git('add', '-A');

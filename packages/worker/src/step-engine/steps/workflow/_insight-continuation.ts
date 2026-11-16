@@ -42,6 +42,7 @@ export function continuationForOutcome(
   if (
     record.stage !== 'outcome' ||
     record.selected.length === 0 ||
+    gate3ChecksSkipped(record) ||
     (record.mode !== 'gate3' && !record.items.some((i) => i.outcome === 'applied'))
   )
     return undefined;
@@ -54,6 +55,18 @@ export function continuationForOutcome(
     round: sourceRound + 1,
     ...(record.mode === 'gate3' ? { mode: 'gate3' as const, stage: 'checks' as const } : {}),
   };
+}
+
+/** A writer's decline is a claim, not proof it left the tree alone. */
+export function gate3ChecksSkipped(record: InsightBatchRecord): boolean {
+  return (
+    record.mode === 'gate3' &&
+    record.stage === 'outcome' &&
+    record.selected.length > 0 &&
+    record.items.length === record.selected.length &&
+    record.items.every((i) => i.outcome === 'not_applied') &&
+    record.worktreeUnchanged === true
+  );
 }
 
 /** A downstream Retry keeps the route; replacing its source generation invalidates it.

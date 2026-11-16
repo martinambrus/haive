@@ -35,10 +35,18 @@ export async function readChangedFiles(
   tree: string,
   baseBranch: string | null,
   gitTimeoutMs = CHANGE_READ_GIT_TIMEOUT_MS,
+  options: { ignoreSubmodules?: 'none' } = {},
 ): Promise<string[] | null> {
   const status = await gitRun(
     tree,
-    ['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all'],
+    [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '--untracked-files=all',
+      ...(options.ignoreSubmodules === 'none' ? ['--ignore-submodules=none'] : []),
+    ],
     undefined,
     { timeout: gitTimeoutMs },
   );
@@ -48,6 +56,7 @@ export async function readChangedFiles(
     includeDeleted: true,
     timeoutMs: gitTimeoutMs,
     forkPointOnly: baseBranch !== null,
+    ignoreSubmodules: options.ignoreSubmodules,
   });
   if (committed === null) return null;
   const dirty = parsePorcelainZ(status.stdout).flatMap((entry) =>
