@@ -468,7 +468,7 @@ Corrected attempt stopped 2026-11-01T16:55Z: T293 reproduced during normal09_3. 
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
-status: blocked · blocked-by: graded evaluation data (T300's general run cannot supply it) · priority: P3
+status: open (owner approved 2026-11-16 a bounded paid collection of graded selection data on owned fixtures, ~$10-15) · was blocked-by: graded evaluation data · priority: P3
 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
@@ -763,7 +763,7 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
-status: parked (OWNER DECISION 2026-11-14: build paused until a full workflow run gives a fresh 08c baseline to compare DE against) · kind: design · found: owner GO 2026-11-14 · priority: P4
+status: open, RESUMED 2026-11-16 (owner: resume once an 08c baseline exists; the 2026-11-16 capped run recorded two clean real-task 08c baselines) · kind: design · found: owner GO 2026-11-14 · priority: P4
 
 Plan: `docs/plans/deeppattern-module.md` Part B.
 
