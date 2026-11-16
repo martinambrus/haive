@@ -16,6 +16,11 @@ package, source, version, parts), which the web production image ships at `/app/
 so a build can read back what an image carries; and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
 it first, as do the `test` scripts of the api, worker and web.
 
+Compiled module pages receive the host's `MarkdownView` component through `ModulePageProps`
+from `@haive/web-kit/host`, alongside `api`, `moduleId` and `path`. Pass this component to
+module prose views rather than importing the host application or adding another Markdown
+renderer. The statistics report uses it for its coverage note.
+
 The integration settings and admin cards identify a provider's contributing module and live
 provider state separately from its configured switch; see [Integrations](integrations.md). A
 provider enabled by configuration can still be unavailable because its module is deactivated.
