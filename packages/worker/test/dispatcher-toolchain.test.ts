@@ -93,3 +93,21 @@ it('gives native and sequential sub-agents and synthesis the same fact and exec 
     expect(plan.invocation.spec.synthesis.prompt).toContain('<haive_sandbox_toolchain>');
   }
 });
+
+it('stamps only the advisory block instead of duplicating the task prompt in Redis', () => {
+  const body = 'Unique task instructions '.repeat(100);
+  const plan = resolveDispatch(
+    request('p0', {
+      input: { kind: 'prompt', prompt: body, capabilities: [] },
+      sandboxToolchain: { p0: { imageId: ID, php: 'absent' } },
+    }),
+  );
+  if (plan.invocation?.kind !== 'cli') throw new Error('expected CLI');
+  const stamp = plan.invocation.spec.sandboxToolchain;
+  expect(stamp).toEqual({
+    imageId: ID,
+    block: expect.stringContaining('<haive_sandbox_toolchain>'),
+  });
+  expect(JSON.stringify(stamp)).not.toContain(body);
+  expect(JSON.stringify(stamp).length).toBeLessThan(400);
+});

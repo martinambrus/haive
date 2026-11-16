@@ -8,7 +8,9 @@ export const SANDBOX_TOOLCHAIN_MARKER = '<haive_sandbox_toolchain>';
 const CLOSE = '</haive_sandbox_toolchain>';
 export interface SandboxToolchainStamp {
   imageId: string;
-  prompt: string;
+  block?: string;
+  /** Read-only compatibility with jobs queued before block-only stamps. Never write these fields. */
+  prompt?: string;
   /** A native sub-agent invocation embeds several independently adapted prompts. */
   segments?: string[];
 }
@@ -24,13 +26,13 @@ export function toolchainEnvironmentMatches(
 }
 
 /** Only remove Haive's block within the leading block sequence. A quoted marker stays data. */
-export function stripSandboxToolchain(prompt: string): string {
+function findSandboxToolchain(prompt: string): { at: number; after: number; block: string } | null {
   const opener = /<haive_\w+>/y;
   let at = 0;
   for (;;) {
     opener.lastIndex = at;
     const open = opener.exec(prompt)?.[0];
-    if (!open) return prompt;
+    if (!open) return null;
     const close = `\n</${open.slice(1)}`;
     let end = prompt.indexOf(close, at + open.length);
     while (
@@ -40,14 +42,27 @@ export function stripSandboxToolchain(prompt: string): string {
     ) {
       end = prompt.indexOf(close, end + 1);
     }
-    if (end === -1) return prompt;
+    if (end === -1) return null;
     let after = end + close.length;
-    while (prompt[after] === '\n') after++;
+    if (prompt.startsWith('\n\n', after)) after += 2;
+    else if (prompt[after] === '\n') after++;
     if (open === SANDBOX_TOOLCHAIN_MARKER) {
-      return stripSandboxToolchain(prompt.slice(0, at) + prompt.slice(after));
+      return { at, after, block: prompt.slice(at, end + close.length) };
     }
     at = after;
   }
+}
+
+/** Remove just the owned advisory and its separator; preserve task-leading blank lines. */
+export function stripSandboxToolchain(prompt: string): string {
+  const found = findSandboxToolchain(prompt);
+  return found
+    ? stripSandboxToolchain(prompt.slice(0, found.at) + prompt.slice(found.after))
+    : prompt;
+}
+
+export function sandboxToolchainBlock(prompt: string): string | null {
+  return findSandboxToolchain(prompt)?.block ?? null;
 }
 
 export function withSandboxToolchain(
@@ -73,7 +88,7 @@ export async function recheckSandboxToolchain(
   runner: DockerRunner = defaultDockerRunner,
   wrapper?: string | null,
   extraEnv?: Record<string, string>,
-): Promise<{ spec: CliCommandSpec; image: string | null }> {
+): Promise<{ spec: CliCommandSpec; image: string | null; strippedBlock?: string }> {
   const stamp = spec.sandboxToolchain;
   if (!stamp) return { spec, image };
   const selected = image ?? process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
@@ -91,18 +106,15 @@ export async function recheckSandboxToolchain(
     toolchainEnvironmentMatches(wrapper, { ...spec.env, ...extraEnv })
   )
     return { spec, image: pinned };
-  let prompt = stamp.prompt;
-  for (const segment of new Set(stamp.segments ?? [stamp.prompt])) {
-    prompt = prompt.replaceAll(segment, () => stripSandboxToolchain(segment));
-  }
-  const replace = (text: string) => text.replaceAll(stamp.prompt, () => prompt);
+  const block = stamp.block ?? sandboxToolchainBlock(stamp.segments?.[0] ?? stamp.prompt ?? '');
+  const separator = block ? block + '\n\n' : '';
+  const replace = (text: string) => (separator ? text.replaceAll(separator, '') : text);
   const replaceJson = (text: string) =>
-    text.replaceAll(JSON.stringify(stamp.prompt).slice(1, -1), () =>
-      JSON.stringify(prompt).slice(1, -1),
-    );
+    separator ? text.replaceAll(JSON.stringify(separator).slice(1, -1), '') : text;
   const { sandboxToolchain: _stamp, ...clean } = spec;
   return {
     image: pinned ?? image,
+    ...(block ? { strippedBlock: block } : {}),
     spec: {
       ...clean,
       args: spec.args.map(replace),

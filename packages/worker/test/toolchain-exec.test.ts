@@ -12,6 +12,7 @@ const OLD = `sha256:${'a'.repeat(64)}`;
 const NEW = `sha256:${'b'.repeat(64)}`;
 const fact = { imageId: OLD, php: 'absent' as const };
 const prompt = withSandboxToolchain('Check code', fact);
+const block = prompt.slice(0, prompt.indexOf('\n\n'));
 const inspect = vi.fn(async () => ({ exists: true, imageId: NEW }));
 const runner = fakeDockerRunner({ inspect });
 function spec(): CliCommandSpec {
@@ -19,7 +20,7 @@ function spec(): CliCommandSpec {
     command: 'cli',
     args: ['-p', prompt],
     env: {},
-    sandboxToolchain: { imageId: OLD, prompt },
+    sandboxToolchain: { imageId: OLD, block },
   };
 }
 it('pins exec to the newly inspected immutable ID and strips the old dispatch fact', async () => {
@@ -59,7 +60,7 @@ it('also strips each nested native prompt and synthesis fact', async () => {
   const s = {
     ...spec(),
     args: [assembled],
-    sandboxToolchain: { imageId: OLD, prompt: assembled, segments: [prompt] },
+    sandboxToolchain: { imageId: OLD, block },
   };
   expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([
     'Agent:\nCheck code\nSynthesize:\nCheck code',
@@ -92,6 +93,18 @@ it('preserves quoted markers in outer rules and literal replacement syntax in ta
   const outer = `<haive_agent_rules>\nQuote <haive_sandbox_toolchain> literally.\n</haive_agent_rules>\n\n${inner}`;
   const expected = `<haive_agent_rules>\nQuote <haive_sandbox_toolchain> literally.\n</haive_agent_rules>\n\n${source}`;
   expect(stripSandboxToolchain(outer)).toBe(expected);
-  const s = { ...spec(), args: [outer], sandboxToolchain: { imageId: OLD, prompt: outer } };
+  const s = { ...spec(), args: [outer], sandboxToolchain: { imageId: OLD, block } };
   expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([expected]);
+});
+
+it('strips exactly the stamped block and its blank line, preserving task whitespace and other blocks', async () => {
+  const body = '\n\nCheck code\n\n';
+  const other = '<haive_app_reach>\nKeep this.\n</haive_app_reach>\n\n';
+  const source = other + withSandboxToolchain(body, fact);
+  const s = { ...spec(), args: [source] };
+  expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([other + body]);
+});
+it('continues to handle legacy full-prompt stamps already queued before the upgrade', async () => {
+  const s = { ...spec(), sandboxToolchain: { imageId: OLD, prompt } };
+  expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args[1]).toBe('Check code');
 });

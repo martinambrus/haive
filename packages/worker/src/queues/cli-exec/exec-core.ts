@@ -1,4 +1,4 @@
-import { recheckSandboxToolchain } from '../../sandbox/toolchain-prompt.js';
+import { recheckInvocationToolchain } from './toolchain-audit.js';
 import { CommittedSnapshotError, snapshotToolProfile } from '../../repo/committed-snapshot.js';
 import { assertSnapshotOwner } from '../../plan/chat-snapshot.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -718,9 +718,10 @@ export async function executeCliSpec(
   onSteeringUnavailable?: () => Promise<void>,
 ): Promise<ExecutionOutcome> {
   // App-server reads its turn BEFORE the spawner runs, so validate its prompt here too.
-  const checked = await recheckSandboxToolchain(
+  const checked = await recheckInvocationToolchain(
     spec,
     sandboxImage,
+    invocationId,
     undefined,
     wrapperContent,
     secrets,
@@ -1628,7 +1629,13 @@ export function createSandboxSpawner(
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
     // The actual image can have changed while queued. Recheck at the last spawn seam,
     // then use its immutable ID for this launch, never the mutable tag just inspected.
-    const checked = await recheckSandboxToolchain(spec, sandboxImage, undefined, wrapperContent);
+    const checked = await recheckInvocationToolchain(
+      spec,
+      sandboxImage,
+      invocationId,
+      undefined,
+      wrapperContent,
+    );
     spec = checked.spec;
     const executionImage = checked.image;
     if (spec.planSnapshot) {

@@ -1,3 +1,4 @@
+import { sandboxToolchainBlock } from '../../sandbox/toolchain-prompt.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { type CliExecJobPayload, type CliProviderName } from '@haive/shared';
@@ -64,8 +65,9 @@ export async function executeSubAgentNative(
   if (invocation.sandboxToolchainImageId)
     spec.sandboxToolchain = {
       imageId: invocation.sandboxToolchainImageId,
-      prompt,
-      segments: [...invocation.steps.map((step) => step.prompt), invocation.synthesis.prompt],
+      block:
+        sandboxToolchainBlock(invocation.steps[0]?.prompt ?? invocation.synthesis.prompt) ??
+        undefined,
     };
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
@@ -195,7 +197,10 @@ export async function executeSubAgentSequential(
         effortLevel: payload.effortLevel,
       });
       if (invocation.sandboxToolchainImageId)
-        spec.sandboxToolchain = { imageId: invocation.sandboxToolchainImageId, prompt };
+        spec.sandboxToolchain = {
+          imageId: invocation.sandboxToolchainImageId,
+          block: sandboxToolchainBlock(prompt) ?? undefined,
+        };
       return spec;
     },
     spawner,
