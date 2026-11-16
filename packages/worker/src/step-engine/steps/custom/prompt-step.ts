@@ -27,7 +27,8 @@ import {
   fencedAgentBlock,
 } from '../_untrusted-repo.js';
 
-export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
+import { capStepOutput, PROMPT_STEP_OUTPUT_CAP_BYTES } from '../../prompt-output-text.js';
+export { capStepOutput, PROMPT_STEP_OUTPUT_CAP_BYTES } from '../../prompt-output-text.js';
 /** Every quoted step output in one prompt together, however often the template repeats a token. */
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
 /** Every field, title, description and account text in one prompt together, the same way. */
@@ -46,8 +47,8 @@ export interface PromptStepDetect {
 }
 
 export interface PromptStepOutput {
-  raw: string;
-  parsed: unknown;
+  raw?: string;
+  parsed?: unknown;
   roleOutput?: ReturnType<typeof parsePromptRoleOutput>;
 }
 
@@ -60,21 +61,12 @@ function assertPromptRoles(entry: PromptStepEntry): void {
   if (problems.length) throw new DataEdgePlanError(problems.map((p) => p.message).join(' '));
 }
 
-export function capStepOutput(text: string, cap: number = PROMPT_STEP_OUTPUT_CAP_BYTES): string {
-  const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= cap) return text;
-  const notice = (shown: number): string =>
-    `\n[truncated: ${bytes.length - shown} more bytes not shown]`;
-  // notice(0) holds the most digits any notice can, so the head always leaves room for its own.
-  const room = Math.max(cap - Buffer.byteLength(notice(0)), 0);
-  const head = bytes.subarray(0, room).toString('utf8').replace(/�+$/, '');
-  return head + notice(Buffer.byteLength(head));
-}
-
 function stepOutputText(output: unknown, stepId: string): string {
   if (typeof output === 'string') return output;
   if (isCustomStepId(stepId) && typeof output === 'object' && output !== null) {
-    const { raw, parsed } = output as { raw?: unknown; parsed?: unknown };
+    const { raw, parsed, roleOutput } = output as PromptStepOutput;
+    if (roleOutput)
+      return JSON.stringify({ contract: roleOutput.contract, data: roleOutput.data }, null, 2);
     if (typeof raw === 'string' && parsed !== undefined) return raw;
   }
   return JSON.stringify(output, null, 2) ?? '';
@@ -163,18 +155,24 @@ function renderTemplate(
         throw new DataEdgePlanError(`${token.id}: role contract mismatch`);
       if (quote && !input.optional && read?.state !== 'ready')
         throw new DataEdgePlanError(`${token.id}: required input ${read?.state ?? 'absent'}`);
-      const ready = read?.state === 'ready' ? safeParseStepOutput(input.contract, read.data) : null;
+      // Old detect snapshots may still contain data; new snapshots retain bounded quote text only.
+      const ready =
+        read?.state === 'ready' && 'data' in read
+          ? safeParseStepOutput(input.contract, read.data)
+          : null;
       if (ready && !ready.success)
         throw new DataEdgePlanError(`${token.id}: required input invalid`);
       roles[token.id] = !quote
         ? ''
         : fencedAgentBlock(
-            ready?.success
-              ? capStepOutput(
-                  JSON.stringify(projectRoleOutput(input.role, ready.data), null, 2) ?? '',
-                  perQuote,
-                )
-              : `(no ready output for input ${token.id}: ${read?.state ?? 'absent'})`,
+            read?.state === 'ready' && 'text' in read
+              ? capStepOutput(read.text, perQuote)
+              : ready?.success
+                ? capStepOutput(
+                    JSON.stringify(projectRoleOutput(input.role, ready.data), null, 2) ?? '',
+                    perQuote,
+                  )
+                : `(no ready output for input ${token.id}: ${read?.state ?? 'absent'})`,
           );
     }
   }
@@ -273,6 +271,7 @@ export function buildPromptStep(
   stepId: string,
   entry: ParsedPromptStepEntry,
   index: number,
+  limits: { structuredReplyMaxBytes?: number } = {},
 ): StepDefinition<PromptStepDetect, PromptStepOutput> {
   const def: StepDefinition<PromptStepDetect, PromptStepOutput> = {
     ...(entry.consumesRoles ? { consumesRoles: entry.consumesRoles } : {}),
@@ -362,7 +361,11 @@ export function buildPromptStep(
       const finish = (output: PromptStepOutput): PromptStepOutput => {
         const provided = entry.outputMode === 'structured' ? entry.providesRoles?.[0] : undefined;
         return provided
-          ? { ...output, roleOutput: parsePromptRoleOutput(output.raw, provided, stepId) }
+          ? {
+              roleOutput: parsePromptRoleOutput(output.raw ?? '', provided, stepId, {
+                maxBytes: limits.structuredReplyMaxBytes,
+              }),
+            }
           : output;
       };
       // The runner hands apply the parsed value when the reply was JSON; the stored reply is
@@ -381,12 +384,12 @@ export function buildPromptStep(
         }
       }
       if (entry.outputMode === 'structured' && args.llmInvocationId) {
-        const provided = entry.providesRoles![0]!;
         // Missing recorded text must not fall back to a repaired CLI parse.
-        return { raw: '', parsed: null, roleOutput: parsePromptRoleOutput('', provided, stepId) };
+        return finish({ raw: '' });
       }
       const out = args.llmOutput;
       if (typeof out === 'string') {
+        if (entry.outputMode === 'structured') return finish({ raw: out });
         let parsed: unknown = null;
         try {
           parsed = JSON.parse(out) as unknown;

@@ -18,3 +18,14 @@ describe('promptStepReply', () => {
     expect(promptStepReply('custom.t.a', 'done', null)).toBeNull();
   });
 });
+
+it('shows the single stored structured payload as JSON', () => {
+  const roleOutput = {
+    role: 'test.agent-report',
+    contract: { id: 'test', version: 1 },
+    data: { report: 'result' },
+  };
+  expect(promptStepReply('custom.demo.report', 'done', { roleOutput })).toBe(
+    JSON.stringify({ contract: roleOutput.contract, data: roleOutput.data }, null, 2),
+  );
+});

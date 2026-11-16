@@ -9,22 +9,27 @@ import { StepOutputContractInvalidError } from './step-output-contract.js';
 const record = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+export const PROMPT_ROLE_REPLY_MAX_BYTES = 256 * 1024;
+
 /** A strict JSON envelope. The generic CLI parser may repair or extract JSON; this mode
  * deliberately parses the recorded reply itself and never trusts that parser's result. */
 export function parsePromptRoleOutput(
   raw: string,
   provided: { role: StepRoleId; contract: StepOutputContractRef },
   stepId: string,
+  limits: { maxBytes?: number } = {},
 ) {
+  const fail = (paths: readonly string[]): never => {
+    throw new StepOutputContractInvalidError(provided.contract, stepId, paths);
+  };
+  if (Buffer.byteLength(raw, 'utf8') > (limits.maxBytes ?? PROMPT_ROLE_REPLY_MAX_BYTES))
+    return fail(['$reply.too-large']);
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
     /* reported below without reply content */
   }
-  const fail = (paths: readonly string[]): never => {
-    throw new StepOutputContractInvalidError(provided.contract, stepId, paths);
-  };
   if (
     !record(value) ||
     Object.keys(value).length !== 2 ||
@@ -40,8 +45,7 @@ export function parsePromptRoleOutput(
   return { role: provided.role, contract: provided.contract, data: parsed.data };
 }
 
-/** Custom producers keep raw/parsed for physical {{step:}} readers. Role readers see
- * only this separately validated payload, checked again against the pinned contract. */
+/** Structured producers store the parsed payload once, checked again by role readers. */
 export function promptRoleOutputValue(
   output: unknown,
   role: StepRoleId,

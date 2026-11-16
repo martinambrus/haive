@@ -1,13 +1,21 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { DataEdgePlanError, selectDataEdgeCandidate } from '@haive/shared/data-edge-plan';
-import { isQuotableRole, STEP_ROLE_REGISTRY, type StepRoleId } from '@haive/shared/step-outputs';
+import {
+  isQuotableRole,
+  projectRoleOutput,
+  STEP_ROLE_REGISTRY,
+  type StepRoleId,
+} from '@haive/shared/step-outputs';
 import { parsePromptTemplate, type PromptStepEntry } from '@haive/shared/modularity';
 import type { StepContext } from './step-definition.js';
+import { capStepOutput } from './prompt-output-text.js';
 import { readDataRole, type RoleRead } from './read-role.js';
 
 type WithoutLegacy<R> = R extends unknown ? Omit<R, 'iterations' | 'legacyOutput'> : never;
-export type PromptRoleRead = WithoutLegacy<RoleRead<StepRoleId>>;
+type Read = WithoutLegacy<RoleRead<StepRoleId>>;
+export type PromptRoleRead =
+  Read | (Omit<Extract<Read, { state: 'ready' }>, 'data'> & { text: string });
 
 export async function loadPromptRoleInputs(
   ctx: StepContext,
@@ -43,7 +51,13 @@ export async function loadPromptRoleInputs(
       throw new DataEdgePlanError(`${name}: required input ${read.state}`);
     if ('iterations' in read) {
       const { iterations: _iterations, legacyOutput: _legacy, ...view } = read;
-      out[name] = view;
+      if (view.state === 'ready') {
+        const { data, ...metadata } = view;
+        out[name] = {
+          ...metadata,
+          text: capStepOutput(JSON.stringify(projectRoleOutput(input.role, data), null, 2) ?? ''),
+        };
+      } else out[name] = view;
     } else out[name] = read;
   }
   ctx.throwIfCancelled();

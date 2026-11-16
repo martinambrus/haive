@@ -18,6 +18,7 @@ import {
   buildPromptStep,
   promptStepNamedText,
   PROMPT_STEP_OUTPUTS_BUDGET_BYTES,
+  PROMPT_STEP_OUTPUT_CAP_BYTES,
 } from '../src/step-engine/steps/custom/prompt-step.js';
 import { UNTRUSTED_OPEN, UNTRUSTED_CLOSE } from '../src/step-engine/steps/_untrusted-repo.js';
 import { readDataRole } from '../src/step-engine/read-role.js';
@@ -143,13 +144,17 @@ it('uses the canonical producer for a legacy task without a v3 plan', async () =
   fake.patch(schema.tasks, ctx.taskId, { dataEdgePlan: null });
   put(role, data);
   const d = await buildPromptStep(consumerId, consumer, 1).detect!(ctx);
-  expect(d.roleOutputs?.report).toMatchObject({ state: 'ready', producer: { stepId: role }, data });
+  expect(d.roleOutputs?.report).toMatchObject({
+    state: 'ready',
+    producer: { stepId: role },
+    text: expect.stringContaining('audited'),
+  });
 });
 
 it('stores host-validated structured output and reads it through the pinned role edge', async () => {
   const { ctx, producer, consumer, put, pin } = fixture();
   const output = await apply(producer, JSON.stringify({ contract, data }));
-  expect(output).toMatchObject({ raw: expect.any(String), roleOutput: { role, contract, data } });
+  expect(output).toMatchObject({ roleOutput: { role, contract, data } });
   put(producerId, output);
   const read = await readDataRole(ctx, role, 1, 'report');
   expect(read).toMatchObject({ state: 'ready', producer: { stepId: producerId }, data });
@@ -282,6 +287,39 @@ it('shares the existing quote cap across repeated role and step quotes', async (
   const prompt = await def.llm!.buildPrompt({ detected: d, formValues: {} });
   expect(Buffer.byteLength((prompt.match(/§/g) ?? []).join(''))).toBeLessThanOrEqual(
     PROMPT_STEP_OUTPUTS_BUDGET_BYTES,
+    PROMPT_STEP_OUTPUT_CAP_BYTES,
   );
   expect(prompt).toContain('[truncated:');
+});
+
+it('persists only bounded projected role text in detect and prepare', async () => {
+  const { ctx, put, consumer } = fixture();
+  put(producerId, {
+    ...data,
+    findings: [{ severity: 'high', issue: '§'.repeat(10000) }],
+    humanFeedback: 'do not duplicate',
+  });
+  const def = buildPromptStep(consumerId, consumer, 1);
+  const d = await def.detect!(ctx);
+  await def.llm!.prepare!({ ctx, detected: d, formValues: {} });
+  const snapshot = d.roleOutputs!.report!;
+  expect(snapshot).not.toHaveProperty('data');
+  expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(
+    PROMPT_STEP_OUTPUT_CAP_BYTES + 1024,
+  );
+  expect(JSON.stringify(snapshot)).not.toContain('do not duplicate');
+});
+it('rejects oversized valid JSON before parsing, naming the contract', async () => {
+  const { parsePromptRoleOutput, PROMPT_ROLE_REPLY_MAX_BYTES } =
+    await import('../src/step-engine/prompt-role-output.js');
+  expect(PROMPT_ROLE_REPLY_MAX_BYTES).toBe(256 * 1024);
+  const reply = JSON.stringify({ contract, data });
+  expect(() =>
+    parsePromptRoleOutput(reply, { role, contract }, producerId, { maxBytes: 8 }),
+  ).toThrow('haive.code-audit@1');
+});
+it('stores parsed structured data once', async () => {
+  const { producer } = fixture();
+  const output = await apply(producer, JSON.stringify({ contract, data }));
+  expect(Object.keys(output)).toEqual(['roleOutput']);
 });

@@ -98,7 +98,7 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
     return { ...w, connectionId, claude: await seedProvider(db, w.userId, 'claude-code') };
   }
 
-  it.each(['invalid', 'missing', 'valid'] as const)(
+  it.each(['invalid', 'missing', 'oversized', 'valid'] as const)(
     '[PRT4B] persists a structured %s reply without ever requesting an implementation repair',
     async (kind) => {
       const w = await world(null);
@@ -112,7 +112,9 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
         outputMode: 'structured',
         providesRoles: [{ role, contract }],
       });
-      const def = buildPromptStep(STEP_ID, entry, 0);
+      const def = buildPromptStep(STEP_ID, entry, 0, {
+        structuredReplyMaxBytes: kind === 'oversized' ? 8 : undefined,
+      });
       // Even an error-loop hook must not turn a host contract failure into a code diagnosis.
       const stepDef = { ...def, fixLoopOnError: true } as unknown as StepDefinition;
       await db
@@ -151,7 +153,11 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       const [invocation] = await runsOf(db, w.taskId);
       const data = { audited: true, findings: [], coverage: null };
       const rawOutput =
-        kind === 'valid' ? JSON.stringify({ contract, data }) : kind === 'missing' ? null : '{}';
+        kind === 'valid' || kind === 'oversized'
+          ? JSON.stringify({ contract, data })
+          : kind === 'missing'
+            ? null
+            : '{}';
       await db
         .update(schema.cliInvocations)
         .set({
@@ -167,7 +173,7 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       if (kind !== 'valid') {
         expect(result.row.errorMessage).toContain('haive.code-audit@1');
         expect(result.row.output).toBeNull();
-      } else expect(result.row.output).toMatchObject({ roleOutput: { role, contract, data } });
+      } else expect(result.row.output).toEqual({ roleOutput: { role, contract, data } });
       expect(
         await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, implementation!.id) }),
       ).toMatchObject({ status: 'done', output: { kept: true } });
