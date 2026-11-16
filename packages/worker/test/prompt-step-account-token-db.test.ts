@@ -10,7 +10,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { lockTaskIntegrations } from '@haive/shared/integrations';
-import { parsePinnedCustomSteps, promptStepEntrySchema } from '@haive/shared/modularity';
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
+import { readDataRole } from '../src/step-engine/read-role.js';
+import {
+  derivePromptStepComposable,
+  parsePinnedCustomSteps,
+  promptStepEntrySchema,
+} from '@haive/shared/modularity';
 import { STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -98,7 +105,7 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
     return { ...w, connectionId, claude: await seedProvider(db, w.userId, 'claude-code') };
   }
 
-  it.each(['invalid', 'missing', 'oversized', 'valid'] as const)(
+  it.each(['invalid', 'wrong-shape', 'missing', 'oversized', 'valid'] as const)(
     '[PRT4B] persists a structured %s reply without ever requesting an implementation repair',
     async (kind) => {
       const w = await world(null);
@@ -117,9 +124,24 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       });
       // Even an error-loop hook must not turn a host contract failure into a code diagnosis.
       const stepDef = { ...def, fixLoopOnError: true } as unknown as StepDefinition;
+      const consumerId = 'custom.demo.use';
+      const consumer = promptStepEntrySchema.parse({
+        slug: 'use',
+        title: 'Use',
+        template: '{{role:report}}',
+        timeoutMs: 60000,
+        consumesRoles: [{ input: 'report', role, contract, optional: false }],
+      });
+      const declarations = new Map([
+        [STEP_ID, derivePromptStepComposable(entry, 'demo', false)],
+        [consumerId, derivePromptStepComposable(consumer, 'demo', false)],
+      ]);
+      const dataEdgePlan = buildDataEdgePlan('static', [
+        { executionPath: null, nodes: dataPortNodes([STEP_ID, consumerId], {}, declarations) },
+      ]);
       await db
         .update(schema.tasks)
-        .set({ customSteps: { [STEP_ID]: entry } })
+        .set({ customSteps: { [STEP_ID]: entry, [consumerId]: consumer }, dataEdgePlan })
         .where(eq(schema.tasks.id, w.taskId));
       const [implementation] = await db
         .insert(schema.taskSteps)
@@ -155,9 +177,11 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       const rawOutput =
         kind === 'valid' || kind === 'oversized'
           ? JSON.stringify({ contract, data })
-          : kind === 'missing'
-            ? null
-            : '{}';
+          : kind === 'wrong-shape'
+            ? JSON.stringify({ contract, data: { audited: 'bad' } })
+            : kind === 'missing'
+              ? null
+              : '{}';
       await db
         .update(schema.cliInvocations)
         .set({
@@ -173,7 +197,29 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       if (kind !== 'valid') {
         expect(result.row.errorMessage).toContain('haive.code-audit@1');
         expect(result.row.output).toBeNull();
-      } else expect(result.row.output).toEqual({ roleOutput: { role, contract, data } });
+      } else {
+        expect(result.row.output).toEqual({ roleOutput: { role, contract, data } });
+        const [consumerRow] = await db
+          .insert(schema.taskSteps)
+          .values({
+            taskId: w.taskId,
+            stepId: consumerId,
+            title: 'Use',
+            stepIndex: 2,
+            round: 0,
+            runSeq: 0,
+            status: 'running',
+          })
+          .returning();
+        expect(
+          await readDataRole(
+            { db, taskId: w.taskId, taskStepId: consumerRow!.id, round: 0 },
+            role,
+            0,
+            'report',
+          ),
+        ).toMatchObject({ state: 'ready', producer: { stepId: STEP_ID }, data });
+      }
       expect(
         await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, implementation!.id) }),
       ).toMatchObject({ status: 'done', output: { kept: true } });

@@ -10,6 +10,7 @@ import {
 } from '@haive/shared/step-outputs';
 import { fixConsumerSchema, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepDefinition } from './step-definition.js';
+import { promptRoleOutputValue } from './prompt-role-output.js';
 
 type Declaration = Pick<
   StepDefinition,
@@ -117,7 +118,12 @@ export function validateSuccessfulStepOutput(
 ): void {
   for (const provided of step.providesRoles ?? []) {
     const ref = STEP_ROLE_REGISTRY[provided.role].contract;
-    const result = safeParseStepOutput(ref, output);
+    // Match readDataRole: prompt producers store one role envelope; core/module
+    // producers return the payload itself. The envelope must name this exact port.
+    const value = step.metadata.id.startsWith('custom.')
+      ? promptRoleOutputValue(output, provided.role, ref)
+      : output;
+    const result = safeParseStepOutput(ref, value);
     if (!result.success)
       throw new StepOutputContractInvalidError(ref, step.metadata.id, result.issuePaths);
   }

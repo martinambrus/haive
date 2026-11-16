@@ -8,7 +8,7 @@ vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) =>
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { promptStepEntrySchema, derivePromptStepComposable } from '@haive/shared/modularity';
 import { STEP_ROLES, SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { dataPortNodes } from '@haive/shared/step-ports';
@@ -22,6 +22,7 @@ import {
 } from '../src/step-engine/steps/custom/prompt-step.js';
 import { UNTRUSTED_OPEN, UNTRUSTED_CLOSE } from '../src/step-engine/steps/_untrusted-repo.js';
 import { readDataRole } from '../src/step-engine/read-role.js';
+import { advanceStep } from '../src/step-engine/step-runner.js';
 import { assertDataEdgeSupport } from '../src/step-engine/data-edge-support.js';
 
 const role = TEST_PROMPT_ROLE,
@@ -49,6 +50,8 @@ function fixture(optional = false) {
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
     taskTypeDefinitions: schema.taskTypeDefinitions,
+    modules: schema.modules,
+    taskEvents: schema.taskEvents,
   });
   const taskId = randomUUID(),
     taskStepId = randomUUID();
@@ -322,3 +325,67 @@ it('stores parsed structured data once', async () => {
   const output = await apply(producer, JSON.stringify({ contract, data }));
   expect(Object.keys(output)).toEqual(['roleOutput']);
 });
+
+it.each(['valid', 'data', 'role', 'contract'] as const)(
+  'validates the stored structured payload before completion: %s',
+  async (kind) => {
+    const { ctx, fake, producer } = fixture();
+    fake.patch(schema.tasks, ctx.taskId, {
+      status: 'running',
+      currentStepId: producerId,
+      currentRound: 0,
+      orchestrationEpoch: 0,
+      autoContinue: true,
+    });
+    const output = {
+      roleOutput: {
+        role: kind === 'role' ? SPEC_ROLES.checked : role,
+        contract: kind === 'contract' ? { ...contract, version: 2 } : contract,
+        data: kind === 'data' ? { audited: 'bad' } : data,
+      },
+    };
+    fake.insert(schema.taskSteps, {
+      id: randomUUID(),
+      taskId: ctx.taskId,
+      stepId: producerId,
+      status: 'running',
+      round: 0,
+      runSeq: 0,
+      detectOutput: {},
+      formValues: {},
+      iterationCount: 0,
+      iterations: [],
+      startedAt: new Date(),
+      endedAt: null,
+      output: null,
+    });
+    const fixLoop = vi.fn(() => null);
+    const def = buildPromptStep(producerId, producer, 0);
+    const result = await advanceStep({
+      db: fake.db as unknown as Database,
+      taskId: ctx.taskId,
+      userId: randomUUID(),
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      providers: [],
+      runSeq: 0,
+      stepDef: {
+        ...def,
+        llm: undefined,
+        apply: async () => output,
+        fixLoopOnError: true,
+        fixLoop: { evaluate: fixLoop },
+      },
+    });
+    expect(result.status).toBe(kind === 'valid' ? 'done' : 'failed');
+    if (kind === 'valid') {
+      expect(result.row.output).toEqual(output);
+      expect(await readDataRole(ctx, role, 1, 'report')).toMatchObject({ state: 'ready', data });
+    } else {
+      expect(result.row.output).toBeNull();
+      expect(result.row.errorMessage).toContain('haive.code-audit@1');
+      expect(fixLoop).not.toHaveBeenCalled();
+    }
+  },
+);
