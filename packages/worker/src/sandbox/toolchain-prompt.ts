@@ -9,6 +9,10 @@ const CLOSE = '</haive_sandbox_toolchain>';
 export interface SandboxToolchainStamp {
   imageId: string;
   block?: string;
+  /** Number of independently adapted leading advisories (one when omitted). */
+  copies?: number;
+  /** One-based match ordinals when task quotes occur between native prompts. */
+  occurrences?: number[];
   /** Read-only compatibility with jobs queued before block-only stamps. Never write these fields. */
   prompt?: string;
   /** A native sub-agent invocation embeds several independently adapted prompts. */
@@ -50,6 +54,7 @@ function findSandboxToolchain(prompt: string): { at: number; after: number; bloc
       return { at, after, block: prompt.slice(at, end + close.length) };
     }
     at = after;
+    while (prompt[at] === '\n') at++;
   }
 }
 
@@ -78,6 +83,53 @@ export function withSandboxToolchain(
   return `${SANDBOX_TOOLCHAIN_MARKER}\n${line}\nProject-local tools and the project runtime may differ.\n${CLOSE}\n\n${clean}`;
 }
 
+/** Each prompt owns only its leading advisory, even when its body quotes the same block.
+ * Native assembly adds no advisories between these prompts, so match ordinals survive assembly.
+ * If any block cannot be located, rebuild every prompt without the optional fact. */
+export function prepareSandboxToolchainPrompts(prompts: string[], imageId?: string) {
+  if (!imageId) return { prompts };
+  const blocks = prompts.map(sandboxToolchainBlock);
+  const block = blocks[0];
+  if (!block || blocks.some((candidate) => candidate !== block))
+    return { prompts: prompts.map(stripSandboxToolchain) };
+  const separator = block + '\n\n';
+  let matches = 0;
+  const occurrences = prompts.map((prompt) => {
+    const owned = matches + 1;
+    matches += prompt.split(separator).length - 1;
+    return owned;
+  });
+  return {
+    prompts,
+    stamp: {
+      imageId,
+      block,
+      copies: prompts.length,
+      ...(occurrences.some((n, i) => n !== i + 1) ? { occurrences } : {}),
+    } satisfies SandboxToolchainStamp,
+  };
+}
+
+function sandboxToolchainOccurrences(stamp: SandboxToolchainStamp): number[] {
+  if (stamp.occurrences) return stamp.occurrences;
+  // Old native stamps carried the original segments rather than a count.
+  if (stamp.segments) {
+    return (
+      prepareSandboxToolchainPrompts(stamp.segments, stamp.imageId).stamp?.occurrences ??
+      Array.from({ length: stamp.segments.length }, (_, i) => i + 1)
+    );
+  }
+  return Array.from({ length: stamp.copies ?? 1 }, (_, i) => i + 1);
+}
+
+function removeStampedCopies(text: string, separator: string, occurrences: number[]): string {
+  if (!separator) return text;
+  if (occurrences.length === 1 && occurrences[0] === 1) return text.replace(separator, () => '');
+  let match = 0;
+  const owned = new Set(occurrences);
+  return text.replaceAll(separator, () => (owned.has(++match) ? '' : separator));
+}
+
 /** Recheck at the final spawn choke point, including sub-agent and app-server fallback paths.
  * Pin the launch to the inspected ID so a tag rebuilt AFTER inspect cannot invalidate the fact.
  * A different/unknown image or changed environment strips the advisory, never guesses a replacement.
@@ -88,7 +140,12 @@ export async function recheckSandboxToolchain(
   runner: DockerRunner = defaultDockerRunner,
   wrapper?: string | null,
   extraEnv?: Record<string, string>,
-): Promise<{ spec: CliCommandSpec; image: string | null; strippedBlock?: string }> {
+): Promise<{
+  spec: CliCommandSpec;
+  image: string | null;
+  strippedBlock?: string;
+  strippedOccurrences?: number[];
+}> {
   const stamp = spec.sandboxToolchain;
   if (!stamp) return { spec, image };
   const selected = image ?? process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
@@ -108,18 +165,24 @@ export async function recheckSandboxToolchain(
     return { spec, image: pinned };
   const block = stamp.block ?? sandboxToolchainBlock(stamp.segments?.[0] ?? stamp.prompt ?? '');
   const separator = block ? block + '\n\n' : '';
-  const replace = (text: string) => (separator ? text.replaceAll(separator, '') : text);
+  const occurrences = sandboxToolchainOccurrences(stamp);
+  const replace = (text: string) => removeStampedCopies(text, separator, occurrences);
   const replaceJson = (text: string) =>
-    separator ? text.replaceAll(JSON.stringify(separator).slice(1, -1), '') : text;
+    removeStampedCopies(text, JSON.stringify(separator).slice(1, -1), occurrences);
   const { sandboxToolchain: _stamp, ...clean } = spec;
   return {
     image: pinned ?? image,
-    ...(block ? { strippedBlock: block } : {}),
+    ...(block ? { strippedBlock: block, strippedOccurrences: occurrences } : {}),
     spec: {
       ...clean,
       args: spec.args.map(replace),
       ...(spec.stdinPrompt !== undefined
-        ? { stdinPrompt: replaceJson(replace(spec.stdinPrompt)) }
+        ? {
+            stdinPrompt:
+              separator && spec.stdinPrompt.includes(separator)
+                ? replace(spec.stdinPrompt)
+                : replaceJson(spec.stdinPrompt),
+          }
         : {}),
       ...(spec.stdinInitial !== undefined ? { stdinInitial: replaceJson(spec.stdinInitial) } : {}),
       ...(spec.promptFile

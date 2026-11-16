@@ -1092,6 +1092,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     '13-pr-wait llm builder, already scanned through the registry',
   'step-engine/steps/type-draft/_type-draft.ts#buildDraftPrompt':
     '01-type-draft llm builder, already scanned through the registry',
+  'sandbox/toolchain-prompt.ts#prepareSandboxToolchainPrompts':
+    'prepares already-built sub-agent prompts and their advisory stamps; adds no prompt text',
   'cli-adapters/antigravity.ts#antigravityStdinPrompt':
     'wraps an already-built prompt for stdin; adds no text of its own',
   'cli-adapters/prompt-delivery.ts#deliverPrompt':

@@ -383,8 +383,7 @@ async function resolveTaskDispatchOnTree(
   req: DispatchRequest,
   snapshotWorkspace: ResolvedCommittedSnapshots | null,
 ): Promise<DispatchPlan> {
-  // Enforcement must read current facets. Share only within this dispatch; the toolchain's
-  // advisory-only cache must not make house-rule selection stale.
+  // Enforcement reads current facets, shared with the advisory only within this dispatch.
   let taskFacets: ReturnType<typeof resolveTaskFacets> | undefined;
   const resolveFacets = () => (taskFacets ??= resolveTaskFacets(db, taskId));
   const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
@@ -936,7 +935,14 @@ function buildCliSidePlan(
     let agentRules = rules.stamp;
     let houseRules = house.stamp;
     let spec: CliCommandSpec | undefined;
+    let toolchainBlock: string | null = null;
     while (spec === undefined) {
+      toolchainBlock = toolchainFact ? sandboxToolchainBlock(effectivePrompt) : null;
+      if (toolchainFact && !toolchainBlock) {
+        toolchainFact = null;
+        effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
+        continue;
+      }
       try {
         spec = adapter.buildCliInvocation(provider, effectivePrompt, {
           ...invokeOpts,
@@ -961,11 +967,8 @@ function buildCliSidePlan(
         effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
       }
     }
-    if (toolchainFact)
-      spec.sandboxToolchain = {
-        imageId: toolchainFact.imageId,
-        block: sandboxToolchainBlock(effectivePrompt)!,
-      };
+    if (toolchainFact && toolchainBlock)
+      spec.sandboxToolchain = { imageId: toolchainFact.imageId, block: toolchainBlock };
     spec.agentRules = agentRules;
     if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
@@ -997,21 +1000,48 @@ function buildCliSidePlan(
     };
   }
 
+  // Splitters can prepend prose (sequential roles and synthesis instructions). Apply the
+  // advisory after splitting so each executable prompt still owns a leading block.
+  const subAgentFact = toolchainFact;
+  toolchainFact = null;
   const subAgentSpec = {
     ...req.input.spec,
-    // No step builds a sub-agent spec, so these carry no rules block rather than one per prompt.
     subAgents: req.input.spec.subAgents.map((subAgent) => ({
       ...subAgent,
       prompt: adaptPrompt(subAgent.prompt, null, null),
     })),
     synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt, null, null),
   };
+  toolchainFact = subAgentFact;
   const assignedAgentIds = assignedPersonaIds(req, [
     ...req.input.spec.subAgents.map((subAgent) => subAgent.prompt),
     req.input.spec.synthesisPrompt,
   ]);
   const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, invokeOpts);
-  if (toolchainFact) split.invocation.sandboxToolchainImageId = toolchainFact.imageId;
+  const cleanInvocation = split.invocation;
+  if (toolchainFact) {
+    split.invocation = {
+      ...cleanInvocation,
+      steps: cleanInvocation.steps.map((step) => ({
+        ...step,
+        prompt: withSandboxToolchain(step.prompt, toolchainFact),
+      })),
+      synthesis: {
+        ...cleanInvocation.synthesis,
+        prompt: withSandboxToolchain(cleanInvocation.synthesis.prompt, toolchainFact),
+      },
+    };
+    if (
+      [...split.invocation.steps, split.invocation.synthesis].some(
+        (step) => !sandboxToolchainBlock(step.prompt),
+      )
+    ) {
+      toolchainFact = null;
+      split.invocation = cleanInvocation;
+    } else {
+      split.invocation.sandboxToolchainImageId = toolchainFact.imageId;
+    }
+  }
   const invocation =
     assignedAgentIds.length > 0 ? { ...split.invocation, assignedAgentIds } : split.invocation;
   return {

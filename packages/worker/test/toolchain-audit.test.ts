@@ -28,9 +28,11 @@ it('awaits a block-only, invocation-scoped audit update before returning the exe
   });
   const set = vi.fn((values: { prompt: SQL }) => {
     const query = new PgDialect().sqlToQuery(values.prompt);
-    expect(query.sql).toContain('replace(');
-    expect(query.params).toEqual([block + '\n\n']);
-    stored = stored.replaceAll(query.params[0] as string, '');
+    expect(query.sql).toContain('string_agg(');
+    expect(query.sql).toContain('ordinal - 1 = any(');
+    expect(query.sql).toContain('order by ordinal');
+    expect(query.params).toEqual([[1], block + '\n\n', block + '\n\n']);
+    stored = stored.replace(query.params[1] as string, () => '');
     return { where };
   });
   const db = { update: () => ({ set }) } as unknown as Database;
@@ -70,4 +72,71 @@ it('does no audit write for unchanged facts or invocations without a durable row
   await recheckInvocationToolchain(spec, 'image:tag', 'run-id', same, null, {}, db);
   await recheckInvocationToolchain(spec, 'image:tag', null, runner, null, {}, db);
   expect(update).not.toHaveBeenCalled();
+});
+
+it('preserves a full quoted advisory in both CLI delivery and the invocation prompt', async () => {
+  const body = `Task text quoting the advisory:\n${block}\n\nKeep this quote.`;
+  const quoted = withSandboxToolchain(body, { imageId: oldId, php: 'absent' });
+  let stored = quoted;
+  const db = {
+    update: () => ({
+      set: (values: { prompt: SQL }) => {
+        const query = new PgDialect().sqlToQuery(values.prompt);
+        const separator = query.params[query.sql.includes('replace(') ? 0 : 1] as string;
+        // Model the selected SQL operation at the storage seam.
+        stored = query.sql.includes('replace(')
+          ? stored.replaceAll(separator, '')
+          : stored.replace(separator, () => '');
+        return { where: async () => {} };
+      },
+    }),
+  } as unknown as Database;
+  const answer = await recheckInvocationToolchain(
+    { ...spec, args: [quoted] },
+    'image:tag',
+    'run-id',
+    runner,
+    null,
+    {},
+    db,
+  );
+  expect(stored).toBe(body);
+  expect(answer.spec.args[0]).toBe(body);
+});
+
+it('persists counted native removal without consuming quoted copies between prompts', async () => {
+  const body = `Quoted:\n${block}\n\nKeep this.`;
+  const segment = withSandboxToolchain(body, { imageId: oldId, php: 'absent' });
+  const assembled = `${segment}\nNext agent:\n${segment}`;
+  let stored = assembled;
+  const db = {
+    update: () => ({
+      set: (values: { prompt: SQL }) => {
+        const { params } = new PgDialect().sqlToQuery(values.prompt);
+        const [ordinals, delimiter, separator] = params as [number[], string, string];
+        expect(ordinals).toEqual([1, 3]);
+        expect(delimiter).toBe(separator);
+        stored = stored
+          .split(separator)
+          .map((piece, i) => (i === 0 || ordinals.includes(i) ? '' : delimiter) + piece)
+          .join('');
+        return { where: async () => {} };
+      },
+    }),
+  } as unknown as Database;
+  const answer = await recheckInvocationToolchain(
+    {
+      ...spec,
+      args: [assembled],
+      sandboxToolchain: { imageId: oldId, block, copies: 2, occurrences: [1, 3] },
+    },
+    'image:tag',
+    'run-id',
+    runner,
+    null,
+    {},
+    db,
+  );
+  expect(stored).toBe(`${body}\nNext agent:\n${body}`);
+  expect(answer.spec.args[0]).toBe(stored);
 });

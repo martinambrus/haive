@@ -1,4 +1,5 @@
-import { expect, it } from 'vitest';
+import * as toolchain from '../src/sandbox/toolchain-prompt.js';
+import { expect, it, vi } from 'vitest';
 import { resolveDispatch, type DispatchRequest } from '../src/orchestrator/dispatcher.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 const ID = `sha256:${'a'.repeat(64)}`;
@@ -89,8 +90,8 @@ it('gives native and sequential sub-agents and synthesis the same fact and exec 
     expect(plan.invocation?.kind).toBe('subagent');
     if (plan.invocation?.kind !== 'subagent') throw new Error('expected sub-agent');
     expect(plan.invocation.spec.sandboxToolchainImageId).toBe(ID);
-    expect(plan.invocation.spec.steps[0]?.prompt).toContain('<haive_sandbox_toolchain>');
-    expect(plan.invocation.spec.synthesis.prompt).toContain('<haive_sandbox_toolchain>');
+    expect(toolchain.sandboxToolchainBlock(plan.invocation.spec.steps[0]!.prompt)).toBeTruthy();
+    expect(toolchain.sandboxToolchainBlock(plan.invocation.spec.synthesis.prompt)).toBeTruthy();
   }
 });
 
@@ -111,3 +112,28 @@ it('stamps only the advisory block instead of duplicating the task prompt in Red
   expect(JSON.stringify(stamp)).not.toContain(body);
   expect(JSON.stringify(stamp).length).toBeLessThan(400);
 });
+
+it.each(['prompt', 'subagent'] as const)(
+  'rebuilds a %s dispatch without the fact when its block cannot be located',
+  (kind) => {
+    const lookup = vi.spyOn(toolchain, 'sandboxToolchainBlock').mockReturnValue(null);
+    try {
+      const req = request('p0', { sandboxToolchain: { p0: { imageId: ID, php: 'absent' } } });
+      if (kind === 'subagent')
+        req.input = {
+          kind,
+          capabilities: [],
+          spec: {
+            subAgents: [{ name: 'one', prompt: 'Check one', outputKey: 'one' }],
+            synthesisPrompt: 'Combine',
+          },
+        };
+      const plan = resolveDispatch(req);
+      expect(JSON.stringify(plan.invocation)).not.toContain('sandboxToolchain');
+      expect(JSON.stringify(plan.invocation)).not.toContain('haive_sandbox_toolchain');
+      expect(plan.effectivePrompt ?? '').not.toContain('haive_sandbox_toolchain');
+    } finally {
+      lookup.mockRestore();
+    }
+  },
+);

@@ -3,10 +3,6 @@ import { emptyProjectFacetSet } from '@haive/shared/global-kb';
 import type { Database } from '@haive/database';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 const h = vi.hoisted(() => ({ facets: vi.fn(), peek: vi.fn(), probe: vi.fn() }));
-vi.mock('@haive/shared/global-kb', async (original) => ({
-  ...(await original<object>()),
-  resolveTaskFacets: h.facets,
-}));
 vi.mock('../src/queues/cli-exec/images.js', () => ({
   peekSandboxImageTag: h.peek,
   createSandboxImagePeekBatch: () => ({}),
@@ -16,11 +12,17 @@ vi.mock('../src/sandbox/toolchain-probe.js', async (original) => ({
   sandboxToolchainProbe: { get: h.probe },
 }));
 import {
-  resolveDispatchSandboxToolchain,
+  resolveDispatchSandboxToolchain as resolveWithFacets,
   TOOLCHAIN_DISPATCH_WAIT_MS,
 } from '../src/orchestrator/sandbox-toolchain.js';
 import { SandboxToolchainProbe } from '../src/sandbox/toolchain-probe.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
+const resolveDispatchSandboxToolchain = (
+  db: Database,
+  taskId: string,
+  providers: CliProviderRecord[],
+  opts: Partial<Parameters<typeof resolveWithFacets>[3]> = {},
+) => resolveWithFacets(db, taskId, providers, { resolveFacets: h.facets, ...opts });
 let db = {} as Database;
 const ID = `sha256:${'a'.repeat(64)}`;
 const providers = [0, 1].map(
@@ -139,17 +141,15 @@ it('two dispatches and two image tags of one ID share a probe, and a rebuilt tag
   expect(run).toHaveBeenCalledTimes(2);
 });
 
-it('memoizes task facets and provider peeks for 10 seconds across serial and racing dispatches', async () => {
+it('memoizes provider peeks for 10 seconds across serial and racing dispatches', async () => {
   await Promise.all([
     resolveDispatchSandboxToolchain(db, 't', providers),
     resolveDispatchSandboxToolchain(db, 't', providers),
   ]);
   await resolveDispatchSandboxToolchain(db, 't', providers);
-  expect(h.facets).toHaveBeenCalledTimes(1);
   expect(h.peek).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(10_000);
   await resolveDispatchSandboxToolchain(db, 't', providers);
-  expect(h.facets).toHaveBeenCalledTimes(2);
   expect(h.peek).toHaveBeenCalledTimes(4);
 });
 it('uses facets already resolved by the dispatch', async () => {

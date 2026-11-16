@@ -1,5 +1,5 @@
 import type { Database } from '@haive/database';
-import { resolveTaskFacets, type ProjectFacetSet } from '@haive/shared/global-kb';
+import type { ProjectFacetSet } from '@haive/shared/global-kb';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { peekSandboxImageTag, createSandboxImagePeekBatch } from '../queues/cli-exec/images.js';
 import { sandboxToolchainProbe, type SandboxToolchainFact } from '../sandbox/toolchain-probe.js';
@@ -14,7 +14,6 @@ export const TOOLCHAIN_PEEK_CACHE_LIMIT = 128;
 type CacheLimits = { cacheLimit?: number; ttlMs?: number };
 
 type Memo<T> = WeakMap<Database, Map<string, { promise: Promise<T>; expiresAt: number }>>;
-const facetsMemo: Memo<ProjectFacetSet> = new WeakMap();
 const peekMemo: Memo<Awaited<ReturnType<typeof peekSandboxImageTag>>> = new WeakMap();
 
 function memo<T>(
@@ -40,15 +39,6 @@ function memo<T>(
   return promise;
 }
 
-/** Advisory-only fallback for callers without a dispatch's fresh, shared facet getter. */
-function resolveDispatchTaskFacets(
-  db: Database,
-  taskId: string,
-  limits?: CacheLimits,
-): Promise<ProjectFacetSet> {
-  return memo(facetsMemo, db, taskId, () => resolveTaskFacets(db, taskId), limits);
-}
-
 /** PHP is the only measured missing-interpreter case. No repository-provided binary names.
  * Both provider fan-out and caller wait are bounded; slow work may finish/cache later but
  * never mutates an already returned result or starts a probe after this batch expires. */
@@ -59,16 +49,15 @@ export async function resolveDispatchSandboxToolchain(
   opts: {
     extraEnv?: Record<string, string>;
     waitMs?: number;
-    resolveFacets?: () => Promise<ProjectFacetSet>;
+    resolveFacets: () => Promise<ProjectFacetSet>;
     cacheLimits?: CacheLimits;
-  } = {},
+  },
 ): Promise<Record<string, SandboxToolchainFact | null>> {
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const facts: Record<string, SandboxToolchainFact | null> = {};
   const work = async () => {
-    const facets = await (opts.resolveFacets?.() ??
-      resolveDispatchTaskFacets(db, taskId, opts.cacheLimits));
+    const facets = await opts.resolveFacets();
     if (expired || !facets.language.includes('php')) return;
     const batch = createSandboxImagePeekBatch();
     let next = 0;

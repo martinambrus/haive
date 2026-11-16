@@ -1,4 +1,10 @@
-import { sandboxToolchainBlock } from '../../sandbox/toolchain-prompt.js';
+import {
+  prepareSandboxToolchainPrompts,
+  sandboxToolchainBlock,
+  stripSandboxToolchain,
+} from '../../sandbox/toolchain-prompt.js';
+import { buildAmpSequentialInvocation } from '../../sub-agent-emulator/amp-mode.js';
+import { buildCodexSequentialInvocation } from '../../sub-agent-emulator/codex-mode.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { type CliExecJobPayload, type CliProviderName } from '@haive/shared';
@@ -56,19 +62,21 @@ export async function executeSubAgentNative(
     throw new Error(`subagent_native expected native invocation, got ${invocation.mode}`);
   }
 
-  const prompt = assembleNativePrompt(invocation);
+  const prepared = prepareSandboxToolchainPrompts(
+    [...invocation.steps.map((step) => step.prompt), invocation.synthesis.prompt],
+    invocation.sandboxToolchainImageId,
+  );
+  const prompt = assembleNativePrompt({
+    ...invocation,
+    steps: invocation.steps.map((step, i) => ({ ...step, prompt: prepared.prompts[i]! })),
+    synthesis: { ...invocation.synthesis, prompt: prepared.prompts.at(-1)! },
+  });
   const spec = adapter.buildCliInvocation(provider, prompt, {
     cwd: sandboxWorkdir,
     extraEnv: secrets,
     effortLevel: payload.effortLevel,
   });
-  if (invocation.sandboxToolchainImageId)
-    spec.sandboxToolchain = {
-      imageId: invocation.sandboxToolchainImageId,
-      block:
-        sandboxToolchainBlock(invocation.steps[0]?.prompt ?? invocation.synthesis.prompt) ??
-        undefined,
-    };
+  if (prepared.stamp) spec.sandboxToolchain = prepared.stamp;
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
@@ -146,10 +154,13 @@ export async function executeSubAgentSequential(
   }
   const adapter = cliAdapterRegistry.get(provider.name);
 
-  const invocation = payload.spec as SubAgentInvocation;
+  let invocation = payload.spec as SubAgentInvocation;
   if (invocation.mode !== 'sequential') {
     throw new Error(`subagent_sequential expected sequential invocation, got ${invocation.mode}`);
   }
+
+  if (invocation.sandboxToolchainImageId)
+    invocation = normalizeSequentialToolchain(invocation, provider.name === 'amp');
 
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
@@ -191,16 +202,13 @@ export async function executeSubAgentSequential(
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
     (prompt) => {
-      const spec = adapter.buildCliInvocation(provider, prompt, {
+      const prepared = prepareSandboxToolchainPrompts([prompt], invocation.sandboxToolchainImageId);
+      const spec = adapter.buildCliInvocation(provider, prepared.prompts[0]!, {
         cwd: sandboxWorkdir,
         extraEnv: secrets,
         effortLevel: payload.effortLevel,
       });
-      if (invocation.sandboxToolchainImageId)
-        spec.sandboxToolchain = {
-          imageId: invocation.sandboxToolchainImageId,
-          block: sandboxToolchainBlock(prompt) ?? undefined,
-        };
+      if (prepared.stamp) spec.sandboxToolchain = prepared.stamp;
       return spec;
     },
     spawner,
@@ -219,6 +227,45 @@ export async function executeSubAgentSequential(
     apiDurationMs: result.apiDurationMs,
     // N processes under one row and no stream: what each sub-step used is not observable here.
     toolUsage: unobservedToolUsage('stream'),
+  };
+}
+
+/** Older queued sequential jobs put the advisory inside the generated role wrapper.
+ * Derive that wrapper from its own builder, rather than searching arbitrary task text.
+ * Lift only a leading advisory in that exact body; quotes elsewhere remain data. */
+function normalizeSequentialToolchain(
+  invocation: SubAgentInvocation,
+  amp: boolean,
+): SubAgentInvocation {
+  const marker = '\0haive-toolchain-body\0';
+  const template = (amp ? buildAmpSequentialInvocation : buildCodexSequentialInvocation)({
+    subAgents: invocation.steps.map((step) => ({
+      name: step.id,
+      outputKey: step.collectInto ?? '',
+      prompt: marker,
+    })),
+    synthesisPrompt: marker,
+  });
+  const lift = (prompt: string, wrapped: string): string => {
+    if (sandboxToolchainBlock(prompt)) return prompt;
+    const parts = wrapped.split(marker);
+    if (parts.length !== 2) throw new Error('Cannot identify the queued sub-agent body.');
+    const [prefix, suffix] = parts as [string, string];
+    if (!prompt.startsWith(prefix) || !prompt.endsWith(suffix)) return prompt;
+    const body = prompt.slice(prefix.length, prompt.length - suffix.length);
+    const block = sandboxToolchainBlock(body);
+    return block ? `${block}\n\n${prefix}${stripSandboxToolchain(body)}${suffix}` : prompt;
+  };
+  return {
+    ...invocation,
+    steps: invocation.steps.map((step, i) => ({
+      ...step,
+      prompt: lift(step.prompt, template.steps[i]!.prompt),
+    })),
+    synthesis: {
+      ...invocation.synthesis,
+      prompt: lift(invocation.synthesis.prompt, template.synthesis.prompt),
+    },
   };
 }
 

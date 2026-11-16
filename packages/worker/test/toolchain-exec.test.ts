@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import {
+  prepareSandboxToolchainPrompts,
   recheckSandboxToolchain,
   stripSandboxToolchain,
   withSandboxToolchain,
@@ -60,7 +61,7 @@ it('also strips each nested native prompt and synthesis fact', async () => {
   const s = {
     ...spec(),
     args: [assembled],
-    sandboxToolchain: { imageId: OLD, block },
+    sandboxToolchain: { imageId: OLD, block, copies: 2 },
   };
   expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([
     'Agent:\nCheck code\nSynthesize:\nCheck code',
@@ -107,4 +108,63 @@ it('strips exactly the stamped block and its blank line, preserving task whitesp
 it('continues to handle legacy full-prompt stamps already queued before the upgrade', async () => {
   const s = { ...spec(), sandboxToolchain: { imageId: OLD, prompt } };
   expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args[1]).toBe('Check code');
+});
+
+it.each(['argv', 'stdin', 'steering', 'antigravity', 'file', 'app-server'] as const)(
+  'keeps a full quoted advisory including its blank line in %s delivery',
+  async (mode) => {
+    const body = `Task text quoting the advisory:\n${block}\n\nKeep $& $$ $\` $' verbatim.`;
+    const quoted = withSandboxToolchain(body, fact);
+    const s: CliCommandSpec = {
+      ...spec(),
+      args: mode === 'argv' ? [quoted] : ['--model', 'chosen'],
+    };
+    if (mode === 'stdin') s.stdinPrompt = quoted;
+    if (mode === 'steering') s.stdinInitial = steeringUserMessageLine(quoted);
+    if (mode === 'antigravity') s.stdinPrompt = antigravityStdinPrompt(quoted);
+    if (mode === 'file') s.promptFile = { containerPath: '/prompt', content: quoted };
+    if (mode === 'app-server')
+      s.codexAppServer = { prompt: quoted, model: 'chosen', effort: 'high', execArgs: ['exec'] };
+    const { spec: clean } = await recheckSandboxToolchain(s, 'image:tag', runner);
+    if (mode === 'argv') expect(clean.args).toEqual([body]);
+    if (mode === 'stdin') expect(clean.stdinPrompt).toBe(body);
+    if (mode === 'steering') expect(clean.stdinInitial).toBe(steeringUserMessageLine(body));
+    if (mode === 'antigravity') expect(clean.stdinPrompt).toBe(antigravityStdinPrompt(body));
+    if (mode === 'file') expect(clean.promptFile?.content).toBe(body);
+    if (mode === 'app-server') expect(clean.codexAppServer?.prompt).toBe(body);
+  },
+);
+
+it.each(['block', 'legacy'] as const)(
+  'removes native leading copies while retaining interleaved quotes with %s stamps',
+  async (kind) => {
+    const body = `Quoted advisory:\n${block}\n\nDo not change it.`;
+    const prompts = [withSandboxToolchain(body, fact), withSandboxToolchain(body, fact), prompt];
+    const prepared = prepareSandboxToolchainPrompts(prompts, OLD);
+    expect(prepared.stamp).toMatchObject({ copies: 3, occurrences: [1, 3, 5] });
+    const assembled = prompts.join('\nNext agent:\n');
+    const stamp = kind === 'legacy' ? { imageId: OLD, segments: prompts } : prepared.stamp;
+    const s = { ...spec(), args: [assembled], sandboxToolchain: stamp };
+    const checked = await recheckSandboxToolchain(s, 'image:tag', runner);
+    expect(checked.spec.args).toEqual([[body, body, 'Check code'].join('\nNext agent:\n')]);
+  },
+);
+it.each(['single', 'native'] as const)(
+  'rebuilds %s prompts without the advisory if any leading block is missing',
+  (kind) => {
+    const prompts = kind === 'single' ? ['No block here'] : [prompt, 'No block here'];
+    const prepared = prepareSandboxToolchainPrompts(prompts, OLD);
+    expect(prepared.stamp).toBeUndefined();
+    expect(prepared.prompts).toEqual(
+      kind === 'single' ? ['No block here'] : ['Check code', 'No block here'],
+    );
+  },
+);
+
+it('finds the advisory behind extra separator lines without consuming task-leading blank lines', async () => {
+  const outer = '<haive_agent_rules>\nKeep these rules.\n</haive_agent_rules>\n\n\n\n';
+  const s = { ...spec(), args: [outer + withSandboxToolchain('\n\nCheck code', fact)] };
+  expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([
+    outer + '\n\nCheck code',
+  ]);
 });
