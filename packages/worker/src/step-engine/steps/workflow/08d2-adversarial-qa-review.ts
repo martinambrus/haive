@@ -1,6 +1,8 @@
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { dispositionReviewFindings } from './_review-findings.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
@@ -185,14 +187,16 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
 
   // Only when 08d actually ran AND surfaced findings — nothing to review otherwise.
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
-    const out = prev?.output as Phase8dOutput | null;
+    const out = checkResultOutput(
+      await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa),
+    ) as Phase8dOutput;
     return out?.ran === true && (out.findings?.length ?? 0) > 0;
   },
 
   async detect(ctx: StepContext): Promise<QaReviewDetect> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
-    const out = (prev?.output as Phase8dOutput | null) ?? {};
+    const out = checkResultOutput(
+      await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa),
+    ) as Phase8dOutput;
     const findings: QaFinding[] = (out.findings ?? []).map((f, i) => {
       const cat = f.category ?? 'issue';
       const loc = f.location ? ` @ ${f.location}` : '';

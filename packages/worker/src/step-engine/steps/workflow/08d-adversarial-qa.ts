@@ -1,3 +1,4 @@
+import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
@@ -17,6 +18,8 @@ import {
   shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
 } from '../../mining-failure.js';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
@@ -903,6 +906,12 @@ export function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): str
 }
 
 export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApply> = {
+  providesRoles: [
+    {
+      role: CHECK_RESULT_ROLES.adversarialQa,
+      contract: STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.adversarialQa].contract,
+    },
+  ],
   metadata: {
     id: '08d-adversarial-qa',
     workflowType: 'workflow',
@@ -939,8 +948,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const spec = (await resolveSpecView(ctx)).text;
 
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
-    const browser = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');
-    const browserOut = browser?.output as { appUrl?: string; appLogin?: AppLoginOutcome } | null;
+    const browserOut = checkResultOutput(await readRole(ctx, CHECK_RESULT_ROLES.browser));
     const appUrl = browserOut?.appUrl ?? boot?.appUrl ?? null;
     // Absent on rows written before app login existed, and on the probe/manual paths
     // that never attempt one — both mean "not logged in", which is what the adversaries
