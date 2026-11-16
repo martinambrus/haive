@@ -29,10 +29,18 @@ import {
 // edit files only (git is unavailable in the sandbox); 10-gate-3-commit picks
 // the edits up via `git add -A` later.
 
+import {
+  recordChangeSize,
+  unknownSize,
+  type SizeMeasurement,
+  type SimplifySizes,
+} from './_change-size.js';
+
 const ROLE_SIMPLIFIER = 'simplifier';
 const ROLE_FIXUP = 'fixup';
 
 interface SimplifyDetect {
+  changeSizeBefore?: SizeMeasurement;
   worktreePath: string;
   sandboxWorktreePath: string;
   spec: string;
@@ -46,6 +54,7 @@ interface SimplifyDetect {
 }
 
 interface SimplifyApply {
+  changeSize: SimplifySizes;
   ran: boolean;
   filesSimplified: string[];
   changesMade: string[];
@@ -239,6 +248,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
     const dagOut = dag?.output as { ran?: boolean; issues?: number; levels?: number } | null;
 
     return {
+      changeSizeBefore: await recordChangeSize(ctx, wt.worktreePath, 'before', null, -1),
       worktreePath: wt.worktreePath,
       // Per-invocation isolation mounts the worktree alone at the workdir root, so the
       // agent's workspace is ctx.sandboxWorkdir. worktreePath (host) stays for host-side
@@ -338,6 +348,23 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
   },
 
   async apply(ctx, args): Promise<SimplifyApply> {
+    const before = args.detected.changeSizeBefore ?? unknownSize('Before-image was not recorded.');
+    const measured = await recordChangeSize(
+      ctx,
+      args.detected.worktreePath,
+      args.iteration > 0 ? 'afterFixup' : 'afterSimplify',
+      args.llmInvocationId ?? null,
+      args.iteration,
+      before,
+    );
+    const changeSize: SimplifySizes = {
+      before,
+      afterSimplify:
+        args.iteration > 0
+          ? (priorSimplifier(args.previousIterations)?.changeSize?.afterSimplify ?? unknownSize())
+          : measured,
+      afterFixup: args.iteration > 0 ? measured : unknownSize('Fixup has not run.'),
+    };
     // Pass 1 — fixup verification: merge with the pass-0 simplifier result.
     if (args.iteration > 0) {
       const fixup = parseFixupOutput(args.llmOutput ?? null);
@@ -347,6 +374,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
         'simplification fixup verified',
       );
       return {
+        changeSize,
         ran: true,
         filesSimplified: prior?.filesSimplified ?? [],
         changesMade: prior?.changesMade ?? [],
@@ -366,6 +394,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
         'code simplification pass complete',
       );
       return {
+        changeSize,
         ran: true,
         filesSimplified: parsed.filesSimplified,
         changesMade: parsed.changesMade,
@@ -377,6 +406,7 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
     }
     ctx.logger.info('code simplification output unparseable — treating as no changes');
     return {
+      changeSize,
       ran: true,
       filesSimplified: [],
       changesMade: [],

@@ -266,6 +266,10 @@
     "./step-ports": {
       "types": "./dist/step-engine/step-ports.d.ts",
       "import": "./dist/step-engine/step-ports.js"
+    },
+    "./change-size": {
+      "types": "./dist/change-size.d.ts",
+      "import": "./dist/change-size.js"
     }
   },
   "scripts": {
@@ -278,10 +282,12 @@
   },
   "dependencies": {
     "@haive/database": "workspace:*",
+    "@vscode/tree-sitter-wasm": "0.3.1",
     "drizzle-orm": "0.45.2",
     "ioredis": "^6.0.0",
     "pino": "^10.4.0",
     "postgres": "^4.1.1",
+    "web-tree-sitter": "0.25.10",
     "zod": "^4.6.6"
   },
   "devDependencies": {
