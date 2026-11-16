@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { registryModuleExports } from '../registry-module.mjs';
+import { REGISTRY_MODULE_MAX_PACK_BYTES, registryModuleExports } from '../registry-module.mjs';
 
 for (const identity of ['matching', 'different']) {
   test(`reads a real packed manifest when registry exports are absent (${identity} identity)`, async (t) => {
@@ -39,8 +39,9 @@ for (const identity of ['matching', 'different']) {
               spawnSync('tar', ['-czf', join(scratch, 'demo.tgz'), '-C', dir, 'package']).status,
               0,
             );
-            return { stdout: JSON.stringify([{ filename: 'demo.tgz' }]) };
+            return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
           }
+          assert.ok(args.includes('--occurrence=1'));
           const result = spawnSync(cmd, args, { ...options, encoding: 'utf8' });
           assert.equal(result.status, 0, result.stderr);
           return result;
@@ -52,3 +53,28 @@ for (const identity of ['matching', 'different']) {
     assert.equal(existsSync(scratch), false);
   });
 }
+
+test('refuses oversized pack metadata before reading tar, with an injectable byte limit', async () => {
+  let scratch;
+  const calls = [];
+  await assert.rejects(
+    registryModuleExports('@haive-module/demo@1.0.0', {
+      cwd: tmpdir(),
+      env: {},
+      maxPackBytes: 4,
+      command: async (cmd, args) => {
+        calls.push(cmd);
+        if (cmd === 'pnpm') return { stdout: '' };
+        scratch = args.at(-1);
+        return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 5 }]) };
+      },
+    }),
+    /packed module exceeds size limit/,
+  );
+  assert.deepEqual(calls, ['pnpm', 'npm']);
+  assert.equal(existsSync(scratch), false);
+});
+
+test('pins the production pack limit to 100 MiB', () => {
+  assert.equal(REGISTRY_MODULE_MAX_PACK_BYTES, 100 * 1024 * 1024);
+});

@@ -2,9 +2,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
+export const REGISTRY_MODULE_MAX_PACK_BYTES = 100 * 1024 * 1024;
+
 // GitHub Packages omits exports from its packument. Inspect the published archive
 // when metadata is absent, without installing dependencies or running package code.
-export async function registryModuleExports(spec, { command, cwd, env }) {
+export async function registryModuleExports(
+  spec,
+  { command, cwd, env, maxPackBytes = REGISTRY_MODULE_MAX_PACK_BYTES },
+) {
   const view = await command('pnpm', ['view', spec, 'exports', '--json'], { cwd, env });
   if (view.stdout.trim()) return JSON.parse(view.stdout);
   const scratch = mkdtempSync(join(tmpdir(), 'haive-registry-module-'));
@@ -19,9 +24,18 @@ export async function registryModuleExports(spec, { command, cwd, env }) {
     const file = files?.length === 1 ? files[0]?.filename : undefined;
     if (typeof file !== 'string' || basename(file) !== file || !file.endsWith('.tgz'))
       throw new Error(`could not identify the packed module ${spec}`);
+    if (files[0].size > maxPackBytes)
+      throw new Error(`packed module exceeds size limit (${maxPackBytes} bytes): ${spec}`);
     const manifest = await command(
       'tar',
-      ['--no-wildcards', '-xzOf', join(scratch, file), '--', 'package/package.json'],
+      [
+        '--occurrence=1',
+        '--no-wildcards',
+        '-xzOf',
+        join(scratch, file),
+        '--',
+        'package/package.json',
+      ],
       { cwd: scratch, env },
     );
     if (Buffer.byteLength(manifest.stdout) > 1024 * 1024)

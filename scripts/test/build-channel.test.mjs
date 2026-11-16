@@ -120,7 +120,7 @@ function fixture(t, config = {}) {
       writeFileSync(output, 'archive');
       return ok();
     }
-    if (cmd === 'npm') return ok(JSON.stringify([{ filename: 'demo.tgz' }]));
+    if (cmd === 'npm') return ok(JSON.stringify([{ filename: 'demo.tgz', size: 256 }]));
     if (cmd === 'tar' && args.includes('package/package.json'))
       return ok(
         JSON.stringify({

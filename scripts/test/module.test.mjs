@@ -376,6 +376,11 @@ describe('module add @haive-module/<id>@<version>', () => {
 
   for (const [label, env, message] of [
     [
+      'an oversized pack',
+      { STUB_NPM_SIZE: String(100 * 1024 * 1024 + 1) },
+      /packed module exceeds size limit/,
+    ],
+    [
       'npm pack failure',
       { STUB_NPM_EXIT: '1' },
       /npm pack @haive-module\/foo@1\.0\.0 .*failed: stub npm pack failure/,

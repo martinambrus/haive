@@ -6,6 +6,7 @@ import local from './local-modules.cjs';
 import { registryModuleExports } from './registry-module.mjs';
 import { publicModuleLock } from './public-module-lock.mjs';
 
+const REGISTRY_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const [command, target, ...extra] = process.argv.slice(2);
 
@@ -111,6 +112,7 @@ if (registry === null) {
             ...options,
             encoding: 'utf8',
             maxBuffer: 2 * 1024 * 1024,
+            timeout: REGISTRY_COMMAND_TIMEOUT_MS,
           });
           if (result.status !== 0 || result.error)
             throw new Error(
