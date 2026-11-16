@@ -73,6 +73,20 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
+  it('refuses test management after verify in the shared composer/admission walk', () => {
+    expect(
+      validateComposition(
+        ['01-worktree-setup', '07-phase-2-implement', '08-phase-5-verify', '08b-test-management'],
+        catalog,
+      ),
+    ).toContainEqual({
+      kind: 'too-late',
+      index: 3,
+      stepId: '08b-test-management',
+      token: 'verification',
+    });
+  });
+
   it('allows run configuration after commit because commit consumes none of its settings', () => {
     expect(
       validateComposition(['01-worktree-setup', '10-gate-3-commit', '06-run-config'], catalog),
