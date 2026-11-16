@@ -1245,7 +1245,7 @@
     "context": "Object.freeze",
     "value": "05-phase-0b5-spec-quality",
     "count": 1,
-    "reason": "Host-owned input/provider metadata used by locked v3 admission; no repository/output query or module authority."
+    "reason": "Spec-quality consumer's optional draft-spec input declaration for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -1253,7 +1253,7 @@
     "context": "input",
     "value": "@roles",
     "count": 1,
-    "reason": "Host-owned input/provider metadata used by locked v3 admission; no repository/output query or module authority."
+    "reason": "Spec-quality consumer's optional draft-spec input declaration for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -1261,7 +1261,7 @@
     "context": "Object.freeze",
     "value": "05a-resolve-spec-warnings",
     "count": 1,
-    "reason": "Host-owned input/provider metadata used by locked v3 admission; no repository/output query or module authority."
+    "reason": "Spec-warning resolver's optional draft and checked spec input declarations for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -1269,7 +1269,7 @@
     "context": "input",
     "value": "@roles",
     "count": 2,
-    "reason": "Host-owned input/provider metadata used by locked v3 admission; no repository/output query or module authority."
+    "reason": "Spec-warning resolver's optional draft and checked spec input declarations for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -1277,7 +1277,7 @@
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
     "value": "@roles",
     "count": 2,
-    "reason": "Host-owned input/provider metadata used by locked v3 admission; no repository/output query or module authority."
+    "reason": "Inventory of physical effective-spec consumers receiving optional draft/checked/resolved spec-stage inputs for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -2373,7 +2373,7 @@
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
     "value": "07-phase-2-implement",
     "count": 1,
-    "reason": "Exact host summary declarations and structural single/DAG route; no shape-based producer selection."
+    "reason": "Inventory of physical effective-spec consumers receiving optional draft/checked/resolved spec-stage inputs for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -3053,7 +3053,7 @@
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
     "value": "07b-phase-4-validate",
     "count": 1,
-    "reason": "Host-declared optional check-result data edges and canonical producer projection for admission/history; no routing authority."
+    "reason": "Inventory of physical effective-spec consumers receiving optional draft/checked/resolved spec-stage inputs for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
@@ -3061,7 +3061,7 @@
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
     "value": "08b-test-management",
     "count": 1,
-    "reason": "Host-declared optional check-result data edges and canonical producer projection for admission/history; no routing authority."
+    "reason": "Inventory of physical effective-spec consumers receiving optional draft/checked/resolved spec-stage inputs for admission and port projection."
   },
   {
     "file": "packages/shared/src/step-engine/execution-paths.ts",
@@ -4093,7 +4093,7 @@
     "context": "[ '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.', TOOLING_PAGE_HINT, 'Nothing here says the code is correct.', declinedConfigsSentence(detected.declinedConfigs), ] .filter",
     "value": "08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.",
     "count": 1,
-    "reason": "Explicit host gate adapter reads typed check-result data; existing human approval/reject policy and physical restart target remain unchanged."
+    "reason": "User-facing NOT RUN explanation names the physical verify step and root-only tooling discovery; this is display copy, not an output lookup."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/09-gate-2-verify-approval.ts",
@@ -4101,7 +4101,7 @@
     "context": "import",
     "value": "./08-phase-5-verify.js",
     "count": 1,
-    "reason": "Explicit host gate adapter reads typed check-result data; existing human approval/reject policy and physical restart target remain unchanged."
+    "reason": "Imports the shared tooling-notice formatting helpers from verify; this import reads no producer output."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts",
@@ -4142,5 +4142,21 @@
     "value": "./08b-test-management.js",
     "count": 1,
     "reason": "Retained physical step identity in index.ts:import for execution configuration, UI presentation or historical provenance; not a migrated result-data consumer."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_gate-house-rules.ts",
+    "symbol": "validationCheck.canonical",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Host compares the actual producer identity with its canonical registry id; alternate producers require an owned stamp and cannot attest the host fingerprint."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_gate-house-rules.ts",
+    "symbol": "codeReviewCheck.canonical",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "@roles",
+    "count": 2,
+    "reason": "Host compares the actual producer identity with its canonical registry id; alternate producers require an owned stamp and cannot attest the host fingerprint."
   }
 ]

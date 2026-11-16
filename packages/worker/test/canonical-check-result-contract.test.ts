@@ -7,10 +7,17 @@ import {
 } from '@haive/shared/step-outputs';
 import { finalizeCanonicalCheckResult } from '../src/step-engine/check-result-output.js';
 
+import type { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
+import type { phase5VerifyStep } from '../src/step-engine/steps/workflow/08-phase-5-verify.js';
+import type { testManagementStep } from '../src/step-engine/steps/workflow/08b-test-management.js';
+type ValidationReturn = Awaited<ReturnType<NonNullable<typeof phase4ValidateStep.apply>>>;
+type VerifyReturn = Awaited<ReturnType<NonNullable<typeof phase5VerifyStep.apply>>>;
+type ManagementReturn = Awaited<ReturnType<NonNullable<typeof testManagementStep.apply>>>;
+
 // Full return records reproduced from the apply paths, including storage-only fields.
 // Keep these in step with 07b's fixer/validator/stub, 08's aggregate and 08b's
 // skip/aggregate. Partial consumer fixtures cannot prove the throwing writer safe.
-const validator = {
+const validator: ValidationReturn = {
   validationSnapshot: { 'src/a.ts': 'file:sha256' },
   verdict: 'VALID',
   summary: 'All dimensions checked',
@@ -31,9 +38,14 @@ const validator = {
   validatorPasses: 1,
   source: 'validator',
 };
-const issue = { severity: 'high', file: 'src/a.ts', description: 'a defect', fix: 'repair it' };
+const issue: ValidationReturn['issues'][number] = {
+  severity: 'high',
+  file: 'src/a.ts',
+  description: 'a defect',
+  fix: 'repair it',
+};
 // 07b apply: fixer carries the previous validator's metadata and adds its own writes.
-const fixer = {
+const fixer: ValidationReturn = {
   runtimeChanged: true,
   verdict: 'ISSUES_FOUND',
   summary: 'Defect found',
@@ -45,7 +57,7 @@ const fixer = {
   validatorInvocationId: 'validator-run',
   changedFilesCoverage: { listed: 2, total: 2 },
   changeFingerprint: 'host-fingerprint',
-  implementationFiles: { files: ['src/a.ts'], total: 1, scanFailed: false },
+  implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false, scanError: null },
   converged: true,
   churnFiles: [],
   fixesApplied: ['repaired a.ts'],
@@ -57,7 +69,7 @@ const fixer = {
   source: 'fixer',
 };
 // 07b apply: no parsed reply deliberately has neither invocation nor coverage.
-const stub = {
+const stub: ValidationReturn = {
   validationSnapshot: null,
   verdict: 'UNPARSEABLE',
   summary: 'Validator output could not be parsed; review the raw report at gate 2.',
@@ -73,7 +85,12 @@ const stub = {
   validatorPasses: 1,
   source: 'stub',
 };
-const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+const skipped: VerifyReturn['test'] = {
+  ran: false,
+  passed: false,
+  command: null,
+  output: 'skipped',
+};
 const ran = { ran: true, passed: true, command: 'pnpm test', output: 'tests passed' };
 const unavailable = {
   ran: false,
@@ -96,8 +113,14 @@ const noSmoke = {
   url: null,
   errorExcerpt: 'no runtime',
 };
-const verify = { test: ran, lint: ran, typecheck: ran, passed: true, runtimeSmoke: noSmoke };
-const management = {
+const verify: VerifyReturn = {
+  test: ran,
+  lint: ran,
+  typecheck: ran,
+  passed: true,
+  runtimeSmoke: noSmoke,
+};
+const management: ManagementReturn = {
   action: 'manage',
   testsCreated: ['a.test.ts'],
   testsUpdated: ['b.test.ts'],
@@ -178,7 +201,7 @@ add(
     excludedDimensions: [],
     ruleConflicts: [],
     validatorInvocationId: null,
-    implementationFiles: null,
+    implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
     converged: true,
     churnFiles: [],
     fixesApplied: [],

@@ -223,7 +223,7 @@ it('one producer may supply validation and review without hiding either historic
 
 // A module's invocation id and fingerprint are claims, not host evidence.
 for (const kind of ['validation', 'review'] as const) {
-  for (const ownership of ['own', 'other-row', 'other-task', 'missing'] as const) {
+  for (const ownership of ['own', 'other-row', 'other-task', 'missing', 'malformed'] as const) {
     it(`${kind}: a module stamp requires the same task and producer row (${ownership})`, async () => {
       const fake = createFakeDb({
         tasks: schema.tasks,
@@ -287,7 +287,12 @@ for (const kind of ['validation', 'review'] as const) {
         status: 'done',
         output: {
           ...evidence,
-          [invocationKey]: ownership === 'missing' ? null : invocationId,
+          [invocationKey]:
+            ownership === 'missing'
+              ? null
+              : ownership === 'malformed'
+                ? 'not-a-uuid'
+                : invocationId,
           changeFingerprint: 'module-claim',
         },
         iterations: [],
@@ -321,3 +326,84 @@ for (const kind of ['validation', 'review'] as const) {
     });
   }
 }
+
+it('mines one row once when it is both the review binding and a physical finding step', () => {
+  const qa = '08d-adversarial-qa';
+  const task = JSON.parse(JSON.stringify(rolePin()).replaceAll(PRODUCER, qa));
+  const combined = {
+    peer: { findings: [{ severity: 'high', path: 'a.ts', issue: 'one finding' }] },
+    findings: [{ severity: 'high', location: 'a.ts', impact: 'one finding' }],
+  };
+  const expected = renderTaskHistoryDigest(
+    [{ stepId: '08c-code-review', round: 0, output: combined }],
+    [],
+    {},
+  );
+  const actual = renderTaskHistoryDigest([{ stepId: qa, round: 0, output: combined }], [], task);
+  expect(actual).toEqual(expected);
+  expect(actual.findingCount).toBe(1);
+});
+
+it('a later canonical peer cannot hide an unverified module validation invocation', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    cliInvocations: schema.cliInvocations,
+  });
+  const taskId = randomUUID(),
+    taskStepId = randomUUID(),
+    reviewRowId = randomUUID(),
+    peerInvocationId = randomUUID();
+  const review = '08c-code-review';
+  fake.insert(schema.tasks, { id: taskId, ...pin([moduleValidator, review, gate], 'static') });
+  fake.insert(schema.taskSteps, {
+    id: taskStepId,
+    taskId,
+    stepId: gate,
+    round: 1,
+    status: 'running',
+  });
+  fake.insert(schema.taskSteps, {
+    id: randomUUID(),
+    taskId,
+    stepId: moduleValidator,
+    round: 0,
+    status: 'done',
+    iterations: [],
+    output: {
+      ...output,
+      resultStatus: 'passed',
+      verdict: 'VALID',
+      issues: [],
+      ruleConflicts: [],
+      changedFilesCoverage: { listed: 1, total: 1 },
+      validatorInvocationId: null,
+    },
+  });
+  fake.insert(schema.taskSteps, {
+    id: reviewRowId,
+    taskId,
+    stepId: review,
+    round: 0,
+    status: 'done',
+    output: { peerInvocationId, peer: { findings: [] } },
+  });
+  fake.insert(schema.cliInvocations, {
+    id: peerInvocationId,
+    taskId,
+    taskStepId: reviewRowId,
+    houseRules: {
+      mode: 'review',
+      entries: [
+        { id: rule, hash: `hr1:${'a'.repeat(64)}`, title: 'House rule', why: { scope: 'always' } },
+      ],
+      omitted: [],
+    },
+  });
+  const rules = await loadGateHouseRules(fake.db as unknown as Database, taskId, {
+    withCodeReview: true,
+    consumer: { taskStepId, round: 1 },
+  });
+  expect(houseRulesRow(rules)?.statusLabel).toBe('NOT CHECKED');
+  expect(houseRulesHoldApprove(rules)).toBe(true);
+});

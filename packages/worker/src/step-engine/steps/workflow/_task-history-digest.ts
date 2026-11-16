@@ -244,7 +244,10 @@ export function renderTaskHistoryDigest(
           checkOutput(s, CHECK_RESULT_ROLES.validation),
         ),
       );
-    else if (FINDING_STEP_IDS.has(s.stepId)) findings.push(...extractFindings(s.stepId, s.output));
+    // A bound review row is already mined above, even if its physical id also
+    // belongs to the legacy finding-step set. Distinct validation findings stay.
+    else if (s.stepId !== reviewId && FINDING_STEP_IDS.has(s.stepId))
+      findings.push(...extractFindings(s.stepId, s.output));
     if (s.stepId === verifyId)
       runtimeErrors.push(
         ...extractRuntimeErrors(

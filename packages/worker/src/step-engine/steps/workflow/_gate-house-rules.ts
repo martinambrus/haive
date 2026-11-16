@@ -108,6 +108,9 @@ export async function loadInvocationStamp(
   invocationId: string,
   owner: Pick<StepContext, 'taskId' | 'taskStepId'>,
 ): Promise<HouseRulesStamp | null> {
+  // The contract permits a string; reject malformed ids before PostgreSQL's UUID cast.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invocationId))
+    return null;
   const [row] = await db
     .select({ houseRules: schema.cliInvocations.houseRules })
     .from(schema.cliInvocations)
@@ -353,6 +356,10 @@ function mergeChecks(validation: GateHouseRules, review: GateHouseRules): GateHo
   const coverage = review.changedFilesCoverage ?? validation.changedFilesCoverage;
   return {
     ...review,
+    // A later review cannot attest an alternate validator's invocation ownership.
+    ...(validation.unverifiedInvocation || review.unverifiedInvocation
+      ? { unverifiedInvocation: true as const }
+      : {}),
     violations: [...validation.violations, ...review.violations],
     conflicts: [...validation.conflicts, ...review.conflicts],
     ...(coverage === undefined ? {} : { changedFilesCoverage: coverage }),

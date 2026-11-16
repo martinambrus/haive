@@ -1989,7 +1989,12 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
       ...stored,
     };
     for (const [id, houseRules] of Object.entries(rows)) {
-      fake.insert(schema.cliInvocations, { id, taskId: TASK, taskStepId: 'aaaaaaaa-0000-4000-8000-000000000002', houseRules });
+      fake.insert(schema.cliInvocations, {
+        id,
+        taskId: TASK,
+        taskStepId: 'aaaaaaaa-0000-4000-8000-000000000002',
+        houseRules,
+      });
     }
     if (setup) {
       fake.insert(schema.taskSteps, {

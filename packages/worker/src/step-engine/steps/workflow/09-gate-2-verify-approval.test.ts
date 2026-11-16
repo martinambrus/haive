@@ -2459,6 +2459,9 @@ describe('check-result role compatibility bytes', () => {
     'verify not run',
     'verify declined',
     'test management skipped',
+    'skipped verify row',
+    'skipped management row',
+    'verify discovery disclosures',
     ...ids.map((id) => `absent ${id}`),
     'fix round',
     ...ids.map((id) => `retry ${id}`),
@@ -2518,6 +2521,32 @@ describe('check-result role compatibility bytes', () => {
           testsPassed: null,
           testsCreated: [],
         });
+      if (name === 'skipped verify row')
+        Object.assign(stored[ids[2]!]!, { status: 'skipped', output: null });
+      if (name === 'skipped management row')
+        Object.assign(stored[ids[1]!]!, { status: 'skipped', output: null });
+      if (name === 'verify discovery disclosures') {
+        stored[ids[2]!]!.detect = {
+          test: { source: 'declared' },
+          lint: null,
+          typecheck: null,
+          declinedConfigs: ['packages/web/vitest.config.ts'],
+          offSlots: ['lint'],
+          slotWithoutRunner: true,
+        };
+        stored[ids[2]!]!.output = {
+          ...stored[ids[2]!]!.output,
+          test: {
+            ran: false,
+            passed: false,
+            command: 'check',
+            output: 'runner unavailable',
+            note: 'runner unavailable',
+          },
+          lint: { ran: false, passed: false, command: null, output: 'skipped' },
+          typecheck: { ran: false, passed: false, command: null, output: 'skipped' },
+        };
+      }
       for (const id of ids) {
         if (name === `absent ${id}`) delete stored[id];
         if (name === `retry ${id}`)
