@@ -1016,6 +1016,55 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       },
     );
 
+    it('boot fences a live task in the middle of an unsupported span before orphan recovery or duplicate advance', async () => {
+      const executionContract = {
+        version: 1,
+        guardedSpans: [
+          {
+            id: 'planned',
+            firstStepId: A,
+            lastStepId: B,
+            predicateId: 'module.fx.planned',
+            args: {},
+          },
+        ],
+      };
+      const id = await make({ repositoryId, currentStepId: B, executionContract });
+      const first = await row(id, A, 'done', { output: { summary: 'retained' } });
+      const active = await row(id, B, 'waiting_cli');
+      const orphan = await run(id, active.id, { startedAt: DEAD_AT });
+      const before = await task(id);
+      const stepsBefore = [await stepRow(first.id), await stepRow(active.id)];
+      const { sent, deps } = recorder();
+      await reconcileDeadTasks(db, deps);
+      const marked = await task(id);
+      expect(marked).toMatchObject({
+        status: before.status,
+        currentStepId: B,
+        orchestrationEpoch: before.orchestrationEpoch,
+        executionContract,
+        deadAt: expect.any(Date),
+        deadReason: expect.stringContaining('invalid-execution-contract'),
+      });
+      expect((await runOf(orphan.id)).supersededAt).toBeInstanceOf(Date);
+      const advances = vi.fn();
+      await reconcileOrphanedSteps(db, {
+        enqueueAdvance: advances,
+        queuedInvocationIds: async () => new Set<string>(),
+      });
+      const payload = { taskId: id, userId, stepId: B, round: 0, epoch: 3 };
+      await processTaskJob(job(TASK_JOB_NAMES.ADVANCE_STEP, payload));
+      await processTaskJob(job(TASK_JOB_NAMES.ADVANCE_STEP, payload));
+      await reconcileDeadTasks(db, deps);
+      expect(await task(id)).toEqual(marked);
+      expect([await stepRow(first.id), await stepRow(active.id)]).toEqual(stepsBefore);
+      expect(await events(id, 'task.dead')).toHaveLength(1);
+      expect(await events(id, 'task.revived')).toHaveLength(0);
+      expect(advances).not.toHaveBeenCalled();
+      expect(sent).toEqual([]);
+      expect(h.adds).toEqual([]);
+    });
+
     it('keeps an unsupported execution pin dead at direct revival without remapping it', async () => {
       const id = await makeDead({
         repositoryId,

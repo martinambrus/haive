@@ -1,4 +1,5 @@
 import { assertTaskRootMergeIdle } from '../lib/root-merge-busy.js';
+import { assertExecutionContractUsable } from '../lib/execution-contract-admission.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
@@ -328,7 +329,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { id: true, userId: true, status: true, pausedAt: true },
+    columns: { id: true, userId: true, status: true, pausedAt: true, executionContract: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
@@ -385,6 +386,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
+      assertExecutionContractUsable(task.executionContract);
       const ev = await db.transaction(async (tx) => {
         await assertTaskRootMergeIdle(tx, taskId);
         // Only the resume that changes the row is recorded.
