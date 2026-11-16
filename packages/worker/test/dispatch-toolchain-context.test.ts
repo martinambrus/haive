@@ -159,3 +159,23 @@ it('uses facets already resolved by the dispatch', async () => {
   expect(h.facets).not.toHaveBeenCalled();
   expect(h.peek).toHaveBeenCalledTimes(2);
 });
+
+it('gives three overlapping identical dispatches the same prompt facts', async () => {
+  let release!: (image: { tag: string; imageId: string }) => void;
+  h.peek.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const requests = Array.from({ length: 3 }, () =>
+    resolveDispatchSandboxToolchain(db, 't', [providers[0]!], { waitMs: 10 }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  release({ tag: 'image:tag', imageId: ID });
+  await vi.advanceTimersByTimeAsync(10);
+  const answers = await Promise.all(requests);
+  expect(answers).toEqual(
+    Array.from({ length: 3 }, () => ({ p0: { imageId: ID, php: 'absent' } })),
+  );
+});

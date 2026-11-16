@@ -6,8 +6,7 @@ import { sandboxToolchainProbe, type SandboxToolchainFact } from '../sandbox/too
 import { toolchainEnvironmentMatches } from '../sandbox/toolchain-prompt.js';
 
 export const TOOLCHAIN_DISPATCH_WAIT_MS = 2_500;
-const MAX_PEEKS = 2;
-let activePeeks = 0;
+const PEEK_BATCH_WIDTH = 2;
 
 export const TOOLCHAIN_PEEK_TTL_MS = 10_000;
 export const TOOLCHAIN_PEEK_CACHE_LIMIT = 128;
@@ -59,7 +58,7 @@ export async function resolveDispatchSandboxToolchain(
     let next = 0;
     const consume = async () => {
       while (next < providers.length) {
-        if (expired || activePeeks >= MAX_PEEKS) return;
+        if (expired) return;
         const provider = providers[next++]!;
         if (
           !provider.enabled ||
@@ -69,7 +68,6 @@ export async function resolveDispatchSandboxToolchain(
           })
         )
           continue;
-        activePeeks++;
         try {
           const key = JSON.stringify([
             taskId,
@@ -85,12 +83,10 @@ export async function resolveDispatchSandboxToolchain(
           facts[provider.id] = image ? await sandboxToolchainProbe.get(image.imageId) : null;
         } catch {
           // Advisory only: database, inspect and probe errors add no prompt text.
-        } finally {
-          activePeeks--;
         }
       }
     };
-    await Promise.all(Array.from({ length: MAX_PEEKS }, consume));
+    await Promise.all(Array.from({ length: PEEK_BATCH_WIDTH }, consume));
   };
   try {
     await Promise.race([
