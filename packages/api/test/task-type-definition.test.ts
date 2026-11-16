@@ -593,6 +593,63 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
       await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, checks));
     }
   });
+  it('pins browser and QA edges at locked INSERT for admin and module seeds', async () => {
+    const ids = [
+      '08a-browser-verify',
+      '08d-adversarial-qa',
+      '08d2-adversarial-qa-review',
+      '09-gate-2-verify-approval',
+      '11-phase-8-learning',
+    ];
+    const names = ['browser-qa-admin', 'browser-qa-module'];
+    await db.insert(schema.stepCatalog).values(ids.map((id) => catalogRow(id)));
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values(
+        names.map((slug, index) =>
+          row(slug, { source: index === 0 ? 'admin' : 'module:prt3', stepIds: ids }),
+        ),
+      );
+    try {
+      const admin = await insert(names[0]!);
+      const module = await insert(names[1]!);
+      expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
+      expect(admin.dataEdgePlan).toMatchObject({
+        version: 3,
+        candidates: [
+          {
+            bindings: {
+              '1:browser': {
+                producerStepId: ids[0],
+                contract: { id: 'haive.browser-verification', version: 1 },
+              },
+              '2:adversarial-qa': {
+                producerStepId: ids[1],
+                contract: { id: 'haive.adversarial-qa', version: 1 },
+              },
+              '3:browser': { producerStepId: ids[0] },
+              '3:adversarial-qa': { producerStepId: ids[1] },
+              '4:browser': { producerStepId: ids[0] },
+              '4:adversarial-qa': { producerStepId: ids[1] },
+            },
+          },
+        ],
+      });
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ stepIds: [ids[3]!] })
+        .where(eq(schema.taskTypeDefinitions.slug, names[0]!));
+      expect(
+        (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, admin.id) }))?.dataEdgePlan,
+      ).toEqual(admin.dataEdgePlan);
+    } finally {
+      await db.delete(schema.tasks).where(inArray(schema.tasks.type, names));
+      await db
+        .delete(schema.taskTypeDefinitions)
+        .where(inArray(schema.taskTypeDefinitions.slug, names));
+      await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, ids));
+    }
+  });
   it('uses the definition and catalog at INSERT, not the preflight copy', async () => {
     const before = await definitionForCreate(db, slugs[0]!, { locked: false, generic: true });
     await db
