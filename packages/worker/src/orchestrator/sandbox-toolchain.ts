@@ -11,28 +11,42 @@ const PEEK_BATCH_WIDTH = 2;
 export const TOOLCHAIN_PEEK_TTL_MS = 10_000;
 export const TOOLCHAIN_PEEK_CACHE_LIMIT = 128;
 
+type CacheLimits = { cacheLimit?: number; ttlMs?: number };
+
 type Memo<T> = WeakMap<Database, Map<string, { promise: Promise<T>; expiresAt: number }>>;
 const facetsMemo: Memo<ProjectFacetSet> = new WeakMap();
 const peekMemo: Memo<Awaited<ReturnType<typeof peekSandboxImageTag>>> = new WeakMap();
 
-function memo<T>(store: Memo<T>, db: Database, key: string, load: () => Promise<T>): Promise<T> {
+function memo<T>(
+  store: Memo<T>,
+  db: Database,
+  key: string,
+  load: () => Promise<T>,
+  limits: CacheLimits = {},
+): Promise<T> {
+  const cap = limits.cacheLimit ?? TOOLCHAIN_PEEK_CACHE_LIMIT;
+  if (cap <= 0) return load();
   let entries = store.get(db);
   if (!entries) store.set(db, (entries = new Map()));
   const hit = entries.get(key);
   if (hit && hit.expiresAt > Date.now()) return hit.promise;
   entries.delete(key);
-  if (entries.size >= TOOLCHAIN_PEEK_CACHE_LIMIT) entries.delete(entries.keys().next().value!);
+  if (entries.size >= cap) entries.delete(entries.keys().next().value!);
   const promise = load().catch((err: unknown) => {
     if (entries.get(key)?.promise === promise) entries.delete(key);
     throw err;
   });
-  entries.set(key, { promise, expiresAt: Date.now() + TOOLCHAIN_PEEK_TTL_MS });
+  entries.set(key, { promise, expiresAt: Date.now() + (limits.ttlMs ?? TOOLCHAIN_PEEK_TTL_MS) });
   return promise;
 }
 
-/** Shared with the global KB's lazy facet read so one dispatch/fan-out reads the task once. */
-export function resolveDispatchTaskFacets(db: Database, taskId: string): Promise<ProjectFacetSet> {
-  return memo(facetsMemo, db, taskId, () => resolveTaskFacets(db, taskId));
+/** Advisory-only fallback for callers without a dispatch's fresh, shared facet getter. */
+function resolveDispatchTaskFacets(
+  db: Database,
+  taskId: string,
+  limits?: CacheLimits,
+): Promise<ProjectFacetSet> {
+  return memo(facetsMemo, db, taskId, () => resolveTaskFacets(db, taskId), limits);
 }
 
 /** PHP is the only measured missing-interpreter case. No repository-provided binary names.
@@ -46,13 +60,15 @@ export async function resolveDispatchSandboxToolchain(
     extraEnv?: Record<string, string>;
     waitMs?: number;
     resolveFacets?: () => Promise<ProjectFacetSet>;
+    cacheLimits?: CacheLimits;
   } = {},
 ): Promise<Record<string, SandboxToolchainFact | null>> {
   let expired = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const facts: Record<string, SandboxToolchainFact | null> = {};
   const work = async () => {
-    const facets = await (opts.resolveFacets?.() ?? resolveDispatchTaskFacets(db, taskId));
+    const facets = await (opts.resolveFacets?.() ??
+      resolveDispatchTaskFacets(db, taskId, opts.cacheLimits));
     if (expired || !facets.language.includes('php')) return;
     const batch = createSandboxImagePeekBatch();
     let next = 0;
@@ -76,8 +92,12 @@ export async function resolveDispatchSandboxToolchain(
             provider.cliVersion,
             provider.sandboxDockerfileExtra,
           ]);
-          const image = await memo(peekMemo, db, key, () =>
-            peekSandboxImageTag(db, taskId, provider, undefined, batch),
+          const image = await memo(
+            peekMemo,
+            db,
+            key,
+            () => peekSandboxImageTag(db, taskId, provider, undefined, batch),
+            opts.cacheLimits,
           );
           if (expired) return;
           facts[provider.id] = image ? await sandboxToolchainProbe.get(image.imageId) : null;

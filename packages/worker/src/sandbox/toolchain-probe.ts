@@ -1,3 +1,4 @@
+import { BINARY_MISSING_EXIT } from './binary-missing.js';
 import { logger } from '@haive/shared';
 import { resourceLimitsEnabled } from './runtime-caps.js';
 import { shellQuote } from './shell-quote.js';
@@ -16,20 +17,22 @@ export const TOOLCHAIN_OUTPUT_LIMIT_BYTES = 1_024;
 export const IMMUTABLE_IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 
 // The script owns 199. A raw shell error (including no shell) never proves absence.
-const PHP_DISCOVERY =
-  "if command -v php >/dev/null 2>&1; then php -n -r 'echo PHP_VERSION;' 2>/dev/null; exit 0; else exit 199; fi";
+const PHP_DISCOVERY = `if command -v php >/dev/null 2>&1; then php -n -r 'echo PHP_VERSION;' 2>/dev/null; exit 0; else exit ${BINARY_MISSING_EXIT}; fi`;
 
 // The container must expire even if its Docker client or worker dies. Prefer timeout;
-// the fallback watchdog kills PID 1, which also ends its container's descendants.
+// the fallback kills the probe child and lets PID 1 exit. A child cannot force-kill
+// its namespace's init with an unhandled signal.
 const PHP_PROBE = [
   'if command -v timeout >/dev/null 2>&1; then',
   `  exec timeout -s KILL 1 /bin/sh -c ${shellQuote(PHP_DISCOVERY)}`,
   'fi',
-  'parent=$$',
-  '( sleep 1; kill -KILL "$parent" ) &',
+  `( ${PHP_DISCOVERY} ) &`,
+  'probe=$!',
+  '( sleep 1; kill -KILL "$probe" ) &',
   'watchdog=$!',
   `trap 'kill "$watchdog" 2>/dev/null || :' EXIT`,
-  PHP_DISCOVERY,
+  'wait "$probe"',
+  'exit $?',
 ].join('\n');
 
 /** One shared, bounded cache per worker. In-flight entries are never evicted: evicting one
@@ -108,7 +111,7 @@ export class SandboxToolchainProbe {
     });
     if (result.timedOut || result.error)
       return this.unknown(imageId, result.exitCode, result.timedOut);
-    if (result.exitCode === 199) return { imageId, php: 'absent' };
+    if (result.exitCode === BINARY_MISSING_EXIT) return { imageId, php: 'absent' };
     if (result.exitCode !== 0) return this.unknown(imageId, result.exitCode, result.timedOut);
     // Dockerfile-authored stdout is data. Only a small version alphabet enters a prompt.
     const version = result.stdout.trim();

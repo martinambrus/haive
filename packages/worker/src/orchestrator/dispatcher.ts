@@ -1,3 +1,4 @@
+import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
   resolveTaskCommittedSnapshots,
@@ -86,7 +87,7 @@ import {
   withMcpSurface,
   type McpSurface,
 } from '../sandbox/mcp-surface.js';
-import { resolveDispatchSandboxToolchain, resolveDispatchTaskFacets } from './sandbox-toolchain.js';
+import { resolveDispatchSandboxToolchain } from './sandbox-toolchain.js';
 import {
   stripSandboxToolchain,
   sandboxToolchainBlock,
@@ -382,6 +383,10 @@ async function resolveTaskDispatchOnTree(
   req: DispatchRequest,
   snapshotWorkspace: ResolvedCommittedSnapshots | null,
 ): Promise<DispatchPlan> {
+  // Enforcement must read current facets. Share only within this dispatch; the toolchain's
+  // advisory-only cache must not make house-rule selection stale.
+  let taskFacets: ReturnType<typeof resolveTaskFacets> | undefined;
+  const resolveFacets = () => (taskFacets ??= resolveTaskFacets(db, taskId));
   const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
   const [
     lspConfigured,
@@ -410,7 +415,7 @@ async function resolveTaskDispatchOnTree(
         ),
     resolveGlobalKbContext(db, taskId, {
       houseRules: houseRules !== undefined,
-      resolveFacets: () => resolveDispatchTaskFacets(db, taskId),
+      resolveFacets,
     }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
@@ -419,6 +424,7 @@ async function resolveTaskDispatchOnTree(
     resolveAgentRulesInjectionEnabled(),
     resolveDispatchSandboxToolchain(db, taskId, req.providers, {
       extraEnv: req.invokeOpts.extraEnv,
+      resolveFacets,
     }),
   ]);
   const appServesOtherTree =
@@ -796,7 +802,7 @@ function buildCliSidePlan(
   // disagree — a prompt that says "discover with rag_search" while the digest is withheld
   // describes a surface neither half is looking at.
   const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
-  const toolchainFact =
+  let toolchainFact =
     req.invokeOpts.disableTools === true && adapter.supportsDisableTools === true
       ? null
       : toolchainEnvironmentMatches(provider.wrapperContent, {
@@ -938,10 +944,12 @@ function buildCliSidePlan(
         });
       } catch (err) {
         // An argv-only adapter must never fail just because rules push a prompt
-        // that fits past that limit: drop the house rules, then the agent rules, and say so.
+        // that fits past that limit: drop the advisory, house rules, then agent rules.
         // This pre-budget contract applies to required steps too; input that still cannot fit fails.
         if (!(err instanceof PromptTooLargeError)) throw err;
-        if (houseBlock !== null) {
+        if (toolchainFact) {
+          toolchainFact = null;
+        } else if (houseBlock !== null) {
           houseBlock = null;
           houseRules = house.droppedStamp;
         } else if (agentRules.injected) {

@@ -1657,6 +1657,24 @@ describe('house rules injection', () => {
       expect(agentBytes).toBeGreaterThan(houseBytes);
     });
 
+    it('drops the advisory before approved house and provider rules when argv is full', () => {
+      const base = dispatch({ ...house, agentRulesInjection: true }, 'x', gemini);
+      const { prompt, spec } = dispatch(
+        {
+          ...house,
+          agentRulesInjection: true,
+          registry: new ArgvOnlyRegistry(bytes(base.prompt)),
+          sandboxToolchain: { [gemini.id]: { imageId: `sha256:${'a'.repeat(64)}`, php: 'absent' } },
+        },
+        'x',
+        gemini,
+      );
+      expect(prompt).toBe(base.prompt);
+      expect(prompt).toContain(HOUSE_RULES_MARKER);
+      expect(spec.agentRules?.injected).toBe(true);
+      expect(spec.sandboxToolchain).toBeUndefined();
+    });
+
     it('keeps the repacked budgeted prompt when falling back without rules', () => {
       const packed = 'packed';
       const repack = vi.fn(() => packed);

@@ -19,6 +19,12 @@ it.each([true, false])(
         fakeDockerRunner({
           run: async (opts) => {
             script = opts.cmd[1]!;
+            // A PID namespace's init ignores an unhandled SIGKILL from its own children.
+            // Model that restriction on the host; the deadline must still work.
+            if (!hasTimeout)
+              script =
+                'kill() { if [ "$1" = "-KILL" ] && [ "$2" = "$$" ]; then return 1; fi; command kill "$@"; };\n' +
+                script;
             return { exitCode: 0, stdout: '', stderr: '', timedOut: false, durationMs: 0 };
           },
         }),

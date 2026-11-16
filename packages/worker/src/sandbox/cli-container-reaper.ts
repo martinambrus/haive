@@ -17,6 +17,7 @@ export const SHUTDOWN_REAP_BUDGET_MS = 3_000;
 /** Kills all running haive-managed sandbox containers — both CLI exec
  *  sandboxes (label `haive.task.id`) and per-task terminal shells
  *  (label `haive.role=terminal-shell`, name prefix `haive-shell-`).
+ *  Toolchain probes are reaped in every state, including Created and Exited.
  *  Used on worker boot and shutdown to clean up containers orphaned by an
  *  earlier worker pid that died mid-job (e.g. tsx watch restart, SIGKILL).
  *  Single-worker assumption — DO NOT call from a multi-worker deployment

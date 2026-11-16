@@ -93,7 +93,7 @@ it('peeks the configured base fallback, and a missing image answers null', async
 
 it('inspects the core once for an entire provider batch', async () => {
   const { createSandboxImagePeekBatch } = await import('../src/queues/cli-exec/images.js');
-  const inspect = vi.fn(async () => ({ exists: true, imageId: ID }));
+  const inspect = vi.fn(async (_ref: string) => ({ exists: true, imageId: ID }));
   const runner = fakeDockerRunner({ inspect });
   const batch = createSandboxImagePeekBatch(runner);
   await Promise.all(

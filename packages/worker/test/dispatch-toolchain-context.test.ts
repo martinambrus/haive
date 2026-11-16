@@ -179,3 +179,15 @@ it('gives three overlapping identical dispatches the same prompt facts', async (
     Array.from({ length: 3 }, () => ({ p0: { imageId: ID, php: 'absent' } })),
   );
 });
+
+it('bounds the peek cache and expires entries using injectable limits', async () => {
+  const opts = { cacheLimits: { cacheLimit: 2, ttlMs: 10 } };
+  for (const taskId of ['one', 'two', 'three', 'one'])
+    await resolveDispatchSandboxToolchain(db, taskId, [providers[0]!], opts);
+  expect(h.peek).toHaveBeenCalledTimes(4);
+  await resolveDispatchSandboxToolchain(db, 'one', [providers[0]!], opts);
+  expect(h.peek).toHaveBeenCalledTimes(4);
+  await vi.advanceTimersByTimeAsync(10);
+  await resolveDispatchSandboxToolchain(db, 'one', [providers[0]!], opts);
+  expect(h.peek).toHaveBeenCalledTimes(5);
+});

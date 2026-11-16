@@ -1,3 +1,4 @@
+import { BINARY_MISSING_EXIT } from './binary-missing.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -29,7 +30,7 @@ import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 /** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH,
  *  taken as that only together with the run's own marker on stdout: a command may exit 199 itself. */
-export const BINARY_MISSING_EXIT = 199;
+export { BINARY_MISSING_EXIT } from './binary-missing.js';
 
 function missingBinaryGuard(): { marker: string; preamble: string } {
   const marker = `step-bin-missing-${randomBytes(8).toString('hex')}`;
