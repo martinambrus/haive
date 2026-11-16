@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { makeTree, names, registry } from './tree.mjs';
 
@@ -366,11 +366,42 @@ describe('module add @haive-module/<id>@<version>', () => {
   it('refuses a package that publishes no exports at all', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();
-    const out = add(tree, []);
+    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], { STUB_PNPM_VIEW: '' });
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /\.\/manifest/);
     assert.deepEqual(tree.snapshot(), before);
+    assert.equal(tree.npmCalls().length, 1);
+    assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
   });
+
+  for (const [label, env, message] of [
+    [
+      'npm pack failure',
+      { STUB_NPM_EXIT: '1' },
+      /npm pack @haive-module\/foo@1\.0\.0 .*failed: stub npm pack failure/,
+    ],
+    ['a symlink manifest member', { STUB_NPM_SYMLINK: '1' }, /module:/],
+    [
+      'a parent-traversing pack filename',
+      { STUB_NPM_FILENAME: '../x.tgz' },
+      /could not identify the packed module/,
+    ],
+  ]) {
+    it(`refuses ${label}, cleans scratch and leaves the tree untouched`, (t) => {
+      const tree = makeTree(t);
+      const before = tree.snapshot();
+      const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+        STUB_PNPM_VIEW: '',
+        ...env,
+      });
+      assert.notEqual(out.status, 0);
+      assert.match(out.stderr, message);
+      assert.deepEqual(tree.snapshot(), before);
+      assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
+      assert.equal(tree.npmCalls().length, 1);
+      assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
+    });
+  }
 
   it('refuses when pnpm view fails, says so, writes nothing and runs no lockfile step', (t) => {
     const tree = makeTree(t);
