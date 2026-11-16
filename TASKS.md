@@ -670,6 +670,13 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T691 · Owner's `gpt-5.5` codex provider rows fail with model_not_found; transport pin regex too broad
+
+status: open, item 1 waits on the owner · kind: fix · found: message-threads measurement 2026-11-16 (#1230) · priority: P3
+
+1. The four dev-install codex rows labelled "OpenAI Codex 5.5 Low/Med/High/xhigh" pass `--model gpt-5.5`, which codex 0.152.0 refuses on a ChatGPT-account login: `400 invalid_request_error` "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account." (`model_not_found`). Any task step dispatched to them fails at the first turn. These are owner rows: the owner decides whether to repoint them (e.g. to `gpt-5.6-sol`) or disable them; never edit them for him.
+2. Low: `packages/worker/test/adapter-transport.test.ts` ~:23-25 matches any codex override containing `transport`, so a legitimate future `-c mcp_servers.<name>.transport=...` would trip it with a misleading "must not override its incremental transport" message. Narrow it to the model-provider transport keys (e.g. `model_providers\.[^=]*transport`) when touched.
+
 ### T690 · codex CLI version list never refreshes (full npm document times out)
 
 status: open · kind: fix · found: worker log 2026-11-15 · priority: P3
