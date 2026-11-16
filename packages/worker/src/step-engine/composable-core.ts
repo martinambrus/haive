@@ -1,5 +1,12 @@
 import {
+  CHECK_RESULT_ROLES,
+  VALIDATION_OUTPUT_CONTRACT,
+  VERIFY_OUTPUT_CONTRACT,
+  TEST_MANAGEMENT_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
+import {
   CORE_STAGE_INPUTS,
+  CHECK_RESULT_INPUTS,
   SPEC_INPUTS,
   DISCOVERY_REQUIREMENTS_INPUTS,
 } from '@haive/shared/step-ports';
@@ -523,6 +530,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '07b-phase-4-validate',
+    providesRoles: [{ role: CHECK_RESULT_ROLES.validation, contract: VALIDATION_OUTPUT_CONTRACT }],
     agentAuthoredOutput: true,
     label: 'Phase 4: Implementation validation',
     group: 'check',
@@ -558,6 +566,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '08b-test-management',
+    providesRoles: [
+      { role: CHECK_RESULT_ROLES.testManagement, contract: TEST_MANAGEMENT_OUTPUT_CONTRACT },
+    ],
     label: 'Phase 5b: Test management',
     group: 'check',
     dispatchesCli: true,
@@ -578,6 +589,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '08-phase-5-verify',
+    providesRoles: [{ role: CHECK_RESULT_ROLES.verify, contract: VERIFY_OUTPUT_CONTRACT }],
     label: 'Phase 5: Verify',
     group: 'check',
     dispatchesCli: false,
@@ -846,7 +858,15 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
 ].map((entry) => ({
   ...entry,
-  ...(CORE_STAGE_INPUTS[entry.stepId] ? { consumesRoles: CORE_STAGE_INPUTS[entry.stepId] } : {}),
+  ...(CORE_STAGE_INPUTS[entry.stepId] || CHECK_RESULT_INPUTS[entry.stepId]
+    ? {
+        consumesRoles: [
+          ...(CORE_STAGE_INPUTS[entry.stepId] ?? []),
+          ...(CHECK_RESULT_INPUTS[entry.stepId] ?? []),
+          ...(entry.consumesRoles ?? []),
+        ],
+      }
+    : {}),
 })) as readonly CoreComposableStepEntry[];
 
 export function assertCoreComposableCatalog(
@@ -944,8 +964,8 @@ export function assertDiscoveryRequirementsPortDeclarations(
       throw new Error(`discovery-requirements-port-provider-invalid: ${role}`);
   }
   for (const e of entries) {
-    const inputs = (e.consumesRoles ?? []).filter(
-      (p) => ![...Object.values(SPEC_ROLES), IMPLEMENTATION_SUMMARY_ROLE].includes(p.role as never),
+    const inputs = (e.consumesRoles ?? []).filter((p) =>
+      [DISCOVERY_ROLE, ...Object.values(REQUIREMENTS_ROLES)].includes(p.role as never),
     );
     if (JSON.stringify(inputs) !== JSON.stringify(DISCOVERY_REQUIREMENTS_INPUTS[e.stepId] ?? []))
       throw new Error(`discovery-requirements-port-input-invalid: ${e.stepId}`);

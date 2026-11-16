@@ -1,3 +1,7 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
+import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput, checkResultHoldApprove } from '../../read-check-result.js';
 import { STEP_ROLES, type CodeReviewOutput } from '@haive/shared/step-outputs';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import {
@@ -390,37 +394,6 @@ interface Phase5aOutput {
   checklistMarkdown?: string | null;
 }
 
-interface Phase5bOutput {
-  action?: string;
-  testsCreated?: string[];
-  testsUpdated?: string[];
-  testsDeleted?: string[];
-  testRun?: { ran?: boolean; passed?: boolean } | null;
-  testsPassed?: boolean | null;
-}
-
-interface Phase4Output {
-  verdict?: string;
-  summary?: string;
-  issues?: {
-    upstream?: UpstreamKind | null;
-    severity?: string;
-    file?: string;
-    description?: string;
-    fix?: string;
-  }[];
-  dimensions?: { name?: string; status?: string; note?: string }[];
-  excludedDimensions?: string[];
-  fixesApplied?: string[];
-  report?: string;
-  reportChars?: number;
-  converged?: boolean;
-  churnFiles?: string[];
-  changedFilesCoverage?: CoverageOutput;
-  /** The first validator pass is given detect's list, before any fix. */
-  validatorPasses?: number;
-}
-
 const REPORT_EXCERPT_CHARS = 8000;
 
 // A report opens with its findings and ends with its verdict block, so a cut keeps both ends.
@@ -470,21 +443,6 @@ interface StoredCheck {
   output?: string;
   scope?: { blocking?: number; preExisting?: number };
   note?: string;
-}
-
-interface VerifyOutput {
-  test?: StoredCheck;
-  lint?: StoredCheck;
-  phpLint?: StoredCheck;
-  typecheck?: StoredCheck;
-  passed?: boolean;
-  runtimeSmoke?: {
-    ran?: boolean;
-    passed?: boolean | null;
-    httpStatus?: number | null;
-    url?: string | null;
-    errorExcerpt?: string;
-  } | null;
 }
 
 /** Narrow a stored verify-slot result to what the gate needs. A skipped slot (08
@@ -591,6 +549,7 @@ function formatRejectDiagnosis(
 }
 
 export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGateApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['09-gate-2-verify-approval'],
   needsRuntime: 'if-serving',
   metadata: {
     id: '09-gate-2-verify-approval',
@@ -616,31 +575,19 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   },
 
   async detect(ctx: StepContext): Promise<VerifyGateDetect> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
-    const output = (prev?.output as VerifyOutput | null) ?? {};
-    const declinedRaw = (prev?.detect as { declinedConfigs?: unknown } | null)?.declinedConfigs;
-    const declinedConfigs = Array.isArray(declinedRaw)
-      ? declinedRaw.filter((c): c is string => typeof c === 'string')
-      : [];
-    const prevDetect = (prev?.detect ?? null) as Record<string, unknown> | null;
-    const slotNames: VerifySlotName[] = ['test', 'lint', 'typecheck'];
-    const declaredSlots = slotNames.filter(
-      (n) => (prevDetect?.[n] as { source?: unknown } | null | undefined)?.source === 'declared',
-    );
-    const offRaw = prevDetect?.offSlots;
-    const offSlots = Array.isArray(offRaw) ? slotNames.filter((n) => offRaw.includes(n)) : [];
-    // A slot turned off on purpose is not a missing runner.
-    const slotWithoutRunner = slotNames.some(
-      (n) => prevDetect?.[n] === null && !offSlots.includes(n),
-    );
+    const verifyResult = await readRole(ctx, CHECK_RESULT_ROLES.verify);
+    const output = checkResultOutput(verifyResult);
+    const declinedConfigs = output.declinedConfigs ?? [];
+    const declaredSlots = output.declaredSlots ?? [];
+    const offSlots = output.offSlots ?? [];
+    const slotWithoutRunner = output.slotWithoutRunner === true;
 
     // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
     // user" lands here — exhausted budget / open issues / unparseable output).
-    const phase4 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07b-phase-4-validate');
-    const p4 = phase4?.output as Phase4Output | null;
+    const phase4 = await readRole(ctx, CHECK_RESULT_ROLES.validation);
+    const p4 = checkResultOutput(phase4);
     let validation: VerifyGateDetect['validation'] = null;
     if (p4?.verdict) {
-      const iterations = (phase4?.iterations ?? []) as { exhaustedBudget?: boolean }[];
       // 07b stores {listed, total} without the flag the other steps store: the cap is the difference.
       const given = readCoverage(p4.changedFilesCoverage);
       validation = {
@@ -654,7 +601,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           .map((d) => `${d.name}${d.note ? `: ${d.note}` : ''}`),
         excludedDimensions: p4.excludedDimensions ?? [],
         fixesApplied: (p4.fixesApplied ?? []).length,
-        exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
+        exhaustedBudget: p4.exhaustedBudget === true,
         converged: p4.converged !== false,
         churnFiles: p4.churnFiles ?? [],
         // A report with its reply length was cut once by 07b, at this size; one without it predates that and is cut here.
@@ -669,8 +616,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     }
 
     // Phase 5b test management: one summary line + escalation on failed runs.
-    const phase5b = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
-    const p5 = phase5b?.output as Phase5bOutput | null;
+    const phase5b = await readRole(ctx, CHECK_RESULT_ROLES.testManagement);
+    const p5 = checkResultOutput(phase5b);
     let testManagement: VerifyGateDetect['testManagement'] = null;
     if (p5?.action) {
       const counts = `created ${(p5.testsCreated ?? []).length}, updated ${(p5.testsUpdated ?? []).length}, deleted ${(p5.testsDeleted ?? []).length}`;
@@ -928,6 +875,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const insights = await loadUnactedInsights(ctx.db, ctx.taskId, { limit: INSIGHTS_AT_GATE });
     const houseRules = await loadGateHouseRules(ctx.db, ctx.taskId, {
       withCodeReview: true,
+      consumer: ctx,
       currentFingerprint: () => taskChangeFingerprint(ctx),
     });
 
@@ -938,7 +886,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ...(output.phpLint ? { phpLint: liteCheck(output.phpLint) } : {}),
         typecheck: liteCheck(output.typecheck),
       },
-      allPassed: output.passed === true,
+      allPassed:
+        output.passed === true && ![verifyResult, phase4, phase5b].some(checkResultHoldApprove),
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
       ...(declinedConfigs.length > 0 && slotWithoutRunner ? { slotWithoutRunner } : {}),
       ...(declaredSlots.length > 0 ? { declaredSlots } : {}),

@@ -1,5 +1,8 @@
+import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
 import { STEP_ROLES } from '@haive/shared/step-outputs';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StatusSummaryItem } from '@haive/shared';
 import { isBlockingSeverity, type ReviewSeverity } from '@haive/shared/review';
@@ -34,6 +37,10 @@ export interface ChangedFilesCoverage {
 
 export interface GateHouseRules {
   mode: HouseRulesStamp['mode'];
+  /** No host stamp could be tied to this alternate producer's row. */
+  unverifiedInvocation?: true;
+  /** Alternate outputs cannot attest the host's change fingerprint. */
+  fingerprintUnverified?: true;
   reason?: HouseRulesStamp['reason'];
   errorClass?: HouseRulesStamp['errorClass'];
   entries: { shortId: string; title: string; why: HouseRulesStamp['entries'][number]['why'] }[];
@@ -99,11 +106,21 @@ function parseChangedFilesCoverage(
 export async function loadInvocationStamp(
   db: Database,
   invocationId: string,
+  owner: Pick<StepContext, 'taskId' | 'taskStepId'>,
 ): Promise<HouseRulesStamp | null> {
+  // The contract permits a string; reject malformed ids before PostgreSQL's UUID cast.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invocationId))
+    return null;
   const [row] = await db
     .select({ houseRules: schema.cliInvocations.houseRules })
     .from(schema.cliInvocations)
-    .where(eq(schema.cliInvocations.id, invocationId))
+    .where(
+      and(
+        eq(schema.cliInvocations.id, invocationId),
+        eq(schema.cliInvocations.taskId, owner.taskId),
+        eq(schema.cliInvocations.taskStepId, owner.taskStepId),
+      ),
+    )
     .limit(1);
   return parseHouseRulesStamp(row?.houseRules);
 }
@@ -115,12 +132,12 @@ export const namesGivenRule = (item: { rule?: string }, given: ReadonlySet<strin
 /** Short ids of the house rules a pass was given, from the stamp of its own invocation. Read only
  *  when an item names a rule. */
 export async function givenRuleIds(
-  db: Database,
+  ctx: Pick<StepContext, 'db' | 'taskId' | 'taskStepId'>,
   items: readonly { rule?: string }[],
   invocationId: string | null | undefined,
 ): Promise<Set<string>> {
   if (!invocationId || !items.some((item) => item.rule !== undefined)) return new Set();
-  const stamp = await loadInvocationStamp(db, invocationId);
+  const stamp = await loadInvocationStamp(ctx.db, invocationId, ctx);
   return new Set(stamp ? houseRuleShortIds(stamp.entries.map((entry) => entry.id)).values() : []);
 }
 
@@ -194,9 +211,14 @@ function checkOf(
 const recordsOf = (value: unknown): Record<string, unknown>[] =>
   (Array.isArray(value) ? value : []).map((item) => (item ?? {}) as Record<string, unknown>);
 
-async function stampNamedBy(db: Database, invocationId: unknown): Promise<HouseRulesStamp | null> {
-  if (typeof invocationId !== 'string' || invocationId === '') return null;
-  return loadInvocationStamp(db, invocationId);
+async function stampNamedBy(
+  db: Database,
+  invocationId: unknown,
+  taskId: string,
+  rowId: string | null,
+): Promise<HouseRulesStamp | null> {
+  if (rowId === null || typeof invocationId !== 'string' || invocationId === '') return null;
+  return loadInvocationStamp(db, invocationId, { taskId, taskStepId: rowId });
 }
 
 /** A check's row data with what the gate compares the change by: the fingerprint the check stored
@@ -211,23 +233,54 @@ const checkWith = (
   rules: GateHouseRules,
   stamp: HouseRulesStamp,
   output: Record<string, unknown>,
+  canonical = true,
 ): Check => {
   const inPlay = stamp.entries.length > 0 || (stamp.filesRulesUnmatched ?? 0) > 0;
   return {
-    rules: inPlay ? { ...rules, inPlay } : rules,
+    rules: inPlay
+      ? { ...rules, inPlay, ...(!canonical ? { fingerprintUnverified: true as const } : {}) }
+      : rules,
     fingerprint:
-      typeof output.changeFingerprint === 'string' && output.changeFingerprint !== ''
+      canonical && typeof output.changeFingerprint === 'string' && output.changeFingerprint !== ''
         ? output.changeFingerprint
         : null,
     inPlay,
   };
 };
 
-async function validationCheck(db: Database, taskId: string): Promise<Check | null> {
-  const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
-  const output = (validation?.output ?? {}) as Record<string, unknown>;
-  const stamp = await stampNamedBy(db, output.validatorInvocationId);
-  if (stamp === null) return null;
+function uncheckedInvocation(): Check {
+  return {
+    rules: {
+      mode: 'review',
+      unverifiedInvocation: true,
+      entries: [],
+      omitted: [],
+      violations: [],
+      conflicts: [],
+    },
+    fingerprint: null,
+    inPlay: false,
+  };
+}
+
+async function validationCheck(
+  db: Database,
+  taskId: string,
+  consumer?: Pick<StepContext, 'taskStepId' | 'round'>,
+): Promise<Check | null> {
+  const validation = await readRole({ db, taskId, ...consumer }, CHECK_RESULT_ROLES.validation);
+  const output = checkResultOutput(validation) as Record<string, unknown>;
+  const producer = validation.producer;
+  const canonical =
+    producer === null ||
+    producer.stepId === STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.validation].legacyStepId;
+  const stamp = await stampNamedBy(
+    db,
+    output.validatorInvocationId,
+    taskId,
+    producer?.rowId ?? null,
+  );
+  if (stamp === null) return canonical ? null : uncheckedInvocation();
   const rules = checkOf(
     stamp,
     recordsOf(output.issues).map((issue) => ({
@@ -238,15 +291,17 @@ async function validationCheck(db: Database, taskId: string): Promise<Check | nu
     output.ruleConflicts,
     output.changedFilesCoverage,
   );
-  return checkWith(rules, stamp, output);
+  return checkWith(rules, stamp, output, canonical);
 }
 
 async function codeReviewCheck(db: Database, taskId: string): Promise<Check | null> {
   const review = await loadPreviousStepOutput(db, taskId, { role: STEP_ROLES.codeReview });
   if (review?.outputCompatible === false) return null;
   const output = (review?.output ?? {}) as Record<string, unknown>;
-  const stamp = await stampNamedBy(db, output.peerInvocationId);
-  if (stamp === null) return null;
+  const canonical =
+    review === null || review.stepId === STEP_ROLE_REGISTRY[STEP_ROLES.codeReview].legacyStepId;
+  const stamp = await stampNamedBy(db, output.peerInvocationId, taskId, review?.id ?? null);
+  if (stamp === null) return !canonical && review?.status === 'done' ? uncheckedInvocation() : null;
   const peer = (output.peer ?? {}) as Record<string, unknown>;
   const rules = checkOf(
     stamp,
@@ -261,7 +316,7 @@ async function codeReviewCheck(db: Database, taskId: string): Promise<Check | nu
     output.coverage,
     'code review',
   );
-  return checkWith(rules, stamp, output);
+  return checkWith(rules, stamp, output, canonical);
 }
 
 /** From the stamp of the invocation 07b's latest output names, never one picked by title, message or age.
@@ -272,9 +327,14 @@ export async function loadGateHouseRules(
   {
     withCodeReview = false,
     currentFingerprint,
-  }: { withCodeReview?: boolean; currentFingerprint?: () => Promise<string | null> } = {},
+    consumer,
+  }: {
+    withCodeReview?: boolean;
+    currentFingerprint?: () => Promise<string | null>;
+    consumer?: Pick<StepContext, 'taskStepId' | 'round'>;
+  } = {},
 ): Promise<GateHouseRules | null> {
-  const validation = await validationCheck(db, taskId);
+  const validation = await validationCheck(db, taskId, consumer);
   const review = withCodeReview ? await codeReviewCheck(db, taskId) : null;
   const last = review ?? validation;
   if (last === null) return null;
@@ -296,6 +356,10 @@ function mergeChecks(validation: GateHouseRules, review: GateHouseRules): GateHo
   const coverage = review.changedFilesCoverage ?? validation.changedFilesCoverage;
   return {
     ...review,
+    // A later review cannot attest an alternate validator's invocation ownership.
+    ...(validation.unverifiedInvocation || review.unverifiedInvocation
+      ? { unverifiedInvocation: true as const }
+      : {}),
     violations: [...validation.violations, ...review.violations],
     conflicts: [...validation.conflicts, ...review.conflicts],
     ...(coverage === undefined ? {} : { changedFilesCoverage: coverage }),
@@ -347,9 +411,11 @@ const unreadChange = (data: GateHouseRules): boolean =>
 function caseOf(data: GateHouseRules): HouseCase | null {
   if (data.conflicts.length > 0) return 'conflict';
   if (data.violations.length > 0) return 'violated';
+  if (data.unverifiedInvocation === true) return 'notChecked';
   if (data.reason === 'unavailable' || data.reason === 'too_large') return 'notChecked';
   if (data.reason === 'switched_off') return 'off';
   if (
+    data.fingerprintUnverified === true ||
     data.omitted.length > 0 ||
     cappedList(data) !== null ||
     unreadChange(data) ||
@@ -365,6 +431,8 @@ const checkName = (coverage: ChangedFilesCoverage): string =>
   coverage.givenTo === undefined ? 'the validator' : `the ${coverage.givenTo}`;
 
 function reasonText(data: GateHouseRules): string {
+  if (data.unverifiedInvocation === true)
+    return 'no house-rules invocation stamp could be verified for this producer';
   if (data.reason === 'unavailable') {
     return `the global KB could not be read${data.errorClass ? ` (${data.errorClass})` : ''}`;
   }
@@ -407,6 +475,9 @@ function bodyOf(data: GateHouseRules): string {
               ),
             ]),
         ...(unreadChange(data) ? [bullet('files the read missed, if any', UNREAD_CHANGE)] : []),
+        ...(data.fingerprintUnverified === true
+          ? [bullet("the check's change fingerprint could not be verified")]
+          : []),
         ...(data.modifiedAfterCheck === true
           ? [bullet('changes made after the last house-rules check')]
           : []),
@@ -455,6 +526,9 @@ export function houseRulesRow(data: GateHouseRules | null | undefined): StatusSu
       ? ''
       : `${checkName(capped)} was given ${capped.listed} of ${capped.total} changed files`,
     unreadChange(data) ? UNREAD_CHANGE : '',
+    data.fingerprintUnverified === true
+      ? "the check's change fingerprint could not be verified"
+      : '',
     data.modifiedAfterCheck === true
       ? 'the change was modified after the last house-rules check'
       : '',

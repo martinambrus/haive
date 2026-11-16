@@ -28,7 +28,7 @@ describe('phase5VerifyStep.detect lint runners', () => {
   const put = (name: string, body: string) => writeFile(path.join(workspace, name), body);
   const detect = () =>
     phase5VerifyStep.detect!({
-      db: {},
+      db: { query: { tasks: { findFirst: async () => null } } },
       taskId: 'task-1',
       workspacePath: workspace,
       repoPath: workspace,

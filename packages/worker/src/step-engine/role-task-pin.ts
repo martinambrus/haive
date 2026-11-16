@@ -7,7 +7,13 @@ import type { RoleTaskPin } from '@haive/shared/step-outputs';
 export async function loadRoleTaskPin(db: Database, taskId: string): Promise<RoleTaskPin> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { derivedRunPlan: true, executionPath: true, runListSnapshot: true, type: true },
+    columns: {
+      dataEdgePlan: true,
+      derivedRunPlan: true,
+      executionPath: true,
+      runListSnapshot: true,
+      type: true,
+    },
   });
   if (!task) throw new DerivedRunPlanError();
   // Strategy is immutable on a definition; this read only detects a required missing plan.

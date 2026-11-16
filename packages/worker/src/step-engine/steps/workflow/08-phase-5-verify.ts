@@ -1,3 +1,8 @@
+import { VERIFY_SKIPPED_OUTPUT } from '../../check-result-output.js';
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
+import { CHECK_RESULT_ROLES, VERIFY_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { randomBytes } from 'node:crypto';
 import {
   ensureDirNoFollow,
@@ -804,7 +809,7 @@ const skippedResult = (): CheckResult => ({
   ran: false,
   passed: false,
   command: null,
-  output: 'skipped',
+  output: VERIFY_SKIPPED_OUTPUT,
 });
 
 // Body/exit signatures that mean the app did NOT come up cleanly. Conservative on
@@ -930,6 +935,8 @@ export async function runRuntimeSmoke(
 }
 
 export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['08-phase-5-verify'],
+  providesRoles: [{ role: CHECK_RESULT_ROLES.verify, contract: VERIFY_OUTPUT_CONTRACT }],
   needsRuntime: 'if-serving',
   metadata: {
     id: '08-phase-5-verify',
@@ -989,9 +996,8 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     }
     // 08b-test-management runs immediately before this step (index 7.9 against 8), so its
     // detect is the freshest identification of the framework in this workspace.
-    const infra = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
-    const testFramework =
-      ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
+    const infra = await readRole(ctx, CHECK_RESULT_ROLES.testManagement);
+    const testFramework = checkResultOutput(infra).primary ?? null;
     const declared = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
     const { slots, offSlots } = applyDeclaredCommands(
       await resolveSlots(workspace, ddevMode),

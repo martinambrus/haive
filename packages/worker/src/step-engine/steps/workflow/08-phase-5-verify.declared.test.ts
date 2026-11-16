@@ -61,7 +61,7 @@ describe('08 detect with the repository verify commands', () => {
   const put = (name: string, body: string) => writeFile(path.join(workspace, name), body);
   const detect = () =>
     phase5VerifyStep.detect!({
-      db: {},
+      db: { query: { tasks: { findFirst: async () => null } } },
       taskId: 'task-1',
       workspacePath: workspace,
       repoPath: workspace,
@@ -167,7 +167,7 @@ describe('08 apply with a declared command', () => {
     taskId: 'task-1',
     taskStepId: 'step-1',
     round: 0,
-    db: {},
+    db: { query: { tasks: { findFirst: async () => null } } },
     logger: { info: vi.fn(), warn: vi.fn() },
   } as never;
   const RUNNER = { container: 'haive-ddev-x', projectDir: '/repos/u/r' };
@@ -406,7 +406,7 @@ describe('the runner shell sees a declared command as exactly one argument', () 
     await mkdir(path.join(dir, '.ddev'), { recursive: true });
     await writeFile(path.join(dir, '.ddev/config.yaml'), 'name: x\n');
     const detected = await phase5VerifyStep.detect!({
-      db: {},
+      db: { query: { tasks: { findFirst: async () => null } } },
       taskId: 't',
       workspacePath: dir,
       repoPath: dir,

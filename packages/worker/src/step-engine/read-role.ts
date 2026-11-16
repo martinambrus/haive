@@ -1,3 +1,4 @@
+import { canonicalCheckResult } from './check-result-output.js';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared/logger';
@@ -8,6 +9,8 @@ import {
   DataEdgePlanError,
 } from '@haive/shared/data-edge-plan';
 import {
+  CHECK_RESULT_ROLES,
+  type CheckResultRole,
   STEP_ROLE_REGISTRY,
   IMPLEMENTATION_SUMMARY_ROLE,
   IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
@@ -171,12 +174,41 @@ export async function readDataRole(
   // from issue claims or use this reporting adapter for review/fix routing.
   if (role === IMPLEMENTATION_SUMMARY_ROLE && producerStepId === IMPLEMENTATION_SUMMARY_DAG_STEP_ID)
     output = { summary: '', filesTouched: [] };
+  if (
+    Object.values(CHECK_RESULT_ROLES).some((r) => r === role) &&
+    producerStepId === entry.legacyStepId
+  )
+    output = canonicalCheckResult(
+      role as CheckResultRole,
+      output,
+      row.detect,
+      row.iterations,
+      row.status ?? 'done',
+    );
   const common = {
     role,
     contract,
     producer: { rowId: row.id, stepId: row.stepId, round: row.round, status: row.status },
     iterations: row.iterations,
-    legacyOutput: pinned && row.status !== 'done' ? null : projectRoleOutput(role, output),
+    legacyOutput:
+      pinned && row.status !== 'done'
+        ? row.status === 'skipped' &&
+          producerStepId === entry.legacyStepId &&
+          Object.values(CHECK_RESULT_ROLES).some((r) => r === role)
+          ? // A skip has no check evidence, but its host discovery metadata still
+            // feeds verify/gate context. Never expose retained apply output here.
+            projectRoleOutput(
+              role,
+              canonicalCheckResult(
+                role as CheckResultRole,
+                null,
+                row.detect,
+                row.iterations,
+                'skipped',
+              ),
+            )
+          : null
+        : projectRoleOutput(role, output),
   };
   if (row.status !== 'done') return { ...common, state: 'not-ready' };
   const result = safeParseStepOutput(contract, output);

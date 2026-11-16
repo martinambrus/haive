@@ -1,3 +1,4 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import { pendingInsightApproval } from '../../../queues/insight-gate3-return.js';
 import { changeInsightPage, insightPageOffset, insightPageField } from './_insight-page.js';
 import {
@@ -265,6 +266,7 @@ async function persistCommitOutcome(
 }
 
 export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['10-gate-3-commit'],
   metadata: {
     id: '10-gate-3-commit',
     workflowType: 'workflow',
@@ -298,6 +300,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const houseRules = gate2?.output
       ? null
       : await loadGateHouseRules(ctx.db, ctx.taskId, {
+          consumer: ctx,
           currentFingerprint: () => taskChangeFingerprint(ctx),
         });
     const insightSummary = await loadInsightSummary(ctx, inventory.insights, offset);

@@ -119,3 +119,33 @@ it('checks both implementation-summary providers and its one optional consumer a
     ),
   ).toThrow('port-input-invalid');
 });
+
+it('keeps check-result executable and serialized declarations aligned, with only optional inputs', async () => {
+  const { CHECK_RESULT_ROLES } = await import('@haive/shared/step-outputs');
+  const { CHECK_RESULT_INPUTS } = await import('@haive/shared/step-ports');
+  const { StepRegistry } = await import('../src/step-engine/registry.js');
+  const { registerAllSteps } = await import('../src/step-engine/steps/index.js');
+  const registry = new StepRegistry();
+  registerAllSteps(registry);
+  for (const role of Object.values(CHECK_RESULT_ROLES)) {
+    const expected = STEP_ROLE_REGISTRY[role];
+    const entry = CORE_COMPOSABLE_STEPS.find((e) => e.stepId === expected.legacyStepId)!;
+    expect(entry.providesRoles?.find((p) => p.role === role)).toEqual({
+      role,
+      contract: expected.contract,
+    });
+    expect(registry.require(entry.stepId).providesRoles?.find((p) => p.role === role)).toEqual({
+      role,
+      contract: expected.contract,
+    });
+  }
+  for (const [id, expected] of Object.entries(CHECK_RESULT_INPUTS)) {
+    const onlyChecks = (ports: readonly { role: string }[] | undefined) =>
+      (ports ?? []).filter((p) => Object.values(CHECK_RESULT_ROLES).some((r) => r === p.role));
+    expect(onlyChecks(CORE_COMPOSABLE_STEPS.find((e) => e.stepId === id)?.consumesRoles)).toEqual(
+      expected,
+    );
+    expect(onlyChecks(registry.require(id).consumesRoles)).toEqual(expected);
+    expect(expected.every((p) => p.optional)).toBe(true);
+  }
+});

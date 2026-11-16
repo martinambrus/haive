@@ -2,14 +2,25 @@ import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
+import { CHECK_RESULT_ROLES, SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { StepDefinition } from '@haive/shared/step';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 
-it.each(['module.ports.check', 'custom.ports.check', 'core-check'])(
-  'validates role-only producer %s through advanceStep before fix-loop routing',
-  async (stepId) => {
-    for (const valid of [false, true]) {
+it.each([
+  ...['module.ports.check', 'custom.ports.check', 'core-check'].map((stepId) => ({
+    stepId,
+    role: SPEC_ROLES.checked,
+    invalidOnly: false,
+  })),
+  ...Object.values(CHECK_RESULT_ROLES).map((role) => ({
+    stepId: `module.check.${role.split('.').at(-1)}`,
+    role,
+    invalidOnly: true,
+  })),
+])(
+  'validates role-only producer $stepId through advanceStep before fix-loop routing',
+  async ({ stepId, role, invalidOnly }) => {
+    for (const valid of invalidOnly ? [false] : [false, true]) {
       const fake = createFakeDb({
         tasks: schema.tasks,
         taskSteps: schema.taskSteps,
@@ -56,9 +67,7 @@ it.each(['module.ports.check', 'custom.ports.check', 'core-check'])(
           index: 0,
           requiresCli: false,
         },
-        providesRoles: [
-          { role: SPEC_ROLES.checked, contract: STEP_ROLE_REGISTRY[SPEC_ROLES.checked].contract },
-        ],
+        providesRoles: [{ role, contract: STEP_ROLE_REGISTRY[role].contract }],
         fixLoopOnError: true,
         fixLoop: { evaluate: fixLoop },
         apply,
@@ -83,7 +92,7 @@ it.each(['module.ports.check', 'custom.ports.check', 'core-check'])(
         expect(result).toMatchObject({
           error: expect.stringContaining('step-output-contract-invalid'),
         });
-        expect(stored.errorMessage).toContain('haive.spec.checked@1');
+        expect(stored.errorMessage).toContain(`${STEP_ROLE_REGISTRY[role].contract.id}@1`);
         expect(stored.output).toBeNull();
         expect(fixLoop).not.toHaveBeenCalled();
       }

@@ -3,6 +3,7 @@ import ts from 'typescript';
 import { expect, it } from 'vitest';
 import { projectStepPorts, dataPortNodes, CORE_DATA_INPUTS } from '@haive/shared/step-ports';
 import {
+  CHECK_RESULT_ROLES,
   IMPLEMENTATION_SUMMARY_ROLE,
   SPEC_ROLES,
   STEP_ROLES,
@@ -39,6 +40,7 @@ const nodes = () => projectStepPorts(ids).nodes;
 
 it('mirrors every core data input and output declaration including its exact contract', () => {
   const dataRoles = new Set<string>([
+    ...Object.values(CHECK_RESULT_ROLES),
     IMPLEMENTATION_SUMMARY_ROLE,
     ...Object.values(SPEC_ROLES),
     DISCOVERY_ROLE,

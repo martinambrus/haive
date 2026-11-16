@@ -51,6 +51,12 @@ describe('ungated step-role reader ratchet', () => {
     ).toBeGreaterThan(0);
   });
   it.each([
+    'haive.validation',
+    'haive.verify',
+    'haive.test-management',
+    '07b-phase-4-validate',
+    '08-phase-5-verify',
+    '08b-test-management',
     'haive.implementation.summary',
     '07-phase-2-implement',
     '06c-dag-execute',
@@ -73,6 +79,7 @@ describe('ungated step-role reader ratchet', () => {
     ).toBeGreaterThan(0);
   });
   it.each([
+    'CHECK_RESULT_ROLES',
     'IMPLEMENTATION_SUMMARY_ROLE',
     'IMPLEMENTATION_SUMMARY_DAG_STEP_ID',
     'SPEC_ROLES',

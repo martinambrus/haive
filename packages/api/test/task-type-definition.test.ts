@@ -530,6 +530,69 @@ describe.skipIf(!url)('v3 per-consumer locked admission', () => {
     });
     expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
   });
+  it('pins check-result inputs at locked INSERT for admin and module-seeded tasks', async () => {
+    const checks = [
+      '07b-phase-4-validate',
+      '08b-test-management',
+      '08-phase-5-verify',
+      '09-gate-2-verify-approval',
+      '11-phase-8-learning',
+    ];
+    const checkSlugs = ['check-results-admin', 'check-results-module'];
+    await db.insert(schema.stepCatalog).values(checks.map((id) => catalogRow(id)));
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values(
+        checkSlugs.map((slug, index) =>
+          row(slug, { source: index === 0 ? 'admin' : 'module:prt3', stepIds: checks }),
+        ),
+      );
+    try {
+      const admin = await insert(checkSlugs[0]!);
+      const module = await insert(checkSlugs[1]!);
+      expect(module.dataEdgePlan).toEqual(admin.dataEdgePlan);
+      expect(admin.dataEdgePlan).toMatchObject({
+        version: 3,
+        candidates: [
+          {
+            bindings: {
+              '2:test-management': {
+                producerStepId: checks[1],
+                contract: { id: 'haive.test-management', version: 1 },
+              },
+              '3:validation': {
+                producerStepId: checks[0],
+                contract: { id: 'haive.validation', version: 1 },
+              },
+              '3:verify': {
+                producerStepId: checks[2],
+                contract: { id: 'haive.verify', version: 1 },
+              },
+              '3:test-management': {
+                producerStepId: checks[1],
+                contract: { id: 'haive.test-management', version: 1 },
+              },
+              '4:validation': { producerStepId: checks[0] },
+              '4:verify': { producerStepId: checks[2] },
+            },
+          },
+        ],
+      });
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ stepIds: [checks[3]!] })
+        .where(eq(schema.taskTypeDefinitions.slug, checkSlugs[0]!));
+      expect(
+        (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, admin.id) }))?.dataEdgePlan,
+      ).toEqual(admin.dataEdgePlan);
+    } finally {
+      await db.delete(schema.tasks).where(inArray(schema.tasks.type, checkSlugs));
+      await db
+        .delete(schema.taskTypeDefinitions)
+        .where(inArray(schema.taskTypeDefinitions.slug, checkSlugs));
+      await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, checks));
+    }
+  });
   it('uses the definition and catalog at INSERT, not the preflight copy', async () => {
     const before = await definitionForCreate(db, slugs[0]!, { locked: false, generic: true });
     await db

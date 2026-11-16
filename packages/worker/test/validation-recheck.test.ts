@@ -147,3 +147,104 @@ describe('insight validation composition', () => {
     },
   );
 });
+
+it('a module validation data binding cannot replace the physical recheck snapshot or fix target', async () => {
+  const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const routingCtx = { taskId } as ResolvedTaskContext;
+  const { schema } = await import('@haive/database');
+  const { createFakeDb } = await import('@haive/database/testing');
+  const { buildDataEdgePlan } = await import('@haive/shared/data-edge-plan');
+  const { dataPortNodes } = await import('@haive/shared/step-ports');
+  const { finishedRoutingVerdict } = await import('../src/step-engine/step-runner.js');
+  const { phase4ValidateStep } =
+    await import('../src/step-engine/steps/workflow/07b-phase-4-validate.js');
+  const { FIX_LOOP_TARGET_STEP_ID } =
+    await import('../src/step-engine/steps/workflow/_fix-loop.js');
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  fake.insert(schema.tasks, { id: taskId });
+  fake.insert(schema.taskSteps, {
+    id: 'bbbbbbbb-0000-4000-8000-000000000001',
+    taskId,
+    stepId: VALIDATE,
+    round: 0,
+    status: 'done',
+    output: { validationSnapshot: { 'a.ts': 'same' } },
+  });
+  fake.insert(schema.taskSteps, {
+    id: 'bbbbbbbb-0000-4000-8000-000000000002',
+    taskId,
+    stepId: 'module.check.validator',
+    round: 0,
+    status: 'done',
+    output: { validationSnapshot: { 'a.ts': 'poison' }, verdict: 'VALID' },
+  });
+  const steps = [
+    step(RECONCILE),
+    step(VALIDATE),
+    step('module.check.validator'),
+    { ...step('editor'), editsCodeOrTests: true },
+    step('09-gate-2-verify-approval'),
+  ];
+  const output = {
+    verdict: 'ISSUES_FOUND',
+    issues: [{ severity: 'high', file: 'a.ts', description: 'broken' }],
+    fixesApplied: [],
+    churnFiles: [],
+    converged: true,
+  };
+  h.snapshot.mockResolvedValue({ 'a.ts': 'same' });
+  const before = JSON.stringify({
+    recheck: await validationSuccessor(
+      fake.db as unknown as Database,
+      routingCtx,
+      'editor',
+      0,
+      steps,
+      {},
+    ),
+    fix: await finishedRoutingVerdict(
+      fake.db as unknown as Database,
+      taskId,
+      phase4ValidateStep,
+      output,
+    ),
+  });
+  const role = 'haive.validation' as const;
+  const nodes = dataPortNodes(
+    steps.map((s) => s.metadata.id),
+    {},
+    new Map([
+      ['module.check.validator', { providesRoles: [{ role, contract: { id: role, version: 1 } }] }],
+    ]),
+  );
+  fake.patch(schema.tasks, taskId, {
+    dataEdgePlan: buildDataEdgePlan('static', [
+      { executionPath: null, nodes, bindings: { '4:validation': 2 } },
+    ]),
+  });
+  expect(
+    JSON.stringify({
+      recheck: await validationSuccessor(
+        fake.db as unknown as Database,
+        routingCtx,
+        'editor',
+        0,
+        steps,
+        {},
+      ),
+      fix: await finishedRoutingVerdict(
+        fake.db as unknown as Database,
+        taskId,
+        phase4ValidateStep,
+        output,
+      ),
+    }),
+  ).toBe(before);
+  expect(before).toContain('loop_back');
+  expect(before).not.toContain('recheck_requested');
+  expect(FIX_LOOP_TARGET_STEP_ID).toBe('07-phase-2-implement');
+});

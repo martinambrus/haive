@@ -1,3 +1,4 @@
+import { CHECK_RESULT_ROLES, VALIDATION_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import {
   affectedValidationFiles,
   readValidationSnapshot,
@@ -648,6 +649,7 @@ function outputContract(docsOnly: boolean, dimensions: readonly ReviewDimension[
 }
 
 export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> = {
+  providesRoles: [{ role: CHECK_RESULT_ROLES.validation, contract: VALIDATION_OUTPUT_CONTRACT }],
   needsRuntime: 'if-serving',
   editsCodeOrTests: true,
   metadata: {
@@ -1114,7 +1116,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         parsed.issues.length > 0 ? await loadReviewDependencyPolicy(ctx, d) : d.dependencyPolicy;
       const ruled = raiseRuleViolations(
         parsed.issues,
-        await givenRuleIds(ctx.db, parsed.issues, args.llmInvocationId),
+        await givenRuleIds(ctx, parsed.issues, args.llmInvocationId),
       );
       const issues = ruled.items.map((issue) => {
         const upstream = upstreamKind(issue.file, policy);
