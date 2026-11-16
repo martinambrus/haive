@@ -1,4 +1,5 @@
 import { rolePin, PRODUCER } from '../../../../test/step-role-fixtures.js';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,8 @@ import {
 } from './_gate-house-rules.js';
 
 const TASK = 'aaaaaaaa-0000-4000-8000-000000000001';
+const STEP = 'aaaaaaaa-0000-4000-8000-000000000002';
+const owner = { taskId: TASK, taskStepId: STEP };
 const VALIDATOR = 'bbbbbbbb-0000-4000-8000-000000000001';
 const OTHER = 'bbbbbbbb-0000-4000-8000-000000000002';
 const HASH = `hr1:${'a'.repeat(64)}`;
@@ -198,7 +201,13 @@ function world() {
   fake.insert(schema.tasks, { id: TASK, type: 'workflow' });
   const db = fake.db as unknown as Database;
   const step07b = (output: unknown, round = 0) =>
-    fake.insert(schema.taskSteps, { taskId: TASK, stepId: '07b-phase-4-validate', round, output });
+    fake.insert(schema.taskSteps, {
+      id: round === 0 ? STEP : randomUUID(),
+      taskId: TASK,
+      stepId: '07b-phase-4-validate',
+      round,
+      output,
+    });
   const step08c = (output: unknown, round = 0) =>
     fake.insert(schema.taskSteps, { taskId: TASK, stepId: '08c-code-review', round, output });
   const invocation = (
@@ -206,7 +215,17 @@ function world() {
     houseRules: unknown,
     over: Record<string, unknown> = {},
   ): void => {
-    fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules, ...over });
+    const producer = fake.rows(schema.taskSteps).find((r) => {
+      const o = (r.output ?? {}) as Record<string, unknown>;
+      return o.validatorInvocationId === id || o.peerInvocationId === id;
+    });
+    fake.insert(schema.cliInvocations, {
+      id,
+      taskId: TASK,
+      taskStepId: producer?.id ?? STEP,
+      houseRules,
+      ...over,
+    });
   };
   return { fake, db, step07b, step08c, invocation };
 }
@@ -232,7 +251,7 @@ describe('loadInvocationStamp', () => {
     const w = world();
     w.invocation(OTHER, stamp({ entries: [entry(RULE_B, 'Other', ALWAYS)] }));
     w.invocation(VALIDATOR, stamp({ entries: [entry(RULE_A, 'Mine', ALWAYS)] }));
-    expect((await loadInvocationStamp(w.db, VALIDATOR))?.entries.map((e) => e.id)).toEqual([
+    expect((await loadInvocationStamp(w.db, VALIDATOR, owner))?.entries.map((e) => e.id)).toEqual([
       RULE_A,
     ]);
   });
@@ -244,7 +263,7 @@ describe('loadInvocationStamp', () => {
   ])('answers null for %s', async (_name, id, stored) => {
     const w = world();
     if (stored !== undefined) w.invocation(VALIDATOR, stored);
-    expect(await loadInvocationStamp(w.db, id)).toBeNull();
+    expect(await loadInvocationStamp(w.db, id, owner)).toBeNull();
   });
 });
 
@@ -1212,7 +1231,7 @@ describe('givenRuleIds', () => {
     w.invocation(VALIDATOR, stamp({ entries }));
     w.invocation(OTHER, stamp({ entries: [entry(RULE_C, 'Other', ALWAYS)] }));
     const shorts = houseRuleShortIds([RULE_A, RULE_B]);
-    expect(await givenRuleIds(w.db, [{ rule: 'x' }], VALIDATOR)).toEqual(
+    expect(await givenRuleIds({ db: w.db, ...owner }, [{ rule: 'x' }], VALIDATOR)).toEqual(
       new Set([shorts.get(RULE_A), shorts.get(RULE_B)]),
     );
   });
@@ -1225,9 +1244,11 @@ describe('givenRuleIds', () => {
         throw new Error('the store was read');
       },
     });
-    expect(await givenRuleIds(db, [{}, { rule: undefined }], VALIDATOR)).toEqual(new Set());
-    expect(await givenRuleIds(db, [{ rule: 'x' }], null)).toEqual(new Set());
-    expect(await givenRuleIds(db, [{ rule: 'x' }], undefined)).toEqual(new Set());
+    expect(await givenRuleIds({ db, ...owner }, [{}, { rule: undefined }], VALIDATOR)).toEqual(
+      new Set(),
+    );
+    expect(await givenRuleIds({ db, ...owner }, [{ rule: 'x' }], null)).toEqual(new Set());
+    expect(await givenRuleIds({ db, ...owner }, [{ rule: 'x' }], undefined)).toEqual(new Set());
     expect(reads).toEqual([]);
   });
 
@@ -1238,7 +1259,7 @@ describe('givenRuleIds', () => {
   ])('is empty for %s', async (_name, id, stored) => {
     const w = world();
     if (stored !== undefined) w.invocation(VALIDATOR, stored);
-    expect(await givenRuleIds(w.db, [{ rule: 'x' }], id)).toEqual(new Set());
+    expect(await givenRuleIds({ db: w.db, ...owner }, [{ rule: 'x' }], id)).toEqual(new Set());
   });
 });
 
@@ -1853,7 +1874,9 @@ describe('pinned replacement rule evidence', () => {
       status: 'done',
       output,
     });
-    expect(await loadGateHouseRules(w.db, TASK, { withCodeReview: true })).toBeNull();
+    expect(
+      houseRulesRow(await loadGateHouseRules(w.db, TASK, { withCodeReview: true }))?.statusLabel,
+    ).toBe('NOT CHECKED');
     w.invocation(
       OTHER,
       stamp({ entries: [entry(RULE_A, 'Rule from the actual invocation', ALWAYS)] }),

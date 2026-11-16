@@ -692,6 +692,7 @@ describe('10-gate-3-commit house rules', () => {
     omitted: [],
   };
   const output07b = (over: Record<string, unknown> = {}) => ({
+    id: 'aaaaaaaa-0000-4000-8000-000000000002',
     stepId: '07b-phase-4-validate',
     status: 'done',
     round: 0,

@@ -1361,7 +1361,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
 
     // A violation of a rule the peer reviewer was given blocks, whatever severity it gave it.
     const peerInvocationId = miningInvocationId(results, 'peer-reviewer');
-    const given = await givenRuleIds(ctx.db, peerOut.findings, peerInvocationId);
+    const given = await givenRuleIds(ctx, peerOut.findings, peerInvocationId);
     const ruled = raiseRuleViolations(peerOut.findings, given);
     peerOut.findings = ruled.items;
 

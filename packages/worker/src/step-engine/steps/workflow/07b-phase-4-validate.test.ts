@@ -1002,7 +1002,7 @@ function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unkno
     taskDagIssues: schema.taskDagIssues,
   });
   for (const [id, houseRules] of Object.entries(stamps)) {
-    fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+    fake.insert(schema.cliInvocations, { id, taskId: TASK, taskStepId: STEP, houseRules });
   }
   if (setup) {
     fake.insert(schema.taskSteps, {

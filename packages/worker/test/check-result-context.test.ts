@@ -1,3 +1,4 @@
+import { rolePin, PRODUCER } from './step-role-fixtures.js';
 import type { RolePortDeclarations } from '@haive/shared/modularity';
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
@@ -8,6 +9,7 @@ import { dataPortNodes } from '@haive/shared/step-ports';
 import {
   loadGateHouseRules,
   houseRulesRow,
+  houseRulesHoldApprove,
 } from '../src/step-engine/steps/workflow/_gate-house-rules.js';
 import { renderTaskHistoryDigest } from '../src/step-engine/steps/workflow/_task-history-digest.js';
 const validation = 'haive.validation',
@@ -85,7 +87,7 @@ function pin(ids: string[], selection: 'static' | 'derived') {
   };
 }
 for (const selection of ['static', 'derived'] as const) {
-  it(`${selection}: house-rules row is byte identical for canonical and bound validation`, async () => {
+  it(`${selection}: house-rules findings survive an owned bound invocation with explicit fingerprint caveat`, async () => {
     const fake = createFakeDb({
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
@@ -101,8 +103,9 @@ for (const selection of ['static', 'derived'] as const) {
       round: 1,
       status: 'running',
     });
+    const canonicalRowId = randomUUID();
     fake.insert(schema.taskSteps, {
-      id: randomUUID(),
+      id: canonicalRowId,
       taskId,
       stepId: validator,
       round: 0,
@@ -112,6 +115,8 @@ for (const selection of ['static', 'derived'] as const) {
     });
     fake.insert(schema.cliInvocations, {
       id: invocation,
+      taskId,
+      taskStepId: canonicalRowId,
       houseRules: {
         mode: 'review',
         entries: [
@@ -128,8 +133,9 @@ for (const selection of ['static', 'derived'] as const) {
     const before = JSON.stringify(
       houseRulesRow(await loadGateHouseRules(fake.db as unknown as Database, taskId)),
     );
+    const moduleRowId = randomUUID();
     fake.insert(schema.taskSteps, {
-      id: randomUUID(),
+      id: moduleRowId,
       taskId,
       stepId: moduleValidator,
       round: 0,
@@ -137,16 +143,26 @@ for (const selection of ['static', 'derived'] as const) {
       output,
       iterations: [],
     });
+    // Each producer must name its own invocation, with the same host stamp.
+    fake.patch(schema.cliInvocations, invocation, { taskStepId: moduleRowId });
     fake.patch(schema.tasks, taskId, pin([moduleValidator, gate], selection));
-    expect(
-      JSON.stringify(
-        houseRulesRow(
-          await loadGateHouseRules(fake.db as unknown as Database, taskId, {
-            consumer: { taskStepId, round: 1 },
-          }),
-        ),
+    const bound = houseRulesRow(
+      await loadGateHouseRules(fake.db as unknown as Database, taskId, {
+        consumer: { taskStepId, round: 1 },
+      }),
+    );
+    const canonical = JSON.parse(before);
+    expect(bound).toEqual({
+      ...canonical,
+      detail: canonical.detail.replace(
+        '1 conflict(s)',
+        "the check's change fingerprint could not be verified; 1 conflict(s)",
       ),
-    ).toBe(before);
+      body: canonical.body.replace(
+        '\n\n## Conflicts',
+        "\n- the check's change fingerprint could not be verified\n\n## Conflicts",
+      ),
+    });
     expect(before).toContain('CONFLICT');
   });
   it(`${selection}: historical role reads preserve every round and exact digest bytes`, () => {
@@ -204,3 +220,104 @@ it('one producer may supply validation and review without hiding either historic
       .findingCount,
   ).toBe(2);
 });
+
+// A module's invocation id and fingerprint are claims, not host evidence.
+for (const kind of ['validation', 'review'] as const) {
+  for (const ownership of ['own', 'other-row', 'other-task', 'missing'] as const) {
+    it(`${kind}: a module stamp requires the same task and producer row (${ownership})`, async () => {
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskSteps: schema.taskSteps,
+        cliInvocations: schema.cliInvocations,
+      });
+      const taskId = randomUUID(),
+        taskStepId = randomUUID(),
+        producerId = randomUUID(),
+        invocationId = randomUUID();
+      const canonicalRowId = randomUUID();
+      fake.insert(schema.taskSteps, {
+        id: canonicalRowId,
+        taskId,
+        stepId: kind === 'review' ? '08c-code-review' : validator,
+        round: 0,
+        status: 'done',
+        output: { validatorInvocationId: invocationId, peerInvocationId: invocationId },
+      });
+      const review = kind === 'review';
+      const producer = review ? PRODUCER : moduleValidator;
+      fake.insert(schema.tasks, {
+        id: taskId,
+        ...(review ? rolePin() : pin([producer, gate], 'static')),
+      });
+      fake.insert(schema.taskSteps, {
+        id: taskStepId,
+        taskId,
+        stepId: gate,
+        round: 1,
+        status: 'running',
+      });
+      const invocationKey = review ? 'peerInvocationId' : 'validatorInvocationId';
+      const evidence = review
+        ? {
+            reviewed: true,
+            peer: { verdict: 'APPROVE', findings: [], positives: [] },
+            security: { verdict: 'SAFE', findings: [] },
+            extraLenses: [],
+            blocking: false,
+            reviewIncomplete: false,
+            advisoryVerdict: false,
+            coverage: null,
+            refutedCount: 0,
+            counts: { peer: 0, securityCriticalHigh: 0 },
+            recurringNote: '',
+          }
+        : {
+            ...output,
+            resultStatus: 'passed',
+            verdict: 'VALID',
+            issues: [],
+            ruleConflicts: [],
+            changedFilesCoverage: { listed: 1, total: 1 },
+          };
+      fake.insert(schema.taskSteps, {
+        id: producerId,
+        taskId,
+        stepId: producer,
+        round: 0,
+        status: 'done',
+        output: {
+          ...evidence,
+          [invocationKey]: ownership === 'missing' ? null : invocationId,
+          changeFingerprint: 'module-claim',
+        },
+        iterations: [],
+      });
+      fake.insert(schema.cliInvocations, {
+        id: invocationId,
+        taskId: ownership === 'other-task' ? randomUUID() : taskId,
+        taskStepId: ownership === 'other-row' ? canonicalRowId : producerId,
+        houseRules: {
+          mode: 'review',
+          entries: [
+            {
+              id: rule,
+              hash: `hr1:${'a'.repeat(64)}`,
+              title: 'House rule',
+              why: { scope: 'always' },
+            },
+          ],
+          omitted: [],
+        },
+      });
+      const rules = await loadGateHouseRules(fake.db as unknown as Database, taskId, {
+        withCodeReview: review,
+        consumer: { taskStepId, round: 1 },
+        currentFingerprint: async () => 'module-claim',
+      });
+      const row = houseRulesRow(rules);
+      expect(row?.statusLabel).toBe(ownership === 'own' ? 'PARTIAL' : 'NOT CHECKED');
+      expect(houseRulesHoldApprove(rules)).toBe(true);
+      expect(rules?.entries).toHaveLength(ownership === 'own' ? 1 : 0);
+    });
+  }
+}

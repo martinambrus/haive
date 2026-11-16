@@ -1989,7 +1989,7 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
       ...stored,
     };
     for (const [id, houseRules] of Object.entries(rows)) {
-      fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
+      fake.insert(schema.cliInvocations, { id, taskId: TASK, taskStepId: 'aaaaaaaa-0000-4000-8000-000000000002', houseRules });
     }
     if (setup) {
       fake.insert(schema.taskSteps, {
@@ -2012,7 +2012,7 @@ describe('08c re-checks the house rules the peer reviewer was given', () => {
     const ctx = {
       logger: logger.child({ test: '08c-rules' }),
       taskId: TASK,
-      taskStepId: 's1',
+      taskStepId: 'aaaaaaaa-0000-4000-8000-000000000002',
       round: 0,
       db,
     } as unknown as StepContext;
