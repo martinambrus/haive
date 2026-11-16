@@ -1,5 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
+import { type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
@@ -41,6 +43,7 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const OWNER = '00000000-0000-4000-8000-000000000002';
+const ADMIN = '00000000-0000-4000-8000-000000000001';
 const TASK = '00000000-0000-4000-8000-000000000003';
 const STAMP = new Date('2026-01-01');
 const empty = { version: 1, guardedSpans: [] };
@@ -68,7 +71,7 @@ const request = (path: string, body: unknown, method = 'POST') =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-function setup(contract: unknown) {
+function setup(contract: unknown, pausedAt: Date | null = STAMP) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
@@ -81,7 +84,7 @@ function setup(contract: unknown) {
     type: 'test',
     status: 'running',
     executionContract: contract,
-    pausedAt: STAMP,
+    pausedAt,
     orchestrationEpoch: 3,
   });
   return fake;
@@ -188,6 +191,105 @@ it.each(unsupported)(
         });
       else expect(after).toEqual(row);
     }
+    const stamp = fake.rows(schema.tasks).find((t) => t.id === unheld)?.pausedAt as Date;
+    expect(fake.rows(schema.taskEvents)).toMatchObject([
+      {
+        taskId: unheld,
+        eventType: 'task.paused',
+        payload: { by: ADMIN, byAdmin: true, reason: 'unsupported-execution-contract' },
+      },
+    ]);
+    expect(fake.rows(schema.taskEvents)).toHaveLength(1);
+    expect(fake.rows(schema.auditEvents)).toMatchObject([
+      { action: 'config.global_pause', metadata: { from: true, to: false } },
+      {
+        actorUserId: ADMIN,
+        action: 'task.admin_pause',
+        targetType: 'task',
+        targetId: unheld,
+        metadata: {
+          ownerUserId: OWNER,
+          pausedAt: stamp.toISOString(),
+          reason: 'invalid-execution-contract',
+        },
+      },
+    ]);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(2);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(h.kill).not.toHaveBeenCalled();
+  },
+);
+it('an already-off global lift leaves unsupported tasks and their pause evidence untouched', async () => {
+  const fake = setup(guarded, null);
+  h.paused = false;
+  const before = structuredClone(fake.rows(schema.tasks));
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status, await res.clone().text()).toBe(200);
+  expect(fake.rows(schema.tasks)).toEqual(before);
+  expect(await res.json()).toEqual({ paused: false });
+  expect(fake.rows(schema.taskEvents)).toEqual([]);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { action: 'config.global_pause', metadata: { from: false, to: false } },
+  ]);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+  expect(h.paused).toBe(false);
+});
+it('a task hold lock timeout answers 503, rolls back the config audit, and leaves the switch on', async () => {
+  const fake = setup(guarded, null);
+  const before = state(fake);
+  const statements: string[][] = [];
+  const transaction = fake.db.transaction;
+  vi.spyOn(fake.db, 'transaction').mockImplementation((run) =>
+    transaction(async (tx) => {
+      const queries: string[] = [];
+      statements.push(queries);
+      const execute = tx.execute;
+      tx.execute = async (query) => {
+        queries.push(new PgDialect().sqlToQuery(query as SQL).sql);
+        return execute(query);
+      };
+      return run(tx);
+    }),
+  );
+  fake.hooks.beforeUpdate = (table) => {
+    if (table === schema.tasks)
+      throw new Error('task hold failed', {
+        cause: Object.assign(new Error('lock timeout'), { code: '55P03' }),
+      });
+  };
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status, await res.clone().text()).toBe(503);
+  expect(await res.json()).toEqual({
+    error: 'Another save of this setting is in progress; try again',
+    code: null,
+  });
+  expect(state(fake)).toEqual(before);
+  expect(h.paused).toBe(true);
+  expect(statements).toHaveLength(2);
+  expect(statements[0]?.[0]).toBe("SET LOCAL lock_timeout = '30000ms'");
+  expect(statements[1]).toEqual([statements[0]?.[0]]);
+  expect(h.add).not.toHaveBeenCalled();
+  expect(h.kill).not.toHaveBeenCalled();
+});
+it.each([schema.taskEvents, schema.auditEvents])(
+  'a refused hold evidence insert rolls back the task hold and keeps the global switch on',
+  async (refusedTable) => {
+    const fake = setup(guarded, null);
+    const before = state(fake);
+    fake.hooks.beforeInsert = (table) => {
+      if (table === refusedTable && fake.rows(schema.tasks)[0]?.pausedAt)
+        throw new Error('hold evidence refused');
+    };
+
+    const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+    expect(res.status).toBe(500);
+    expect(state(fake)).toEqual(before);
+    expect(h.paused).toBe(true);
     expect(h.add).not.toHaveBeenCalled();
     expect(h.kill).not.toHaveBeenCalled();
   },

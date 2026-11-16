@@ -558,7 +558,7 @@ async function saveConfig(
     privateFields?: readonly string[];
     secret?: { key: string; value: string; description: string };
   },
-  prepare?: () => Promise<void>,
+  prepare?: (previous: Record<string, ConfigValue>) => Promise<void>,
 ): Promise<void> {
   const entries = Object.entries(fields);
   const lockName =
@@ -603,7 +603,7 @@ async function saveConfig(
           await insertAuditEvent(savepoint, full);
           // Preparation must commit before Redis releases a pickup gate; the surrounding
           // config advisory lock still serializes concurrent saves of that switch.
-          await prepare?.();
+          await prepare?.(Object.fromEntries(changes.map(({ name, from }) => [name, from])));
           if (options?.secret) {
             const { key, value, description } = options.secret;
             await secretsService.set(key, value, description, savepoint);
@@ -1912,6 +1912,7 @@ async function holdUnsupportedTasksForGlobalResume(actorUserId: string) {
     } catch (error) {
       if (!(error instanceof HttpError) || error.code !== 'invalid-execution-contract') throw error;
       const event = await db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${CONFIG_LOCK_TIMEOUT_MS}ms'`));
         const now = new Date();
         const held = await tx
           .update(schema.tasks)
@@ -1975,7 +1976,8 @@ adminRoutes.put('/config/global-pause', async (c) => {
     undefined,
     paused
       ? undefined
-      : async () => {
+      : async (previous) => {
+          if (!previous.paused) return;
           skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId'));
         },
   );
