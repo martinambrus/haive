@@ -39,6 +39,25 @@ export const IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT = Object.freeze({
   id: 'haive.implementation.summary',
   version: 1,
 } as const);
+export const CHECK_RESULT_ROLES = Object.freeze({
+  validation: 'haive.validation',
+  verify: 'haive.verify',
+  testManagement: 'haive.test-management',
+} as const);
+export const VALIDATION_OUTPUT_CONTRACT = Object.freeze({
+  id: CHECK_RESULT_ROLES.validation,
+  version: 1,
+} as const);
+export const VERIFY_OUTPUT_CONTRACT = Object.freeze({
+  id: CHECK_RESULT_ROLES.verify,
+  version: 1,
+} as const);
+export const TEST_MANAGEMENT_OUTPUT_CONTRACT = Object.freeze({
+  id: CHECK_RESULT_ROLES.testManagement,
+  version: 1,
+} as const);
+export type CheckResultRole = (typeof CHECK_RESULT_ROLES)[keyof typeof CHECK_RESULT_ROLES];
+
 export const IMPLEMENTATION_SUMMARY_ROLE = 'haive.implementation.summary' as const;
 export const IMPLEMENTATION_SUMMARY_DAG_STEP_ID = '06c-dag-execute' as const;
 
@@ -82,6 +101,27 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     quoteProjection: 'agent',
     legacyStepId: STEP_ROLES.codeAudit,
     hostPolicy: 'code-audit',
+  } as const),
+  [CHECK_RESULT_ROLES.validation]: Object.freeze({
+    id: CHECK_RESULT_ROLES.validation,
+    contract: VALIDATION_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '07b-phase-4-validate',
+  } as const),
+  [CHECK_RESULT_ROLES.verify]: Object.freeze({
+    id: CHECK_RESULT_ROLES.verify,
+    contract: VERIFY_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '08-phase-5-verify',
+  } as const),
+  [CHECK_RESULT_ROLES.testManagement]: Object.freeze({
+    id: CHECK_RESULT_ROLES.testManagement,
+    contract: TEST_MANAGEMENT_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '08b-test-management',
   } as const),
   // 07's salvage/bypass stubs and the DAG compatibility adapter write host text.
   // Module producers cannot strengthen this whole-role authorship guarantee.
@@ -396,7 +436,168 @@ export type ImplementationSummaryOutput = ContractShape<
   z.infer<typeof implementationSummaryOutputSchema>
 >;
 
+// Explicit outcome states are independent of the physical producer's lifecycle.
+// A successful write can truthfully report an incomplete or unexecuted check.
+const resultStatusSchema = z.enum([
+  'not-run',
+  'skipped',
+  'incomplete',
+  'failed',
+  'passed',
+  'manual',
+  'declined',
+]);
+const resultCoverageSchema = z
+  .object({ listed: z.number(), total: z.number(), scanFailed: z.literal(true).optional() })
+  .passthrough();
+const validationOutputSchema = z
+  .object({
+    resultStatus: resultStatusSchema.exclude(['manual', 'declined']),
+    exhaustedBudget: z.boolean(),
+    verdict: z.enum(['VALID', 'ISSUES_FOUND', 'UNPARSEABLE']),
+    summary: z.string(),
+    issues: z.array(
+      z
+        .object({
+          upstream: z.enum(['infrastructure', 'dependency', 'unknown']).nullable().optional(),
+          severity: z.enum(REVIEW_SEVERITIES),
+          file: z.string().optional(),
+          description: z.string(),
+          fix: z.string().optional(),
+          rule: z.string().optional(),
+        })
+        .passthrough(),
+    ),
+    dimensions: z.array(
+      z
+        .object({
+          name: z.string(),
+          status: z.enum(['PASS', 'FAIL', 'N/A']),
+          note: z.string().optional(),
+        })
+        .passthrough(),
+    ),
+    excludedDimensions: z.array(z.string()),
+    fixesApplied: z.array(z.string()),
+    converged: z.boolean(),
+    churnFiles: z.array(z.string()),
+    report: z.string(),
+    reportChars: z.number().optional(),
+    validatorPasses: z.number(),
+    validatorInvocationId: z.string().nullable().optional(),
+    changeFingerprint: z.string().optional(),
+    changedFilesCoverage: resultCoverageSchema.optional(),
+    ruleConflicts: z
+      .array(
+        z
+          .object({ rule: z.string(), file: z.string().optional(), reason: z.string() })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough()
+  .superRefine((o, ctx) => {
+    if (
+      o.resultStatus === 'passed' &&
+      (o.verdict !== 'VALID' ||
+        o.exhaustedBudget ||
+        !o.converged ||
+        o.issues.length ||
+        o.dimensions.some((d) => d.status === 'FAIL') ||
+        o.changedFilesCoverage?.scanFailed ||
+        (o.changedFilesCoverage && o.changedFilesCoverage.listed < o.changedFilesCoverage.total))
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'passing validation requires complete valid evidence',
+      });
+  });
+const checkSlotSchema = z
+  .object({
+    ran: z.boolean(),
+    passed: z.boolean(),
+    command: z.string().nullable(),
+    output: z.string(),
+    note: z.string().optional(),
+    scope: z.object({ blocking: z.number(), preExisting: z.number() }).passthrough().optional(),
+  })
+  .passthrough();
+const slotNameSchema = z.enum(['test', 'lint', 'typecheck']);
+const verifyOutputSchema = z
+  .object({
+    resultStatus: resultStatusSchema,
+    test: checkSlotSchema,
+    lint: checkSlotSchema,
+    phpLint: checkSlotSchema.optional(),
+    typecheck: checkSlotSchema,
+    passed: z.boolean(),
+    declinedConfigs: z.array(z.string()),
+    declaredSlots: z.array(slotNameSchema),
+    offSlots: z.array(slotNameSchema),
+    slotWithoutRunner: z.boolean(),
+    runtimeSmoke: z
+      .object({
+        ran: z.boolean(),
+        passed: z.boolean().nullable(),
+        httpStatus: z.number().nullable(),
+        url: z.string().nullable(),
+        errorExcerpt: z.string(),
+      })
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough()
+  .superRefine((o, ctx) => {
+    const checks = [o.test, o.lint, o.phpLint, o.typecheck].filter((v) => v !== undefined);
+    if (
+      o.resultStatus === 'passed' &&
+      (!o.passed || !checks.some((c) => c.ran) || checks.some((c) => c.ran && !c.passed))
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'passing verification requires executed checks',
+      });
+  });
+const testManagementOutputSchema = z
+  .object({
+    resultStatus: resultStatusSchema.exclude(['manual', 'declined']),
+    action: z.string(),
+    testsCreated: z.array(z.string()),
+    testsUpdated: z.array(z.string()),
+    testsDeleted: z.array(z.string()),
+    testsPassed: z.boolean().nullable(),
+    primary: z
+      .enum([
+        'playwright',
+        'cypress',
+        'vitest',
+        'jest',
+        'phpunit',
+        'pytest',
+        'pkg-script',
+        'composer-script',
+      ])
+      .nullable(),
+  })
+  .passthrough()
+  .superRefine((o, ctx) => {
+    if (o.resultStatus === 'passed' && (o.testsPassed !== true || o.action === 'skip'))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'passing test management requires executed tests',
+      });
+  });
+export type ValidationOutput = ContractShape<z.infer<typeof validationOutputSchema>>;
+export type VerifyResultOutput = ContractShape<z.infer<typeof verifyOutputSchema>>;
+export type TestManagementOutput = ContractShape<z.infer<typeof testManagementOutputSchema>>;
+
 const outputValidators = Object.freeze({
+  'haive.validation': validationOutputSchema,
+  'haive.verify': verifyOutputSchema,
+  'haive.test-management': testManagementOutputSchema,
   'haive.implementation.summary': implementationSummaryOutputSchema,
   'haive.discovery': discoveryOutputSchema,
   'haive.requirements.draft': requirementsOutputSchema,

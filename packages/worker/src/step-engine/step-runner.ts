@@ -1,3 +1,4 @@
+import { finalizeCanonicalCheckResult } from './check-result-output.js';
 import {
   recordGate3Check,
   pendingInsightApproval,
@@ -4156,6 +4157,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // clear the flag. The pre-`done` check stays as the narrower backstop it always was.
     throwIfCancelled();
 
+    output = finalizeCanonicalCheckResult(
+      stepDef.metadata.id,
+      output,
+      detected,
+      current.iterations ?? [],
+    );
+
     // Only new successful apply returns are validated. Throws and parks above, and
     // terminal-row recovery, retain their existing semantics. Check ownership before
     // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
@@ -4227,6 +4235,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         iterationCount: newIterations.length,
         statusMessage: null,
       });
+      output = finalizeCanonicalCheckResult(stepDef.metadata.id, output, detected, newIterations);
       ctx.logger.info(
         { iteration, continueRequested, budget, exhaustedBudget },
         'loop pass completed',
