@@ -1,3 +1,7 @@
+import {
+  IMPLEMENTATION_SUMMARY_ROLE,
+  IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
@@ -27,6 +31,9 @@ interface DagExecuteDetect {
 }
 
 interface DagExecuteApply {
+  /** Host reporting adapter: learning historically read a skipped/absent 07. */
+  summary: string;
+  filesTouched: string[];
   ran: boolean;
   issues: number;
   levels: number;
@@ -148,6 +155,9 @@ async function loadDroppedIssues(
 }
 
 export const dagExecuteStep: StepDefinition<DagExecuteDetect, DagExecuteApply> = {
+  providesRoles: [
+    { role: IMPLEMENTATION_SUMMARY_ROLE, contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT },
+  ],
   metadata: {
     id: '06c-dag-execute',
     workflowType: 'workflow',
@@ -202,13 +212,21 @@ export const dagExecuteStep: StepDefinition<DagExecuteDetect, DagExecuteApply> =
       'dag execution complete',
     );
     if (dropped.length === 0) {
-      return { ran: true, issues: detected.issueCount, levels: detected.levelCount };
+      return {
+        summary: '',
+        filesTouched: [],
+        ran: true,
+        issues: detected.issueCount,
+        levels: detected.levelCount,
+      };
     }
     const named = dropped
       .slice(0, DROPPED_ISSUES_NAMED)
       .map((d) => (d.reason ? `${d.issueKey} (${d.reason})` : d.issueKey));
     const elided = dropped.length - named.length;
     return {
+      summary: '',
+      filesTouched: [],
       ran: true,
       issues: detected.issueCount,
       levels: detected.levelCount,

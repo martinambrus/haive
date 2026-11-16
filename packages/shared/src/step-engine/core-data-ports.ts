@@ -5,6 +5,8 @@ import {
 } from './role-port-declarations.js';
 import {
   SPEC_ROLES,
+  IMPLEMENTATION_SUMMARY_ROLE,
+  IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
   DISCOVERY_ROLE,
   REQUIREMENTS_ROLES,
   STEP_ROLES,
@@ -89,8 +91,24 @@ export const CORE_DATA_INPUTS: Readonly<Record<string, readonly DataInput[]>> = 
     ...reviewInputs,
     input('audit', STEP_ROLES.codeAudit),
   ]),
-  '11-phase-8-learning': reviewInputs,
+  '11-phase-8-learning': Object.freeze([
+    ...reviewInputs,
+    input('implementation-summary', IMPLEMENTATION_SUMMARY_ROLE),
+  ]),
 });
+/** The canonical single path owns fix rounds even when the initial build is DAG.
+ * Only a list without 07 uses the host-normalized DAG summary. No shape search. */
+export function implementationSummaryProducer(
+  stepIds: readonly string[],
+  canonicalLegacy = false,
+): string | null {
+  const single = STEP_ROLE_REGISTRY[IMPLEMENTATION_SUMMARY_ROLE].legacyStepId;
+  return stepIds.includes(single)
+    ? single
+    : !canonicalLegacy && stepIds.includes(IMPLEMENTATION_SUMMARY_DAG_STEP_ID)
+      ? IMPLEMENTATION_SUMMARY_DAG_STEP_ID
+      : null;
+}
 export type DataRoleBindings = Readonly<
   Record<string, { stepId: string; outputContract: { id: string; version: number } }>
 >;
@@ -107,6 +125,7 @@ export function dataPortNodes(
   stepIds: readonly string[],
   roleBindings: DataRoleBindings = {},
   entries: ReadonlyMap<string, RolePortDeclarations> = new Map(),
+  canonicalLegacy = false,
 ): PortNode[] {
   return stepIds.map((id) => {
     const occupied = Object.keys(roleBindings).find((role) => roleBindings[role]!.stepId === id);
@@ -134,7 +153,10 @@ export function dataPortNodes(
       .filter((entry) => {
         const bound = roleBindings[entry.id];
         return (
-          (bound?.stepId ?? entry.legacyStepId) === id &&
+          (bound?.stepId ??
+            (entry.id === IMPLEMENTATION_SUMMARY_ROLE
+              ? implementationSummaryProducer(stepIds, canonicalLegacy)
+              : entry.legacyStepId)) === id &&
           (!bound ||
             (bound.outputContract.id === entry.contract.id &&
               bound.outputContract.version === entry.contract.version))
@@ -142,6 +164,14 @@ export function dataPortNodes(
       })
       .map((entry) => port(entry.id, entry.id, false));
     for (const provided of declared.providesRoles ?? []) {
+      // Both core implementations declare the contract for successful writes, but
+      // a candidate exposes only its structural host route to the one input.
+      if (
+        provided.role === IMPLEMENTATION_SUMMARY_ROLE &&
+        id === IMPLEMENTATION_SUMMARY_DAG_STEP_ID &&
+        implementationSummaryProducer(stepIds, canonicalLegacy) !== id
+      )
+        continue;
       if (!outputs.some((p) => p.role === provided.role))
         outputs.push(port(provided.role, provided.role, false));
     }

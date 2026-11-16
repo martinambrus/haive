@@ -37,7 +37,7 @@ export function projectTaskPorts(
     const plan = parseDataEdgePlan(task.dataEdgePlan);
     const candidate = selectDataEdgeCandidate({ ...task, dataEdgePlan: task.dataEdgePlan }, plan);
     const ids = [...new Set([...candidate.nodes.map((n) => n.id), ...steps.map((s) => s.stepId)])];
-    const canonical = dataPortNodes(ids);
+    const canonical = dataPortNodes(ids, undefined, undefined, true);
     const nodes = ids.map((id) => {
       const pinned = candidate.nodes.find((n) => n.id === id),
         current = canonical.find((n) => n.id === id)!;
@@ -117,6 +117,7 @@ export function projectTaskPorts(
         .map((candidate) => ({
           executionPath: candidate.executionPath,
           graph: projectStepPorts(candidate.stepIds, {
+            canonicalLegacy: true,
             labels,
             roleBindings: task.executionPath == null ? undefined : candidate.roleBindings,
           }),
@@ -126,7 +127,10 @@ export function projectTaskPorts(
   const ids = task.runListSnapshot ?? [...new Set(steps.map((step) => step.stepId))];
   return {
     candidates: [
-      { executionPath: task.executionPath ?? null, graph: projectStepPorts(ids, { labels }) },
+      {
+        executionPath: task.executionPath ?? null,
+        graph: projectStepPorts(ids, { labels, canonicalLegacy: true }),
+      },
     ],
   };
 }

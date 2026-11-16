@@ -1,3 +1,7 @@
+import {
+  IMPLEMENTATION_SUMMARY_ROLE,
+  IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
 import type { FormSchema } from '@haive/shared';
 import {
   TaskCancelledError,
@@ -270,6 +274,9 @@ function stubImplement(detect: ImplementDetect): {
 }
 
 export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply> = {
+  providesRoles: [
+    { role: IMPLEMENTATION_SUMMARY_ROLE, contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT },
+  ],
   needsRuntime: 'if-serving',
   editsCodeOrTests: true,
   metadata: {

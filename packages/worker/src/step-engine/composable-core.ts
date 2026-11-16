@@ -5,6 +5,8 @@ import {
 } from '@haive/shared/step-ports';
 import {
   SPEC_ROLES,
+  IMPLEMENTATION_SUMMARY_ROLE,
+  IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
   DISCOVERY_ROLE,
   REQUIREMENTS_ROLES,
   DISCOVERY_OUTPUT_CONTRACT,
@@ -472,6 +474,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '06c-dag-execute',
+    providesRoles: [
+      { role: IMPLEMENTATION_SUMMARY_ROLE, contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT },
+    ],
     label: 'DAG implementation',
     group: 'build',
     dispatchesCli: true,
@@ -489,6 +494,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: IMPLEMENT,
+    providesRoles: [
+      { role: IMPLEMENTATION_SUMMARY_ROLE, contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT },
+    ],
     label: 'Phase 2: Implement',
     group: 'build',
     dispatchesCli: true,
@@ -707,6 +715,14 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '11-phase-8-learning',
+    consumesRoles: [
+      {
+        input: 'implementation-summary',
+        role: IMPLEMENTATION_SUMMARY_ROLE,
+        contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
+        optional: true,
+      },
+    ],
     label: 'Phase 8: Learning capture',
     group: 'knowledge',
     dispatchesCli: true,
@@ -837,6 +853,7 @@ export function assertCoreComposableCatalog(
   registry: StepRegistry,
   entries: readonly ComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
 ): void {
+  assertImplementationSummaryPortDeclarations(entries as readonly CoreComposableStepEntry[]);
   assertSpecPortDeclarations(entries as readonly CoreComposableStepEntry[]);
   assertDiscoveryRequirementsPortDeclarations(entries as readonly CoreComposableStepEntry[]);
   const ids = new Set(entries.map((e) => e.stepId));
@@ -928,7 +945,7 @@ export function assertDiscoveryRequirementsPortDeclarations(
   }
   for (const e of entries) {
     const inputs = (e.consumesRoles ?? []).filter(
-      (p) => !Object.values(SPEC_ROLES).includes(p.role as never),
+      (p) => ![...Object.values(SPEC_ROLES), IMPLEMENTATION_SUMMARY_ROLE].includes(p.role as never),
     );
     if (JSON.stringify(inputs) !== JSON.stringify(DISCOVERY_REQUIREMENTS_INPUTS[e.stepId] ?? []))
       throw new Error(`discovery-requirements-port-input-invalid: ${e.stepId}`);
@@ -936,4 +953,42 @@ export function assertDiscoveryRequirementsPortDeclarations(
   for (const id of Object.keys(DISCOVERY_REQUIREMENTS_INPUTS))
     if (!entries.some((e) => e.stepId === id))
       throw new Error(`discovery-requirements-port-consumer-missing: ${id}`);
+}
+
+/** Keep the two host routes and the one optional reporting input exact at boot. */
+export function assertImplementationSummaryPortDeclarations(
+  entries: readonly CoreComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
+): void {
+  const providers = entries.filter((e) =>
+    e.providesRoles?.some((p) => p.role === IMPLEMENTATION_SUMMARY_ROLE),
+  );
+  if (
+    JSON.stringify(providers.map((e) => e.stepId)) !==
+      JSON.stringify(['06c-dag-execute', IMPLEMENT]) ||
+    providers.some(
+      (e) =>
+        JSON.stringify(
+          e.providesRoles?.find((p) => p.role === IMPLEMENTATION_SUMMARY_ROLE)?.contract,
+        ) !== JSON.stringify(IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT),
+    )
+  )
+    throw new Error('implementation-summary-port-provider-invalid');
+  for (const e of entries) {
+    const inputs = (e.consumesRoles ?? []).filter((p) => p.role === IMPLEMENTATION_SUMMARY_ROLE);
+    const expected =
+      e.stepId === '11-phase-8-learning'
+        ? [
+            {
+              input: 'implementation-summary',
+              role: IMPLEMENTATION_SUMMARY_ROLE,
+              contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
+              optional: true,
+            },
+          ]
+        : [];
+    if (JSON.stringify(inputs) !== JSON.stringify(expected))
+      throw new Error(`implementation-summary-port-input-invalid: ${e.stepId}`);
+  }
+  if (!entries.some((e) => e.stepId === '11-phase-8-learning'))
+    throw new Error('implementation-summary-port-consumer-missing');
 }

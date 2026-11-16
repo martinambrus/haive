@@ -1,6 +1,7 @@
 export * from './core-data-ports.js';
 import {
   CORE_DATA_INPUTS,
+  implementationSummaryProducer,
   SPEC_INPUTS,
   DISCOVERY_REQUIREMENTS_INPUTS,
   EFFECTIVE_REQUIREMENTS_ROLES,
@@ -9,7 +10,13 @@ import {
 } from './core-data-ports.js';
 import type { DataRoleBindingsDraft, RolePortDeclarations } from './role-port-declarations.js';
 export type { DataRoleBindingsDraft } from './role-port-declarations.js';
-import { SPEC_ROLES, STEP_ROLES, STEP_ROLE_REGISTRY, type StepRoleId } from './output-contracts.js';
+import {
+  IMPLEMENTATION_SUMMARY_ROLE,
+  SPEC_ROLES,
+  STEP_ROLES,
+  STEP_ROLE_REGISTRY,
+  type StepRoleId,
+} from './output-contracts.js';
 
 export const MAX_DATA_PORT_STEPS = 256;
 
@@ -144,6 +151,8 @@ const reviewConsumers = new Set(
 );
 
 export interface PortProjectionOptions {
+  /** Old tasks and inputs missing from an older pin use canonical physical readers. */
+  canonicalLegacy?: boolean;
   labels?: ReadonlyMap<string, string>;
   declarations?: ReadonlyMap<string, RolePortDeclarations>;
   dataRoleBindings?: DataRoleBindingsDraft;
@@ -158,7 +167,12 @@ export function projectStepPorts(
   opts: PortProjectionOptions = {},
 ): StepPortGraph {
   if (opts.declarations || opts.dataRoleBindings) {
-    const nodes = dataPortNodes(stepIds, opts.roleBindings, opts.declarations).map((n) => ({
+    const nodes = dataPortNodes(
+      stepIds,
+      opts.roleBindings,
+      opts.declarations,
+      opts.canonicalLegacy,
+    ).map((n) => ({
       ...n,
       label: opts.labels?.get(n.id) ?? n.label,
     }));
@@ -178,7 +192,10 @@ export function projectStepPorts(
       const role = roleId as StepRoleId;
       const bound = opts.roleBindings?.[role];
       if (
-        (bound?.stepId ?? registered.legacyStepId) === id &&
+        (bound?.stepId ??
+          (role === IMPLEMENTATION_SUMMARY_ROLE
+            ? implementationSummaryProducer(stepIds, opts.canonicalLegacy)
+            : registered.legacyStepId)) === id &&
         (!bound ||
           (bound.outputContract.id === registered.contract.id &&
             bound.outputContract.version === registered.contract.version))
@@ -217,6 +234,8 @@ export function projectStepPorts(
           contract: { ...STEP_ROLE_REGISTRY[role].contract },
         })),
       });
+    if (id === '11-phase-8-learning')
+      inputs.push(port(IMPLEMENTATION_SUMMARY_ROLE, 'implementation-summary'));
     if (reviewConsumers.has(id)) inputs.push(port(STEP_ROLES.codeReview, 'review'));
     if (id === '09-gate-2-verify-approval') inputs.push(port(STEP_ROLES.codeAudit, 'audit'));
     for (const input of inputs) {
