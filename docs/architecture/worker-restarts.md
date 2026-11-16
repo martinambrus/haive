@@ -796,8 +796,12 @@ conflicts) counts as held and is logged at info with that structural reason; a r
 because the repository was deleted is permanent and keeps no timer running. A malformed v3 or derived pin is permanent
 too: an epoch-fenced update fails the task, clears the dead marker and records one
 `task.failed` event in the same transaction. The pin is retained unchanged. Remaining runs
-are superseded after that commit under the new failed epoch. Later boot/revival passes
-do not fail it again or keep the revival timer alive. Explicit Retry still cannot repair a
+are superseded after that commit under the new failed epoch, without holding a task-row
+lock while taking run locks. Boot and the revival retry sweep also inspect failed tasks
+with open runs: a malformed pin retries that cleanup at the failed epoch without another
+failure event or epoch bump. Cleanup errors and locked runs keep the retry sweep active
+until no open run remains. A queued CLI job refuses a failed task even after its dead
+marker was cleared. Settled failures do not keep the revival timer alive. Explicit Retry still cannot repair a
 malformed pin or remap its producer.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after

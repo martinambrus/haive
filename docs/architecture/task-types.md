@@ -349,7 +349,10 @@ scope questions. Unknown storage fields survive validation; readers project decl
 `providesRoles`/`consumesRoles` are also module executable and manifest declarations, checked
 for exact host contract references and boot parity. A data declaration grants no replacement
 policy. Prompt role tokens and structured prompt output remain separate work. The spec definitions and serialized catalog entries have no
-`outputContract`; the runner's successful-output validation block therefore remains unchanged.
+`outputContract`. After a successful apply, the runner also validates every declared
+`providesRoles` output, including core, module and prompt producers. A data-contract
+mismatch fails the producer visibly before summaries and routing, even with
+`fixLoopOnError`; it never requests an implementation fix round.
 The executable `outputContract` and v1/v2 replacement gates still accept review/audit only;
 module data declarations use the separate exact registry reference gate and reject every
 role carrying `hostPolicy`, including `08c-code-review` and `08c2-code-audit`, in both
