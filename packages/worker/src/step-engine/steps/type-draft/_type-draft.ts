@@ -336,6 +336,9 @@ const TIMEOUT_RANGE = `${PROMPT_STEP_TIMEOUT_MIN_MS} to ${PROMPT_STEP_TIMEOUT_MA
 
 export function buildDraftPrompt(d: TypeDraftDetect): string {
   const history = recentTurns(d.transcript, HISTORY_MAX_CHARS, { keepNewest: true });
+  const providableRoles = Object.values(STEP_ROLE_REGISTRY)
+    .filter((role) => isPromptProvidableRole(role.id))
+    .map((role) => role.id);
   return [
     'You are helping an administrator of Haive design a TASK TYPE, in conversation. A task type is a',
     'named, ordered list of steps that Haive runs one after another on a task. A step is either a',
@@ -385,7 +388,10 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     '  - `consumesRoles`, `providesRoles` and `outputMode` are optional. Leave them out unless needed.',
     '  - `consumesRoles`: optional [{input, role, contract:{id,version}, optional:false}]. Inputs need an earlier compatible producer.',
     '  - `outputMode`: optional "structured"; requires exactly one `providesRoles: [{role, contract:{id,version}}]`.',
-    '    Providers must be agent-only roles with an agent-only quote projection and no hostPolicy. No production role qualifies until PR5.',
+    '    Providers must be agent-only roles with an agent-only quote projection and no hostPolicy.',
+    providableRoles.length
+      ? `    Providable roles: ${providableRoles.join(', ')}.`
+      : '    No registered role is providable by a prompt step.',
     '    Raw replies provide no roles. Structured replies must be JSON {"contract":{"id":...,"version":...},"data":...}; Haive adds the host schema and validates the exact version. Roles grant data only, no control policy.',
     '- `stepLoopLimitDefaults`: optional; maps a step id in `stepIds` to a whole number from 1 to 50,',
     '  only for a step marked "loop budget editable" below.',

@@ -1,3 +1,6 @@
+import { DISCOVERY_ROLE } from '@haive/shared/step-outputs';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
+import { CORE_STAGE_INPUTS } from '@haive/shared/step-ports';
 import { readTextNoFollow, toSafeRel } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -5,7 +8,6 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import { INVESTIGATIONS_DIR, KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -209,11 +211,6 @@ interface PrePlanningApply {
   affectedComponents?: AffectedComponents;
 }
 
-interface DiscoveryOutput {
-  summary?: string;
-  relevantKbIds?: string[];
-}
-
 export function parsePrePlanningOutput(raw: unknown): {
   summary: string;
   spec: string;
@@ -360,6 +357,7 @@ async function recordTouchedPlanNodes(
 }
 
 export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanningApply> = {
+  consumesRoles: CORE_STAGE_INPUTS['04-phase-0b-pre-planning'],
   metadata: {
     id: '04-phase-0b-pre-planning',
     workflowType: 'workflow',
@@ -375,8 +373,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
 
   async detect(ctx: StepContext): Promise<PrePlanningDetect> {
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03-phase-0a-discovery');
-    const output = (prev?.output as DiscoveryOutput | null) ?? {};
+    const output = legacyRoleOutput(await readRole(ctx, DISCOVERY_ROLE));
     const ids = Array.isArray(output.relevantKbIds) ? output.relevantKbIds : [];
     const kbReferences = await resolveKbReferences(ctx.repoPath, ids);
     // Approved business requirements ground the technical spec when present — the

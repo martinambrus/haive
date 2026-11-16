@@ -12,7 +12,7 @@ import {
   SPEC_ROLES,
   projectRoleOutput,
   safeParseStepOutput,
-  type SpecRoleId,
+  type DataStepRoleId,
   type StepRoleId,
   type RoleOutput,
 } from '@haive/shared/step-outputs';
@@ -59,17 +59,17 @@ export function readRole(
   input: 'resolved',
   maxRound?: number,
 ): Promise<RoleRead<typeof SPEC_ROLES.resolved>>;
-export function readRole<R extends SpecRoleId>(
+export function readRole<R extends DataStepRoleId>(
   ctx: ReadContext,
   input: R,
   maxRound?: number,
 ): Promise<RoleRead<R>>;
 export async function readRole(
   ctx: ReadContext,
-  input: SpecRoleId | keyof typeof SPEC_ROLES,
+  input: DataStepRoleId | keyof typeof SPEC_ROLES,
   maxRound?: number,
-): Promise<RoleRead<SpecRoleId>> {
-  return readDataRole(ctx, input, maxRound) as Promise<RoleRead<SpecRoleId>>;
+): Promise<RoleRead<DataStepRoleId>> {
+  return readDataRole(ctx, input, maxRound) as Promise<RoleRead<DataStepRoleId>>;
 }
 
 /** Exact SDK input names can share a role without borrowing each other's binding. */
@@ -187,6 +187,6 @@ export async function readDataRole(
 
 /** PR1 host adapters preserve tolerant old-row reads, including absent spec fields and
  * non-done rows with retained output. Validation is diagnostic, never a new routing gate. */
-export function legacyRoleOutput<R extends SpecRoleId>(read: RoleRead<R>): Partial<RoleOutput<R>> {
+export function legacyRoleOutput<R extends StepRoleId>(read: RoleRead<R>): Partial<RoleOutput<R>> {
   return read.producer === null ? {} : (read.legacyOutput ?? {});
 }

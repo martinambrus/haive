@@ -23,6 +23,24 @@ export const SPEC_RESOLVED_OUTPUT_CONTRACT = Object.freeze({
   version: 1,
 } as const);
 
+export const DISCOVERY_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.discovery',
+  version: 1,
+} as const);
+export const REQUIREMENTS_DRAFT_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.requirements.draft',
+  version: 1,
+} as const);
+export const REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.requirements.humanized',
+  version: 1,
+} as const);
+export const DISCOVERY_ROLE = 'haive.discovery' as const;
+export const REQUIREMENTS_ROLES = Object.freeze({
+  draft: 'haive.requirements.draft',
+  humanized: 'haive.requirements.humanized',
+} as const);
+
 /** Frozen v1/v2 aliases. Do not extend this set: those pins support review/audit only. */
 export const STEP_ROLES = Object.freeze({
   codeReview: '08c-code-review',
@@ -58,6 +76,31 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     legacyStepId: STEP_ROLES.codeAudit,
     hostPolicy: 'code-audit',
   } as const),
+  // Discovery's stub copies operator/repository text; its normal aggregate also adds
+  // host headings and coverage notes. No agent-only projection covers every path.
+  [DISCOVERY_ROLE]: Object.freeze({
+    id: DISCOVERY_ROLE,
+    contract: DISCOVERY_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '03-phase-0a-discovery',
+  } as const),
+  // Draft parsing defaults and bypass/final-attempt fallbacks write host text.
+  [REQUIREMENTS_ROLES.draft]: Object.freeze({
+    id: REQUIREMENTS_ROLES.draft,
+    contract: REQUIREMENTS_DRAFT_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '03b-business-requirements',
+  } as const),
+  // Humanization can pass through that draft, including an alternate module's data.
+  [REQUIREMENTS_ROLES.humanized]: Object.freeze({
+    id: REQUIREMENTS_ROLES.humanized,
+    contract: REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '03b2-humanize-requirements',
+  } as const),
   [SPEC_ROLES.draft]: Object.freeze({
     id: SPEC_ROLES.draft,
     contract: SPEC_DRAFT_OUTPUT_CONTRACT,
@@ -81,6 +124,7 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
   } as const),
 });
 export type StepRoleId = keyof typeof STEP_ROLE_REGISTRY;
+export type DataStepRoleId = Exclude<StepRoleId, LegacyStepRoleId>;
 export type StepOutputContractRef = (typeof STEP_ROLE_REGISTRY)[StepRoleId]['contract'];
 /** The ONLY ports with executable host policy. New data roles must never enter that branch. */
 export const HOST_POLICY_STEP_ROLES: readonly LegacyStepRoleId[] = Object.freeze(
@@ -302,7 +346,23 @@ export type SpecDraftOutput = ContractShape<z.infer<typeof specDraftOutputSchema
 export type SpecCheckedOutput = ContractShape<z.infer<typeof specCheckedOutputSchema>>;
 export type SpecResolvedOutput = ContractShape<z.infer<typeof specResolvedOutputSchema>>;
 
+const discoveryOutputSchema = z
+  .object({
+    summary: z.string(),
+    relevantKbIds: z.array(z.string()),
+    source: z.string().optional(),
+  })
+  .passthrough();
+const requirementsOutputSchema = z
+  .object({ requirements: z.string(), summary: z.string() })
+  .passthrough();
+export type DiscoveryOutput = ContractShape<z.infer<typeof discoveryOutputSchema>>;
+export type RequirementsOutput = ContractShape<z.infer<typeof requirementsOutputSchema>>;
+
 const outputValidators = Object.freeze({
+  'haive.discovery': discoveryOutputSchema,
+  'haive.requirements.draft': requirementsOutputSchema,
+  'haive.requirements.humanized': requirementsOutputSchema,
   'haive.code-review': codeReviewOutputSchema,
   'haive.code-audit': codeAuditOutputSchema,
   'haive.spec.draft': specDraftOutputSchema,

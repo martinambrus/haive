@@ -377,6 +377,53 @@ rows and all stored readers retain their existing behavior; historical rows are 
 validated as new writes nor migrated. Audit parsing stays report-only, including its current
 empty-findings fallback for unreadable replies.
 
+## Discovery and requirements data roles
+
+`haive.discovery@1` (03) declares `{summary: string, relevantKbIds: string[], source?: string}`.
+`haive.requirements.draft@1` (03b) and `haive.requirements.humanized@1` (03b2) each declare
+`{requirements: string, summary: string}`. All have cardinality one, canonical legacy producers,
+no host policy and mixed authorship. No agent-only quote projection is declared: discovery's
+stub copies the task and repository index, and its normal aggregate inserts host headings and
+coverage notes; draft parsing supplies missing fields and final-attempt/bypass fallbacks write
+host text; humanization can pass through that mixed draft or a module's document. Module data
+producers promise shape, not exclusively agent provenance. Unknown storage extensions remain
+outside the declared projection. Neither role quotation nor structured prompt production is
+allowed for these roles; the explicit agent-only eligibility rule stays unchanged.
+
+03b and 03b2 remain `{{step:}}`-quotable through their `agentAuthoredOutput` flags in
+`worker/src/step-engine/composable-core.ts`, and nothing operator-typed reaches their stored
+output: guidance and human review feedback go to prompts, events, form values and 03c's own
+output, never to theirs. 03b stores agent prose,
+source tags, empty defaults and a fixed bypass stub. 03b2 stores agent prose, or on bypass and
+passthrough copies its draft input unchanged; when a module supplies that draft, the copied text
+is the module's, and a quote of it is still fenced as untrusted agent output. A physical `{{step:03b-business-requirements}}`
+quote still reads that physical row, even when a module supplies the draft role to a downstream
+consumer. 03 is not `{{step:}}`-quotable, and none of the three new roles is `{{role:}}`-quotable
+or providable by a prompt step.
+
+Module declarations can consume these roles, but a ready mixed-role read through
+`ctx.host.loadRoleOutput` refuses with `host adapter unavailable`, even for an optional input:
+there is no module host adapter for discovery or requirements. The core adapters below do not
+grant modules a mixed-role read or quotation projection.
+
+03b consumes optional discovery; 03b2 consumes the optional raw draft. 03c and 04 use the
+explicit host `effective-requirements` adapter, with independently optional ordered inputs
+humanized > draft, and 04 also consumes optional discovery. A humanized requirements string
+wins only when `trim()` is nonempty, and its original bytes and own summary are returned. A
+blank/missing humanized body falls back to the draft, including an intentional empty draft;
+missing fields fall back to `''`. This differs deliberately from effective-spec's nullish
+precedence. Human review decisions and the revise destination remain physical host control.
+
+New tasks pin these edges through the existing v3 admission writer. Older tasks and valid v3
+pins predating an input keep canonical, unbounded legacy reads, including tolerant retained
+output. A bound v3 input uses its exact producer and current-round ceiling; Retry cannot
+resurrect an older success or retained reset output. An explicit optional absence stays absent.
+Malformed/unknown bindings still refuse; no definition edit, Retry or recovery rewrites a pin.
+The legacy port display groups a complete effective-requirements role set, regardless of input
+names, while a raw-draft-only consumer retains its direct input. Editable declarations and v3
+pins expose each stage independently. Rollback follows the v3 policy below: stop new
+admission and retain capable readers/workers while any affected task can resume.
+
 ## Pinned output-role reads
 
 `@haive/shared/step-outputs` exports `STEP_ROLES`, `readStepRole(task, role, read)` and
@@ -420,7 +467,7 @@ source; ignored external-module files are not enumerated by git. The ungated sca
 seconds to the shared test job and has an explicit 20-second cold-run timeout. It changes neither
 the gated-file count nor the configured CI time budgets.
 
-For tasks without v3, the worker's core `readRole(ctx, role, maxRound?)` accepts spec roles only
+For tasks without v3, the worker's core `readRole(ctx, role, maxRound?)` accepts spec, discovery and requirements data roles
 and resolves their canonical legacy producer. It returns `ready`, `absent`, `not-ready` or `invalid`, with producer
 row id, physical step id, round, status and exact contract. Selection keeps the physical loader's
 newest-round ordering, no status predicate and no implicit round ceiling; an explicit ceiling is

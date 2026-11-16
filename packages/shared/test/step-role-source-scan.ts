@@ -74,7 +74,14 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
     true,
     file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
-  const tableNames = ['STEP_ROLES', 'SPEC_ROLES', 'STEP_ROLE_REGISTRY', 'HOST_POLICY_STEP_ROLES'];
+  const tableNames = [
+    'STEP_ROLES',
+    'SPEC_ROLES',
+    'DISCOVERY_ROLE',
+    'REQUIREMENTS_ROLES',
+    'STEP_ROLE_REGISTRY',
+    'HOST_POLICY_STEP_ROLES',
+  ];
   const aliases = new Set(tableNames);
   for (const statement of source.statements) {
     if (

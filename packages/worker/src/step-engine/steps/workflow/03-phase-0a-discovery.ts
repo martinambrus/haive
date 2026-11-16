@@ -1,3 +1,4 @@
+import { DISCOVERY_ROLE, DISCOVERY_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -307,6 +308,7 @@ function unionKbIds(minings: AgentMiningSummary[]): string[] {
 }
 
 export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryApply> = {
+  providesRoles: [{ role: DISCOVERY_ROLE, contract: DISCOVERY_OUTPUT_CONTRACT }],
   metadata: {
     id: '03-phase-0a-discovery',
     workflowType: 'workflow',

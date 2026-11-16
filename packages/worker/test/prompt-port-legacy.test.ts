@@ -4,8 +4,12 @@ import { expect, it } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { schema, type Database } from '@haive/database';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
-import { buildDataEdgePlan, type DataEdgePlan } from '@haive/shared/data-edge-plan';
-import { dataPortNodes } from '@haive/shared/step-ports';
+import {
+  buildDataEdgePlan,
+  parseDataEdgePlan,
+  type DataEdgePlan,
+} from '@haive/shared/data-edge-plan';
+import type { PortNode } from '@haive/shared/step-ports';
 import {
   buildPromptStep,
   type PromptStepDetect,
@@ -26,7 +30,7 @@ const fixture = JSON.parse(
   }[];
   plans: {
     selection: DataEdgePlan['selection'];
-    candidates: { executionPath: null | 'quick_bugfix'; stepIds: string[] }[];
+    candidates: { executionPath: null | 'quick_bugfix'; stepIds: string[]; nodes: PortNode[] }[];
     sha256: string;
   }[];
   reads: { row: Record<string, unknown> & { taskId: string }; sha256: string }[];
@@ -37,15 +41,20 @@ it.each(fixture.prompts)('preserves legacy prompt bytes for $entry.slug', async 
   const prompt = await buildPromptStep(`custom.demo.${entry.slug}`, entry, 2).llm!.buildPrompt(c);
   expect(sha(prompt)).toBe(c.sha256);
 });
+// Freeze the old declarations too: new admissions intentionally acquire new inputs.
+// Nodes captured from b97c70f74 reproduce the original 556f32dc1 hashes unchanged.
 it.each(fixture.plans)('preserves $selection v3 pin bytes', (c) => {
   const plan = buildDataEdgePlan(
     c.selection,
     c.candidates.map((candidate) => ({
       executionPath: candidate.executionPath,
-      nodes: dataPortNodes(candidate.stepIds),
+      nodes: candidate.nodes,
     })),
   );
   expect(sha(JSON.stringify(plan))).toBe(c.sha256);
+  expect(sha(JSON.stringify(parseDataEdgePlan(plan)))).toBe(c.sha256);
+  for (const candidate of c.candidates)
+    expect(candidate.nodes.map((n) => n.id)).toEqual(candidate.stepIds);
 });
 it.each(fixture.reads)('preserves canonical legacy role read bytes for $row.status', async (c) => {
   const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });

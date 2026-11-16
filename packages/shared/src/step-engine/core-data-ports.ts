@@ -5,6 +5,8 @@ import {
 } from './role-port-declarations.js';
 import {
   SPEC_ROLES,
+  DISCOVERY_ROLE,
+  REQUIREMENTS_ROLES,
   STEP_ROLES,
   STEP_ROLE_REGISTRY,
   type StepRoleId,
@@ -56,9 +58,33 @@ export const SPEC_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Objec
     ].map((id) => [id, stages]),
   ),
 });
+export const EFFECTIVE_REQUIREMENTS_ROLES = Object.freeze([
+  REQUIREMENTS_ROLES.humanized,
+  REQUIREMENTS_ROLES.draft,
+] as const);
+const requirementsStages = Object.freeze([
+  input('requirements-humanized', REQUIREMENTS_ROLES.humanized),
+  input('requirements-draft', REQUIREMENTS_ROLES.draft),
+]);
+export const DISCOVERY_REQUIREMENTS_INPUTS: Readonly<Record<string, readonly DataInput[]>> =
+  Object.freeze({
+    '03b-business-requirements': Object.freeze([input('discovery', DISCOVERY_ROLE)]),
+    '03b2-humanize-requirements': Object.freeze([
+      input('requirements-draft', REQUIREMENTS_ROLES.draft),
+    ]),
+    '03c-business-requirements-review': requirementsStages,
+    '04-phase-0b-pre-planning': Object.freeze([
+      input('discovery', DISCOVERY_ROLE),
+      ...requirementsStages,
+    ]),
+  });
+export const CORE_STAGE_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
+  ...SPEC_INPUTS,
+  ...DISCOVERY_REQUIREMENTS_INPUTS,
+});
 const reviewInputs = Object.freeze([input('review', STEP_ROLES.codeReview)]);
 export const CORE_DATA_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
-  ...SPEC_INPUTS,
+  ...CORE_STAGE_INPUTS,
   '09-gate-2-verify-approval': Object.freeze([
     ...reviewInputs,
     input('audit', STEP_ROLES.codeAudit),

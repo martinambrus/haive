@@ -72,6 +72,90 @@
             "04-phase-0b-pre-planning",
             "05-phase-0b5-spec-quality",
             "07-phase-2-implement"
+          ],
+          "nodes": [
+            {
+              "id": "04-phase-0b-pre-planning",
+              "label": "04-phase-0b-pre-planning",
+              "outputs": [
+                {
+                  "id": "haive.spec.draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": []
+            },
+            {
+              "id": "05-phase-0b5-spec-quality",
+              "label": "05-phase-0b5-spec-quality",
+              "outputs": [
+                {
+                  "id": "haive.spec.checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": [
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            },
+            {
+              "id": "07-phase-2-implement",
+              "label": "07-phase-2-implement",
+              "outputs": [],
+              "inputs": [
+                {
+                  "id": "resolved",
+                  "role": "haive.spec.resolved",
+                  "contract": {
+                    "id": "haive.spec.resolved",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            }
           ]
         }
       ],
@@ -86,6 +170,90 @@
             "04-phase-0b-pre-planning",
             "05-phase-0b5-spec-quality",
             "07-phase-2-implement"
+          ],
+          "nodes": [
+            {
+              "id": "04-phase-0b-pre-planning",
+              "label": "04-phase-0b-pre-planning",
+              "outputs": [
+                {
+                  "id": "haive.spec.draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": []
+            },
+            {
+              "id": "05-phase-0b5-spec-quality",
+              "label": "05-phase-0b5-spec-quality",
+              "outputs": [
+                {
+                  "id": "haive.spec.checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": [
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            },
+            {
+              "id": "07-phase-2-implement",
+              "label": "07-phase-2-implement",
+              "outputs": [],
+              "inputs": [
+                {
+                  "id": "resolved",
+                  "role": "haive.spec.resolved",
+                  "contract": {
+                    "id": "haive.spec.resolved",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            }
           ]
         },
         {
@@ -94,6 +262,90 @@
             "04-phase-0b-pre-planning",
             "05-phase-0b5-spec-quality",
             "07-phase-2-implement"
+          ],
+          "nodes": [
+            {
+              "id": "04-phase-0b-pre-planning",
+              "label": "04-phase-0b-pre-planning",
+              "outputs": [
+                {
+                  "id": "haive.spec.draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": []
+            },
+            {
+              "id": "05-phase-0b5-spec-quality",
+              "label": "05-phase-0b5-spec-quality",
+              "outputs": [
+                {
+                  "id": "haive.spec.checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": false
+                }
+              ],
+              "inputs": [
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            },
+            {
+              "id": "07-phase-2-implement",
+              "label": "07-phase-2-implement",
+              "outputs": [],
+              "inputs": [
+                {
+                  "id": "resolved",
+                  "role": "haive.spec.resolved",
+                  "contract": {
+                    "id": "haive.spec.resolved",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "checked",
+                  "role": "haive.spec.checked",
+                  "contract": {
+                    "id": "haive.spec.checked",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                },
+                {
+                  "id": "draft",
+                  "role": "haive.spec.draft",
+                  "contract": {
+                    "id": "haive.spec.draft",
+                    "version": 1
+                  },
+                  "authorship": "mixed",
+                  "optional": true
+                }
+              ]
+            }
           ]
         }
       ],

@@ -1,5 +1,8 @@
 import type { StepContext } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { REQUIREMENTS_ROLES } from '@haive/shared/step-outputs';
+import { EFFECTIVE_REQUIREMENTS_ROLES } from '@haive/shared/step-ports';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
+export const EFFECTIVE_REQUIREMENTS_INPUTS = EFFECTIVE_REQUIREMENTS_ROLES;
 
 // Shared accessor for the business-requirements doc. 03b drafts it; 03b2 humanizes
 // it; 03c reviews it and 04 grounds the technical spec on it. Consumers must read
@@ -15,12 +18,34 @@ export interface BizReqDoc {
 /** The business-requirements doc downstream steps should consume: the humanized
  *  03b2 output when present and non-empty, else the raw 03b draft, else empty. */
 export async function loadBusinessRequirements(ctx: StepContext): Promise<BizReqDoc> {
-  const humanized = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b2-humanize-requirements');
-  const h = humanized?.output as { requirements?: string; summary?: string } | null;
-  if (h && typeof h.requirements === 'string' && h.requirements.trim().length > 0) {
-    return { requirements: h.requirements, summary: h.summary ?? '' };
+  return effectiveRequirements(await readRequirementsStages(ctx));
+}
+
+/** Host adapter: prefer a nonblank humanized body, preserving its exact bytes.
+ * Unlike effective-spec, a blank humanized body falls back to the raw draft.
+ * Canonical old rows remain tolerant; v3 reads suppress output from reset rows. */
+export async function readRequirementsStages(ctx: StepContext) {
+  const [humanized, draft] = await Promise.all([
+    readRole(ctx, REQUIREMENTS_ROLES.humanized),
+    readRole(ctx, REQUIREMENTS_ROLES.draft),
+  ]);
+  return { humanized, draft };
+}
+export function effectiveRequirements(
+  stages: Awaited<ReturnType<typeof readRequirementsStages>>,
+): BizReqDoc {
+  const byRole = {
+    [REQUIREMENTS_ROLES.humanized]: stages.humanized,
+    [REQUIREMENTS_ROLES.draft]: stages.draft,
+  };
+  for (const role of EFFECTIVE_REQUIREMENTS_INPUTS) {
+    const out = legacyRoleOutput(byRole[role]);
+    if (
+      role === REQUIREMENTS_ROLES.humanized &&
+      !(typeof out.requirements === 'string' && out.requirements.trim().length > 0)
+    )
+      continue;
+    return { requirements: out.requirements ?? '', summary: out.summary ?? '' };
   }
-  const raw = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b-business-requirements');
-  const r = raw?.output as { requirements?: string; summary?: string } | null;
-  return { requirements: r?.requirements ?? '', summary: r?.summary ?? '' };
+  return { requirements: '', summary: '' };
 }

@@ -61,3 +61,39 @@ it('refuses drift in input names and optional flags', () => {
     ).toThrow('spec-port-input-invalid');
   }
 });
+
+it('checks discovery/requirements providers and optional inputs at boot', async () => {
+  const { assertDiscoveryRequirementsPortDeclarations } =
+    await import('../src/step-engine/composable-core.js');
+  const { DISCOVERY_ROLE, REQUIREMENTS_ROLES } = await import('@haive/shared/step-outputs');
+  expect(() => assertDiscoveryRequirementsPortDeclarations()).not.toThrow();
+  for (const role of [DISCOVERY_ROLE, ...Object.values(REQUIREMENTS_ROLES)]) {
+    const id = STEP_ROLE_REGISTRY[role].legacyStepId;
+    const entry = CORE_COMPOSABLE_STEPS.find((e) => e.stepId === id)!;
+    expect(() =>
+      assertDiscoveryRequirementsPortDeclarations(
+        CORE_COMPOSABLE_STEPS.map((e) => (e.stepId === id ? { ...e, providesRoles: [] } : e)),
+      ),
+    ).toThrow('port-provider-invalid');
+    expect(() =>
+      assertDiscoveryRequirementsPortDeclarations([
+        ...CORE_COMPOSABLE_STEPS,
+        { ...entry, stepId: 'other' },
+      ]),
+    ).toThrow('port-provider-invalid');
+  }
+  for (const change of [{ input: 'renamed' }, { optional: false }]) {
+    expect(() =>
+      assertDiscoveryRequirementsPortDeclarations(
+        CORE_COMPOSABLE_STEPS.map((e) =>
+          e.stepId === '04-phase-0b-pre-planning'
+            ? {
+                ...e,
+                consumesRoles: e.consumesRoles!.map((p, i) => (i === 0 ? { ...p, ...change } : p)),
+              }
+            : e,
+        ),
+      ),
+    ).toThrow('port-input-invalid');
+  }
+});
