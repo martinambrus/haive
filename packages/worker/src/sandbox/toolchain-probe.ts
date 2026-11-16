@@ -1,3 +1,4 @@
+import { shellQuote } from './shell-quote.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 
 export type SandboxToolchainFact =
@@ -10,8 +11,21 @@ export const TOOLCHAIN_OUTPUT_LIMIT_BYTES = 1_024;
 export const IMMUTABLE_IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 
 // The script owns 199. A raw shell error (including no shell) never proves absence.
-const PHP_PROBE =
+const PHP_DISCOVERY =
   "if command -v php >/dev/null 2>&1; then php -n -r 'echo PHP_VERSION;' 2>/dev/null; exit 0; else exit 199; fi";
+
+// The container must expire even if its Docker client or worker dies. Prefer timeout;
+// the fallback watchdog kills PID 1, which also ends its container's descendants.
+const PHP_PROBE = [
+  'if command -v timeout >/dev/null 2>&1; then',
+  `  exec timeout -s KILL 1 /bin/sh -c ${shellQuote(PHP_DISCOVERY)}`,
+  'fi',
+  'parent=$$',
+  '( sleep 1; kill -KILL "$parent" ) &',
+  'watchdog=$!',
+  `trap 'kill "$watchdog" 2>/dev/null || :' EXIT`,
+  PHP_DISCOVERY,
+].join('\n');
 
 /** One shared, bounded cache per worker. In-flight entries are never evicted: evicting one
  * would let another fan-out start the same container again. Saturation answers unknown,
