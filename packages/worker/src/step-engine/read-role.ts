@@ -13,12 +13,13 @@ import {
   projectRoleOutput,
   safeParseStepOutput,
   type SpecRoleId,
+  type StepRoleId,
   type RoleOutput,
 } from '@haive/shared/step-outputs';
 import type { StepContext } from './step-definition.js';
 import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 
-type Producer<R extends SpecRoleId> = {
+type Producer<R extends StepRoleId> = {
   role: R;
   contract: (typeof STEP_ROLE_REGISTRY)[R]['contract'];
   producer: { rowId: string | null; stepId: string; round: number | null; status: string | null };
@@ -27,7 +28,7 @@ type Producer<R extends SpecRoleId> = {
    * Only explicit host compatibility adapters use this; new consumers must require ready. */
   legacyOutput: Partial<RoleOutput<R>> | null;
 };
-export type RoleRead<R extends SpecRoleId> =
+export type RoleRead<R extends StepRoleId> =
   | {
       state: 'absent' | 'unselected';
       role: R;
@@ -67,12 +68,22 @@ export async function readRole(
   input: SpecRoleId | keyof typeof SPEC_ROLES,
   maxRound?: number,
 ): Promise<RoleRead<SpecRoleId>> {
+  return readDataRole(ctx, input, maxRound) as Promise<RoleRead<SpecRoleId>>;
+}
+
+/** Exact SDK input names can share a role without borrowing each other's binding. */
+export async function readDataRole(
+  ctx: ReadContext,
+  input: StepRoleId | keyof typeof SPEC_ROLES,
+  maxRound?: number,
+  consumerInput?: string,
+): Promise<RoleRead<StepRoleId>> {
   const namedInput = Object.hasOwn(SPEC_ROLES, input);
-  const role = namedInput ? SPEC_ROLES[input as keyof typeof SPEC_ROLES] : (input as SpecRoleId);
+  const role = namedInput ? SPEC_ROLES[input as keyof typeof SPEC_ROLES] : (input as StepRoleId);
   const entry = STEP_ROLE_REGISTRY[role];
   if (!Object.hasOwn(STEP_ROLE_REGISTRY, role))
     throw new Error(`readRole cannot resolve unregistered role ${role}`);
-  if ('hostPolicy' in entry)
+  if ('hostPolicy' in entry && !consumerInput)
     throw new Error('readRole cannot resolve host-policy roles without per-input pins');
   const contract = entry.contract;
   const task = await ctx.db.query.tasks.findFirst({
@@ -104,8 +115,9 @@ export async function readRole(
       return { state: 'unselected', role, contract, producer: null };
     const node = candidate.nodes.find((n) => n.id === consumer.stepId);
     const inputs = node?.inputs.filter((i) => i.role === role) ?? [];
-    if (!namedInput && inputs.length > 1) throw new DataEdgePlanError('ambiguous consumer input');
-    const portName = namedInput ? input : inputs[0]?.id;
+    if (!consumerInput && !namedInput && inputs.length > 1)
+      throw new DataEdgePlanError('ambiguous consumer input');
+    const portName = consumerInput ?? (namedInput ? input : inputs[0]?.id);
     const declaration = node?.inputs.find((i) => i.id === portName);
     if (!declaration) {
       // This input did not exist when the task was admitted. No binding is being
@@ -114,11 +126,13 @@ export async function readRole(
         {
           taskId: ctx.taskId,
           consumer: consumer.stepId,
-          input: namedInput
-            ? input
-            : Object.keys(SPEC_ROLES).find(
-                (key) => SPEC_ROLES[key as keyof typeof SPEC_ROLES] === role,
-              )!,
+          input:
+            consumerInput ??
+            (namedInput
+              ? input
+              : (Object.keys(SPEC_ROLES).find(
+                  (key) => SPEC_ROLES[key as keyof typeof SPEC_ROLES] === role,
+                ) ?? role)),
         },
         'data input absent from v3 pin; reading canonically',
       );
@@ -163,7 +177,7 @@ export async function readRole(
     ...common,
     state: 'ready',
     legacyOutput: projectRoleOutput(role, result.data),
-    data: projectRoleOutput(role, result.data) as RoleOutput<SpecRoleId>,
+    data: projectRoleOutput(role, result.data) as RoleOutput<StepRoleId>,
   };
 }
 

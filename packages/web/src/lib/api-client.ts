@@ -2635,6 +2635,7 @@ export type StoredPromptStep = Omit<PromptStepEntry, 'tools'> & {
 };
 
 export interface AdminTaskType {
+  dataRoleBindings?: import('@haive/shared/step-ports').DataRoleBindingsDraft | null;
   slug: string;
   displayName: string;
   description: string | null;

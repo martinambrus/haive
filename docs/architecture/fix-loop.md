@@ -49,6 +49,11 @@ cannot hold two targets for one emitter, with a second independent copy of the s
 `_prompt-defect.ts`. The tree a fix pass must edit is `01-worktree-setup`'s integration
 worktree in BOTH modes, which is exactly what 07 already uses.
 
+A module's `DataEdgePlanError` is an input/plan failure, never an implementation repair
+assignment. The runner excludes it beside `StepOutputContractInvalidError` before consulting
+`fixLoopOnError`, whether the required-input pre-dispatch check or the module's own
+`ctx.host.loadRoleOutput` raises it. The step fails and 07 is not reset.
+
 **A round must not be spent on a failure no agent can repair, and that verdict has to be
 reachable without a human.** `08b-test-management` is the worked example. Its fix loop is
 driven by `testsPassed`, and `null` there means "not a defect" — `fixLoop.evaluate` returns

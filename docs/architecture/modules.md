@@ -512,7 +512,7 @@ entries. These entries grant no new dispatch service.
 
 Every production context supplies `ctx.host`, typed as optional `StepHostServices` so existing
 test doubles remain valid. A module requiring it checks once and fails clearly when it is absent.
-The four services capture the context's task, user and round, verify task-step ownership, and
+The five services capture the context's task, user and round, verify task-step ownership, and
 the worktree-backed services accept only its resolved worktree, using the canonical latest setup decision (a skipped 01
 selects the repository root even with an old worktree column); a mismatch throws `StepHostBindingError`.
 `loadPreviousStepOutput(stepId)` adapts the core helper with a ceiling of `ctx.round`;
@@ -670,11 +670,25 @@ and its composable manifest entry. Boot rejects unknown references and disagreem
 The frozen `STEP_ROLE_REGISTRY` also lists the canonical mixed-author spec ports
 `haive.spec.draft@1`, `haive.spec.checked@1` and `haive.spec.resolved@1`. Their data contracts
 preserve storage extensions while core readers project declared fields. They have no quote
-projection or executable host policy. Core-only port declarations do not expose SDK reads or
-manifest ports. Executable `outputContract` registration, manifest references, and v1/v2 plan
-entry decoding remain review/audit-only; spec output contracts are never serialized in catalog
-entries or pins. Existing v1/v2 role bindings and `replaces` remain limited to review and audit.
-No generic role prompt token is available.
+projection or executable host policy. Module executable and local composable manifest entries may declare `providesRoles` and
+`consumesRoles` using exact registered contracts, limited to roles without `hostPolicy`. Both declaration
+arrays reject review/audit policy roles. Boot checks parity; declarations cannot
+name another module's or core's physical step. Static seeds can carry `dataRoleBindings`,
+limited to their own listed steps. Unchanged seeds retain their timestamps. Executable `outputContract` registration and v1/v2 replacement decoding remain
+review/audit-only. Data role references are serialized in catalog entries and v3 pins
+through the separate declaration schema. Existing v1/v2 role bindings and `replaces` remain limited to review and audit.
+No generic role prompt token is available. `ctx.host.loadRoleOutput(input)` resolves
+the exact v3 consumer input under the captured identity and round ceiling, with cancellation
+checks. It returns ready, absent, unselected, not-ready or invalid and bounded provenance.
+Required unreadable inputs fail by name before dispatch, including after a detect replay.
+Registry authorship selects the host adapter: mixed spec roles return
+`{adapter: "spec", assignment, agentContext}`. The assignment preserves operator authority;
+agent attachments are projected and fenced. Raw storage extensions, iterations and legacy
+projections are never exposed. A human/mixed role without an adapter refuses. Module
+producers are validated on successful output; an invalid data output fails that producer
+and never enters the implementation fix loop. `DataEdgePlanError` also fails a module
+consumer without a fix round, whether raised by the pre-dispatch required-input check or
+the module's own `loadRoleOutput` call, even with `fixLoopOnError`.
 
 `replaces` declares capability for the two review roles only, with the matching host
 reference. It declares replacement capability; admission separately checks every candidate, exact contract equality, explicit role tokens, policy, producer uniqueness and final composition. Only the canonical review and audit roles are replaceable, in one hop. Existing catalog `entry` JSON holds
@@ -696,9 +710,8 @@ its decoded candidate binding. Before path selection, task history clears replac
 bindings and labels the null-path graph as candidate-only. It returns only public
 role/contract/authorship metadata and edges, never module-private entry fields, output
 values, contract schemas or host policy hooks. Declaring replacement capability alone
-does not create a runtime data edge. The graph adds no manifest ports, SDK service,
-prompt token or new replacement role; existing catalog entry and plan vocabularies
-remain unchanged.
+does not create a runtime data edge. The task history graph stays read-only. Authoring graphs expose module data ports and
+connections, while prompt tokens and additional replacement roles remain unsupported.
 
 ### Execution declarations (P6; unavailable at runtime)
 

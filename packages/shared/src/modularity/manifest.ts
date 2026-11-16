@@ -440,6 +440,14 @@ export const moduleManifestSchema = z
         if (!span.predicateId.startsWith(`module.${m.id}.`))
           fail(`predicate "${span.predicateId}" must belong to this module`);
       }
+      for (const b of seed.dataRoleBindings ?? []) {
+        if (
+          b.executionPath !== null ||
+          !seed.stepIds?.includes(b.consumerStepId) ||
+          !seed.stepIds?.includes(b.producerStepId)
+        )
+          fail('data role binding must name steps of this static seed');
+      }
       const seen = new Set<string>();
       for (const stepId of seed.stepIds ?? []) {
         if (seen.has(stepId)) fail(`step "${stepId}" appears twice`);

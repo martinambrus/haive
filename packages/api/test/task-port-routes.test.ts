@@ -153,10 +153,16 @@ it('projects the v3 pinned producer and declarations without reconstructing from
   const nodes = dataPortNodes(['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality']);
   nodes[0]!.id = 'pinned-spec';
   const plan = buildDataEdgePlan('static', [{ executionPath: null, nodes }]);
-  const fake = setup({ dataEdgePlan: plan, runListSnapshot: nodes.map((n) => n.id) });
+  const fake = setup({
+    dataEdgePlan: plan,
+    executionPath: 'quick_bugfix',
+    runListSnapshot: nodes.map((n) => n.id),
+  });
   const response = await app.request(`/tasks/${TASK}/ports`);
   expect(response.status).toBe(200);
-  const graph = ((await response.json()) as StepPortProjection).candidates[0]!.graph;
+  const projection = (await response.json()) as StepPortProjection;
+  expect(projection.candidates[0]!.executionPath).toBe('quick_bugfix');
+  const graph = projection.candidates[0]!.graph;
   expect(graph.edges[0]).toMatchObject({
     source: 'pinned-spec',
     target: nodes[1]!.id,

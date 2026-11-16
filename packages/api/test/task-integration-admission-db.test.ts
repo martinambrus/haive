@@ -14,11 +14,15 @@ import { createDatabase, schema, type Database } from '@haive/database';
 const url = process.env.TASK_INTEGRATION_ADMISSION_TEST_URL;
 if (url) {
   const parsed = new URL(url);
-  const localScratch = parsed.hostname === '127.0.0.1' && parsed.port === '45553';
+  const localScratch =
+    parsed.hostname === '127.0.0.1' &&
+    parsed.port === (process.env.TASK_INTEGRATION_ADMISSION_TEST_PORT ?? '45553');
   const ciScratch =
     process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.port === '5432';
   if (!parsed.pathname.startsWith('/ti_admission_') || !(localScratch || ciScratch))
-    throw new Error('Use owned /ti_admission_* scratch PostgreSQL (local45553 or CI service)');
+    throw new Error(
+      'Use owned /ti_admission_* scratch PostgreSQL (explicit owned local port or CI service)',
+    );
 }
 const h = vi.hoisted(() => ({
   db: undefined as unknown,

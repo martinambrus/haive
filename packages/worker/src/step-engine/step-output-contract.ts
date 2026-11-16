@@ -1,5 +1,7 @@
+import { rolePortDeclarationsSchema } from '@haive/shared/modularity';
 import {
   parseStepOutputContractRef,
+  STEP_ROLE_REGISTRY,
   safeParseStepOutput,
   stepOutputContractsEqual,
   stepRoleOutputContract,
@@ -9,7 +11,10 @@ import {
 import { fixConsumerSchema, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepDefinition } from './step-definition.js';
 
-type Declaration = Pick<StepDefinition, 'outputContract' | 'replaces' | 'fixConsumer'> &
+type Declaration = Pick<
+  StepDefinition,
+  'outputContract' | 'replaces' | 'fixConsumer' | 'providesRoles' | 'consumesRoles'
+> &
   Partial<
     Pick<
       StepDefinition,
@@ -31,6 +36,8 @@ export function hasConflictingReplacementHooks(step: Declaration): boolean {
 export function assertStepOutputDeclaration(step: Declaration): void {
   if (step.fixConsumer !== undefined && !fixConsumerSchema.safeParse(step.fixConsumer).success)
     throw new Error('fix-consumer-invalid');
+  if (!rolePortDeclarationsSchema.safeParse(step).success)
+    throw new Error('step-data-role-invalid');
   if (step.outputContract !== undefined && !parseStepOutputContractRef(step.outputContract)) {
     throw new Error('step-output-contract-unknown');
   }
@@ -57,6 +64,7 @@ export function assertStepOutputDeclaration(step: Declaration): void {
 export function assertMatchingOutputDeclaration(
   step: Declaration,
   entry: ComposableStepEntry,
+  compareDataPorts = true,
 ): void {
   assertStepOutputDeclaration(step);
   assertStepOutputDeclaration(entry);
@@ -67,6 +75,18 @@ export function assertMatchingOutputDeclaration(
     !stepOutputContractsEqual(step.outputContract, entry.outputContract)
   )
     throw new Error('step-output-contract-mismatch');
+  for (const key of compareDataPorts ? (['providesRoles', 'consumesRoles'] as const) : []) {
+    const normalize = (d: Declaration) =>
+      [...(d[key] ?? [])]
+        .map((p) => ({
+          role: p.role,
+          contract: { id: p.contract.id, version: p.contract.version },
+          ...('input' in p && 'optional' in p ? { input: p.input, optional: p.optional } : {}),
+        }))
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    if (JSON.stringify(normalize(step)) !== JSON.stringify(normalize(entry)))
+      throw new Error('step-data-role-mismatch');
+  }
   const roles = (declaration: Declaration) => [...(declaration.replaces ?? [])].sort();
   if (JSON.stringify(roles(step)) !== JSON.stringify(roles(entry))) {
     throw new Error('step-output-role-mismatch');
@@ -95,6 +115,12 @@ export function validateSuccessfulStepOutput(
   logger: { warn(bindings: object, message: string): void },
   replacedRole?: StepRoleId,
 ): void {
+  for (const provided of step.providesRoles ?? []) {
+    const ref = STEP_ROLE_REGISTRY[provided.role].contract;
+    const result = safeParseStepOutput(ref, output);
+    if (!result.success)
+      throw new StepOutputContractInvalidError(ref, step.metadata.id, result.issuePaths);
+  }
   const ref = step.outputContract;
   const builtin = step.metadata.id === '08c-code-review' || step.metadata.id === '08c2-code-audit';
   const replacement = !builtin && replacedRole !== undefined;

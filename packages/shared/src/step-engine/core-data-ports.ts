@@ -1,3 +1,4 @@
+import { rolePortDeclarationsSchema, type RolePortDeclarations } from './role-port-declarations.js';
 import {
   SPEC_ROLES,
   STEP_ROLES,
@@ -70,15 +71,33 @@ const port = (role: StepRoleId, id: string, optional: boolean): StepPort => ({
   authorship: STEP_ROLE_REGISTRY[role].authorship,
   optional,
 });
-/** PR3 supports host declarations only. A module inherits spec inputs solely when occupying
- * an already admitted v2 host-policy seat; it cannot declare a new data role. */
+/** Host declarations plus exact module data ports. V2 host-policy occupancy retains
+ * its inherited inputs; a new data declaration never establishes occupancy. */
 export function dataPortNodes(
   stepIds: readonly string[],
   roleBindings: DataRoleBindings = {},
+  entries: ReadonlyMap<string, RolePortDeclarations> = new Map(),
 ): PortNode[] {
   return stepIds.map((id) => {
     const occupied = Object.keys(roleBindings).find((role) => roleBindings[role]!.stepId === id);
-    const declarations = CORE_DATA_INPUTS[occupied ?? id] ?? [];
+    const declared = rolePortDeclarationsSchema.parse(entries.get(id) ?? {});
+    for (const d of declared.consumesRoles ?? []) {
+      const inherited = CORE_DATA_INPUTS[occupied ?? id]?.find((c) => c.input === d.input);
+      if (
+        inherited &&
+        (inherited.role !== d.role ||
+          inherited.contract.id !== d.contract.id ||
+          inherited.contract.version !== d.contract.version ||
+          inherited.optional !== d.optional)
+      )
+        throw new Error(`data-role-input-conflict: ${id}.${d.input}`);
+    }
+    const declarations = [
+      ...(CORE_DATA_INPUTS[occupied ?? id] ?? []),
+      ...(declared.consumesRoles ?? []).filter(
+        (d) => !(CORE_DATA_INPUTS[occupied ?? id] ?? []).some((c) => c.input === d.input),
+      ),
+    ];
     const outputs = Object.values(STEP_ROLE_REGISTRY)
       .filter((entry) => {
         const bound = roleBindings[entry.id];
@@ -90,6 +109,10 @@ export function dataPortNodes(
         );
       })
       .map((entry) => port(entry.id, entry.id, false));
+    for (const provided of declared.providesRoles ?? []) {
+      if (!outputs.some((p) => p.role === provided.role))
+        outputs.push(port(provided.role, provided.role, false));
+    }
     return {
       id,
       label: id,

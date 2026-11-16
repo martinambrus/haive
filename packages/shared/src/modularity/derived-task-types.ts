@@ -13,7 +13,7 @@ import {
   SYNC_BASE_STEP_ID,
   TRIAGE_STEP_ID,
 } from '../step-engine/execution-paths.js';
-import { composableStepEntrySchema, type ComposableStepEntry } from './contracts.js';
+import { legacyComposableStepEntrySchema, type ComposableStepEntry } from './contracts.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { checkPromptSteps, type PromptStepIssue } from './task-type-draft.js';
 import type { ParsedPromptStepEntry } from './prompt-steps.js';
@@ -483,7 +483,7 @@ const planSchema = z
       .strict(),
     overlay: z.object({ revision: z.string().min(1), changes: derivedChangesSchema }).strict(),
     requiresRepository: z.boolean(),
-    composableEntries: z.array(composableStepEntrySchema),
+    composableEntries: z.array(legacyComposableStepEntrySchema),
     candidates: z
       .array(
         candidateSchema.extend({
@@ -518,7 +518,7 @@ const v2PlanSchema = planSchema.extend({
       candidateSchema.extend({
         outcomes: z.array(outcomeSchema),
         compositionIssues: z.array(z.never()),
-        effectiveEntries: z.array(composableStepEntrySchema),
+        effectiveEntries: z.array(legacyComposableStepEntrySchema),
         roleBindings: z
           .object({
             [STEP_ROLES.codeReview]: producerSchema.optional(),

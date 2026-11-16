@@ -1,3 +1,4 @@
+import { loadModuleRoleOutput } from './module-role-read.js';
 import path from 'node:path';
 import type { FileHandle } from 'node:fs/promises';
 import { eq } from 'drizzle-orm';
@@ -89,6 +90,12 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     }
   }
   return {
+    loadRoleOutput(input) {
+      return hostCall(ctx, async () => {
+        await verifyIdentity();
+        return loadModuleRoleOutput(ctx, input);
+      });
+    },
     loadUnactedInsights(options) {
       // Capture only supported options before awaiting; callers cannot retarget this capability.
       const captured = { limit: options?.limit, includePicked: options?.includePicked };

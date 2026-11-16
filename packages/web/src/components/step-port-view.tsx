@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import { useEffect, useState, type ReactNode } from 'react';
-import type { StepPortProjection } from '@haive/shared/step-ports';
+import type { StepPortGraph, StepPortProjection } from '@haive/shared/step-ports';
 import { api } from '@/lib/api-client';
 import { Button, FormError } from '@/components/ui';
 
@@ -12,6 +12,8 @@ const StepPortCanvas = dynamic(() => import('./step-port-canvas'), {
 });
 export interface StepPortViewProps {
   children: ReactNode;
+  draftGraph?: StepPortGraph;
+  onBind?: (consumer: string, input: string, producer: string) => void;
   request: { path: string; body?: unknown; revision?: string };
   executionPath?: string | null;
   disabled?: boolean;
@@ -26,6 +28,8 @@ export interface StepPortViewProps {
 export function StepPortView({
   children,
   request,
+  draftGraph,
+  onBind,
   executionPath,
   disabled = false,
   keepListVisible = false,
@@ -37,8 +41,9 @@ export function StepPortView({
   const [result, setResult] = useState<{ key: string; data: StepPortProjection } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const key = JSON.stringify(request);
+  const editable = onBind !== undefined;
   useEffect(() => {
-    if (!canvas || !hasSteps) return;
+    if (draftGraph || (!canvas && !editable) || !hasSteps) return;
     const controller = new AbortController();
     setError(null);
     const current = JSON.parse(key) as StepPortViewProps['request'];
@@ -55,17 +60,18 @@ export function StepPortView({
           setError(cause instanceof Error ? cause.message : 'Could not load ports');
       });
     return () => controller.abort();
-  }, [canvas, key, hasSteps]);
+  }, [canvas, key, hasSteps, draftGraph, editable]);
   const candidates = result?.key === key ? result.data.candidates : [];
-  const loaded = result?.key === key;
-  const graph = candidates.find(
-    (candidate) => candidate.executionPath === (executionPath ?? null),
-  )?.graph;
+  const loaded = !!draftGraph || result?.key === key;
+  const graph =
+    draftGraph ??
+    candidates.find((candidate) => candidate.executionPath === (executionPath ?? null))?.graph;
   // Keep the existing flow mounted during a refresh so an accepted reorder retains
   // its viewport. Hide stale data until the matching response arrives.
-  const retainedGraph = result?.data.candidates.find(
-    (candidate) => candidate.executionPath === (executionPath ?? null),
-  )?.graph;
+  const retainedGraph =
+    draftGraph ??
+    result?.data.candidates.find((candidate) => candidate.executionPath === (executionPath ?? null))
+      ?.graph;
   if (!hasSteps) return <>{children}</>;
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -103,7 +109,7 @@ export function StepPortView({
               {loaded ? 'No port graph is available for the selected path.' : 'Loading ports…'}
             </p>
           )}
-          {loaded && result.data.candidatesOnly && (
+          {loaded && result?.data.candidatesOnly && (
             <p role="status" className="text-sm text-neutral-400">
               Path not selected. Candidate ports only; bindings are not pinned.
             </p>
@@ -113,13 +119,57 @@ export function StepPortView({
               <StepPortCanvas
                 graph={graph ?? retainedGraph}
                 compact={keepListVisible}
+                onBind={disabled || !graph ? undefined : onBind}
                 onReorder={disabled || !graph ? undefined : onReorder}
               />
             </div>
           )}
         </>
       )}
-      {(!canvas || keepListVisible) && children}
+      {(!canvas || keepListVisible) && (
+        <>
+          {graph && onBind && (
+            <div aria-label="Input bindings" className="flex flex-col gap-2">
+              {graph.nodes.flatMap((node) =>
+                node.inputs.map((input) => (
+                  <label
+                    key={`${node.id}:${input.id}`}
+                    className={`text-sm ${input.state === 'dangling' ? 'text-red-300' : ''}`}
+                  >
+                    {node.label} · {input.id} · {input.state}
+                    <select
+                      aria-label={`${node.id}.${input.id} producer`}
+                      disabled={disabled}
+                      value={
+                        graph.edges.find((e) => e.target === node.id && e.targetPort === input.id)
+                          ?.source ?? ''
+                      }
+                      onChange={(e) => {
+                        onBind(node.id, input.id, e.target.value);
+                      }}
+                      className="ml-2 rounded border border-neutral-700 bg-neutral-950 p-2"
+                    >
+                      <option value="">
+                        {input.state === 'ambiguous'
+                          ? 'Choose producer'
+                          : input.optional
+                            ? 'No producer'
+                            : 'Required producer missing'}
+                      </option>
+                      {input.candidates.map((id) => (
+                        <option key={id} value={id}>
+                          {graph.nodes.find((node) => node.id === id)?.label ?? id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )),
+              )}
+            </div>
+          )}
+          {children}
+        </>
+      )}
     </div>
   );
 }

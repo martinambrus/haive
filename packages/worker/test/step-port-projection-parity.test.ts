@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { expect, it } from 'vitest';
-import { projectStepPorts, dataPortNodes } from '@haive/shared/step-ports';
+import { projectStepPorts, dataPortNodes, CORE_DATA_INPUTS } from '@haive/shared/step-ports';
 import { SPEC_ROLES, STEP_ROLES } from '@haive/shared/step-outputs';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 
@@ -172,4 +172,50 @@ it('pins review consumers to the direct gate reader and the house-rules/history 
       .filter((node) => node.inputs.some((input) => input.role === STEP_ROLES.codeAudit))
       .map((node) => node.id),
   ).toEqual(['09-gate-2-verify-approval']);
+});
+
+it('uses the same review/audit consumer input inventory for admission and projection', () => {
+  for (const [id, inputs] of Object.entries(CORE_DATA_INPUTS))
+    for (const input of inputs.filter((i) => i.input === 'review' || i.input === 'audit')) {
+      expect(projectStepPorts([id]).nodes[0]!.inputs).toContainEqual(
+        expect.objectContaining({
+          id: input.input,
+          role: input.role,
+          contract: input.contract,
+          optional: input.optional,
+        }),
+      );
+      expect(dataPortNodes([id])[0]!.inputs).toContainEqual(
+        expect.objectContaining({
+          id: input.input,
+          role: input.role,
+          contract: input.contract,
+          optional: input.optional,
+        }),
+      );
+    }
+});
+
+it('keeps core and existing replacement data pins byte-identical when declarations reach the catalog', async () => {
+  const { buildDataEdgePlan } = await import('@haive/shared/data-edge-plan');
+  const entries = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e]));
+  const ids = CORE_COMPOSABLE_STEPS.map((e) => e.stepId);
+  for (const roles of [
+    {},
+    {
+      [STEP_ROLES.codeReview]: {
+        stepId: 'module.demo.review',
+        outputContract: { id: 'haive.code-review', version: 1 },
+      },
+    },
+  ] as Parameters<typeof dataPortNodes>[1][]) {
+    const physical = ids.map((id) => roles?.[id]?.stepId ?? id);
+    const canonical = buildDataEdgePlan('static', [
+      { executionPath: null, nodes: dataPortNodes(physical, roles) },
+    ]);
+    const catalog = buildDataEdgePlan('static', [
+      { executionPath: null, nodes: dataPortNodes(physical, roles, entries as never) },
+    ]);
+    expect(JSON.stringify(catalog)).toBe(JSON.stringify(canonical));
+  }
 });

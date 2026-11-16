@@ -1,5 +1,9 @@
 import { MODULE_ID_PATTERN_SOURCE } from './module-id.js';
 import { executionContractSchema, fixConsumerSchema } from './execution-contract.js';
+import {
+  rolePortDeclarationsSchema,
+  dataRoleBindingsSchema,
+} from '../step-engine/role-port-declarations.js';
 import { z } from 'zod';
 import {
   parseStepOutputContractRef,
@@ -173,7 +177,7 @@ export const REPOSITORY_TOKEN = 'repository';
 /** Tokens no catalog entry provides or removes: the composition starts with them. */
 export const IMPLICIT_COMPOSITION_TOKENS: ReadonlySet<string> = new Set([REPOSITORY_TOKEN]);
 
-export const composableStepEntrySchema = z
+export const legacyComposableStepEntrySchema = z
   .object({
     stepId: stepIdSchema,
     label: z.string().min(1),
@@ -230,6 +234,10 @@ export const composableStepEntrySchema = z
     (e) => ![...e.provides, ...(e.removes ?? [])].some((t) => IMPLICIT_COMPOSITION_TOKENS.has(t)),
     { message: 'an implicit composition token cannot be provided or removed by a step' },
   );
+/** V1/v2 plans keep the original schema and strip fields added for v3 data ports. */
+export const composableStepEntrySchema = legacyComposableStepEntrySchema.safeExtend(
+  rolePortDeclarationsSchema.shape,
+);
 export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;
 
 export const taskTypeDefinitionSeedSchema = z
@@ -242,6 +250,7 @@ export const taskTypeDefinitionSeedSchema = z
     description: z.string().optional(),
     runListStrategy: z.enum(['static', 'workflow_paths', 'run_app_modes']),
     stepIds: z.array(stepIdSchema).nullable(),
+    dataRoleBindings: dataRoleBindingsSchema.optional(),
     selectable: z.boolean(),
     requiresRepository: z.boolean(),
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),

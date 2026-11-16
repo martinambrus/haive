@@ -98,7 +98,14 @@ function setup(initialState: string | Error = 'normal') {
         failSelects -= 1;
         throw new Error('database went away');
       }
-      return fake.db.select(...args);
+      return {
+        from: (table: Parameters<ReturnType<typeof fake.db.select>['from']>[0]) => {
+          // These admission fixtures have no invocations. Model the empty open-run
+          // subquery as IN (NULL); the real-store cleanup controls cover live runs.
+          if (table === schema.cliInvocations) return { where: () => [null] };
+          return fake.db.select(...args).from(table);
+        },
+      };
     },
     transaction: (fn: (tx: unknown) => Promise<unknown>) =>
       fake.db.transaction((tx) =>

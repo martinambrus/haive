@@ -383,6 +383,23 @@ describe('a cli run start', () => {
   });
 });
 
+it('refuses a queued invocation after malformed-pin failure cleared the dead marker', async () => {
+  stubs.executeByKind.mockResolvedValue(ok);
+  const { db, writes } = fakeDb({
+    task: { status: 'failed', deadAt: null },
+    lockedRun: { id: RUN, supersededAt: null },
+  });
+  await handleCliExecJob(db, base);
+  expect(stubs.executeByKind).not.toHaveBeenCalled();
+  expect(runWrites(writes).some((w) => 'startedAt' in w.set)).toBe(false);
+  expect(runWrites(writes)).toHaveLength(1);
+  expect(runWrites(writes)[0]!.set).toMatchObject({
+    exitCode: 137,
+    endedAt: expect.any(Date),
+    supersededAt: expect.any(Date),
+  });
+});
+
 describe('a cli run of a dead task', () => {
   const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 

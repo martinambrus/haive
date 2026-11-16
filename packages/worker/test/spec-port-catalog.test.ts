@@ -12,7 +12,7 @@ import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
 import { assertStepOutputDeclaration } from '../src/step-engine/step-output-contract.js';
 import type { StepRegistry } from '../src/step-engine/registry.js';
 
-it('writes only base-compatible entries to the actual catalog persistence boundary', async () => {
+it('persists data declarations without executable host policy at the catalog boundary', async () => {
   const writes: { stepId: string; entry: unknown }[] = [];
   const tx = {
     insert: () => ({
@@ -40,10 +40,8 @@ it('writes only base-compatible entries to the actual catalog persistence bounda
   for (const row of writes) {
     const source = CORE_COMPOSABLE_STEPS.find((e) => e.stepId === row.stepId)!;
     expect(row.entry).toEqual(composableStepEntrySchema.parse(source));
-    expect(JSON.stringify(row.entry)).not.toContain('haive.spec.');
+    expect(row.entry).toHaveProperty('providesRoles', source.providesRoles);
     expect(row.entry).not.toHaveProperty('outputContract');
-    expect(row.entry).not.toHaveProperty('providesRoles');
-    expect(row.entry).not.toHaveProperty('consumesRoles');
   }
 });
 

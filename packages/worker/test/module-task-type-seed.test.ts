@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -268,6 +269,68 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
       contentHash: hashOf(['module.fx.report']),
     });
     expect(await one('weekly')).toBeUndefined();
+  });
+
+  it('keeps role declarations and selected bindings stable across an unchanged resync', async () => {
+    const role = SPEC_ROLES.checked,
+      contract = STEP_ROLE_REGISTRY[role].contract;
+    const providesRoles = [{ role, contract }],
+      consumesRoles = [{ input: 'spec', role, contract, optional: false }];
+    const composableSteps = ['check', 'use'].map((stepId) => ({
+      stepId,
+      label: stepId,
+      group: 'build',
+      dispatchesCli: false,
+      requires: [],
+      provides: [],
+      ...(stepId === 'check' ? { providesRoles } : { consumesRoles }),
+    }));
+    const bindings = [
+      {
+        executionPath: null,
+        consumerStepId: 'module.fx.use',
+        input: 'spec',
+        producerStepId: 'module.fx.check',
+      },
+    ];
+    const [loaded] = registerModuleSteps(new StepRegistry(), [
+      {
+        packageName: '@haive/module-fx',
+        manifest: {
+          id: 'fx',
+          name: 'Fx',
+          version: '1',
+          schemaVersion: 1,
+          composableSteps,
+          taskTypes: [
+            seedOf({
+              stepIds: ['module.fx.check', 'module.fx.use'],
+              dataRoleBindings: bindings,
+              preAnswerDefaults: {},
+              stepLoopLimitDefaults: {},
+            }),
+          ],
+        },
+        steps: composableSteps.map((e) => ({
+          metadata: {
+            id: e.stepId,
+            workflowType: 'fx',
+            title: e.label,
+            index: 0,
+            description: '',
+            requiresCli: false,
+          },
+          providesRoles: 'providesRoles' in e ? e.providesRoles : undefined,
+          consumesRoles: 'consumesRoles' in e ? e.consumesRoles : undefined,
+          apply: async () => ({ spec: 'body' }),
+        })),
+      },
+    ]);
+    await sync(loaded!);
+    const before = await one('fx__weekly');
+    expect(before?.dataRoleBindings).toEqual(bindings);
+    await sync(loaded!);
+    expect(await one('fx__weekly')).toEqual(before);
   });
 
   it('stores the defaults for what a seed leaves out', async () => {

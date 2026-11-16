@@ -1,14 +1,27 @@
+import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import {
   assertExecutionContractSupported,
   ExecutionContractError,
+  DerivedRunPlanError,
   parseDerivedRunPlan,
   pinnedTaskStepIds,
 } from '@haive/shared/modularity';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
-import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import {
   schema,
   boundedLockWait,
@@ -401,6 +414,74 @@ async function currentIntegrationMissing(db: Database | DbTx, c: Candidate): Pro
   );
 }
 
+/** Permanent pin corruption is terminal until an explicit operator Retry. Keep the pin
+ * unchanged and publish one failure under the same epoch CAS; never hold a retry timer. */
+async function failMalformedPin(db: Database, c: Candidate, error: unknown): Promise<boolean> {
+  if (!(error instanceof DataEdgePlanError) && !(error instanceof DerivedRunPlanError))
+    return false;
+  const message = error instanceof DataEdgePlanError ? error.message : 'invalid-derived-run-plan';
+  const changed = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(schema.tasks)
+      .set({
+        status: 'failed',
+        deadAt: null,
+        deadReason: null,
+        errorMessage: message,
+        completedAt: new Date(),
+        orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.tasks.id, c.id),
+          eq(schema.tasks.orchestrationEpoch, c.epoch),
+          notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+          or(isNotNull(schema.tasks.deadAt), notInArray(schema.tasks.status, ['failed'])),
+          c.deadAt === null ? isNull(schema.tasks.deadAt) : eq(schema.tasks.deadAt, c.deadAt),
+        ),
+      )
+      .returning({ id: schema.tasks.id });
+    if (!row) return false;
+    await tx.insert(schema.taskEvents).values({
+      taskId: c.id,
+      taskStepId: null,
+      eventType: 'task.failed',
+      payload: {
+        reason: error instanceof DataEdgePlanError ? error.code : 'invalid-derived-run-plan',
+      },
+    });
+    return true;
+  });
+  if (changed)
+    log.error({ err: error, taskId: c.id }, 'task failed permanently: malformed execution pin');
+  // Run cleanup holds no task-row lock: Retry takes runs before steps and the task.
+  // A failed cleanup is retried by boot and the revival sweep even after deadAt was cleared.
+  await db.transaction((tx) =>
+    supersedeDeadTaskRuns(
+      tx,
+      and(
+        eq(schema.cliInvocations.taskId, c.id),
+        inArray(
+          schema.cliInvocations.taskId,
+          tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(
+              and(
+                eq(schema.tasks.id, c.id),
+                eq(schema.tasks.status, 'failed'),
+                eq(schema.tasks.orchestrationEpoch, changed ? c.epoch + 1 : c.epoch),
+              ),
+            ),
+        ),
+      ),
+    ),
+  );
+  await resyncAfterTaskEnd(db, c.id);
+  return true;
+}
+
 /** One pass over the dead tasks whose steps are registered again: each is revived, counted as held while new work is held, or counted as failed when judging or reviving it throws. */
 export async function reviveDeadTasks(
   db: Database,
@@ -409,15 +490,36 @@ export async function reviveDeadTasks(
   let revived = 0;
   let held = 0;
   let failed = 0;
-  for (const c of await readCandidates(db, isNotNull(schema.tasks.deadAt))) {
+  for (const c of await readCandidates(
+    db,
+    or(
+      isNotNull(schema.tasks.deadAt),
+      and(
+        eq(schema.tasks.status, 'failed'),
+        inArray(
+          schema.tasks.id,
+          db
+            .select({ taskId: schema.cliInvocations.taskId })
+            .from(schema.cliInvocations)
+            .where(
+              and(
+                isNull(schema.cliInvocations.endedAt),
+                isNull(schema.cliInvocations.supersededAt),
+              ),
+            ),
+        ),
+      ),
+    ),
+  )) {
     try {
-      if (!(await judgeCandidate(db, c)).resolves) continue;
+      if (!(await judgeCandidate(db, c)).resolves || c.deadAt === null) continue;
       const outcome = await reviveDeadTask(db, c, deps);
       if (outcome === 'held') held += 1;
       else if (outcome) revived += 1;
     } catch (err) {
       failed += 1;
-      log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
+      if (!(await failMalformedPin(db, c, err)))
+        log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
     }
   }
   if (held > 0) {
@@ -482,7 +584,8 @@ export async function reconcileDeadTasks(
         }
       }
     } catch (err) {
-      log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
+      if (!(await failMalformedPin(db, c, err)))
+        log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
     }
   }
   const { revived, held, failed } = await reviveDeadTasks(db, deps);

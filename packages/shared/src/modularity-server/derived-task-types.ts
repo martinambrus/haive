@@ -124,13 +124,24 @@ export function inspectDerivedDefinition(
     },
     own.composable,
   );
+  // Data declarations belong exclusively to v3. Keep legacy pin bytes and the
+  // v1/v2 catalog fingerprint independent of this added catalog vocabulary.
+  const legacyEntry = (entry: import('../modularity/contracts.js').ComposableStepEntry) => {
+    const { providesRoles: _provides, consumesRoles: _consumes, ...legacy } = entry;
+    return legacy;
+  };
+  const legacyCandidates = evaluation.candidates.map((c) =>
+    c.effectiveEntries ? { ...c, effectiveEntries: c.effectiveEntries.map(legacyEntry) } : c,
+  );
   const hasReplacement = evaluation.candidates.some((c) => c.roleBindings !== undefined);
   const fingerprint = createHash('sha256')
     .update(
       JSON.stringify({
         rows: [...catalog.orderedRows].sort((a, b) => a.stepId.localeCompare(b.stepId)),
-        entries: [...own.composable].sort(([a], [b]) => a.localeCompare(b)),
-        ...(hasReplacement ? { candidates: evaluation.candidates } : {}),
+        entries: [...own.composable]
+          .map(([id, e]) => [id, legacyEntry(e)] as const)
+          .sort(([a], [b]) => a.localeCompare(b)),
+        ...(hasReplacement ? { candidates: legacyCandidates } : {}),
       }),
     )
     .digest('hex');
@@ -150,19 +161,21 @@ export function inspectDerivedDefinition(
             changes: changes.success ? changes.data : [],
           },
           requiresRepository: definition.requiresRepository,
-          composableEntries: [...own.composable.values()].filter(
-            (entry) =>
-              stepIds.includes(entry.stepId) ||
-              evaluation.candidates.some((c) =>
-                c.outcomes.some(
-                  (o) =>
-                    o.outcome === 'applied' &&
-                    'replace' in o.change &&
-                    o.change.replace === entry.stepId,
+          composableEntries: [...own.composable.values()]
+            .map(legacyEntry)
+            .filter(
+              (entry) =>
+                stepIds.includes(entry.stepId) ||
+                evaluation.candidates.some((c) =>
+                  c.outcomes.some(
+                    (o) =>
+                      o.outcome === 'applied' &&
+                      'replace' in o.change &&
+                      o.change.replace === entry.stepId,
+                  ),
                 ),
-              ),
-          ),
-          candidates: evaluation.candidates,
+            ),
+          candidates: legacyCandidates,
           commonPrefix: [...DERIVED_WORKFLOW_PREFIX],
           warnings: evaluation.warnings,
           defaultWarnings: defaultIssues,

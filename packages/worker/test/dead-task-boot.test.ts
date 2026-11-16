@@ -522,6 +522,76 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     },
   );
 
+  it.each(['running', 'failed'] as const)(
+    'fails a permanently malformed data pin once from %s instead of keeping the revival timer alive',
+    async (status) => {
+      const id = await makeDead({ status });
+      await db
+        .update(schema.tasks)
+        .set({ dataEdgePlan: { version: 3 } })
+        .where(eq(schema.tasks.id, id));
+      frozenPins.set(id, { version: 3 });
+      const { deps, sent } = recorder();
+      expect(await reviveDeadTasks(db, deps)).toEqual({ revived: 0, held: 0, failed: 1 });
+      expect(await task(id)).toMatchObject({ status: 'failed', deadAt: null });
+      expect(await reviveDeadTasks(db, deps)).toEqual({ revived: 0, held: 0, failed: 0 });
+      expect(await events(id, 'task.failed')).toHaveLength(1);
+      await reconcileDeadTasks(db, deps);
+      expect(await events(id, 'task.failed')).toHaveLength(1);
+      expect(sent).toHaveLength(0);
+    },
+  );
+
+  it.each(['data', 'derived'] as const)(
+    'finishes %s malformed-pin cleanup on the next boot after the run write fails',
+    async (kind) => {
+      const id = await makeDead({
+        ...(kind === 'data'
+          ? { dataEdgePlan: { version: 3 } }
+          : { derivedRunPlan: { version: 2 } }),
+      });
+      if (kind === 'data') frozenPins.set(id, { version: 3 });
+      const open = await run(id, null);
+      const { deps, sent } = recorder();
+      await db.execute(sql`CREATE FUNCTION reject_malformed_pin_cleanup() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected run cleanup failure'; END $$`);
+      await db.execute(sql`CREATE TRIGGER reject_malformed_pin_cleanup BEFORE UPDATE ON cli_invocations
+        FOR EACH ROW EXECUTE FUNCTION reject_malformed_pin_cleanup()`);
+      try {
+        await expect(reviveDeadTasks(db, deps)).rejects.toThrow();
+        expect(await task(id)).toMatchObject({
+          status: 'failed',
+          deadAt: null,
+          orchestrationEpoch: 4,
+        });
+        expect(await runOf(open.id)).toMatchObject({ endedAt: null, supersededAt: null });
+      } finally {
+        await db.execute(sql`DROP TRIGGER reject_malformed_pin_cleanup ON cli_invocations`);
+        await db.execute(sql`DROP FUNCTION reject_malformed_pin_cleanup()`);
+      }
+      await reconcileDeadTasks(db, deps);
+      await expectEndedAsDead(open.id);
+      expect(await events(id, 'task.failed')).toHaveLength(1);
+      expect(await task(id)).toMatchObject({
+        status: 'failed',
+        deadAt: null,
+        orchestrationEpoch: 4,
+      });
+      expect(sent).toHaveLength(0);
+    },
+  );
+
+  it('the revival retry pass also finishes failed malformed-pin tasks with open runs', async () => {
+    const id = await make({ status: 'failed', dataEdgePlan: { version: 3 } });
+    frozenPins.set(id, { version: 3 });
+    const open = await run(id, null);
+    const { deps } = recorder();
+    await reviveDeadTasks(db, deps);
+    await expectEndedAsDead(open.id);
+    expect(await events(id, 'task.failed')).toHaveLength(0);
+    expect((await task(id)).orchestrationEpoch).toBe(3);
+  });
+
   describe('a dead task whose run list resolves again', () => {
     const CASES = [
       { status: 'queued', current: null, row: null, job: 'start' },

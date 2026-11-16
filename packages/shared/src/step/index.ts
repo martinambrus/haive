@@ -2,6 +2,7 @@ import type {
   ExecutionPredicateDeclaration,
   FixConsumer,
 } from '../modularity/execution-contract.js';
+import type { RolePortDeclarations } from '../step-engine/role-port-declarations.js';
 import type { CommittedSnapshotRef } from '../committed-snapshot.js';
 export type { CommittedSnapshotRef } from '../committed-snapshot.js';
 import type { StepOutputContractRef, LegacyStepRoleId } from '../step-engine/output-contracts.js';
@@ -630,6 +631,8 @@ export interface StepLoopSpec<TApply = unknown> {
 }
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {
+  readonly providesRoles?: readonly NonNullable<RolePortDeclarations['providesRoles']>[number][];
+  readonly consumesRoles?: readonly NonNullable<RolePortDeclarations['consumesRoles']>[number][];
   readonly metadata: StepMetadata;
   /** Exact immutable host output contract; the host supplies its validator. */
   readonly outputContract?: StepOutputContractRef;
@@ -824,6 +827,7 @@ export interface StepHostServices {
   loadUnactedInsights(
     options?: import('./review-types.js').InsightLoadOptions,
   ): Promise<import('./review-types.js').InsightLoadResult>;
+  loadRoleOutput(input: string): Promise<ModuleRoleRead>;
   loadPreviousStepOutput(stepId: string): Promise<PreviousStepOutput | null>;
   collectImplementationFiles(
     worktreePath: string,
@@ -842,3 +846,23 @@ export interface InsightReviseContinuation {
   mode?: 'gate3';
   stage?: 'apply' | 'checks';
 }
+
+/** Host views omit raw storage, iterations and legacy projections. Mixed spec assignments
+ * retain operator authority; agent attachments arrive fenced by the host. */
+export type ModuleRoleRead = {
+  role: string;
+  contract: { id: string; version: number };
+  producer: {
+    rowId: string | null;
+    stepId: string;
+    round: number | null;
+    status: string | null;
+  } | null;
+} & (
+  | { state: 'absent' | 'unselected' | 'not-ready' }
+  | { state: 'invalid'; issuePaths: readonly string[] }
+  | {
+      state: 'ready';
+      data: { adapter: 'spec'; assignment: string; agentContext: string } | Record<string, unknown>;
+    }
+);

@@ -1,3 +1,5 @@
+import { dataRoleDraftIssues } from '@haive/shared/step-ports';
+import { dataRoleBindingsSchema } from '@haive/shared/modularity';
 import { projectPortCandidates } from '../lib/step-port-projection.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -287,6 +289,7 @@ export const MAX_PORT_DRAFT_STEPS = 256;
 // Only identity/labels affect prompt ports today; templates, tools, defaults and
 // other execution/save constraints are deliberately outside this read-only boundary.
 const portDraftFields = z.object({
+  dataRoleBindings: dataRoleBindingsSchema.optional(),
   slug: z.string(),
   promptSteps: z
     .record(
@@ -354,9 +357,15 @@ adminTaskTypeRoutes.post('/ports', async (c) => {
       base,
       catalog,
     );
-    return c.json(projectPortCandidates(diagnostics.candidates, catalog));
+    return c.json(projectPortCandidates(diagnostics.candidates, catalog, body.dataRoleBindings));
   }
-  return c.json(projectPortCandidates([{ executionPath: null, stepIds: body.stepIds }], catalog));
+  return c.json(
+    projectPortCandidates(
+      [{ executionPath: null, stepIds: body.stepIds }],
+      catalog,
+      body.dataRoleBindings,
+    ),
+  );
 });
 
 adminTaskTypeRoutes.get('/:slug/ports', async (c) => {
@@ -380,12 +389,19 @@ adminTaskTypeRoutes.get('/:slug/ports', async (c) => {
       catalog,
       registeredCategoryIds(),
     );
-    return c.json(projectPortCandidates(diagnostics.candidates, catalog));
+    return c.json(
+      projectPortCandidates(
+        diagnostics.candidates,
+        catalog,
+        dataRoleBindingsSchema.parse(row.dataRoleBindings ?? []),
+      ),
+    );
   }
   return c.json(
     projectPortCandidates(
       [{ executionPath: null, stepIds: row.stepIds ?? [] }],
       mergePromptStepCatalog(catalog, row),
+      dataRoleBindingsSchema.parse(row.dataRoleBindings ?? []),
     ),
   );
 });
@@ -471,6 +487,13 @@ adminTaskTypeRoutes.post('/', async (c) => {
         promptSteps: body.promptSteps ?? {},
       };
       const diagnostics = await readDerivedDefinition(tx, values, registeredCategoryIds());
+      const portIssues = dataRoleDraftIssues(
+        diagnostics.candidates,
+        diagnostics.catalog.composable,
+        body.dataRoleBindings,
+      );
+      if (portIssues.length)
+        return { invalid: { error: 'Invalid data role bindings', issues: portIssues } } as const;
       if (!diagnostics.plan || diagnostics.defaultIssues.length)
         return {
           invalid: {
@@ -530,6 +553,13 @@ adminTaskTypeRoutes.post('/', async (c) => {
     requiresRepository: body.requiresRepository,
   });
   if (issues.length > 0) return c.json({ error: 'Invalid step composition', issues }, 400);
+  const portIssues = dataRoleDraftIssues(
+    [{ executionPath: null, stepIds: body.stepIds }],
+    composable,
+    body.dataRoleBindings,
+  );
+  if (portIssues.length)
+    return c.json({ error: 'Invalid data role bindings', issues: portIssues }, 400);
   const defaultIssues = validateTaskTypeDefaults(body, composable);
   if (defaultIssues.length > 0) {
     return c.json({ error: 'Invalid defaults', issues: defaultIssues }, 400);
@@ -549,6 +579,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
         description: body.description ?? null,
         runListStrategy: 'static',
         stepIds: body.stepIds,
+        dataRoleBindings: body.dataRoleBindings ?? null,
         preAnswerDefaults: body.preAnswerDefaults ?? {},
         stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
         promptSteps,
@@ -604,7 +635,22 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     if (row.runListStrategy === 'derived') {
       const merged = { ...row, ...body };
       const diagnostics = await readDerivedDefinition(tx, merged, registeredCategoryIds());
-      const structural = body.changes !== undefined || body.promptSteps !== undefined;
+      const portIssues = dataRoleDraftIssues(
+        diagnostics.candidates,
+        diagnostics.catalog.composable,
+        dataRoleBindingsSchema.parse(merged.dataRoleBindings ?? []),
+      );
+      if (
+        (body.changes !== undefined ||
+          body.dataRoleBindings !== undefined ||
+          body.promptSteps !== undefined) &&
+        portIssues.length
+      )
+        return { invalid: { error: 'Invalid data role bindings', issues: portIssues } } as const;
+      const structural =
+        body.changes !== undefined ||
+        body.promptSteps !== undefined ||
+        body.dataRoleBindings !== undefined;
       const explicitDefaultIssues = diagnostics.defaultIssues.filter((issue) =>
         issue.kind === 'loop-limit-not-editable'
           ? body.stepLoopLimitDefaults !== undefined
@@ -648,6 +694,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       if (kept) dropped.stepLoopLimitDefaults = kept;
     }
     if (
+      body.dataRoleBindings !== undefined ||
       body.stepIds !== undefined ||
       body.requiresRepository !== undefined ||
       body.promptSteps !== undefined ||
@@ -690,6 +737,18 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
           return { invalid: { error: 'Invalid step composition', issues } } as const;
         }
       }
+      const portIssues = dataRoleDraftIssues(
+        [{ executionPath: null, stepIds }],
+        composable,
+        dataRoleBindingsSchema.parse(body.dataRoleBindings ?? row.dataRoleBindings ?? []),
+      );
+      if (
+        portIssues.length &&
+        (body.dataRoleBindings !== undefined ||
+          body.stepIds !== undefined ||
+          body.promptSteps !== undefined)
+      )
+        return { invalid: { error: 'Invalid data role bindings', issues: portIssues } } as const;
       const defaultIssues = validateTaskTypeDefaults(
         {
           stepIds,

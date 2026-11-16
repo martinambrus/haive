@@ -36,9 +36,17 @@ export function assertDataEdgeSupport(
         )
           throw new PinnedStepSupportError(b.producerStepId);
       } else {
-        const declaration = CORE_COMPOSABLE_STEPS.find(
-          (e) => e.stepId === b.producerStepId,
-        )?.providesRoles?.find((p) => p.role === b.role);
+        const provided = def.providesRoles?.find((p) => p.role === b.role);
+        if (
+          provided &&
+          provided.contract.id === b.contract.id &&
+          provided.contract.version === b.contract.version
+        )
+          continue;
+        const declaration =
+          CORE_COMPOSABLE_STEPS.find((e) => e.stepId === b.producerStepId)?.providesRoles?.find(
+            (p) => p.role === b.role,
+          ) ?? def.providesRoles?.find((p) => p.role === b.role);
         if (
           declaration?.contract.id !== b.contract.id ||
           declaration.contract.version !== b.contract.version

@@ -28,6 +28,7 @@ describe('host output contracts', () => {
       'SPEC_ROLES',
       'STEP_ROLES',
       'STEP_ROLE_REGISTRY',
+      'parseRegistryOutputContractRef',
       'parseStepOutputContractRef',
       'projectRoleOutput',
       'projectStepOutputRoles',

@@ -99,7 +99,8 @@ export async function reviewWithHost(ctx: import('@haive/shared/step').StepConte
   const refs: import('@haive/shared/step').InsightSourceRef[] = records.flatMap(
     (i) => i.sourceRefs ?? [],
   );
-  return { scope, review, inventory, refs };
+  const role: import('@haive/shared/step').ModuleRoleRead = await host.loadRoleOutput('spec');
+  return { scope, review, inventory, refs, role };
 }
 
 // A real compiled consumer of the host contract and its inferred SDK output type.

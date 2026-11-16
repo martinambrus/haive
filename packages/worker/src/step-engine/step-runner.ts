@@ -4,6 +4,8 @@ import {
   freshInsightGate2Submission,
 } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
+import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
+import { assertRequiredRoleInputs } from './module-role-read.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
@@ -3343,6 +3345,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
     }
 
+    await assertRequiredRoleInputs(ctx, stepDef);
     let redetected = false;
     if (
       meta.providerSensitive === true &&
@@ -4156,7 +4159,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Only new successful apply returns are validated. Throws and parks above, and
     // terminal-row recovery, retain their existing semantics. Check ownership before
     // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
-    if (stepDef.outputContract) {
+    if (stepDef.outputContract || stepDef.providesRoles?.length) {
       const taskPin = stepDef.replaces?.length
         ? await db.query.tasks.findFirst({
             where: eq(schema.tasks.id, taskId),
@@ -4412,6 +4415,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // and still hard-fail on the ones no amount of re-implementing would clear.
     const routeErrorToFixLoop =
       !(err instanceof StepOutputContractInvalidError) &&
+      !(err instanceof DataEdgePlanError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       if (meta.id === '08-phase-5-verify')

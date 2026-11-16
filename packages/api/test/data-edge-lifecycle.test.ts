@@ -1,6 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
-import { SPEC_ROLES } from '@haive/shared/step-outputs';
+import { buildDataEdgePlan, resolveDataInput } from '@haive/shared/data-edge-plan';
 import { dataPortNodes } from '@haive/shared/step-ports';
 import { createFakeDb } from '@haive/database/testing';
 import { schema } from '@haive/database';
@@ -118,21 +117,20 @@ it.each(['Stop/Resume', 'step Retry', 'full task Retry'] as const)(
       expect((await act(`/tasks/${TASK}/action`, 'retry')).status).toBe(200);
     }
     unchanged();
-    // Exercise the worker reader as well as storage: a future success must never replace
-    // this consumer's current-round producer after any recovery action.
-    const { readRole } = (await import(
-      new URL('../../worker/src/step-engine/read-role.js', import.meta.url).href
-    )) as { readRole: (ctx: unknown, role: typeof SPEC_ROLES.draft) => Promise<unknown> };
+    // Reader semantics live in the worker's data-edge-reader suite. This API control
+    // checks the immutable selected identity and the route's actual upstream reset.
     expect(
-      await readRole(
-        { db: fake.db, taskId: TASK, taskStepId: step.id, round: 0 },
-        SPEC_ROLES.draft,
+      resolveDataInput(
+        { dataEdgePlan: fake.rows(schema.tasks)[0]!.dataEdgePlan },
+        ids[1]!,
+        'draft',
       ),
-    ).toMatchObject({
-      state: 'ready',
-      producer: { stepId: ids[0], round: 0 },
-      data: { spec: 'pinned current round' },
-    });
+    ).toMatchObject({ state: 'active', binding: { producerStepId: ids[0] } });
+    expect((await act(`/tasks/${TASK}/steps/${ids[0]}/action`, 'retry')).status).toBe(200);
+    unchanged();
+    expect(
+      fake.rows(schema.taskSteps).find((r) => r.stepId === ids[0] && r.round === 0),
+    ).toMatchObject({ status: 'pending', output: null });
     expect(h.add).toHaveBeenCalled();
   },
 );

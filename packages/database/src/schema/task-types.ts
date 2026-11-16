@@ -55,6 +55,8 @@ export const taskTypeDefinitions = pgTable(
     changes: jsonb('changes').$type<unknown>(),
     /** Immutable execution declaration; decoded by shared at every boundary. */
     executionContract: jsonb('execution_contract').$type<unknown>(),
+    /** Author choices; copied to immutable task data-edge pins only at INSERT. */
+    dataRoleBindings: jsonb('data_role_bindings').$type<unknown>(),
   },
   (table) => [
     check(

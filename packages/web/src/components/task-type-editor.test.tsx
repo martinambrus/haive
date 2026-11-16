@@ -734,3 +734,46 @@ describe('TaskTypeEditor stored tool problems', () => {
     expect(shown(await mount())).toEqual([]);
   });
 });
+
+describe('TaskTypeEditor required data inputs', () => {
+  it('disables save and refuses submission until a dangling required input has a producer', async () => {
+    const { SPEC_ROLES, STEP_ROLE_REGISTRY } = await import('@haive/shared/step-outputs');
+    const role = SPEC_ROLES.checked,
+      contract = STEP_ROLE_REGISTRY[role].contract;
+    const producer = 'module.ports.check',
+      consumer = 'module.ports.use';
+    const steps = [producer, consumer].map((stepId) => ({
+      stepId,
+      source: 'module:ports',
+      title: stepId,
+      entry: {
+        stepId,
+        label: stepId,
+        group: 'build',
+        dispatchesCli: false,
+        requires: [],
+        provides: [],
+        ...(stepId === producer
+          ? { providesRoles: [{ role, contract }] }
+          : { consumesRoles: [{ input: 'spec', role, contract, optional: false }] }),
+      },
+    }));
+    api.getTaskTypeCatalog.mockResolvedValue({
+      ...TEST_CATALOG,
+      steps: [...TEST_CATALOG.steps, ...steps],
+      registeredStepIds: [...TEST_CATALOG.registeredStepIds, producer, consumer],
+      modules: [{ id: 'ports', name: 'Ports', state: 'loaded' }],
+    });
+    const view = await mount(null);
+    const values = { ...FLAT, slug: 'tt-ports', requiresRepository: false };
+    view.edit(values);
+    view.composer().props.onStepIdsChange([consumer]);
+    view.draw();
+    expect(view.form().props.submitDisabled).toBe(true);
+    await view.save(values);
+    expect(api.createTaskType).not.toHaveBeenCalled();
+    view.composer().props.onStepIdsChange([producer, consumer]);
+    view.draw();
+    expect(view.form().props.submitDisabled).toBe(false);
+  });
+});

@@ -13,12 +13,20 @@ it('appends the storage-only derived strategy without changing existing enum ord
 
 it('appends nullable definition columns with named checks and a restrictive self-FK', () => {
   const table = getTableConfig(schema.taskTypeDefinitions);
-  expect(table.columns.slice(-4).map((column) => [column.name, column.notNull])).toEqual([
+  expect(
+    table.columns
+      .slice(table.columns.findIndex((column) => column.name === 'prompt_steps'))
+      .map((column) => [column.name, column.notNull]),
+  ).toEqual([
     ['prompt_steps', true],
     ['base_slug', false],
     ['changes', false],
     ['execution_contract', false],
+    ['data_role_bindings', false],
   ]);
+  for (const name of ['base_slug', 'changes', 'execution_contract', 'data_role_bindings']) {
+    expect(table.columns.find((column) => column.name === name)?.hasDefault).toBe(false);
+  }
   expect(table.checks.map((constraint) => constraint.name)).toEqual([
     'task_type_definitions_derived_shape_check',
     'task_type_definitions_non_derived_shape_check',
