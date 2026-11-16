@@ -301,6 +301,17 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
     path: 'other.ts',
     disposition: 'open',
   });
+  const duplicateOwner = randomUUID();
+  fake.insert(schema.reviewFindings, {
+    id: randomUUID(),
+    taskId: ctx.taskId,
+    taskStepId: duplicateOwner,
+    round: 1,
+    fingerprint: fp1,
+    reviewerId: 'bandit',
+    path: 'a.ts',
+    disposition: 'open',
+  });
   const recurrence = await loadFindingRecurrence(ctx, 1);
   expect([...recurrence.values()]).toEqual([[0], [0]]);
   expect(await adversarialQaReviewStep.shouldRun!(ctx)).toBe(true);
@@ -325,6 +336,7 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
     rows.filter((r) => r.round === 1 && r.taskStepId === qaRow).map((r) => r.disposition),
   ).toEqual(['dismissed_human', 'dismissed_human']);
   expect(rows.find((r) => r.fingerprint === foreignFp)?.disposition).toBe('open');
+  expect(rows.find((r) => r.taskStepId === duplicateOwner)?.disposition).toBe('open');
   expect(await loadFindingRecurrence(ctx, 1)).toEqual(recurrence);
   expect((await adversarialQaReviewStep.detect!(ctx)).findings).toEqual(detected.findings);
 });

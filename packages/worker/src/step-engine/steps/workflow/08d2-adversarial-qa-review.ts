@@ -38,6 +38,8 @@ interface QaFinding {
 }
 
 interface QaReviewDetect {
+  /** Host-owned physical QA row for alternate-producer waiver writes; never from the payload. */
+  findingOwnerStepRowId?: string;
   ran: boolean;
   level: string;
   blocking: boolean;
@@ -277,6 +279,9 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     // suppression list"). The waiver reaches the next round as prompt context instead.
     const shown = findings.filter((f) => !f.folded);
     return {
+      ...(ownedFingerprints !== null && read.producer?.rowId
+        ? { findingOwnerStepRowId: read.producer.rowId }
+        : {}),
       ran: out.ran === true,
       level: out.level ?? 'poc',
       blocking: out.blocking === true,
@@ -403,6 +408,7 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
         waived.flatMap((f) => f.fingerprints),
         'dismissed_human',
         '08d2-adversarial-qa-review',
+        args.detected.findingOwnerStepRowId,
       );
       await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
         stepId: '08d2-adversarial-qa-review',
