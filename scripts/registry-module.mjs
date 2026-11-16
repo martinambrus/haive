@@ -8,7 +8,14 @@ export const REGISTRY_MODULE_MAX_PACK_BYTES = 100 * 1024 * 1024;
 // when metadata is absent, without installing dependencies or running package code.
 export async function registryModuleExports(
   spec,
-  { command, cwd, env, maxPackBytes = REGISTRY_MODULE_MAX_PACK_BYTES },
+  {
+    command,
+    cwd,
+    env,
+    maxPackBytes = REGISTRY_MODULE_MAX_PACK_BYTES,
+    removeScratch = rmSync,
+    warn = (line) => console.error(line),
+  },
 ) {
   const view = await command('pnpm', ['view', spec, 'exports', '--json'], { cwd, env });
   if (view.stdout.trim()) return JSON.parse(view.stdout);
@@ -36,7 +43,7 @@ export async function registryModuleExports(
         '--',
         'package/package.json',
       ],
-      { cwd: scratch, env },
+      { cwd: scratch, env: { PATH: env.PATH, LANG: env.LANG } },
     );
     if (Buffer.byteLength(manifest.stdout) > 1024 * 1024)
       throw new Error(`packed module manifest exceeds 1 MiB: ${spec}`);
@@ -45,6 +52,10 @@ export async function registryModuleExports(
       throw new Error(`packed module identity differs from ${spec}`);
     return pkg.exports;
   } finally {
-    rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
+    try {
+      removeScratch(scratch, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      warn(`registry-module: cleanup failed; leftover path ${scratch}`);
+    }
   }
 }

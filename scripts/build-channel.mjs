@@ -442,6 +442,7 @@ export async function run(
         command: (cmd, args, options) => command(cmd, args, { ...options, quiet: true }),
         cwd: tree,
         env: moduleEnv,
+        warn: emit,
       });
       if (!exports || exports['./manifest'] === undefined)
         throw new Error('an entitled package does not export ./manifest');

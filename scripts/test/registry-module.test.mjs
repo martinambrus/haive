@@ -25,7 +25,12 @@ for (const identity of ['matching', 'different']) {
     const read = () =>
       registryModuleExports('@haive-module/demo@1.0.0', {
         cwd: dir,
-        env: { PATH: process.env.PATH, NPM_CONFIG_USERCONFIG: '/private/npmrc' },
+        env: {
+          PATH: process.env.PATH,
+          LANG: 'C',
+          NPM_CONFIG_USERCONFIG: '/private/npmrc',
+          TAR_OPTIONS: '--invalid-option',
+        },
         command: async (cmd, args, options) => {
           calls.push(cmd);
           if (cmd === 'pnpm') return { stdout: '' };
@@ -41,6 +46,7 @@ for (const identity of ['matching', 'different']) {
             );
             return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
           }
+          assert.deepEqual(options.env, { PATH: process.env.PATH, LANG: 'C' });
           assert.ok(args.includes('--occurrence=1'));
           const result = spawnSync(cmd, args, { ...options, encoding: 'utf8' });
           assert.equal(result.status, 0, result.stderr);
@@ -78,3 +84,40 @@ test('refuses oversized pack metadata before reading tar, with an injectable byt
 test('pins the production pack limit to 100 MiB', () => {
   assert.equal(REGISTRY_MODULE_MAX_PACK_BYTES, 100 * 1024 * 1024);
 });
+
+for (const failed of [false, true]) {
+  test(`cleanup failure preserves the ${failed ? 'original error' : 'successful result'} and names scratch`, async (t) => {
+    let scratch;
+    const warnings = [];
+    const original = new Error('original npm failure');
+    const read = () =>
+      registryModuleExports('@haive-module/demo@1.0.0', {
+        cwd: tmpdir(),
+        env: {},
+        removeScratch: () => {
+          throw new Error('cleanup denied');
+        },
+        warn: (line) => warnings.push(line),
+        command: async (cmd, args) => {
+          if (cmd === 'pnpm') return { stdout: '' };
+          if (cmd === 'npm') {
+            scratch = args.at(-1);
+            t.after(() => rmSync(scratch, { recursive: true, force: true }));
+            if (failed) throw original;
+            return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
+          }
+          return {
+            stdout: JSON.stringify({
+              name: '@haive-module/demo',
+              version: '1.0.0',
+              exports: { './manifest': './manifest.js' },
+            }),
+          };
+        },
+      });
+    if (failed) await assert.rejects(read, (error) => error === original);
+    else assert.deepEqual(await read(), { './manifest': './manifest.js' });
+    assert.deepEqual(warnings, [`registry-module: cleanup failed; leftover path ${scratch}`]);
+    assert.equal(existsSync(scratch), true);
+  });
+}
