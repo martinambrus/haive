@@ -142,7 +142,7 @@ for (const mode of ['builtin', 'derived'] as const)
     if (name === 'fix round') put(single, { ...output, summary: 'Fixed the regression' }, 1);
     if (name === 'retry') put(single, null, 1, 'pending');
     const detected = await phase8LearningStep.detect!(ctx);
-    // Frozen physical formula from base 626c2a04b; no role resolver in the oracle.
+    // Frozen pre-role physical read; no role resolver in the oracle.
     const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, single);
     const old = (row?.output ?? {}) as typeof output;
     expect({
