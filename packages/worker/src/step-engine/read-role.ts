@@ -1,3 +1,4 @@
+import { canonicalCheckResult } from './check-result-output.js';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared/logger';
@@ -8,6 +9,8 @@ import {
   DataEdgePlanError,
 } from '@haive/shared/data-edge-plan';
 import {
+  CHECK_RESULT_ROLES,
+  type CheckResultRole,
   STEP_ROLE_REGISTRY,
   IMPLEMENTATION_SUMMARY_ROLE,
   IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
@@ -171,6 +174,17 @@ export async function readDataRole(
   // from issue claims or use this reporting adapter for review/fix routing.
   if (role === IMPLEMENTATION_SUMMARY_ROLE && producerStepId === IMPLEMENTATION_SUMMARY_DAG_STEP_ID)
     output = { summary: '', filesTouched: [] };
+  if (
+    Object.values(CHECK_RESULT_ROLES).some((r) => r === role) &&
+    producerStepId === entry.legacyStepId
+  )
+    output = canonicalCheckResult(
+      role as CheckResultRole,
+      output,
+      row.detect,
+      row.iterations,
+      row.status ?? 'done',
+    );
   const common = {
     role,
     contract,
