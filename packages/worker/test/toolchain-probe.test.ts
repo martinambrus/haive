@@ -1,5 +1,11 @@
+const h = vi.hoisted(() => ({ warn: vi.fn(), enabled: vi.fn(async () => true) }));
+vi.mock('../src/sandbox/runtime-caps.js', () => ({ resourceLimitsEnabled: h.enabled }));
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<object>()),
+  logger: { child: () => ({ warn: h.warn }) },
+}));
 import type { DockerRunOpts } from '../src/sandbox/docker-runner.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SandboxToolchainProbe,
   TOOLCHAIN_CACHE_LIMIT,
@@ -15,6 +21,11 @@ const result = (exitCode: number | null, stdout = '', timedOut = false) => ({
   durationMs: 1,
   timedOut,
 });
+beforeEach(() => {
+  vi.useFakeTimers();
+  h.warn.mockClear();
+  h.enabled.mockResolvedValue(true);
+});
 afterEach(() => vi.useRealTimers());
 
 describe('immutable-image PHP probe', () => {
@@ -29,6 +40,7 @@ describe('immutable-image PHP probe', () => {
     const probe = new SandboxToolchainProbe(fakeDockerRunner({ run }));
     const first = probe.get(id(1));
     const second = probe.get(id(1));
+    await Promise.resolve();
     expect(run).toHaveBeenCalledTimes(1);
     expect(run.mock.calls[0]?.[0]).toMatchObject({
       image: id(1),
@@ -64,20 +76,31 @@ describe('immutable-image PHP probe', () => {
     result(null),
     result(199, '', true),
     { ...result(0), error: 'spawn failed' },
-  ])('does not cache an inconclusive result: %j', async (unknown) => {
+  ])('caches an inconclusive result as unknown for 60 seconds: %j', async (unknown) => {
     const run = vi.fn().mockResolvedValueOnce(unknown).mockResolvedValueOnce(result(199));
     const probe = new SandboxToolchainProbe(fakeDockerRunner({ run }));
     expect(await probe.get(id(1))).toBeNull();
+    expect(await probe.get(id(1))).toBeNull();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    expect(h.warn).toHaveBeenCalledWith(
+      { imageId: id(1), exitCode: unknown.exitCode, timedOut: unknown.timedOut },
+      'sandbox toolchain probe returned unknown',
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
     expect((await probe.get(id(1)))?.php).toBe('absent');
     expect(run).toHaveBeenCalledTimes(2);
   });
 
-  it('evicts rejected probes and does not run mutable tags', async () => {
+  it('briefly caches rejected probes and does not run mutable tags', async () => {
     const run = vi.fn().mockRejectedValueOnce(new Error('spawn')).mockResolvedValue(result(199));
     const probe = new SandboxToolchainProbe(fakeDockerRunner({ run }));
     expect(await probe.get('some:tag')).toBeNull();
     expect(run).not.toHaveBeenCalled();
     expect(await probe.get(id(1))).toBeNull();
+    expect(await probe.get(id(1))).toBeNull();
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect((await probe.get(id(1)))?.php).toBe('absent');
   });
 
@@ -108,4 +131,14 @@ describe('immutable-image PHP probe', () => {
     await probe.get(id(2));
     expect(run.mock.calls.map((c) => c[0].image)).toEqual([id(1), id(2), id(3), id(2)]);
   });
+});
+
+it('omits cgroup limits when the sandbox resource governor is disabled', async () => {
+  h.enabled.mockResolvedValue(false);
+  const run = vi.fn().mockResolvedValue(result(199));
+  await new SandboxToolchainProbe(fakeDockerRunner({ run })).get(id(1));
+  expect(h.enabled).toHaveBeenCalledWith({ strict: true });
+  const opts = run.mock.calls[0]![0];
+  for (const key of ['memoryLimitMb', 'cpuLimitMilli', 'pidsLimit'])
+    expect(opts).not.toHaveProperty(key);
 });
