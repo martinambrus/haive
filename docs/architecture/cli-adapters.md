@@ -99,6 +99,20 @@ from later actions within the same displayed segment. Timing metadata is capped
 at 8,192 fragments per invocation; dropping old offsets leaves the display text
 intact. Older transcripts lack this metadata and remain valid.
 
+## Incremental request transports
+
+Claude Code message threads and Codex Responses WebSockets reduce request latency and upload
+bandwidth. The CLI binary owns transport selection and fallback. A non-first-party
+`ANTHROPIC_BASE_URL` override or `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` disables Claude Code
+threads; Codex config overrides can disable `responses_websockets` or select another
+`wire_api`/transport. Claude's `CLAUDE_CODE_TETHER_LIVE` is a volatile internal override: if an
+operator ever uses it, it belongs only in that provider's `envVars`, never in adapter defaults.
+These transports change no token figure, so `token_usage`, spend and context badges need no change.
+
+`packages/worker/test/adapter-transport.test.ts` pins Claude's default environment, explicit
+provider env passthrough and the unchanged egress lists. It also checks Codex's public builders
+for transport overrides in exec (argv and stdin), app-server and its exec fallback.
+
 ## Credential refresh and usage polling
 
 The singleton usage-poll worker refreshes expiring Grok credentials before polling usage.
