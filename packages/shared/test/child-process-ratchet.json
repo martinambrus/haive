@@ -17,5 +17,6 @@
   "scripts/build-release-manifest.mjs": 1,
   "scripts/channel-capture.mjs": 1,
   "scripts/channel-gate.mjs": 1,
-  "scripts/check-public-modules.mjs": 1
+  "scripts/check-public-modules.mjs": 1,
+  "scripts/module.mjs": 1
 }
