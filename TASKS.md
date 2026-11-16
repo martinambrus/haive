@@ -2439,6 +2439,7 @@ All low unless marked.
 - Learning provenance (#1177): each learning file records its origin and last five updates as a trailing comment with before/after hashes, stripped from excerpts and RAG chunks.
 
 - Time and cost report PR 3 (#1176): idle time is labelled "Idle" on the statistics tile and "parked" on the task pages, never "waiting on you"; the plan is complete apart from the idle-detection note line.
+- Time and cost report note (#1232): "What these figures cover" states the reading allowance, the bounded iframe credit and that older figures are not directly comparable; the plan is complete. Low (review): the note hardcodes the 1-5 and 15 minute figures that live in `activity-clock.ts`; pin them from the constants if they change.
 
 - Time and cost report PR 2 (#1170): every 08/08b check run is recorded in `task_check_runs` (migration 0239) as observation only, with bounded writes; the report counts passed, failed, not run and incomplete runs. Lows filed as T671.
 
