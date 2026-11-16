@@ -558,7 +558,6 @@ async function saveConfig(
     privateFields?: readonly string[];
     secret?: { key: string; value: string; description: string };
   },
-  prepare?: (previous: Record<string, ConfigValue>) => Promise<void>,
 ): Promise<void> {
   const entries = Object.entries(fields);
   const lockName =
@@ -601,9 +600,6 @@ async function saveConfig(
         await tx.transaction(async (savepoint) => {
           // A write that fails after the first takes the full row back with the savepoint.
           await insertAuditEvent(savepoint, full);
-          // Preparation must commit before Redis releases a pickup gate; the surrounding
-          // config advisory lock still serializes concurrent saves of that switch.
-          await prepare?.(Object.fromEntries(changes.map(({ name, from }) => [name, from])));
           if (options?.secret) {
             const { key, value, description } = options.secret;
             await secretsService.set(key, value, description, savepoint);
@@ -1966,21 +1962,18 @@ adminRoutes.get('/config/global-pause', async (c) => {
 
 adminRoutes.put('/config/global-pause', async (c) => {
   const { paused } = globalPauseSchema.parse(await c.req.json());
-  let skippedTasks: Awaited<ReturnType<typeof holdUnsupportedTasksForGlobalResume>> = [];
-  await saveConfig(
-    c.get('userId'),
-    'global-pause',
-    {
-      paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
-    },
-    undefined,
-    paused
-      ? undefined
-      : async (previous) => {
-          if (!previous.paused) return;
-          skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId'));
-        },
-  );
+  // Hold transactions finish before saveConfig borrows its connection and config lock:
+  // a lock owner borrowing a second connection can deadlock a saturated pool of saves.
+  // Read the stored switch first so an already-off lift stamps no task holds. A concurrent
+  // switch change or a later save failure may leave extra holds on unsupported tasks;
+  // keeping them paused is safe (the worker would otherwise mark their pins dead).
+  const skippedTasks =
+    !paused && parseStored(await configService.getFresh(CONFIG_KEYS.GLOBAL_PAUSE), false) === true
+      ? await holdUnsupportedTasksForGlobalResume(c.get('userId')).catch(lockBusyError)
+      : [];
+  await saveConfig(c.get('userId'), 'global-pause', {
+    paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
+  });
   log.info({ paused }, 'global pause switch updated');
   return c.json({ paused, ...(skippedTasks.length ? { skippedTasks } : {}) });
 });

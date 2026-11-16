@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
+import { configService } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 
 const h = vi.hoisted(() => ({
@@ -201,7 +203,6 @@ it.each(unsupported)(
     ]);
     expect(fake.rows(schema.taskEvents)).toHaveLength(1);
     expect(fake.rows(schema.auditEvents)).toMatchObject([
-      { action: 'config.global_pause', metadata: { from: true, to: false } },
       {
         actorUserId: ADMIN,
         action: 'task.admin_pause',
@@ -213,6 +214,7 @@ it.each(unsupported)(
           reason: 'invalid-execution-contract',
         },
       },
+      { action: 'config.global_pause', metadata: { from: true, to: false } },
     ]);
     expect(fake.rows(schema.auditEvents)).toHaveLength(2);
     expect(h.add).not.toHaveBeenCalled();
@@ -236,7 +238,7 @@ it('an already-off global lift leaves unsupported tasks and their pause evidence
   expect(fake.rows(schema.auditEvents)).toHaveLength(1);
   expect(h.paused).toBe(false);
 });
-it('a task hold lock timeout answers 503, rolls back the config audit, and leaves the switch on', async () => {
+it('a task hold lock timeout answers 503 before the config save and leaves the switch on', async () => {
   const fake = setup(guarded, null);
   const before = state(fake);
   const statements: string[][] = [];
@@ -269,9 +271,9 @@ it('a task hold lock timeout answers 503, rolls back the config audit, and leave
   });
   expect(state(fake)).toEqual(before);
   expect(h.paused).toBe(true);
-  expect(statements).toHaveLength(2);
+  expect(statements).toHaveLength(1);
   expect(statements[0]?.[0]).toBe("SET LOCAL lock_timeout = '30000ms'");
-  expect(statements[1]).toEqual([statements[0]?.[0]]);
+  expect(statements[0]).toHaveLength(1);
   expect(h.add).not.toHaveBeenCalled();
   expect(h.kill).not.toHaveBeenCalled();
 });
@@ -300,4 +302,112 @@ it('global pause engagement leaves tasks untouched', async () => {
   const res = await request('/admin/config/global-pause', { paused: true }, 'PUT');
   expect(res.status).toBe(200);
   expect(fake.rows(schema.tasks)).toEqual(before);
+});
+
+// Model a finite pool separately from the fake database's real per-key advisory mutex.
+// A savepoint borrows no connection; a root transaction does. Fail a nested borrow by
+// the config-lock owner as if the pool/lock timeout fired, so regressions cannot hang.
+it.each([1, 2, 3])('completes N+1 global lifts with an injected pool of %i', async (size) => {
+  const fake = setup(guarded, null);
+  const context = new AsyncLocalStorage<{ configLockHeld: boolean }>();
+  const firstWave = Promise.withResolvers<void>();
+  const waiting: Array<() => void> = [];
+  let inUse = 0;
+  let peak = 0;
+  let acquisitions = 0;
+  let nestedBorrows = 0;
+  const transaction = fake.db.transaction;
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (run) => {
+    if (context.getStore()?.configLockHeld) {
+      nestedBorrows += 1;
+      throw Object.assign(new Error('pool acquire blocked behind the config lock owner'), {
+        code: '55P03',
+      });
+    }
+    if (inUse === size) await new Promise<void>((resolve) => waiting.push(resolve));
+    else inUse += 1;
+    peak = Math.max(peak, inUse);
+    if (++acquisitions === size) firstWave.resolve();
+    await firstWave.promise;
+    try {
+      return await context.run({ configLockHeld: false }, () =>
+        transaction(async (tx) => {
+          const execute = tx.execute;
+          tx.execute = async (query) => {
+            const result = await execute(query);
+            if (new PgDialect().sqlToQuery(query as SQL).sql.includes('pg_advisory_xact_lock'))
+              context.getStore()!.configLockHeld = true;
+            return result;
+          };
+          return run(tx);
+        }),
+      );
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else inUse -= 1;
+    }
+  });
+
+  const responses = await Promise.all(
+    Array.from({ length: size + 1 }, () =>
+      request('/admin/config/global-pause', { paused: false }, 'PUT'),
+    ),
+  );
+
+  expect(nestedBorrows, 'no config-lock owner may borrow a second pooled connection').toBe(0);
+  expect(responses.map((res) => res.status)).toEqual(Array(size + 1).fill(200));
+  expect(peak).toBe(size);
+  expect(inUse).toBe(0);
+  expect(waiting).toEqual([]);
+  expect(h.paused).toBe(false);
+  expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+  expect(fake.rows(schema.taskEvents)).toHaveLength(1);
+  expect(
+    fake.rows(schema.auditEvents).filter((row) => row.action === 'task.admin_pause'),
+  ).toHaveLength(1);
+  expect(
+    fake.rows(schema.auditEvents).filter((row) => row.action === 'config.global_pause'),
+  ).toHaveLength(size + 1);
+});
+
+it('keeps the committed task hold and evidence when the later config write fails', async () => {
+  const fake = setup(guarded, null);
+  h.beforeLift = () => {
+    throw new Error('redis write failed');
+  };
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status).toBe(500);
+  expect(h.paused).toBe(true);
+  expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+  expect(fake.rows(schema.taskEvents)).toMatchObject([
+    { taskId: TASK, eventType: 'task.paused', payload: { by: ADMIN, byAdmin: true } },
+  ]);
+  expect(fake.rows(schema.taskEvents)).toHaveLength(1);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { targetId: TASK, action: 'task.admin_pause' },
+  ]);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+});
+
+it('allows an extra unsupported-task hold when another lift turns the switch off after the read', async () => {
+  const fake = setup(guarded, null);
+  vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
+    h.paused = false;
+    return 'true';
+  });
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status, await res.clone().text()).toBe(200);
+  expect(h.paused).toBe(false);
+  expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+  expect(fake.rows(schema.taskEvents)).toHaveLength(1);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { targetId: TASK, action: 'task.admin_pause' },
+    { action: 'config.global_pause', metadata: { from: false, to: false } },
+  ]);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(2);
 });

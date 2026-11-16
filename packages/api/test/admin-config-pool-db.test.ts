@@ -425,6 +425,72 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       }
     });
 
+    it('completes N+1 global lifts while unsupported tasks need holds on the same pool', async () => {
+      await control.insert(schema.users).values({
+        id: actor,
+        emailEncrypted: 'global-pause-pool-test',
+        emailBlindIndex: actor,
+        passwordHash: 'not-real',
+        role: 'admin',
+      });
+      try {
+        const [task] = await control
+          .insert(schema.tasks)
+          .values({
+            userId: actor,
+            type: 'workflow',
+            title: 'global pause pool control',
+            status: 'queued',
+            executionContract: {
+              version: 1,
+              guardedSpans: [
+                {
+                  id: 'guard',
+                  firstStepId: 'report',
+                  lastStepId: 'report',
+                  predicateId: 'module.fx.planned',
+                  args: {},
+                },
+              ],
+            },
+          })
+          .returning();
+        h.stored.set(CONFIG_KEYS.GLOBAL_PAUSE, 'true');
+        h.beforeWrite = async () => {
+          const [held] = await control
+            .select()
+            .from(schema.tasks)
+            .where(eq(schema.tasks.id, task!.id));
+          expect(held?.pausedAt).toBeInstanceOf(Date);
+        };
+        const count = pool.$client.options.max + 1;
+
+        const statuses = await allSettle(
+          Array.from({ length: count }, () => putConfig('global-pause', { paused: false })),
+        );
+
+        expect(statuses).toEqual(Array(count).fill(200));
+        expect(h.stored.get(CONFIG_KEYS.GLOBAL_PAUSE)).toBe('false');
+        const events = await control
+          .select()
+          .from(schema.taskEvents)
+          .where(eq(schema.taskEvents.taskId, task!.id));
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+          eventType: 'task.paused',
+          payload: { by: actor, byAdmin: true, reason: 'unsupported-execution-contract' },
+        });
+        const audits = await auditRows();
+        expect(audits.filter((row) => row.action === 'task.admin_pause')).toHaveLength(1);
+        const saves = audits.filter((row) => row.action === 'config.global_pause');
+        expect(saves).toHaveLength(count);
+        expect(saves.filter((row) => (row.metadata as { from: boolean }).from)).toHaveLength(1);
+        expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
+      } finally {
+        await control.delete(schema.users).where(eq(schema.users.id, actor));
+      }
+    });
+
     it('queues a second save of one switch behind the first, and the rows chain', async () => {
       const hold = holdWrites(1);
       const first = putConfig('cli-soft-timeout', { enabled: false, percent: 50 });
