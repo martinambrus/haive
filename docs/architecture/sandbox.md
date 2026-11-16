@@ -480,12 +480,16 @@ immutable image ID and its zero-based Unicode character offset in the stored pro
 fallback drops it before house and provider rules. If a leading block cannot be located, dispatch
 rebuilds without the fact and never emits a blockless stamp. Execution inspects the chosen image
 again and pins the launch to its immutable ID. A changed or unreadable image, or an environment
-override introduced at execution, removes the first stamped advisory and its trailing blank line
-from a single prompt. Full advisory quotes in task text remain intact. The same rule applies to
-Codex app-server turns. Before execution, the stored invocation prompt loses the separator only
+override introduced at execution, removes the owned advisory and its trailing blank line at the
+stamped character offset. JSON user-message inputs are decoded before checking that position.
+Full advisory quotes in agent rules, house rules and task text remain intact. The same rule applies
+to Codex app-server turns and their exec fallback. Execution verifies the separator at that offset;
+a mismatched positional payload is refused before any audit write or CLI send, without stripping
+a different copy; the invocation fails once, and a Retry dispatches again with a freshly measured
+stamp. Before execution, the stored invocation prompt loses the separator only
 when the text at the stamped offset still equals it; a redelivery with the same stamp then changes
 nothing. A failed audit update prevents sending the changed prompt. Older stamps without offsets
-retain their first-match or counted-ordinal audit behavior, and older full-prompt stamps remain readable.
+retain their first-match or counted-ordinal removal and audit behavior, and older full-prompt stamps remain readable.
 
 Native and sequential sub-agent inputs have no production builder today. Their exec-time stamps
 carry copy counts and, when needed, match ordinals to preserve quotes between independently adapted
