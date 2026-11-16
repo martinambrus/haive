@@ -497,6 +497,12 @@ const validationOutputSchema = z
   })
   .passthrough()
   .superRefine((o, ctx) => {
+    if (o.resultStatus === 'failed' && o.verdict !== 'ISSUES_FOUND')
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'failed validation requires issues verdict',
+      });
     if (
       o.resultStatus === 'passed' &&
       (o.verdict !== 'VALID' ||
@@ -550,6 +556,12 @@ const verifyOutputSchema = z
   .passthrough()
   .superRefine((o, ctx) => {
     const checks = [o.test, o.lint, o.phpLint, o.typecheck].filter((v) => v !== undefined);
+    if (o.resultStatus === 'failed' && (o.passed || !checks.some((c) => c.ran && !c.passed)))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'failed verification requires a failed executed check',
+      });
     if (
       o.resultStatus === 'passed' &&
       (!o.passed || !checks.some((c) => c.ran) || checks.some((c) => c.ran && !c.passed))
@@ -588,6 +600,15 @@ const testManagementOutputSchema = z
         code: 'custom',
         path: ['resultStatus'],
         message: 'passing test management requires executed tests',
+      });
+    if (
+      (o.resultStatus === 'failed' && o.testsPassed !== false) ||
+      (!['passed', 'failed'].includes(o.resultStatus) && o.testsPassed !== null)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resultStatus'],
+        message: 'test-management status must match its nullable test verdict',
       });
   });
 export type ValidationOutput = ContractShape<z.infer<typeof validationOutputSchema>>;
