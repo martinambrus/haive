@@ -42,6 +42,7 @@ describe.skipIf(!url)('read exposure backfill PostgreSQL selection and CAS', () 
       { name: 'no numeric version', usage: { ...facts, reads: {} } },
       { name: 'string version', usage: { ...facts, reads: { version: '1' } } },
       { name: 'old version', usage: { ...current, reads: { ...current.reads, version: 0 } } },
+      { name: 'swept malformed', usage: { ...facts, reads: {} }, swept: true },
       { name: 'current version', usage: current },
       { name: 'future version', usage: { ...current, reads: { ...current.reads, version: 2 } } },
       {
@@ -87,19 +88,19 @@ describe.skipIf(!url)('read exposure backfill PostgreSQL selection and CAS', () 
     expect(before.find((r) => r.id === ids[1])?.sqlNull).toBe(false);
     const opts = { budgetMs: 5000, batchSize: 2, apply: true };
     expect(await backfillToolUsage(db, opts)).toMatchObject({
-      examined: 7,
-      written: 7,
+      examined: 8,
+      written: 8,
       remaining: 0,
     });
     const after = await rows();
     for (const [i, id] of ids.entries()) {
       const prior = before.find((r) => r.id === id)!;
       const saved = after.find((r) => r.id === id)!;
-      if (i >= 7) expect(saved, states[i]!.name).toEqual(prior);
+      if (i >= 8) expect(saved, states[i]!.name).toEqual(prior);
       else {
         expect(saved.toolUsage?.reads, states[i]!.name).toMatchObject({
           version: 1,
-          coverage: 'full',
+          coverage: states[i]!.swept ? 'none' : 'full',
         });
         expect(saved.xmin).not.toBe(prior.xmin);
         if (prior.toolUsage) {
