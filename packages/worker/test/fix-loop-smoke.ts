@@ -212,6 +212,8 @@ async function createFixtureRepo(): Promise<string> {
 
 /** Override 07b to always report ISSUES_FOUND so its fixLoop hook routes back every
  *  round, with no internal validator/fixer loop or CLI dispatch. */
+type ValidateReturn = Awaited<ReturnType<NonNullable<typeof phase4ValidateStep.apply>>>;
+
 function overrideValidateAlwaysFails(): void {
   stepRegistry.override({
     ...phase4ValidateStep,
@@ -228,7 +230,9 @@ function overrideValidateAlwaysFails(): void {
         debtBlock: '',
       };
     },
-    async apply() {
+    // Typed against the real step's return so a field the output contract requires
+    // cannot go missing here unnoticed: the registry override itself is untyped.
+    async apply(): Promise<ValidateReturn> {
       return {
         verdict: 'ISSUES_FOUND' as const,
         summary: 'forced failure for the fix-loop smoke',
@@ -236,7 +240,10 @@ function overrideValidateAlwaysFails(): void {
           { severity: 'high' as const, file: 'package.json', description: 'smoke-forced issue' },
         ],
         dimensions: [],
+        excludedDimensions: [],
         fixesApplied: [],
+        converged: true,
+        churnFiles: [],
         findingsSummary: 'Smoke-forced ISSUES_FOUND to drive the fix loop.',
         report: '',
         validatorPasses: 1,
