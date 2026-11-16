@@ -190,7 +190,25 @@ export async function readDataRole(
     contract,
     producer: { rowId: row.id, stepId: row.stepId, round: row.round, status: row.status },
     iterations: row.iterations,
-    legacyOutput: pinned && row.status !== 'done' ? null : projectRoleOutput(role, output),
+    legacyOutput:
+      pinned && row.status !== 'done'
+        ? row.status === 'skipped' &&
+          producerStepId === entry.legacyStepId &&
+          Object.values(CHECK_RESULT_ROLES).some((r) => r === role)
+          ? // A skip has no check evidence, but its host discovery metadata still
+            // feeds verify/gate context. Never expose retained apply output here.
+            projectRoleOutput(
+              role,
+              canonicalCheckResult(
+                role as CheckResultRole,
+                null,
+                row.detect,
+                row.iterations,
+                'skipped',
+              ),
+            )
+          : null
+        : projectRoleOutput(role, output),
   };
   if (row.status !== 'done') return { ...common, state: 'not-ready' };
   const result = safeParseStepOutput(contract, output);

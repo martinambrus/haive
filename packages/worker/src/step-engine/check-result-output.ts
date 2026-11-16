@@ -17,7 +17,6 @@ export function canonicalCheckResult(
 ): Record<string, unknown> | null {
   const o = record(value);
   const d = record(detect);
-  if (value == null && role !== CHECK_RESULT_ROLES.testManagement) return null;
   const state = status === 'skipped' ? 'skipped' : status !== 'done' ? 'incomplete' : undefined;
   if (role === CHECK_RESULT_ROLES.validation) {
     const exhaustedBudget = iterations.some((v) => record(v).exhaustedBudget === true);

@@ -202,3 +202,29 @@ it.each(roles)(
     expect(await readRole(ctx, role)).toMatchObject({ state: 'absent' });
   },
 );
+
+it('a skipped canonical producer retains only discovery metadata through its pinned input', async () => {
+  const { ctx, fake, put } = setup(false);
+  const ids = ['08b-test-management', '08-phase-5-verify', gate];
+  fake.patch(schema.tasks, ctx.taskId, {
+    runListSnapshot: ids,
+    dataEdgePlan: buildDataEdgePlan('static', [{ executionPath: null, nodes: dataPortNodes(ids) }]),
+  });
+  const management = put(ids[0]!, { ...outputs['haive.test-management'] }, 0, 'skipped');
+  fake.patch(schema.taskSteps, management, { detectOutput: { primary: 'playwright' } });
+  expect(await readRole(ctx, 'haive.test-management')).toMatchObject({
+    state: 'not-ready',
+    legacyOutput: { primary: 'playwright', resultStatus: 'skipped' },
+  });
+  expect((await readRole(ctx, 'haive.test-management')).producer).not.toBeNull();
+  const verification = put(ids[1]!, outputs['haive.verify'], 0, 'skipped');
+  fake.patch(schema.taskSteps, verification, {
+    detectOutput: { declinedConfigs: ['nested'], test: null },
+  });
+  const result = await readRole(ctx, 'haive.verify');
+  expect(result).toMatchObject({
+    state: 'not-ready',
+    legacyOutput: { declinedConfigs: ['nested'], slotWithoutRunner: true, resultStatus: 'skipped' },
+  });
+  if (result.producer) expect(result.legacyOutput).not.toHaveProperty('passed');
+});
