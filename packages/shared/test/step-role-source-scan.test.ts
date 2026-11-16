@@ -51,6 +51,12 @@ describe('ungated step-role reader ratchet', () => {
     ).toBeGreaterThan(0);
   });
   it.each([
+    'haive.discovery',
+    'haive.requirements.draft',
+    'haive.requirements.humanized',
+    '03-phase-0a-discovery',
+    '03b-business-requirements',
+    '03b2-humanize-requirements',
     'haive.spec.draft',
     'haive.spec.checked',
     'haive.spec.resolved',
@@ -63,20 +69,23 @@ describe('ungated step-role reader ratchet', () => {
         .length,
     ).toBeGreaterThan(0);
   });
-  it.each(['SPEC_ROLES', 'STEP_ROLE_REGISTRY', 'HOST_POLICY_STEP_ROLES'])(
-    'pins aliased registry table %s',
-    (table) => {
-      expect(
-        checkRoleReaderPins(
-          roleReaderSites(
-            'packages/worker/src/new.ts',
-            `import {${table} as roles} from 'outputs'; const r=roles.draft; load(r)`,
-          ),
-          [],
-        ).length,
-      ).toBeGreaterThan(0);
-    },
-  );
+  it.each([
+    'SPEC_ROLES',
+    'DISCOVERY_ROLE',
+    'REQUIREMENTS_ROLES',
+    'STEP_ROLE_REGISTRY',
+    'HOST_POLICY_STEP_ROLES',
+  ])('pins aliased registry table %s', (table) => {
+    expect(
+      checkRoleReaderPins(
+        roleReaderSites(
+          'packages/worker/src/new.ts',
+          `import {${table} as roles} from 'outputs'; const r=roles.draft; load(r)`,
+        ),
+        [],
+      ).length,
+    ).toBeGreaterThan(0);
+  });
   it('collapses indentation and line-break whitespace in call contexts', () => {
     const file = 'packages/worker/src/negative.ts';
     expect(roleReaderSites(file, "loader\n  .read('08c-code-review')")).toEqual(

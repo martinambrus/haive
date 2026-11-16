@@ -1,7 +1,12 @@
+import { CORE_STAGE_INPUTS } from '@haive/shared/step-ports';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
+import {
+  REQUIREMENTS_ROLES,
+  REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseBizReqOutput } from './03b-business-requirements.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
@@ -35,8 +40,7 @@ interface HumanizeApply {
 async function loadSourceRequirements(
   ctx: StepContext,
 ): Promise<{ requirements: string; summary: string }> {
-  const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b-business-requirements');
-  const out = prev?.output as { requirements?: string; summary?: string } | null;
+  const out = legacyRoleOutput(await readRole(ctx, REQUIREMENTS_ROLES.draft));
   return { requirements: out?.requirements ?? '', summary: out?.summary ?? '' };
 }
 
@@ -48,6 +52,10 @@ const PERSONA = [
 ] as const;
 
 export const humanizeRequirementsStep: StepDefinition<HumanizeDetect, HumanizeApply> = {
+  providesRoles: [
+    { role: REQUIREMENTS_ROLES.humanized, contract: REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT },
+  ],
+  consumesRoles: CORE_STAGE_INPUTS['03b2-humanize-requirements'],
   metadata: {
     id: '03b2-humanize-requirements',
     workflowType: 'workflow',

@@ -1,3 +1,4 @@
+import { CORE_STAGE_INPUTS } from '@haive/shared/step-ports';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -44,6 +45,7 @@ export function hasRequirements(out: BizReqOutput): boolean {
 
 export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, BizReqReviewApply> =
   {
+    consumesRoles: CORE_STAGE_INPUTS['03c-business-requirements-review'],
     metadata: {
       id: '03c-business-requirements-review',
       workflowType: 'workflow',

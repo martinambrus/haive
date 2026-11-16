@@ -1,6 +1,15 @@
-import { SPEC_INPUTS } from '@haive/shared/step-ports';
+import {
+  CORE_STAGE_INPUTS,
+  SPEC_INPUTS,
+  DISCOVERY_REQUIREMENTS_INPUTS,
+} from '@haive/shared/step-ports';
 import {
   SPEC_ROLES,
+  DISCOVERY_ROLE,
+  REQUIREMENTS_ROLES,
+  DISCOVERY_OUTPUT_CONTRACT,
+  REQUIREMENTS_DRAFT_OUTPUT_CONTRACT,
+  REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT,
   STEP_ROLE_REGISTRY,
   SPEC_DRAFT_OUTPUT_CONTRACT,
   SPEC_CHECKED_OUTPUT_CONTRACT,
@@ -319,6 +328,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '03-phase-0a-discovery',
+    providesRoles: [{ role: DISCOVERY_ROLE, contract: DISCOVERY_OUTPUT_CONTRACT }],
     label: 'Phase 0a: Knowledge discovery',
     group: 'spec',
     dispatchesCli: true,
@@ -328,6 +338,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '03b-business-requirements',
+    providesRoles: [
+      { role: REQUIREMENTS_ROLES.draft, contract: REQUIREMENTS_DRAFT_OUTPUT_CONTRACT },
+    ],
     agentAuthoredOutput: true,
     label: 'Draft business requirements',
     group: 'spec',
@@ -339,6 +352,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '03b2-humanize-requirements',
+    providesRoles: [
+      { role: REQUIREMENTS_ROLES.humanized, contract: REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT },
+    ],
     agentAuthoredOutput: true,
     label: 'Humanize business requirements',
     group: 'spec',
@@ -814,7 +830,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
 ].map((entry) => ({
   ...entry,
-  ...(SPEC_INPUTS[entry.stepId] ? { consumesRoles: SPEC_INPUTS[entry.stepId] } : {}),
+  ...(CORE_STAGE_INPUTS[entry.stepId] ? { consumesRoles: CORE_STAGE_INPUTS[entry.stepId] } : {}),
 })) as readonly CoreComposableStepEntry[];
 
 export function assertCoreComposableCatalog(
@@ -822,6 +838,7 @@ export function assertCoreComposableCatalog(
   entries: readonly ComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
 ): void {
   assertSpecPortDeclarations(entries as readonly CoreComposableStepEntry[]);
+  assertDiscoveryRequirementsPortDeclarations(entries as readonly CoreComposableStepEntry[]);
   const ids = new Set(entries.map((e) => e.stepId));
   const provided = new Set(entries.flatMap((e) => e.provides));
   for (const entry of entries) {
@@ -882,9 +899,41 @@ export function assertSpecPortDeclarations(
       throw new Error(`spec-port-provider-invalid: ${role}`);
   }
   for (const e of entries) {
-    if (JSON.stringify(e.consumesRoles ?? []) !== JSON.stringify(SPEC_INPUTS[e.stepId] ?? []))
+    if (
+      JSON.stringify(
+        (e.consumesRoles ?? []).filter((p) => Object.values(SPEC_ROLES).includes(p.role as never)),
+      ) !== JSON.stringify(SPEC_INPUTS[e.stepId] ?? [])
+    )
       throw new Error(`spec-port-input-invalid: ${e.stepId}`);
   }
   for (const id of Object.keys(SPEC_INPUTS))
     if (!entries.some((e) => e.stepId === id)) throw new Error(`spec-port-consumer-missing: ${id}`);
+}
+
+/** New stages must keep their canonical writers and tolerant optional inputs at boot. */
+export function assertDiscoveryRequirementsPortDeclarations(
+  entries: readonly CoreComposableStepEntry[] = CORE_COMPOSABLE_STEPS,
+): void {
+  for (const role of [DISCOVERY_ROLE, ...Object.values(REQUIREMENTS_ROLES)]) {
+    const providers = entries.flatMap((e) =>
+      (e.providesRoles ?? []).filter((p) => p.role === role).map((p) => ({ entry: e, port: p })),
+    );
+    const expected = STEP_ROLE_REGISTRY[role];
+    if (
+      providers.length !== 1 ||
+      providers[0]!.entry.stepId !== expected.legacyStepId ||
+      JSON.stringify(providers[0]!.port.contract) !== JSON.stringify(expected.contract)
+    )
+      throw new Error(`discovery-requirements-port-provider-invalid: ${role}`);
+  }
+  for (const e of entries) {
+    const inputs = (e.consumesRoles ?? []).filter(
+      (p) => !Object.values(SPEC_ROLES).includes(p.role as never),
+    );
+    if (JSON.stringify(inputs) !== JSON.stringify(DISCOVERY_REQUIREMENTS_INPUTS[e.stepId] ?? []))
+      throw new Error(`discovery-requirements-port-input-invalid: ${e.stepId}`);
+  }
+  for (const id of Object.keys(DISCOVERY_REQUIREMENTS_INPUTS))
+    if (!entries.some((e) => e.stepId === id))
+      throw new Error(`discovery-requirements-port-consumer-missing: ${id}`);
 }

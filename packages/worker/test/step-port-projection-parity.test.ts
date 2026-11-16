@@ -2,7 +2,12 @@ import { readdirSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { expect, it } from 'vitest';
 import { projectStepPorts, dataPortNodes, CORE_DATA_INPUTS } from '@haive/shared/step-ports';
-import { SPEC_ROLES, STEP_ROLES } from '@haive/shared/step-outputs';
+import {
+  SPEC_ROLES,
+  STEP_ROLES,
+  DISCOVERY_ROLE,
+  REQUIREMENTS_ROLES,
+} from '@haive/shared/step-outputs';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 
 const workflow = new URL('../src/step-engine/steps/workflow/', import.meta.url);
@@ -31,18 +36,52 @@ const stepSources = sources.filter((name) => /^\d/.test(name));
 const ids = stepSources.map((name) => name.slice(0, -3));
 const nodes = () => projectStepPorts(ids).nodes;
 
-it('mirrors every core spec input and output declaration including its exact contract', () => {
-  const specRoles = new Set<string>(Object.values(SPEC_ROLES));
+it('mirrors every core data input and output declaration including its exact contract', () => {
+  const dataRoles = new Set<string>([
+    ...Object.values(SPEC_ROLES),
+    DISCOVERY_ROLE,
+    ...Object.values(REQUIREMENTS_ROLES),
+  ]);
   for (const entry of CORE_COMPOSABLE_STEPS) {
     const node = dataPortNodes([entry.stepId])[0]!;
     const inputs = node.inputs
-      .filter((input) => !input.adapter && specRoles.has(input.role))
+      .filter((input) => !input.adapter && dataRoles.has(input.role))
       .map(({ id, role, contract, optional }) => ({ input: id, role, contract, optional }));
     const outputs = node.outputs
-      .filter((output) => specRoles.has(output.role))
+      .filter((output) => dataRoles.has(output.role))
       .map(({ role, contract }) => ({ role, contract }));
     expect(inputs, entry.stepId).toEqual(entry.consumesRoles ?? []);
     expect(outputs, entry.stepId).toEqual(entry.providesRoles ?? []);
+  }
+});
+
+it('covers every effective-requirements adapter importer with independently declared inputs', () => {
+  const consumers = stepSources
+    .filter((name) =>
+      imports(name).some(
+        (item) =>
+          item.module === './_business-requirements.js' &&
+          item.names.includes('loadBusinessRequirements'),
+      ),
+    )
+    .map((name) => name.slice(0, -3))
+    .sort();
+  expect(consumers).toEqual(['03c-business-requirements-review', '04-phase-0b-pre-planning']);
+  expect(
+    nodes()
+      .filter((n) => n.inputs.some((i) => i.adapter === 'effective-requirements'))
+      .map((n) => n.id)
+      .sort(),
+  ).toEqual(consumers);
+  for (const id of consumers) {
+    expect(
+      dataPortNodes([id])[0]!
+        .inputs.filter((i) => Object.values(REQUIREMENTS_ROLES).includes(i.role as never))
+        .map((i) => ({ id: i.id, role: i.role, optional: i.optional })),
+    ).toEqual([
+      { id: 'requirements-humanized', role: REQUIREMENTS_ROLES.humanized, optional: true },
+      { id: 'requirements-draft', role: REQUIREMENTS_ROLES.draft, optional: true },
+    ]);
   }
 });
 

@@ -1,9 +1,15 @@
+import { CORE_STAGE_INPUTS } from '@haive/shared/step-ports';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
+import {
+  DISCOVERY_ROLE,
+  REQUIREMENTS_ROLES,
+  REQUIREMENTS_DRAFT_OUTPUT_CONTRACT,
+} from '@haive/shared/step-outputs';
 import { z } from 'zod';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
@@ -30,10 +36,6 @@ interface BizReqApply {
   requirements: string;
   summary: string;
   source: 'llm' | 'stub';
-}
-
-interface DiscoveryOutput {
-  summary?: string;
 }
 
 const bizReqSchema = z.object({
@@ -64,6 +66,8 @@ const PERSONA = [
 ] as const;
 
 export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply> = {
+  providesRoles: [{ role: REQUIREMENTS_ROLES.draft, contract: REQUIREMENTS_DRAFT_OUTPUT_CONTRACT }],
+  consumesRoles: CORE_STAGE_INPUTS['03b-business-requirements'],
   metadata: {
     id: '03b-business-requirements',
     workflowType: 'workflow',
@@ -81,8 +85,7 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
 
   async detect(ctx: StepContext): Promise<BizReqDetect> {
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03-phase-0a-discovery');
-    const output = (prev?.output as DiscoveryOutput | null) ?? {};
+    const output = legacyRoleOutput(await readRole(ctx, DISCOVERY_ROLE));
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,

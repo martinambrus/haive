@@ -2,6 +2,8 @@ export * from './core-data-ports.js';
 import {
   CORE_DATA_INPUTS,
   SPEC_INPUTS,
+  DISCOVERY_REQUIREMENTS_INPUTS,
+  EFFECTIVE_REQUIREMENTS_ROLES,
   dataPortNodes,
   type DataRoleBindings,
 } from './core-data-ports.js';
@@ -18,7 +20,7 @@ export interface StepPort {
   contract: { id: string; version: number };
   authorship: 'agent' | 'human' | 'host' | 'mixed';
   optional: boolean;
-  adapter?: 'effective-spec';
+  adapter?: 'effective-spec' | 'effective-requirements';
   /** Ordered alternatives describe the host adapter, not multiple interchangeable producers. */
   alternatives?: readonly { role: string; contract: { id: string; version: number } }[];
 }
@@ -191,6 +193,19 @@ export function projectStepPorts(
         ...port(SPEC_ROLES.resolved, 'effective-spec'),
         adapter: 'effective-spec',
         alternatives: [SPEC_ROLES.resolved, SPEC_ROLES.checked, SPEC_ROLES.draft].map((role) => ({
+          role,
+          contract: { ...STEP_ROLE_REGISTRY[role].contract },
+        })),
+      });
+    for (const d of DISCOVERY_REQUIREMENTS_INPUTS[id] ?? []) {
+      if (d.input.startsWith('requirements-') && id !== '03b2-humanize-requirements') continue;
+      inputs.push({ ...port(d.role, d.input), optional: d.optional });
+    }
+    if ((DISCOVERY_REQUIREMENTS_INPUTS[id] ?? []).some((d) => d.input === 'requirements-humanized'))
+      inputs.push({
+        ...port(EFFECTIVE_REQUIREMENTS_ROLES[0], 'effective-requirements'),
+        adapter: 'effective-requirements',
+        alternatives: EFFECTIVE_REQUIREMENTS_ROLES.map((role) => ({
           role,
           contract: { ...STEP_ROLE_REGISTRY[role].contract },
         })),
