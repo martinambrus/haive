@@ -296,6 +296,20 @@ for (const stream of ['stdout', 'stderr']) {
   });
 }
 
+test('explains TS7016 with different wording around the quoted module name', async (t) => {
+  const f = fixture(t, {
+    buildFailure: true,
+    buildChunks: [
+      [
+        'error TS7016: Declarations unavailable: "@haive-module/demo/manifest" needs types.\n',
+        'stdout',
+      ],
+    ],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.output.join(''), /demo\/manifest has no resolvable TypeScript declarations/);
+});
+
 test('does not diagnose declarations for unrelated TypeScript errors', async (t) => {
   const f = fixture(t, {
     buildFailure: true,

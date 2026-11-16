@@ -240,7 +240,7 @@ export async function run(
           // verdict without attempting a second, less complete package resolver.
           const diagnostic = ((diagnostics.get(name) ?? '') + ready).slice(-8192);
           declarationModule ??=
-            /TS7016:[^\r\n]*for module ['"](@haive-module\/[a-z0-9-]+(?:\/[a-zA-Z0-9_./-]+)?)['"]/.exec(
+            /TS7016:[^\r\n]*['"](@haive-module\/[a-z0-9-]+(?:\/[a-zA-Z0-9_./-]+)?)['"]/.exec(
               diagnostic,
             )?.[1];
           diagnostics.set(name, diagnostic);
