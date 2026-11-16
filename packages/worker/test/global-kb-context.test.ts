@@ -492,3 +492,13 @@ describe('resolveGlobalKbContext: switches and failures', () => {
     expect(out.digest.entries.map((e) => e.title)).toEqual(['Rule']);
   });
 });
+
+it('reuses the dispatch facet result without another task lookup', async () => {
+  seedStore([]);
+  h.facetsFail = true;
+  const { emptyProjectFacetSet } = await import('@haive/shared/global-kb');
+  const resolveFacets = vi.fn(async () => emptyProjectFacetSet());
+  const answer = await resolveGlobalKbContext(TASK_DB, 't', { houseRules: false, resolveFacets });
+  expect(answer.status).toBe('ok');
+  expect(resolveFacets).toHaveBeenCalledTimes(1);
+});

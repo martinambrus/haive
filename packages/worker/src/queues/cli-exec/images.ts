@@ -179,6 +179,11 @@ export async function resolveSandboxImageTag(
   return ensureProviderSandboxImage(db, provider, IN_FLIGHT_BUILD_WAIT_MS, runner);
 }
 
+export function createSandboxImagePeekBatch(runner: DockerRunner = defaultDockerRunner) {
+  let core: ReturnType<DockerRunner['inspect']> | undefined;
+  return { inspectCore: () => (core ??= runner.inspect(SANDBOX_CORE_IMAGE)) };
+}
+
 /** Advisory only: this function never ensures or builds an image, including the core. */
 export async function peekSandboxImageTag(
   db: Database,
@@ -190,6 +195,7 @@ export async function peekSandboxImageTag(
     sandboxDockerfileExtra: string | null;
   },
   runner: DockerRunner = defaultDockerRunner,
+  batch = createSandboxImagePeekBatch(runner),
 ): Promise<{ tag: string; imageId: string } | null> {
   const config = {
     name: provider.name as CliProviderName,
@@ -197,14 +203,21 @@ export async function peekSandboxImageTag(
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   };
   const composition = taskId
-    ? await resolveSandboxImageComposition(db, taskId, config, runner)
+    ? await resolveSandboxImageComposition(
+        db,
+        taskId,
+        config,
+        runner,
+        false,
+        async () => (await batch.inspectCore()).imageId,
+      )
     : null;
   const tag =
     composition?.tag ??
     resolveImageTag({ ...config, providerId: provider.id })?.tag ??
     process.env.SANDBOX_IMAGE ??
     SANDBOX_CORE_IMAGE;
-  const inspected = await runner.inspect(tag);
+  const inspected = await (tag === SANDBOX_CORE_IMAGE ? batch.inspectCore() : runner.inspect(tag));
   return inspected.exists && inspected.imageId ? { tag, imageId: inspected.imageId } : null;
 }
 

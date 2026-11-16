@@ -51,6 +51,7 @@ export async function resolveSandboxImageComposition(
   provider: ComposedImageProvider,
   runner: DockerRunner = defaultDockerRunner,
   buildBase = false,
+  peekBaseImageId?: () => Promise<string | null>,
 ): Promise<SandboxImageComposition | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -87,7 +88,9 @@ export async function resolveSandboxImageComposition(
 
   const baseImageId = buildBase
     ? await resolveBaseImageId(runner)
-    : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
+    : peekBaseImageId
+      ? await peekBaseImageId()
+      : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
   return composeSandboxImage({
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,

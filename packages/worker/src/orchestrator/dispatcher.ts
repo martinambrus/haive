@@ -86,7 +86,7 @@ import {
   withMcpSurface,
   type McpSurface,
 } from '../sandbox/mcp-surface.js';
-import { resolveDispatchSandboxToolchain } from './sandbox-toolchain.js';
+import { resolveDispatchSandboxToolchain, resolveDispatchTaskFacets } from './sandbox-toolchain.js';
 import {
   stripSandboxToolchain,
   toolchainEnvironmentMatches,
@@ -407,7 +407,10 @@ async function resolveTaskDispatchOnTree(
           req.customTools,
           req.integrations,
         ),
-    resolveGlobalKbContext(db, taskId, { houseRules: houseRules !== undefined }),
+    resolveGlobalKbContext(db, taskId, {
+      houseRules: houseRules !== undefined,
+      resolveFacets: () => resolveDispatchTaskFacets(db, taskId),
+    }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
     taskHasRepository(db, taskId),

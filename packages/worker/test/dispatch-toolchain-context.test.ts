@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { emptyProjectFacetSet } from '@haive/shared/global-kb';
 import type { Database } from '@haive/database';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 const h = vi.hoisted(() => ({ facets: vi.fn(), peek: vi.fn(), probe: vi.fn() }));
@@ -6,7 +7,10 @@ vi.mock('@haive/shared/global-kb', async (original) => ({
   ...(await original<object>()),
   resolveTaskFacets: h.facets,
 }));
-vi.mock('../src/queues/cli-exec/images.js', () => ({ peekSandboxImageTag: h.peek }));
+vi.mock('../src/queues/cli-exec/images.js', () => ({
+  peekSandboxImageTag: h.peek,
+  createSandboxImagePeekBatch: () => ({}),
+}));
 vi.mock('../src/sandbox/toolchain-probe.js', async (original) => ({
   ...(await original<object>()),
   sandboxToolchainProbe: { get: h.probe },
@@ -17,7 +21,7 @@ import {
 } from '../src/orchestrator/sandbox-toolchain.js';
 import { SandboxToolchainProbe } from '../src/sandbox/toolchain-probe.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
-const db = {} as Database;
+let db = {} as Database;
 const ID = `sha256:${'a'.repeat(64)}`;
 const providers = [0, 1].map(
   (n) =>
@@ -30,6 +34,7 @@ const providers = [0, 1].map(
     }) as CliProviderRecord,
 );
 beforeEach(() => {
+  db = {} as Database;
   vi.useFakeTimers();
   h.facets.mockReset().mockResolvedValue({ language: ['php'] });
   h.peek.mockReset().mockResolvedValue({ tag: 'image:tag', imageId: ID });
@@ -44,6 +49,7 @@ it('resolves every enabled provider and never probes an unmapped language or a P
   expect(h.peek).toHaveBeenCalledTimes(2);
   h.peek.mockClear();
   h.facets.mockResolvedValueOnce({ language: ['typescript'] });
+  await vi.advanceTimersByTimeAsync(10_000);
   expect(await resolveDispatchSandboxToolchain(db, 't', providers)).toEqual({});
   const overridden = [
     { ...providers[0]!, wrapperContent: 'exec cli' },
@@ -122,6 +128,7 @@ it('two dispatches and two image tags of one ID share a probe, and a rebuilt tag
   release({ exitCode: 199, stdout: '', stderr: '', durationMs: 1, timedOut: false });
   expect((await first).p0?.php).toBe('absent');
   expect((await second).p1?.php).toBe('absent');
+  await vi.advanceTimersByTimeAsync(10_000);
   const nextId = `sha256:${'b'.repeat(64)}`;
   h.peek.mockResolvedValueOnce({ tag: 'provider-one:tag', imageId: nextId });
   expect((await resolveDispatchSandboxToolchain(db, 't', [providers[0]!])).p0).toEqual({
@@ -130,4 +137,25 @@ it('two dispatches and two image tags of one ID share a probe, and a rebuilt tag
     version: '8.4.2',
   });
   expect(run).toHaveBeenCalledTimes(2);
+});
+
+it('memoizes task facets and provider peeks for 10 seconds across serial and racing dispatches', async () => {
+  await Promise.all([
+    resolveDispatchSandboxToolchain(db, 't', providers),
+    resolveDispatchSandboxToolchain(db, 't', providers),
+  ]);
+  await resolveDispatchSandboxToolchain(db, 't', providers);
+  expect(h.facets).toHaveBeenCalledTimes(1);
+  expect(h.peek).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(10_000);
+  await resolveDispatchSandboxToolchain(db, 't', providers);
+  expect(h.facets).toHaveBeenCalledTimes(2);
+  expect(h.peek).toHaveBeenCalledTimes(4);
+});
+it('uses facets already resolved by the dispatch', async () => {
+  await resolveDispatchSandboxToolchain(db, 't', providers, {
+    resolveFacets: async () => ({ ...emptyProjectFacetSet(), language: ['php'] }),
+  });
+  expect(h.facets).not.toHaveBeenCalled();
+  expect(h.peek).toHaveBeenCalledTimes(2);
 });

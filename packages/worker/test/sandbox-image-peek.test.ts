@@ -90,3 +90,16 @@ it('peeks the configured base fallback, and a missing image answers null', async
   inspect.mockResolvedValue({ exists: false, imageId: null as unknown as string });
   expect(await peekSandboxImageTag(database(), 't', noInstall, runner)).toBeNull();
 });
+
+it('inspects the core once for an entire provider batch', async () => {
+  const { createSandboxImagePeekBatch } = await import('../src/queues/cli-exec/images.js');
+  const inspect = vi.fn(async () => ({ exists: true, imageId: ID }));
+  const runner = fakeDockerRunner({ inspect });
+  const batch = createSandboxImagePeekBatch(runner);
+  await Promise.all(
+    [provider, { ...provider, id: 'p2', name: 'gemini' }].map((p) =>
+      peekSandboxImageTag(database(`FROM ${SANDBOX_CORE_IMAGE}`), 't', p, runner, batch),
+    ),
+  );
+  expect(inspect.mock.calls.filter(([tag]) => tag === SANDBOX_CORE_IMAGE)).toHaveLength(1);
+});
