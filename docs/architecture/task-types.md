@@ -459,6 +459,103 @@ replacement, skip, loop, root, approval or CLI-seat authority. No migration is n
 Rollback first disables new v3 admission; retain this contract and capable readers
 while any affected task can resume. Never erase, downgrade or regenerate its pin.
 
+## Check result data roles
+
+`haive.validation@1` (07b), `haive.verify@1` (08), and `haive.test-management@1`
+(08b) are cardinality-one data roles. Each has an exact host-owned contract,
+its canonical legacy producer, mixed authorship, no quote projection and no
+host policy. Validation combines agent findings with host coverage, invocation
+identity, convergence and iteration budgets. Verification combines command
+results with human command selection and host runner discovery. Test management
+combines agent edits, human action selection, command outcomes and host framework
+discovery. Neither generic role quotation nor structured prompt production is
+available for these roles. Module declarations grant data compatibility only.
+
+Every result carries `resultStatus`. Validation and test management distinguish
+`not-run`, `skipped`, `incomplete`, `failed` and `passed`; verification also admits
+`manual` and `declined`. A manual checklist is not an executed passing check.
+Verification's legacy `passed` boolean describes only checks that ran, so it can
+remain true when none ran; the explicit status and existing not-run disclosures
+must accompany it. Gate recommendations still require executed checks. Canonical validator reports pairing `VALID` with issues or a failed dimension are
+stored as `incomplete`, retaining their original verdict and routing. An
+alternate producer cannot declare a passing status without the corresponding
+valid evidence. Invalid successful module output fails the producer before
+routing, including when it declares an error-to-fix-loop hook.
+
+Validation declares its verdict, summary, issues, dimensions, excluded dimensions,
+fixes, convergence, churn files, report and report length, validator pass count,
+coverage, invocation id, fingerprint and house-rule conflicts. `exhaustedBudget`
+projects the host's iteration metadata. Verification declares each test, lint,
+optional PHP lint and typecheck result, its own verdict, runtime smoke and the
+previously detect-only `declinedConfigs`, `declaredSlots`, `offSlots` and
+`slotWithoutRunner`. Test management declares action, created/updated/deleted
+test paths, nullable `testsPassed`, and detect's nullable `primary` framework.
+Storage extensions survive validation; role projections expose declared fields
+only, including at nested object boundaries.
+
+The host normalizes only the three canonical producers' successful returns before
+contract validation. New 07b, 08 and 08b `task_steps.output` values permanently
+include `resultStatus` and their role metadata (`exhaustedBudget`, verification's
+`declinedConfigs`, `declaredSlots`, `offSlots`, `slotWithoutRunner`, and test
+management's `primary`). Local-loop `iterations[].applyOutput` values also retain
+the normalization performed before the iteration is appended. The final validation
+output additionally receives the current exhaustion decision after the loop hook;
+the already-appended iteration retains the pre-decision value. These
+metadata additions do not change the local loop evaluator, its budget, the
+fix-loop diagnosis or routing. Historical canonical rows receive the same
+projection at read time without backfill. An alternate module must supply the
+complete contract itself; the host never fills missing fields for it.
+
+Gate 2 consumes optional validation, verification and test-management inputs.
+Its existing sections, blocking disclosures and default decision retain their
+bytes for canonical historical results, including missing sections, skipped
+management, declined or unavailable checks, incomplete validation and retries.
+A selected alternate input that is unavailable or invalid is incomplete evidence
+and holds the approval recommendation. Explicit optional absence remains absent;
+an unselected derived candidate never supplies a result. Only the human gate
+retains approval and rejection authority.
+
+The house-rules adapter reads the gate consumer's validation edge. Validation
+and review share one stamp lookup scoped to `cli_invocations.id`, `taskId` and
+`taskStepId`, which must equal the actual producer row id. An alternate validation
+producer, or an alternate review producer whose row is done with contract-compatible
+output, gets a visible NOT CHECKED row that holds Approve when its invocation is missing
+or not its own, including when a later canonical peer ran; an incompatible review row
+adds no house-rules row and gate 2's own review hold covers it. An owned module invocation may supply its
+host-written stamp, but its output cannot attest `changeFingerprint`: rules in
+play remain PARTIAL with a fingerprint caveat. Canonical validator and peer
+review rows retain their existing rendering and host fingerprint comparison. Gate 3 declares its own optional
+validation edge for its existing house-rules fallback; its gate decisions and
+commit receipts remain physical. Learning consumes optional verification and
+validation edges. Its history digest mines every round of those bound producers,
+retains event provenance and physical source identities, and preserves canonical
+history bytes. A row bound to review and also classified as a finding step is
+mined once through review, while a producer carrying distinct validation and
+review findings retains both sets. Verification consumes test management's framework through its own
+optional input. A role result never requires its consumer to inspect a producer's
+detect output or iteration rows. The composer and admission share
+`validateComposition`: 08b's `precedes: ['verification', ...]` rejects test
+management after 08 with `too-late`. The static editor, admin-static admission and derived-candidate validation enforce
+this guard. Module-seeded static lists containing an internal step without a
+composable entry deliberately skip composition checks (`resolveTaskTypeAvailability`);
+such a list may admit 08 before 08b. A new pin for that list records the optional
+framework input as explicitly absent: verify reads no framework from the later 08b
+and never borrows a future producer. A previously pinned explicit absence is never remapped.
+
+Creation pins these inputs with the existing v3 writer for built-in, static,
+module-seeded and derived candidates. Old tasks, and inputs missing from a valid
+older v3 pin, retain canonical resolution. Present bindings keep their exact
+producer and current-round ceiling, selecting the newest row before checking
+readiness; Retry never borrows an older successful row. Malformed or unknown
+bindings remain errors. Definition edits and recovery never remap a binding.
+
+Validation rechecks, snapshot comparisons, fix-round decisions, iteration caps,
+loop and gate-revise destinations, closing and commit control stay physical.
+`07-phase-2-implement` remains the only fix target. No migration is needed.
+Rollback first stops new v3 admission and retains capable readers and workers
+while any affected task can resume. Keep every persisted result and immutable
+pin; never erase, downgrade, regenerate or backfill one to permit an older worker.
+
 ## Pinned output-role reads
 
 `@haive/shared/step-outputs` exports `STEP_ROLES`, `readStepRole(task, role, read)` and
