@@ -7,7 +7,7 @@ import { logger } from '@haive/shared';
 import type { Insight, LoadedInsight } from '@haive/shared/step';
 import type { StepContext } from '../../step-definition.js';
 import { lockOwnedStep, StepSupersededError } from '../../step-ownership.js';
-import { readValidationSnapshot } from './_validation-snapshot.js';
+import { readValidationSnapshot, validationSnapshotDigest } from './_validation-snapshot.js';
 
 export const INSIGHT_BATCH_EVENT = 'insight.batch';
 export const INSIGHT_STEP = '08e-insights-triage';
@@ -150,10 +150,28 @@ const journalSchema = z
     miningId: z.string().nullable(),
     invocationId: z.string().nullable(),
     // Host evidence only. Legacy/missing/incomplete snapshots never authorize skipping checks.
+    // Accept old journals for recovery, but never copy their per-file maps into new events.
     worktreeBefore: z.record(z.string(), z.string()).nullable().optional(),
+    worktreeBeforeDigest: z
+      .object({
+        sha256: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .nullable(),
+        incomplete: z.boolean(),
+      })
+      .strict()
+      .optional(),
     worktreeUnchanged: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .transform(({ worktreeBefore: legacySnapshot, ...record }) => ({
+    ...record,
+    // Old equality was against the writer's own start, so it cannot authorize a skip.
+    ...(legacySnapshot !== undefined && record.worktreeUnchanged !== undefined
+      ? { worktreeUnchanged: false }
+      : {}),
+  }));
 export type InsightBatchRecord = z.infer<typeof journalSchema>;
 export function readInsightBatchRecord(payload: unknown): InsightBatchRecord {
   const value = payload as { version?: unknown; protocolVersion?: unknown } | null;
@@ -292,7 +310,11 @@ export async function ensureInsightIntent(
     miningId: null,
     invocationId: null,
     ...(mode === 'gate3'
-      ? { worktreeBefore: await readValidationSnapshot(ctx, { requireComplete: true }) }
+      ? {
+          worktreeBeforeDigest: validationSnapshotDigest(
+            await readValidationSnapshot(ctx, { requireComplete: true }),
+          ),
+        }
       : {}),
   };
   const saved = await appendInsightBatch(ctx, record);

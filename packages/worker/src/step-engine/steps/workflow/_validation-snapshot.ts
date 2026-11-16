@@ -15,6 +15,21 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
  * Ignored runtime artifacts are not deliverables. No file bytes are persisted. */
 export type ValidationSnapshot = Record<string, string>;
 
+/** Fixed-size equality evidence. Each per-path stamp already binds content, kind and mode. */
+export function validationSnapshotDigest(snapshot: ValidationSnapshot | null): {
+  sha256: string | null;
+  incomplete: boolean;
+} {
+  if (snapshot === null) return { sha256: null, incomplete: true };
+  const pairs = Object.keys(snapshot)
+    .sort()
+    .map((path) => [path, snapshot[path]]);
+  return {
+    sha256: createHash('sha256').update(JSON.stringify(pairs)).digest('hex'),
+    incomplete: false,
+  };
+}
+
 export async function readValidationSnapshot(
   ctx: Pick<StepContext, 'db' | 'taskId'>,
   options: { requireComplete?: boolean; maxFileBytes?: number } = {},

@@ -1504,95 +1504,249 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     }
   });
-  it.each(['declined', 'justified', 'touched', 'mixed', 'unconfirmed', 'unreadable'])(
-    'gate3 decline routing checks the actual tree: %s',
-    async (kind) => {
-      const ctx = await seed();
-      const workspace = await mkdtemp(join(tmpdir(), 'g3i-outcome-'));
-      try {
-        await gitExec(['init'], { cwd: workspace });
-        await writeFile(join(workspace, 'a.ts'), 'base');
-        await gitExec(['add', '.'], { cwd: workspace });
-        await gitExec(
-          ['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-m', 'base'],
-          { cwd: workspace },
-        );
-        await writeFile(join(workspace, 'a.ts'), 'pending approved changes');
-        await db.insert(schema.taskSteps).values({
+  it.each([
+    'declined',
+    'justified',
+    'touched',
+    'mixed',
+    'unconfirmed',
+    'unreadable',
+    'missing baseline',
+    'legacy baseline',
+    'incomplete baseline',
+  ])('gate3 decline routing checks the actual tree: %s', async (kind) => {
+    const ctx = await seed();
+    const workspace = await mkdtemp(join(tmpdir(), 'g3i-outcome-'));
+    try {
+      await gitExec(['init'], { cwd: workspace });
+      await writeFile(join(workspace, 'a.ts'), 'base');
+      await gitExec(['add', '.'], { cwd: workspace });
+      await gitExec(
+        ['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-m', 'base'],
+        { cwd: workspace },
+      );
+      await writeFile(join(workspace, 'a.ts'), 'pending approved changes');
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: '01-worktree-setup',
+        stepIndex: 1,
+        title: 'Setup',
+        status: 'done',
+        output: { worktreePath: workspace },
+      });
+      const picks = kind === 'mixed' ? [...selected, { ...selected[0]!, id: 'two' }] : selected;
+      const [gate] = await db
+        .insert(schema.taskSteps)
+        .values({
           taskId: ctx.taskId,
-          stepId: '01-worktree-setup',
-          stepIndex: 1,
-          title: 'Setup',
-          status: 'done',
-          output: { worktreePath: workspace },
-        });
-        const picks = kind === 'mixed' ? [...selected, { ...selected[0]!, id: 'two' }] : selected;
-        const intent = await ensureInsightIntent(ctx, picks, 'gate3');
-        if (kind === 'touched')
-          await writeFile(join(workspace, 'a.ts'), 'partial edit despite decline');
-        const snapshot =
-          kind === 'unreadable'
-            ? vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null)
-            : null;
-        let output;
-        try {
-          output = await insightsTriageStep.apply(
-            { ...ctx, workspacePath: workspace, logger: { info() {} } } as unknown as StepContext,
-            {
-              detected: {
-                worktreePath: workspace,
-                sandboxWorktreePath: '/ws',
-                spec: '',
-                insights: picks,
-                gate3Request: {
-                  version: 1,
-                  kind: 'insight_revise',
-                  batchId: 'pick',
-                  sourceStepRow: 'gate',
-                  generation: 0,
-                  round: 1,
-                  mode: 'gate3',
-                  stage: 'apply',
-                },
-              },
-              formValues: {},
-              llmOutput:
-                kind === 'unconfirmed'
-                  ? 'invalid'
-                  : {
-                      version: 1,
-                      batchId: intent.batchId,
-                      items: picks.map((i, n) => ({
-                        id: i.id,
-                        outcome: n === 1 ? 'applied' : 'not_applied',
-                        changes: n === 1 ? ['edit'] : [],
-                        reason: kind === 'justified' ? 'Outside scope' : '',
-                      })),
-                      notes: '',
-                    },
-              iteration: 0,
-              previousIterations: [],
-            },
+          stepId: '10-gate-3-commit',
+          stepIndex: 10,
+          title: 'Commit',
+          status: 'running',
+          round: 0,
+        })
+        .returning();
+      const baseline = await ensureInsightIntent({ ...ctx, taskStepId: gate!.id }, picks, 'gate3');
+      const intent = await ensureInsightIntent(ctx, picks, 'gate3');
+      if (kind === 'missing baseline') {
+        await db
+          .delete(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.taskStepId, gate!.id),
+            ),
           );
-        } finally {
-          snapshot?.mockRestore();
-        }
-        if (['declined', 'justified'].includes(kind)) {
-          expect(output.continuation).toBeUndefined();
-          expect(insightsTriageStep.reviseLoop!.evaluate(output)).toBeNull();
-          expect(output).toMatchObject({
-            checksSkipped: { reason: 'all_not_applied_unchanged', batchId: intent.batchId },
-          });
-          const replay = (await loadInsightBatchRecords(db, ctx.taskId)).find(
-            (r) => r.stage === 'outcome',
-          )!;
-          expect(continuationForOutcome(replay, 0)).toBeUndefined();
-        } else expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
-      } finally {
-        await rm(workspace, { recursive: true, force: true });
+      } else if (kind === 'legacy baseline' || kind === 'incomplete baseline') {
+        const { worktreeBeforeDigest: _digest, ...legacy } = baseline;
+        await db
+          .update(schema.taskEvents)
+          .set({
+            payload: {
+              ...legacy,
+              ...(kind === 'legacy baseline'
+                ? { worktreeBefore: { 'a.ts': 'legacy' } }
+                : { worktreeBeforeDigest: { sha256: null, incomplete: true } }),
+            },
+          })
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.taskStepId, gate!.id),
+            ),
+          );
       }
-    },
-  );
+
+      if (kind === 'touched')
+        await writeFile(join(workspace, 'a.ts'), 'partial edit despite decline');
+      const snapshot =
+        kind === 'unreadable'
+          ? vi.spyOn(validationSnapshots, 'readValidationSnapshot').mockResolvedValue(null)
+          : null;
+      let output;
+      try {
+        output = await insightsTriageStep.apply(
+          { ...ctx, workspacePath: workspace, logger: { info() {} } } as unknown as StepContext,
+          {
+            detected: {
+              worktreePath: workspace,
+              sandboxWorktreePath: '/ws',
+              spec: '',
+              insights: picks,
+              gate3Request: {
+                version: 1,
+                kind: 'insight_revise',
+                batchId: baseline.batchId,
+                sourceStepRow: gate!.id,
+                generation: 0,
+                round: 1,
+                mode: 'gate3',
+                stage: 'apply',
+              },
+            },
+            formValues: {},
+            llmOutput:
+              kind === 'unconfirmed'
+                ? 'invalid'
+                : {
+                    version: 1,
+                    batchId: intent.batchId,
+                    items: picks.map((i, n) => ({
+                      id: i.id,
+                      outcome: n === 1 ? 'applied' : 'not_applied',
+                      changes: n === 1 ? ['edit'] : [],
+                      reason: kind === 'justified' ? 'Outside scope' : '',
+                    })),
+                    notes: '',
+                  },
+            iteration: 0,
+            previousIterations: [],
+          },
+        );
+      } finally {
+        snapshot?.mockRestore();
+      }
+      if (['declined', 'justified'].includes(kind)) {
+        expect(output.continuation).toBeUndefined();
+        expect(insightsTriageStep.reviseLoop!.evaluate(output)).toBeNull();
+        expect(output).toMatchObject({
+          checksSkipped: { reason: 'all_not_applied_unchanged', batchId: intent.batchId },
+        });
+        const replay = (await loadInsightBatchRecords(db, ctx.taskId)).find(
+          (r) => r.stage === 'outcome',
+        )!;
+        expect(continuationForOutcome(replay, 0)).toBeUndefined();
+      } else expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+  it('gate3 writer crash then 08e Retry cannot skip checks on the first pass edits', async () => {
+    const ctx = await seed();
+    ctx.round = 1;
+    await db
+      .update(schema.taskSteps)
+      .set({ round: 1 })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: '08e-insights-triage', currentRound: 1 })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    const snapshot = vi
+      .spyOn(validationSnapshots, 'readValidationSnapshot')
+      .mockResolvedValue({ 'a.ts': 'approved' });
+    try {
+      const [gate] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '10-gate-3-commit',
+          stepIndex: 10,
+          title: 'Commit',
+          status: 'running',
+          round: 0,
+        })
+        .returning();
+      const baseline = await ensureInsightIntent(
+        { ...ctx, taskStepId: gate!.id, round: 0 },
+        selected,
+        'gate3',
+      );
+      const first = await ensureInsightIntent(ctx, selected, 'gate3');
+      await recordInsightInvocation(
+        ctx,
+        `implementer-${first.batchId}`,
+        'first-mining',
+        'first-run',
+      );
+      // Writer pass 1 edits, then crashes before publishing any outcome.
+      snapshot.mockResolvedValue({ 'a.ts': 'unchecked first pass edits' });
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done' })
+        .where(eq(schema.taskSteps.id, gate!.id));
+      await resetStepAndDownstream(db, ctx.taskId, '08e-insights-triage', 1, 0);
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'running' })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const retry = {
+        ...ctx,
+        rerunGeneration: 1,
+        epoch: 1,
+        logger: { info() {} },
+      } as unknown as StepContext;
+      const second = await ensureInsightIntent(retry, selected, 'gate3');
+      // Writer pass 2 declines every item and touches nothing.
+      const output = await insightsTriageStep.apply(retry, {
+        detected: {
+          worktreePath: '/repo',
+          sandboxWorktreePath: '/ws',
+          spec: '',
+          insights: selected,
+          gate3Request: {
+            version: 1,
+            kind: 'insight_revise',
+            mode: 'gate3',
+            stage: 'apply',
+            batchId: baseline.batchId,
+            sourceStepRow: gate!.id,
+            generation: 0,
+            round: 1,
+          },
+        },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: {
+          version: 1,
+          batchId: second.batchId,
+          notes: '',
+          items: [{ id: selected[0]!.id, outcome: 'not_applied', changes: [], reason: '' }],
+        },
+      });
+      expect(output.continuation).toMatchObject({ mode: 'gate3', stage: 'checks' });
+      expect(output.checksSkipped).toBeUndefined();
+      const journal = await loadInsightBatchRecords(db, ctx.taskId);
+      const raw = await db.query.taskEvents.findMany({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.eventType, 'insight.batch'),
+        ),
+      });
+      for (const row of raw) {
+        expect(row.payload).not.toHaveProperty('worktreeBefore');
+        expect(JSON.stringify(row.payload?.worktreeBeforeDigest).length).toBeLessThan(110);
+      }
+
+      expect(journal.some((r) => r.batchId === first.batchId && r.stage === 'outcome')).toBe(false);
+      expect(
+        journal.find((r) => r.batchId === second.batchId && r.stage === 'outcome'),
+      ).toMatchObject({ worktreeUnchanged: false });
+    } finally {
+      snapshot.mockRestore();
+    }
+  });
   it('deduplicates concurrent stages under the source-row lock', async () => {
     const ctx = await seed();
     const [a, b] = await Promise.all([

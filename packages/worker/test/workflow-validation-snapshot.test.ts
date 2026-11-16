@@ -7,6 +7,7 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   affectedValidationFiles,
+  validationSnapshotDigest,
   readValidationSnapshot,
 } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 
@@ -180,4 +181,22 @@ describe('the final changes affected since validation', () => {
     w.git('branch', '-D', 'main');
     expect(await w.read()).toBeNull();
   });
+});
+
+it('snapshot digests bind sorted paths and their content/kind/mode stamps in fixed-size evidence', () => {
+  const first = validationSnapshotDigest({ 'b.ts': 'file-stamp', 'a.ts': 'link-stamp' });
+  expect(first).toEqual(validationSnapshotDigest({ 'a.ts': 'link-stamp', 'b.ts': 'file-stamp' }));
+  expect(first).toMatchObject({
+    sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    incomplete: false,
+  });
+  const changedSnapshots: Record<string, string>[] = [
+    { 'b.ts': 'file-stamp' },
+    { 'b.ts': 'file-stamp', 'renamed.ts': 'link-stamp' },
+    { 'b.ts': 'file-stamp', 'a.ts': 'different-kind-or-content' },
+  ];
+  for (const changed of changedSnapshots)
+    expect(validationSnapshotDigest(changed)).not.toEqual(first);
+  expect(validationSnapshotDigest(null)).toEqual({ sha256: null, incomplete: true });
+  expect(validationSnapshotDigest({})).toMatchObject({ incomplete: false });
 });

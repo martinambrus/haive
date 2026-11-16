@@ -63,6 +63,25 @@ describe('bounded insight event pages through the polled route', () => {
       for (const key of fields) expect(page[0]!.payload[key]).toEqual(values.slice(30));
     },
   );
+  it('omits legacy per-file snapshots from event responses without mutating journal evidence', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
+    fake.insert(schema.tasks, { id: TASK, userId: USER });
+    const payload = {
+      version: 1,
+      selected: [],
+      items: [],
+      worktreeBefore: { 'private-path.ts': 'hash' },
+      worktreeBeforeDigest: { sha256: 'a'.repeat(64), incomplete: false },
+    };
+    fake.insert(schema.taskEvents, { taskId: TASK, eventType: 'insight.batch', payload });
+    h.db = fake.db;
+    const response = await app.request(`/tasks/${TASK}/events`);
+    expect(response.status).toBe(200);
+    const shown = ((await response.json()) as EventResponse).events[0]!.payload;
+    expect(shown).not.toHaveProperty('worktreeBefore');
+    expect(shown.worktreeBeforeDigest).toEqual(payload.worktreeBeforeDigest);
+    expect(fake.rows(schema.taskEvents)[0]!.payload).toEqual(payload);
+  });
   it('leaves under-bound payload bytes unchanged', async () => {
     const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
     fake.insert(schema.tasks, { id: TASK, userId: USER });

@@ -48,7 +48,7 @@ import {
 } from './_insight-continuation.js';
 import { hydrateNoSpecBrief, resolveSpecView, resolveTaskWorktreePath } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { affectedValidationFiles, readValidationSnapshot } from './_validation-snapshot.js';
+import { readValidationSnapshot, validationSnapshotDigest } from './_validation-snapshot.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
@@ -556,9 +556,17 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
             batchId,
             selected.map((i) => i.id),
           );
+      // The gate's original intent predates EVERY writer attempt, including an interrupted
+      // generation. An 08e Retry must never adopt unchecked edits as its baseline.
+      const baseline = d.gate3Request
+        ? records.find(
+            (r) =>
+              r.batchId === d.gate3Request!.batchId && r.stage === 'intent' && r.mode === 'gate3',
+          )?.worktreeBeforeDigest
+        : undefined;
       const after =
         intent.mode === 'gate3' && outcome.items.every((i) => i.outcome === 'not_applied')
-          ? await readValidationSnapshot(ctx, { requireComplete: true })
+          ? validationSnapshotDigest(await readValidationSnapshot(ctx, { requireComplete: true }))
           : null;
       const saved = await appendInsightBatch(ctx, {
         ...intent,
@@ -571,9 +579,10 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         ...(intent.mode === 'gate3'
           ? {
               worktreeUnchanged:
-                intent.worktreeBefore != null &&
-                after !== null &&
-                affectedValidationFiles(intent.worktreeBefore, after).length === 0,
+                baseline?.incomplete === false &&
+                baseline.sha256 != null &&
+                after?.incomplete === false &&
+                baseline.sha256 === after.sha256,
             }
           : {}),
       });
