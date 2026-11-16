@@ -4,7 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { REGISTRY_MODULE_MAX_PACK_BYTES, registryModuleExports } from '../registry-module.mjs';
+import {
+  REGISTRY_MODULE_MAX_MANIFEST_BYTES,
+  REGISTRY_MODULE_MAX_PACK_BYTES,
+  registryModuleExports,
+} from '../registry-module.mjs';
 
 for (const identity of ['matching', 'different']) {
   test(`reads a real packed manifest when registry exports are absent (${identity} identity)`, async (t) => {
@@ -115,6 +119,70 @@ for (const [label, size] of [
 test('pins the production pack limit to 100 MiB', () => {
   assert.equal(REGISTRY_MODULE_MAX_PACK_BYTES, 100 * 1024 * 1024);
 });
+
+test('pins the production manifest limit to 1 MiB', () => {
+  assert.equal(REGISTRY_MODULE_MAX_MANIFEST_BYTES, 1024 * 1024);
+});
+
+for (const oversized of [false, true]) {
+  test(`manifest at ${oversized ? 'one byte over' : 'exactly'} the byte limit`, async () => {
+    const stdout = JSON.stringify({
+      name: '@haive-module/demo',
+      version: '1.0.0',
+      exports: { './manifest': './manifest.js' },
+      description: 'é',
+    });
+    let scratch;
+    const calls = [];
+    const read = () =>
+      registryModuleExports('@haive-module/demo@1.0.0', {
+        cwd: tmpdir(),
+        env: {},
+        maxManifestBytes: Buffer.byteLength(stdout) - (oversized ? 1 : 0),
+        command: async (cmd, args) => {
+          calls.push(cmd);
+          if (cmd === 'pnpm') return { stdout: '' };
+          if (cmd === 'npm') {
+            scratch = args.at(-1);
+            return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
+          }
+          return { stdout };
+        },
+      });
+    if (oversized) await assert.rejects(read, /packed module manifest exceeds 1 MiB/);
+    else assert.deepEqual(await read(), { './manifest': './manifest.js' });
+    assert.deepEqual(calls, ['pnpm', 'npm', 'tar']);
+    assert.equal(existsSync(scratch), false);
+  });
+}
+
+for (const files of [
+  [],
+  [
+    { filename: 'a.tgz', size: 1 },
+    { filename: 'b.tgz', size: 1 },
+  ],
+]) {
+  test(`refuses ${files.length} packed files before tar`, async () => {
+    let scratch;
+    const calls = [];
+    await assert.rejects(
+      registryModuleExports('@haive-module/demo@1.0.0', {
+        cwd: tmpdir(),
+        env: {},
+        command: async (cmd, args) => {
+          calls.push(cmd);
+          if (cmd === 'pnpm') return { stdout: '' };
+          scratch = args.at(-1);
+          return { stdout: JSON.stringify(files) };
+        },
+      }),
+      /could not identify the packed module/,
+    );
+    assert.deepEqual(calls, ['pnpm', 'npm']);
+    assert.equal(existsSync(scratch), false);
+  });
+}
 
 for (const failed of [false, true]) {
   test(`cleanup failure preserves the ${failed ? 'original error' : 'successful result'} and names scratch`, async (t) => {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
 export const REGISTRY_MODULE_MAX_PACK_BYTES = 100 * 1024 * 1024;
+export const REGISTRY_MODULE_MAX_MANIFEST_BYTES = 1024 * 1024;
 
 // GitHub Packages omits exports from its packument. Inspect the published archive
 // when metadata is absent, without installing dependencies or running package code.
@@ -13,6 +14,7 @@ export async function registryModuleExports(
     cwd,
     env,
     maxPackBytes = REGISTRY_MODULE_MAX_PACK_BYTES,
+    maxManifestBytes = REGISTRY_MODULE_MAX_MANIFEST_BYTES,
     removeScratch = rmSync,
     warn = (line) => console.error(line),
   },
@@ -45,7 +47,7 @@ export async function registryModuleExports(
       ],
       { cwd: scratch, env: { PATH: env.PATH, LANG: env.LANG } },
     );
-    if (Buffer.byteLength(manifest.stdout) > 1024 * 1024)
+    if (Buffer.byteLength(manifest.stdout) > maxManifestBytes)
       throw new Error(`packed module manifest exceeds 1 MiB: ${spec}`);
     if (!manifest.stdout.trim())
       throw new Error(`packed module has no package/package.json: ${spec}`);
