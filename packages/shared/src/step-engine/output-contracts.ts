@@ -328,6 +328,11 @@ export function isQuotableRole(role: unknown): role is StepRoleId {
   );
 }
 
+/** Prompt producers must carry neither host policy nor human/mixed authorship. */
+export function isPromptProvidableRole(role: unknown): role is StepRoleId {
+  return isQuotableRole(role) && !('hostPolicy' in STEP_ROLE_REGISTRY[role]);
+}
+
 /** A fresh JSON schema, never the mutable validator instance. */
 export function stepOutputJsonSchema(ref: StepOutputContractRef): Record<string, unknown> {
   const registered = parseRegistryOutputContractRef(ref);

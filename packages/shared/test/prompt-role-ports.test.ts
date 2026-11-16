@@ -1,4 +1,11 @@
-import { expect, it } from 'vitest';
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
+vi.mock('../src/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../src/step-engine/output-contracts.js')>(),
+  );
+});
+import { expect, it, vi } from 'vitest';
 import {
   promptStepEntrySchema,
   validatePromptStep,
@@ -61,7 +68,7 @@ it('refuses undeclared inputs and human/mixed roles in shared save/admission che
   }
 });
 it('requires structured mode for providing one exact host contract', () => {
-  const providesRoles = [{ role, contract }];
+  const providesRoles = [{ role: TEST_PROMPT_ROLE, contract }];
   expect(
     validatePromptStep(entry({ template: 'Produce', providesRoles }), context).map((p) => p.kind),
   ).toContain('role-output-mode-required');
@@ -86,3 +93,17 @@ it('keeps substituted tokens literal in the single-pass renderer', () => {
     }),
   ).toBe('{{role:report}}');
 });
+
+it.each([...Object.values(STEP_ROLES), ...Object.values(SPEC_ROLES)])(
+  'refuses prompt provision of policy or mixed role %s',
+  (role) => {
+    expect(
+      promptStepEntrySchema.safeParse({
+        ...base,
+        template: 'Produce',
+        outputMode: 'structured',
+        providesRoles: [{ role, contract: STEP_ROLE_REGISTRY[role].contract }],
+      }).success,
+    ).toBe(false);
+  },
+);

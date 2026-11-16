@@ -38,7 +38,7 @@ export function assertDataEdgeSupport(
         role.contract.version !== b.contract.version
       )
         throw new PinnedStepSupportError(b.producerStepId);
-      if ('hostPolicy' in role && !b.producerStepId.startsWith('custom.')) {
+      if ('hostPolicy' in role) {
         if (
           def.outputContract?.id !== b.contract.id ||
           def.outputContract.version !== b.contract.version

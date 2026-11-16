@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   STEP_ROLE_REGISTRY,
+  isPromptProvidableRole,
   parseRegistryOutputContractRef,
   type StepOutputContractRef,
   type StepRoleId,
@@ -36,11 +37,18 @@ export const consumesRoleSchema = roleContract
   })
   .refine(exact, 'role contract mismatch')
   .refine(dataOnly, 'host-policy role is not a module data port');
-/** Prompt ports are data only, including review/audit data. They never declare replaces
- * or executable outputContract. Module declarations retain their narrower gate. */
+/** Prompt consumers may quote policy-role data. Producers require agent-only data roles. */
 export const promptRolePortDeclarationsSchema = z.object({
   providesRoles: z
-    .array(roleContract.refine(exact, 'role contract mismatch'))
+    .array(
+      roleContract
+        .refine(exact, 'role contract mismatch')
+        .refine(dataOnly, 'host-policy role is not a prompt data port')
+        .refine(
+          (v) => isPromptProvidableRole(v.role),
+          'prompt output requires an agent-only role and quote projection',
+        ),
+    )
     .max(32)
     .refine((v) => new Set(v.map((p) => p.role)).size === v.length, 'duplicate provided role')
     .optional(),

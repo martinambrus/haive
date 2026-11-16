@@ -1,5 +1,12 @@
+import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
+  );
+});
 import { randomUUID } from 'node:crypto';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { schema } from '@haive/database';
 import { promptStepEntrySchema, derivePromptStepComposable } from '@haive/shared/modularity';
@@ -13,10 +20,10 @@ import {
   PROMPT_STEP_OUTPUTS_BUDGET_BYTES,
 } from '../src/step-engine/steps/custom/prompt-step.js';
 import { UNTRUSTED_OPEN, UNTRUSTED_CLOSE } from '../src/step-engine/steps/_untrusted-repo.js';
-import { readDataRole, readRole } from '../src/step-engine/read-role.js';
+import { readDataRole } from '../src/step-engine/read-role.js';
 import { assertDataEdgeSupport } from '../src/step-engine/data-edge-support.js';
 
-const role = STEP_ROLES.codeAudit,
+const role = TEST_PROMPT_ROLE,
   contract = STEP_ROLE_REGISTRY[role].contract;
 const base = {
   slug: 'use',
@@ -98,40 +105,18 @@ const apply = (entry: ReturnType<typeof make>, output: unknown, ctx = {} as Step
   });
 const detected = { taskTitle: '', taskDescription: '', stepOutputs: {} };
 
-it('publishes structured spec data for an explicit core role reader while quotation remains forbidden', async () => {
-  const { ctx, fake, put } = fixture();
-  const role = SPEC_ROLES.draft,
-    contract = STEP_ROLE_REGISTRY[role].contract;
-  const producer = make({
-    slug: 'produce',
-    template: 'Draft',
-    consumesRoles: [],
-    outputMode: 'structured',
-    providesRoles: [{ role, contract }],
-  });
-  const declaration = derivePromptStepComposable(producer, 'demo', false);
-  const nodes = dataPortNodes(
-    [producerId, '05-phase-0b5-spec-quality'],
-    {},
-    new Map([[producerId, declaration]]),
-  );
-  fake.patch(schema.tasks, ctx.taskId, {
-    dataEdgePlan: buildDataEdgePlan('static', [{ executionPath: null, nodes }]),
-  });
-  fake.patch(schema.taskSteps, ctx.taskStepId, { stepId: '05-phase-0b5-spec-quality' });
-  put(
-    producerId,
-    await apply(
-      producer,
-      JSON.stringify({ contract, data: { spec: 'assignment', extension: 'omit' } }),
-    ),
-  );
-  expect(await readRole(ctx, 'draft')).toMatchObject({
-    state: 'ready',
-    producer: { stepId: producerId },
-    data: { spec: 'assignment' },
-  });
-});
+it.each([...Object.values(STEP_ROLES), ...Object.values(SPEC_ROLES)])(
+  'refuses unsafe prompt provider at runtime: %s',
+  async (role) => {
+    const unsafe = {
+      ...base,
+      template: 'Produce',
+      outputMode: 'structured' as const,
+      providesRoles: [{ role, contract: STEP_ROLE_REGISTRY[role].contract }],
+    };
+    await expect(apply(unsafe, '{}')).rejects.toThrow('Role declarations');
+  },
+);
 
 it.each(['absent', 'not-ready', 'invalid'] as const)(
   'keeps an optional %s input explicit and never borrows stale text',

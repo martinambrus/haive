@@ -1,3 +1,10 @@
+import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
+  );
+});
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -95,7 +102,7 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
     '[PRT4B] persists a structured %s reply without ever requesting an implementation repair',
     async (kind) => {
       const w = await world(null);
-      const role = STEP_ROLES.codeAudit,
+      const role = TEST_PROMPT_ROLE,
         contract = STEP_ROLE_REGISTRY[role].contract;
       const entry = promptStepEntrySchema.parse({
         slug: 'audit',

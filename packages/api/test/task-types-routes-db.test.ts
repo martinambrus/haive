@@ -1,3 +1,10 @@
+import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
+  );
+});
 import {
   SPEC_ROLES,
   STEP_ROLE_REGISTRY,
@@ -219,10 +226,57 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     },
   );
 
+  it.each([...Object.values(STEP_ROLES), ...Object.values(SPEC_ROLES)])(
+    '[PRT4B] refuses unsafe provider %s at save and admission; no core consumer pin',
+    async (role) => {
+      h.flags.set(CUSTOM_KEY, true);
+      const slug = 'tt-role-refused';
+      const produce = {
+        slug: 'produce',
+        title: 'Produce',
+        template: 'Produce',
+        timeoutMs: 60000,
+        outputMode: 'structured',
+        providesRoles: [{ role, contract: STEP_ROLE_REGISTRY[role].contract }],
+      };
+      const stepIds = [
+        `custom.${slug}.produce`,
+        '07-phase-2-implement',
+        '09-gate-2-verify-approval',
+      ];
+      expect(
+        (
+          await send(
+            'POST',
+            '/admin/task-types',
+            valid(slug, { stepIds, promptSteps: { produce } }),
+          )
+        ).status,
+      ).toBe(400);
+      expect(await row(slug)).toBeUndefined();
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug,
+          displayName: slug,
+          source: 'admin',
+          stepIds,
+          promptSteps: { produce },
+          requiresRepository: true,
+          runListStrategy: 'static',
+        });
+      await expect(
+        db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, slug))).toEqual([]);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+
   it('[PRT4B] saves prompt ports and pins the same producer the authoring graph shows', async () => {
     h.flags.set(CUSTOM_KEY, true);
     const slug = 'tt-role-valid',
-      role = STEP_ROLES.codeAudit,
+      role = TEST_PROMPT_ROLE,
       contract = STEP_ROLE_REGISTRY[role].contract;
     const produce = {
       slug: 'produce',
