@@ -23,12 +23,15 @@ const m = vi.hoisted(() => ({
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
-  loadPreviousStepOutput: (
+  loadPreviousStepOutput: async (
     db: unknown,
     task: string,
     step: string | { role: string },
     ...rest: unknown[]
-  ) => m.loadPreviousStepOutput(db, task, step, ...rest),
+  ) => {
+    const row = await m.loadPreviousStepOutput(db, task, step, ...rest);
+    return row && { stepId: selectorId(step), status: 'done', ...row };
+  },
 }));
 vi.mock('../env-replicate/_shared.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../env-replicate/_shared.js')>()),
@@ -1900,7 +1903,7 @@ describe('gate-2 verification results read from 08', () => {
     expect(m.loadGateHouseRules).toHaveBeenLastCalledWith(
       (ctx as { db: unknown }).db,
       (ctx as { taskId: string }).taskId,
-      { withCodeReview: true, currentFingerprint: expect.any(Function) },
+      { withCodeReview: true, consumer: ctx, currentFingerprint: expect.any(Function) },
     );
     expect(detected.houseRules).toEqual(rules);
     expect(
@@ -2440,4 +2443,114 @@ describe('gate-2 says when it cuts a check output or the smoke excerpt', () => {
       expect(row?.body).toMatch(/omitted/);
     }
   });
+});
+
+// Captured on the parent before migrating result readers. These snapshots include
+// every form byte, the default recommendation and all blocking disclosures.
+describe('check-result role compatibility bytes', () => {
+  const ids = ['07b-phase-4-validate', '08b-test-management', '08-phase-5-verify'];
+  const names = [
+    'passed',
+    'validation failed',
+    'validation incomplete',
+    'budget exhausted',
+    'verify not run',
+    'verify declined',
+    'test management skipped',
+    ...ids.map((id) => `absent ${id}`),
+    'fix round',
+    ...ids.map((id) => `retry ${id}`),
+  ];
+  for (const type of ['workflow', 'derived-example'])
+    it.each(names)(`${type}: %s`, async (name) => {
+      const check = { ran: true, passed: true, command: 'check', output: 'ok' };
+      const stored: Record<string, any> = {
+        [ids[0]!]: {
+          output: {
+            verdict: 'VALID',
+            summary: 'checked',
+            issues: [],
+            dimensions: [],
+            excludedDimensions: [],
+            fixesApplied: [],
+            converged: true,
+            churnFiles: [],
+            report: 'report',
+            validatorPasses: 1,
+          },
+          iterations: [],
+        },
+        [ids[1]!]: {
+          output: {
+            action: 'manage',
+            testsCreated: ['a.test.ts'],
+            testsUpdated: [],
+            testsDeleted: [],
+            testsPassed: true,
+          },
+          detect: { primary: 'vitest' },
+        },
+        [ids[2]!]: {
+          output: { test: check, lint: check, typecheck: check, passed: true, runtimeSmoke: null },
+          detect: { test: { source: 'declared' }, lint: {}, typecheck: {} },
+        },
+      };
+      if (name === 'validation failed')
+        Object.assign(stored[ids[0]!]!.output, {
+          verdict: 'ISSUES_FOUND',
+          issues: [{ severity: 'high', file: 'a.ts', description: 'broken' }],
+        });
+      if (name === 'validation incomplete') stored[ids[0]!]!.output.verdict = 'UNPARSEABLE';
+      if (name === 'budget exhausted') stored[ids[0]!]!.iterations = [{ exhaustedBudget: true }];
+      if (name === 'verify not run' || name === 'verify declined')
+        for (const slot of ['test', 'lint', 'typecheck'])
+          stored[ids[2]!]!.output[slot] = {
+            ...check,
+            ran: false,
+            passed: false,
+            note: name === 'verify declined' ? 'declined by user' : 'no runner',
+          };
+      if (name === 'test management skipped')
+        Object.assign(stored[ids[1]!]!.output, {
+          action: 'skip',
+          testsPassed: null,
+          testsCreated: [],
+        });
+      for (const id of ids) {
+        if (name === `absent ${id}`) delete stored[id];
+        if (name === `retry ${id}`)
+          stored[id] = { status: 'pending', output: null, iterations: [], detect: null };
+      }
+      m.getTaskEnvTemplate.mockResolvedValue(null);
+      m.resolveTaskDirectAccess.mockResolvedValue(false);
+      m.hasWorkspaceEntry.mockResolvedValue(false);
+      m.resolveScreenshotRoot.mockResolvedValue('/repos/u/r');
+      m.loadTaskSimilarSites.mockResolvedValue({ sites: [], omitted: 0 });
+      m.loadUnactedInsights.mockResolvedValue({ insights: [], omitted: 0 });
+      m.loadGateHouseRules.mockResolvedValue(null);
+      m.loadPreviousStepOutput.mockImplementation(async (_db, _task, selector) => {
+        const id = selectorId(selector);
+        return stored[id]
+          ? {
+              id: 'row',
+              stepId: id,
+              round: name === 'fix round' ? 1 : 0,
+              status: 'done',
+              iterations: [],
+              ...stored[id],
+            }
+          : null;
+      });
+      const ctx = {
+        taskId: 'task',
+        round: 1,
+        repoPath: '/repos/u/r',
+        logger: { info: vi.fn(), warn: vi.fn() },
+        db: { query: { tasks: { findFirst: async () => ({ type }) } } },
+      } as never;
+      const detected = await gate2VerifyApprovalStep.detect!(ctx);
+      expect(
+        JSON.stringify({ detected, form: gate2VerifyApprovalStep.form!(ctx, detected) }),
+      ).toMatchSnapshot();
+    });
 });
