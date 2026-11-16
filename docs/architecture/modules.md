@@ -511,6 +511,14 @@ for its fence writers, name filters and lint line map. Review imports the portab
 guards; all other shared entries remain unable to reach any SDK entry. No extra subpath
 is published.
 
+A module step may declare `attachmentContext: 'none'` directly on `StepDefinition`, including
+a mining-only step with no `llm` phase. Unset or `'notice'` preserves automatic attachment
+context. `'none'` skips the dispatch's automatic archive expansion, attachment lookup/list and
+notice across LLM passes and step-owned mining dispatches. It does not remove sandbox mounts,
+change independent DAG behavior, or strip notices from legacy mining prompts replayed verbatim.
+A step that reads or expands attachments explicitly still does so; it owns the content and
+bounds of any attachment input it supplies. See [Task attachments](task-attachments.md).
+
 The worker's old paths re-export the contracts, DTOs and helpers for compatibility. Other shared
 entries, including the root and browser entries, do not re-export any of the three step SDK
 entries. These entries grant no new dispatch service.

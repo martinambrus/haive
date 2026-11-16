@@ -107,7 +107,7 @@ function describeIncompleteArchives(rows: readonly AttachmentRow[]): string[] {
 /**
  * The file list, and how many files it actually NAMES.
  *
- * This notice rides EVERY step's prompt, so it is the one place a folder upload
+ * This notice rides every step's prompt unless the step opts out, so it is the one place a folder upload
  * turns into unbounded cost: 400 attachments used to be 400 lines in front of
  * every agent, on every step, for the life of the task. Past the limit the list
  * collapses to one line per top-level folder with a count, and the caller states
