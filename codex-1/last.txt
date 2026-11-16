@@ -1,0 +1,30 @@
+Security change completed and committed locally; nothing pushed.
+
+Design and changes: Reused the existing signed task-token format with task,
+step-row and invocation claims. Each execution receives its own read-only RAG
+token file; shared MCP configuration retains only task-scoped credentials. The
+API verifies invocation/step ownership and started, ended and superseded state
+at request admission. Caller-supplied invocation IDs are ignored. Unprovable or
+stale identity logs NULL while retrieval continues. Migration 0247 appends a
+nullable invocation reference; historical rows remain unknown. Documentation is
+provided only in codex-1/docs.patch.
+
+Red/green evidence: On unchanged origin/main, new controls failed: API 15,
+credential delivery 2, proxy precedence 1, schema 1. They pass after implementation;
+delivery coverage also includes four CLIs and full/RAG-only profiles.
+
+Full suites passed with at most two Vitest workers:
+- Worker: 18,626 passed, 4 expected failures, 1,431 skipped.
+- API: 8,064 passed, 2,192 skipped.
+- Database: 200 passed, 66 skipped.
+Database, worker and API typechecks passed separately. Formatting passed.
+Disposable PostgreSQL 18 verified schema parity, historical NULLs, guarded replay,
+preserved attribution and SET NULL on deletion. The container and volume were removed.
+
+Rollback: Revert application code. The migration is additive; leave its nullable
+column in place. Existing application versions ignore it.
+
+Found-not-fixed: Existing statistics and usage review still group by time window.
+Custom rag-query tools retain separate custom_tool_calls telemetry rather than
+creating rag_query_log rows. Skipped tests were not exercised; no dev-stack actions
+were taken. See codex-1/evidence.txt for commands and raw-log location.

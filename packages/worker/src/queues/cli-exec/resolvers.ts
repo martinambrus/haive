@@ -39,7 +39,11 @@ import {
   emittedDefaultServerNames,
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
-import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import {
+  RAG_MCP_SERVER_JS,
+  RAG_MCP_SERVER_PATH,
+  RAG_MCP_TOKEN_PATH,
+} from '../../sandbox/rag-mcp-server.js';
 import {
   CUSTOM_MCP_SERVER_JS,
   CUSTOM_MCP_SERVER_PATH,
@@ -538,7 +542,25 @@ export async function resolveMcpExtraFiles(
   // The haive-rag proxy is a bind-mounted script run via `node`; ship it
   // whenever rag is enabled so the MCP server command resolves.
   const ragFiles: SandboxExtraFile[] = surface.rag.enabled
-    ? [{ containerPath: RAG_MCP_SERVER_PATH, content: RAG_MCP_SERVER_JS }]
+    ? [
+        { containerPath: RAG_MCP_SERVER_PATH, content: RAG_MCP_SERVER_JS },
+        {
+          containerPath: RAG_MCP_TOKEN_PATH,
+          content:
+            run?.taskStepId && process.env.CONFIG_ENCRYPTION_KEY
+              ? signTaskToken(
+                  {
+                    aud: 'rag',
+                    taskId,
+                    taskStepId: run.taskStepId,
+                    cliInvocationId: run.invocationId,
+                    ...runTokenLifetime(run.timeoutMs),
+                  },
+                  process.env.CONFIG_ENCRYPTION_KEY,
+                )
+              : surface.rag.token,
+        },
+      ]
     : [];
   const ddevFiles: SandboxExtraFile[] = surface.ddevControl.enabled
     ? [{ containerPath: DDEV_MCP_SERVER_PATH, content: DDEV_MCP_SERVER_JS }]

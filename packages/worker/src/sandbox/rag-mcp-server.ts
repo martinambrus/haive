@@ -19,18 +19,25 @@ export function formatRagResponse(
  *  source of that file. The server is a dependency-free Node ESM script that
  *  speaks MCP over stdio (newline-delimited JSON-RPC) and proxies the single
  *  `rag_search` tool to the Haive API. It holds NO database credentials — only
- *  the API URL and a task-scoped token injected via env. This keeps DB access
+ *  the API URL and a task bearer, bound to the invocation in a run-private file
+ *  when available (legacy env-only credentials remain task-scoped). This keeps DB access
  *  and embedding server-side and works for internal/external/ddev rag DBs
  *  uniformly. */
 export const RAG_MCP_SERVER_PATH = '/haive/haive-rag-mcp.mjs';
+export const RAG_MCP_TOKEN_PATH = '/haive/haive-rag.token';
 
 export const RAG_MCP_SERVER_JS = String.raw`#!/usr/bin/env node
 // Haive RAG MCP server (auto-generated, do not edit). Dependency-free stdio
 // MCP proxy: exposes one tool, rag_search, forwarding to the Haive API.
 import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
 
 const API_URL = process.env.RAG_API_URL || '';
-const TOKEN = process.env.RAG_TASK_TOKEN || '';
+// A shared MCP config can name only a task token. The file is private to this run,
+// so a sibling's volume-backed config cannot choose the invocation we attribute.
+let runToken = '';
+try { runToken = readFileSync(new URL('haive-rag.token', import.meta.url), 'utf8').trim(); } catch {}
+const TOKEN = runToken || process.env.RAG_TASK_TOKEN || '';
 const LSP_AVAILABLE = process.env.HAIVE_LSP_AVAILABLE === '1';
 const PROTOCOL_VERSION = '2024-11-05';
 const GROUNDING_TOOLS = LSP_AVAILABLE ? 'LSP + grep' : 'grep + direct file reads';

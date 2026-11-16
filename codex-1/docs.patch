@@ -1,0 +1,64 @@
+diff --git a/docs/architecture/rag-playground.md b/docs/architecture/rag-playground.md
+index 4b6a27d43..33bc9201a 100644
+--- a/docs/architecture/rag-playground.md
++++ b/docs/architecture/rag-playground.md
+@@ -14,6 +14,15 @@ expansion stay identical. Playground runs do not insert telemetry or affect a
+ step's statistics. They search the current index and settings, so a rerun is
+ shown separately from the original response.
+
++Agent query logs carry nullable `cli_invocation_id` (migration 0247). Only a signed
++`rag` bearer naming the task, step row and invocation can establish it. At request
++admission the API verifies the invocation and step belong to that task, the run
++has started, and it is neither ended nor superseded. A missing binding, unavailable
++ownership check or stale invocation still permits retrieval but stores NULL,
++explicitly unknown. Historical rows stay NULL; body-supplied invocation ids and
++time-window candidates never establish attribution. Existing time-window statistics
++and usage review keep their current semantics; this column records credential proof.
++
+ Migration 0180 adds `rag_query_log.result_hits`, saved after merging and expansion.
+ NULL means the response was not captured; `[]` means a captured zero-hit response.
+ Each hit carries `ranks` (`dense`, `fts`, `ident`): its rank in each ranker's
+diff --git a/docs/architecture/sandbox.md b/docs/architecture/sandbox.md
+index d79c39f14..a467e12dd 100644
+--- a/docs/architecture/sandbox.md
++++ b/docs/architecture/sandbox.md
+@@ -537,6 +537,15 @@ reaper, once half its expiry has passed, so a shell kept open for days still pus
+ reads only that file, and the route takes only this token: the env fallback and the older two-part
+ token keyed with the raw secret went once the last of them had expired.
+
++RAG execution uses the existing signed step/invocation claims too. The worker puts
++that bearer in `/haive/haive-rag.token`, one run-private read-only extra file beside
++the MCP script, using the same delivery as custom and integration tokens. All MCP
++configuration delivery modes still carry only the shared task bearer in their env;
++the RAG proxy prefers its own token file, so a concurrent agent rewriting a task
++volume cannot select another invocation for attribution. A run without a step
++keeps a task-only token and logs unknown attribution. Legacy env-only proxies remain
++query-compatible and unknown. No new token type, audience or tool argument is used.
++
+ Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
+ its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
+ worker decrypts it for that probe only. It resolves no active provider secrets, mounts no shared
+diff --git a/docs/plans/agent-memory-lessons.md b/docs/plans/agent-memory-lessons.md
+index 6a8587d93..d34be86a1 100644
+--- a/docs/plans/agent-memory-lessons.md
++++ b/docs/plans/agent-memory-lessons.md
+@@ -1,7 +1,7 @@
+ # What Anthropic's agent-memory research offers Haive: close the learning loop, measure it, then consolidate
+
+ > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
+-> **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). **P1.2 implemented** (2026-11-14): bounded learning origin/update records excluded from excerpts and indexed content; see the same topic. P1.3 remains not started. P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
++> **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). **P1.2 implemented** (2026-11-14): bounded learning origin/update records excluded from excerpts and indexed content; see the same topic. RAG invocation attribution is implemented; see [RAG query attribution](../architecture/rag-playground.md). P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
+ > Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
+ > Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
+ > Fix the step 11 defects that keep the loop from closing (P0), add the records the next benchmark
+@@ -98,6 +98,10 @@ Each adds a record and changes no behaviour, so none needs analysis first. Durab
+    invocation, so per-step and per-model use must be joined by time window, which is ambiguous
+    during a fan-out. Check first whether the rag MCP server can know the invocation that called it;
+    if it cannot cheaply, keep the time-window join and say so in P2's report.
++   Implementation: the existing signed task-token claims bind RAG credentials to one
++   invocation through a run-private file. The API verifies task/step ownership and
++   liveness before recording nullable `cli_invocation_id`; legacy or unprovable
++   identity remains NULL. Existing time-window consumers are unchanged.
+
+ **Record contract for P1.** Use one versioned reconcile event per apply attempt, keyed by task,
+ step row, round and invocation; a crash/retry must not double-count it. Record proposed, parsed,

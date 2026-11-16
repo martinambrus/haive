@@ -17,7 +17,7 @@ import {
   type RagSearchHit,
   type RagToolingPrefs,
 } from '@haive/shared/rag';
-import { verifyTaskToken } from '@haive/shared/task-token';
+import { verifyTaskToken, type TaskTokenPayload } from '@haive/shared/task-token';
 import {
   extractProjectFacets,
   resolveGlobalKbEnabled,
@@ -30,6 +30,7 @@ import {
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
+import { assertInvocationLive } from '../lib/task-call-auth.js';
 
 const log = logger.child({ module: 'rag-routes' });
 
@@ -133,10 +134,12 @@ async function logRagQuery(
   query: string,
   topK: number | null,
   hits: RagSearchHit[],
+  cliInvocationId: string | null,
 ): Promise<void> {
   try {
     await db.insert(schema.ragQueryLog).values({
       taskId,
+      cliInvocationId,
       resultHits: hits,
       query,
       topK,
@@ -151,6 +154,47 @@ async function logRagQuery(
     });
   } catch (err) {
     log.warn({ err, taskId }, 'failed to log rag query');
+  }
+}
+
+/** Attribution is proof at request admission, never a caller-selected id or a time join.
+ * A task-only credential, stale run or unavailable ownership check remains explicitly unknown. */
+async function ragInvocationId(
+  db: ReturnType<typeof getDb>,
+  claims: TaskTokenPayload,
+): Promise<string | null> {
+  if (!claims.taskStepId || !claims.cliInvocationId) return null;
+  try {
+    const row = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, claims.cliInvocationId),
+      columns: {
+        id: true,
+        taskId: true,
+        taskStepId: true,
+        startedAt: true,
+        endedAt: true,
+        supersededAt: true,
+      },
+      with: { step: { columns: { id: true, taskId: true } } },
+    });
+    assertInvocationLive(row, {
+      taskId: claims.taskId,
+      taskStepId: claims.taskStepId,
+      cliInvocationId: claims.cliInvocationId,
+    });
+    if (
+      row.id !== claims.cliInvocationId ||
+      row.startedAt === null ||
+      row.step?.id !== claims.taskStepId ||
+      row.step.taskId !== claims.taskId
+    )
+      return null;
+    return row.id;
+  } catch (err) {
+    if (!(err instanceof HttpError)) {
+      log.warn({ err, taskId: claims.taskId }, 'failed to verify rag query attribution');
+    }
+    return null;
   }
 }
 
@@ -317,8 +361,9 @@ ragRoutes.post('/search', sandboxBodyLimit, async (c) => {
       : undefined;
 
   const availability: { note?: string } = {};
+  const cliInvocationId = await ragInvocationId(getDb(), verified);
   const hits = await executeRagSearch(taskId, query, topK, 'all', availability);
-  await logRagQuery(getDb(), taskId, query, topK ?? null, hits);
+  await logRagQuery(getDb(), taskId, query, topK ?? null, hits, cliInvocationId);
   return c.json({ hits, ...availability });
 });
 
