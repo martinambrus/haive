@@ -79,6 +79,7 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
     file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const tableNames = [
+    'CHECK_RESULT_ROLES',
     'IMPLEMENTATION_SUMMARY_ROLE',
     'IMPLEMENTATION_SUMMARY_DAG_STEP_ID',
     'STEP_ROLES',

@@ -228,3 +228,16 @@ it('a skipped canonical producer retains only discovery metadata through its pin
   });
   if (result.producer) expect(result.legacyOutput).not.toHaveProperty('passed');
 });
+
+it('explicit absent optional inputs ignore passing rows outside the pinned run list', async () => {
+  const { ctx, fake } = setup();
+  fake.patch(schema.tasks, ctx.taskId, {
+    runListSnapshot: [gate],
+    dataEdgePlan: buildDataEdgePlan('static', [
+      { executionPath: null, nodes: dataPortNodes([gate]) },
+    ]),
+  });
+  for (const role of roles)
+    expect(await readRole(ctx, role)).toMatchObject({ state: 'absent', producer: null });
+  expect((await decision(ctx)).value).toBe('reject');
+});

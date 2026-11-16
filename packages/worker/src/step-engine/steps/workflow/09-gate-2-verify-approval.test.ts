@@ -1,3 +1,5 @@
+import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
+import { dataPortNodes } from '@haive/shared/step-ports';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { CODE_AUDIT_OUTPUT_CONTRACT, STEP_ROLES } from '@haive/shared/step-outputs';
@@ -2549,8 +2551,44 @@ describe('check-result role compatibility bytes', () => {
         db: { query: { tasks: { findFirst: async () => ({ type }) } } },
       } as never;
       const detected = await gate2VerifyApprovalStep.detect!(ctx);
+      const baseline = JSON.stringify({
+        detected,
+        form: gate2VerifyApprovalStep.form!(ctx, detected),
+      });
+      expect(baseline).toMatchSnapshot();
+      const stepIds = [...ids.filter((id) => name !== `absent ${id}`), '09-gate-2-verify-approval'];
+      const nodes = dataPortNodes(stepIds);
+      const selection = type === 'workflow' ? 'static' : 'derived';
+      const pinnedCtx = {
+        ...(ctx as unknown as Record<string, unknown>),
+        taskStepId: 'gate-row',
+        db: {
+          query: {
+            tasks: {
+              findFirst: async () => ({
+                type,
+                executionPath: 'full_workflow',
+                runListSnapshot: stepIds,
+                dataEdgePlan: buildDataEdgePlan(selection, [
+                  { executionPath: null, nodes },
+                  ...(selection === 'derived'
+                    ? [{ executionPath: 'full_workflow' as const, nodes }]
+                    : []),
+                ]),
+              }),
+            },
+            taskSteps: {
+              findFirst: async () => ({ stepId: '09-gate-2-verify-approval', round: 1 }),
+            },
+          },
+        },
+      } as never;
+      const pinned = await gate2VerifyApprovalStep.detect!(pinnedCtx);
       expect(
-        JSON.stringify({ detected, form: gate2VerifyApprovalStep.form!(ctx, detected) }),
-      ).toMatchSnapshot();
+        JSON.stringify({
+          detected: pinned,
+          form: gate2VerifyApprovalStep.form!(pinnedCtx, pinned),
+        }),
+      ).toBe(baseline);
     });
 });

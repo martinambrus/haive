@@ -19,6 +19,7 @@ const {
 describe('host output contracts', () => {
   it('exports frozen references and operations, never the mutable schemas or validator registry', () => {
     expect(Object.keys(contracts).sort()).toEqual([
+      'CHECK_RESULT_ROLES',
       'CODE_AUDIT_OUTPUT_CONTRACT',
       'CODE_REVIEW_OUTPUT_CONTRACT',
       'DISCOVERY_OUTPUT_CONTRACT',
@@ -36,6 +37,9 @@ describe('host output contracts', () => {
       'SPEC_ROLES',
       'STEP_ROLES',
       'STEP_ROLE_REGISTRY',
+      'TEST_MANAGEMENT_OUTPUT_CONTRACT',
+      'VALIDATION_OUTPUT_CONTRACT',
+      'VERIFY_OUTPUT_CONTRACT',
       'isPromptProvidableRole',
       'isQuotableRole',
       'parseRegistryOutputContractRef',
