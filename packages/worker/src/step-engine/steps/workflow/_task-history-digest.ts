@@ -244,7 +244,7 @@ export function renderTaskHistoryDigest(
   const runtimeErrors: string[] = [];
   for (const s of steps) {
     if (s.stepId === reviewId) findings.push(...extractFindings(STEP_ROLES.codeReview, s.output));
-    else if (s.stepId === validationId)
+    if (s.stepId === validationId)
       findings.push(
         ...extractFindings(
           STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.validation].legacyStepId,
