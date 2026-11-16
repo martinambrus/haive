@@ -445,3 +445,43 @@ it('holds unsupported tasks after saving when the switch turns on after the pre-
   ]);
   expect(fake.rows(schema.auditEvents)).toHaveLength(2);
 });
+
+it('reports recovery when a raced post-save hold times out after the switch is lifted', async () => {
+  const fake = setup(guarded, null);
+  h.paused = false;
+  vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
+    h.paused = true;
+    return 'false';
+  });
+  fake.hooks.beforeUpdate = (table) => {
+    if (table === schema.tasks) {
+      expect(h.paused).toBe(false);
+      expect(fake.rows(schema.auditEvents)).toMatchObject([
+        { action: 'config.global_pause', metadata: { from: true, to: false } },
+      ]);
+      throw new Error('task hold failed', {
+        cause: Object.assign(new Error('lock timeout'), { code: '55P03' }),
+      });
+    }
+  };
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status, await res.clone().text()).toBe(503);
+  const body = await res.json();
+  expect(body).toEqual({
+    error:
+      'The global pause was lifted, but holding the affected tasks failed; turn the switch on and lift it again to re-run the holds',
+    code: null,
+  });
+  expect(body).not.toMatchObject({ error: expect.stringContaining('Another save') });
+  expect(h.paused).toBe(false);
+  expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+  expect(fake.rows(schema.taskEvents)).toEqual([]);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { action: 'config.global_pause', metadata: { from: true, to: false } },
+  ]);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+  expect(h.add).not.toHaveBeenCalled();
+  expect(h.kill).not.toHaveBeenCalled();
+});

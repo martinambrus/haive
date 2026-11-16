@@ -549,8 +549,9 @@ function lockBusyError(err: unknown): never {
 }
 
 /** Saves configuration with its audit row and returns the previous values read under its lock.
- * Private fields record only presence, and an optional secret is encrypted in the same
- * transaction as the audit, never included in metadata. */
+ * Returned values are raw (including private fields) and for in-process use only.
+ * Private fields record only presence in the audit, and an optional secret is encrypted
+ * in the same transaction as the audit, never included in metadata. */
 async function saveConfig(
   userId: string,
   route: string,
@@ -1973,6 +1974,8 @@ adminRoutes.put('/config/global-pause', async (c) => {
   // switch-off or a later save failure can leave extra holds. If it turned on after this
   // read, hold unsupported tasks after the save, outside its lock. This narrows the gap;
   // a task the worker starts in that gap is fenced dead rather than held.
+  // A failed post-save pass leaves the switch off without holds; turn it on and lift
+  // it again to re-run them.
   const wasPaused =
     !paused && parseStored(await configService.getFresh(CONFIG_KEYS.GLOBAL_PAUSE), false) === true;
   let skippedTasks = wasPaused
@@ -1981,8 +1984,20 @@ adminRoutes.put('/config/global-pause', async (c) => {
   const from = await saveConfig(c.get('userId'), 'global-pause', {
     paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
   });
-  if (!paused && !wasPaused && from.paused === true)
-    skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId')).catch(lockBusyError);
+  if (!paused && !wasPaused && from.paused === true) {
+    try {
+      skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId'));
+    } catch (err) {
+      log.error(
+        { err, actorUserId: c.get('userId'), paused: false },
+        'Holding affected tasks failed after the global pause switch was already turned off',
+      );
+      throw new HttpError(
+        503,
+        'The global pause was lifted, but holding the affected tasks failed; turn the switch on and lift it again to re-run the holds',
+      );
+    }
+  }
   log.info({ paused }, 'global pause switch updated');
   return c.json({ paused, ...(skippedTasks.length ? { skippedTasks } : {}) });
 });
