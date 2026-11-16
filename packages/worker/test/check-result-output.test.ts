@@ -42,3 +42,24 @@ it('carries the primary framework even when canonical test management was skippe
     canonicalCheckResult('haive.test-management', null, { primary: 'playwright' }, [], 'skipped'),
   ).toEqual({ primary: 'playwright', resultStatus: 'skipped' });
 });
+
+it('distinguishes declined commands from runners that could not execute', () => {
+  const skipped = { ran: false, passed: false, output: 'skipped' };
+  expect(
+    canonicalCheckResult(
+      'haive.verify',
+      { passed: true, test: skipped },
+      { test: { label: 'test' } },
+    ),
+  ).toMatchObject({ resultStatus: 'declined' });
+  expect(
+    canonicalCheckResult(
+      'haive.verify',
+      {
+        passed: true,
+        test: { ...skipped, output: 'runner unavailable', note: 'runner unavailable' },
+      },
+      { test: { label: 'test' } },
+    ),
+  ).toMatchObject({ resultStatus: 'not-run' });
+});

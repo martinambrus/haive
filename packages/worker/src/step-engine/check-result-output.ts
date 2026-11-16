@@ -61,6 +61,9 @@ export function canonicalCheckResult(
   const checks = [...names, 'phpLint'].map((n) => record(o[n]));
   const anyRan = checks.some((c) => c.ran === true);
   const failed = checks.some((c) => c.ran === true && c.passed === false);
+  // The canonical apply writes this host stub only when a detected command was
+  // not selected. Runner/environment failures carry their own output and note.
+  const declined = names.some((n) => d[n] != null && record(o[n]).output === 'skipped');
   return {
     ...o,
     declinedConfigs: Array.isArray(d.declinedConfigs)
@@ -71,7 +74,15 @@ export function canonicalCheckResult(
     slotWithoutRunner: names.some((n) => d[n] === null && !offSlots.includes(n)),
     resultStatus:
       state ??
-      (failed ? 'failed' : !anyRan ? 'not-run' : o.passed === true ? 'passed' : 'incomplete'),
+      (failed
+        ? 'failed'
+        : !anyRan
+          ? declined
+            ? 'declined'
+            : 'not-run'
+          : o.passed === true
+            ? 'passed'
+            : 'incomplete'),
   };
 }
 /** Called by the runner on successful returns and after its loop budget decision. */
