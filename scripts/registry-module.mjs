@@ -31,7 +31,7 @@ export async function registryModuleExports(
     const file = files?.length === 1 ? files[0]?.filename : undefined;
     if (typeof file !== 'string' || basename(file) !== file || !file.endsWith('.tgz'))
       throw new Error(`could not identify the packed module ${spec}`);
-    if (files[0].size > maxPackBytes)
+    if (!Number.isSafeInteger(files[0].size) || files[0].size > maxPackBytes)
       throw new Error(`packed module exceeds size limit (${maxPackBytes} bytes): ${spec}`);
     const manifest = await command(
       'tar',

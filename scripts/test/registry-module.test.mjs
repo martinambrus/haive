@@ -81,6 +81,37 @@ test('refuses oversized pack metadata before reading tar, with an injectable byt
   assert.equal(existsSync(scratch), false);
 });
 
+for (const [label, size] of [
+  ['missing', undefined],
+  ['string', '256'],
+  ['null', null],
+  ['fractional', 1.5],
+  ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+]) {
+  test(`refuses ${label} pack size before reading tar`, async () => {
+    let scratch;
+    const calls = [];
+    await assert.rejects(
+      registryModuleExports('@haive-module/demo@1.0.0', {
+        cwd: tmpdir(),
+        env: {},
+        command: async (cmd, args) => {
+          calls.push(cmd);
+          if (cmd === 'pnpm') return { stdout: '' };
+          if (cmd === 'npm') {
+            scratch = args.at(-1);
+            return { stdout: JSON.stringify([{ filename: 'demo.tgz', size }]) };
+          }
+          return { stdout: JSON.stringify({ name: '@haive-module/demo', version: '1.0.0' }) };
+        },
+      }),
+      /packed module exceeds size limit/,
+    );
+    assert.deepEqual(calls, ['pnpm', 'npm']);
+    assert.equal(existsSync(scratch), false);
+  });
+}
+
 test('pins the production pack limit to 100 MiB', () => {
   assert.equal(REGISTRY_MODULE_MAX_PACK_BYTES, 100 * 1024 * 1024);
 });
