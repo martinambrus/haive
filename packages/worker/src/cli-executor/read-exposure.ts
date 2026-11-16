@@ -65,7 +65,7 @@ export function readerCommandPaths(command: unknown): Paths {
   }
   if (!/(?:^|[\s;&|])(?:\/(?:usr\/)?bin\/)?(?:cat|sed|head|tail|nl)(?:\s|$)/.test(command))
     return null;
-  if (/[$`*?\n]|\|[^|]|[(){}]/.test(command)) return 'unattributed';
+  if (command.includes('\n')) return 'unattributed';
   // Tokens retain quoted spaces. Reject unmatched quotes rather than guessing.
   const tokens: string[] = [];
   let token = '',
@@ -75,11 +75,12 @@ export function readerCommandPaths(command: unknown): Paths {
     const c = command[i]!;
     if (quote) {
       if (c === quote) quote = '';
+      else if (quote === '"' && /[$`\\]/.test(c)) return 'unattributed';
       else token += c;
     } else if (c === "'" || c === '"') {
       quote = c;
       active = true;
-    } else if (c === '\\') return 'unattributed';
+    } else if (/[$`*?(){}\\]/.test(c)) return 'unattributed';
     else if (/\s/.test(c)) {
       if (active) tokens.push(token);
       token = '';
@@ -104,13 +105,19 @@ export function readerCommandPaths(command: unknown): Paths {
   const segments: string[][] = [[]];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (['>', '>>', '<', '<<'].includes(t)) {
+    // Only output-file redirects and output descriptor duplication/close are supported.
+    // In particular <<, <<- and <<< supply shell text, never a filename to attribute.
+    if (['<', '<<'].includes(t)) return 'unattributed';
+    if (['>', '>>'].includes(t)) {
       const current = segments.at(-1)!;
       if (/^\d+$/.test(current.at(-1) ?? '')) current.pop();
       if (t === '>' && tokens[i + 1] === '&') {
         if (!/^(?:\d+|-)$/.test(tokens[i + 2] ?? '')) return 'unattributed';
         i += 2;
-      } else if (!tokens[++i] || tokens[i] === '&') return 'unattributed';
+      } else {
+        const target = tokens[++i];
+        if (!target || /^[;&<>|]+$/.test(target)) return 'unattributed';
+      }
     } else if (['&&', ';'].includes(t)) segments.push([]);
     else if (['&', '||', '|'].includes(t)) return 'unattributed';
     else segments.at(-1)!.push(t);
@@ -120,12 +127,12 @@ export function readerCommandPaths(command: unknown): Paths {
     if (!segment.length) continue;
     const name = segment[0]!.replace(/^\/(?:usr\/)?bin\//, '');
     if (!['cat', 'sed', 'head', 'tail', 'nl'].includes(name)) return 'unattributed';
-    if (
-      name === 'sed' &&
-      !segment.slice(1).some((t) => t === '-n' || t === '--quiet' || t === '--silent')
-    )
-      return 'unattributed';
-    let script = name !== 'sed';
+    if (name === 'sed') {
+      const sedPaths = sedPrintPaths(segment.slice(1));
+      if (sedPaths === 'unattributed') return sedPaths;
+      paths.push(...sedPaths);
+      continue;
+    }
     let options = true;
     for (let i = 1; i < segment.length; i++) {
       const t = segment[i]!;
@@ -134,14 +141,7 @@ export function readerCommandPaths(command: unknown): Paths {
         continue;
       }
       if (options && t.startsWith('-')) {
-        if (['-e', '--expression'].includes(t) && name === 'sed') {
-          i++;
-          script = true;
-        } else if (
-          ['-n', '-c', '--lines', '--bytes'].includes(t) &&
-          ['head', 'tail'].includes(name)
-        )
-          i++;
+        if (['-n', '-c', '--lines', '--bytes'].includes(t) && ['head', 'tail'].includes(name)) i++;
         else if (
           ['-s', '-w', '-v', '-i', '-b', '-d', '-f', '-h', '-l'].includes(t) &&
           name === 'nl'
@@ -151,15 +151,43 @@ export function readerCommandPaths(command: unknown): Paths {
           return 'unattributed';
         continue;
       }
-      if (!script) {
-        script = true;
-        continue;
-      }
       if (t === '-') return 'unattributed';
       paths.push(t);
     }
   }
   return paths.length ? paths : 'unattributed';
+}
+
+/** No script interpretation: every command must be p, optionally addressed by a line,
+ * range, end-of-file or slash-delimited regex. Anything else may source its output elsewhere. */
+function sedPrintPaths(args: string[]): string[] | 'unattributed' {
+  const expressions: string[] = [];
+  const operands: string[] = [];
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (options && arg === '--') options = false;
+    else if (options && ['-n', '--quiet', '--silent'].includes(arg)) continue;
+    else if (options && ['-e', '--expression'].includes(arg)) {
+      const expression = args[++i];
+      if (!expression) return 'unattributed';
+      expressions.push(expression);
+    } else if (options && (arg.startsWith('-e') || arg.startsWith('--expression='))) {
+      expressions.push(arg.startsWith('-e') ? arg.slice(2) : arg.slice('--expression='.length));
+    } else if (options && arg.startsWith('-')) return 'unattributed';
+    else operands.push(arg);
+  }
+  if (!expressions.length) expressions.push(operands.shift() ?? '');
+  const print = /^(?:(?:\d+|\$|\/(?:[^/\\]|\\.)*\/)(?:,(?:\d+|\$|\/(?:[^/\\]|\\.)*\/))?)?p$/;
+  if (
+    !expressions.every((expression) =>
+      expression.split(';').every((command) => print.test(command.trim())),
+    ) ||
+    !operands.length ||
+    operands.includes('-')
+  )
+    return 'unattributed';
+  return operands;
 }
 
 /** Count textual content, excluding images and serialization metadata. */

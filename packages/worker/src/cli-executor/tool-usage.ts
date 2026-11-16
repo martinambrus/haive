@@ -303,7 +303,7 @@ export function createToolUsageTally(opts: {
   const readPaths = (name: string, input: unknown): string[] | 'unattributed' | null => {
     if (!isRecord(input)) return null;
     const shellKey = CLI_TOOL_NAMES.shellTools[name];
-    if (shellKey) return readerCommandPaths(input[shellKey]);
+    if (shellKey) return commandReads(input[shellKey], input.cwd);
     let keys = CLI_TOOL_NAMES.readTools[name];
     const parsed = parseMcpToolName(name);
     if (parsed) keys = CLI_TOOL_NAMES.mcpReadTools[parsed.tool];
@@ -314,6 +314,20 @@ export function createToolUsageTally(opts: {
       if (Array.isArray(value)) return value.filter((p): p is string => typeof p === 'string');
     }
     return 'unattributed';
+  };
+
+  const commandReads = (command: unknown, cwd: unknown): string[] | 'unattributed' | null => {
+    const paths = readerCommandPaths(command);
+    if (!Array.isArray(paths)) return paths;
+    // The mount root is not a command's cwd. Neither a launch cwd nor a Claude init
+    // proves the shell's later directory; only per-call metadata resolves relative paths.
+    const knownCwd =
+      typeof cwd === 'string' &&
+      cwd.startsWith('/') &&
+      !cwd.includes('\u0000') &&
+      cwd.isWellFormed();
+    if (!knownCwd && paths.some((path) => !path.startsWith('/'))) return 'unattributed';
+    return paths.map((path) => (path.startsWith('/') ? path : `${cwd}/${path}`));
   };
 
   const codexItem = (item: Record<string, unknown>, type: string): void => {
@@ -328,7 +342,7 @@ export function createToolUsageTally(opts: {
       bump(tools, type);
       noteCommand(item.command);
       const id = typeof item.id === 'string' ? item.id : `anonymous-${anonymousCall++}`;
-      exposure.tool(id, type, readerCommandPaths(item.command));
+      exposure.tool(id, type, commandReads(item.command, item.cwd));
       const output = item.aggregated_output ?? item.aggregatedOutput;
       if (typeof output === 'string') exposure.result(id, output, 'codex');
       return;

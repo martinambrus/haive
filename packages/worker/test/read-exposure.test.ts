@@ -21,8 +21,9 @@ const result = (id: string, content: unknown) => ({
 });
 const log = (events: unknown[]) => events.map((e) => JSON.stringify(e)).join('\n') + '\n';
 const read = (events: unknown[]) => toolUsageFromStreamLog('claude-code', log(events), root).reads!;
+// Shell fixtures explicitly report cwd; missing-cwd coverage lives below.
 const one = (name: string, input: unknown) => [
-  assistant('a', [use('t', name, input)]),
+  assistant('a', [use('t', name, name === 'Bash' ? { cwd: root, ...(input as object) } : input)]),
   result('t', 'abcd'),
   assistant('b'),
   { type: 'result' },
@@ -126,6 +127,144 @@ describe('read exposure', () => {
     });
   });
 
+  it.each(['exec', 'app-server'] as const)(
+    'resolves reported cwd before classifying %s commands, identically live and replayed',
+    (transport) => {
+      for (const [cwd, command, bucket, path] of [
+        [root + '/packages/worker', 'cat package.json', 'files', 'packages/worker/package.json'],
+        [
+          root + '/.haive/worktrees/task/packages/worker',
+          'cat ../shared/a.ts',
+          'files',
+          'packages/shared/a.ts',
+        ],
+        [root + '/.haive/worktrees/task', 'cat package.json', 'files', 'package.json'],
+        ['/tmp', 'cat package.json', 'outside', null],
+        [root + '-other', 'cat package.json', 'outside', null],
+        [root, 'cat ../private', 'outside', null],
+        [undefined, 'cat package.json', 'unattributed', null],
+        [null, 'cat package.json', 'unattributed', null],
+        ['', 'cat package.json', 'unattributed', null],
+        ['packages/worker', 'cat package.json', 'unattributed', null],
+        [root + '/bad\u0000', 'cat package.json', 'unattributed', null],
+        [undefined, 'cat ' + root + '/src/a.ts', 'files', 'src/a.ts'],
+        [root, 'cd packages/worker && cat package.json', 'unattributed', null],
+      ] as const) {
+        const item = {
+          id: 'cwd',
+          type: transport === 'exec' ? 'command_execution' : 'commandExecution',
+          command,
+          cwd,
+          aggregated_output: 'abcd',
+          aggregatedOutput: 'abcd',
+        };
+        const tally = createToolUsageTally({ workdir: root });
+        if (transport === 'exec') tally.codexExecItem(item);
+        else tally.codexAppServerItem(item);
+        const event =
+          transport === 'exec'
+            ? { type: 'item.completed', item }
+            : { method: 'item/completed', params: { item } };
+        const stored = toolUsageFromStreamLog('codex', log([event]), root).reads!;
+        expect(tally.finalize('stream').reads).toEqual(stored);
+        expect(stored, JSON.stringify({ cwd, command })).toMatchObject({
+          files: path ? [{ path, chars: 4 }] : [],
+          [bucket === 'files' ? 'fileReads' : bucket]: { chars: 4 },
+        });
+        if (!path) expect(stored.fileReads.chars).toBe(0);
+      }
+    },
+  );
+
+  it.each(['Bash', 'bash', 'execute_command', 'run_terminal_command'])(
+    'respects per-call cwd and does not infer one from init for %s',
+    (name) => {
+      for (const [metadata, bucket, path] of [
+        [{ cwd: root + '/packages/worker' }, 'files', 'packages/worker/package.json'],
+        [
+          { cwd: root + '/.haive/worktrees/task/packages/worker' },
+          'files',
+          'packages/worker/package.json',
+        ],
+        [{ cwd: '/tmp' }, 'outside', null],
+        [{}, 'unattributed', null],
+        [{ cwd: null }, 'unattributed', null],
+      ] as const) {
+        const events = [
+          { type: 'system', subtype: 'init', cwd: root },
+          ...one(name, Object.assign({ command: 'cat package.json', cwd: undefined }, metadata)),
+        ];
+        expect(read(events)).toMatchObject({
+          files: path ? [{ path, chars: 4 }] : [],
+          [bucket === 'files' ? 'fileReads' : bucket]: { chars: 4 },
+        });
+      }
+    },
+  );
+
+  it.each([
+    'cat <<< README.md',
+    'cat << EOF README.md',
+    'cat <<- EOF README.md',
+    'cat src/a.ts <<< text',
+    'cat src/a.ts <> target',
+    'cat src/a.ts >| target',
+    'cat src/a.ts <&0',
+    'cat src/a.ts &> out',
+    'cat src/a.ts > > target',
+    'cat src/a.ts >>&1',
+    'cat src/a.ts < input',
+  ])('keeps unsupported redirects unattributed: %s', (command) => {
+    expect(read(one('Bash', { command }))).toMatchObject({
+      files: [],
+      fileReads: { chars: 0 },
+      outside: { chars: 0 },
+      unattributed: { chars: 4 },
+    });
+  });
+
+  it.each([
+    "sed -n 'r /tmp/generated.txt' src/a.ts",
+    "sed -n 'R /tmp/generated.txt' src/a.ts",
+    "sed -n 'w /tmp/output' src/a.ts",
+    "sed -n 'W /tmp/output' src/a.ts",
+    "sed -n 'e echo text' src/a.ts",
+    "sed -n 's/x/y/e' src/a.ts",
+    "sed -n '1p;r /tmp/generated.txt' src/a.ts",
+    "sed -n 'd' src/a.ts",
+    "sed -n -e 1p -e 'r /tmp/generated.txt' src/a.ts",
+    "sed -n -e 1p -e 's/x/y/' src/a.ts",
+    'sed -n -e src/a.ts',
+    "sed -n --expression='r /tmp/generated.txt' src/a.ts",
+    'sed -n -f script.sed src/a.ts',
+  ])('requires every sed expression to be a known print form: %s', (command) => {
+    expect(read(one('Bash', { command }))).toMatchObject({
+      files: [],
+      fileReads: { chars: 0 },
+      unattributed: { chars: 4 },
+    });
+  });
+
+  it.each([
+    "sed -n '1,20p' src/a.ts",
+    "sed -n '2p' src/a.ts",
+    "sed -n '/read/p' src/a.ts",
+    "sed -n '$p' src/a.ts",
+    "sed -n 'p' src/a.ts",
+    "sed '2p' src/a.ts",
+    "sed '/read/p' src/a.ts",
+    "sed '$p' src/a.ts",
+    'sed p src/a.ts',
+    "sed -n -e 1p -e '/read/p' src/a.ts",
+    'sed -n --expression=1p src/a.ts',
+    'sed -n -e1p src/a.ts',
+    "sed -n '1p;2,4p' src/a.ts",
+  ])('attributes supported sed print expressions: %s', (command) => {
+    expect(read(one('Bash', { command })).files).toEqual([
+      { path: 'src/a.ts', reads: 1, chars: 4, weightedChars: 4 },
+    ]);
+  });
+
   it.each(['Read', 'mcp__filesystem__read_text_file'])(
     'keeps home-relative %s paths outside',
     (name) => {
@@ -225,6 +364,7 @@ describe('read exposure', () => {
     const item = {
       id: 'i',
       type: 'command_execution',
+      cwd: root,
       command: 'cat src/a.ts',
       aggregated_output: 'abcd',
     };
@@ -332,6 +472,7 @@ describe('read exposure', () => {
     const item = {
       id: 'i',
       type: 'commandExecution',
+      cwd: root,
       command: '/bin/bash -lc "sed -n \'1,20p\' src/a.ts"',
       aggregatedOutput: 'abcd',
     };
