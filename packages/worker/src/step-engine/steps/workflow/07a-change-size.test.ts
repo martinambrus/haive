@@ -61,6 +61,7 @@ function context() {
       sandboxWorkdir: '/workspace',
       db,
       signal: new AbortController().signal,
+      throwIfCancelled() {},
       logger: { info: vi.fn(), warn: vi.fn() },
     } as unknown as StepContext,
   };

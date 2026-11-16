@@ -1,11 +1,20 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initializeChangeSize, type ChangeSizeCounter } from '../src/change-size.js';
+import manifest from '../package.json' with { type: 'json' };
 
 let counter: ChangeSizeCounter;
 beforeAll(async () => {
   counter = await initializeChangeSize();
 });
 const file = (path: string, base: string, head: string) => counter([{ path, base, head }]);
+
+it('keeps exported dependency versions equal to the exact manifest pins', async () => {
+  const { CHANGE_SIZE_DEPENDENCIES } = await import('../src/change-size.js');
+  expect(CHANGE_SIZE_DEPENDENCIES).toEqual({
+    runtimeVersion: manifest.dependencies['web-tree-sitter'],
+    grammarPackageVersion: manifest.dependencies['@vscode/tree-sitter-wasm'],
+  });
+});
 
 describe('syntax change size', () => {
   it.each([
@@ -197,3 +206,26 @@ it('counts object/array expressions, shorthand names, this and ellipsis', () => 
   expect(file('a.ts', '', 'const x = this;').total).toMatchObject({ net: 4, nullFiles: 0 });
   expect(file('a.py', '', 'x = ...\n').total).toMatchObject({ net: 3, nullFiles: 0 });
 });
+
+it.each(['add', 'delete', 'insert'])(
+  'keeps a 600-unit pure %s exact above the edit budget',
+  (kind) => {
+    const text = 'x=1\n'.repeat(200);
+    const base = kind === 'add' ? '' : kind === 'insert' ? 'f()\n' : text;
+    const head = kind === 'delete' ? '' : kind === 'insert' ? `f()\n${text}` : text;
+    const size = file('a.py', base, head);
+    expect(size.files[0]?.size).toMatchObject({ churn: 600, approximate: false });
+    expect(size.total).toMatchObject({ churn: 600, approximate: false, nullFiles: 0 });
+  },
+);
+
+it.each(['install', 'theme', 'profile', 'engine'])(
+  'counts Drupal .%s files as PHP',
+  (extension) => {
+    expect(file(`example.${extension}`, '<?php $x=1;', '<?php $x=2;').total).toMatchObject({
+      churn: 2,
+      net: 0,
+      nullFiles: 0,
+    });
+  },
+);

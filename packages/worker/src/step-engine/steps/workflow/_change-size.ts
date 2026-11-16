@@ -8,16 +8,10 @@ import {
   toSafeRel,
   errno,
   decodeUtf8Strict,
+  isPathContainmentError,
 } from '@haive/shared/fs-safe';
-import {
-  initializeChangeSize,
-  CHANGE_SIZE_LIMITS,
-  excludedChangeSizePath,
-  type ChangeSizeSet,
-  type FileTexts,
-  type ChangeSizeCounter,
-} from '@haive/shared/change-size';
-import type { StepContext } from '../../step-definition.js';
+import type { ChangeSizeSet, FileTexts, ChangeSizeCounter } from '@haive/shared/change-size';
+import { TaskCancelledError, type StepContext } from '../../step-definition.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { collectImplementationFiles, collectChangeSet } from './_impl-changes.js';
@@ -36,24 +30,51 @@ export interface SizeMeasurement {
   /** Hash of the ordered path/base/head byte hashes; includes untracked working bytes. */
   diffHash?: string;
   eventId?: string;
+  /** An environment fault is not evidence about the tree; do not freeze it in an attempt row. */
+  retryable?: true;
 }
 export interface SimplifySizes {
   before: SizeMeasurement;
   afterSimplify: SizeMeasurement;
   afterFixup: SizeMeasurement;
 }
-export const unknownSize = (reason = 'Measurement unavailable.'): SizeMeasurement => ({
+export const unknownSize = (
+  reason = 'Measurement unavailable.',
+  retryable = false,
+): SizeMeasurement => ({
   state: 'unknown',
   reason,
+  ...(retryable ? { retryable: true } : {}),
 });
 const hash = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex');
-let counter: Promise<ChangeSizeCounter> | undefined;
+let counter:
+  | Promise<{
+      module: typeof import('@haive/shared/change-size');
+      count: ChangeSizeCounter;
+    }>
+  | undefined;
 async function initialized() {
-  counter ??= initializeChangeSize().catch((error) => {
-    counter = undefined;
-    throw error;
-  });
+  counter ??= import('@haive/shared/change-size')
+    .then(async (module) => ({
+      module,
+      count: await module.initializeChangeSize(),
+    }))
+    .catch((error) => {
+      counter = undefined;
+      throw error;
+    });
   return counter;
+}
+async function availableCounter(ctx: StepContext) {
+  try {
+    ctx.throwIfCancelled();
+    return await initialized();
+  } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
+    ctx.throwIfCancelled();
+    ctx.logger.warn({ err }, 'Change-size counter initialization failed');
+    return undefined;
+  }
 }
 const validOid = (value: string) => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value);
 
@@ -67,6 +88,9 @@ export async function measureImplementationSize(
 ): Promise<SizeMeasurement> {
   const limits = { ...CHANGE_SIZE_HOST_LIMITS, ...options };
   try {
+    const ready = await availableCounter(ctx);
+    if (!ready) return unknownSize('Change-size counter unavailable.', true);
+    const { CHANGE_SIZE_LIMITS, excludedChangeSizePath, changeSizeLanguage } = ready.module;
     const prefix = relUnder(ctx.repoPath, worktreePath);
     if (!prefix) return unknownSize('Integration worktree is unavailable.');
     const dir = await openDirNoFollow(ctx.repoPath, prefix);
@@ -90,8 +114,12 @@ export async function measureImplementationSize(
           cwd,
         );
       }
+      ctx.throwIfCancelled();
       if (set.scanError || set.truncated)
-        return unknownSize('Implementation scope could not be measured completely.');
+        return unknownSize(
+          'Implementation scope could not be measured completely.',
+          !!set.scanError,
+        );
       if (!baseCommit) {
         const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
         const baseBranch = (setup?.output as { baseBranch?: string } | null)?.baseBranch;
@@ -102,21 +130,36 @@ export async function measureImplementationSize(
       const files: FileTexts[] = [];
       const identities: unknown[] = [];
       let bytes = 0;
+      const paths = new Map<string, boolean>();
       for (const path of set.files) {
+        try {
+          paths.set(toSafeRel(path), true);
+        } catch (err) {
+          if (err instanceof TaskCancelledError) throw err;
+          if (!isPathContainmentError(err)) throw err;
+          paths.set(path, false);
+        }
+      }
+      const nestedPaths = new Set(Object.keys(set.nestedRepositories ?? {}).map(toSafeRel));
+      for (const [path, safe] of paths) {
+        ctx.throwIfCancelled();
+        if (!safe) {
+          files.push({ path, base: null, head: null });
+          continue;
+        }
         if (excludedChangeSizePath(path)) {
           files.push({ path, base: '', head: '' });
           continue;
         }
-        if (set.nestedRepositories?.[path]) {
+        if (nestedPaths.has(path) || !changeSizeLanguage(path)) {
           files.push({ path, base: null, head: null });
           continue;
         }
         let base: string | null = null,
           head: Uint8Array | null = null;
         try {
-          const safe = toSafeRel(path);
           const entry = await git(
-            ['ls-tree', '-l', '-z', baseCommit, '--', `:(literal)${safe}`],
+            ['ls-tree', '-l', '-z', baseCommit, '--', `:(literal)${path}`],
             64 * 1024,
           );
           if (!entry) base = '';
@@ -134,7 +177,7 @@ export async function measureImplementationSize(
               base = decodeUtf8Strict(Buffer.from(data.stdout, 'latin1'));
             }
           }
-          const read = await readFileNoFollow(ctx.repoPath, prefix ? `${prefix}/${safe}` : safe, {
+          const read = await readFileNoFollow(ctx.repoPath, `${prefix}/${path}`, {
             strict: true,
             maxBytes: CHANGE_SIZE_LIMITS.maxBytes,
           });
@@ -142,8 +185,12 @@ export async function measureImplementationSize(
           // Strict reads return null only for confirmed missing entries, including deletions.
           if (read === null) head = new Uint8Array();
         } catch (error) {
-          // ENOENT on a strict fs-safe read is confirmed absence; other refusal stays null.
+          if (error instanceof TaskCancelledError) throw error;
+          ctx.throwIfCancelled();
+          // Only confirmed absence or a containment refusal is a file-level gap.
           if (errno(error) === 'ENOENT') head = new Uint8Array();
+          else if (!isPathContainmentError(error)) throw error;
+          else ctx.logger.warn({ err: error }, 'Change-size file read refused');
         }
         bytes += (base ? Buffer.byteLength(base) : 0) + (head?.length ?? 0);
         if (bytes > limits.totalBytes)
@@ -155,17 +202,32 @@ export async function measureImplementationSize(
           head === null ? null : hash(head),
         ]);
       }
+      ctx.throwIfCancelled();
+      // Invalid reported names are coverage holes, even if their raw spelling looks excluded.
+      const result = ready.count(files.filter(({ path }) => paths.get(path)));
+      result.touched = files.map(({ path }) => path);
+      for (const { path } of files) {
+        if (paths.get(path)) continue;
+        result.files.push({ path, size: null });
+        result.total.nullFiles++;
+      }
       return {
         state: 'measured',
         baseCommit,
         diffHash: hash(JSON.stringify(identities)),
-        result: (await initialized())(files),
+        result,
       };
     } finally {
       await dir.close();
     }
-  } catch {
-    return unknownSize();
+  } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
+    ctx.throwIfCancelled();
+    ctx.logger.warn({ err }, 'Change-size measurement failed');
+    return unknownSize(
+      'Measurement unavailable.',
+      errno(err) !== 'ENOENT' && !isPathContainmentError(err),
+    );
   }
 }
 
@@ -179,27 +241,31 @@ export async function recordChangeSize(
   pass: number,
   before?: SizeMeasurement,
 ): Promise<SizeMeasurement> {
-  const digest = hash(
-    JSON.stringify([
-      'change-size',
-      1,
-      ctx.taskId,
-      ctx.taskStepId,
-      ctx.round,
-      ctx.rerunGeneration ?? 0,
-      invocationId,
-      pass,
-      phase,
-    ]),
-  );
-  const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
   try {
+    const ready = await availableCounter(ctx);
+    // An environment fault says nothing about this tree and must remain retryable.
+    if (!ready) return unknownSize('Change-size counter unavailable.', true);
+    const { CHANGE_SIZE_VERSION, CHANGE_SIZE_DEPENDENCIES } = ready.module;
+    const digest = hash(
+      JSON.stringify([
+        'change-size',
+        CHANGE_SIZE_VERSION,
+        ctx.taskId,
+        ctx.taskStepId,
+        ctx.round,
+        ctx.rerunGeneration ?? 0,
+        invocationId,
+        pass,
+        phase,
+      ]),
+    );
+    const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
     const stored = await ctx.db.query.taskEvents.findFirst({ where: eq(schema.taskEvents.id, id) });
     if (stored) return (stored.payload as unknown as { measurement: SizeMeasurement }).measurement;
-    const measurement = {
-      ...(await measureImplementationSize(ctx, worktreePath, before?.baseCommit)),
-      eventId: id,
-    };
+    const captured = await measureImplementationSize(ctx, worktreePath, before?.baseCommit);
+    ctx.throwIfCancelled();
+    if (captured.retryable) return captured;
+    const measurement = { ...captured, eventId: id };
     const rows = await ctx.db
       .insert(schema.taskEvents)
       .values({
@@ -208,10 +274,9 @@ export async function recordChangeSize(
         taskStepId: ctx.taskStepId,
         eventType: 'change_size.measured',
         payload: {
-          version: 1,
-          counterVersion: 1,
-          runtimeVersion: '0.25.10',
-          grammarPackageVersion: '0.3.1',
+          version: CHANGE_SIZE_VERSION,
+          counterVersion: CHANGE_SIZE_VERSION,
+          ...CHANGE_SIZE_DEPENDENCIES,
           stepId: '07a-code-simplify',
           invocationId,
           round: ctx.round,
@@ -231,8 +296,13 @@ export async function recordChangeSize(
       (winner?.payload as unknown as { measurement?: SizeMeasurement } | undefined)?.measurement ??
       unknownSize()
     );
-  } catch {
-    ctx.logger.warn('Change-size measurement could not be retained; continuing with unknown size');
+  } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
+    ctx.throwIfCancelled();
+    ctx.logger.warn(
+      { err },
+      'Change-size measurement could not be retained; continuing with unknown size',
+    );
     return unknownSize('Measurement could not be retained.');
   }
 }

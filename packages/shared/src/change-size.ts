@@ -3,6 +3,11 @@ import { Parser, Language, type Node, type Tree } from 'web-tree-sitter';
 import { fileURLToPath } from 'node:url';
 
 export const CHANGE_SIZE_VERSION = 1;
+/** Exact dependency pins; the manifest parity control guards upgrades. */
+export const CHANGE_SIZE_DEPENDENCIES = {
+  runtimeVersion: '0.25.10',
+  grammarPackageVersion: '0.3.1',
+} as const;
 export const CHANGE_SIZE_LIMITS = {
   maxBytes: 1024 * 1024,
   maxUnits: 100_000,
@@ -46,6 +51,10 @@ const EXTENSIONS: Record<string, LanguageName> = {
   php: 'php',
   module: 'php',
   inc: 'php',
+  install: 'php',
+  theme: 'php',
+  profile: 'php',
+  engine: 'php',
   ts: 'typescript',
   mts: 'typescript',
   cts: 'typescript',
@@ -296,7 +305,7 @@ function distance(
   }
   const n = endA - start,
     m = endB - start;
-  if (!n || !m) return n + m <= limits.editBudget ? n + m : null;
+  if (!n || !m) return n + m;
   let work = 0;
   const v = new Map<number, number>([[1, 0]]);
   for (let d = 0; d <= Math.min(n + m, limits.editBudget); d++) {
