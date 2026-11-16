@@ -548,8 +548,9 @@ function lockBusyError(err: unknown): never {
   throw err;
 }
 
-/** Saves configuration with its audit row. Private fields record only presence, and an optional
- * secret is encrypted in the same transaction as the audit, never included in metadata. */
+/** Saves configuration with its audit row and returns the previous values read under its lock.
+ * Private fields record only presence, and an optional secret is encrypted in the same
+ * transaction as the audit, never included in metadata. */
 async function saveConfig(
   userId: string,
   route: string,
@@ -558,7 +559,7 @@ async function saveConfig(
     privateFields?: readonly string[];
     secret?: { key: string; value: string; description: string };
   },
-): Promise<void> {
+): Promise<Record<string, ConfigValue>> {
   const entries = Object.entries(fields);
   const lockName =
     route === 'private-endpoint-allowlist'
@@ -618,11 +619,15 @@ async function saveConfig(
         // Returned, not rethrown: a throw would roll the partial row back with the transaction.
         return { event: partial, error };
       }
-      return { event: full };
+      return {
+        event: full,
+        from: Object.fromEntries(changes.map(({ name, from }) => [name, from])),
+      };
     })
     .catch(lockBusyError);
   logAuditEvent(outcome.event);
   if ('error' in outcome) throw outcome.error;
+  return outcome.from;
 }
 
 const mailUpdateSchema = mailSettingsSchema.and(
@@ -1886,8 +1891,8 @@ adminRoutes.put('/config/chrome-mcp-timeout', async (c) => {
 
 const globalPauseSchema = z.object({ paused: z.boolean() });
 
-/** A global hold has no per-task stamp. Preserve it for unsupported pins before
- * releasing the switch, so their delayed jobs cannot mistake the lift for Resume. */
+/** Give unsupported pins a per-task hold, normally before releasing the global switch,
+ * so their delayed jobs cannot mistake the lift for Resume. */
 async function holdUnsupportedTasksForGlobalResume(actorUserId: string) {
   const db = getDb();
   const candidates = await db
@@ -1962,18 +1967,22 @@ adminRoutes.get('/config/global-pause', async (c) => {
 
 adminRoutes.put('/config/global-pause', async (c) => {
   const { paused } = globalPauseSchema.parse(await c.req.json());
-  // Hold transactions finish before saveConfig borrows its connection and config lock:
+  // Normally holds finish before saveConfig borrows its connection and config lock:
   // a lock owner borrowing a second connection can deadlock a saturated pool of saves.
   // Read the stored switch first so an already-off lift stamps no task holds. A concurrent
-  // switch change or a later save failure may leave extra holds on unsupported tasks;
-  // keeping them paused is safe (the worker would otherwise mark their pins dead).
-  const skippedTasks =
-    !paused && parseStored(await configService.getFresh(CONFIG_KEYS.GLOBAL_PAUSE), false) === true
-      ? await holdUnsupportedTasksForGlobalResume(c.get('userId')).catch(lockBusyError)
-      : [];
-  await saveConfig(c.get('userId'), 'global-pause', {
+  // switch-off or a later save failure can leave extra holds. If it turned on after this
+  // read, hold unsupported tasks after the save, outside its lock. This narrows the gap;
+  // a task the worker starts in that gap is fenced dead rather than held.
+  const wasPaused =
+    !paused && parseStored(await configService.getFresh(CONFIG_KEYS.GLOBAL_PAUSE), false) === true;
+  let skippedTasks = wasPaused
+    ? await holdUnsupportedTasksForGlobalResume(c.get('userId')).catch(lockBusyError)
+    : [];
+  const from = await saveConfig(c.get('userId'), 'global-pause', {
     paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
   });
+  if (!paused && !wasPaused && from.paused === true)
+    skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId')).catch(lockBusyError);
   log.info({ paused }, 'global pause switch updated');
   return c.json({ paused, ...(skippedTasks.length ? { skippedTasks } : {}) });
 });

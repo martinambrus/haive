@@ -465,8 +465,8 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
         };
         const count = pool.$client.options.max + 1;
 
-        const statuses = await allSettle(
-          Array.from({ length: count }, () => putConfig('global-pause', { paused: false })),
+        const statuses = await saveOneKeyWithFullPool(
+          Array.from({ length: count }, () => () => putConfig('global-pause', { paused: false })),
         );
 
         expect(statuses).toEqual(Array(count).fill(200));

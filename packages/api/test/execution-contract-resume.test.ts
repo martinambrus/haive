@@ -411,3 +411,37 @@ it('allows an extra unsupported-task hold when another lift turns the switch off
   ]);
   expect(fake.rows(schema.auditEvents)).toHaveLength(2);
 });
+
+it('holds unsupported tasks after saving when the switch turns on after the pre-read', async () => {
+  const fake = setup(guarded, null);
+  h.paused = false;
+  vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
+    h.paused = true;
+    return 'false';
+  });
+  h.beforeLift = () => {
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+  };
+
+  const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+
+  expect(res.status, await res.clone().text()).toBe(200);
+  expect(h.paused).toBe(false);
+  expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+  expect(await res.json()).toEqual({
+    paused: false,
+    skippedTasks: [
+      { taskId: TASK, code: 'invalid-execution-contract', reason: expect.any(String) },
+    ],
+  });
+  expect(fake.rows(schema.taskEvents)).toMatchObject([
+    { taskId: TASK, eventType: 'task.paused', payload: { by: ADMIN, byAdmin: true } },
+  ]);
+  expect(fake.rows(schema.taskEvents)).toHaveLength(1);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { action: 'config.global_pause', metadata: { from: true, to: false } },
+    { targetId: TASK, action: 'task.admin_pause' },
+  ]);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(2);
+});
