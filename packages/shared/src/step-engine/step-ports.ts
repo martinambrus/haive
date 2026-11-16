@@ -197,11 +197,18 @@ export function projectStepPorts(
           contract: { ...STEP_ROLE_REGISTRY[role].contract },
         })),
       });
-    for (const d of DISCOVERY_REQUIREMENTS_INPUTS[id] ?? []) {
-      if (d.input.startsWith('requirements-') && id !== '03b2-humanize-requirements') continue;
+    const requirementsInputs = DISCOVERY_REQUIREMENTS_INPUTS[id] ?? [];
+    // A full stage set is an effective-requirements read; a raw-draft-only
+    // consumer (the humanizer) retains its direct input. Names grant no adapter.
+    const usesEffectiveRequirements = EFFECTIVE_REQUIREMENTS_ROLES.every((role) =>
+      requirementsInputs.some((d) => d.role === role),
+    );
+    for (const d of requirementsInputs) {
+      if (usesEffectiveRequirements && EFFECTIVE_REQUIREMENTS_ROLES.some((role) => role === d.role))
+        continue;
       inputs.push({ ...port(d.role, d.input), optional: d.optional });
     }
-    if ((DISCOVERY_REQUIREMENTS_INPUTS[id] ?? []).some((d) => d.input === 'requirements-humanized'))
+    if (usesEffectiveRequirements)
       inputs.push({
         ...port(EFFECTIVE_REQUIREMENTS_ROLES[0], 'effective-requirements'),
         adapter: 'effective-requirements',
