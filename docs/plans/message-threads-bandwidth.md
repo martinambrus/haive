@@ -1,7 +1,8 @@
 # Message threads and incremental-request transports for agent CLIs
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> Status: Not started. Written 2026-11-10 from `threads.pdf` (a paywalled Medium post; only its
+> Status: Done 2026-11-16. Phase 1 measured (results below); Phase 2 empty; Phase 3 pinned by
+> `packages/worker/test/adapter-transport.test.ts`. Written 2026-11-10 from `threads.pdf` (a paywalled Medium post; only its
 > intro survives in the PDF) plus primary sources listed at the end.
 
 ## 1. What the feature is
@@ -112,6 +113,49 @@ provider setting, and redact/delete debug files that can contain prompts or cred
 request ZDR/HIPAA policy changes to enable a transport. If the CLI exposes no usable diagnostics,
 record unknown and stop that provider's experiment. Re-verify the dated external transport
 contracts in the primary docs below before changing code; they are not stable guarantees.
+
+#### Phase 1 results (2026-11-16)
+
+Method: a session script ran each CLI through the production sandbox path (`createSandboxSpawner`,
+the provider's real image, auth volume and egress) with an in-memory copy of an existing provider
+row, so no row was written. The prompt asked for 8 sequential `echo` tool calls. Bytes are the
+container's own NIC counters (`/sys/class/net/*/statistics`) read by a wrapper after the CLI exits,
+summed over NICs; no TLS interception. Debug output stayed in memory and only matching lines, with
+ids and digits collapsed, were kept.
+
+| CLI | Build | Network | Setting | Up (KB, mean of 2) | Wall (s) | Threaded (inferred from bytes) |
+| --- | --- | --- | --- | ---: | ---: | --- |
+| claude-code | 2.1.325, image `0e46bb22fca8`, `sonnet`, effort low, subscription, `api.anthropic.com` | full | default | 324 | 11.2 | yes |
+| | | full | `CLAUDE_CODE_TETHER_LIVE=1` | 327 | 11.1 | yes |
+| | | full | `CLAUDE_CODE_TETHER_LIVE=0` | 419 | 10.9 | no |
+| | | `none` (squid) | default | 618 | 13.0 | yes |
+| | | `none` (squid) | `=1` | 620 | 12.5 | yes |
+| | | `none` (squid) | `=0` | 1028 | 12.4 | no |
+| codex | 0.152.0, image `f01c3d0f4e4d`, `gpt-5.6-sol`, effort low, ChatGPT account | full and `none` | default | not comparable | 29.1 / 26.8 | websocket |
+
+- claude-code threads by default in both network modes: the default matches forced-on and uploads
+  23% (full) and 40% (squid) less than forced-off. Squid's egress is not blocking it. Token totals
+  agreed within 0.03% across settings, and no wall-clock gain was visible at this size.
+- claude-code's debug file (`--debug-file`) printed no `[tether]` line in any run, although the
+  binary contains them (they mark refusals and fallbacks), so the paired byte comparison is the
+  evidence, so the Threaded column is an inference, not a logged fact. One earlier cold run of the
+  default setting uploaded 139 KB, unexplained; it is lower, so it does not contradict the
+  inference, but it shows upload is not a clean function of the setting. Squid raises upload 1.9x
+  to 2.5x in every setting; not investigated.
+- codex `exec` runs an in-process app-server in this build (`client_name="codex_exec"`,
+  `rpc.transport="in-process"`), and every turn logged
+  `transport="responses_websocket"` after a startup websocket prewarm, with no HTTPS fallback, in
+  both network modes. The standalone `codex app-server` process that steering spawns was not run
+  separately; it shares that client, which the Phase 3 tests pin by its arguments. Its byte counts are dominated by an MCP server from the shared login
+  volume's codex config that `uvx` installs at startup (226 MB down with full network; the `uvx`
+  fetch failed under squid, though 37.6 MB still came down), so they say nothing about the
+  transport.
+- The four `gpt-5.5` codex rows on the dev install fail with `model_not_found` ("not supported
+  when using Codex with a ChatGPT account"); the measurement used a `gpt-5.6-sol` row.
+- grok, amp, agy: not measured. Phase 2 is empty on the claude-code and codex evidence only.
+
+Exit met: claude-code threads by default and codex uses websockets, so Phase 2 is empty and the
+work skips to Phase 3.
 
 ### Phase 2: fix what Phase 1 finds blocked (only if it does)
 
