@@ -16,10 +16,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
 
+import { registryModuleExports } from './registry-module.mjs';
+
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
 const BUILD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const COMMAND_KILL_GRACE_MS = 30_000;
+export const COMMAND_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 const USAGE =
   'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]';
 const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -64,6 +67,7 @@ export function capture(command, args, options) {
       timeout,
       signal: abortSignal,
       killGrace = COMMAND_KILL_GRACE_MS,
+      maxBuffer = COMMAND_MAX_BUFFER_BYTES,
       ...spawnOptions
     } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -91,8 +95,20 @@ export function capture(command, args, options) {
     let size = 0;
     const collect = (chunks) => (chunk) => {
       size += chunk.length;
-      if (size > 32 * 1024 * 1024) {
-        stop(new Error('command output exceeded 32 MiB'));
+      if (size > maxBuffer) {
+        // Stop consuming both pipes immediately, including output during the kill grace.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        stop(
+          Object.assign(
+            new Error(
+              maxBuffer === COMMAND_MAX_BUFFER_BYTES
+                ? 'command output exceeded 32 MiB'
+                : `command output exceeded ${maxBuffer} bytes`,
+            ),
+            { code: 'ENOBUFS' },
+          ),
+        );
       } else chunks.push(chunk);
     };
     if (onOutput) {
@@ -224,6 +240,8 @@ export async function run(
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
       const buffers = new Map();
+      const diagnostics = new Map();
+      let declarationModule;
       let needsNewline = false;
       const onOutput = (chunk, name = 'stdout') => {
         const text = scrub((buffers.get(name) ?? '') + chunk);
@@ -232,6 +250,14 @@ export async function run(
         buffers.set(name, keep ? text.slice(-keep) : '');
         const ready = keep ? text.slice(0, -keep) : text;
         if (ready) {
+          // Let TypeScript resolve conditional exports; explain its missing-declaration
+          // verdict without attempting a second, less complete package resolver.
+          const diagnostic = ((diagnostics.get(name) ?? '') + ready).slice(-8192);
+          declarationModule ??=
+            /TS7016:[^\r\n]*['"](@haive-module\/[a-z0-9-]+(?:\/[a-zA-Z0-9_./-]+)?)['"]/.exec(
+              diagnostic,
+            )?.[1];
+          diagnostics.set(name, diagnostic);
           write(ready);
           needsNewline = !ready.endsWith('\n');
         }
@@ -265,7 +291,13 @@ export async function run(
           : result.signal
             ? `terminated by ${result.signal}`
             : `failed (${result.status ?? 'no exit code'})`;
-        throw new Error(`${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}`);
+        const hint = declarationModule
+          ? `; ${declarationModule} has no resolvable TypeScript declarations: publish the entry's .d.ts file and expose it through package exports (types), or alongside its JavaScript`
+          : '';
+        throw new Error(
+          `${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}${hint}`,
+          { cause: result.error },
+        );
       }
       return result;
     };
@@ -314,6 +346,7 @@ export async function run(
     await command('tar', ['-xf', archive, '-C', tree], { quiet: true });
     rmSync(archive);
     for (const file of [
+      ...(modules.length > 0 ? ['scripts/registry-module.mjs'] : []),
       'scripts/module.mjs',
       'scripts/gen-modules.mjs',
       'scripts/own-module-builder.mjs',
@@ -324,6 +357,10 @@ export async function run(
       try {
         content = readFileSync(join(tree, file), 'utf8');
       } catch {
+        if (file === 'scripts/registry-module.mjs')
+          throw new Error(
+            `preflight ${tag}: the tag's scripts/module.mjs uses metadata-only registry inspection; omitted exports fail with "does not export ./manifest"; select a tag containing the registry-module.mjs fallback`,
+          );
         throw new Error(`preflight ${tag}: missing ${file}`);
       }
       if (!file.endsWith('/Dockerfile')) continue;
@@ -410,13 +447,12 @@ export async function run(
     };
     for (const module of modules.filter((module) => module.source === 'registry')) {
       const spec = `${module.packageName}@${module.version}`;
-      const metadata = await command('pnpm', ['view', spec, 'exports', '--json'], {
+      const exports = await registryModuleExports(spec, {
+        command: (cmd, args, options) => command(cmd, args, { ...options, quiet: true }),
         cwd: tree,
         env: moduleEnv,
-        quiet: true,
+        warn: emit,
       });
-      if (!metadata.stdout.trim()) throw new Error(`pnpm view returned no exports for ${spec}`);
-      const exports = JSON.parse(metadata.stdout);
       if (!exports || exports['./manifest'] === undefined)
         throw new Error('an entitled package does not export ./manifest');
       module.webParts = ['dashboard', 'web'].filter((part) => exports[`./${part}`] !== undefined);

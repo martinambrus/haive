@@ -446,9 +446,16 @@ database or Redis. If the lockfile step fails the `package.json` edits are put b
 `gen-modules` rejects the result (another module in a half-installed state) the edits stay and its
 message names the fix.
 
-The registry form reads the package's exports with `pnpm view` (the lockfile-only step installs
-nothing, so the package is not on disk yet), adds the exact version to the same hosts, and moves a
-held dependency of another version in place. The root `.npmrc` points the `@haive-module` scope at
+The registry form reads the package's exports with `pnpm view`. If registry metadata omits them
+(as GitHub Packages does), it downloads the exact package with `npm pack --ignore-scripts` and
+reads `package/package.json` from the tarball without extracting it or running package scripts.
+Registry inspection during `module add` has a 5 minute per-command timeout, refuses packs larger
+than 100 MiB before tar (bounding the tar step, not the download), and reads only the first
+`package/package.json` member.
+It checks the packed name and version, removes the temporary package and npm cache, then adds
+the exact version to the same hosts and moves a held dependency of another version in place.
+
+The root `.npmrc` points the `@haive-module` scope at
 GitHub Packages (`https://npm.pkg.github.com`) and holds no token: the token never lives in the
 repository, not even as a `${NPM_TOKEN}` placeholder (an unset one makes pnpm skip the whole file).
 On the host, put the auth line in your user `.npmrc` (`~/.npmrc`).
@@ -475,14 +482,39 @@ after a remove.
 
 ## Packaging a registry module
 
+GitHub Packages requires the npm scope to name an existing GitHub user or organization.
+`@haive-module/<id>` packages belong to the `haive-module` organization; publishing needs
+permission to create packages there as well as a classic personal access token with
+`write:packages`. A token's scopes alone do not grant access to an organization, and a
+`repository` URL under another owner does not change the package's owner. See
+[GitHub's npm registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#publishing-a-package).
+
+Publish with `npm publish --registry=https://npm.pkg.github.com --access=restricted`;
+for a prerelease version, also select a dist-tag with `--tag <tag>`. Verify the result with
+`gh api /orgs/haive-module/packages/npm/<id>`: `owner.login` must be `haive-module` and
+`visibility` must be `private`. Keep the token in a private user npmrc outside the checkout,
+never in a tracked file. Installing registry modules and building vendor channels need
+`read:packages` and read permission on each entitled package. Package cleanup requires `delete:packages`,
+`read:packages` and package admin permission. Private git install sources use a token with
+read access to their repository; they are independent of npm publication and may use
+repositories owned by another account while retaining the module package name. None of
+these normal publish, build or install paths needs `delete_repo`. That scope is needed
+only to delete a throwaway repository created for a release-path test. See
+[GitHub's package permissions](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages#about-scopes-and-permissions-for-package-registries).
+
 A packed module's `workspace:*` dependencies become `0.1.0`, and the core packages are never
 published, so the root `package.json` pins `@haive/shared`, `@haive/database` and `@haive/web-kit` to
 `workspace:*` in `pnpm.overrides`: without them pnpm looks the core packages up on registry.npmjs.org
 (and could install somebody else's). A registry module ships `files: ["dist"]`, takes `@haive/*`,
 `hono`, `drizzle-orm` and `zod` (and `react`/`next` for web parts) as peer dependencies, and is named
-`@haive-module/<id>` with `<id>` equal to its manifest id. `gen-modules` checks the name only; the id
-is checked when the api and worker load the module, so a mismatch builds and they then refuse to
-start, naming the package.
+`@haive-module/<id>` with `<id>` equal to its manifest id. Ship TypeScript declarations for every
+exported entry alongside its JavaScript, since the host API and worker builds typecheck those
+imports. `gen-modules` checks the name only; the id is checked when the api and worker load
+the module, so a mismatch builds and they then refuse to start, naming the package. A missing
+registry module declaration reported by TypeScript as `TS7016` also gets a channel-build
+error naming the entry and explaining how to publish and expose its `.d.ts` file.
+TypeScript's package-export resolution determines whether an entry has usable declarations,
+including entries whose exports use a string.
 
 ## Step SDK
 
@@ -833,14 +865,21 @@ step that reads its record.
   (whole comment lines ignored, as Docker ignores them). v0.2.0 and older are refused
   (exit 2, the missing or unreadable file or the missing stage named). The working tree's `scripts/channel-gate.mjs` and
   `scripts/smoke/scan-image.sh` must be clean, because the gate runs from this checkout, not from the tag.
+- Compatibility: a channel build runs the tag's own `scripts/module.mjs`. Tags cut before the
+  `registry-module.mjs` fallback keep the metadata-only path: omitted exports fail with
+  "does not export ./manifest". When registry entitlements are requested, preflight requires that
+  tag's tree to contain `scripts/registry-module.mjs`, checked before `scripts/module.mjs`;
+  otherwise it exits 2 before registry access and asks for a tag containing the fallback.
 - Modules: `module add` runs once per entitled package inside the tree. A `modules/<dir>` counts as a local module
   only as `gen-modules` counts it: its package exports `./manifest` and the tag's api `package.json` depends on
   it. Its web parts are read from its `./dashboard` and `./web` exports; a folder without `package.json` is
   skipped, an unreadable or malformed one stops the build with its path named.
-- Token: it reaches pnpm and BuildKit only as a private 0600 `.npmrc` in scratch (`--secret id=npmrc`), never
-  argv, env or a build ARG. Streamed output is scrubbed of it across chunk boundaries. Scratch, the pnpm cache
-  (`XDG_CACHE_HOME`) and the secret are removed on every path; a cleanup failure prints the leftover path and
-  keeps the exit code.
+- Token: pnpm and `npm pack` read it through a private 0600 `.npmrc` in scratch, selected by
+  `NPM_CONFIG_USERCONFIG`; BuildKit reads that file through `--secret id=npmrc`. Only the file's path
+  reaches argv or env; the token stays out of argv, env and build ARGs. Streamed output is scrubbed of it
+  across chunk boundaries. Scratch, the pnpm cache (`XDG_CACHE_HOME`) and the secret are removed on every
+  path. Each registry-module inspection also removes its separate scratch directory holding the tarball
+  and npm cache in `finally`. A cleanup failure prints the leftover path and keeps the original result.
 - Images: api and worker are built with `--target production`, `--load`, `HAIVE_VERSION` and the build
   platform, tagged `<registry>/haive-<channel>-<host>:<version>`. The builder
   (`docker/own-module-builder/Dockerfile`) is built the same way from the same prepared tree as

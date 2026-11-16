@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
 import { makeTree, names, registry } from './tree.mjs';
 
@@ -286,6 +288,110 @@ describe('module add @haive-module/<id>@<version>', () => {
     assert.match(out.stdout, /Loaded/);
   });
 
+  it('adds a module through npm pack when pnpm view omits exports', (t) => {
+    const tree = makeTree(t);
+    const before = hosts(tree);
+    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+      STUB_PNPM_VIEW: '',
+      STUB_NPM_EXPORTS: viewOf(['./manifest']),
+    });
+    assert.equal(out.status, 0, out.stderr);
+    for (const rel of HOSTS.slice(0, 2)) {
+      assert.equal(JSON.parse(tree.read(rel)).dependencies['@haive-module/foo'], '1.0.0');
+      assert.equal(tree.read(rel).replace(REGISTRY_LINE, ''), before[rel]);
+    }
+    assert.equal(tree.read(HOSTS[2]), before[HOSTS[2]]);
+    assert.deepEqual(tree.pnpmCalls(), [viewCall(tree), installFor(tree)]);
+    assert.equal(tree.npmCalls().length, 1);
+    assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
+    assert.match(out.stdout, /pnpm docker rebuild/);
+    assert.match(out.stdout, /Loaded/);
+  });
+
+  it('gives tar its own capture cap and preserves the manifest limit error', (t) => {
+    const tree = makeTree(t);
+    const preload = join(tree.root, 'scripts', 'cap-preload.mjs');
+    const log = join(tree.root, 'scripts', 'cap-call.json');
+    writeFileSync(
+      preload,
+      `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { writeFileSync } from 'node:fs';
+const original = childProcess.spawnSync;
+childProcess.spawnSync = (cmd, args, options) => {
+  if (cmd === 'tar' && args.includes('-xzOf')) {
+    writeFileSync(${JSON.stringify(log)}, JSON.stringify({ maxBuffer: options.maxBuffer }));
+    return original(cmd, args, { ...options, maxBuffer: 64 });
+  }
+  return original(cmd, args, options);
+};
+syncBuiltinESMExports();
+`,
+    );
+    const before = tree.snapshot();
+    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+      NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+      STUB_PNPM_VIEW: '',
+      STUB_NPM_EXPORTS: viewOf(['./manifest']),
+    });
+    assert.equal(out.status, 1, out.stderr);
+    assert.match(out.stderr, /packed module manifest exceeds 1 MiB: @haive-module\/foo@1\.0\.0/);
+    assert.equal(JSON.parse(readFileSync(log, 'utf8')).maxBuffer, 1024 * 1024);
+    assert.deepEqual(tree.snapshot(), before);
+    assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
+    assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
+  });
+
+  for (const [cmd, marker] of [
+    ['pnpm', 'view'],
+    ['npm', 'pack'],
+    ['tar', '-xzOf'],
+  ]) {
+    it(`refuses a ${cmd} spawnSync timeout without changing the tree`, (t) => {
+      const tree = makeTree(t);
+      const preload = join(tree.root, 'scripts', 'timeout-preload.mjs');
+      const log = join(tree.root, 'scripts', 'timeout-call.json');
+      // Replace only the registry command; normal stub processes and tar packing still run.
+      writeFileSync(
+        preload,
+        `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { writeFileSync } from 'node:fs';
+const original = childProcess.spawnSync;
+childProcess.spawnSync = (cmd, args, options) => {
+  if (cmd === ${JSON.stringify(cmd)} && args.includes(${JSON.stringify(marker)})) {
+    writeFileSync(${JSON.stringify(log)}, JSON.stringify({ cmd, args, timeout: options.timeout }));
+    return { status: null, stdout: '', stderr: '', error: Object.assign(
+      new Error('spawnSync ' + cmd + ' ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
+  }
+  return original(cmd, args, options);
+};
+syncBuiltinESMExports();
+`,
+      );
+      const before = tree.snapshot();
+      const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+        NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        STUB_PNPM_VIEW: '',
+        STUB_NPM_EXPORTS: viewOf(['./manifest']),
+      });
+      assert.equal(out.status, 1, out.stderr);
+      assert.match(out.stderr, new RegExp(`${cmd} .*failed: spawnSync ${cmd} ETIMEDOUT`));
+      const call = JSON.parse(readFileSync(log, 'utf8'));
+      assert.equal(call.timeout, 5 * 60 * 1000);
+      assert.deepEqual(tree.snapshot(), before);
+      assert.deepEqual(tree.pnpmCalls(), cmd === 'pnpm' ? [] : [viewCall(tree)]);
+      if (cmd === 'npm')
+        assert.equal(existsSync(call.args[call.args.indexOf('--pack-destination') + 1]), false);
+      if (cmd === 'tar') {
+        assert.equal(tree.npmCalls().length, 1);
+        assert.equal(existsSync(dirname(call.args[call.args.indexOf('-xzOf') + 1])), false);
+      }
+    });
+  }
+
   it('adds it to web too when the package exports ./web', (t) => {
     const tree = makeTree(t);
     const out = add(tree, APP);
@@ -366,18 +472,58 @@ describe('module add @haive-module/<id>@<version>', () => {
   it('refuses a package that publishes no exports at all', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();
-    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0']);
+    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], { STUB_PNPM_VIEW: '' });
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /\.\/manifest/);
     assert.deepEqual(tree.snapshot(), before);
+    assert.equal(tree.npmCalls().length, 1);
+    assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
   });
+
+  for (const [label, env, message] of [
+    [
+      'an oversized pack',
+      { STUB_NPM_SIZE: String(100 * 1024 * 1024 + 1) },
+      /packed module exceeds size limit/,
+    ],
+    [
+      'npm pack failure',
+      { STUB_NPM_EXIT: '1' },
+      /npm pack @haive-module\/foo@1\.0\.0 .*failed: stub npm pack failure/,
+    ],
+    [
+      'a symlink manifest member',
+      { STUB_NPM_SYMLINK: '1' },
+      /packed module has no package\/package\.json: @haive-module\/foo@1\.0\.0/,
+    ],
+    [
+      'a parent-traversing pack filename',
+      { STUB_NPM_FILENAME: '../x.tgz' },
+      /could not identify the packed module/,
+    ],
+  ]) {
+    it(`refuses ${label}, cleans scratch and leaves the tree untouched`, (t) => {
+      const tree = makeTree(t);
+      const before = tree.snapshot();
+      const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0'], {
+        STUB_PNPM_VIEW: '',
+        ...env,
+      });
+      assert.notEqual(out.status, 0);
+      assert.match(out.stderr, message);
+      assert.deepEqual(tree.snapshot(), before);
+      assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
+      assert.equal(tree.npmCalls().length, 1);
+      assert.equal(existsSync(tree.npmCalls()[0].scratch), false);
+    });
+  }
 
   it('refuses when pnpm view fails, says so, writes nothing and runs no lockfile step', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();
     const out = add(tree, APP, '@haive-module/foo@1.0.0', { STUB_PNPM_VIEW_EXIT: '1' });
     assert.notEqual(out.status, 0);
-    assert.match(out.stderr, /pnpm view @haive-module\/foo@1\.0\.0 exports failed/);
+    assert.match(out.stderr, /pnpm view @haive-module\/foo@1\.0\.0 exports --json failed/);
     assert.match(out.stderr, /E404/);
     assert.deepEqual(tree.snapshot(), before);
     assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);

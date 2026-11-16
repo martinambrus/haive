@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { run } from '../build-channel.mjs';
+import { COMMAND_MAX_BUFFER_BYTES, run } from '../build-channel.mjs';
 import { parseExpect } from '../channel-gate.mjs';
 
 const TOKEN = 't351-secret-that-must-never-be-printed';
@@ -25,10 +25,15 @@ function seedTree(tree, config = {}) {
   for (const file of [
     'scripts/module.mjs',
     'scripts/gen-modules.mjs',
+    'scripts/registry-module.mjs',
     'scripts/own-module-builder.mjs',
   ]) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
-    if (config.missingTool !== file) writeFileSync(join(tree, file), '');
+    if (
+      config.missingTool !== file &&
+      !(file === 'scripts/registry-module.mjs' && config.legacyModuleInstaller)
+    )
+      writeFileSync(join(tree, file), '');
   }
   for (const host of ['api', 'worker', 'web', 'builder']) {
     const file =
@@ -120,6 +125,18 @@ function fixture(t, config = {}) {
       writeFileSync(output, 'archive');
       return ok();
     }
+    if (cmd === 'npm') return ok(JSON.stringify([{ filename: 'demo.tgz', size: 256 }]));
+    if (cmd === 'tar' && args.includes('package/package.json'))
+      return (
+        config.manifestResult ??
+        ok(
+          JSON.stringify({
+            name: '@haive-module/demo',
+            version: '1.0.0',
+            exports: { './manifest': './dist/manifest.js', './web': './dist/web.js' },
+          }),
+        )
+      );
     if (cmd === 'tar') {
       const tree = args[args.indexOf('-C') + 1];
       mkdirSync(join(tree, 'scripts'), { recursive: true });
@@ -263,6 +280,52 @@ function fixture(t, config = {}) {
     },
   };
 }
+
+for (const stream of ['stdout', 'stderr']) {
+  test(`explains missing registry declarations across ${stream} chunks`, async (t) => {
+    const f = fixture(t, {
+      buildFailure: true,
+      buildChunks: [
+        [
+          'src/modules.generated.ts(3,16): error TS7016: Could not find a declaration file for mod',
+          stream,
+        ],
+        ['unrelated progress\n', stream === 'stdout' ? 'stderr' : 'stdout'],
+        ["ule '@haive-module/demo/manifest'.\n", stream],
+      ],
+    });
+    assert.equal(await f.execute(), 2);
+    assert.match(
+      f.output.join(''),
+      /demo\/manifest has no resolvable TypeScript declarations: publish the entry's \.d\.ts file/,
+    );
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    assert.equal(existsSync(f.scratch), false);
+  });
+}
+
+test('explains TS7016 with different wording around the quoted module name', async (t) => {
+  const f = fixture(t, {
+    buildFailure: true,
+    buildChunks: [
+      [
+        'error TS7016: Declarations unavailable: "@haive-module/demo/manifest" needs types.\n',
+        'stdout',
+      ],
+    ],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.output.join(''), /demo\/manifest has no resolvable TypeScript declarations/);
+});
+
+test('does not diagnose declarations for unrelated TypeScript errors', async (t) => {
+  const f = fixture(t, {
+    buildFailure: true,
+    buildChunks: [["error TS2307: Cannot find module '@haive-module/demo/manifest'.\n", 'stdout']],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.ok(!f.output.join('').includes('publish the entry'));
+});
 
 for (const tag of ['v1.2.3-rc.1', 'v1.2.3+meta', '1.2.3', 'v01.2.3']) {
   test(`refuses non-final tag ${tag} before spawning`, async (t) => {
@@ -527,6 +590,31 @@ test('invalid local package id and local/registry collision fail before builds',
   }
 });
 
+test('preflight refuses a tag without registry-module.mjs before registry access', async (t) => {
+  const f = fixture(t, {
+    legacyModuleInstaller: true,
+    emptyMetadata: true,
+    modules: ['@haive-module/demo@1.0.0'],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.output.join(''), /preflight v1\.2\.3:.*tag.*scripts\/module\.mjs.*metadata-only/);
+  assert.match(f.output.join(''), /does not export \.\/manifest/);
+  assert.match(f.output.join(''), /select a tag containing.*registry-module\.mjs/);
+  assert.ok(!f.calls.some((c) => ['pnpm', 'npm', 'docker', process.execPath].includes(c.cmd)));
+  assert.equal(existsSync(f.scratch), false);
+  assert.equal(existsSync(join(f.out, 'build-record.json')), false);
+});
+
+test('preflight accepts a helper file without matching installer import text', async (t) => {
+  const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'] });
+  assert.equal(await f.execute(), 0, f.output.join(''));
+});
+
+test('metadata-only tags remain usable when no registry modules are requested', async (t) => {
+  const f = fixture(t, { legacyModuleInstaller: true });
+  assert.equal(await f.execute(), 0);
+});
+
 for (const missingTool of [
   'scripts/module.mjs',
   'scripts/gen-modules.mjs',
@@ -753,17 +841,74 @@ for (const dirtyGate of [
   });
 }
 
-test('empty pnpm metadata has a named refusal and isolated cache', async (t) => {
+test('GitHub metadata without exports reads the tarball and builds its web part', async (t) => {
   const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'], emptyMetadata: true });
-  assert.equal(await f.execute(), 2);
-  assert.ok(
-    f.logs.some(
-      (line) =>
-        line.includes('pnpm view returned no exports') && line.includes('@haive-module/demo@1.0.0'),
-    ),
-  );
+  assert.equal(await f.execute(), 0, f.logs.join('\n'));
   const query = f.calls.find((c) => c.cmd === 'pnpm');
   assert.equal(query.options.env.XDG_CACHE_HOME, join(f.scratch, 'cache'));
+  const pack = f.calls.find((c) => c.cmd === 'npm');
+  assert.ok(pack.args.includes('--ignore-scripts'));
+  assert.equal(existsSync(pack.args.at(-1)), false);
+  const manifest = f.calls.find((c) => c.cmd === 'tar' && c.args.includes('package/package.json'));
+  assert.equal(manifest.options.maxBuffer, 1024 * 1024);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.cmd === 'docker' &&
+        c.args.includes('build') &&
+        c.args.includes(join(f.scratch, 'tree/packages/web/Dockerfile')),
+    ),
+  );
+});
+
+test('manifest capture overflow keeps the manifest limit diagnostic in a channel build', async (t) => {
+  const f = fixture(t, {
+    modules: ['@haive-module/demo@1.0.0'],
+    emptyMetadata: true,
+    manifestResult: {
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('overflow'), { code: 'ENOBUFS' }),
+    },
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.logs.join('\n'), /packed module manifest exceeds 1 MiB/);
+  assert.ok(!f.calls.some((c) => c.cmd === 'docker' && c.args[0] === 'buildx'));
+});
+
+test('pins the default command capture limit to 32 MiB', () => {
+  assert.equal(COMMAND_MAX_BUFFER_BYTES, 32 * 1024 * 1024);
+});
+
+test('default capture enforces a per-command byte cap and stops reading after overflow', async (t) => {
+  const { capture } = await import('../build-channel.mjs');
+  let child;
+  let pipesClosedOnStop = false;
+  const original = ChildProcess.prototype.spawn;
+  const kill = ChildProcess.prototype.kill;
+  t.mock.method(ChildProcess.prototype, 'spawn', function (options) {
+    const result = original.call(this, options);
+    child = this;
+    return result;
+  });
+  t.mock.method(ChildProcess.prototype, 'kill', function (signal) {
+    pipesClosedOnStop = this.stdout.destroyed && this.stderr.destroyed;
+    return kill.call(this, signal);
+  });
+  const maxBuffer = 128;
+  const result = await capture(process.execPath, ['-e', "process.stdout.write('x'.repeat(4096))"], {
+    maxBuffer,
+    timeout: 1000,
+    killGrace: 10,
+  });
+  assert.equal(result.error?.code, 'ENOBUFS');
+  assert.ok(Buffer.byteLength(result.stdout) <= maxBuffer);
+  assert.ok(child.stdout.bytesRead > maxBuffer);
+  assert.ok(child.stdout.bytesRead <= maxBuffer + 64 * 1024, 'at most one pipe chunk of slack');
+  assert.equal(pipesClosedOnStop, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
 });
 
 test('split tokens are scrubbed while build output streams', async (t) => {
@@ -1175,16 +1320,23 @@ for (const trigger of ['overflow', 'abort', 'timeout']) {
           '-e',
           `
             process.on('SIGTERM', () => { ${cooperative ? 'process.exit(0);' : ''} });
-            process.stdout.write(${trigger === 'overflow' ? "Buffer.alloc(33 * 1024 * 1024, 'x')" : "'ready\\n'"});
+            // Closing the capture pipes must not turn an ignored SIGTERM into an EPIPE exit.
+            process.stdout.on('error', () => {});
+            process.stdout.write(${trigger === 'overflow' ? "Buffer.alloc(4096, 'x')" : "'ready\\n'"});
             setInterval(() => {}, 1000);
           `,
         ],
-        { timeout: trigger === 'timeout' ? 1000 : 0, killGrace: 200, signal: controller.signal },
+        {
+          timeout: trigger === 'timeout' ? 1000 : 0,
+          killGrace: 200,
+          signal: controller.signal,
+          ...(trigger === 'overflow' ? { maxBuffer: 128 } : {}),
+        },
       );
       assert.equal(watch.fired, false, 'capture did not close before the watchdog');
       assert.equal(result.timedOut, trigger === 'timeout');
       if (trigger === 'overflow')
-        assert.match(result.error?.message ?? '', /output exceeded 32 MiB/);
+        assert.match(result.error?.message ?? '', /output exceeded 128 bytes/);
       if (trigger === 'abort') assert.ok(result.error, 'aborting must report a failure');
       if (cooperative) {
         assert.equal(result.status, 0);

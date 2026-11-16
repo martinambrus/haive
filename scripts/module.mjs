@@ -3,8 +3,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import local from './local-modules.cjs';
+import { registryModuleExports } from './registry-module.mjs';
 import { publicModuleLock } from './public-module-lock.mjs';
 
+const REGISTRY_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const [command, target, ...extra] = process.argv.slice(2);
 
@@ -99,20 +101,31 @@ if (registry === null) {
   // A folder may already carry its registry name; it is linked through workspace:* all the same.
   if (modulePackage?.name === `@haive-module/${id}`) name = modulePackage.name;
 } else if (command === 'add') {
-  // --lockfile-only installs nothing and pnpm's resolution metadata omits exports, so ask the registry for the full document.
-  const view = spawnSync('pnpm', ['view', `${name}@${version}`, 'exports', '--json'], {
-    cwd: root,
-    encoding: 'utf8',
-  });
-  if (view.status !== 0) {
-    fail(
-      `pnpm view ${name}@${version} exports failed${view.error ? `: ${view.error.message}` : `:\n${view.stderr}`}`,
-    );
+  try {
+    modulePackage = {
+      name,
+      exports: await registryModuleExports(`${name}@${version}`, {
+        cwd: root,
+        env: process.env,
+        command: async (cmd, args, options) => {
+          const result = spawnSync(cmd, args, {
+            ...options,
+            encoding: 'utf8',
+            maxBuffer: options.maxBuffer ?? 2 * 1024 * 1024,
+            timeout: REGISTRY_COMMAND_TIMEOUT_MS,
+          });
+          if (result.status !== 0 || result.error)
+            throw new Error(
+              `${cmd} ${args.join(' ')} failed: ${result.error?.message ?? result.stderr}`,
+              { cause: result.error },
+            );
+          return result;
+        },
+      }),
+    };
+  } catch (error) {
+    fail(error.message);
   }
-  modulePackage = {
-    name,
-    exports: view.stdout.trim() === '' ? undefined : JSON.parse(view.stdout),
-  };
 }
 if (command === 'add') {
   if (modulePackage === null) fail(`modules/${id}/package.json not found`);
