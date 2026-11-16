@@ -5,6 +5,7 @@ import type { HostApi } from '@haive/web-kit/host';
 import { StatsPage } from '../../../modules/statistics/src/web/stats-page';
 import { TimeCostReport } from '../../../modules/statistics/src/web/components/time-cost-report';
 import { buildTimeCostReport } from '@haive/shared/stats';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 const h = vi.hoisted(() => ({ search: 'preset=7d&tab=plan', replace: vi.fn() }));
 vi.mock('next/navigation', () => ({
@@ -20,6 +21,37 @@ afterEach(() => {
   cleanup();
   h.search = 'preset=7d&tab=plan';
   h.replace.mockReset();
+});
+
+it('discloses the idle-reading, iframe and historical limits through the host markdown renderer', () => {
+  const report = buildTimeCostReport({ tasks: [], steps: [], events: [], invocations: [] });
+  render(
+    <TimeCostReport
+      MarkdownView={MarkdownView}
+      report={{
+        ...report,
+        rows: [],
+        excludedLegacyInvocations: 0,
+        scope: { providerIgnored: false },
+        costDisplay: { currency: 'USD', usdPerUnit: 1, rateDate: null, approximate: false },
+      }}
+    />,
+  );
+  const note = screen.getByRole('heading', { name: 'What these figures cover' }).parentElement!;
+  const body = note.querySelector('.haive-md')!;
+  expect(body).not.toBeNull();
+  expect(body.textContent).toContain('estimated reading allowance of 1–5 minutes');
+  expect(body.textContent).toContain('idle reading beyond that allowance is not counted');
+  expect(body.textContent).toContain(
+    'Focus in an embedded iframe, such as the IDE, can extend an unexpired allowance to 15 minutes without restarting its clock',
+  );
+  expect(body.textContent).toContain(
+    'Input inside a cross-origin iframe does not renew that allowance, so longer editing can be undercounted',
+  );
+  expect(body.textContent).toContain(
+    'Human active figures recorded before idle detection was introduced are not directly comparable with later figures',
+  );
+  expect(body.textContent).toContain('historical totals have not been recalculated');
 });
 
 it('shows durable recording coverage, suite totals and incomplete checks alongside historical dashes', () => {
@@ -48,6 +80,7 @@ it('shows durable recording coverage, suite totals and incomplete checks alongsi
   });
   render(
     <TimeCostReport
+      MarkdownView={MarkdownView}
       report={{
         ...report,
         rows: report.rows.map((r) => ({ ...r, title: r.taskId, repository: null })),
@@ -81,6 +114,7 @@ it('shows absent task timing as unmeasured even though summary reconciliation to
   });
   render(
     <TimeCostReport
+      MarkdownView={MarkdownView}
       report={{
         ...report,
         rows: report.rows.map((r) => ({ ...r, title: 'Historical task', repository: null })),
@@ -113,7 +147,9 @@ it('loads only when opened, carries the filters and rejects an old window respon
     return null;
   });
   const api = { get } as unknown as HostApi;
-  const view = render(<StatsPage moduleId="statistics" path={[]} api={api} />);
+  const view = render(
+    <StatsPage moduleId="statistics" path={[]} api={api} MarkdownView={MarkdownView} />,
+  );
   await waitFor(() =>
     expect(get.mock.calls.some(([path]) => path.includes('/summary'))).toBe(true),
   );
@@ -121,10 +157,14 @@ it('loads only when opened, carries the filters and rejects an old window respon
   fireEvent.click(screen.getByRole('button', { name: 'Time & cost report' }));
   expect(h.replace.mock.calls[0]?.[0]).toContain('tab=report');
   h.search = 'preset=7d&tab=report';
-  view.rerender(<StatsPage moduleId="statistics" path={[]} api={api} />);
+  view.rerender(
+    <StatsPage moduleId="statistics" path={[]} api={api} MarkdownView={MarkdownView} />,
+  );
   await waitFor(() => expect(finishOld).toBeTypeOf('function'));
   h.search += '&repositoryId=repo2';
-  view.rerender(<StatsPage moduleId="statistics" path={[]} api={api} />);
+  view.rerender(
+    <StatsPage moduleId="statistics" path={[]} api={api} MarkdownView={MarkdownView} />,
+  );
   await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('new window'));
   finishOld({ marker: 'old window' });
   await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('new window'));
@@ -153,6 +193,7 @@ it('renders aggregate command coverage and preserves each mixed-population row l
   });
   render(
     <TimeCostReport
+      MarkdownView={MarkdownView}
       report={{
         ...report,
         rows: report.rows.map((r) => ({ ...r, title: r.taskId, repository: null })),
@@ -180,13 +221,17 @@ it('caches a loaded report across tab reopens and lazily reloads changed windows
     return null;
   });
   const api = { get } as unknown as HostApi;
-  const view = render(<StatsPage moduleId="statistics" path={[]} api={api} />);
+  const view = render(
+    <StatsPage moduleId="statistics" path={[]} api={api} MarkdownView={MarkdownView} />,
+  );
   await waitFor(() => expect(screen.getByTestId('report').textContent).toBe('1'));
 
   const visit = async (search: string) => {
     h.search = search;
     await act(async () => {
-      view.rerender(<StatsPage moduleId="statistics" path={[]} api={api} />);
+      view.rerender(
+        <StatsPage moduleId="statistics" path={[]} api={api} MarkdownView={MarkdownView} />,
+      );
     });
   };
   await visit('preset=7d&tab=plan');

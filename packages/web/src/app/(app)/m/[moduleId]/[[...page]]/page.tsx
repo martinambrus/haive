@@ -17,7 +17,9 @@ export default function ModulePage() {
   const route = resolveModuleRoute(moduleWebPages, modules, params.moduleId, path);
   switch (route.kind) {
     case 'component':
-      return <route.Page moduleId={params.moduleId} path={path} api={api} />;
+      return (
+        <route.Page moduleId={params.moduleId} path={path} api={api} MarkdownView={MarkdownView} />
+      );
     case 'not-found':
       notFound();
     case 'loading':

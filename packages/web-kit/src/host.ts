@@ -1,3 +1,5 @@
+import type { ComponentType } from 'react';
+
 export interface HostApi {
   get<T>(path: string): Promise<T>;
   post<T>(path: string, body?: unknown): Promise<T>;
@@ -17,5 +19,17 @@ export interface HostApiError extends Error {
   body?: unknown;
 }
 
-export type ModulePageProps = { moduleId: string; path: string[]; api: HostApi };
+/** The host's prose renderer, shared without importing the host application. */
+export type HostMarkdownView = ComponentType<{
+  body: string;
+  className?: string;
+  enhanced?: boolean;
+}>;
+
+export type ModulePageProps = {
+  moduleId: string;
+  path: string[];
+  api: HostApi;
+  MarkdownView: HostMarkdownView;
+};
 export type ModuleDashboardWidgetProps = { moduleId: string; api: HostApi };

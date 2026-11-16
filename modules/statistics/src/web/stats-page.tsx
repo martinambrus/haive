@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { useRouter, useSearchParams } from 'next/navigation';
-import type { HostApi, ModulePageProps } from '@haive/web-kit/host';
+import type { ModulePageProps } from '@haive/web-kit/host';
 import { Card, CardDescription, CardHeader, CardTitle, Input } from '@haive/web-kit/ui';
 import { TabNav } from '@haive/web-kit/tabs';
 import { usePageTitle } from '@haive/web-kit/use-page-title';
@@ -301,17 +301,17 @@ function isTab(v: string | null): v is Tab {
   return !!v && (TABS as readonly string[]).includes(v);
 }
 
-export function StatsPage({ moduleId, api }: ModulePageProps) {
+export function StatsPage({ moduleId, api, MarkdownView }: ModulePageProps) {
   return (
     // useSearchParams needs a Suspense boundary to keep the route from opting the whole page
     // out of static rendering.
     <Suspense fallback={<div className="text-sm text-neutral-500">Loading...</div>}>
-      <StatsPageInner moduleId={moduleId} api={api} />
+      <StatsPageInner moduleId={moduleId} api={api} MarkdownView={MarkdownView} />
     </Suspense>
   );
 }
 
-function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
+function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, 'path'>) {
   usePageTitle('Statistics');
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -702,7 +702,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
 
       {tab === 'report' &&
         (report?.params === params ? (
-          <TimeCostReport report={report.data} />
+          <TimeCostReport report={report.data} MarkdownView={MarkdownView} />
         ) : reportError?.params === params ? (
           <div className="text-sm text-neutral-400">
             <p>{reportError.message}</p>

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ModulePageProps } from '@haive/web-kit/host';
 import { api } from '@/lib/api-client';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import ModulePage from './page';
 
 const received: ModulePageProps[] = [];
@@ -40,12 +41,13 @@ describe('module route page', () => {
     listing.error = null;
   });
 
-  it('passes the host api to the resolved page component', () => {
+  it('passes the host api and prose renderer to the resolved page component', () => {
     expect(renderToStaticMarkup(<ModulePage />)).toBe('<p>page-stats</p>');
     expect(received).toHaveLength(1);
     expect(received[0]!.moduleId).toBe('stats');
     expect(received[0]!.path).toEqual(['detail']);
     expect(received[0]!.api).toBe(api);
+    expect(received[0]!.MarkdownView).toBe(MarkdownView);
   });
 
   it('shows a loading state, not a 404, for a path no compiled page owns', () => {
