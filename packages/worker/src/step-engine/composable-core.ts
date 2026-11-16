@@ -862,8 +862,8 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     ? {
         consumesRoles: [
           ...(CORE_STAGE_INPUTS[entry.stepId] ?? []),
-          ...(entry.consumesRoles ?? []),
           ...(CHECK_RESULT_INPUTS[entry.stepId] ?? []),
+          ...(entry.consumesRoles ?? []),
         ],
       }
     : {}),
@@ -964,8 +964,8 @@ export function assertDiscoveryRequirementsPortDeclarations(
       throw new Error(`discovery-requirements-port-provider-invalid: ${role}`);
   }
   for (const e of entries) {
-    const inputs = (e.consumesRoles ?? []).filter(
-      (p) => [DISCOVERY_ROLE, ...Object.values(REQUIREMENTS_ROLES)].includes(p.role as never),
+    const inputs = (e.consumesRoles ?? []).filter((p) =>
+      [DISCOVERY_ROLE, ...Object.values(REQUIREMENTS_ROLES)].includes(p.role as never),
     );
     if (JSON.stringify(inputs) !== JSON.stringify(DISCOVERY_REQUIREMENTS_INPUTS[e.stepId] ?? []))
       throw new Error(`discovery-requirements-port-input-invalid: ${e.stepId}`);
