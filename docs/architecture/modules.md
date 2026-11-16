@@ -446,9 +446,13 @@ database or Redis. If the lockfile step fails the `package.json` edits are put b
 `gen-modules` rejects the result (another module in a half-installed state) the edits stay and its
 message names the fix.
 
-The registry form reads the package's exports with `pnpm view` (the lockfile-only step installs
-nothing, so the package is not on disk yet), adds the exact version to the same hosts, and moves a
-held dependency of another version in place. The root `.npmrc` points the `@haive-module` scope at
+The registry form reads the package's exports with `pnpm view`. If registry metadata omits them
+(as GitHub Packages does), it downloads the exact package with `npm pack --ignore-scripts` and
+reads `package/package.json` from the tarball without extracting it or running package scripts.
+It checks the packed name and version, removes the temporary package and npm cache, then adds
+the exact version to the same hosts and moves a held dependency of another version in place.
+
+The root `.npmrc` points the `@haive-module` scope at
 GitHub Packages (`https://npm.pkg.github.com`) and holds no token: the token never lives in the
 repository, not even as a `${NPM_TOKEN}` placeholder (an unset one makes pnpm skip the whole file).
 On the host, put the auth line in your user `.npmrc` (`~/.npmrc`).
@@ -475,14 +479,39 @@ after a remove.
 
 ## Packaging a registry module
 
+GitHub Packages requires the npm scope to name an existing GitHub user or organization.
+`@haive-module/<id>` packages belong to the `haive-module` organization; publishing needs
+permission to create packages there as well as a classic personal access token with
+`write:packages`. A token's scopes alone do not grant access to an organization, and a
+`repository` URL under another owner does not change the package's owner. See
+[GitHub's npm registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#publishing-a-package).
+
+Publish with `npm publish --registry=https://npm.pkg.github.com --access=restricted`;
+for a prerelease version, also select a dist-tag with `--tag <tag>`. Verify the result with
+`gh api /orgs/haive-module/packages/npm/<id>`: `owner.login` must be `haive-module` and
+`visibility` must be `private`. Keep the token in a private user npmrc outside the checkout,
+never in a tracked file. Installing registry modules and building vendor channels need
+`read:packages` and read permission on each entitled package. Package cleanup requires `delete:packages`,
+`read:packages` and package admin permission. Private git install sources use a token with
+read access to their repository; they are independent of npm publication and may use
+repositories owned by another account while retaining the module package name. None of
+these normal publish, build or install paths needs `delete_repo`. That scope is needed
+only to delete a throwaway repository created for a release-path test. See
+[GitHub's package permissions](https://docs.github.com/en/packages/learn-github-packages/about-permissions-for-github-packages#about-scopes-and-permissions-for-package-registries).
+
 A packed module's `workspace:*` dependencies become `0.1.0`, and the core packages are never
 published, so the root `package.json` pins `@haive/shared`, `@haive/database` and `@haive/web-kit` to
 `workspace:*` in `pnpm.overrides`: without them pnpm looks the core packages up on registry.npmjs.org
 (and could install somebody else's). A registry module ships `files: ["dist"]`, takes `@haive/*`,
 `hono`, `drizzle-orm` and `zod` (and `react`/`next` for web parts) as peer dependencies, and is named
-`@haive-module/<id>` with `<id>` equal to its manifest id. `gen-modules` checks the name only; the id
-is checked when the api and worker load the module, so a mismatch builds and they then refuse to
-start, naming the package.
+`@haive-module/<id>` with `<id>` equal to its manifest id. Ship TypeScript declarations for every
+exported entry alongside its JavaScript, since the host API and worker builds typecheck those
+imports. `gen-modules` checks the name only; the id is checked when the api and worker load
+the module, so a mismatch builds and they then refuse to start, naming the package. A missing
+registry module declaration reported by TypeScript as `TS7016` also gets a channel-build
+error naming the entry and explaining how to publish and expose its `.d.ts` file.
+TypeScript resolves the package exports; the channel script does not substitute its own
+resolver or reject a package merely because its export uses a string.
 
 ## Step SDK
 
