@@ -4592,14 +4592,6 @@
     "reason": "Gate 1.5 consumes its pinned QA findings; human decisions, fingerprints, waiver writes and implementation restart target stay physical."
   },
   {
-    "file": "packages/worker/src/step-engine/steps/workflow/08d2-adversarial-qa-review.ts",
-    "symbol": "adversarialQaReviewStep.detect.out",
-    "context": "readRole",
-    "value": "@roles",
-    "count": 1,
-    "reason": "Gate 1.5 consumes its pinned QA findings; human decisions, fingerprints, waiver writes and implementation restart target stay physical."
-  },
-  {
     "file": "packages/worker/src/step-engine/steps/workflow/09-gate-2-verify-approval.ts",
     "symbol": "gate2VerifyApprovalStep.detect.phase5a",
     "context": "readRole",
@@ -4718,5 +4710,21 @@
     "value": "08d-adversarial-qa",
     "count": 1,
     "reason": "Canonical executable browser/QA consumer declaration matches its serialized optional input; binding changes data only."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08d2-adversarial-qa-review.ts",
+    "symbol": "adversarialQaReviewStep.detect.read",
+    "context": "readRole",
+    "value": "@roles",
+    "count": 1,
+    "reason": "QA findings are read through the pinned input; module fingerprint claims must belong to physical rows of the same task, producer row and current round before human waiver."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/08d2-adversarial-qa-review.ts",
+    "symbol": "adversarialQaReviewStep.detect",
+    "context": "ExclamationEqualsEqualsToken",
+    "value": "@roles",
+    "count": 2,
+    "reason": "QA findings are read through the pinned input; module fingerprint claims must belong to physical rows of the same task, producer row and current round before human waiver."
   }
 ]

@@ -245,13 +245,14 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
   const { ctx, put, fake } = setup();
   const fp1 = findingFingerprint('bandit', 'a.ts', 'bypass');
   const fp2 = findingFingerprint('infector', 'a.ts', 'bypass');
+  const foreignFp = findingFingerprint('unrelated', 'other.ts', 'other finding');
   const finding = {
     severity: 'high',
     category: 'auth',
     location: 'a.ts:1',
     impact: 'bypass',
     verification: 'not_reproduced',
-    fingerprints: [fp1, fp2],
+    fingerprints: [fp1, fp2, foreignFp],
   };
   const out = {
     ...outputs[roles[1]],
@@ -259,7 +260,7 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
     findings: [finding],
     counts: { critical: 0, high: 1, total: 1 },
   };
-  put('module.check.adversarial-qa', out, 1);
+  const qaRow = put('module.check.adversarial-qa', out, 1);
   // Attach the real QA-review consumer to its own immutable input, not the gate-2 node.
   const ids = ['module.check.adversarial-qa', '08d2-adversarial-qa-review'];
   const entries = new Map([
@@ -283,12 +284,23 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
       fake.insert(schema.reviewFindings, {
         id: randomUUID(),
         taskId: ctx.taskId,
+        taskStepId: round === 1 ? qaRow : randomUUID(),
         round,
         fingerprint,
         reviewerId,
         path: 'a.ts',
         disposition: 'open',
       });
+  fake.insert(schema.reviewFindings, {
+    id: randomUUID(),
+    taskId: ctx.taskId,
+    taskStepId: randomUUID(),
+    round: 1,
+    fingerprint: foreignFp,
+    reviewerId: 'unrelated',
+    path: 'other.ts',
+    disposition: 'open',
+  });
   const recurrence = await loadFindingRecurrence(ctx, 1);
   expect([...recurrence.values()]).toEqual([[0], [0]]);
   expect(await adversarialQaReviewStep.shouldRun!(ctx)).toBe(true);
@@ -309,10 +321,10 @@ it('bound QA retains every merged fingerprint, waiver fence and recurrence round
   expect(result).toMatchObject({ waivedCount: 1, selectedCount: 0 });
   const rows = fake.rows(schema.reviewFindings);
   expect(rows.filter((r) => r.round === 0).map((r) => r.disposition)).toEqual(['open', 'open']);
-  expect(rows.filter((r) => r.round === 1).map((r) => r.disposition)).toEqual([
-    'dismissed_human',
-    'dismissed_human',
-  ]);
+  expect(
+    rows.filter((r) => r.round === 1 && r.taskStepId === qaRow).map((r) => r.disposition),
+  ).toEqual(['dismissed_human', 'dismissed_human']);
+  expect(rows.find((r) => r.fingerprint === foreignFp)?.disposition).toBe('open');
   expect(await loadFindingRecurrence(ctx, 1)).toEqual(recurrence);
   expect((await adversarialQaReviewStep.detect!(ctx)).findings).toEqual(detected.findings);
 });

@@ -1,7 +1,9 @@
 import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { readRole } from '../../read-role.js';
 import { checkResultOutput } from '../../read-check-result.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
@@ -196,9 +198,30 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
   },
 
   async detect(ctx: StepContext): Promise<QaReviewDetect> {
-    const out = checkResultOutput(
-      await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa),
-    ) as Phase8dOutput;
+    const read = await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa);
+    const out = checkResultOutput(read) as Phase8dOutput;
+    // Fingerprints name physical telemetry rows, not module-attested authority.
+    // A module may describe findings but cannot waive another producer's rows.
+    let ownedFingerprints: Set<string> | null = null;
+    if (
+      read.producer &&
+      read.producer.stepId !== STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.adversarialQa].legacyStepId
+    ) {
+      ownedFingerprints = new Set();
+      if (read.producer.rowId) {
+        const rows = await ctx.db
+          .select({ fingerprint: schema.reviewFindings.fingerprint })
+          .from(schema.reviewFindings)
+          .where(
+            and(
+              eq(schema.reviewFindings.taskId, ctx.taskId),
+              eq(schema.reviewFindings.taskStepId, read.producer.rowId),
+              eq(schema.reviewFindings.round, ctx.round),
+            ),
+          );
+        for (const row of rows) ownedFingerprints.add(row.fingerprint);
+      }
+    }
     const findings: QaFinding[] = (out.findings ?? []).map((f, i) => {
       const cat = f.category ?? 'issue';
       const loc = f.location ? ` @ ${f.location}` : '';
@@ -224,7 +247,9 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       return {
         key: String(i),
         severity,
-        fingerprints: f.fingerprints ?? [],
+        fingerprints: (f.fingerprints ?? []).filter(
+          (fp) => ownedFingerprints === null || ownedFingerprints.has(fp),
+        ),
         folded: foldsAtGate(f.verification, severity),
         label: `${verdict}[${severity}] ${cat}${loc}`,
         line: `- ${verdict}[${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
