@@ -71,6 +71,7 @@ export function makeTree(
   for (const script of [
     'gen-modules.mjs',
     'module.mjs',
+    'registry-module.mjs',
     'local-modules.cjs',
     'public-module-lock.mjs',
     'workspace-task.mjs',

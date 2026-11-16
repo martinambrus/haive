@@ -120,6 +120,15 @@ function fixture(t, config = {}) {
       writeFileSync(output, 'archive');
       return ok();
     }
+    if (cmd === 'npm') return ok(JSON.stringify([{ filename: 'demo.tgz' }]));
+    if (cmd === 'tar' && args.includes('package/package.json'))
+      return ok(
+        JSON.stringify({
+          name: '@haive-module/demo',
+          version: '1.0.0',
+          exports: { './manifest': './dist/manifest.js', './web': './dist/web.js' },
+        }),
+      );
     if (cmd === 'tar') {
       const tree = args[args.indexOf('-C') + 1];
       mkdirSync(join(tree, 'scripts'), { recursive: true });
@@ -753,17 +762,22 @@ for (const dirtyGate of [
   });
 }
 
-test('empty pnpm metadata has a named refusal and isolated cache', async (t) => {
+test('GitHub metadata without exports reads the tarball and builds its web part', async (t) => {
   const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'], emptyMetadata: true });
-  assert.equal(await f.execute(), 2);
-  assert.ok(
-    f.logs.some(
-      (line) =>
-        line.includes('pnpm view returned no exports') && line.includes('@haive-module/demo@1.0.0'),
-    ),
-  );
+  assert.equal(await f.execute(), 0, f.logs.join('\n'));
   const query = f.calls.find((c) => c.cmd === 'pnpm');
   assert.equal(query.options.env.XDG_CACHE_HOME, join(f.scratch, 'cache'));
+  const pack = f.calls.find((c) => c.cmd === 'npm');
+  assert.ok(pack.args.includes('--ignore-scripts'));
+  assert.equal(existsSync(pack.args.at(-1)), false);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.cmd === 'docker' &&
+        c.args.includes('build') &&
+        c.args.includes(join(f.scratch, 'tree/packages/web/Dockerfile')),
+    ),
+  );
 });
 
 test('split tokens are scrubbed while build output streams', async (t) => {

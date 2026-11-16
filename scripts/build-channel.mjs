@@ -16,6 +16,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
 
+import { registryModuleExports } from './registry-module.mjs';
+
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
 const BUILD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -410,13 +412,11 @@ export async function run(
     };
     for (const module of modules.filter((module) => module.source === 'registry')) {
       const spec = `${module.packageName}@${module.version}`;
-      const metadata = await command('pnpm', ['view', spec, 'exports', '--json'], {
+      const exports = await registryModuleExports(spec, {
+        command: (cmd, args, options) => command(cmd, args, { ...options, quiet: true }),
         cwd: tree,
         env: moduleEnv,
-        quiet: true,
       });
-      if (!metadata.stdout.trim()) throw new Error(`pnpm view returned no exports for ${spec}`);
-      const exports = JSON.parse(metadata.stdout);
       if (!exports || exports['./manifest'] === undefined)
         throw new Error('an entitled package does not export ./manifest');
       module.webParts = ['dashboard', 'web'].filter((part) => exports[`./${part}`] !== undefined);

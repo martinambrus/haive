@@ -366,7 +366,7 @@ describe('module add @haive-module/<id>@<version>', () => {
   it('refuses a package that publishes no exports at all', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();
-    const out = tree.run('module.mjs', ['add', '@haive-module/foo@1.0.0']);
+    const out = add(tree, []);
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /\.\/manifest/);
     assert.deepEqual(tree.snapshot(), before);
@@ -377,7 +377,7 @@ describe('module add @haive-module/<id>@<version>', () => {
     const before = tree.snapshot();
     const out = add(tree, APP, '@haive-module/foo@1.0.0', { STUB_PNPM_VIEW_EXIT: '1' });
     assert.notEqual(out.status, 0);
-    assert.match(out.stderr, /pnpm view @haive-module\/foo@1\.0\.0 exports failed/);
+    assert.match(out.stderr, /pnpm view @haive-module\/foo@1\.0\.0 exports --json failed/);
     assert.match(out.stderr, /E404/);
     assert.deepEqual(tree.snapshot(), before);
     assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
