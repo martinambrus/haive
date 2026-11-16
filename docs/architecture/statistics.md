@@ -377,6 +377,14 @@ An absent marker is disclosed as unavailable. Rollback reverts code and leaves t
 tables; remove them only in a later migration. `/summary` and Money retain their existing
 calculations and population.
 
+The report's “What these figures cover” note uses the host-provided `MarkdownView`. It
+discloses the 1–5 minute estimated reading allowance: reading beyond it without further
+page input is not counted. Embedded iframe focus can extend a still-present activity
+period to 15 minutes without restarting its clock; input inside a cross-origin iframe
+cannot renew it, so longer editing may be undercounted. Human active figures recorded
+before idle detection are not directly comparable with later figures, and historical
+totals have not been recalculated. See [Human active time](human-time.md) for the clock.
+
 Human active is task-form attention, including carried time. Plan-page attention remains
 separately reported on the Time tab and is never added here. Steering, testing another tab
 and forge review are outside this measurement. Waiting for a person pairs each park with

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { formatCost } from '@haive/web-kit/format-cost';
 import { formatDuration } from '@haive/web-kit/format-duration';
+import type { HostMarkdownView } from '@haive/web-kit/host';
 import { TIME_CATEGORIES, type TimeCategory } from '@haive/shared/timing';
 import type { TestExecution, summarizeTestChecks } from '@haive/shared/stats';
 import type { StatsTimeCost } from '../api.js';
@@ -54,7 +55,13 @@ function Tile({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-export function TimeCostReport({ report }: { report: StatsTimeCost }) {
+export function TimeCostReport({
+  report,
+  MarkdownView,
+}: {
+  report: StatsTimeCost;
+  MarkdownView: HostMarkdownView;
+}) {
   const t = report.totals;
   const money = (usd: number | null) => (usd === null ? '—' : formatCost(usd, report.costDisplay));
   const apiRates = (r: {
@@ -200,51 +207,53 @@ export function TimeCostReport({ report }: { report: StatsTimeCost }) {
           )}
         </div>
       )}
-      <div className="haive-md haive-md-inherit text-sm text-neutral-400">
+      <div className="text-sm text-neutral-400">
         <h2 className="font-medium text-neutral-200">What these figures cover</h2>
-        <p>
-          All figures cover tasks completed in the selected window, including their whole history.
-          Money uses the dates runs happened, so its totals can differ from this report.
-        </p>
-        {t.timedTaskCount < report.taskCount && (
-          <p>
-            {report.taskCount - t.timedTaskCount} tasks have no step timing; work and human totals
-            sum only recorded tasks.
-          </p>
-        )}
-        <p>
-          Workflow work is elapsed step work, including deterministic setup and the test phase;
-          agent-hours sum concurrent invocations. Test phase includes setup and skipped commands and
-          does not prove that tests executed. Suite time sums finished test checks, including
-          selective runs and retries; lint and typecheck are excluded. Suite time can include
-          agent-slot wait and the 08b post-failure enumerate probe. Not-run and incomplete checks
-          are excluded from pass share. A task with test check records uses those for execution
-          coverage: passed or failed means ran, only not-run records means not run, otherwise
-          execution is unrecorded. Tasks without test check records fall back to surviving
-          verification output; earlier attempts may be unrecorded. Test commands run by agents
-          during implementation remain in Implementation.
-        </p>
-        <p>
-          Human active counts attention only on a waiting task form. Plan page time is reported
-          separately on the Time tab and is excluded here. Steering, testing in another tab and
-          forge review are not counted. Waiting measures only a form park closed by its submit;
-          open, interrupted or ambiguous waits are unmeasured. {t.unmeasuredWaits} lifecycle records
-          or waits could not be paired. A dash means unmeasured; a recorded zero remains zero.
-        </p>
-        <p>
-          {t.unpricedInvocations} runs have no usable price; API rates are a lower bound when any
-          are unpriced. {t.unsnapshottedInvocations} runs have no cost snapshot; usable legacy
-          reported prices still count. {report.excludedLegacyInvocations} legacy runs without step
-          attribution are excluded from costs and agent-hours, matching task provider cards.{' '}
-          {t.unattributedInvocations} included runs could not be assigned to a category and appear
-          in Other. Costs retained after a provider is deleted can differ from older task provider
-          cards.
-        </p>
-        <p>
-          Display currency: {report.costDisplay.currency}, at the window-end rate
-          {report.costDisplay.rateDate ? ` dated ${report.costDisplay.rateDate}` : ''}
-          {report.costDisplay.approximate ? ' (approximate)' : ''}.
-        </p>
+        <MarkdownView
+          className="haive-md-inherit max-h-none overflow-visible p-0"
+          enhanced={false}
+          body={[
+            'All figures cover tasks completed in the selected window, including their whole history. ' +
+              'Money uses the dates runs happened, so its totals can differ from this report.',
+            ...(t.timedTaskCount < report.taskCount
+              ? [
+                  `${report.taskCount - t.timedTaskCount} tasks have no step timing; work and human totals sum only recorded tasks.`,
+                ]
+              : []),
+            'Workflow work is elapsed step work, including deterministic setup and the test phase; ' +
+              'agent-hours sum concurrent invocations. Test phase includes setup and skipped commands and ' +
+              'does not prove that tests executed. Suite time sums finished test checks, including ' +
+              'selective runs and retries; lint and typecheck are excluded. Suite time can include ' +
+              'agent-slot wait and the 08b post-failure enumerate probe. Not-run and incomplete checks ' +
+              'are excluded from pass share. A task with test check records uses those for execution ' +
+              'coverage: passed or failed means ran, only not-run records means not run, otherwise ' +
+              'execution is unrecorded. Tasks without test check records fall back to surviving ' +
+              'verification output; earlier attempts may be unrecorded. Test commands run by agents ' +
+              'during implementation remain in Implementation.',
+            'Human active counts attention only on a waiting task form. Plan page time is reported ' +
+              'separately on the Time tab and is excluded here. Steering, testing in another tab and ' +
+              'forge review are not counted. Without further page input, reading counts only for the ' +
+              'estimated reading allowance of 1–5 minutes; idle reading beyond that allowance is not counted. ' +
+              'Focus in an embedded iframe, such as the IDE, can extend an unexpired allowance to ' +
+              '15 minutes without restarting its clock. Input inside a cross-origin iframe does not renew ' +
+              'that allowance, so longer editing can be undercounted. Human active figures recorded ' +
+              'before idle detection was introduced are not directly comparable with later figures; ' +
+              'historical totals have not been recalculated.',
+            'Waiting measures only a form park closed by its submit; open, interrupted or ambiguous ' +
+              `waits are unmeasured. ${t.unmeasuredWaits} lifecycle records or waits could not be paired. ` +
+              'A dash means unmeasured; a recorded zero remains zero.',
+            `${t.unpricedInvocations} runs have no usable price; API rates are a lower bound when any ` +
+              `are unpriced. ${t.unsnapshottedInvocations} runs have no cost snapshot; usable legacy ` +
+              `reported prices still count. ${report.excludedLegacyInvocations} legacy runs without step ` +
+              'attribution are excluded from costs and agent-hours, matching task provider cards. ' +
+              `${t.unattributedInvocations} included runs could not be assigned to a category and appear ` +
+              'in Other. Costs retained after a provider is deleted can differ from older task provider cards.',
+            `Display currency: ${report.costDisplay.currency}, at the window-end rate` +
+              (report.costDisplay.rateDate ? ` dated ${report.costDisplay.rateDate}` : '') +
+              (report.costDisplay.approximate ? ' (approximate)' : '') +
+              '.',
+          ].join('\n\n')}
+        />
       </div>
     </section>
   );
