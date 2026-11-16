@@ -1,6 +1,6 @@
-import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
 vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
-  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
   return withTestPromptRole(
     await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
   );
@@ -11,7 +11,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { lockTaskIntegrations } from '@haive/shared/integrations';
 import { parsePinnedCustomSteps, promptStepEntrySchema } from '@haive/shared/modularity';
-import { STEP_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
+import { STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { INTEGRATION_ACCOUNT_CHANGED_REASON } from '../src/step-engine/step-integrations.js';

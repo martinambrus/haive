@@ -42,3 +42,11 @@ it('retains role declaration and mode edits as unsaved changes', () => {
     }),
   ).toBe(false);
 });
+
+it('clearly disables structured output when production has no providable roles', () => {
+  const html = renderToStaticMarkup(
+    <PromptStepEditor entry={entry} onChange={() => {}} onRemove={() => {}} />,
+  );
+  expect(html).toContain('Structured output is unavailable');
+  expect(html).toMatch(/<input[^>]*type="checkbox"[^>]*disabled=""/);
+});

@@ -1,6 +1,6 @@
-import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
 vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
-  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
   return withTestPromptRole(
     await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
   );
@@ -287,7 +287,6 @@ it('shares the existing quote cap across repeated role and step quotes', async (
   const prompt = await def.llm!.buildPrompt({ detected: d, formValues: {} });
   expect(Buffer.byteLength((prompt.match(/§/g) ?? []).join(''))).toBeLessThanOrEqual(
     PROMPT_STEP_OUTPUTS_BUDGET_BYTES,
-    PROMPT_STEP_OUTPUT_CAP_BYTES,
   );
   expect(prompt).toContain('[truncated:');
 });

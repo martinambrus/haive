@@ -237,9 +237,19 @@ export const legacyComposableStepEntrySchema = z
   );
 /** V1/v2 plans keep the original schema and strip fields added for v3 data ports. */
 export const composableStepEntrySchema = legacyComposableStepEntrySchema
-  .safeExtend(promptRolePortDeclarationsSchema.shape)
+  .safeExtend({
+    consumesRoles: promptRolePortDeclarationsSchema.shape.consumesRoles,
+    providesRoles: z.union([
+      promptRolePortDeclarationsSchema.shape.providesRoles,
+      rolePortDeclarationsSchema.shape.providesRoles,
+    ]),
+  })
   .refine(
-    (e) => isCustomStepId(e.stepId) || rolePortDeclarationsSchema.safeParse(e).success,
+    (e) =>
+      (isCustomStepId(e.stepId)
+        ? promptRolePortDeclarationsSchema
+        : rolePortDeclarationsSchema
+      ).safeParse(e).success,
     'invalid module data ports',
   );
 export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;

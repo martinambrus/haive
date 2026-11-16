@@ -1,11 +1,17 @@
 'use client';
 
-import { STEP_ROLE_REGISTRY, isQuotableRole, type StepRoleId } from '@haive/shared/step-outputs';
+import {
+  STEP_ROLE_REGISTRY,
+  isQuotableRole,
+  isPromptProvidableRole,
+  type StepRoleId,
+} from '@haive/shared/step-outputs';
 import type { PromptStepEntry } from '@haive/shared/modularity';
 import { Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 const roles = Object.values(STEP_ROLE_REGISTRY);
+const providable = roles.filter((r) => isPromptProvidableRole(r.id));
 const selectClass = 'h-11 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm';
 
 export function PromptStepRoles({
@@ -23,6 +29,14 @@ export function PromptStepRoles({
     onChange({
       ...entry,
       consumesRoles: inputs.map((i, n) => (n === index ? { ...i, ...patch } : i)),
+      ...(patch.input && patch.input !== inputs[index]?.input
+        ? {
+            template: entry.template.replaceAll(
+              `{{role:${inputs[index]!.input}}}`,
+              `{{role:${patch.input}}}`,
+            ),
+          }
+        : {}),
     });
   return (
     <div className="flex flex-col gap-3">
@@ -122,15 +136,14 @@ export function PromptStepRoles({
       <label className="flex min-h-11 items-center gap-2 text-xs">
         <input
           type="checkbox"
-          disabled={disabled}
+          disabled={disabled || providable.length === 0}
           checked={entry.outputMode === 'structured'}
           onChange={(e) => {
             if (e.target.checked) {
-              const role = roles[0]!;
               onChange({
                 ...entry,
                 outputMode: 'structured',
-                providesRoles: output ? [output] : [{ role: role.id, contract: role.contract }],
+                providesRoles: output && isPromptProvidableRole(output.role) ? [output] : [],
               });
             } else {
               const { outputMode: _mode, providesRoles: _provides, ...raw } = entry;
@@ -140,6 +153,12 @@ export function PromptStepRoles({
         />
         Structured output
       </label>
+      {providable.length === 0 && (
+        <InlineMarkdown
+          body="Structured output is unavailable: no agent-only data roles can currently be provided."
+          className="text-xs text-neutral-500"
+        />
+      )}
       {(entry.outputMode === 'structured' || output) && (
         <>
           <label className="flex flex-col gap-1 text-xs">
@@ -147,8 +166,8 @@ export function PromptStepRoles({
             <select
               aria-label="Provided role"
               className={selectClass}
-              disabled={disabled}
-              value={output?.role ?? ''}
+              disabled={disabled || providable.length === 0}
+              value={output && isPromptProvidableRole(output.role) ? output.role : ''}
               onChange={(e) => {
                 const role = e.target.value as StepRoleId;
                 onChange({
@@ -160,7 +179,7 @@ export function PromptStepRoles({
               <option value="" disabled>
                 Select a role
               </option>
-              {roles.map((r) => (
+              {providable.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.id} — {r.contract.id}@{r.contract.version}
                 </option>

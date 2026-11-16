@@ -203,7 +203,11 @@ export type TaskTypeDraftWarning =
 
 /** A schema failure is {path, message} as the error handler returns it; the rest are the stages' own issues. */
 export type TaskTypeDraftIssue =
-  { path: string; message: string } | PromptStepIssue | CompositionIssue | TaskTypeDefaultsIssue;
+  | { path: string; message: string }
+  | PromptStepIssue
+  | CompositionIssue
+  | TaskTypeDefaultsIssue
+  | ReturnType<typeof dataRoleDraftIssues>[number];
 
 function personaWarnings(
   typeSlug: string,
@@ -278,7 +282,7 @@ export function validateTaskTypeDraft(
   );
   if (edgeIssues.length)
     return {
-      issues: edgeIssues.map((i) => ({ path: `${i.stepId}.${i.input}`, message: i.message })),
+      issues: edgeIssues,
       warnings,
     };
   return { issues: validateTaskTypeDefaults(body, composable), warnings };

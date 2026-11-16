@@ -1,3 +1,11 @@
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
+import { STEP_ROLE_REGISTRY, STEP_ROLES, SPEC_ROLES } from '@haive/shared/step-outputs';
+vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
+  );
+});
 import { describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({ catalog: [] as unknown[] }));
@@ -126,7 +134,65 @@ interface Fixture {
   kinds: string[];
 }
 
+const reportContract = STEP_ROLE_REGISTRY[TEST_PROMPT_ROLE].contract;
+const reportConsumer = step({
+  template: '{{role:report}}',
+  consumesRoles: [
+    { input: 'report', role: TEST_PROMPT_ROLE, contract: reportContract, optional: false },
+  ],
+});
+const reportProducer = (slug: string) =>
+  step({
+    slug,
+    template: 'Produce',
+    outputMode: 'structured',
+    providesRoles: [{ role: TEST_PROMPT_ROLE, contract: reportContract }],
+  });
 const FIXTURES: Fixture[] = [
+  {
+    name: 'a structured role edge',
+    draft: draftOf({
+      stepIds: [`custom.${TYPE}.produce`, CUSTOM_ID],
+      promptSteps: { produce: reportProducer('produce'), review: reportConsumer },
+    }),
+    status: 201,
+    kinds: [],
+  },
+  {
+    name: 'a dangling role edge',
+    draft: draftOf({ stepIds: [CUSTOM_ID], promptSteps: { review: reportConsumer } }),
+    status: 400,
+    error: 'Invalid data role bindings',
+    kinds: ['invalid-data-role-binding'],
+  },
+  {
+    name: 'an ambiguous role edge',
+    draft: draftOf({
+      stepIds: [`custom.${TYPE}.produce`, `custom.${TYPE}.other`, CUSTOM_ID],
+      promptSteps: {
+        produce: reportProducer('produce'),
+        other: reportProducer('other'),
+        review: reportConsumer,
+      },
+    }),
+    status: 400,
+    error: 'Invalid data role bindings',
+    kinds: ['invalid-data-role-binding'],
+  },
+  ...[...Object.values(STEP_ROLES), ...Object.values(SPEC_ROLES)].map((role): Fixture => ({
+    name: `refused provider ${role}`,
+    draft: draftOf({
+      promptSteps: {
+        review: step({
+          outputMode: 'structured',
+          providesRoles: [{ role, contract: STEP_ROLE_REGISTRY[role].contract }],
+        }),
+      },
+    }),
+    status: 400,
+    error: 'Validation failed',
+    kinds: ['schema:promptSteps.review.providesRoles.0'],
+  })),
   { name: 'a valid draft', draft: draftOf(), status: 201, kinds: [] },
   {
     name: 'a bad composition',

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   STEP_ROLE_REGISTRY,
-  isPromptProvidableRole,
+  isQuotableRole,
   parseRegistryOutputContractRef,
   type StepOutputContractRef,
   type StepRoleId,
@@ -45,7 +45,7 @@ export const promptRolePortDeclarationsSchema = z.object({
         .refine(exact, 'role contract mismatch')
         .refine(dataOnly, 'host-policy role is not a prompt data port')
         .refine(
-          (v) => isPromptProvidableRole(v.role),
+          (v) => isQuotableRole(v.role),
           'prompt output requires an agent-only role and quote projection',
         ),
     )

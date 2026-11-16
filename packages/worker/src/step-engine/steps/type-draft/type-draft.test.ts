@@ -81,6 +81,10 @@ it('teaches role inputs, exact structured replies and role quotation authority i
     'Inline and nested tokens are refused',
     '"quotable":false',
     'provides data roles',
+    'are optional',
+    'no hostPolicy',
+    'ambiguous inputs are refused',
+    'cannot carry dataRoleBindings',
   ])
     expect(prompt).toContain(text);
 });

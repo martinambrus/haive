@@ -1,6 +1,6 @@
-import { TEST_PROMPT_ROLE } from '../../shared/test/support/prompt-role.js';
+import { TEST_PROMPT_ROLE } from './support/prompt-role.js';
 vi.mock('../../shared/dist/step-engine/output-contracts.js', async (original) => {
-  const { withTestPromptRole } = await import('../../shared/test/support/prompt-role.js');
+  const { withTestPromptRole } = await import('./support/prompt-role.js');
   return withTestPromptRole(
     await original<typeof import('../../shared/dist/step-engine/output-contracts.js')>(),
   );
@@ -244,12 +244,27 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         '07-phase-2-implement',
         '09-gate-2-verify-approval',
       ];
+      const dataRoleBindings = [
+        {
+          executionPath: null,
+          consumerStepId: role.startsWith('haive.spec.')
+            ? '07-phase-2-implement'
+            : '09-gate-2-verify-approval',
+          input:
+            role === STEP_ROLES.codeReview
+              ? 'review'
+              : role === STEP_ROLES.codeAudit
+                ? 'audit'
+                : role.split('.').at(-1)!,
+          producerStepId: stepIds[0]!,
+        },
+      ];
       expect(
         (
           await send(
             'POST',
             '/admin/task-types',
-            valid(slug, { stepIds, promptSteps: { produce } }),
+            valid(slug, { stepIds, promptSteps: { produce }, dataRoleBindings }),
           )
         ).status,
       ).toBe(400);
@@ -260,12 +275,16 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         source: 'admin',
         stepIds,
         promptSteps: { produce },
+        dataRoleBindings,
         requiresRepository: true,
         runListStrategy: 'static',
       });
       await expect(
         db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
       ).rejects.toMatchObject({ status: 409 });
+      expect((await send('POST', '/tasks', { type: slug, title: 'Refused role pin' })).status).toBe(
+        409,
+      );
       expect(await db.select().from(schema.tasks).where(eq(schema.tasks.type, slug))).toEqual([]);
       expect(h.add).not.toHaveBeenCalled();
     },
@@ -288,17 +307,15 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
           ? { consumesRoles: [{ input: 'report', role, contract, optional: true }] }
           : { outputMode: 'structured', providesRoles: [{ role, contract }] }),
       };
-      await db
-        .insert(schema.taskTypeDefinitions)
-        .values({
-          slug,
-          displayName: slug,
-          source: 'admin',
-          stepIds: [`custom.${slug}.use`],
-          promptSteps: { use },
-          requiresRepository: false,
-          runListStrategy: 'static',
-        });
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug,
+        displayName: slug,
+        source: 'admin',
+        stepIds: [`custom.${slug}.use`],
+        promptSteps: { use },
+        requiresRepository: false,
+        runListStrategy: 'static',
+      });
       await expect(
         db.transaction((tx) => definitionForCreate(tx, slug, { locked: true, generic: true })),
       ).rejects.toMatchObject({ status: 409, code: 'prompt-role-catalog-unsynced' });

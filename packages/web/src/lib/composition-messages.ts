@@ -344,7 +344,7 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
     case 'template-empty':
       return 'Write the prompt: the template is empty.';
     case 'unknown-token':
-      return `${token} is not a template token. The tokens are \`task.title\`, \`task.description\`, \`field:<id>\`, \`step:<id>\`, \`agent:<id>\` and \`integration:<id>.account\`.`;
+      return `${token} is not a template token. The tokens are \`task.title\`, \`task.description\`, \`field:<id>\`, \`step:<id>\`, \`role:<input>\`, \`agent:<id>\` and \`integration:<id>.account\`.`;
     case 'field-not-declared':
       return `${token} names a field this step's form does not declare.`;
     case 'persona-id-invalid':
