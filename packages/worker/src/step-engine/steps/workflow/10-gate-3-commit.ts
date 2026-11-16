@@ -300,6 +300,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const houseRules = gate2?.output
       ? null
       : await loadGateHouseRules(ctx.db, ctx.taskId, {
+          consumer: ctx,
           currentFingerprint: () => taskChangeFingerprint(ctx),
         });
     const insightSummary = await loadInsightSummary(ctx, inventory.insights, offset);

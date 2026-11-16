@@ -1,3 +1,6 @@
+import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
 import { STEP_ROLES } from '@haive/shared/step-outputs';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -223,9 +226,13 @@ const checkWith = (
   };
 };
 
-async function validationCheck(db: Database, taskId: string): Promise<Check | null> {
-  const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
-  const output = (validation?.output ?? {}) as Record<string, unknown>;
+async function validationCheck(
+  db: Database,
+  taskId: string,
+  consumer?: Pick<StepContext, 'taskStepId' | 'round'>,
+): Promise<Check | null> {
+  const validation = await readRole({ db, taskId, ...consumer }, CHECK_RESULT_ROLES.validation);
+  const output = checkResultOutput(validation) as Record<string, unknown>;
   const stamp = await stampNamedBy(db, output.validatorInvocationId);
   if (stamp === null) return null;
   const rules = checkOf(
@@ -272,9 +279,14 @@ export async function loadGateHouseRules(
   {
     withCodeReview = false,
     currentFingerprint,
-  }: { withCodeReview?: boolean; currentFingerprint?: () => Promise<string | null> } = {},
+    consumer,
+  }: {
+    withCodeReview?: boolean;
+    currentFingerprint?: () => Promise<string | null>;
+    consumer?: Pick<StepContext, 'taskStepId' | 'round'>;
+  } = {},
 ): Promise<GateHouseRules | null> {
-  const validation = await validationCheck(db, taskId);
+  const validation = await validationCheck(db, taskId, consumer);
   const review = withCodeReview ? await codeReviewCheck(db, taskId) : null;
   const last = review ?? validation;
   if (last === null) return null;
