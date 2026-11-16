@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { BINARY_MISSING_EXIT } from '../src/sandbox/binary-missing.js';
 import { SandboxToolchainProbe } from '../src/sandbox/toolchain-probe.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
 
@@ -55,7 +56,12 @@ it.each([true, false])(
         });
       });
       expect(result.deadline).toBe(false);
-      expect(result.code === 137 || result.signal === 'SIGKILL').toBe(true);
+      // The exit status of a killed `timeout` depends on its implementation: GNU coreutils
+      // signals its own process group and dies by SIGKILL, uutils exits with a status. Either
+      // way the probe must read it as neither PHP found (0) nor PHP missing.
+      expect(result.signal !== null || result.code !== null).toBe(true);
+      expect(result.code).not.toBe(0);
+      expect(result.code).not.toBe(BINARY_MISSING_EXIT);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
