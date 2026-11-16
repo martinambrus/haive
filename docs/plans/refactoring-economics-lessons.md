@@ -1,9 +1,12 @@
 # What "The Economic Benefit of Refactoring" offers Haive: what agents read, and refactors measured by it
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **Not started** 2026-10-17. One source: Giles Edwards-Alexander, "The Economic Benefit of
+> **In progress** 2026-11-16. The recording tranche of P0 is implemented: tally feeds, paths,
+> versioned records and a convergent backfill. Statistics is pending. The original measurement
+> scripts and output are unavailable, so the same-population reproduction remains unverified.
+> Initially assessed 2026-10-17. One source: Giles Edwards-Alexander, "The Economic Benefit of
 > Refactoring", martinfowler.com (Exploring Gen AI), 30 July 2026. Four items, turned into phases.
-> Nothing is approved. P0 gates the rest: without a record of what agents read there is no hotspot
+> Later phases remain undecided. P0 gates the rest: without a record of what agents read there is no hotspot
 > to refactor and no number to judge a refactor by. P2 is parked; P3 is the owner's decision. Keep
 > this file current by editing the section a change belongs to.
 
@@ -96,11 +99,14 @@ in context. Per repository: the files that cost the most, and which steps pay fo
   compaction; where turns cannot be observed it is null, never 0. The file list is capped (D1) with
   an `omitted` count, so one runaway run cannot bloat the row. `InvocationToolUsage` and its mirror
   type in `@haive/database` change together. jsonb needs no SQL migration.
-- **Backfill.** The boot backfill selects `tool_usage IS NULL`, so it never revisits the 3,542
-  rows on the dev install that already have a record. Add a convergent pass on the missing key
-  (`NOT (tool_usage ? 'reads')`), with the same time budget and batch size, writing `reads: null`
-  where nothing is observable so it converges. An elided transcript (4 MiB head+tail cap) gives
-  floors, as `coverage: 'partial'` already means.
+- **Backfill.** Implemented with the existing 10-second boot budget and batches of 25. Selects
+  unexamined usage and missing, JSON-null, unversioned or older `reads` records. Each examined
+  successful repair receives a versioned terminal coverage state, including `none` for
+  missing reads when no transcript can be observed. Older numeric-version records without a
+  transcript are kept and excluded from upgrade selection. Replay/update failures stay pending
+  while later rows continue; an empty first page skips the count. Existing usage fields are preserved; a compare-and-swap lets concurrent writes win.
+  No token usage or cost snapshot is rewritten. An elided transcript retains raw character floors
+  but has unknown weighted exposure.
 - **Statistics.** A "Files read" section on the existing lazy tool-usage tab
   (`/m/statistics/tool-usage`), which already pays for `tool_usage` rows. Per repository (the repo
   facet), ranked by weighted tokens: path, reads, runs, tasks, estimated weighted tokens, and share
@@ -130,12 +136,13 @@ observed raw characters/calls can still be floors. Reconcile numerator and denom
 same observable runs, with per-provider coverage stated. Repeated message/content-block and tool
 result events are deduplicated by stable ids. A shell call reading several files has one combined
 output: unless the result carries file boundaries, put it in an unattributed multi-file bucket,
-never charge the whole output to every parsed path. Unknown shell syntax stays unattributed;
+never charge the whole output to every parsed path. Unknown shell syntax stays unattributed and outside the repository-file total;
 never execute shell text to discover a path. No file read is needed just to tally a result.
 
-Choose and document D1 before coding: a bounded per-run file list, aggregated overflow bucket and
-explicit omitted counts, with an algorithm version on the record. Backfill selects missing or
-older versions, including JSON-null `reads`, and converges to an explicit terminal coverage state.
+D1 is decided below. The implemented record has a bounded per-run file list, an aggregated overflow
+bucket and explicit omitted counts, with an algorithm version on the record. Backfill selects missing or
+older versions with retained transcripts, including JSON-null `reads`, and converges to an
+explicit terminal coverage state. Existing numeric-version records survive transcript expiry.
 It never rewrites `token_usage` or immutable cost snapshots. M5's fallback defect has since been
 fixed (`assistantUsageByMessage` in `queues/cli-exec/stream.ts`); retain the historical caveat for
 old rows rather than reimplementing that fix.
@@ -225,17 +232,49 @@ The owner's decision (D4): the file is the user's client code.
 
 ## Open decisions
 
-- **D1.** P0's file-list cap per run, and whether the task page's usage panel also lists a run's
-  files.
 - **D2.** One replay harness for P1 and `parsimony-lessons` P3, varying the tree or the model.
 - **D3.** P1 as a dev-install script only, or a product surface later.
 - **D4.** Whether to refactor `d_inspection.inc` at all (P3).
 
 ## Decided
 
-Nothing yet.
+- **D1 (2026-11-16).** Keep at most 50 files per invocation, ranked by `weightedChars`, then
+  `chars`, then path for stable ties. Unknown weights rank by raw characters. Aggregate the rest
+  in one overflow bucket with its distinct-path `omitted` count and complete counters. The task
+  usage panel does not list files in this tranche. Record algorithm version 1; backfill missing,
+  JSON-null, unversioned and replayable older versions into explicit terminal coverage states
+  without rewriting token usage or cost snapshots. Preserve older versioned evidence when its
+  transcript is unavailable.
 
 ## Found, not fixed
+
+- The original `.claude/tmp/read-cost/` scripts and `read-cost.out` are absent from this checkout
+  and the host paths searched. The original row selection cannot be reconstructed from the plan.
+  A SELECT-only replay of retained Claude-family logs started before 2026-10-18 examined 4,034
+  runs and admitted 3,820 with complete weighted exposure, a result event and prompt usage:
+  known repository file exposure was 13.74% and all tool exposure 26.38%, against the historical 13.8% and 19.4%.
+  Current top-20 file concentration is 70.88%; shell-reader output is 15.33% of all tool
+  exposure and native `Read` output is 39.68%. The populations differ (the original had 2,722 runs), and no retained transcript contains
+  `d_inspection.inc`, the original leading hotspot. This does not establish reproduction.
+  Truncated logs, missing message ids and runs without a result are explicitly excluded from
+  the weighted-share denominator. Shell attribution is conservative and combined outputs remain
+  in buckets rather than being charged in full to each path.
+
+- **Reader grammar remains conservative.** A second SELECT-only replay on the same retained
+  population reconciled every outside and unattributed weighted character after the path fixes.
+  Outside holds 365.85M weighted characters: `/home/…` contributes 363.27M (99.29%), `/tmp/…`
+  2.57M (0.70%); `/haive/…` and `/var/…` together contribute 9,215. Unattributed holds 348.45M:
+  commands containing pipeline/OR syntax contribute 252.24M (72.39% of the bucket, 9.55% of all
+  result exposure), other unsupported or mixed syntax 83.04M (23.83%), and expansions 8.18M
+  (2.35%). These categories describe command syntax, not proof that all returned text is file
+  content. The leading individual redacted shape is `cd /haive/… && sed -n <arg> <arg>` at
+  11.25M (3.23% of unattributed). Pipelines and cwd-changing chains remain unattributed; widening
+  that grammar needs a separate measured change, since combined search/listing/file output
+  cannot safely be apportioned. Descriptor redirects are supported now; remaining commands
+  containing `>&` alongside other unsupported syntax hold 2.90M (0.83%). Home expansion alone
+  is only 12,040 (0.0035%). Only first path segments and redacted command shapes were saved in
+  `bucket-breakdown.json`; no file content or complete argument values were retained. This
+  explains the large buckets but still does not reproduce the missing historical reference.
 
 - **Historical killed runs recorded wrong token usage** (M5). Fixed in the current
   `assistantUsageByMessage` fallback; the original defect was in `queues/cli-exec/stream.ts`
