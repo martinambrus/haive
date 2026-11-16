@@ -10,6 +10,7 @@ import {
 import type { StoredPromptStep } from '@/lib/api-client';
 import type { PromptStepIssue } from '@/lib/composition-messages';
 import {
+  type PromptRoleInputRename,
   PROMPT_STEP_TIMEOUT_MAX_MINUTES,
   PROMPT_STEP_TIMEOUT_MIN_MINUTES,
 } from '@/lib/prompt-step-editing';
@@ -39,7 +40,7 @@ interface PromptStepEditorProps {
   issues?: readonly PromptStepIssue[];
   disabled?: boolean;
   integrationCategories?: readonly IntegrationCategoryOption[];
-  onChange: (entry: PromptStepEntry) => void;
+  onChange: (entry: PromptStepEntry, rename?: PromptRoleInputRename) => void;
   onRemove: () => void;
 }
 

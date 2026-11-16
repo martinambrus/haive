@@ -41,6 +41,7 @@ import {
   renamePromptStepTokens,
   withPromptStepEntries,
   type PromptSteps,
+  type PromptRoleInputRename,
 } from '@/lib/prompt-step-editing';
 import {
   buildCreateBody,
@@ -410,6 +411,42 @@ export function TaskTypeEditor({
     setServerPromptIssues([]);
   }
 
+  function changePromptSteps(
+    next: PromptSteps,
+    rename?: PromptRoleInputRename & { stepId: string },
+  ) {
+    if (rename) {
+      const { stepId, from, to } = rename;
+      const entry = Object.values(next).find((e) => promptStepId(typeSlug, e.slug) === stepId);
+      if (
+        dataRoleBindings.some((b) => b.consumerStepId === stepId && b.input === to) ||
+        (entry?.consumesRoles?.filter((i) => i.input === to).length ?? 0) > 1
+      ) {
+        setSaveError(
+          `Cannot rename input: ${to || '(empty)'} already has an input or binding on this step. Clear or rename it first.`,
+        );
+        return;
+      }
+      if (
+        !editableFields.includes('dataRoleBindings') &&
+        dataRoleBindings.some((b) => b.consumerStepId === stepId && b.input === from)
+      ) {
+        setSaveError('Cannot rename this input because its binding is not editable.');
+        return;
+      }
+    }
+    touch();
+    setPromptSteps(next);
+    if (rename)
+      setDataRoleBindings((previous) =>
+        previous.map((b) =>
+          b.consumerStepId === rename.stepId && b.input === rename.from
+            ? { ...b, input: rename.to }
+            : b,
+        ),
+      );
+  }
+
   function loadDraft(draft: Record<string, unknown>) {
     const next = loadDraftIntoEditor({ stepIds, loopLimits, promptSteps, values }, draft, {
       creating,
@@ -666,10 +703,7 @@ export function TaskTypeEditor({
         {...(promptEditable && (!readOnly || derived)
           ? {
               serverPromptIssues,
-              onPromptStepsChange: (next: PromptSteps) => {
-                touch();
-                setPromptSteps(next);
-              },
+              onPromptStepsChange: changePromptSteps,
             }
           : {})}
         onStepIdsChange={(next) => {
@@ -826,10 +860,14 @@ export function TaskTypeEditor({
                     entry={entry}
                     integrationCategories={integrationCategories}
                     disabled={saving || authoringForbidden}
-                    onChange={(next) => {
-                      touch();
-                      setPromptSteps((prev) => ({ ...prev, [entry.slug]: next }));
-                    }}
+                    onChange={(next, rename) =>
+                      changePromptSteps(
+                        { ...promptSteps, [entry.slug]: next },
+                        rename
+                          ? { ...rename, stepId: promptStepId(typeSlug, entry.slug) }
+                          : undefined,
+                      )
+                    }
                     onRemove={() => {
                       touch();
                       setPromptSteps((prev) => {

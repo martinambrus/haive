@@ -9,10 +9,18 @@ import {
 import { projectStepPorts, dataRoleDraftIssues } from '@haive/shared/step-ports';
 import type { TaskTypeCatalog, AdminTaskType } from '@/lib/api-client';
 import { derivedFixture } from '@/lib/derived-test-fixture';
+import { TEST_PROMPT_ROLE } from '../../test/support/prompt-role.js';
+vi.mock('../../../shared/dist/step-engine/output-contracts.js', async (original) => {
+  const { withTestPromptRole } = await import('../../test/support/prompt-role.js');
+  return withTestPromptRole(
+    await original<typeof import('../../../shared/dist/step-engine/output-contracts.js')>(),
+  );
+});
 import { TaskTypeEditor } from './task-type-editor';
 
 const mocks = vi.hoisted(() => ({
   getTaskTypeCatalog: vi.fn(),
+  updateTaskType: vi.fn(),
   getAdminTaskType: vi.fn(),
   previewDerivedTaskType: vi.fn(),
   get: vi.fn(),
@@ -235,3 +243,75 @@ it('projects a derived candidate with its v2 host-policy occupant and inherited 
     ),
   ).toEqual([]);
 });
+
+it.each([false, true])(
+  'renames prompt input bindings through the parent editor (collision: %s)',
+  async (collision) => {
+    const { catalog, row } = setup();
+    const stepId = 'custom.mine.use';
+    const roleInput = {
+      input: 'report',
+      role: TEST_PROMPT_ROLE,
+      contract: STEP_ROLE_REGISTRY[TEST_PROMPT_ROLE].contract,
+      optional: false,
+    };
+    catalog.steps[0]!.entry.providesRoles = [
+      { role: roleInput.role, contract: roleInput.contract },
+    ];
+    row.stepIds = [...row.stepIds!, stepId];
+    row.editableFields.push('promptSteps');
+    row.promptSteps = {
+      use: {
+        slug: 'use',
+        title: 'Read report',
+        template: '{{role:report}}',
+        timeoutMs: 60000,
+        capabilities: [],
+        tools: [],
+        consumesRoles: [roleInput, ...(collision ? [{ ...roleInput, input: 'taken' }] : [])],
+      },
+    };
+    const originalBinding = {
+      executionPath: null,
+      consumerStepId: stepId,
+      input: 'report',
+      producerStepId: producer,
+    };
+    row.dataRoleBindings!.push(originalBinding);
+    if (collision) row.dataRoleBindings!.push({ ...originalBinding, input: 'taken' });
+    mocks.updateTaskType.mockResolvedValue({ taskType: row });
+    await mount(catalog, row);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit prompt step Read report' }));
+    fireEvent.change(screen.getByLabelText('Role input 1 name'), {
+      target: { value: collision ? 'taken' : 'renamed' },
+    });
+    if (collision) {
+      expect((screen.getByLabelText('Role input 1 name') as HTMLInputElement).value).toBe('report');
+      expect(screen.getByRole('alert').textContent).toMatch(/already.*binding/);
+      expect(screen.getByLabelText(`${stepId}.report producer`)).toBeTruthy();
+      expect(screen.getByLabelText(`${stepId}.taken producer`)).toBeTruthy();
+    } else {
+      expect(screen.queryByText(/invalid declarations or producer choice/)).toBeNull();
+      expect((screen.getByLabelText(`${stepId}.renamed producer`) as HTMLSelectElement).value).toBe(
+        producer,
+      );
+      expect((screen.getByLabelText('Prompt template') as HTMLTextAreaElement).value).toBe(
+        '{{role:renamed}}',
+      );
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+      await act(async () => {});
+      expect(mocks.updateTaskType).toHaveBeenCalledWith(
+        'mine',
+        expect.objectContaining({
+          dataRoleBindings: [row.dataRoleBindings![0], { ...originalBinding, input: 'renamed' }],
+          promptSteps: expect.objectContaining({
+            use: expect.objectContaining({
+              consumesRoles: [{ ...roleInput, input: 'renamed' }],
+              template: '{{role:renamed}}',
+            }),
+          }),
+        }),
+      );
+    }
+  },
+);

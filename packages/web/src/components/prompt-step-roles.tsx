@@ -7,6 +7,7 @@ import {
   type StepRoleId,
 } from '@haive/shared/step-outputs';
 import type { PromptStepEntry } from '@haive/shared/modularity';
+import type { PromptRoleInputRename } from '@/lib/prompt-step-editing';
 import { Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
@@ -21,23 +22,30 @@ export function PromptStepRoles({
 }: {
   entry: PromptStepEntry;
   disabled: boolean;
-  onChange: (entry: PromptStepEntry) => void;
+  onChange: (entry: PromptStepEntry, rename?: PromptRoleInputRename) => void;
 }) {
   const inputs = entry.consumesRoles ?? [];
   const output = entry.providesRoles?.[0];
-  const update = (index: number, patch: Partial<(typeof inputs)[number]>) =>
-    onChange({
-      ...entry,
-      consumesRoles: inputs.map((i, n) => (n === index ? { ...i, ...patch } : i)),
-      ...(patch.input !== undefined && patch.input !== inputs[index]?.input
-        ? {
-            template: entry.template.replaceAll(
-              `{{role:${inputs[index]!.input}}}`,
-              `{{role:${patch.input}}}`,
-            ),
-          }
-        : {}),
-    });
+  const update = (index: number, patch: Partial<(typeof inputs)[number]>) => {
+    const from = inputs[index]!.input;
+    const rename =
+      patch.input !== undefined && patch.input !== from ? { from, to: patch.input } : undefined;
+    onChange(
+      {
+        ...entry,
+        consumesRoles: inputs.map((i, n) => (n === index ? { ...i, ...patch } : i)),
+        ...(patch.input !== undefined && patch.input !== inputs[index]?.input
+          ? {
+              template: entry.template.replaceAll(
+                `{{role:${inputs[index]!.input}}}`,
+                `{{role:${patch.input}}}`,
+              ),
+            }
+          : {}),
+      },
+      rename,
+    );
+  };
   return (
     <div className="flex flex-col gap-3">
       <fieldset className="flex flex-col gap-2">
