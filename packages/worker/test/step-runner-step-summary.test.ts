@@ -145,6 +145,7 @@ function makeMockDb(state: MockState): Database {
       taskStepCliTouched: { findFirst: async () => undefined },
       tasks: { findFirst: async () => state.taskRow },
       taskSteps: { findFirst: async () => undefined },
+      taskEvents: { findFirst: async () => undefined },
       envTemplates: { findFirst: async () => undefined },
       repositories: { findFirst: async () => undefined },
     },

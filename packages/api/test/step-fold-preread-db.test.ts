@@ -483,6 +483,38 @@ describe.skipIf(!url)(
       );
     };
 
+    it('gate3 submit atomically attests the owner, generation and explicit commit choice', async () => {
+      const gateId = '10-gate-3-commit';
+      const taskId = await seedTask('running', { currentStepId: gateId, currentRound: 0 });
+      const row = await seedStep(taskId, {
+        stepId: gateId,
+        status: 'waiting_form',
+        rerunGeneration: 2,
+        waitingStartedAt: new Date(),
+        formSchema: {
+          title: 'Commit',
+          fields: [{ id: 'commit', type: 'checkbox', label: 'Commit', default: true }],
+        },
+      });
+      expect(
+        await post(`/tasks/${taskId}/steps/${gateId}/submit`, { values: { commit: false } }),
+      ).toMatchObject({ status: 200 });
+      const saved = await wholeRow(row.id);
+      expect(saved.formValues).toEqual({ commit: false });
+      expect(saved.waitingStartedAt).toBeNull();
+      const event = await db.query.taskEvents.findFirst({
+        where: eq(schema.taskEvents.taskStepId, row.id),
+      });
+      expect(event).toMatchObject({
+        eventType: 'step.form_submitted',
+        payload: {
+          userId: USER,
+          generation: 2,
+          commit: false,
+        },
+      });
+    });
+
     it(
       'INS5 owner approve then reject during one apply accepts only the first decision',
       async () => {

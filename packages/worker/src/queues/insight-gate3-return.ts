@@ -27,18 +27,60 @@ export async function pendingInsightApproval(db: Database, taskId: string): Prom
   return pending;
 }
 
-/** Only the owner-authenticated submit route can attest a decision for this generation.
+/** Gate 2 advances to gate 3. Its durable re-approval keeps
+ * that regenerated form human-only across Retry, Resume and worker takeover. */
+export async function insightGate3ReviewRequired(
+  db: Database,
+  row: typeof schema.taskSteps.$inferSelect,
+): Promise<boolean> {
+  const latest = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, row.taskId),
+      eq(schema.taskEvents.eventType, 'insight.check'),
+    ),
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
+  if (
+    latest &&
+    (latest.payload?.version !== 1 ||
+      typeof latest.payload.batchId !== 'string' ||
+      !['verify_failed', 'gate2_approved'].includes(String(latest.payload.kind)))
+  )
+    throw new Error('Unsupported insight check protocol.');
+  const approvedRound = latest?.payload?.round;
+  if (latest?.payload?.kind !== 'gate2_approved') return false;
+  if (typeof approvedRound !== 'number' || !Number.isInteger(approvedRound) || approvedRound < 0)
+    throw new Error('Unsupported insight approval round.');
+  if (approvedRound > row.round) return false;
+  // A configured late editor can introduce another check round between the gates.
+  // Only an already completed gate-3 pass settles this review requirement.
+  const settled = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, row.taskId),
+      eq(schema.taskSteps.stepId, '10-gate-3-commit'),
+      gte(schema.taskSteps.round, approvedRound),
+      sql`${schema.taskSteps.round} < ${row.round}`,
+      sql`${schema.taskSteps.status} in ('done', 'skipped')`,
+    ),
+  });
+  return !settled;
+}
+
+/** Only the owner-authenticated submit route can attest an answer for this generation.
  * Saved defaults, queue payloads and legacy events are not human approval evidence. */
-export async function freshInsightGate2Submission(
+export async function freshInsightGateSubmission(
   db: Pick<Database, 'query'>,
   userId: string,
   row: typeof schema.taskSteps.$inferSelect,
 ): Promise<boolean> {
+  const gate3 = row.stepId === '10-gate-3-commit';
   const decision = row.formValues?.decision;
   if (
-    row.stepId !== '09-gate-2-verify-approval' ||
+    (!gate3 && row.stepId !== '09-gate-2-verify-approval') ||
     row.waitingStartedAt !== null ||
-    (decision !== 'approve' && decision !== 'reject')
+    (gate3
+      ? typeof row.formValues?.commit !== 'boolean'
+      : decision !== 'approve' && decision !== 'reject')
   )
     return false;
   const submission = await db.query.taskEvents.findFirst({
@@ -52,7 +94,7 @@ export async function freshInsightGate2Submission(
         sql`(
         select max(failed.created_at) from ${schema.taskEvents} failed
         where failed.task_id = ${row.taskId} and failed.event_type = 'insight.check'
-          and failed.payload->>'kind' = 'verify_failed'
+          and failed.payload->>'kind' = ${gate3 ? 'gate2_approved' : 'verify_failed'}
       )`,
       ),
     ),
@@ -61,7 +103,9 @@ export async function freshInsightGate2Submission(
   if (
     submission?.payload?.userId !== userId ||
     submission.payload.generation !== row.rerunGeneration ||
-    submission.payload.decision !== decision
+    (gate3
+      ? submission.payload.commit !== row.formValues?.commit
+      : submission.payload.decision !== decision)
   )
     return false;
   return true;
@@ -131,7 +175,7 @@ export async function recordGate3Check(
       )
       .for('share');
     if (!task) throw new StepSupersededError(row.id);
-    if (kind === 'gate2_approved' && !(await freshInsightGate2Submission(tx, ctx.userId, held)))
+    if (kind === 'gate2_approved' && !(await freshInsightGateSubmission(tx, ctx.userId, held)))
       throw new Error('A fresh owner gate-2 submission is required after failed insight checks.');
     const previous = await tx.query.taskEvents.findMany({
       where: and(

@@ -1278,6 +1278,232 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     }
   });
+  it.each(
+    [
+      'task preset',
+      'type default',
+      'prior reuse',
+      'form autoSubmit',
+      'step defaults',
+      'saved synthetic',
+      'queue answer',
+      'persisted schema',
+    ].flatMap((source) => [[source, true] as const, [source, false] as const]),
+  )('gate3 refreshed approval: %s (cycle=%s)', async (source, cycle) => {
+    const ctx = await seed();
+    const gateId = '10-gate-3-commit';
+    const preset = { [gateId]: { commit: true, commitMessage: 'preset message' } };
+    let type = 'workflow';
+    let preAnswers = source === 'task preset' ? preset : {};
+    if (source === 'type default') {
+      type = `g3i-${randomUUID()}`;
+      const [definition] = await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: 'Commit preset',
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [gateId],
+          preAnswerDefaults: preset,
+        })
+        .returning();
+      preAnswers = definition!.preAnswerDefaults!;
+    }
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'commit preset',
+        source: 'blank',
+        storagePath: '/unused',
+        localPath: '/unused',
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({
+        type,
+        repositoryId: repo!.id,
+        currentStepId: gateId,
+        currentRound: 0,
+        autoContinue: source !== 'form autoSubmit',
+        preAnswers,
+      })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await db
+      .update(schema.taskSteps)
+      .set({
+        stepId: gateId,
+        status: 'pending',
+        detectOutput: {},
+        formValues: source === 'saved synthetic' ? { commit: true } : null,
+      })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    if (cycle) {
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        eventType: 'insight.check',
+        payload: { version: 1, batchId: 'picked', kind: 'verify_failed', round: 0 },
+      });
+      const [approval] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: ctx.taskId,
+          stepId: '09-gate-2-verify-approval',
+          stepIndex: 9,
+          title: 'Approval',
+          status: 'done',
+          formValues: { decision: 'approve' },
+          output: { decision: 'approve' },
+        })
+        .returning();
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: approval!.id,
+        eventType: 'step.form_submitted',
+        payload: { userId, generation: 0, decision: 'approve' },
+      });
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: approval!.stepId })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId, orchestrationEpoch: 0 } as ResolvedTaskContext,
+        approval!,
+        'gate2_approved',
+      );
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: gateId })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      expect(await pendingInsightApproval(db, ctx.taskId)).toBeNull();
+    }
+    if (source === 'prior reuse') {
+      const [prior] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: repo!.id,
+          type,
+          title: 'prior',
+          status: 'completed',
+          completedAt: new Date(),
+        })
+        .returning();
+      await db.insert(schema.taskSteps).values({
+        taskId: prior!.id,
+        stepId: gateId,
+        stepIndex: 10,
+        title: 'Commit',
+        status: 'done',
+        formValues: { commit: true },
+      });
+    }
+    const apply = vi.fn(async () => ({ committed: true }));
+    const reconcile = vi.fn((_ctx, _detected, values) => values);
+    const step: StepDefinition = {
+      metadata: {
+        id: gateId,
+        index: 10,
+        workflowType: 'workflow',
+        title: 'Commit',
+        description: '',
+        requiresCli: false,
+        reuseLastCompletedFormValues: source === 'prior reuse',
+        autoSubmitDefaults: source === 'step defaults',
+      },
+      reconcileReusedFormValues: reconcile,
+      form: () => ({
+        title: 'Commit',
+        autoSubmit: source === 'form autoSubmit',
+        fields: [
+          { id: 'commit', type: 'checkbox', label: 'Commit', default: true },
+          { id: 'commitMessage', type: 'textarea', label: 'Message', default: 'fresh message' },
+        ],
+      }),
+      apply,
+    };
+    if (source === 'persisted schema')
+      await db
+        .update(schema.taskSteps)
+        .set({
+          formSchema: { ...step.form!(ctx, {}, null), autoSubmit: true },
+        })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    const params = {
+      db,
+      taskId: ctx.taskId,
+      userId,
+      repoPath: '/unused',
+      workspacePath: '/unused',
+      cliProviderId: null,
+      stepDef: step,
+      epoch: 0,
+      round: 0,
+      moduleDeactivation: null,
+      ...(source === 'queue answer' ? { formValues: { commit: true } } : {}),
+    };
+    try {
+      const result = await advanceStep(params);
+      expect(result.status).toBe(cycle ? 'waiting_form' : 'done');
+      if (!cycle) {
+        expect(apply).toHaveBeenCalledOnce();
+        return;
+      }
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(result.row.formSchema).toMatchObject({
+        autoSubmit: false,
+        fields: [{ default: true }, { default: 'fresh message' }],
+      });
+      expect(apply).not.toHaveBeenCalled();
+      expect(reconcile).not.toHaveBeenCalled();
+      // Resume and boot re-entry use the persisted waiting_form row. Retry resets it.
+      for (const reentry of ['Resume', 'boot', 'Retry']) {
+        let epoch = 0;
+        if (reentry === 'Retry') {
+          const reset = await resetStepAndDownstream(db, ctx.taskId, gateId, 0, 0);
+          if (reset && reset !== 'superseded') epoch = reset.newEpoch;
+        }
+        const parked = await advanceStep({ ...params, epoch });
+        expect(parked.status, reentry).toBe('waiting_form');
+        expect(parked.row.waitingStartedAt, reentry).not.toBeNull();
+        expect(apply, reentry).not.toHaveBeenCalled();
+      }
+      const row = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, ctx.taskStepId),
+      });
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskSteps)
+          .set({ formValues: { commit: true }, waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, row!.id));
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: row!.id,
+          eventType: 'step.form_submitted',
+          payload: {
+            stepId: gateId,
+            fieldCount: 1,
+            userId,
+            generation: row!.rerunGeneration,
+            commit: true,
+          },
+        });
+      });
+      expect(await advanceStep({ ...params, epoch: 1 })).toMatchObject({ status: 'done' });
+      expect(apply).toHaveBeenCalledOnce();
+    } finally {
+      if (source === 'type default') {
+        await db.delete(schema.tasks).where(eq(schema.tasks.type, type));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    }
+  });
   it('deduplicates concurrent stages under the source-row lock', async () => {
     const ctx = await seed();
     const [a, b] = await Promise.all([

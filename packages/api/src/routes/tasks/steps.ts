@@ -998,7 +998,9 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
       fieldCount: Object.keys(values).length,
       ...(stepId === '09-gate-2-verify-approval'
         ? { userId, generation: step.rerunGeneration, decision: values.decision }
-        : {}),
+        : stepId === '10-gate-3-commit'
+          ? { userId, generation: step.rerunGeneration, commit: values.commit }
+          : {}),
     });
   };
   await db.transaction(async (tx) => {
