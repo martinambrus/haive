@@ -33,8 +33,18 @@ that took the row rejects the superseded pass without restoring its cleared stat
 A task with only zero-hit or uncaptured queries, or no timed model prose, skips
 the classifier. Preparation can return false after refreshing a parked PR, which
 the runner handles before building a prompt, reserving a CLI or enqueueing a job.
-Evidence-loading, model and assessment-storage failures never block finalization;
-cancellation and superseded-pass errors still propagate.
+Evidence-loading, failed model invocations and assessment-storage failures never
+block finalization; cancellation and superseded-pass errors still propagate.
+When the task's recorded worktree is removed or its path is not a directory,
+preparation skips the classifier before dispatch and checkpoints the reason.
+Tool-less invocations still mount the task's tree, so this review must never
+bypass the worktree guard or substitute the main checkout. Only these two
+workspace errors skip the classifier; other probe or dispatch exceptions still
+fail the step, apart from the runner's existing optional prompt-budget fallback
+(`step-runner.ts:1199`). Failed optional model invocations instead degrade to null
+output (`step-runner.ts:842-845`). Apply records unknown usage with the skip reason
+only for queries in the bounded input, preserves zero-hit verdicts, and leaves
+uncaptured or over-budget queries with the existing neutral default reason.
 
 The review is an inference about recorded actions, not proof of an agent's private
 reasoning. Green means the classifier found explicit evidence of use; amber means
