@@ -1103,12 +1103,14 @@ async function resolveLlmPhase(
   // the attachments — otherwise the notice below names a `.zip` no agent can
   // open. Idempotent, never throws, and three indexed queries plus one directory
   // read when the task has no attachments, which is the usual case.
-  await ensureArchivesExpanded(db, params.taskId);
-  // Make every CLI adapter aware of user-attached task files (the prompt flows
-  // through the dispatcher unchanged). No-op when the task has no attachments.
-  prompt = await augmentWithin(prompt, 'before', (p) =>
-    augmentPromptWithAttachments(db, params.taskId, p),
-  );
+  if (stepDef.attachmentContext !== 'none') {
+    await ensureArchivesExpanded(db, params.taskId);
+    // Make every CLI adapter aware of user-attached task files (the prompt flows
+    // through the dispatcher unchanged). No-op when the task has no attachments.
+    prompt = await augmentWithin(prompt, 'before', (p) =>
+      augmentPromptWithAttachments(db, params.taskId, p),
+    );
+  }
   // Carry what earlier steps established (sandbox/tooling/runtime facts) into this
   // agent's fresh CLI process. No-op (byte-identical prompt) while the ledger is empty,
   // so every pre-implementation step pays nothing.
@@ -2501,8 +2503,11 @@ async function dispatchMiningAgents(
     // prepends to a single dispatch, after the same archive expansion, so a mining agent sees the
     // files — and any archive that did not fully expand — exactly as that one would. Once per call:
     // the notice is a property of the task, not of an agent. `''` when nothing is attached.
-    await ensureArchivesExpanded(db, params.taskId);
-    const attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
+    let attachmentsNotice = '';
+    if (stepDef.attachmentContext !== 'none') {
+      await ensureArchivesExpanded(db, params.taskId);
+      attachmentsNotice = await augmentPromptWithAttachments(db, params.taskId, '');
+    }
     let enqueued = 0;
     for (const dispatch of dispatches) {
       ctx.throwIfCancelled();

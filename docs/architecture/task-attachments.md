@@ -77,6 +77,15 @@ dot-directory survives anywhere. De-dupe is per DIRECTORY: two folders' `README.
 documents. It keeps an archive's two-part extension whole (`splitAttachmentExtension`): a second
 `spec.tar.gz` is `spec (2).tar.gz`, never `spec.tar (2).gz`, which no archive rule recognises.
 
+A step may set `attachmentContext: 'none'` on its `StepDefinition` when it supplies its own
+bounded attachment input. Unset or `'notice'` keeps the existing prompt bytes. The opt-out
+skips automatic archive expansion, the attachment lookup/list and the notice in the step's
+LLM dispatches (including pre-form continuations, retries, loops and budget repacking) and
+its mining fan-out, waves and recovery from recorded step prompts. It does not remove sandbox
+mounts, suppress explicit attachment reads or expansion inside a step, or change independent
+DAG dispatches. Legacy mining rows without a recorded step prompt still replay their last
+sent prompt verbatim, including any notice it already contained.
+
 `ensureArchivesExpanded` (`worker/src/attachments/expand-archives.ts`) runs lazily wherever the
 attachments are read for an agent: `00-plan-inputs.detect`, `loadLiveAttachments` (so the live plan
 inputs see an archive's members, not a `binary` zip), and before `augmentPromptWithAttachments` in
@@ -185,7 +194,8 @@ bounded line (`expansionErrorLine`, `describePathDrops`) and collapsed and cappe
 it meets a prompt (`safeNote`), because rows written before that exist.
 
 Three caps exist because a folder is not a handful of files. `augmentPromptWithAttachments`
-rides every agent that works from the task's content: the LLM phase, each agent of a mining
+rides every agent that works from the task's content, unless its step sets
+`attachmentContext: 'none'` (which DAG dispatches ignore): the LLM phase, each agent of a mining
 fan-out (built once per fan-out, joined ahead of the ledger and terseness in `resolveLlmPhase`'s
 order), and each DAG coder, reviewer, fix coder and issue advisor. The DAG replanner and merge-fix
 agent go without it: the first is handed the issue graph and no specification, the second resolves
