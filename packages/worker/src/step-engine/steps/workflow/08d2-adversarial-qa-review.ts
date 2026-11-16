@@ -1,6 +1,11 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
+import { readRole } from '../../read-role.js';
+import { checkResultOutput } from '../../read-check-result.js';
 import { fenceSafe, fencedAgentBlock } from '../_untrusted-repo.js';
 import { dispositionReviewFindings } from './_review-findings.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
@@ -33,6 +38,8 @@ interface QaFinding {
 }
 
 interface QaReviewDetect {
+  /** Host-owned physical QA row for alternate-producer waiver writes; never from the payload. */
+  findingOwnerStepRowId?: string;
   ran: boolean;
   level: string;
   blocking: boolean;
@@ -160,6 +167,7 @@ export function formatWaiverLedgerEntry(round: number, waived: QaFinding[]): str
 }
 
 export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['08d2-adversarial-qa-review'],
   metadata: {
     id: '08d2-adversarial-qa-review',
     workflowType: 'workflow',
@@ -185,14 +193,37 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
 
   // Only when 08d actually ran AND surfaced findings — nothing to review otherwise.
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
-    const out = prev?.output as Phase8dOutput | null;
+    const out = checkResultOutput(
+      await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa),
+    ) as Phase8dOutput;
     return out?.ran === true && (out.findings?.length ?? 0) > 0;
   },
 
   async detect(ctx: StepContext): Promise<QaReviewDetect> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
-    const out = (prev?.output as Phase8dOutput | null) ?? {};
+    const read = await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa);
+    const out = checkResultOutput(read) as Phase8dOutput;
+    // Fingerprints name physical telemetry rows, not module-attested authority.
+    // A module may describe findings but cannot waive another producer's rows.
+    let ownedFingerprints: Set<string> | null = null;
+    if (
+      read.producer &&
+      read.producer.stepId !== STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.adversarialQa].legacyStepId
+    ) {
+      ownedFingerprints = new Set();
+      if (read.producer.rowId) {
+        const rows = await ctx.db
+          .select({ fingerprint: schema.reviewFindings.fingerprint })
+          .from(schema.reviewFindings)
+          .where(
+            and(
+              eq(schema.reviewFindings.taskId, ctx.taskId),
+              eq(schema.reviewFindings.taskStepId, read.producer.rowId),
+              eq(schema.reviewFindings.round, ctx.round),
+            ),
+          );
+        for (const row of rows) ownedFingerprints.add(row.fingerprint);
+      }
+    }
     const findings: QaFinding[] = (out.findings ?? []).map((f, i) => {
       const cat = f.category ?? 'issue';
       const loc = f.location ? ` @ ${f.location}` : '';
@@ -218,7 +249,9 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
       return {
         key: String(i),
         severity,
-        fingerprints: f.fingerprints ?? [],
+        fingerprints: (f.fingerprints ?? []).filter(
+          (fp) => ownedFingerprints === null || ownedFingerprints.has(fp),
+        ),
         folded: foldsAtGate(f.verification, severity),
         label: `${verdict}[${severity}] ${cat}${loc}`,
         line: `- ${verdict}[${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
@@ -246,6 +279,9 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     // suppression list"). The waiver reaches the next round as prompt context instead.
     const shown = findings.filter((f) => !f.folded);
     return {
+      ...(ownedFingerprints !== null && read.producer?.rowId
+        ? { findingOwnerStepRowId: read.producer.rowId }
+        : {}),
       ran: out.ran === true,
       level: out.level ?? 'poc',
       blocking: out.blocking === true,
@@ -372,6 +408,7 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
         waived.flatMap((f) => f.fingerprints),
         'dismissed_human',
         '08d2-adversarial-qa-review',
+        args.detected.findingOwnerStepRowId,
       );
       await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
         stepId: '08d2-adversarial-qa-review',

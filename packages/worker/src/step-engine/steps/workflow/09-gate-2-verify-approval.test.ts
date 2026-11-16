@@ -73,7 +73,7 @@ import { INSIGHTS_AT_GATE } from './_gate-insights.js';
 import { recurrenceTag } from './09-gate-2-verify-approval.js';
 import { recurrenceKey } from './_review-findings.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
-import { formatQaFixDiagnosis } from './08d2-adversarial-qa-review.js';
+import { adversarialQaReviewStep, formatQaFixDiagnosis } from './08d2-adversarial-qa-review.js';
 import { buildGateDirectiveDiagnosis, excerptDiagnosis } from './_fix-loop.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
@@ -2619,5 +2619,194 @@ describe('check-result role compatibility bytes', () => {
           form: gate2VerifyApprovalStep.form!(pinnedCtx, pinned),
         }),
       ).toBe(baseline);
+    });
+});
+
+// Captured at b173bc6c0 before browser/QA reader migration.
+describe('browser and QA role compatibility bytes', () => {
+  const browserId = '08a-browser-verify';
+  const qaId = '08d-adversarial-qa';
+  const names = [
+    'browser passed',
+    'browser failed',
+    'browser manual',
+    'browser skipped',
+    'browser incomplete',
+    'browser absent',
+    'QA clean',
+    'QA incomplete',
+    'QA skipped',
+    'QA absent',
+    ...['critical', 'high', 'medium', 'low', 'nit'].map((s) => `QA ${s}`),
+    'fix round',
+    'retry browser',
+    'retry QA',
+  ];
+  for (const type of ['workflow', 'derived-example'])
+    it.each(names)(`${type}: %s`, async (name) => {
+      const check = { ran: true, passed: true, command: 'check', output: 'ok' };
+      const stored: Record<string, any> = {
+        '08-phase-5-verify': {
+          output: { test: check, lint: check, typecheck: check, passed: true },
+        },
+        [browserId]: {
+          output: {
+            ran: true,
+            method: 'mcp',
+            passed: true,
+            skipped: false,
+            failures: [],
+            visualVerdict: 'STYLED',
+            checklistMarkdown: null,
+            appUrl: 'http://app',
+            consoleErrors: [],
+            networkErrors: [],
+          },
+        },
+        [qaId]: {
+          output: {
+            ran: true,
+            level: 'poc',
+            blocking: false,
+            findings: [],
+            counts: { critical: 0, high: 0, total: 0 },
+            qaIncomplete: false,
+            coverage: null,
+          },
+        },
+      };
+      if (name === 'browser failed')
+        Object.assign(stored[browserId].output, {
+          passed: false,
+          failures: [{ description: 'broken', evidence: 'screenshot' }],
+        });
+      if (name === 'browser manual')
+        Object.assign(stored[browserId].output, {
+          method: 'manual',
+          checklistMarkdown: '- [ ] Check login',
+        });
+      if (name === 'browser incomplete') stored[browserId].output.verificationIncomplete = true;
+      if (name === 'browser skipped') stored[browserId] = { status: 'skipped', output: null };
+      if (name === 'browser absent') delete stored[browserId];
+      if (name === 'QA incomplete') stored[qaId].output.qaIncomplete = true;
+      if (name === 'QA skipped') stored[qaId] = { status: 'skipped', output: null };
+      if (name === 'QA absent') delete stored[qaId];
+      const severity = name.startsWith('QA ') ? name.slice(3) : '';
+      if (['critical', 'high', 'medium', 'low', 'nit'].includes(severity))
+        Object.assign(stored[qaId].output, {
+          findings: [
+            {
+              severity,
+              category: 'auth',
+              location: 'a.ts:1',
+              impact: 'bypass',
+              fix: 'guard',
+              verification: 'reproduced',
+              fingerprints: ['fp-one', 'fp-two'],
+            },
+          ],
+          blocking: ['critical', 'high'].includes(severity),
+          counts: { critical: +(severity === 'critical'), high: +(severity === 'high'), total: 1 },
+        });
+      if (name === 'retry browser') stored[browserId] = { status: 'pending', output: null };
+      if (name === 'retry QA') stored[qaId] = { status: 'pending', output: null };
+      m.getTaskEnvTemplate.mockResolvedValue(null);
+      m.resolveTaskDirectAccess.mockResolvedValue(false);
+      m.hasWorkspaceEntry.mockResolvedValue(false);
+      m.resolveScreenshotRoot.mockResolvedValue('/repos/u/r');
+      m.loadTaskSimilarSites.mockResolvedValue({ sites: [], omitted: 0 });
+      m.loadUnactedInsights.mockResolvedValue({ insights: [], omitted: 0 });
+      m.loadGateHouseRules.mockResolvedValue(null);
+      m.loadPreviousStepOutput.mockImplementation(async (_db, _task, selector) => {
+        const id = selectorId(selector);
+        return stored[id]
+          ? {
+              id: 'row',
+              stepId: id,
+              round: name === 'fix round' ? 1 : 0,
+              status: 'done',
+              iterations: [],
+              ...stored[id],
+            }
+          : null;
+      });
+      const ctx = {
+        taskId: 'task',
+        round: 1,
+        repoPath: '/repos/u/r',
+        logger: { info: vi.fn(), warn: vi.fn() },
+        db: { query: { tasks: { findFirst: async () => ({ type }) } } },
+      } as never;
+      const render = async (c: typeof ctx) => {
+        const detected = await gate2VerifyApprovalStep.detect!(c);
+        const qa = await adversarialQaReviewStep.detect!(c);
+        return JSON.stringify({
+          detected,
+          form: gate2VerifyApprovalStep.form!(c, detected),
+          qaRuns: await adversarialQaReviewStep.shouldRun!(c),
+          qa,
+          qaForm: adversarialQaReviewStep.form!(c, qa),
+        });
+      };
+      const baseline = await render(ctx);
+      expect(baseline).toMatchSnapshot();
+      const ids = [
+        '08-phase-5-verify',
+        ...[browserId, qaId].filter((id) => stored[id]),
+        '08d2-adversarial-qa-review',
+        '09-gate-2-verify-approval',
+      ];
+      const nodes = dataPortNodes(ids);
+      const pin = buildDataEdgePlan(type === 'workflow' ? 'static' : 'derived', [
+        { executionPath: null, nodes },
+        ...(type === 'workflow' ? [] : [{ executionPath: 'full_workflow' as const, nodes }]),
+      ]);
+      const pinned = {
+        ...(ctx as any),
+        taskStepId: 'consumer',
+        db: {
+          query: {
+            tasks: {
+              findFirst: async () => ({
+                type,
+                executionPath: 'full_workflow',
+                dataEdgePlan: pin,
+                runListSnapshot: ids,
+              }),
+            },
+            taskSteps: {
+              findFirst: async () => ({ stepId: '09-gate-2-verify-approval', round: 1 }),
+            },
+          },
+        },
+      } as never;
+      // Gate 1.5 uses its own consumer node, with exactly the same bound QA.
+      const gd = await gate2VerifyApprovalStep.detect!(pinned);
+      expect(
+        JSON.stringify({ detected: gd, form: gate2VerifyApprovalStep.form!(pinned, gd) }),
+      ).toBe(
+        JSON.stringify({
+          detected: JSON.parse(baseline).detected,
+          form: JSON.parse(baseline).form,
+        }),
+      );
+      (pinned as any).db.query.taskSteps.findFirst = async () => ({
+        stepId: '08d2-adversarial-qa-review',
+        round: 1,
+      });
+      const qd = await adversarialQaReviewStep.detect!(pinned);
+      expect(
+        JSON.stringify({
+          qaRuns: await adversarialQaReviewStep.shouldRun!(pinned),
+          qa: qd,
+          qaForm: adversarialQaReviewStep.form!(pinned, qd),
+        }),
+      ).toBe(
+        JSON.stringify({
+          qaRuns: JSON.parse(baseline).qaRuns,
+          qa: JSON.parse(baseline).qa,
+          qaForm: JSON.parse(baseline).qaForm,
+        }),
+      );
     });
 });

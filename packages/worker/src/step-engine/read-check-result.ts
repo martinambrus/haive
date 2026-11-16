@@ -24,9 +24,26 @@ export function checkResultOutput<R extends CheckResultRole>(
   if (
     data.resultStatus === 'passed' ||
     data.resultStatus === 'failed' ||
-    (data.resultStatus === 'skipped' && read.role === CHECK_RESULT_ROLES.testManagement)
+    (data.resultStatus === 'skipped' && read.role === CHECK_RESULT_ROLES.testManagement) ||
+    (read.role === CHECK_RESULT_ROLES.adversarialQa &&
+      read.state === 'ready' &&
+      ['clean', 'findings'].includes(data.resultStatus)) ||
+    (read.role === CHECK_RESULT_ROLES.browser &&
+      read.state === 'ready' &&
+      data.resultStatus === 'manual')
   )
     return data as Partial<RoleOutput<R>>;
+  if (read.role === CHECK_RESULT_ROLES.browser)
+    return {
+      ...data,
+      ran: true,
+      method: 'mcp',
+      skipped: false,
+      passed: false,
+      verificationIncomplete: true,
+    } as Partial<RoleOutput<R>>;
+  if (read.role === CHECK_RESULT_ROLES.adversarialQa)
+    return { ...data, ran: true, level: 'poc', qaIncomplete: true } as Partial<RoleOutput<R>>;
   if (read.role === CHECK_RESULT_ROLES.validation)
     return {
       ...data,
@@ -47,6 +64,10 @@ export function checkResultHoldApprove(read: RoleRead<CheckResultRole>): boolean
   const status = read.data.resultStatus;
   return (
     status !== 'passed' &&
+    !(
+      read.role === CHECK_RESULT_ROLES.adversarialQa &&
+      (status === 'clean' || status === 'findings')
+    ) &&
     !(read.role === CHECK_RESULT_ROLES.testManagement && status === 'skipped')
   );
 }

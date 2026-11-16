@@ -51,6 +51,10 @@ describe('ungated step-role reader ratchet', () => {
     ).toBeGreaterThan(0);
   });
   it.each([
+    'haive.browser-verification',
+    'haive.adversarial-qa',
+    '08a-browser-verify',
+    '08d-adversarial-qa',
     'haive.validation',
     'haive.verify',
     'haive.test-management',

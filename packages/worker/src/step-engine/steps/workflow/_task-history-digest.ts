@@ -52,9 +52,6 @@ const DIAGNOSIS_ITEM_CAP: Record<DigestTier, number> = { low: 700, medium: 1000,
 const DIAGNOSIS_COUNT: Record<DigestTier, number> = { low: 1, medium: 3, high: 12 };
 const SOFT_FINDING_CAP: Record<DigestTier, number> = { low: 4, medium: 12, high: 40 };
 
-/** Steps whose `output` carries severity-bearing findings. */
-const FINDING_STEP_IDS = new Set(['08d-adversarial-qa']);
-
 interface Finding {
   severity: ReviewSeverity;
   where: string;
@@ -217,9 +214,11 @@ export function renderTaskHistoryDigest(
   const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const validationId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.validation);
   const verifyId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.verify);
+  const browserId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.browser);
+  const qaId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.adversarialQa);
   const checkOutput = (
     s: DigestStepInput,
-    role: typeof CHECK_RESULT_ROLES.validation | typeof CHECK_RESULT_ROLES.verify,
+    role: (typeof CHECK_RESULT_ROLES)[keyof typeof CHECK_RESULT_ROLES],
   ) => {
     if (s.stepId === STEP_ROLE_REGISTRY[role].legacyStepId) return s.output;
     if (s.status !== undefined && s.status !== 'done') return null;
@@ -244,10 +243,19 @@ export function renderTaskHistoryDigest(
           checkOutput(s, CHECK_RESULT_ROLES.validation),
         ),
       );
-    // A bound review row is already mined above, even if its physical id also
-    // belongs to the legacy finding-step set. Distinct validation findings stay.
-    else if (s.stepId !== reviewId && FINDING_STEP_IDS.has(s.stepId))
-      findings.push(...extractFindings(s.stepId, s.output));
+    // Preserve the legacy canonical QA/review dedupe, but a distinct bound QA
+    // port on the same producer carries its own findings, just like validation.
+    if (
+      s.stepId === qaId &&
+      (s.stepId !== reviewId ||
+        qaId !== STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.adversarialQa].legacyStepId)
+    )
+      findings.push(
+        ...extractFindings(
+          STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.adversarialQa].legacyStepId,
+          checkOutput(s, CHECK_RESULT_ROLES.adversarialQa),
+        ),
+      );
     if (s.stepId === verifyId)
       runtimeErrors.push(
         ...extractRuntimeErrors(
@@ -255,8 +263,13 @@ export function renderTaskHistoryDigest(
           checkOutput(s, CHECK_RESULT_ROLES.verify),
         ),
       );
-    else if (s.stepId !== STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.verify].legacyStepId)
-      runtimeErrors.push(...extractRuntimeErrors(s.stepId, s.output));
+    if (s.stepId === browserId)
+      runtimeErrors.push(
+        ...extractRuntimeErrors(
+          STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.browser].legacyStepId,
+          checkOutput(s, CHECK_RESULT_ROLES.browser),
+        ),
+      );
   }
   const findingCount = findings.length;
 

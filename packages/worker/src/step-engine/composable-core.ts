@@ -3,6 +3,8 @@ import {
   VALIDATION_OUTPUT_CONTRACT,
   VERIFY_OUTPUT_CONTRACT,
   TEST_MANAGEMENT_OUTPUT_CONTRACT,
+  BROWSER_VERIFICATION_OUTPUT_CONTRACT,
+  ADVERSARIAL_QA_OUTPUT_CONTRACT,
 } from '@haive/shared/step-outputs';
 import {
   CORE_STAGE_INPUTS,
@@ -616,6 +618,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '08a-browser-verify',
+    providesRoles: [
+      { role: CHECK_RESULT_ROLES.browser, contract: BROWSER_VERIFICATION_OUTPUT_CONTRACT },
+    ],
     label: 'Browser verification',
     group: 'check',
     dispatchesCli: true,
@@ -663,6 +668,9 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
   },
   {
     stepId: '08d-adversarial-qa',
+    providesRoles: [
+      { role: CHECK_RESULT_ROLES.adversarialQa, contract: ADVERSARIAL_QA_OUTPUT_CONTRACT },
+    ],
     label: 'Adversarial QA',
     group: 'check',
     dispatchesCli: true,

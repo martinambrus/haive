@@ -196,12 +196,16 @@ export async function recordReviewFindings(
  *    and the stronger verdict is the one worth keeping.
  *  - `round = ctx.round`. The same fingerprint recurs on its OWN row every round, so an
  *    unscoped update would rewrite the history of rounds the developer never saw.
+ *
+ * Alternate QA consumers additionally supply the host-resolved producer row id.
+ * A fingerprint can recur under another producer too; the UPDATE must not cross it.
  */
 export async function dispositionReviewFindings(
   ctx: StepContext,
   fingerprints: string[],
   disposition: 'dismissed_human',
   source: string,
+  producerTaskStepId?: string,
 ): Promise<void> {
   const unique = [...new Set(fingerprints.filter((f) => f.length > 0))];
   if (unique.length === 0) return;
@@ -214,6 +218,7 @@ export async function dispositionReviewFindings(
           eq(schema.reviewFindings.taskId, ctx.taskId),
           eq(schema.reviewFindings.round, ctx.round),
           eq(schema.reviewFindings.disposition, 'open'),
+          ...(producerTaskStepId ? [eq(schema.reviewFindings.taskStepId, producerTaskStepId)] : []),
           inArray(schema.reviewFindings.fingerprint, unique),
         ),
       );

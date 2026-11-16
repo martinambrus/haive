@@ -635,8 +635,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
 
     // Phase 5a browser testing: surface the verdict (mcp fail / manual checklist
     // to confirm); a skipped step contributes nothing blocking.
-    const phase5a = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');
-    const pa = phase5a?.output as Phase5aOutput | null;
+    const phase5a = await readRole(ctx, CHECK_RESULT_ROLES.browser);
+    const pa = checkResultOutput(phase5a) as Phase5aOutput;
     let browser: VerifyGateDetect['browser'] = null;
     if (pa?.ran && pa.method && pa.method !== 'skip') {
       browser = {
@@ -732,8 +732,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     }
 
     // Phase 7 adversarial QA: surface findings; blocking on any critical/high.
-    const phase8d = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
-    const pd = phase8d?.output as Phase8dOutput | null;
+    const phase8d = await readRole(ctx, CHECK_RESULT_ROLES.adversarialQa);
+    const pd = checkResultOutput(phase8d) as Phase8dOutput;
     let adversarial: VerifyGateDetect['adversarial'] = null;
     if (pd?.ran) {
       adversarial = {
@@ -789,7 +789,16 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           // MCP surface can put it back (browser-restore-window.js). Restore BEFORE the
           // navigate below so the human's first paint is already the right size.
           await restoreRunnerBrowserWindow(ctx.taskId);
-          const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
+          // Runtime navigation stays tied to the physical browser/session producer.
+          const browserRuntime = await loadPreviousStepOutput(
+            ctx.db,
+            ctx.taskId,
+            '08a-browser-verify',
+          );
+          const appUrl =
+            (browserRuntime?.output as Phase5aOutput | null)?.appUrl ||
+            (await ddevPrimaryUrl(handle)) ||
+            'http://localhost';
           // http, not https: this URL is opened in the runner's own Chromium, which keeps a
           // trust store separate from the system one curl uses, and an interstitial would
           // put the user on a warning page instead of their mailbox.
@@ -887,7 +896,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         typecheck: liteCheck(output.typecheck),
       },
       allPassed:
-        output.passed === true && ![verifyResult, phase4, phase5b].some(checkResultHoldApprove),
+        output.passed === true &&
+        ![verifyResult, phase4, phase5b, phase5a, phase8d].some(checkResultHoldApprove),
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
       ...(declinedConfigs.length > 0 && slotWithoutRunner ? { slotWithoutRunner } : {}),
       ...(declaredSlots.length > 0 ? { declaredSlots } : {}),

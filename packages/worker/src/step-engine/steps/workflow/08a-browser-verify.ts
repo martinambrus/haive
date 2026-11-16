@@ -1,3 +1,4 @@
+import { CHECK_RESULT_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
@@ -485,6 +486,12 @@ async function bringUpLiveBrowser(
 export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerifyApply> = {
   needsRuntime: 'if-serving',
   editsCodeOrTests: true,
+  providesRoles: [
+    {
+      role: CHECK_RESULT_ROLES.browser,
+      contract: STEP_ROLE_REGISTRY[CHECK_RESULT_ROLES.browser].contract,
+    },
+  ],
   metadata: {
     id: '08a-browser-verify',
     workflowType: 'workflow',
