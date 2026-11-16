@@ -4,6 +4,9 @@ import {
   type CheckResultRole,
 } from '@haive/shared/step-outputs';
 
+/** Canonical verify's host stub for a command that was not selected. */
+export const VERIFY_SKIPPED_OUTPUT = 'skipped';
+
 const record = (v: unknown): Record<string, any> =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, any>) : {};
 /** Host compatibility adapter for the three canonical producers only. Modules must
@@ -69,7 +72,7 @@ export function canonicalCheckResult(
   const failed = checks.some((c) => c.ran === true && c.passed === false);
   // The canonical apply writes this host stub only when a detected command was
   // not selected. Runner/environment failures carry their own output and note.
-  const declined = names.some((n) => d[n] != null && record(o[n]).output === 'skipped');
+  const declined = names.some((n) => d[n] != null && record(o[n]).output === VERIFY_SKIPPED_OUTPUT);
   return {
     ...o,
     declinedConfigs: Array.isArray(d.declinedConfigs)

@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import {
+  VERIFY_SKIPPED_OUTPUT,
   canonicalCheckResult,
   finalizeCanonicalCheckResult,
 } from '../src/step-engine/check-result-output.js';
@@ -44,7 +45,7 @@ it('carries the primary framework even when canonical test management was skippe
 });
 
 it('distinguishes declined commands from runners that could not execute', () => {
-  const skipped = { ran: false, passed: false, output: 'skipped' };
+  const skipped = { ran: false, passed: false, output: VERIFY_SKIPPED_OUTPUT };
   expect(
     canonicalCheckResult(
       'haive.verify',

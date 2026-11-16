@@ -1,3 +1,4 @@
+import { VERIFY_SKIPPED_OUTPUT } from '../../check-result-output.js';
 import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import { readRole } from '../../read-role.js';
 import { checkResultOutput } from '../../read-check-result.js';
@@ -808,7 +809,7 @@ const skippedResult = (): CheckResult => ({
   ran: false,
   passed: false,
   command: null,
-  output: 'skipped',
+  output: VERIFY_SKIPPED_OUTPUT,
 });
 
 // Body/exit signatures that mean the app did NOT come up cleanly. Conservative on
