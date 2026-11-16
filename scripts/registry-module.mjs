@@ -47,6 +47,8 @@ export async function registryModuleExports(
     );
     if (Buffer.byteLength(manifest.stdout) > 1024 * 1024)
       throw new Error(`packed module manifest exceeds 1 MiB: ${spec}`);
+    if (!manifest.stdout.trim())
+      throw new Error(`packed module has no package/package.json: ${spec}`);
     const pkg = JSON.parse(manifest.stdout);
     if (`${pkg.name}@${pkg.version}` !== spec)
       throw new Error(`packed module identity differs from ${spec}`);

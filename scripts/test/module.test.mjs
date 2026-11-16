@@ -385,7 +385,11 @@ describe('module add @haive-module/<id>@<version>', () => {
       { STUB_NPM_EXIT: '1' },
       /npm pack @haive-module\/foo@1\.0\.0 .*failed: stub npm pack failure/,
     ],
-    ['a symlink manifest member', { STUB_NPM_SYMLINK: '1' }, /module:/],
+    [
+      'a symlink manifest member',
+      { STUB_NPM_SYMLINK: '1' },
+      /packed module has no package\/package\.json: @haive-module\/foo@1\.0\.0/,
+    ],
     [
       'a parent-traversing pack filename',
       { STUB_NPM_FILENAME: '../x.tgz' },
