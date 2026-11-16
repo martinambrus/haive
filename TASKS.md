@@ -713,7 +713,7 @@ status: open · kind: fix · found: review of the gate-3 park change 2026-11-16 
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
-status: open, owner decided 2026-11-16: zero-merge cleanup becomes a NEW CORE STEP (not a conditional `commit` requirement); P7 unblocked (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
+status: open (fence re-entry refusals and admin hold lifting DONE #1237 45cfd88f4; next: the zero-merge cleanup core step, then P7), owner decided 2026-11-16: zero-merge cleanup becomes a NEW CORE STEP (not a conditional `commit` requirement); P7 unblocked (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
 
 Design `.claude/tmp/codex-run/DPA-S/codex-1/design.md` sections 5 and 10, accepted decisions `DPA-S/accepted.md`, plan `docs/plans/kind-riding-dream.md` (Core changes ~:938-1027). P6 pins `execution_contract` at task INSERT and refuses any contract with a guarded span or custom fix target until this runtime lands. Session decision 2026-11-15: a span may declare `requiresSpan` (skipped whenever that earlier span was skipped, host-enforced), so the validator excludes merged-without-planned.
 
