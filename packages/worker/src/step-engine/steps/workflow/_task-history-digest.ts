@@ -4,7 +4,6 @@ import {
   safeParseStepOutput,
 } from '@haive/shared/step-outputs';
 import { checkResultHistoryProducer } from '../../read-check-result.js';
-import type { StepContext } from '../../step-definition.js';
 import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { asc, eq, sql } from 'drizzle-orm';
@@ -191,7 +190,6 @@ export interface DigestEventInput {
 export async function buildTaskHistoryDigest(
   db: Database,
   taskId: string,
-  consumer?: Pick<StepContext, 'round'>,
 ): Promise<TaskHistoryDigest> {
   const steps = await db
     .select()
@@ -207,7 +205,7 @@ export async function buildTaskHistoryDigest(
     .from(schema.taskEvents)
     .where(eq(schema.taskEvents.taskId, taskId))
     .orderBy(asc(schema.taskEvents.createdAt));
-  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId), consumer?.round);
+  return renderTaskHistoryDigest(steps, events, await loadRoleTaskPin(db, taskId));
 }
 
 /** Pure renderer (exported for unit tests) over already-fetched step + event rows. */
@@ -215,7 +213,6 @@ export function renderTaskHistoryDigest(
   steps: DigestStepInput[],
   events: DigestEventInput[],
   task: RoleTaskPin,
-  maxCheckRound?: number,
 ): TaskHistoryDigest {
   const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const validationId = checkResultHistoryProducer(task, CHECK_RESULT_ROLES.validation);
@@ -225,11 +222,7 @@ export function renderTaskHistoryDigest(
     role: typeof CHECK_RESULT_ROLES.validation | typeof CHECK_RESULT_ROLES.verify,
   ) => {
     if (s.stepId === STEP_ROLE_REGISTRY[role].legacyStepId) return s.output;
-    if (
-      (maxCheckRound !== undefined && s.round > maxCheckRound) ||
-      (s.status !== undefined && s.status !== 'done')
-    )
-      return null;
+    if (s.status !== undefined && s.status !== 'done') return null;
     const parsed = safeParseStepOutput(STEP_ROLE_REGISTRY[role].contract, s.output);
     return parsed.success ? parsed.data : null;
   };

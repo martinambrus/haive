@@ -181,3 +181,26 @@ it('an unselected historical candidate supplies no findings or passing evidence'
     }).findingCount,
   ).toBe(0);
 });
+
+it('one producer may supply validation and review without hiding either historical finding', () => {
+  const review = '08c-code-review';
+  const nodes = dataPortNodes(
+    [review, learning],
+    {},
+    new Map([
+      [review, { providesRoles: [{ role: validation, contract: { id: validation, version: 1 } }] }],
+    ]),
+  );
+  const task = {
+    dataEdgePlan: buildDataEdgePlan('static', [{ executionPath: null, nodes }]),
+    runListSnapshot: [review, learning],
+  };
+  const combined = {
+    ...output,
+    peer: { findings: [{ severity: 'high', path: 'b.ts', issue: 'peer finding' }] },
+  };
+  expect(
+    renderTaskHistoryDigest([{ stepId: review, round: 0, output: combined }], [], task)
+      .findingCount,
+  ).toBe(2);
+});

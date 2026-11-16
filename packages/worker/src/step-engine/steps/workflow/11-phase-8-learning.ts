@@ -1343,7 +1343,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const implementOutput = legacyRoleOutput(implement);
     const verifyOutput = checkResultOutput(verify);
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
-    const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId, ctx);
+    const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId);
     const repositoryId =
       (
         await ctx.db.query.tasks.findFirst({
