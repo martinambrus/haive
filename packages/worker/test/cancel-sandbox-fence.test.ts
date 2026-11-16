@@ -1456,7 +1456,11 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       expect(result.row.formValues).toBeNull();
       expect(result.row.formSchema).toMatchObject({
         autoSubmit: false,
-        fields: [{ default: true }, { default: 'fresh message' }],
+        fields: expect.arrayContaining([
+          expect.objectContaining({ id: 'commit', default: true }),
+          expect.objectContaining({ id: 'commitMessage', default: 'fresh message' }),
+          expect.objectContaining({ id: 'reopenedFormNotice', type: 'note', variant: 'warning' }),
+        ]),
       });
       expect(apply).not.toHaveBeenCalled();
       expect(reconcile).not.toHaveBeenCalled();
@@ -1504,6 +1508,86 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     }
   });
+  it.each(['wrong user', 'wrong generation', 'commit mismatch', 'older submission'])(
+    'gate3 stays parked with invalid human evidence: %s',
+    async (kind) => {
+      const ctx = await seed();
+      const gateId = '10-gate-3-commit';
+      await db
+        .update(schema.tasks)
+        .set({
+          currentStepId: gateId,
+          currentRound: 0,
+          autoContinue: true,
+          preAnswers: { [gateId]: { commit: true } },
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      await db
+        .update(schema.taskSteps)
+        .set({
+          stepId: gateId,
+          status: 'waiting_form',
+          detectOutput: {},
+          formValues: { commit: true },
+          waitingStartedAt: null,
+        })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const approvedAt = new Date('2026-01-02T00:00:00Z');
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        eventType: 'insight.check',
+        createdAt: approvedAt,
+        payload: { version: 1, batchId: 'picked', kind: 'gate2_approved', round: 0 },
+      });
+      await db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: ctx.taskStepId,
+        eventType: 'step.form_submitted',
+        createdAt: new Date(
+          kind === 'older submission' ? '2026-01-01T00:00:00Z' : '2026-01-03T00:00:00Z',
+        ),
+        payload: {
+          userId: kind === 'wrong user' ? randomUUID() : userId,
+          generation: kind === 'wrong generation' ? 1 : 0,
+          commit: kind !== 'commit mismatch',
+        },
+      });
+      const apply = vi.fn(async () => ({ committed: true }));
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        repoPath: '/unused',
+        workspacePath: '/unused',
+        cliProviderId: null,
+        epoch: 0,
+        round: 0,
+        moduleDeactivation: null,
+        formValues: { commit: true },
+        stepDef: {
+          metadata: {
+            id: gateId,
+            index: 10,
+            workflowType: 'workflow',
+            title: 'Commit',
+            description: '',
+            requiresCli: false,
+            autoSubmitDefaults: true,
+          },
+          form: () => ({
+            title: 'Commit',
+            autoSubmit: true,
+            fields: [{ id: 'commit', type: 'checkbox', label: 'Commit', default: true }],
+          }),
+          apply,
+        },
+      });
+      expect(result.status).toBe('waiting_form');
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(apply).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     'declined',
     'justified',

@@ -3579,6 +3579,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // Keep the form's evidence-based defaults; only an attested owner submit
       // may apply them. Task/type presets and prior-task reuse stay suppressed.
       persistedSchema = { ...persistedSchema, autoSubmit: false };
+      if (meta.id === '10-gate-3-commit' && !insightHumanSubmission) {
+        persistedSchema = {
+          ...persistedSchema,
+          fields: [
+            {
+              type: 'note',
+              id: 'reopenedFormNotice',
+              label: 'Review before continuing',
+              body: 'The changes were refreshed after your review. Review them and confirm whether to commit.',
+              variant: 'warning',
+            },
+            ...persistedSchema.fields.filter((field) => field.id !== 'reopenedFormNotice'),
+          ],
+        };
+      }
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 
