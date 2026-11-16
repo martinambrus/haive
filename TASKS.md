@@ -691,7 +691,7 @@ Left from #1231 reviews (lows, parked under the owner rule):
 
 ### T691 · Owner's `gpt-5.5` codex provider rows fail with model_not_found; transport pin regex too broad
 
-status: open, item 1 waits on the owner · kind: fix · found: message-threads measurement 2026-11-16 (#1230) · priority: P3
+status: open (item 1 DONE 2026-11-16 on the owner's decision: the four rows now pass `--model gpt-5.6-sol`, edited through the provider API; their labels still say 5.5, left for the owner) · kind: fix · found: message-threads measurement 2026-11-16 (#1230) · priority: P3
 
 1. The four dev-install codex rows labelled "OpenAI Codex 5.5 Low/Med/High/xhigh" pass `--model gpt-5.5`, which codex 0.152.0 refuses on a ChatGPT-account login: `400 invalid_request_error` "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account." (`model_not_found`). Any task step dispatched to them fails at the first turn. These are owner rows: the owner decides whether to repoint them (e.g. to `gpt-5.6-sol`) or disable them; never edit them on the owner's behalf.
 2. Low: `packages/worker/test/adapter-transport.test.ts` ~:23-25 matches any codex override containing `transport`, so a legitimate future `-c mcp_servers.<name>.transport=...` would trip it with a misleading "must not override its incremental transport" message. Narrow it to the model-provider transport keys (e.g. `model_providers\.[^=]*transport`) when touched.
@@ -704,7 +704,7 @@ status: open · kind: fix · found: worker log 2026-11-15 · priority: P3
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
-status: open, BLOCKED on an owner decision for P7's scan scenarios (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
+status: open, owner decided 2026-11-16: zero-merge cleanup becomes a NEW CORE STEP (not a conditional `commit` requirement); P7 unblocked (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
 
 Design `.claude/tmp/codex-run/DPA-S/codex-1/design.md` sections 5 and 10, accepted decisions `DPA-S/accepted.md`, plan `docs/plans/kind-riding-dream.md` (Core changes ~:938-1027). P6 pins `execution_contract` at task INSERT and refuses any contract with a guarded span or custom fix target until this runtime lands. Session decision 2026-11-15: a span may declare `requiresSpan` (skipped whenever that earlier span was skipped, host-enforced), so the validator excludes merged-without-planned.
 
@@ -727,7 +727,7 @@ Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The defa
 
 ### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+29)
 
-status: open (lows; bundle with the next insight-loop change or park) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
+status: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both are now non-trivial and scheduled) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 
