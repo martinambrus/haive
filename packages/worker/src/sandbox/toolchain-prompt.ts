@@ -9,7 +9,7 @@ const CLOSE = '</haive_sandbox_toolchain>';
 export interface SandboxToolchainStamp {
   imageId: string;
   block?: string;
-  /** Zero-based Unicode character offset in the stored prompt, for replay-safe audit removal. */
+  /** Zero-based Unicode character offset in the prompt, shared by exec and replay-safe audit removal. */
   offset?: number;
   /** Number of independently adapted leading advisories (one when omitted). */
   copies?: number;
@@ -139,6 +139,50 @@ function removeStampedCopies(text: string, separator: string, occurrences: numbe
   return text.replaceAll(separator, () => (owned.has(++match) ? '' : separator));
 }
 
+function stampPositionError(): Error {
+  return new Error('Sandbox toolchain advisory does not match its stamped prompt position');
+}
+
+/** The offset counts PostgreSQL characters. Convert to a JS index only after decoding transport
+ * framing, and never fall back to a textual match that could belong to operator/task copy. */
+function removeStampedPosition(text: string, separator: string, offset: number): string {
+  if (!separator || !Number.isSafeInteger(offset) || offset < 0) throw stampPositionError();
+  let at = 0;
+  let characters = 0;
+  for (const character of text) {
+    if (characters === offset) break;
+    at += character.length;
+    characters++;
+  }
+  if (characters !== offset || !text.startsWith(separator, at)) throw stampPositionError();
+  return text.slice(0, at) + text.slice(at + separator.length);
+}
+
+/** Both stream-json inputs wrap one user prompt. Decode it so quotes, escapes and astral
+ * characters preceding the advisory cannot change the stamped position. */
+function removeStampedJsonPosition(text: string, separator: string, offset: number): string {
+  let frame: { message?: { content?: string | Array<{ type?: string; text?: string }> } };
+  try {
+    frame = JSON.parse(text);
+  } catch {
+    throw stampPositionError();
+  }
+  const content = frame?.message?.content;
+  if (typeof content === 'string') {
+    frame.message!.content = removeStampedPosition(content, separator, offset);
+  } else if (
+    Array.isArray(content) &&
+    content.length === 1 &&
+    content[0]?.type === 'text' &&
+    typeof content[0].text === 'string'
+  ) {
+    content[0].text = removeStampedPosition(content[0].text, separator, offset);
+  } else {
+    throw stampPositionError();
+  }
+  return JSON.stringify(frame) + (text.endsWith('\n') ? '\n' : '');
+}
+
 /** Recheck at the final spawn choke point, including sub-agent and app-server fallback paths.
  * Pin the launch to the inspected ID so a tag rebuilt AFTER inspect cannot invalidate the fact.
  * A different/unknown image or changed environment strips the advisory, never guesses a replacement.
@@ -175,33 +219,51 @@ export async function recheckSandboxToolchain(
   const block = stamp.block ?? sandboxToolchainBlock(stamp.segments?.[0] ?? stamp.prompt ?? '');
   const separator = block ? block + '\n\n' : '';
   const occurrences = sandboxToolchainOccurrences(stamp);
-  const replace = (text: string) => removeStampedCopies(text, separator, occurrences);
-  const replaceJson = (text: string) =>
-    removeStampedCopies(text, JSON.stringify(separator).slice(1, -1), occurrences);
+  let removed = false;
+  const replace = (text: string) => {
+    if (stamp.offset === undefined) return removeStampedCopies(text, separator, occurrences);
+    const clean = removeStampedPosition(text, separator, stamp.offset);
+    removed = true;
+    return clean;
+  };
+  const replaceJson = (text: string) => {
+    if (stamp.offset === undefined)
+      return removeStampedCopies(text, JSON.stringify(separator).slice(1, -1), occurrences);
+    const clean = removeStampedJsonPosition(text, separator, stamp.offset);
+    removed = true;
+    return clean;
+  };
   const { sandboxToolchain: _stamp, ...clean } = spec;
+  const cleanedSpec: CliCommandSpec = {
+    ...clean,
+    // Other argv entries are flags/configuration, not the prompt the offset was measured on.
+    args: spec.args.map((arg) =>
+      stamp.offset === undefined || (separator && arg.includes(separator)) ? replace(arg) : arg,
+    ),
+    ...(spec.stdinPrompt !== undefined
+      ? {
+          stdinPrompt:
+            separator && spec.stdinPrompt.includes(separator)
+              ? replace(spec.stdinPrompt)
+              : replaceJson(spec.stdinPrompt),
+        }
+      : {}),
+    ...(spec.stdinInitial !== undefined ? { stdinInitial: replaceJson(spec.stdinInitial) } : {}),
+    ...(spec.promptFile
+      ? { promptFile: { ...spec.promptFile, content: replace(spec.promptFile.content) } }
+      : {}),
+    ...(spec.codexAppServer
+      ? {
+          codexAppServer: { ...spec.codexAppServer, prompt: replace(spec.codexAppServer.prompt) },
+        }
+      : {}),
+  };
+  // An unlocatable owned block cannot be safely omitted by guessing another copy's position.
+  // Refuse this malformed positional payload before auditing or sending any transport.
+  if (stamp.offset !== undefined && !removed) throw stampPositionError();
   return {
     image: pinned ?? image,
     ...(block ? { strippedBlock: block, strippedOccurrences: occurrences } : {}),
-    spec: {
-      ...clean,
-      args: spec.args.map(replace),
-      ...(spec.stdinPrompt !== undefined
-        ? {
-            stdinPrompt:
-              separator && spec.stdinPrompt.includes(separator)
-                ? replace(spec.stdinPrompt)
-                : replaceJson(spec.stdinPrompt),
-          }
-        : {}),
-      ...(spec.stdinInitial !== undefined ? { stdinInitial: replaceJson(spec.stdinInitial) } : {}),
-      ...(spec.promptFile
-        ? { promptFile: { ...spec.promptFile, content: replace(spec.promptFile.content) } }
-        : {}),
-      ...(spec.codexAppServer
-        ? {
-            codexAppServer: { ...spec.codexAppServer, prompt: replace(spec.codexAppServer.prompt) },
-          }
-        : {}),
-    },
+    spec: cleanedSpec,
   };
 }

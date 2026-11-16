@@ -104,7 +104,12 @@ it('preserves a full quoted advisory in both CLI delivery and the invocation pro
   expect(answer.spec.args[0]).toBe(body);
 });
 
-it.each(['', '<haive_agent_rules>\nKeep 💡 rules\n</haive_agent_rules>\n\n'])(
+it.each([
+  '',
+  '<haive_agent_rules>\nKeep 💡 rules\n</haive_agent_rules>\n\n',
+  `<haive_agent_rules>\nKeep 💡 rules and this quote:\n${block}\n\nEnd.\n</haive_agent_rules>\n\n`,
+  `<haive_house_rules>\nKeep 💡 rules and this quote:\n${block}\n\nEnd.\n</haive_house_rules>\n\n`,
+])(
   'preserves a full quote when the same positional stamp is audited twice (prefix %j)',
   async (prefix) => {
     const body = `Keep $& $$ and this full quote:\n${block}\n\nEnd.`;

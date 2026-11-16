@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest';
 import {
   prepareSandboxToolchainPrompts,
   recheckSandboxToolchain,
+  sandboxToolchainOffset,
   stripSandboxToolchain,
   withSandboxToolchain,
 } from '../src/sandbox/toolchain-prompt.js';
@@ -166,5 +167,82 @@ it('finds the advisory behind extra separator lines without consuming task-leadi
   const s = { ...spec(), args: [outer + withSandboxToolchain('\n\nCheck code', fact)] };
   expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([
     outer + '\n\nCheck code',
+  ]);
+});
+
+for (const rules of ['agent', 'house']) {
+  it.each(['argv', 'stdin', 'steering', 'antigravity', 'file', 'app-server'] as const)(
+    `keeps a full advisory quote in ${rules} rules before the owned copy over %s`,
+    async (mode) => {
+      const prefix = `<haive_${rules}_rules>\nKeep 💡 "rules" and this quote:\n${block}\n\nEnd.\n</haive_${rules}_rules>\n\n`;
+      const body = `Check $& $$ code, retaining a later quote:\n${block}\n\nEnd.`;
+      const queued = prefix + withSandboxToolchain(body, fact);
+      const s: CliCommandSpec = {
+        ...spec(),
+        args: mode === 'argv' ? [queued] : ['--model', 'chosen'],
+        sandboxToolchain: { imageId: OLD, block, offset: sandboxToolchainOffset(queued) },
+      };
+      if (mode === 'stdin') s.stdinPrompt = queued;
+      if (mode === 'steering') s.stdinInitial = steeringUserMessageLine(queued);
+      if (mode === 'antigravity') s.stdinPrompt = antigravityStdinPrompt(queued);
+      if (mode === 'file') s.promptFile = { containerPath: '/prompt', content: queued };
+      if (mode === 'app-server')
+        s.codexAppServer = { prompt: queued, model: 'chosen', effort: 'high', execArgs: ['exec'] };
+      for (const [r, wrapper, extraEnv] of [
+        [runner, undefined, undefined],
+        [
+          fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: OLD }) }),
+          'wrapper',
+          undefined,
+        ],
+        [
+          fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: OLD }) }),
+          undefined,
+          { PATH: '/custom' },
+        ],
+      ] as const) {
+        const { spec: clean } = await recheckSandboxToolchain(s, 'image:tag', r, wrapper, extraEnv);
+        const expected = prefix + body;
+        if (mode === 'argv') expect(clean.args).toEqual([expected]);
+        if (mode === 'stdin') expect(clean.stdinPrompt).toBe(expected);
+        if (mode === 'steering') expect(clean.stdinInitial).toBe(steeringUserMessageLine(expected));
+        if (mode === 'antigravity')
+          expect(clean.stdinPrompt).toBe(antigravityStdinPrompt(expected));
+        if (mode === 'file') expect(clean.promptFile?.content).toBe(expected);
+        if (mode === 'app-server') expect(clean.codexAppServer?.prompt).toBe(expected);
+        // A second recheck of the executable spec cannot consume either quote.
+        expect((await recheckSandboxToolchain(clean, 'image:tag', r)).spec).toEqual(clean);
+      }
+    },
+  );
+}
+
+it.each(['argv', 'stdin', 'steering', 'antigravity', 'file', 'app-server'] as const)(
+  'refuses a mismatched owned offset in %s rather than stripping a different quote',
+  async (mode) => {
+    const quoted = `Moved prompt\n${prompt}`;
+    const s: CliCommandSpec = {
+      ...spec(),
+      args: mode === 'argv' ? [quoted] : [],
+      sandboxToolchain: { imageId: OLD, block, offset: 0 },
+    };
+    if (mode === 'stdin') s.stdinPrompt = quoted;
+    if (mode === 'steering') s.stdinInitial = steeringUserMessageLine(quoted);
+    if (mode === 'antigravity') s.stdinPrompt = antigravityStdinPrompt(quoted);
+    if (mode === 'file') s.promptFile = { containerPath: '/prompt', content: quoted };
+    if (mode === 'app-server')
+      s.codexAppServer = { prompt: quoted, model: null, effort: null, execArgs: ['exec'] };
+    await expect(recheckSandboxToolchain(s, 'image:tag', runner)).rejects.toThrow(
+      'Sandbox toolchain advisory does not match its stamped prompt position',
+    );
+    expect(JSON.stringify(s)).toContain('haive_sandbox_toolchain');
+  },
+);
+
+it('retains first-match removal for a legacy stamp even with an earlier full quote', async () => {
+  const prefix = `Quoted:\n${block}\n\nEnd.\n`;
+  const s = { ...spec(), args: [prefix + prompt] };
+  expect((await recheckSandboxToolchain(s, 'image:tag', runner)).spec.args).toEqual([
+    `Quoted:\nEnd.\n${prompt}`,
   ]);
 });
