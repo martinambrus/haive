@@ -1,3 +1,4 @@
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import { STEP_ROLES, type CodeReviewOutput } from '@haive/shared/step-outputs';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import {
@@ -591,6 +592,7 @@ function formatRejectDiagnosis(
 }
 
 export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGateApply> = {
+  consumesRoles: CHECK_RESULT_INPUTS['09-gate-2-verify-approval'],
   needsRuntime: 'if-serving',
   metadata: {
     id: '09-gate-2-verify-approval',

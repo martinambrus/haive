@@ -5,6 +5,7 @@ import {
 } from './role-port-declarations.js';
 import {
   SPEC_ROLES,
+  CHECK_RESULT_ROLES,
   IMPLEMENTATION_SUMMARY_ROLE,
   IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
   DISCOVERY_ROLE,
@@ -85,13 +86,29 @@ export const CORE_STAGE_INPUTS: Readonly<Record<string, readonly DataInput[]>> =
   ...DISCOVERY_REQUIREMENTS_INPUTS,
 });
 const reviewInputs = Object.freeze([input('review', STEP_ROLES.codeReview)]);
+export const CHECK_RESULT_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
+  '09-gate-2-verify-approval': Object.freeze([
+    input('validation', CHECK_RESULT_ROLES.validation),
+    input('verify', CHECK_RESULT_ROLES.verify),
+    input('test-management', CHECK_RESULT_ROLES.testManagement),
+  ]),
+  '10-gate-3-commit': Object.freeze([input('validation', CHECK_RESULT_ROLES.validation)]),
+  '11-phase-8-learning': Object.freeze([
+    input('validation', CHECK_RESULT_ROLES.validation),
+    input('verify', CHECK_RESULT_ROLES.verify),
+  ]),
+  '08-phase-5-verify': Object.freeze([input('test-management', CHECK_RESULT_ROLES.testManagement)]),
+});
 export const CORE_DATA_INPUTS: Readonly<Record<string, readonly DataInput[]>> = Object.freeze({
   ...CORE_STAGE_INPUTS,
+  ...CHECK_RESULT_INPUTS,
   '09-gate-2-verify-approval': Object.freeze([
+    ...CHECK_RESULT_INPUTS['09-gate-2-verify-approval']!,
     ...reviewInputs,
     input('audit', STEP_ROLES.codeAudit),
   ]),
   '11-phase-8-learning': Object.freeze([
+    ...CHECK_RESULT_INPUTS['11-phase-8-learning']!,
     ...reviewInputs,
     input('implementation-summary', IMPLEMENTATION_SUMMARY_ROLE),
   ]),

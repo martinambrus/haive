@@ -1,3 +1,4 @@
+import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
 import { CORE_DATA_INPUTS } from '@haive/shared/step-ports';
 import { IMPLEMENTATION_SUMMARY_ROLE } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
@@ -1303,7 +1304,9 @@ async function ensureWorktreeKb(workspace: string): Promise<void> {
 
 export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> = {
   consumesRoles: CORE_DATA_INPUTS['11-phase-8-learning']?.filter(
-    (p) => p.role === IMPLEMENTATION_SUMMARY_ROLE,
+    (p) =>
+      p.role === IMPLEMENTATION_SUMMARY_ROLE ||
+      Object.values(CHECK_RESULT_ROLES).some((r) => r === p.role),
   ),
   metadata: {
     id: '11-phase-8-learning',

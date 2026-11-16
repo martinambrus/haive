@@ -1,3 +1,5 @@
+import { CHECK_RESULT_ROLES, VERIFY_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
+import { CHECK_RESULT_INPUTS } from '@haive/shared/step-ports';
 import { randomBytes } from 'node:crypto';
 import {
   ensureDirNoFollow,
@@ -930,6 +932,8 @@ export async function runRuntimeSmoke(
 }
 
 export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
+  providesRoles: [{ role: CHECK_RESULT_ROLES.verify, contract: VERIFY_OUTPUT_CONTRACT }],
+  consumesRoles: CHECK_RESULT_INPUTS['08-phase-5-verify'],
   needsRuntime: 'if-serving',
   metadata: {
     id: '08-phase-5-verify',

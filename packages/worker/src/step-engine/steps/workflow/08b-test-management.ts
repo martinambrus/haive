@@ -1,3 +1,4 @@
+import { CHECK_RESULT_ROLES, TEST_MANAGEMENT_OUTPUT_CONTRACT } from '@haive/shared/step-outputs';
 import { TEST_FILE_RE } from './_test-paths.js';
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
@@ -719,6 +720,9 @@ function buildTestFailureDiagnosis(out: TestManagementApply): string {
 }
 
 export const testManagementStep: StepDefinition<TestManagementDetect, TestManagementApply> = {
+  providesRoles: [
+    { role: CHECK_RESULT_ROLES.testManagement, contract: TEST_MANAGEMENT_OUTPUT_CONTRACT },
+  ],
   // Playwright/Cypress run against a SERVING app. The runtime is brought up far
   // earlier (01a/01c, re-ensured by 07c), but the idle reaper can reclaim it during
   // the 07→07c chain, so re-ensure rather than assume. 'if-serving' keeps a

@@ -1,6 +1,7 @@
 export * from './core-data-ports.js';
 import {
   CORE_DATA_INPUTS,
+  CHECK_RESULT_INPUTS,
   implementationSummaryProducer,
   SPEC_INPUTS,
   DISCOVERY_REQUIREMENTS_INPUTS,
@@ -234,6 +235,7 @@ export function projectStepPorts(
           contract: { ...STEP_ROLE_REGISTRY[role].contract },
         })),
       });
+    for (const d of CHECK_RESULT_INPUTS[id] ?? []) inputs.push(port(d.role, d.input));
     if (id === '11-phase-8-learning')
       inputs.push(port(IMPLEMENTATION_SUMMARY_ROLE, 'implementation-summary'));
     if (reviewConsumers.has(id)) inputs.push(port(STEP_ROLES.codeReview, 'review'));
