@@ -838,15 +838,20 @@ parse. Before parsing, the UTF-8 reply must fit the 256 KiB limit (injectable in
 Oversized valid JSON, missing text, an unavailable/wrong version or invalid data raises
 `StepOutputContractInvalidError`, visibly fails the producer and cannot route to 07.
 Structured `task_steps.output` stores only `roleOutput: {role, contract, data}` once,
-without duplicate `raw` or `parsed` bodies. Role readers unwrap and revalidate that payload;
-physical step quotes and history serialize its contract/data envelope. The invocation retains
-its existing CLI capture. Raw-mode output remains `{raw, parsed}` and cannot provide roles.
+without duplicate `raw` or `parsed` bodies. Successful-output validation and role readers
+use the same unwrapping helper, checking the envelope role and exact contract before
+validating its data. Core and module producers still validate their direct payloads.
+Role readers revalidate that payload; physical step quotes and history serialize its
+contract/data envelope. The invocation retains its existing CLI capture. Raw-mode output remains `{raw, parsed}` and cannot provide roles.
 
 Both arrays are data declarations: they grant no `replaces`, executable `outputContract`,
 review/audit policy, seat, persona, skip or fix-loop authority. Module declarations retain
 their separate restrictions. Admission and the canvas use the merged prompt catalog,
 including producer choices. The existing editor authors inputs and optionality, inserts
 own-line tokens and rewrites matching `{{role:}}` tokens when an input is renamed.
+The parent editor moves that step's author bindings to the new input name on every
+candidate path, preserving their producers. A target name that already has an input or
+binding is refused visibly without changing either declaration or binding.
 Structured mode starts with no provided-role selection; the select lists only eligible roles.
 With none registered, the toggle and select are disabled with an explanation.
 Mode/declaration edits count as unsaved.
