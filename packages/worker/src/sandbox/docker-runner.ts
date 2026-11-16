@@ -91,6 +91,10 @@ export interface DockerRunOpts {
   network?: string;
   /** Read-only image filesystem, used by advisory interpreter probes. */
   readOnly?: boolean;
+  /** Image acquisition policy; probes only use already-inspected local images. */
+  pull?: 'never' | 'missing' | 'always';
+  capDrop?: string[];
+  securityOpt?: string[];
   /** Optional combined stdout/stderr capture cap; exceeding it kills and removes the run. */
   maxOutputBytes?: number;
   /** Extra networks to attach AFTER create, before start (docker run takes only
@@ -455,6 +459,9 @@ export const defaultDockerRunner: DockerRunner = {
       }
     }
     if (opts.readOnly) flagArgs.push('--read-only');
+    if (opts.pull) flagArgs.push('--pull', opts.pull);
+    for (const capability of opts.capDrop ?? []) flagArgs.push('--cap-drop', capability);
+    for (const security of opts.securityOpt ?? []) flagArgs.push('--security-opt', security);
     if (opts.user) flagArgs.push('--user', opts.user);
     if (opts.workdir) flagArgs.push('-w', opts.workdir);
     if (opts.network) flagArgs.push('--network', opts.network);
