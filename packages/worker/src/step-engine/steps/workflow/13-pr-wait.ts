@@ -8,6 +8,8 @@ import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { killTaskDdevRunners } from '../../../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../../../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../../../sandbox/ide-runner.js';
+import { WorktreeNotDirectoryError, WorktreeRemovedError } from '../../../repo/task-worktree.js';
+import { resolveInvocationUsesWorktreeGitBoundary } from '../../../repo/worktree-git-boundary.js';
 import {
   buildRagUsagePrompt,
   loadRagUsageInput,
@@ -17,6 +19,7 @@ import {
 
 interface PrWaitDetect {
   ragUsage?: RagUsageInput;
+  ragUsageSkipReason?: string;
   /** True when this task opened a pull request (12-worktree-cleanup create_pr). When
    *  false the step is a no-op pass-through and the task completes normally. */
   pending: boolean;
@@ -137,6 +140,25 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     async prepare({ ctx, detected }) {
       const d = detected as PrWaitDetect;
       d.ragUsage = await readUsage(ctx);
+      delete d.ragUsageSkipReason;
+      if (d.ragUsage.queries.length > 0 && d.ragUsage.runs.some((run) => run.turns.length > 0)) {
+        try {
+          // Tool-less invocations still mount the task's tree. Never override that
+          // tree with the main checkout just to run this best-effort classifier.
+          await resolveInvocationUsesWorktreeGitBoundary(ctx.db, ctx.taskId);
+        } catch (err) {
+          ctx.throwIfCancelled();
+          if (err instanceof WorktreeRemovedError) {
+            d.ragUsageSkipReason =
+              'RAG usage review skipped because the task worktree was removed.';
+          } else if (err instanceof WorktreeNotDirectoryError) {
+            d.ragUsageSkipReason =
+              'RAG usage review skipped because the task worktree path is not a directory.';
+          } else {
+            throw err;
+          }
+        }
+      }
       // A PR can remain open while agents do more work. Preserve this refreshed
       // input so apply validates the same evidence after the CLI resumes the step.
       try {
@@ -149,7 +171,11 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
       }
       // skipIf runs before refresh. A parked PR can gain or lose classifiable
       // evidence; decide again now without reserving a CLI or spending tokens.
-      if (d.ragUsage.queries.length === 0 || !d.ragUsage.runs.some((run) => run.turns.length > 0)) {
+      if (
+        d.ragUsageSkipReason ||
+        d.ragUsage.queries.length === 0 ||
+        !d.ragUsage.runs.some((run) => run.turns.length > 0)
+      ) {
         return false;
       }
     },
@@ -161,7 +187,12 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     const d = args.detected;
     try {
       const input = d.ragUsage ?? (await readUsage(ctx));
-      await saveRagUsage(ctx, input, args.llmOutput);
+      await saveRagUsage(
+        ctx,
+        input,
+        args.llmOutput,
+        args.llmOutput == null ? d.ragUsageSkipReason : undefined,
+      );
     } catch (err) {
       ctx.throwIfCancelled();
       ctx.logger.warn({ err }, 'RAG usage review unavailable; continuing finalization');

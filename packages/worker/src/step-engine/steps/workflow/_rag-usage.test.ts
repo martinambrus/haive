@@ -1,10 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { createCleanTranscriptBuffer } from '../../../queues/cli-exec/clean-transcript-buffer.js';
 import {
   assessRagUsage,
   buildRagUsagePrompt,
   boundRagUsageInput,
   loadRagUsageInput,
+  saveRagUsage,
   type RagUsageInput,
 } from './_rag-usage.js';
 import type { StepContext } from '../../step-definition.js';
@@ -47,6 +51,60 @@ const status = (data: RagUsageInput, output: unknown) =>
   assessRagUsage(data, output)[0]!.assessment.status;
 
 describe('RAG usage evidence', () => {
+  it('applies a skip reason only to captured queries in the bounded review input', async () => {
+    const taskId = randomUUID();
+    const fake = createFakeDb({ ragQueryLog: schema.ragQueryLog });
+    const selectedId = randomUUID();
+    const uncapturedId = randomUUID();
+    fake.insert(schema.ragQueryLog, {
+      id: selectedId,
+      taskId,
+      query: 'selected query',
+      hitCount: 1,
+      resultHits: input.queries[0]!.hits,
+    });
+    fake.insert(schema.ragQueryLog, {
+      id: uncapturedId,
+      taskId,
+      query: 'uncaptured response',
+      hitCount: 1,
+      resultHits: null,
+    });
+    // This captured row represents a query omitted from the bounded checkpoint.
+    fake.insert(schema.ragQueryLog, {
+      id: randomUUID(),
+      taskId,
+      query: 'omitted from the evidence budget',
+      hitCount: 1,
+      resultHits: input.queries[0]!.hits,
+    });
+    const ctx = {
+      taskId,
+      db: fake.db,
+      throwIfCancelled: vi.fn(),
+    } as unknown as StepContext;
+    const skipReason = 'Review skipped because the task worktree was removed.';
+    await saveRagUsage(
+      ctx,
+      {
+        queries: [
+          { ...input.queries[0]!, id: selectedId },
+          { ...input.queries[0]!, id: uncapturedId, hits: null },
+        ],
+        runs: input.runs,
+      },
+      null,
+      skipReason,
+    );
+    for (const { id, usageAssessment } of fake.rows(schema.ragQueryLog)) {
+      expect(usageAssessment).toMatchObject({
+        status: 'unknown',
+        reason:
+          id === selectedId ? skipReason : 'The available agent record does not establish usage.',
+        evidence: [],
+      });
+    }
+  });
   it('bounds the evidence returned to detect and dispatch before it can be checkpointed', async () => {
     const q = input.queries[0]!;
     const run = input.runs[0]!;
