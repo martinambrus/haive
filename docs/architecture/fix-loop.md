@@ -575,7 +575,18 @@ reused, and empty selection retains the existing staging and commit path.
 
 A failed ran 08 check, fixable boot error or other non-cancelled 08 failure records
 required `insight.check` state before leaving its row. Successful repair never clears
-it. Only a new gate-2 approval records `gate2_approved`. This task-wide latch survives
+it. Only a new gate-2 approval records `gate2_approved`. While approval is pending, gate 2
+ignores task/type presets, prior-task answer reuse and every auto-submit path. It keeps
+the form's own computed defaults, rebuilding unanswered persisted schemas without preset
+overlays, forces `autoSubmit: false` and parks for the owner. A saved answer or queue
+payload alone cannot approve: the owner-authenticated submit route must have recorded an
+explicit decision for that row and rerun generation after the latest failed insight check.
+The worker validates that saved answer against the persisted schema and moves the row to
+`running` before apply, so a second owner POST during apply is refused and cannot replace
+the recorded decision. Malformed feedback returns a form-validation failure before reject
+diagnosis formatting. Required `step.form_submitted` evidence is checked again under the
+owned row/task fence before `gate2_approved` is written. Gate 2 without a latch retains its
+existing behavior. This task-wide latch survives
 Retry of the original request/source independently of continuation validity. Gate-3
 apply checks it before navigation, picks or Git and revises to gate 2 while pending.
 A pinned list without that destination refuses instead of running off-list. The quick

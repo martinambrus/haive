@@ -978,7 +978,12 @@ conditional tail as described below; existing pins are never recomputed.
 or its pinned replacement) as well as its existing worktree, with verification as its
 revise target. Stored admin/module/derived types missing these requirements become
 unavailable when revalidated for new task creation; repair their composition before
-creating another task. Existing tasks retain their immutable lists and fail the source
+creating another task. A pending failed-insight approval overrides task/type gate-2
+presets, prior-task form reuse and auto-continue: gate 2 parks with its own computed
+form defaults and `autoSubmit: false`. Preset overlays never change that recommendation.
+Only a fresh explicit owner submission bound to the row and rerun generation can clear
+it; latch-free gate-2 preset behavior is unchanged.
+Existing tasks retain their immutable lists and fail the source
 step retryably if their destinations are incomplete. No data migration weakens the rule.
 The development install had no such stored types when checked by the session.
 

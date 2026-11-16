@@ -957,7 +957,21 @@ Required `insight.check` records preserve failure and new gate-2 approval outsid
 resettable output. Source Retry cannot erase this task-wide approval requirement.
 The precommit guard applies even to an empty selection. Conditional quick gate 2 uses
 the latch in both its shouldRun wrapper and fresh pause/provider admission, so a pending
-approval cannot accidentally become a dormant skip. Report snapshots stay immutable
+approval cannot accidentally become a dormant skip. A pending approval also forces gate 2
+to park rather than replay presets or saved synthetic answers, while retaining the form's
+computed defaults. Unanswered persisted schemas are rebuilt without preset overlays.
+The submit route records the authenticated owner, rerun generation and explicit decision
+in `step.form_submitted` atomically with its answer and cleared park marker. The worker
+accepts only that saved answer, with matching row/generation/owner and a submission newer
+than the latest failed check (compared at PostgreSQL timestamp precision); legacy unbound
+submissions repark. Queue values cannot replace an attested decision. The saved answer
+passes the normal persisted-schema validation and the row becomes `running` before apply,
+refusing a second owner POST during apply. The required approval-event writer rechecks
+this evidence under its existing row and task fences.
+
+Deploy the API and worker together for this change. An old API never sends the required
+owner/generation marker, so a latched gate 2 cannot be approved until both are current.
+Do not restore an older API while pending approvals can resume. Report snapshots stay immutable
 per source generation and readable after completion.
 
 Rollback stops offering new gate-3 picks and automatic batches, then retains capable
