@@ -1,4 +1,5 @@
 import { CLI_PROVIDER_LIST, startsWithSegments, type InvocationToolUsage } from '@haive/shared';
+import { createReadExposure, readerCommandPaths } from './read-exposure.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 
 /* ------------------------------------------------------------------ */
@@ -31,8 +32,8 @@ import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
  * matching degrades to an uncounted native tool, never to a wrong count.
  *
  * LEAF MODULE: `cli-executor/` is dependency-free of `queues/` (the codex collectors live here
- * and `stream.ts` imports downward), so this file may import only `@haive/shared` and
- * `repo/worktree-paths.js`. The sandbox workdir is passed in for the same reason. */
+ * and `stream.ts` imports downward), so imports stay within `@haive/shared`, pure sibling
+ * modules and `repo/worktree-paths.js`. The sandbox workdir is passed in for the same reason. */
 
 export interface ReadTarget {
   kind: 'agent' | 'skill';
@@ -230,7 +231,9 @@ export interface ToolUsageTally {
   /** claude-family / grok `system`/`init` event. First one wins. */
   claudeInit(event: Record<string, unknown>): void;
   /** One `tool_use` block off an `assistant` event (claude family and grok alike). */
-  claudeToolUse(name: string, input: unknown): void;
+  claudeToolUse(name: string, input: unknown, id?: string): void;
+  /** Whole events feed turns, tool results and compactions through the same live/replay path. */
+  claudeEvent(event: Record<string, unknown>): void;
   /** One codex `item.completed` item (exec `--json`). Never feed `item.started`. */
   codexExecItem(item: Record<string, unknown>): void;
   /** One codex app-server `item/completed` item. Never feed `item/started`. */
@@ -241,7 +244,14 @@ export interface ToolUsageTally {
   finalize(source: InvocationToolUsage['source'], elided?: boolean): InvocationToolUsage;
 }
 
-export function createToolUsageTally(opts: { workdir: string | null }): ToolUsageTally {
+export function createToolUsageTally(opts: {
+  workdir: string | null;
+  readFileLimit?: number;
+}): ToolUsageTally {
+  const exposure = createReadExposure(opts);
+  const seenCalls = new Set<string>();
+  const seenItems = new Set<string>();
+  let anonymousCall = 0;
   const tools = new Map<string, number>();
   const mcp = new Map<string, { server: string; tool: string; calls: number }>();
   const subagents = new Map<string | null, number>();
@@ -289,14 +299,48 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
     return true;
   };
 
+  const readPaths = (name: string, input: unknown): string[] | 'unattributed' | null => {
+    if (!isRecord(input)) return null;
+    const shellKey = CLI_TOOL_NAMES.shellTools[name];
+    if (shellKey) return readerCommandPaths(input[shellKey]);
+    let keys = CLI_TOOL_NAMES.readTools[name];
+    const parsed = parseMcpToolName(name);
+    if (parsed) keys = CLI_TOOL_NAMES.mcpReadTools[parsed.tool];
+    if (!keys) return null;
+    for (const key of keys) {
+      const value = input[key];
+      if (typeof value === 'string') return [value];
+      if (Array.isArray(value)) return value.filter((p): p is string => typeof p === 'string');
+    }
+    return 'unattributed';
+  };
+
   const codexItem = (item: Record<string, unknown>, type: string): void => {
+    if (typeof item.id === 'string') {
+      if (seenItems.has(item.id)) return;
+      seenItems.add(item.id);
+    }
+    exposure.unknownTurns();
+
     const names = CLI_TOOL_NAMES.codex;
     if (type === names.command) {
       bump(tools, type);
       noteCommand(item.command);
+      const id = typeof item.id === 'string' ? item.id : `anonymous-${anonymousCall++}`;
+      exposure.tool(id, type, readerCommandPaths(item.command));
+      const output = item.aggregated_output ?? item.aggregatedOutput;
+      if (typeof output === 'string') exposure.result(id, output, 'codex');
       return;
     }
     if (type === names.mcp) {
+      const id = typeof item.id === 'string' ? item.id : `anonymous-${anonymousCall++}`;
+      const name =
+        typeof item.server === 'string' && typeof item.tool === 'string'
+          ? `mcp__${item.server}__${item.tool}`
+          : type;
+      exposure.tool(id, name, readPaths(name, item.arguments));
+      if (isRecord(item.result) && item.result.content !== undefined)
+        exposure.result(id, item.result.content, 'codex');
       if (typeof item.server === 'string' && typeof item.tool === 'string') {
         bumpMcp(item.server, item.tool);
         notePathsIn(item.arguments, CLI_TOOL_NAMES.mcpReadTools[item.tool]);
@@ -313,8 +357,9 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
     bump(tools, type);
   };
 
-  return {
+  const tally: ToolUsageTally = {
     claudeInit(event) {
+      exposure.observe();
       observable = true;
       if (loaded !== null) return;
       const servers: string[] = [];
@@ -334,7 +379,21 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
         toolCount: Array.isArray(event.tools) ? event.tools.length : 0,
       };
     },
-    claudeToolUse(name, input) {
+    claudeToolUse(name, input, id) {
+      if (id) {
+        if (seenCalls.has(id)) return;
+        seenCalls.add(id);
+      }
+      let readName = name,
+        readInput = input;
+      if (name === CLI_TOOL_NAMES.mcpWrapperTool && isRecord(input)) {
+        const wrapped = input[CLI_TOOL_NAMES.mcpWrapperNameKey];
+        if (typeof wrapped === 'string') {
+          readName = wrapped;
+          readInput = input[CLI_TOOL_NAMES.mcpWrapperInputKey];
+        }
+      }
+      exposure.tool(id ?? `anonymous-${anonymousCall++}`, name, readPaths(readName, readInput));
       observable = true;
       const inp = isRecord(input) ? input : {};
       const names = CLI_TOOL_NAMES;
@@ -378,10 +437,44 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
       }
       bump(tools, name);
     },
+    claudeEvent(event) {
+      const key = typeof event.parent_tool_use_id === 'string' ? event.parent_tool_use_id : 'main';
+      if (event.type === 'system' && event.subtype === 'init') tally.claudeInit(event);
+      if (event.type === 'system' && event.subtype === 'compact_boundary')
+        exposure.compaction(event.uuid, key);
+      if (event.type === 'result') exposure.resultSeen();
+      const message = isRecord(event.message) ? event.message : null;
+      const content = message && Array.isArray(message.content) ? message.content : [];
+      if (event.type === 'assistant') {
+        // Synthetic messages are CLI-authored errors, not model requests.
+        if (typeof message?.model === 'string' && message.model.startsWith('<')) return;
+        exposure.assistant(message?.id, key);
+        for (const block of content) {
+          if (isRecord(block) && block.type === 'tool_use' && typeof block.name === 'string')
+            tally.claudeToolUse(
+              block.name,
+              block.input,
+              typeof block.id === 'string' ? block.id : undefined,
+            );
+        }
+      }
+      if (event.type === 'user') {
+        for (const block of content) {
+          if (
+            isRecord(block) &&
+            block.type === 'tool_result' &&
+            typeof block.tool_use_id === 'string'
+          )
+            exposure.result(block.tool_use_id, block.content, key);
+        }
+      }
+    },
     codexExecItem(item) {
       const type = item.type;
       if (typeof type !== 'string') return;
       observable = true;
+      exposure.observe();
+      exposure.unknownTurns();
       if (CLI_TOOL_NAMES.codex.skipped.includes(type)) return;
       codexItem(item, type);
     },
@@ -389,6 +482,8 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
       const type = item.type;
       if (typeof type !== 'string') return;
       observable = true;
+      exposure.observe();
+      exposure.unknownTurns();
       if (CLI_TOOL_NAMES.codex.appServerSkipped.includes(type)) return;
       codexItem(item, CLI_TOOL_NAMES.codex.appServerSpelling[type] ?? type);
     },
@@ -404,6 +499,7 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
       return {
         source,
         coverage,
+        reads: exposure.finalize(elided),
         tools: sortedRecord(tools),
         mcp: [...mcp.values()].sort((a, b) =>
           a.server === b.server
@@ -423,6 +519,7 @@ export function createToolUsageTally(opts: { workdir: string | null }): ToolUsag
       };
     },
   };
+  return tally;
 }
 
 /** Code-unit order, never `localeCompare`: the record must serialise identically on every
@@ -460,6 +557,7 @@ export function unobservedToolUsage(
   return {
     source,
     coverage: 'none',
+    reads: createReadExposure({ workdir: null }).finalize(),
     tools: {},
     mcp: [],
     subagents: [],
@@ -481,8 +579,10 @@ export function applyProviderObservability(
   if (providerName === null || !CLI_TOOL_NAMES.unobservableProviders.includes(providerName)) {
     return usage;
   }
+  const unobserved = unobservedToolUsage(usage.source, usage.loaded);
   return {
-    ...unobservedToolUsage(usage.source, usage.loaded),
+    ...unobserved,
+    reads: { ...unobserved.reads!, resultSeen: usage.reads?.resultSeen ?? false },
     agents: { assigned: usage.agents.assigned, read: [] },
   };
 }

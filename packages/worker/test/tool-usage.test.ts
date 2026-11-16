@@ -536,6 +536,7 @@ describe('coverage, shape and determinism', () => {
     expect(Object.keys(usage)).toEqual([
       'source',
       'coverage',
+      'reads',
       'tools',
       'mcp',
       'subagents',

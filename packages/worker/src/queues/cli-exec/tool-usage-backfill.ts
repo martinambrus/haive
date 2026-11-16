@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type InvocationToolUsage } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
@@ -8,6 +8,7 @@ import {
   unobservedToolUsage,
   type ToolUsageTally,
 } from '../../cli-executor/tool-usage.js';
+import { READ_EXPOSURE_VERSION } from '../../cli-executor/read-exposure.js';
 import { isElidedStreamLog } from './stream-log-buffer.js';
 
 /* ------------------------------------------------------------------ */
@@ -21,9 +22,9 @@ import { isElidedStreamLog } from './stream-log-buffer.js';
  * Runs at boot as a convergent data migration with a time budget (a large install converges
  * over a few boots instead of holding one boot for the whole rewrite), and from
  * `scripts/backfill-tool-usage.ts` for a one-shot full run. Idempotent by construction: it
- * selects `tool_usage IS NULL` and writes every examined row, so a re-run finds nothing — a
- * row whose transcript carries no tool events gets `coverage: 'none'` rather than staying
- * NULL, which is the whole reason that value exists (see the column's note). */
+ * selects unexamined tool usage and missing/older reads versions. Every examined row gets
+ * a versioned terminal reads coverage state, including unobservable transcripts, so a
+ * re-run finds nothing. Existing tool counters, assignment and source facts are preserved. */
 
 const log = logger.child({ module: 'tool-usage-backfill' });
 
@@ -52,20 +53,7 @@ export function timestampLiteral(date: Date): string {
  *  the exec fallback's. Exactly the events the live collectors feed, nothing more, so a
  *  backfilled record and a live one read the same run identically. */
 function feedTranscriptLine(tally: ToolUsageTally, event: Record<string, unknown>): void {
-  if (event.type === 'system' && event.subtype === 'init') {
-    tally.claudeInit(event);
-    return;
-  }
-  if (event.type === 'assistant') {
-    const message = isRecord(event.message) ? event.message : null;
-    const content = message && Array.isArray(message.content) ? message.content : [];
-    for (const block of content) {
-      if (isRecord(block) && block.type === 'tool_use' && typeof block.name === 'string') {
-        tally.claudeToolUse(block.name, block.input);
-      }
-    }
-    return;
-  }
+  tally.claudeEvent(event);
   if (event.type === 'item.completed' && isRecord(event.item)) {
     tally.codexExecItem(event.item);
     return;
@@ -128,13 +116,13 @@ export interface ToolUsageBackfillResult {
   budgetExhausted: boolean;
 }
 
-/** Examine every ended invocation whose `tool_usage` is still NULL, newest first, and write
- *  what its transcript says it used.
+/** Examine ended invocations with unexamined usage or missing/older read exposure, newest
+ *  first. Add reads to an existing record without rewriting its other facts.
  *
  *  Keyset-paged on `(ended_at, id)` in BOTH modes, so a dry run cannot spin on rows it never
  *  writes and an apply run does not depend on the predicate shrinking underneath it. The write
- *  is a compare-and-swap on `tool_usage IS NULL`: a completion write that raced this one wins.
- *  A row whose transcript throws is logged with its id and skipped — it stays NULL and visible,
+ *  compares against the selected tool_usage and pending version: any concurrent change wins.
+ *  A row whose transcript throws is logged with its id and skipped — it stays pending and visible,
  *  which is a bug signal rather than a data state, since every input path here is defensive. */
 export async function backfillToolUsage(
   db: Database,
@@ -153,7 +141,16 @@ export async function backfillToolUsage(
     budgetExhausted: false,
   };
   const inv = schema.cliInvocations;
-  const base = and(isNull(inv.toolUsage), isNotNull(inv.endedAt));
+  // jsonb null, absent keys and unversioned/older records all converge to a terminal
+  // versioned record, including paths whose transcript is unavailable.
+  const needsReads = or(
+    isNull(inv.toolUsage),
+    sql`jsonb_typeof(${inv.toolUsage}->'reads') IS DISTINCT FROM 'object'`,
+    sql`CASE WHEN jsonb_typeof(${inv.toolUsage}->'reads'->'version') = 'number'
+      THEN (${inv.toolUsage}->'reads'->>'version')::numeric < ${READ_EXPOSURE_VERSION}
+      ELSE true END`,
+  );
+  const base = and(needsReads, isNotNull(inv.endedAt));
   // The cursor's timestamp travels as a LITERAL with an explicit cast, never as a JS Date: inside
   // a raw `sql` tuple drizzle hands the value to postgres.js unmapped, and postgres.js has no
   // serializer for `timestamp without time zone`, so a Date bound there fails the Bind step
@@ -172,6 +169,7 @@ export async function backfillToolUsage(
         id: inv.id,
         endedAt: inv.endedAt,
         streamLog: inv.streamLog,
+        toolUsage: inv.toolUsage,
         providerName: schema.cliProviders.name,
       })
       .from(inv)
@@ -199,12 +197,21 @@ export async function backfillToolUsage(
       }
       result.examined += 1;
       result[usage.coverage] += 1;
-      opts.onRow?.(row.id, row.providerName ?? null, usage);
+      const proposed = row.toolUsage == null ? usage : { ...row.toolUsage, reads: usage.reads };
+      opts.onRow?.(row.id, row.providerName ?? null, proposed);
       if (!opts.apply) continue;
       const written = await db
         .update(inv)
-        .set({ toolUsage: usage })
-        .where(and(eq(inv.id, row.id), isNull(inv.toolUsage)))
+        .set({ toolUsage: proposed })
+        .where(
+          and(
+            eq(inv.id, row.id),
+            needsReads,
+            row.toolUsage == null
+              ? or(isNull(inv.toolUsage), sql`${inv.toolUsage} = 'null'::jsonb`)
+              : eq(inv.toolUsage, row.toolUsage),
+          ),
+        )
         .returning({ id: inv.id });
       result.written += written.length;
     }

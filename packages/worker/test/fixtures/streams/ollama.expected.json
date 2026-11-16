@@ -24,8 +24,14 @@
     "tools": {},
     "mcp": [],
     "subagents": [],
-    "skills": { "invoked": [], "read": [] },
-    "agents": { "assigned": [], "read": [] },
+    "skills": {
+      "invoked": [],
+      "read": []
+    },
+    "agents": {
+      "assigned": [],
+      "read": []
+    },
     "loaded": {
       "agents": ["Explore", "Plan", "claude", "general-purpose", "statusline-setup"],
       "skills": [
@@ -47,6 +53,46 @@
       ],
       "mcpServers": [],
       "toolCount": 0
+    },
+    "reads": {
+      "version": 1,
+      "coverage": "full",
+      "turns": 1,
+      "compactions": 0,
+      "resultSeen": true,
+      "results": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0
+      },
+      "fileReads": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0
+      },
+      "files": [],
+      "outside": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0
+      },
+      "multiFile": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0
+      },
+      "unattributed": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0
+      },
+      "overflow": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": 0,
+        "omitted": 0
+      },
+      "byTool": {}
     }
   },
   "modelIdentity": {

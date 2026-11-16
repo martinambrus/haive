@@ -1202,6 +1202,21 @@ export const cliInvocations = pgTable(
      *  Declared after the older columns because ALTER TABLE ADD COLUMN appends while drizzle-kit
      *  push builds the table in declaration order; anywhere else and schema-parity goes red. */
     toolUsage: jsonb('tool_usage').$type<{
+      reads?: {
+        version: number;
+        coverage: 'full' | 'partial' | 'none';
+        turns: number | null;
+        compactions: number;
+        resultSeen: boolean;
+        results: { reads: number; chars: number; weightedChars: number | null };
+        fileReads: { reads: number; chars: number; weightedChars: number | null };
+        files: Array<{ path: string; reads: number; chars: number; weightedChars: number | null }>;
+        outside: { reads: number; chars: number; weightedChars: number | null };
+        multiFile: { reads: number; chars: number; weightedChars: number | null };
+        unattributed: { reads: number; chars: number; weightedChars: number | null };
+        overflow: { omitted: number; reads: number; chars: number; weightedChars: number | null };
+        byTool: Record<string, { reads: number; chars: number; weightedChars: number | null }>;
+      };
       source: 'stream' | 'backfill';
       coverage: 'full' | 'partial' | 'none';
       tools: Record<string, number>;
