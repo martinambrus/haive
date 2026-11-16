@@ -383,3 +383,29 @@ it('allows Stop on an unsupported mid-span task but refuses the following Resume
   expect(h.kill).not.toHaveBeenCalled();
   expect(h.add).not.toHaveBeenCalled();
 });
+
+it.each([
+  { label: 'task Cancel', path: '/action', action: 'cancel' },
+  { label: 'step Abort', path: `/steps/${STEP}/action`, action: 'abort' },
+])('keeps $label available on a guarded pin', async ({ path, action }) => {
+  const fake = stopped(guarded, 'running');
+  await fake.db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, TASK));
+  const app = new Hono<AppEnv>();
+  app.route('/tasks', taskRoutes);
+  app.onError(errorHandler);
+  const res = await app.request(`/tasks/${TASK}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action, round: 0 }),
+  });
+  expect(res.status, await res.clone().text()).toBe(200);
+  expect(fake.rows(schema.tasks)[0]).toMatchObject({
+    status: 'cancelled',
+    executionContract: guarded,
+  });
+  expect(h.add).toHaveBeenCalledWith(
+    'cancel-task',
+    expect.objectContaining({ taskId: TASK }),
+    expect.anything(),
+  );
+});

@@ -46,6 +46,9 @@ const h = vi.hoisted(() => {
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
     execute: async () => [],
+    // The global-pause lift checks for unsupported task pins; this config-only
+    // fixture has no tasks. Task holds are covered by execution-contract-resume.
+    select: () => ({ from: () => ({ where: () => ({ orderBy: async () => [] }) }) }),
     transaction: async (run: (tx: unknown) => Promise<unknown>) => {
       let key: string | undefined;
       const rows: unknown[] = [];

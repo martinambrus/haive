@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, gte, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lte, notInArray, sql, type SQL } from 'drizzle-orm';
 import { isLockNotAvailable, schema } from '@haive/database';
 import {
   ALLOWANCE_WATCH_MODES,
@@ -55,6 +55,8 @@ import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 import { MAIL_FIELDS, readStoredMailSettings, sendMail } from '../lib/mailer.js';
 import { relinkUser } from '../lib/admin-relink.js';
 import { webOrigin } from '../lib/request-origin.js';
+import { assertExecutionContractUsable } from '../lib/execution-contract-admission.js';
+import { appendPauseEvent } from './tasks/_helpers.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -556,6 +558,7 @@ async function saveConfig(
     privateFields?: readonly string[];
     secret?: { key: string; value: string; description: string };
   },
+  prepare?: () => Promise<void>,
 ): Promise<void> {
   const entries = Object.entries(fields);
   const lockName =
@@ -598,6 +601,9 @@ async function saveConfig(
         await tx.transaction(async (savepoint) => {
           // A write that fails after the first takes the full row back with the savepoint.
           await insertAuditEvent(savepoint, full);
+          // Preparation must commit before Redis releases a pickup gate; the surrounding
+          // config advisory lock still serializes concurrent saves of that switch.
+          await prepare?.();
           if (options?.secret) {
             const { key, value, description } = options.secret;
             await secretsService.set(key, value, description, savepoint);
@@ -1884,6 +1890,68 @@ adminRoutes.put('/config/chrome-mcp-timeout', async (c) => {
 
 const globalPauseSchema = z.object({ paused: z.boolean() });
 
+/** A global hold has no per-task stamp. Preserve it for unsupported pins before
+ * releasing the switch, so their delayed jobs cannot mistake the lift for Resume. */
+async function holdUnsupportedTasksForGlobalResume(actorUserId: string) {
+  const db = getDb();
+  const candidates = await db
+    .select({ id: schema.tasks.id, executionContract: schema.tasks.executionContract })
+    .from(schema.tasks)
+    .where(
+      and(
+        isNull(schema.tasks.deadAt),
+        notInArray(schema.tasks.status, ['completed', 'cancelled']),
+        isNotNull(schema.tasks.executionContract),
+      ),
+    )
+    .orderBy(schema.tasks.id);
+  const skippedTasks: { taskId: string; code: string; reason: string }[] = [];
+  for (const task of candidates) {
+    try {
+      assertExecutionContractUsable(task.executionContract);
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.code !== 'invalid-execution-contract') throw error;
+      const event = await db.transaction(async (tx) => {
+        const now = new Date();
+        const held = await tx
+          .update(schema.tasks)
+          .set({ pausedAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(schema.tasks.id, task.id),
+              isNull(schema.tasks.pausedAt),
+              isNull(schema.tasks.deadAt),
+              notInArray(schema.tasks.status, ['completed', 'cancelled']),
+            ),
+          )
+          .returning({ userId: schema.tasks.userId });
+        if (!held[0]) return null;
+        await appendPauseEvent(tx, task.id, {
+          by: actorUserId,
+          byAdmin: true,
+          reason: 'unsupported-execution-contract',
+        });
+        const audit: AuditEvent = {
+          actorUserId,
+          action: 'task.admin_pause',
+          targetType: 'task',
+          targetId: task.id,
+          metadata: {
+            ownerUserId: held[0].userId,
+            pausedAt: now.toISOString(),
+            reason: error.code,
+          },
+        };
+        await insertAuditEvent(tx, audit);
+        return audit;
+      });
+      if (event) logAuditEvent(event);
+      skippedTasks.push({ taskId: task.id, code: error.code, reason: error.message });
+    }
+  }
+  return skippedTasks;
+}
+
 // Global pause switch. ON stops the orchestrator handing out work everywhere: no step
 // advances and no queued CLI invocation is picked up. A CLI already RUNNING finishes —
 // nothing is killed, nothing is superseded, no environment is torn down. Terminals, the
@@ -1897,11 +1965,22 @@ adminRoutes.get('/config/global-pause', async (c) => {
 
 adminRoutes.put('/config/global-pause', async (c) => {
   const { paused } = globalPauseSchema.parse(await c.req.json());
-  await saveConfig(c.get('userId'), 'global-pause', {
-    paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
-  });
+  let skippedTasks: Awaited<ReturnType<typeof holdUnsupportedTasksForGlobalResume>> = [];
+  await saveConfig(
+    c.get('userId'),
+    'global-pause',
+    {
+      paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
+    },
+    undefined,
+    paused
+      ? undefined
+      : async () => {
+          skippedTasks = await holdUnsupportedTasksForGlobalResume(c.get('userId'));
+        },
+  );
   log.info({ paused }, 'global pause switch updated');
-  return c.json({ paused });
+  return c.json({ paused, ...(skippedTasks.length ? { skippedTasks } : {}) });
 });
 
 const modelIdentityStrictSchema = z.object({ enabled: z.boolean() });
