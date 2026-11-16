@@ -610,7 +610,7 @@ status: open (2026-11-15 #1198: items 11 and 14 resolved; items 1 and 10 verifie
 
 ### T666 · FNF[human-time-lows] · idle-aware human time lows, after #1163 and #1165 (+10)
 
-status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) for items 2-10; item 1 owed live check rides the overnight capped workflow run (owner 2026-11-14) · kind: fix · found: human time PR 1-2 · priority: P3
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) for items 2-10; item 1 task-page part verified live 2026-11-16 (capped run: gate-2 user_active_ms stopped at the allowance and stayed flat through 65 s of polling, UI matched); still owed: the plan page, `visibleWords` cost and null rate, the maximized and short-form allowances · kind: fix · found: human time PR 1-2 · priority: P3
 
 1. The real-browser check of the task-page timer, and of the plan page (#1165: time accumulates during input, stops at the allowance, keeps counting through a running chat turn up to 15 minutes; `plan_active_time` rows for the hour), is owed (no live non-plan-chat task was parked at a form on 2026-11-14): allowance ~2 min inline spec, ~5 min maximized, ~1 min short form; stops with the mouse still; poll/auto-scroll does not restart; `visibleWords` cost and null rate on a real gate page.
 2. A paused task still counts as plan-page pending work: pausing sets `pausedAt` and leaves the status, and the node payload (`GET /plan/nodes/:id` tasks) does not carry `pausedAt` (web plan-detail-panel.tsx ~:106). Bounded by the 15-minute pending window. Add `pausedAt` to the payload and exclude it.
@@ -669,6 +669,18 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 2. Switch ON: each 08e round runs a separate triage agent that classifies every new insight (consequential vs minor/nit, with kind and reason; security, data loss and regression are always consequential), auto-selects the consequential ones, applies them, re-runs 08 verify and 08c review, and returns to 08e. Stops when a round finds no new consequential insight or after 3 rounds. Identity across rounds via `findingIdentity`. Minor items and nits are never acted on and are listed in the end summary with their class.
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
+
+### T693 · Live notional cost of a running claude-code invocation is unpriced when the provider row's model is set only by `--model`
+
+status: parked: diminishing returns (2026-11-16, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: capped real workflow run 2026-11-16 · priority: P4
+
+While an invocation runs, `token_usage` has no model identity yet; `resolveInvocationCost` then falls back to `provider.model`, which is NULL on rows that pick the model through a saved `--model` CLI argument (the owner's "Claude Code Opus 5.5 High" row). A live read prices it as unknown; once the invocation ends, the stored served model prices it normally. Only a live spend reader (a watcher, a live budget cap) is affected. Fix when touched: fall back to the requested model parsed from the provider's saved `--model` argument before `provider.model`, through the adapter that owns the flag.
+
+### T692 · No-PR workflow fails at 13-pr-wait: the RAG usage review dispatches after cleanup removed the worktree
+
+status: open · kind: fix · found: capped real workflow run 2026-11-16 · priority: P1
+
+A full workflow whose `12-worktree-cleanup` ran `remove_only` (no PR) parks `13-pr-wait` with `pending:false`; the empty-form submit then enters its optional RAG usage-review LLM phase, and `resolveTaskDispatchOnTree` (`orchestrator/dispatcher.ts` ~:386) -> `resolveInvocationUsesWorktreeGitBoundary` -> `resolveTaskWorktree` (`repo/task-worktree.ts` ~:78) throws `WorktreeRemovedError` ("The worktree for branch ... was removed, so this task has no workspace to open."). The step fails before any invocation row, so the task ends `failed` after its work was committed. The guard is right to refuse the main checkout; the review has `disableTools: true` and needs no workspace. Expected per rag-playground.md (finalization review is non-blocking): the review runs without a worktree, or is skipped with a recorded reason, and the task completes. Repro: task `f7ecd064-...` on the dev install (only occurrence so far; earlier capped runs never reached 13). Check every other post-cleanup step with an LLM phase for the same dispatch.
 
 ### T691 · Owner's `gpt-5.5` codex provider rows fail with model_not_found; transport pin regex too broad
 
@@ -851,7 +863,7 @@ Reviews in `.claude/tmp/codex-run/EXM-S/` (review-2.md, review-3.md).
 
 ### T675 · FNF[plan-chat-bound] · bounded plan chat, plan writers and plan write fence lows, after #1178, #1183 and #1193 (+21)
 
-status: open (items 10, 1 and 3 resolved 2026-11-14 in #1193; item 9 owed live check rides the capped workflow run; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
+status: open (items 10, 1 and 3 resolved 2026-11-14 in #1193; item 9 owed live check still open: the 2026-11-16 capped run had no plan chat; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change)) · kind: fix · found: #1178 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/PCB-S/` (review-2.md, review-4.md, review-5.md).
 
@@ -930,7 +942,7 @@ From #1181 (updater reads the bundle), reviews in `.claude/tmp/codex-run/RBR-S/r
 
 ### T673 · FNF[next-round-cli] · fix-loop next-round CLI choice lows, after #1175 (+9)
 
-status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 9 owed live check rides the overnight capped workflow run · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 9 owed live check still open: the 2026-11-16 capped run had no fix-loop escalation · kind: fix · found: #1175 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/NRC-S/`.
 
@@ -962,7 +974,7 @@ status: parked (item 1 resolved 2026-11-15 in #1194, items 2-3 in #1202; the res
 
 ### T671 · FNF[check-run-records] · check-run recording lows, after #1170 (+8)
 
-status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 8 owed live check rides the overnight capped workflow run · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
+status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change); item 8 partly verified live 2026-11-16 (capped run: one passed 08/test row, the task Tests tooltip shows it, an Off lint slot writes none); still owed: 08b rows (needs a fixture with a selective runner) and the Statistics "Time & cost report" for a completed task (the run ended failed at T692) · kind: fix · found: #1170 reviews 2026-11-14 · priority: P4
 
 Reviews in `.claude/tmp/codex-run/TC2-S/` (review-2.md, review-3.md).
 
