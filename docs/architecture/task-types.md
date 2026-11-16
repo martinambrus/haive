@@ -556,6 +556,77 @@ Rollback first stops new v3 admission and retains capable readers and workers
 while any affected task can resume. Keep every persisted result and immutable
 pin; never erase, downgrade, regenerate or backfill one to permit an older worker.
 
+## Browser verification and adversarial QA data roles
+
+`haive.browser-verification@1` (08a verify) and `haive.adversarial-qa@1`
+(08d) are cardinality-one data roles with exact host-owned contracts, canonical
+legacy producers, mixed authorship, no quote projection and no host policy.
+Browser reports combine agent testing, host runtime and screenshot evidence,
+manual checklists and human method choices. QA combines agent findings with
+host-generated gap findings, coverage, aggregate counts, verification collapse
+and fingerprint attachment. Neither role is quotable or providable through
+structured prompt output.
+
+Browser `resultStatus` distinguishes `passed`, `failed`, `manual`, `skipped`,
+`incomplete` and `not-run`. Manual means a checklist was prepared, never that
+browser tests passed. `verificationIncomplete` retains its separate evidence
+warning. The contract declares executed method, ran/skipped/pass flags,
+failures and evidence, visual verdict, checklist, console/network errors,
+app URL and optional login outcome (attempted, ok, reason; no credentials).
+Passing alternate output requires executed testing, no failures or unstyled
+verdict and no incomplete-evidence flag. Canonical contradictory passes retain
+their stored verdict and routing while their role status becomes incomplete.
+
+QA `resultStatus` distinguishes `findings`, `clean`, `incomplete`, `skipped`
+and `not-run`. Its contract declares ran, level, blocking, counts, findings,
+verification verdicts, merged fingerprints, `qaIncomplete` and coverage.
+Counts and blocking must agree with the findings. Clean requires an executed,
+complete run with no findings; incomplete coverage never becomes clean.
+The host adds status only to canonical successful outputs before strict
+contract validation and iteration persistence, and projects historical rows
+at read time without backfill. Alternate producers supply the entire contract.
+A malformed or contradictory successful module output fails before routing,
+including an error-to-fix-loop hook; it cannot recommend approval.
+
+Gate 2 reads its optional browser and QA inputs; gate 1.5 reads its optional
+QA findings, preserving verification markers, folded findings and every merged
+fingerprint. Alternate QA fingerprint references are intersected with physical
+`review_findings` rows for the same task, actual producer row and current round;
+a module payload cannot waive another producer's findings. The host-owned producer
+row id also constrains the physical waiver UPDATE, since the same fingerprint may
+exist under several producers. Fingerprint generation, recurrence and canonical
+waiver behavior stay unchanged, including the current-round/open guards. Their
+canonical detect/form bytes, recommendations, blocking and
+defaults remain unchanged, including manual, missing, skipped, incomplete,
+fix-round and Retry cases. A selected alternate result that is unavailable
+or incomplete holds the approval recommendation. Missing and unselected
+inputs supply no passing or clean result. Gate decisions and revise targets
+remain human and physical.
+
+QA reads its own pinned browser app URL/login only as prompt context. App boot,
+readiness, reach probes, startup, stopping, browser setup choices and gate 2's
+live-browser navigation stay physical. Setup receives no separate result role:
+its mode and URL choose which runtime is exercised; the verification contract
+carries the method actually reported. A data-role binding cannot redirect the
+live-browser navigation or establish a session. Web timeline outcomes retain
+physical row identity and distinguish manual preparation from tested passes.
+
+Learning history mines every round of its bound browser and QA producers,
+validates alternate outputs, and preserves canonical formatting and physical
+event provenance. Distinct bound QA and peer-review result ports on one producer
+retain both finding sets; the historical canonical review/QA deduplication stays
+unchanged. New tasks pin these optional edges through the existing
+locked v3 admission for built-in, static, module-seeded and derived candidates.
+Old tasks and inputs absent from valid older pins read canonically. Explicit
+absence, Retry readiness and round ceilings never borrow another producer;
+unknown or malformed bindings are refused.
+
+Finding identity, telemetry writes, recurrence, human waivers, fix routing,
+iteration budgets, closing and commit remain physical. No migration is needed.
+Rollback stops new v3 admission and retains capable readers/workers while any
+affected task can resume. Preserve stored results and immutable pins; never
+regenerate, downgrade or backfill a pin for an older worker.
+
 ## Pinned output-role reads
 
 `@haive/shared/step-outputs` exports `STEP_ROLES`, `readStepRole(task, role, read)` and

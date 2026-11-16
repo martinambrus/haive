@@ -1,6 +1,6 @@
 # Review findings and waivers
 
-`review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. `recordReviewFindings` (`_review-findings.ts`) is the only core insert (a module may record its own rows under the rules in [Modules](modules.md#core-row-writes)), and its two readers only inform: `loadFindingRecurrence` counts earlier rounds for `recurrence_count`, and `GET /stats/quality` aggregates it. No behaviour gates on it, which is why every write there is best-effort and never throws — telemetry must not fail the review that produced it.
+`review_findings` is the durable record of what every reviewing step raised — 07b's validator, 08c/08c2, 08d's adversaries. Findings otherwise live only in `task_steps.output`, which a manual retry nulls, so nothing could say whether a reviewer change helped. `recordReviewFindings` (`_review-findings.ts`) is the only core insert (a module may record its own rows under the rules in [Modules](modules.md#core-row-writes)), and its historical readers inform: `loadFindingRecurrence` counts earlier rounds for `recurrence_count`, and `GET /stats/quality` aggregates it. Those aggregates never decide a verdict. Every write there is best-effort and never throws — telemetry must not fail the review that produced it.
 
 `disposition` is the verdict on a finding. Every value that is written has exactly one core writer (module writes follow [Modules](modules.md#core-row-writes)):
 
@@ -11,6 +11,15 @@
 - `fixed` / `recurred` — declared, SUPERSEDED, and must stay unwritten. Recurrence lives on `recurrence_count` instead (below); `fixed` should never be written at all, because absence of a finding is not evidence it was fixed — a reviewer that was skipped, budget-killed, or simply reworded it produces an identical absence. Do not read `open` as "still outstanding".
 
 Both UPDATE paths are scoped to the CURRENT round and guarded on `disposition = 'open'`. The round scope matters because the same fingerprint recurs on its own row every round, so an unscoped update rewrites the history of rounds the developer never saw — and because with no `fixed` writer, an earlier round's rows are `open` whether they were fixed or recurred. The `open` guard keeps the more specific verdict: a refuter's disproof and a gate-1.5 waiver both outrank a blanket acceptance. Findings raised AFTER the acceptance stay `open` and are NOT swept into it — the developer accepted the remainder they had been shown, not findings nobody had seen yet. That is the normal case, not an edge one: acceptance stands down the FIX loop only, while `restartLoop` (a gate-2 reject) is suppression-immune, so a later round runs and records more. MEASURED on the dev install, every accepted task has findings past its accepted round (accepted 7 / findings to 9, 4 to 5, 5 to 7, 6 to 9). Those surface at gate 2, where the call is the developer's again.
+
+For an alternate QA result producer, gate 1.5 checks payload fingerprint references
+against physical rows for the same task, actual producer row and current round.
+Its detect snapshot carries that host-resolved producer row id separately from
+role data, and the physical disposition UPDATE adds a `task_step_id` guard.
+The same fingerprint can exist under two producers, so filtering references alone
+would still allow one producer's waiver to update the other's row. Canonical QA
+retains the existing update scope. Fingerprint generation, earlier-round history,
+recurrence and the current-round/open guards stay unchanged.
 
 A waiver is CONTEXT, never SUPPRESSION. Nothing reads `dismissed_human` back, and 08d2's detect deliberately does not fold on it. A verdict is about a MOMENT, not about the defect — the reason 08d gives where it carries its disproved set forward, and a human declining to spend a round on something is far weaker evidence than a PoC a verifier actually ran and could not reproduce. What a partial fix round leaves behind instead is a task-ledger entry (`formatWaiverLedgerEntry`) whose wording invites a re-raise and asks what changed; `augmentPromptWithLedger` already carries it into the next round's prompts, so it needs no plumbing of its own. Accept-as-is at gate 1.5 records NOTHING — those findings still surface advisorily at gate 2, so the call is deferred rather than made.
 
