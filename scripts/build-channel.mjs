@@ -226,6 +226,8 @@ export async function run(
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
       const buffers = new Map();
+      const diagnostics = new Map();
+      let declarationModule;
       let needsNewline = false;
       const onOutput = (chunk, name = 'stdout') => {
         const text = scrub((buffers.get(name) ?? '') + chunk);
@@ -234,6 +236,14 @@ export async function run(
         buffers.set(name, keep ? text.slice(-keep) : '');
         const ready = keep ? text.slice(0, -keep) : text;
         if (ready) {
+          // Let TypeScript resolve conditional exports; explain its missing-declaration
+          // verdict without attempting a second, less complete package resolver.
+          const diagnostic = ((diagnostics.get(name) ?? '') + ready).slice(-8192);
+          declarationModule ??=
+            /TS7016:[^\r\n]*for module ['"](@haive-module\/[a-z0-9-]+(?:\/[a-zA-Z0-9_./-]+)?)['"]/.exec(
+              diagnostic,
+            )?.[1];
+          diagnostics.set(name, diagnostic);
           write(ready);
           needsNewline = !ready.endsWith('\n');
         }
@@ -267,7 +277,12 @@ export async function run(
           : result.signal
             ? `terminated by ${result.signal}`
             : `failed (${result.status ?? 'no exit code'})`;
-        throw new Error(`${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}`);
+        const hint = declarationModule
+          ? `; ${declarationModule} has no resolvable TypeScript declarations: publish the entry's .d.ts file and expose it through package exports (types), or alongside its JavaScript`
+          : '';
+        throw new Error(
+          `${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}${hint}`,
+        );
       }
       return result;
     };

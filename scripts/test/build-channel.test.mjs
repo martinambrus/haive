@@ -273,6 +273,38 @@ function fixture(t, config = {}) {
   };
 }
 
+for (const stream of ['stdout', 'stderr']) {
+  test(`explains missing registry declarations across ${stream} chunks`, async (t) => {
+    const f = fixture(t, {
+      buildFailure: true,
+      buildChunks: [
+        [
+          'src/modules.generated.ts(3,16): error TS7016: Could not find a declaration file for mod',
+          stream,
+        ],
+        ['unrelated progress\n', stream === 'stdout' ? 'stderr' : 'stdout'],
+        ["ule '@haive-module/demo/manifest'.\n", stream],
+      ],
+    });
+    assert.equal(await f.execute(), 2);
+    assert.match(
+      f.output.join(''),
+      /demo\/manifest has no resolvable TypeScript declarations: publish the entry's \.d\.ts file/,
+    );
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    assert.equal(existsSync(f.scratch), false);
+  });
+}
+
+test('does not diagnose declarations for unrelated TypeScript errors', async (t) => {
+  const f = fixture(t, {
+    buildFailure: true,
+    buildChunks: [["error TS2307: Cannot find module '@haive-module/demo/manifest'.\n", 'stdout']],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.ok(!f.output.join('').includes('publish the entry'));
+});
+
 for (const tag of ['v1.2.3-rc.1', 'v1.2.3+meta', '1.2.3', 'v01.2.3']) {
   test(`refuses non-final tag ${tag} before spawning`, async (t) => {
     const f = fixture(t);
