@@ -10,6 +10,33 @@ import {
   registryModuleExports,
 } from '../registry-module.mjs';
 
+for (const [label, requestedVersion, name, version, accepted] of [
+  ['spec build metadata', '1.0.0+build.5', '@haive-module/demo', '1.0.0', true],
+  ['stored build metadata', '1.0.0', '@haive-module/demo', '1.0.0+build.6', true],
+  ['different build metadata', '1.0.0+build.5', '@haive-module/demo', '1.0.0+build.6', true],
+  ['matching prerelease', '1.0.0-rc.1+build.5', '@haive-module/demo', '1.0.0-rc.1', true],
+  ['different prerelease', '1.0.0-rc.1+build.5', '@haive-module/demo', '1.0.0-rc.2', false],
+  ['different release', '1.0.0+build.5', '@haive-module/demo', '1.0.1', false],
+  ['different name', '1.0.0+build.5', '@haive-module/other', '1.0.0', false],
+]) {
+  test(`packed identity: ${label}`, async () => {
+    const exports = { './manifest': './manifest.js' };
+    const read = () =>
+      registryModuleExports(`@haive-module/demo@${requestedVersion}`, {
+        cwd: tmpdir(),
+        env: {},
+        command: async (cmd) => {
+          if (cmd === 'pnpm') return { stdout: '' };
+          if (cmd === 'npm')
+            return { stdout: JSON.stringify([{ filename: 'demo.tgz', size: 256 }]) };
+          return { stdout: JSON.stringify({ name, version, exports }) };
+        },
+      });
+    if (accepted) assert.deepEqual(await read(), exports);
+    else await assert.rejects(read, /packed module identity differs/);
+  });
+}
+
 for (const identity of ['matching', 'different']) {
   test(`reads a real packed manifest when registry exports are absent (${identity} identity)`, async (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'registry-module-test-'));

@@ -52,7 +52,12 @@ export async function registryModuleExports(
     if (!manifest.stdout.trim())
       throw new Error(`packed module has no package/package.json: ${spec}`);
     const pkg = JSON.parse(manifest.stdout);
-    if (`${pkg.name}@${pkg.version}` !== spec)
+    const at = spec.lastIndexOf('@');
+    if (
+      pkg.name !== spec.slice(0, at) ||
+      typeof pkg.version !== 'string' ||
+      pkg.version.split('+')[0] !== spec.slice(at + 1).split('+')[0]
+    )
       throw new Error(`packed module identity differs from ${spec}`);
     return pkg.exports;
   } finally {
