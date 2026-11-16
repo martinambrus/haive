@@ -331,9 +331,9 @@ export async function run(
     await command('tar', ['-xf', archive, '-C', tree], { quiet: true });
     rmSync(archive);
     for (const file of [
+      ...(modules.length > 0 ? ['scripts/registry-module.mjs'] : []),
       'scripts/module.mjs',
       'scripts/gen-modules.mjs',
-      ...(modules.length > 0 ? ['scripts/registry-module.mjs'] : []),
       'scripts/own-module-builder.mjs',
       'docker/own-module-builder/Dockerfile',
       ...['api', 'worker', 'web'].map((host) => `packages/${host}/Dockerfile`),
@@ -342,18 +342,12 @@ export async function run(
       try {
         content = readFileSync(join(tree, file), 'utf8');
       } catch {
+        if (file === 'scripts/registry-module.mjs')
+          throw new Error(
+            `preflight ${tag}: the tag's scripts/module.mjs uses metadata-only registry inspection; omitted exports fail with "does not export ./manifest"; select a tag containing the registry-module.mjs fallback`,
+          );
         throw new Error(`preflight ${tag}: missing ${file}`);
       }
-      if (
-        file === 'scripts/module.mjs' &&
-        modules.length > 0 &&
-        !/\bimport\s+\{[^}]*\bregistryModuleExports\b[^}]*\}\s+from\s+['"]\.\/registry-module\.mjs['"]/.test(
-          content,
-        )
-      )
-        throw new Error(
-          `preflight ${tag}: the tag's scripts/module.mjs uses metadata-only registry inspection; omitted exports fail with "does not export ./manifest"; select a tag containing the registry-module.mjs fallback`,
-        );
       if (!file.endsWith('/Dockerfile')) continue;
       // Docker ignores whole comment lines, including within continued instructions.
       const instructions = content

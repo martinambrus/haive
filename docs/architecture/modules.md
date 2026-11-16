@@ -857,7 +857,7 @@ step that reads its record.
 - Compatibility: a channel build runs the tag's own `scripts/module.mjs`. Tags cut before the
   `registry-module.mjs` fallback keep the metadata-only path: omitted exports fail with
   "does not export ./manifest". When registry entitlements are requested, preflight requires that
-  installer to import `registryModuleExports` from `registry-module.mjs` and the helper file to exist;
+  tag's tree to contain `scripts/registry-module.mjs`, checked before `scripts/module.mjs`;
   otherwise it exits 2 before registry access and asks for a tag containing the fallback.
 - Modules: `module add` runs once per entitled package inside the tree. A `modules/<dir>` counts as a local module
   only as `gen-modules` counts it: its package exports `./manifest` and the tag's api `package.json` depends on
