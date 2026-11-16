@@ -980,7 +980,21 @@ this evidence under its existing row and task fences.
 
 Deploy the API and worker together for this change. An old API never sends the required
 owner/generation marker, so a latched gate 2 cannot be approved until both are current.
-Do not restore an older API while pending approvals can resume. Report snapshots stay immutable
+Do not restore an older API while pending approvals can resume. The same attestation now
+covers the regenerated gate 3 after human gate-2 re-approval: the saved explicit `commit`
+choice, owner and rerun generation must match its submit event, newer than the approval.
+The durable approval event holds that pass across Retry, Resume and epoch takeover;
+synthetic saved values or a job payload repark through the existing approval guard.
+Gate-3 batch intents carry a bounded SHA-256 digest plus an incomplete flag; outcomes carry
+the unchanged comparison. The continuation's original gate-3 intent remains the baseline
+across 08e Retry, so an interrupted writer's unchecked edits cannot become a fresh baseline.
+Historical per-file maps are read for compatibility, stripped before publication and
+omitted from browser event responses; their old equality cannot authorize a skip.
+Older strict journal readers cannot consume those added fields:
+keep compatible workers for every resumable task carrying those records, even after
+its batch and check shortcut settle. Finishing a batch alone does not make an older
+reader compatible, since journal loading reads historical records too.
+Report snapshots stay immutable
 per source generation and readable after completion.
 
 Rollback stops offering new gate-3 picks and automatic batches, then retains capable
