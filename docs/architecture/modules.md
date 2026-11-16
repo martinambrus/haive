@@ -449,6 +449,9 @@ message names the fix.
 The registry form reads the package's exports with `pnpm view`. If registry metadata omits them
 (as GitHub Packages does), it downloads the exact package with `npm pack --ignore-scripts` and
 reads `package/package.json` from the tarball without extracting it or running package scripts.
+Registry inspection during `module add` has a 5 minute per-command timeout, refuses packs larger
+than 100 MiB before tar (bounding the tar step, not the download), and reads only the first
+`package/package.json` member.
 It checks the packed name and version, removes the temporary package and npm cache, then adds
 the exact version to the same hosts and moves a held dependency of another version in place.
 
