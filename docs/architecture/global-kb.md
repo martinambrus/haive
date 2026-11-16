@@ -345,7 +345,7 @@ else is record (seeded record); a read that throws is off. `stripHaivePreamble`
 removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
 agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
 or duplicates the injection. An injected block counts as external text for agent isolation. When an
-argv-only CLI cannot take the prompt, the dispatch drops the house block first (stamp reason
+argv-only CLI cannot take the prompt, the dispatch drops the sandbox advisory first, then the house block (stamp reason
 `too_large`), then the agent rules; no shipped adapter is argv-only since gemini reads stdin, so the
 ladder is a guard.
 
