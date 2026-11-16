@@ -510,8 +510,8 @@ imports. `gen-modules` checks the name only; the id is checked when the api and 
 the module, so a mismatch builds and they then refuse to start, naming the package. A missing
 registry module declaration reported by TypeScript as `TS7016` also gets a channel-build
 error naming the entry and explaining how to publish and expose its `.d.ts` file.
-TypeScript resolves the package exports; the channel script does not substitute its own
-resolver or reject a package merely because its export uses a string.
+TypeScript's package-export resolution determines whether an entry has usable declarations,
+including entries whose exports use a string.
 
 ## Step SDK
 
@@ -854,14 +854,21 @@ step that reads its record.
   (whole comment lines ignored, as Docker ignores them). v0.2.0 and older are refused
   (exit 2, the missing or unreadable file or the missing stage named). The working tree's `scripts/channel-gate.mjs` and
   `scripts/smoke/scan-image.sh` must be clean, because the gate runs from this checkout, not from the tag.
+- Compatibility: a channel build runs the tag's own `scripts/module.mjs`. Tags cut before the
+  `registry-module.mjs` fallback keep the metadata-only path: omitted exports fail with
+  "does not export ./manifest". When registry entitlements are requested, preflight requires that
+  installer to import `registryModuleExports` from `registry-module.mjs` and the helper file to exist;
+  otherwise it exits 2 before registry access and asks for a tag containing the fallback.
 - Modules: `module add` runs once per entitled package inside the tree. A `modules/<dir>` counts as a local module
   only as `gen-modules` counts it: its package exports `./manifest` and the tag's api `package.json` depends on
   it. Its web parts are read from its `./dashboard` and `./web` exports; a folder without `package.json` is
   skipped, an unreadable or malformed one stops the build with its path named.
-- Token: it reaches pnpm and BuildKit only as a private 0600 `.npmrc` in scratch (`--secret id=npmrc`), never
-  argv, env or a build ARG. Streamed output is scrubbed of it across chunk boundaries. Scratch, the pnpm cache
-  (`XDG_CACHE_HOME`) and the secret are removed on every path; a cleanup failure prints the leftover path and
-  keeps the exit code.
+- Token: pnpm and `npm pack` read it through a private 0600 `.npmrc` in scratch, selected by
+  `NPM_CONFIG_USERCONFIG`; BuildKit reads that file through `--secret id=npmrc`. Only the file's path
+  reaches argv or env; the token stays out of argv, env and build ARGs. Streamed output is scrubbed of it
+  across chunk boundaries. Scratch, the pnpm cache (`XDG_CACHE_HOME`) and the secret are removed on every
+  path. Each registry-module inspection also removes its separate scratch directory holding the tarball
+  and npm cache in `finally`. A cleanup failure prints the leftover path and keeps the original result.
 - Images: api and worker are built with `--target production`, `--load`, `HAIVE_VERSION` and the build
   platform, tagged `<registry>/haive-<channel>-<host>:<version>`. The builder
   (`docker/own-module-builder/Dockerfile`) is built the same way from the same prepared tree as

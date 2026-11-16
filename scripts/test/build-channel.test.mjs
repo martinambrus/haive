@@ -25,10 +25,17 @@ function seedTree(tree, config = {}) {
   for (const file of [
     'scripts/module.mjs',
     'scripts/gen-modules.mjs',
+    'scripts/registry-module.mjs',
     'scripts/own-module-builder.mjs',
   ]) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
-    if (config.missingTool !== file) writeFileSync(join(tree, file), '');
+    if (config.missingTool !== file)
+      writeFileSync(
+        join(tree, file),
+        file === 'scripts/module.mjs' && !config.legacyModuleInstaller
+          ? "import { registryModuleExports } from './registry-module.mjs';\n"
+          : '',
+      );
   }
   for (const host of ['api', 'worker', 'web', 'builder']) {
     const file =
@@ -580,6 +587,26 @@ test('invalid local package id and local/registry collision fail before builds',
     assert.equal(await f.execute(), 2);
     assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
   }
+});
+
+test('preflight refuses a tag with metadata-only module add before registry access', async (t) => {
+  const f = fixture(t, {
+    legacyModuleInstaller: true,
+    emptyMetadata: true,
+    modules: ['@haive-module/demo@1.0.0'],
+  });
+  assert.equal(await f.execute(), 2);
+  assert.match(f.output.join(''), /preflight v1\.2\.3:.*tag.*scripts\/module\.mjs.*metadata-only/);
+  assert.match(f.output.join(''), /does not export \.\/manifest/);
+  assert.match(f.output.join(''), /select a tag containing.*registry-module\.mjs/);
+  assert.ok(!f.calls.some((c) => ['pnpm', 'npm', 'docker', process.execPath].includes(c.cmd)));
+  assert.equal(existsSync(f.scratch), false);
+  assert.equal(existsSync(join(f.out, 'build-record.json')), false);
+});
+
+test('metadata-only tags remain usable when no registry modules are requested', async (t) => {
+  const f = fixture(t, { legacyModuleInstaller: true });
+  assert.equal(await f.execute(), 0);
 });
 
 for (const missingTool of [
