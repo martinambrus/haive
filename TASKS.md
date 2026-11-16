@@ -736,7 +736,7 @@ Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The defa
 
 ### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+29)
 
-status: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both are now non-trivial and scheduled) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
+status: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both DONE 2026-11-16 in #1233 b457672e7; remaining items stay lows) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 
@@ -758,12 +758,12 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 16. LOW: `AutoDetect.dependencyPolicy` (`withheldPaths`, `workspaceRoots`, `ownedPaths`) is persisted unbounded in the polled 08e detect output; persisted insights keep full descriptions with no per-item clip. Bound with the same reload approach if sizes matter (measure first).
 17. NIT: `syntheticInsightReply` (`step-runner.ts` ~:2255-2267, test bypass only) reads the bounded detect copy.
 18. LOW, from #1218 review-8: `loadDependencyPolicy` reads `baseBranch` from the retained 01 output (`worker/src/step-engine/steps/workflow/_dependency-policy.ts` ~:181-190); when that output is gone it falls back to `rev-parse HEAD`, which in the worktree may already hold the task's own commits. Fix: read the base from the durable task columns, or fail closed without it as `review-diff.ts` ~:277-280 does.
-19. LOW, from #1223 (reviews in `.claude/tmp/codex-run/INS5-S/`, review-4/5 and codex-4/5 last.txt): after a human gate-2 re-approval clears the insight latch, the regenerated gate 3 still accepts a preset `commit` (task pre-answers, type defaults, prior-task reuse), so the refreshed diff can commit without a look. Decide whether a picked-insight cycle should force gate 3 to park like the latched gate 2.
+19. DONE (#1233). LOW, from #1223 (reviews in `.claude/tmp/codex-run/INS5-S/`, review-4/5 and codex-4/5 last.txt): after a human gate-2 re-approval clears the insight latch, the regenerated gate 3 still accepts a preset `commit` (task pre-answers, type defaults, prior-task reuse), so the refreshed diff can commit without a look. Decide whether a picked-insight cycle should force gate 3 to park like the latched gate 2.
 20. LOW: the manual 08e fallback accepts a non-empty preset selection (prior-task reuse drops unknown ids, so reach is narrow).
 21. LOW: the module loader does not reject `loopTargetWhenPresent` / `loopBeforeClose` on module entries, and `effectiveReplacementEntry` (`shared/.../derived-task-types.ts` ~:176) spreads a replacement entry's flag onto a role-owned loop target; a trusted module can skip `missing-loop-target` (fails at loop time by name). Reject both flags for module entries.
 22. LOW: gate 3 offers the pick field when 08e is present but gate 2 is absent, then refuses every submit with the run-list error (`_gate-insights.ts` ~:74); gate the offer on gate 2 too.
 23. COVERAGE: no test of `validateComposition` with a live execution contract AND `loopTargetWhenPresent`; no control through the real submit route followed by the worker for the owner-attested approval; detect paging tests mock `insightPageOffset`.
-24. LOW: `continuationForOutcome` returns the checks stage for a gate-3 batch even when every pick was `not_applied` (full 08 + 08c for no change). Owner question whether to short-circuit.
+24. DONE (#1233). LOW: `continuationForOutcome` returns the checks stage for a gate-3 batch even when every pick was `not_applied` (full 08 + 08c for no change). Owner question whether to short-circuit.
 25. LOW: the persisted `insightSummary` is bounded but large (30 items x 30 refs x 30 attempts, stored in detect and apply output); no ceiling test. Choices are bounded separately.
 26. LOW: summary and choices page on different units (identities vs occurrences), so page 2 can show summary rows for other items; nothing dropped.
 27. LOW: a worker pass holding an older row snapshot can re-park a latched gate 2 after the owner's submit (lost click, safe direction); the owner marker payload `{userId, generation, decision}` is duplicated in steps.ts, insight-gate3-return.ts and tests without a shared type (drift fails closed).
