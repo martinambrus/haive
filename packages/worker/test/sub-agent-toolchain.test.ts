@@ -2,8 +2,6 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import type { CliCommandSpec, SubAgentInvocation } from '../src/cli-adapters/types.js';
-import { buildAmpSequentialInvocation } from '../src/sub-agent-emulator/amp-mode.js';
-import { buildCodexSequentialInvocation } from '../src/sub-agent-emulator/codex-mode.js';
 import { withSandboxToolchain } from '../src/sandbox/toolchain-prompt.js';
 const h = vi.hoisted(() => ({ specs: [] as CliCommandSpec[] }));
 vi.mock('../src/queues/cli-exec/exec-core.js', () => ({
@@ -92,27 +90,5 @@ it.each(['native', 'sequential'] as const)(
       expect(spec.sandboxToolchain).toBeUndefined();
       expect(JSON.stringify(spec)).not.toContain('haive_sandbox_toolchain');
     }
-  },
-);
-
-it.each(['codex', 'amp'] as const)(
-  'normalizes an older queued %s wrapper before stamping, preserving full quotes',
-  async (kind) => {
-    if (kind === 'amp') provider.name = 'amp';
-    const body = `Quoted advisory:\n${withSandboxToolchain('', fact)}Keep this quote.`;
-    const old = (kind === 'amp' ? buildAmpSequentialInvocation : buildCodexSequentialInvocation)({
-      subAgents: [
-        { name: 'agent-0', outputKey: 'out-0', prompt: withSandboxToolchain(body, fact) },
-      ],
-      synthesisPrompt: withSandboxToolchain('Combine', fact),
-    });
-    await run('sequential', [old.steps[0]!.prompt, old.synthesis.prompt]);
-    expect(h.specs).toHaveLength(2);
-    for (const spec of h.specs)
-      expect(spec.sandboxToolchain).toMatchObject({ imageId: ID, copies: 1 });
-    const sent =
-      h.specs[0]!.stdinPrompt ?? h.specs[0]!.args.find((arg) => arg.includes('Quoted advisory:'))!;
-    expect(sent).toContain(body);
-    expect(sent.split('<haive_sandbox_toolchain>')).toHaveLength(3);
   },
 );

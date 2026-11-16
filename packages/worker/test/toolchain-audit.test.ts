@@ -104,6 +104,52 @@ it('preserves a full quoted advisory in both CLI delivery and the invocation pro
   expect(answer.spec.args[0]).toBe(body);
 });
 
+it.each(['', '<haive_agent_rules>\nKeep 💡 rules\n</haive_agent_rules>\n\n'])(
+  'preserves a full quote when the same positional stamp is audited twice (prefix %j)',
+  async (prefix) => {
+    const body = `Keep $& $$ and this full quote:\n${block}\n\nEnd.`;
+    const queued = prefix + withSandboxToolchain(body, { imageId: oldId, php: 'absent' });
+    const offset = [...prefix].length;
+    const payload = {
+      ...spec,
+      args: [queued],
+      sandboxToolchain: { imageId: oldId, block, offset },
+    };
+    let stored = queued;
+    const db = {
+      update: () => ({
+        set: (values: { prompt: SQL }) => {
+          const query = new PgDialect().sqlToQuery(values.prompt);
+          expect(query.sql).toContain('when substr(');
+          expect(query.sql).toContain('then overlay(');
+          const separator = block + '\n\n';
+          expect(query.params).toEqual([offset + 1, separator, separator, offset + 1, separator]);
+          // Model PostgreSQL's character-based substring guard and overlay at the storage seam.
+          const chars = [...stored];
+          if (chars.slice(offset, offset + [...separator].length).join('') === separator)
+            stored =
+              chars.slice(0, offset).join('') +
+              chars.slice(offset + [...separator].length).join('');
+          return { where: async () => {} };
+        },
+      }),
+    } as unknown as Database;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const answer = await recheckInvocationToolchain(
+        payload,
+        'image:tag',
+        'run-id',
+        runner,
+        null,
+        {},
+        db,
+      );
+      expect(stored).toBe(prefix + body);
+      expect(answer.spec.args[0]).toBe(prefix + body);
+    }
+  },
+);
+
 it('persists counted native removal without consuming quoted copies between prompts', async () => {
   const body = `Quoted:\n${block}\n\nKeep this.`;
   const segment = withSandboxToolchain(body, { imageId: oldId, php: 'absent' });

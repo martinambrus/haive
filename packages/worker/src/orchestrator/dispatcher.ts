@@ -91,6 +91,7 @@ import { resolveDispatchSandboxToolchain } from './sandbox-toolchain.js';
 import {
   stripSandboxToolchain,
   sandboxToolchainBlock,
+  sandboxToolchainOffset,
   toolchainEnvironmentMatches,
   withSandboxToolchain,
 } from '../sandbox/toolchain-prompt.js';
@@ -968,7 +969,11 @@ function buildCliSidePlan(
       }
     }
     if (toolchainFact && toolchainBlock)
-      spec.sandboxToolchain = { imageId: toolchainFact.imageId, block: toolchainBlock };
+      spec.sandboxToolchain = {
+        imageId: toolchainFact.imageId,
+        block: toolchainBlock,
+        offset: sandboxToolchainOffset(effectivePrompt),
+      };
     spec.agentRules = agentRules;
     if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;

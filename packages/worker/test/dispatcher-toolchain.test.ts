@@ -108,9 +108,32 @@ it('stamps only the advisory block instead of duplicating the task prompt in Red
   expect(stamp).toEqual({
     imageId: ID,
     block: expect.stringContaining('<haive_sandbox_toolchain>'),
+    offset: 0,
   });
   expect(JSON.stringify(stamp)).not.toContain(body);
   expect(JSON.stringify(stamp).length).toBeLessThan(400);
+});
+
+it('stamps the owned block offset after Unicode rules, even when those rules quote the block', () => {
+  const block = toolchain.sandboxToolchainBlock(
+    toolchain.withSandboxToolchain('', { imageId: ID, php: 'absent' }),
+  )!;
+  const plan = resolveDispatch(
+    request('p0', {
+      providers: [
+        { ...providers[0]!, rulesContent: `Keep 💡 rules and this quote:\n${block}\n\nEnd.` },
+      ],
+      agentRulesInjection: true,
+      sandboxToolchain: { p0: { imageId: ID, php: 'absent' } },
+    }),
+  );
+  if (plan.invocation?.kind !== 'cli') throw new Error('expected CLI');
+  const stamp = plan.invocation.spec.sandboxToolchain!;
+  const prompt = plan.effectivePrompt!;
+  const ownedAt = prompt.lastIndexOf(block);
+  expect(ownedAt).toBeGreaterThan(prompt.indexOf(block));
+  expect(stamp.offset).toBe([...prompt.slice(0, ownedAt)].length);
+  expect(stamp.offset).toBeLessThan(ownedAt);
 });
 
 it.each(['prompt', 'subagent'] as const)(

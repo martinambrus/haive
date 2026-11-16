@@ -9,6 +9,8 @@ const CLOSE = '</haive_sandbox_toolchain>';
 export interface SandboxToolchainStamp {
   imageId: string;
   block?: string;
+  /** Zero-based Unicode character offset in the stored prompt, for replay-safe audit removal. */
+  offset?: number;
   /** Number of independently adapted leading advisories (one when omitted). */
   copies?: number;
   /** One-based match ordinals when task quotes occur between native prompts. */
@@ -70,6 +72,12 @@ export function sandboxToolchainBlock(prompt: string): string | null {
   return findSandboxToolchain(prompt)?.block ?? null;
 }
 
+export function sandboxToolchainOffset(prompt: string): number | undefined {
+  const found = findSandboxToolchain(prompt);
+  // PostgreSQL text positions count Unicode characters, not JavaScript UTF-16 code units.
+  return found ? [...prompt.slice(0, found.at)].length : undefined;
+}
+
 export function withSandboxToolchain(
   prompt: string,
   fact: SandboxToolchainFact | null | undefined,
@@ -84,7 +92,6 @@ export function withSandboxToolchain(
 }
 
 /** Each prompt owns only its leading advisory, even when its body quotes the same block.
- * Native assembly adds no advisories between these prompts, so match ordinals survive assembly.
  * If any block cannot be located, rebuild every prompt without the optional fact. */
 export function prepareSandboxToolchainPrompts(prompts: string[], imageId?: string) {
   if (!imageId) return { prompts };
@@ -94,6 +101,8 @@ export function prepareSandboxToolchainPrompts(prompts: string[], imageId?: stri
     return { prompts: prompts.map(stripSandboxToolchain) };
   const separator = block + '\n\n';
   let matches = 0;
+  // Production code builds neither native nor sequential sub-agent kinds today. If wired,
+  // their ordinals must come from the assembled text, whose joins can complete quoted separators.
   const occurrences = prompts.map((prompt) => {
     const owned = matches + 1;
     matches += prompt.split(separator).length - 1;
