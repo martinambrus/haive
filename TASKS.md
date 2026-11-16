@@ -702,6 +702,15 @@ status: open · kind: fix · found: worker log 2026-11-15 · priority: P3
 
 `cli_package_versions` row `codex` keeps `fetch_error` "Unterminated string in JSON at position 214128" while every other CLI refreshes. `fetchNpmVersions` (`worker/src/cli-versions/fetcher.ts` ~:7-18, ~:62-75) requests the full npm document (`Accept: application/json`, 19.3 MB for `@openai/codex`, 8.4 s from the host) under a 15 s abort, and reads only the `versions` keys and `dist-tags`. Fix: `Accept: application/vnd.npm.install-v1+json` (abbreviated, 5.6 MB, 4.1 s, same two fields); control with a fetch stub asserting the header. Check the same pattern in `tool_package_versions` / runtime fetchers.
 
+### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+4)
+
+status: open · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+
+1. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
+2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too.
+3. Gate 1.5 (08d2) defaults to accept and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
+4. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
+
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
 status: open, owner decided 2026-11-16: zero-merge cleanup becomes a NEW CORE STEP (not a conditional `commit` requirement); P7 unblocked (P6 storage/validation/admission fence DONE #1222 6d912f6ce, migration 0245) · kind: feature · found: DPA design 2026-11-15 · priority: P2
