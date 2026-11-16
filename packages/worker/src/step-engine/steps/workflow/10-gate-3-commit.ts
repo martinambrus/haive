@@ -1,3 +1,13 @@
+import { pendingInsightApproval } from '../../../queues/insight-gate3-return.js';
+import { changeInsightPage, insightPageOffset, insightPageField } from './_insight-page.js';
+import {
+  insightSummaryMarkdown,
+  loadInsightSummary,
+  persistInsightReport,
+} from './_insight-summary.js';
+import { ensureInsightIntent, selectOfferedInsights } from './_insight-batch.js';
+import { readInsightContinuation } from './_insight-continuation.js';
+import type { InsightSummary, InsightReviseContinuation } from '@haive/shared/step';
 import { loadFixTestRecords } from './_fix-test-store.js';
 import {
   fixTestEditsRow,
@@ -25,6 +35,7 @@ import { loadTaskSimilarSites, similarSitesRow, type GateSimilarSite } from './_
 import {
   INSIGHTS_AT_GATE,
   gateInsights,
+  gate3InsightPicksAvailable,
   insightsRow,
   loadUnactedInsights,
 } from './_gate-insights.js';
@@ -83,6 +94,13 @@ interface CommitGateDetect {
   similarSites?: GateSimilarSite[];
   similarSitesOmitted?: number;
   outOfScopeInsights?: Insight[];
+  insightChoices?: Insight[];
+  insightPicksAvailable?: boolean;
+  insightSummary?: InsightSummary;
+  insightPage?: number;
+  insightTotal?: number;
+  insightPageSize?: number;
+  insightReportId?: string;
   outOfScopeInsightsOmitted?: number;
   /** Only when no gate 2 decided on the house rules. Optional because this payload is persisted. */
   houseRules?: GateHouseRules | null;
@@ -91,6 +109,10 @@ interface CommitGateDetect {
 }
 
 interface CommitGateApply {
+  continuation?: InsightReviseContinuation;
+  findingsSummary?: string;
+  approvalRequired?: boolean;
+  insightSummary?: InsightSummary;
   committed: boolean;
   commitSha: string | null;
   message: string;
@@ -263,18 +285,39 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const similar = gate2?.output
       ? { sites: [], omitted: 0 }
       : await loadTaskSimilarSites(ctx.db, ctx.taskId);
-    const insights = gate2?.output
-      ? { insights: [], omitted: 0 }
-      : await loadUnactedInsights(ctx.db, ctx.taskId, { limit: INSIGHTS_AT_GATE });
+    const inventory = await loadUnactedInsights(ctx.db, ctx.taskId, { includePicked: true });
+    const unacted = inventory.insights;
+    const requestedOffset =
+      inventory.insights.length > INSIGHTS_AT_GATE ? await insightPageOffset(ctx) : 0;
+    const offset =
+      requestedOffset < Math.max(unacted.length, inventory.insights.length) ? requestedOffset : 0;
+    const insights = {
+      insights: unacted.slice(offset, offset + INSIGHTS_AT_GATE),
+      omitted: Math.max(0, unacted.length - Math.min(INSIGHTS_AT_GATE, unacted.length - offset)),
+    };
     const houseRules = gate2?.output
       ? null
       : await loadGateHouseRules(ctx.db, ctx.taskId, {
           currentFingerprint: () => taskChangeFingerprint(ctx),
         });
+    const insightSummary = await loadInsightSummary(ctx, inventory.insights, offset);
+    const insightPicksAvailable = await gate3InsightPicksAvailable(ctx);
+    const insightView = {
+      insightPicksAvailable,
+      // Use stable occurrence ids for choices; the legacy status row keeps positional ids.
+      insightChoices: insightPicksAvailable
+        ? gateInsights(insights.insights.map((i) => ({ ...i, legacyId: i.id })))
+        : [],
+      ...(insightSummary.totals.identities ? { insightSummary } : {}),
+      insightPage: offset,
+      insightTotal: Math.max(unacted.length, insightSummary.totals.identities),
+      insightPageSize: INSIGHTS_AT_GATE,
+    };
     // Throws on a present-but-unusable `.git`: reporting corruption as "0 dirty
     // files" defaults the commit checkbox off and drops the whole changeset.
     if (!(await requireUsableGit(workspacePath))) {
       return {
+        ...insightView,
         hasGit: false,
         workspacePath,
         diffSummary: '(no git)',
@@ -287,7 +330,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
           : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
         similarSites: similar.sites,
         similarSitesOmitted: similar.omitted,
-        outOfScopeInsights: gateInsights(insights.insights),
+        outOfScopeInsights: gateInsights(insights.insights.filter((i) => !i.picked)),
         outOfScopeInsightsOmitted: insights.omitted,
         houseRules,
       };
@@ -348,6 +391,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     }
 
     return {
+      ...insightView,
       hasGit: true,
       workspacePath,
       diffSummary: summary,
@@ -362,7 +406,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         : fixTestSummaries(await loadFixTestRecords(ctx.db, ctx.taskId, 30, { patches: false })),
       similarSites: similar.sites,
       similarSitesOmitted: similar.omitted,
-      outOfScopeInsights: gateInsights(insights.insights),
+      outOfScopeInsights: gateInsights(insights.insights.filter((i) => !i.picked)),
       outOfScopeInsightsOmitted: insights.omitted,
       houseRules,
       unregisteredGitlinks: orphanGitlinks,
@@ -412,6 +456,8 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
   },
 
   async prepareForm(ctx, detected): Promise<void> {
+    if (detected.insightSummary?.totals.identities)
+      detected.insightReportId = await persistInsightReport(ctx);
     const records = detected.fixTestRecords?.length
       ? await loadFixTestRecords(ctx.db, ctx.taskId)
       : [];
@@ -435,7 +481,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const insightRow = insightsRow(
       detected.outOfScopeInsights ?? [],
       detected.outOfScopeInsightsOmitted ?? 0,
-      'Anything listed here needs a follow-up task.',
+      detected.insightPicksAvailable === false
+        ? 'These improvements remain available in the insight summary and report.'
+        : 'Select improvements below to apply them and run fresh checks before returning to this gate.',
     );
     const statusRows = [
       houseRulesRow(detected.houseRules),
@@ -469,7 +517,53 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         detected.diffSummary,
       ].join('\n'),
       ...(statusRows.length > 0 ? { statusSummary: statusRows } : {}),
+      ...(detected.insightSummary?.totals.identities
+        ? {
+            infoSections: [
+              {
+                title: 'Insight summary',
+                body:
+                  insightSummaryMarkdown(detected.insightSummary) +
+                  (detected.insightReportId
+                    ? `\n\n[Read the complete insight report](/tasks/${encodeURIComponent(_ctx.taskId)}/reports/${encodeURIComponent(detected.insightReportId)})`
+                    : ''),
+                defaultOpen: false,
+              },
+            ],
+          }
+        : {}),
       fields: [
+        ...insightPageField(
+          detected.insightTotal ?? 0,
+          detected.insightPage,
+          detected.insightPageSize,
+        ),
+        ...(detected.insightPicksAvailable !== false && detected.insightChoices?.length
+          ? [
+              {
+                type: 'multi-select' as const,
+                id: 'selectedInsights',
+                label: 'Improvements to apply before committing',
+                defaults: [],
+                description:
+                  'Selected improvements run through fresh verification and review. You will review a new diff and commit message before committing.',
+                options: detected.insightChoices.map((i) => ({
+                  value: i.id,
+                  label: asPlainText(`${i.title}${i.location ? ` (${i.location})` : ''}`),
+                })),
+              },
+            ]
+          : []),
+        ...(detected.outOfScopeInsightsOmitted
+          ? [
+              {
+                type: 'note' as const,
+                id: 'insightOmissions',
+                label: 'More improvements',
+                body: `${detected.outOfScopeInsightsOmitted} more not shown on this page. Choose another insight page and submit to browse without an edit or commit.`,
+              },
+            ]
+          : []),
         {
           type: 'checkbox',
           id: 'commit',
@@ -495,15 +589,64 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
   },
 
   async apply(ctx, args): Promise<CommitGateApply> {
+    if (await pendingInsightApproval(ctx.db, ctx.taskId))
+      return {
+        committed: false,
+        commitSha: null,
+        message:
+          'Verification failed during insight checks. A new gate-2 approval is required before committing.',
+        approvalRequired: true,
+      };
+    const summary = args.detected.insightSummary?.totals.identities
+      ? {
+          insightSummary: args.detected.insightSummary,
+          findingsSummary:
+            insightSummaryMarkdown(args.detected.insightSummary) +
+            (args.detected.insightReportId
+              ? `\n\n[Read the complete insight report](/tasks/${encodeURIComponent(ctx.taskId)}/reports/${encodeURIComponent(args.detected.insightReportId)})`
+              : ''),
+        }
+      : {};
+    await changeInsightPage(ctx, args.detected, args.formValues);
+    const offered = selectOfferedInsights(args.detected.insightChoices ?? [], args.formValues);
+    if (offered.length) {
+      if (!(await gate3InsightPicksAvailable(ctx)))
+        throw new Error(
+          'Insight triage is not in this task run list. Refresh the form before committing.',
+        );
+      const inventory = await loadUnactedInsights(ctx.db, ctx.taskId, { includePicked: true });
+      ctx.throwIfCancelled();
+      // Never turn a disappeared id into an empty selection and fall through to Git.
+      const selected = selectOfferedInsights(inventory.insights, {
+        selectedInsights: offered.map((i) => i.id),
+      });
+      const intent = await ensureInsightIntent(ctx, selected, 'gate3');
+      return {
+        ...summary,
+        committed: false,
+        commitSha: null,
+        message: 'Selected improvements will be applied before a new commit approval.',
+        continuation: {
+          version: 1,
+          kind: 'insight_revise',
+          batchId: intent.batchId,
+          sourceStepRow: ctx.taskStepId,
+          generation: ctx.rerunGeneration ?? 0,
+          round: ctx.round + 1,
+          mode: 'gate3',
+          stage: 'apply',
+        },
+      };
+    }
     const values = args.formValues as {
       commit?: boolean;
       commitMessage?: string;
     };
     if (!values.commit) {
-      return { committed: false, commitSha: null, message: 'commit skipped' };
+      return { ...summary, committed: false, commitSha: null, message: 'commit skipped' };
     }
     if (!args.detected.hasGit) {
-      return { committed: false, commitSha: null, message: 'no git repo' };
+      return { ...summary, committed: false, commitSha: null, message: 'no git repo' };
     }
     const workspace = args.detected.workspacePath;
     const message = (values.commitMessage ?? generatedCommitMessage(args.llmOutput) ?? '').trim();
@@ -530,6 +673,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
     if (!(await gitCommitStaged(workspace, message, commitEnv))) {
       return {
+        ...summary,
         committed: false,
         commitSha: null,
         message: 'nothing to commit',
@@ -547,10 +691,22 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     }
     await warnStep(ctx, notes);
     return {
+      ...summary,
       committed: true,
       commitSha,
       message,
       ...(excludedRepositories.length ? { excludedRepositories } : {}),
     };
+  },
+  reviseLoop: {
+    evaluate(output) {
+      if (output?.approvalRequired) return { targetStepId: '09-gate-2-verify-approval' };
+      return output?.continuation
+        ? {
+            targetStepId: '08e-insights-triage',
+            continuation: readInsightContinuation(output.continuation),
+          }
+        : null;
+    },
   },
 };

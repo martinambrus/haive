@@ -15,6 +15,8 @@ const continuationSchema = z
     sourceStepRow: z.string().min(1),
     generation: z.number().int().nonnegative(),
     round: z.number().int().positive(),
+    mode: z.literal('gate3').optional(),
+    stage: z.enum(['apply', 'checks']).optional(),
   })
   .strict();
 const checkpointSchema = z
@@ -27,7 +29,9 @@ const checkpointSchema = z
 export function readInsightContinuation(value: unknown): InsightReviseContinuation {
   if ((value as { version?: unknown } | null)?.version !== 1)
     throw new Error('Unsupported insight continuation protocol version.');
-  return continuationSchema.parse(value);
+  const parsed = continuationSchema.parse(value);
+  if (!!parsed.mode !== !!parsed.stage) throw new Error('Invalid insight continuation stage.');
+  return parsed;
 }
 
 /** Only the required, stored journal outcome can authorize a new check round. */
@@ -38,7 +42,7 @@ export function continuationForOutcome(
   if (
     record.stage !== 'outcome' ||
     record.selected.length === 0 ||
-    !record.items.some((i) => i.outcome === 'applied')
+    (record.mode !== 'gate3' && !record.items.some((i) => i.outcome === 'applied'))
   )
     return undefined;
   return {
@@ -48,6 +52,7 @@ export function continuationForOutcome(
     sourceStepRow: record.sourceStepRowId,
     generation: record.generation,
     round: sourceRound + 1,
+    ...(record.mode === 'gate3' ? { mode: 'gate3' as const, stage: 'checks' as const } : {}),
   };
 }
 

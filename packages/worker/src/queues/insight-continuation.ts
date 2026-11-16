@@ -18,7 +18,7 @@ import { validationSuccessor, VALIDATION_RECHECK_EVENT } from './validation-rech
 export class InsightRunListError extends Error {
   constructor() {
     super(
-      'Insight continuation requires verification, code review and insight triage in the run list. Repair the task type and Retry this step.',
+      'Insight continuation requires verification, code review and insight triage; gate-3 picks also require gate 2 before gate 3 in the run list. Repair the task type and Retry this step.',
     );
     this.name = 'InsightRunListError';
   }
@@ -40,11 +40,19 @@ export function assertInsightRunList(
 export function assertInsightTaskSteps(
   ctx: ResolvedTaskContext,
   steps: readonly StepDefinition[],
+  gate3 = false,
 ): void {
   const review = readStepRole(ctx, STEP_ROLES.codeReview, (binding) =>
     binding.state === 'active' ? binding.stepId : null,
   );
   assertInsightRunList(steps, review);
+  if (gate3) {
+    const index = (id: string) => steps.findIndex((s) => s.metadata.id === id);
+    const gate = index('10-gate-3-commit');
+    const approval = index('09-gate-2-verify-approval');
+    if (gate <= index('08e-insights-triage') || approval < 0 || approval >= gate)
+      throw new InsightRunListError();
+  }
 }
 
 export async function handoffInsightContinuation(
@@ -55,7 +63,8 @@ export async function handoffInsightContinuation(
   steps: readonly StepDefinition[],
 ): Promise<{ next: StepDefinition; round: number; epoch: number } | null> {
   const continuation = readInsightContinuation(value);
-  assertInsightTaskSteps(ctx, steps);
+  assertInsightTaskSteps(ctx, steps, continuation.mode === 'gate3');
+  const applying = continuation.mode === 'gate3' && continuation.stage === 'apply';
   if (
     continuation.sourceStepRow !== source.id ||
     continuation.generation !== source.rerunGeneration ||
@@ -63,25 +72,34 @@ export async function handoffInsightContinuation(
   )
     throw new StepSupersededError(source.id);
   const journal = await loadInsightBatchRecords(db, ctx.taskId);
-  const outcome = journal.find((r) => r.batchId === continuation.batchId && r.stage === 'outcome');
+  const outcome = journal.find(
+    (r) => r.batchId === continuation.batchId && r.stage === (applying ? 'intent' : 'outcome'),
+  );
   if (
     !outcome ||
-    JSON.stringify(continuationForOutcome(outcome, source.round)) !== JSON.stringify(continuation)
+    (applying
+      ? outcome.mode !== 'gate3' ||
+        outcome.sourceStepRowId !== source.id ||
+        outcome.generation !== source.rerunGeneration
+      : JSON.stringify(continuationForOutcome(outcome, source.round)) !==
+        JSON.stringify(continuation))
   )
     throw new Error('Insight continuation has no matching applied journal outcome.');
   // File reads precede every lock. The same recheck rule serves ordinary late editors.
-  const successor = await validationSuccessor(
-    db,
-    ctx,
-    source.stepId,
-    source.round,
-    steps,
-    source.output,
-    INSIGHT_VERIFY,
-  );
+  const successor = applying
+    ? { recheck: null, next: null }
+    : await validationSuccessor(
+        db,
+        ctx,
+        source.stepId,
+        source.round,
+        steps,
+        source.output,
+        INSIGHT_VERIFY,
+      );
   const next = successor.recheck
     ? successor.next!
-    : steps.find((s) => s.metadata.id === INSIGHT_VERIFY)!;
+    : steps.find((s) => s.metadata.id === (applying ? '08e-insights-triage' : INSIGHT_VERIFY))!;
   const round = continuation.round;
   try {
     return await db.transaction(async (tx) => {
@@ -176,7 +194,7 @@ export async function handoffInsightContinuation(
           payload: {
             stepId: source.stepId,
             sourceStepId: source.stepId,
-            targetStepId: INSIGHT_VERIFY,
+            targetStepId: applying ? '08e-insights-triage' : INSIGHT_VERIFY,
             round,
             continuation,
             endedAt: source.endedAt?.toISOString() ?? null,

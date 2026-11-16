@@ -46,6 +46,7 @@ export function gateContext(repo: string): StepContext {
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
+    throwIfCancelled() {},
     db: {
       select: () => chain,
       query: {

@@ -1,3 +1,9 @@
+import {
+  changeInsightPage,
+  insightPageOffset,
+  insightPageField,
+  isInsightPageChange,
+} from './_insight-page.js';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { autoInsightReport, assertAutoVersion } from './_insight-auto-flow.js';
@@ -57,6 +63,9 @@ interface TriageDetect {
   insightCheckpoint?: InsightReviseContinuation;
   insightsOmitted?: number;
   auto?: AutoDetect;
+  gate3Request?: InsightReviseContinuation;
+  insightPage?: number;
+  insightTotal?: number;
 }
 
 interface TriageApply extends InsightOutcome {
@@ -93,6 +102,7 @@ function insightDisplay(
   insights: LoadedInsight[],
   auto: AutoDetect,
   limit = INSIGHTS_AT_GATE,
+  offset = 0,
 ): { insights: LoadedInsight[]; auto: AutoDetect; insightsOmitted?: number } {
   // Small snapshots retain their original order and shape.
   if (
@@ -102,16 +112,16 @@ function insightDisplay(
     (auto.claim?.insights.length ?? 0) <= limit
   )
     return { insights, auto };
-  const page = (auto.mode === 'manual' ? auto.candidates : insights).slice(0, limit);
+  const page = (auto.mode === 'manual' ? auto.candidates : insights).slice(offset, offset + limit);
   const omitted = insights.length - page.length;
-  const candidatesOmitted = Math.max(0, auto.candidates.length - limit);
+  const candidatesOmitted = Math.max(0, auto.candidates.length - page.length);
   return {
     insights: page,
     ...(omitted > 0 ? { insightsOmitted: omitted } : {}),
     auto: {
       ...auto,
       decisionsTotal: auto.decisions.length,
-      candidates: auto.candidates.slice(0, limit),
+      candidates: auto.candidates.slice(offset, offset + limit),
       ...(candidatesOmitted > 0 ? { candidatesOmitted } : {}),
       decisions: auto.decisions
         .filter((d) => page.some((i) => i.identity === d.identity || i.id === d.id))
@@ -221,7 +231,17 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const checkpoint =
       ctx.round > 0 ? await activeInsightContinuation(ctx.db, ctx.taskId, ctx.round) : null;
     ctx.throwIfCancelled();
-    const automatic = await insightAutoEnabled(ctx.db, ctx.taskId);
+    const gate3Request =
+      checkpoint?.mode === 'gate3' && checkpoint.stage === 'apply' ? checkpoint : null;
+    if (checkpoint?.mode === 'gate3' && checkpoint.stage === 'checks')
+      return {
+        worktreePath: ctx.workspacePath,
+        sandboxWorktreePath: ctx.sandboxWorkdir,
+        spec: '',
+        insights: [],
+        insightCheckpoint: checkpoint,
+      };
+    const automatic = !gate3Request && (await insightAutoEnabled(ctx.db, ctx.taskId));
     ctx.throwIfCancelled();
     const manualCheckpoint =
       checkpoint &&
@@ -244,7 +264,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         : null;
     ctx.throwIfCancelled();
     const remainingPage = (source?.detectOutput as TriageDetect | null)?.auto?.candidatesOmitted;
-    if (checkpoint && (!automatic || (manualCheckpoint && !remainingPage)))
+    if (checkpoint && !gate3Request && (!automatic || (manualCheckpoint && !remainingPage)))
       return {
         worktreePath: ctx.workspacePath,
         sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -264,15 +284,41 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const worktreePath = automatic
       ? ((await resolveTaskWorktreePath(ctx)) ?? ctx.workspacePath)
       : (wt?.worktreePath ?? ctx.workspacePath);
-    const insights = await collectInsights(ctx, automatic);
+    const intent = gate3Request
+      ? (await loadInsightBatchRecords(ctx.db, ctx.taskId)).find(
+          (r) => r.batchId === gate3Request.batchId && r.stage === 'intent',
+        )
+      : null;
+    if (gate3Request && (!intent || intent.mode !== 'gate3'))
+      throw new Error('Gate-3 selection has no durable intent.');
+    const insights = intent
+      ? intent.selected.map((i) => ({ ...i, picked: false }))
+      : await collectInsights(ctx, true);
     const auto = automatic ? await detectAutoInsights(ctx, insights, worktreePath) : undefined;
+    const total = auto?.mode === 'manual' ? auto.candidates.length : insights.length;
+    const requestedOffset =
+      !gate3Request && total > INSIGHTS_AT_GATE && (!auto || auto.mode === 'manual')
+        ? await insightPageOffset(ctx)
+        : 0;
+    const offset = requestedOffset < total ? requestedOffset : 0;
     const display = auto
-      ? insightDisplay(insights, auto)
-      : { insights, auto: undefined, insightsOmitted: undefined };
+      ? insightDisplay(insights, auto, INSIGHTS_AT_GATE, offset)
+      : {
+          insights: insights.slice(offset, offset + INSIGHTS_AT_GATE),
+          auto: undefined,
+          insightsOmitted: Math.max(
+            0,
+            insights.length - Math.min(INSIGHTS_AT_GATE, insights.length - offset),
+          ),
+        };
+
     return {
       ...(display.auto ? { auto: display.auto } : {}),
       ...(display.insightsOmitted ? { insightsOmitted: display.insightsOmitted } : {}),
-      ...(checkpoint ? { insightCheckpoint: checkpoint } : {}),
+      ...(gate3Request ? { gate3Request } : checkpoint ? { insightCheckpoint: checkpoint } : {}),
+      ...(!gate3Request && total > INSIGHTS_AT_GATE
+        ? { insightPage: offset, insightTotal: total }
+        : {}),
       worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
@@ -283,6 +329,8 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   form(_ctx, detected): FormSchema {
     assertAutoVersion(detected.auto);
+    if (detected.gate3Request)
+      return { title: 'Apply gate-3 improvements', fields: [], autoSubmit: true };
     if (detected.insightCheckpoint && !detected.auto)
       return { title: 'Insight checks complete', fields: [], autoSubmit: true };
     if (detected.auto && detected.auto.mode !== 'manual')
@@ -316,9 +364,9 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         `Agents surfaced ${detected.insights.length} optional improvement(s) during this run.`,
         'Select any to implement now (leave all unchecked to skip). Selected items are applied by',
         'one agent and re-verified at the next gate.',
-        ...(detected.auto?.candidatesOmitted
+        ...((detected.auto?.candidatesOmitted ?? detected.insightsOmitted)
           ? [
-              `${detected.auto.candidatesOmitted} more not shown. Unacted improvements remain available on the next visit.`,
+              `${detected.auto?.candidatesOmitted ?? detected.insightsOmitted} more not shown. Unacted improvements remain available on the next visit.`,
             ]
           : []),
       ].join('\n'),
@@ -335,6 +383,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
           })),
           defaults: [],
         },
+        ...insightPageField(detected.insightTotal ?? 0, detected.insightPage),
       ],
       submitLabel: 'Apply selected',
     };
@@ -347,19 +396,29 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     async selectAgents({ ctx, detected, formValues }) {
       const d = detected as TriageDetect;
       assertAutoVersion(d.auto);
+      if (isInsightPageChange(d, formValues)) return [];
       if (d.auto?.mode === 'classify')
         return startAutoClassification(ctx, await classificationState(ctx, d));
       if (d.auto?.mode === 'settled') return [];
       if (d.insightCheckpoint && !d.auto) return [];
-      const selected = selectOfferedInsights(
-        d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
-        formValues,
+      const selected = (
+        d.gate3Request
+          ? d.insights
+          : selectOfferedInsights(
+              d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
+              formValues,
+            )
       ).map((i) => ({
         ...i,
         identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
+        picked: i.picked ?? false,
       }));
       if (selected.length === 0) return [];
-      const batch = await ensureInsightIntent(ctx, selected);
+      const batch = await ensureInsightIntent(
+        ctx,
+        selected,
+        d.gate3Request ? 'gate3' : 'manual_08e',
+      );
       await hydrateNoSpecBrief(ctx, d);
       ctx.throwIfCancelled();
       return [
@@ -375,6 +434,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   async apply(ctx, args): Promise<TriageApply> {
     const d = args.detected;
+    await changeInsightPage(ctx, d, args.formValues);
     assertAutoVersion(d.auto);
     ctx.throwIfCancelled();
     if (d.insightCheckpoint && !d.auto)
@@ -391,15 +451,18 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
         insightCheckpoint: d.insightCheckpoint,
       };
     let selected = (
-      d.auto && d.auto.mode !== 'manual'
-        ? []
-        : selectOfferedInsights(
-            d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
-            args.formValues,
-          )
+      d.gate3Request
+        ? d.insights
+        : d.auto && d.auto.mode !== 'manual'
+          ? []
+          : selectOfferedInsights(
+              d.auto?.mode === 'manual' ? d.auto.candidates : d.insights,
+              args.formValues,
+            )
     ).map((i) => ({
       ...i,
       identity: i.identity ?? findingIdentity({ file: i.location, description: i.title }),
+      picked: i.picked ?? false,
     }));
     if (d.auto?.mode === 'classify') {
       const classified = await finishAutoClassification(
@@ -451,7 +514,7 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       const intent = await ensureInsightIntent(
         ctx,
         selected,
-        d.auto?.mode === 'classify' ? 'auto_08e' : 'manual_08e',
+        d.gate3Request ? 'gate3' : d.auto?.mode === 'classify' ? 'auto_08e' : 'manual_08e',
       );
       const records = await loadInsightBatchRecords(ctx.db, ctx.taskId);
       ctx.throwIfCancelled();

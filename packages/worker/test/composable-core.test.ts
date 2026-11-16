@@ -199,7 +199,7 @@ describe('core composable catalog', () => {
     ]);
   });
 
-  it('accepts a worktree, implement, verify, commit order', () => {
+  it('requires the insight destination before a new commit gate', () => {
     const order = [
       '01-worktree-setup',
       '07-phase-2-implement',
@@ -209,7 +209,7 @@ describe('core composable catalog', () => {
     expect(validateComposition(order, catalog)).toEqual([]);
   });
 
-  it('accepts learning capture after the commit, as the built-in workflow runs it', () => {
+  it('requires the insight destination even when learning follows the commit', () => {
     const order = [
       '01-worktree-setup',
       '07-phase-2-implement',
@@ -955,4 +955,19 @@ describe('core composable catalog repository token', () => {
       /01-worktree-setup.*unknown-implicit/,
     );
   });
+});
+
+it('gate 3 may revise before committing; a later loop still cannot cross its commit', () => {
+  const order = [
+    '01-worktree-setup',
+    '07-phase-2-implement',
+    '08-phase-5-verify',
+    '08c-code-review',
+    '08e-insights-triage',
+    '10-gate-3-commit',
+  ];
+  expect(validateComposition(order, catalog)).toEqual([]);
+  expect(validateComposition([...order, '09-gate-2-verify-approval'], catalog)).toContainEqual(
+    expect.objectContaining({ kind: 'loop-after-closing', closingStepId: '10-gate-3-commit' }),
+  );
 });

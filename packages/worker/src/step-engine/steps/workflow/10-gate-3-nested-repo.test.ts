@@ -230,6 +230,7 @@ describe('gate 3 nested repository controls', () => {
       where: () => chain,
       orderBy: () => chain,
       limit: async () => [{ output: { baseBranch: 'task-base' } }],
+      then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
     });
     ctx.db.select = (() => chain) as unknown as typeof ctx.db.select;
     await expect(

@@ -941,3 +941,41 @@ and claims, including stored opt-ins, and disable new manual opt-ins. Keep capab
 workers until active version-1 batches and continuations settle. Retain spent claims
 and journal JSON. No schema migration is required; older workers cannot safely consume
 active automatic stages or checkpoint ownership references.
+
+## Gate-3 insight recovery
+
+A current-generation gate-3 `insight.batch` intent counts as durable work before done
+publication, as an 08e intent does. Boot preserves its approved snapshot and answers.
+The same source/generation/batch replays the handoff once; explicit Retry advances the
+generation without erasing history. The v1 continuation optionally carries `mode: gate3`
+and `stage: apply | checks`; unknown versions are refused. Apply-stage handoff targets
+fresh 08e; checks-stage handoff composes with validation and targets fresh verification.
+Both retain the atomic event/reset/pointer transaction and lost-enqueue recovery.
+Stop/Cancel/dead win; pause lets owned publication/handoff finish and holds fresh work.
+
+Required `insight.check` records preserve failure and new gate-2 approval outside
+resettable output. Source Retry cannot erase this task-wide approval requirement.
+The precommit guard applies even to an empty selection. Conditional quick gate 2 uses
+the latch in both its shouldRun wrapper and fresh pause/provider admission, so a pending
+approval cannot accidentally become a dormant skip. A pending approval also forces gate 2
+to park rather than replay presets or saved synthetic answers, while retaining the form's
+computed defaults. Unanswered persisted schemas are rebuilt without preset overlays.
+The submit route records the authenticated owner, rerun generation and explicit decision
+in `step.form_submitted` atomically with its answer and cleared park marker. The worker
+accepts only that saved answer, with matching row/generation/owner and a submission newer
+than the latest failed check (compared at PostgreSQL timestamp precision); legacy unbound
+submissions repark. Queue values cannot replace an attested decision. The saved answer
+passes the normal persisted-schema validation and the row becomes `running` before apply,
+refusing a second owner POST during apply. The required approval-event writer rechecks
+this evidence under its existing row and task fences.
+
+Deploy the API and worker together for this change. An old API never sends the required
+owner/generation marker, so a latched gate 2 cannot be approved until both are current.
+Do not restore an older API while pending approvals can resume. Report snapshots stay immutable
+per source generation and readable after completion.
+
+Rollback stops offering new gate-3 picks and automatic batches, then retains capable
+workers until active continuations and pending new gate forms are settled. Retain check
+latches, journals, report readers and compatible derived-pin readers for every resumable
+task. Reverting an executor underneath that state is unsafe. No schema migration needs
+reversal, and spent claims and attempt history are never reset.

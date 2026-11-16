@@ -1,3 +1,4 @@
+import * as pages from './_insight-page.js';
 import * as secretPolicy from '../../../queues/cli-exec/secret-mask.js';
 import * as safeFs from '@haive/shared/fs-safe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -70,6 +71,7 @@ const result = (
 describe('automatic insight stages', () => {
   let history: { claims: auto.AutoClaim[]; results: auto.AutoClassification[] };
   beforeEach(() => {
+    vi.spyOn(pages, 'insightPageOffset').mockResolvedValue(0);
     history = { claims: [claim], results: [] };
     vi.spyOn(auto, 'loadAutoHistory').mockImplementation(async () => history);
     vi.spyOn(auto, 'saveAutoClassification').mockImplementation(async (_ctx, record) => {
@@ -571,6 +573,24 @@ describe('automatic insight stages', () => {
         identity: `src/a.ts::page-${n}`,
         title: `Page ${n}`,
       }));
+    it('manual 08e detect offers the final page at offset 30 and counts omitted entries', async () => {
+      inventory = Array.from({ length: 31 }, (_, n) => ({
+        ...one,
+        id: `item-${n}`,
+        identity: `identity-${n}`,
+        title: `Item ${n}`,
+      }));
+      vi.mocked(auto.insightAutoEnabled).mockResolvedValue(false);
+      vi.mocked(pages.insightPageOffset).mockResolvedValue(30);
+      vi.spyOn(continuations, 'activeInsightContinuation').mockResolvedValue(null);
+      const detected = await insightsTriageStep.detect!(flowCtx);
+      expect(detected.insights.map((i) => i.id)).toEqual(['item-30']);
+      expect(detected).toMatchObject({ insightPage: 30, insightTotal: 31, insightsOmitted: 30 });
+      expect(detected.auto).toBeUndefined();
+      const form = await insightsTriageStep.form!(flowCtx, detected, null);
+      expect(form!.fields.find((f) => f.id === 'insightPage')).toMatchObject({ default: '30' });
+      expect(form!.description).toContain('30');
+    });
     it('poll bound: persists a bounded view but classifies the whole budgeted cohort', async () => {
       inventory = cohort();
       const detected = await insightsTriageStep.detect!(flowCtx);

@@ -1,6 +1,6 @@
 import { scanFences } from '@haive/shared/markdown-fences';
 import { createHash } from 'node:crypto';
-import { and, eq, isNull, notInArray } from 'drizzle-orm';
+import { and, asc, eq, isNull, notInArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -138,7 +138,7 @@ const journalSchema = z
   .object({
     version: z.literal(1),
     protocolVersion: z.literal(1),
-    mode: z.enum(['manual_08e', 'auto_08e']),
+    mode: z.enum(['manual_08e', 'auto_08e', 'gate3']),
     batchId: z.string(),
     sourceStepRowId: z.string(),
     generation: z.number().int().nonnegative(),
@@ -180,7 +180,8 @@ export async function loadInsightBatchRecords(
         eq(schema.taskEvents.taskId, taskId),
         eq(schema.taskEvents.eventType, INSIGHT_BATCH_EVENT),
       ),
-    );
+    )
+    .orderBy(asc(schema.taskEvents.createdAt), asc(schema.taskEvents.id));
   const records: InsightBatchRecord[] = [];
   for (const row of rows) {
     try {

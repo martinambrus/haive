@@ -1,3 +1,8 @@
+import {
+  recordGate3Check,
+  pendingInsightApproval,
+  freshInsightGate2Submission,
+} from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { publishInsightStep } from './steps/workflow/_insight-continuation.js';
 import type { InsightReviseContinuation } from '@haive/shared/step';
@@ -3505,7 +3510,19 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
-    const rawPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const insightApprovalRequired =
+      meta.id === '09-gate-2-verify-approval' &&
+      (await pendingInsightApproval(db, taskId)) !== null;
+    const insightHumanSubmission =
+      insightApprovalRequired && (await freshInsightGate2Submission(db, params.userId, current));
+    // A queue payload is delivery, never proof of a person. Only the submit route's
+    // atomic saved answer/event can satisfy the failed-insight approval requirement.
+    if (insightApprovalRequired && !insightHumanSubmission && current.formValues) {
+      current = await updateRow(db, current.id, { formValues: null });
+    }
+    const rawPreAnswer = insightApprovalRequired
+      ? undefined
+      : (taskFlags?.preAnswers ?? {})[meta.id];
     const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
     if (normalizedPreAnswer && !normalizedPreAnswer.success)
       throw new Error(normalizedPreAnswer.issues.join('; '));
@@ -3527,7 +3544,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       persistedSchema = safeExistingSchema;
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
-    if (!persistedSchema && stepDef.form) {
+    // A parked schema may have been built by an older worker with a preset overlay.
+    // Rebuild an unanswered latched form from detect so its own recommendations win.
+    if (
+      (!persistedSchema || (insightApprovalRequired && !insightHumanSubmission)) &&
+      stepDef.form
+    ) {
       // Post-llm / pre-form seam: let the step produce any artifact the form's
       // web viewer will reference (form() itself is sync). Awaited once, here,
       // only when the form is first built.
@@ -3547,9 +3569,19 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
     }
 
+    if (insightApprovalRequired && persistedSchema) {
+      // Keep the form's evidence-based defaults; only an attested owner submit
+      // may apply them. Task/type presets and prior-task reuse stay suppressed.
+      persistedSchema = { ...persistedSchema, autoSubmit: false };
+      current = await updateRow(db, current.id, { formSchema: persistedSchema });
+    }
+
     // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
     // set, so values a job carries can only be a submit sent before it: the form parks instead.
-    const submitted = redetected || current.pauseFormOnRetry ? undefined : params.formValues;
+    const submitted =
+      redetected || current.pauseFormOnRetry || insightApprovalRequired
+        ? undefined
+        : params.formValues;
 
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -3595,6 +3627,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
         // user can inspect and edit. Cleared on park below (one-shot).
         !isGateForm &&
+        !insightApprovalRequired &&
         !current.pauseFormOnRetry &&
         !meta.alwaysWaitForUser &&
         (autoContinue || persistedSchema.autoSubmit === true) &&
@@ -3691,8 +3724,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
     // Values carried by the job can then only be a submit redelivered after it was applied.
     const continuing = row.status === 'waiting_cli' && current.formValues != null;
-    if (persistedSchema && submitted && !continuing) {
-      const expanded = validateFormValues(persistedSchema, submitted);
+    // A latched owner answer comes from the attested saved values, never the job.
+    // Validate it and close the form through the ordinary submitted-answer path.
+    const submittedAnswer = insightHumanSubmission ? formValues : submitted;
+    if (persistedSchema && submittedAnswer && !continuing) {
+      const expanded = validateFormValues(persistedSchema, submittedAnswer);
       const validation = expanded.success
         ? normalizeStepFormValues(meta.id, expanded.data)
         : expanded;
@@ -3708,7 +3744,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           error: validation.issues.join('; '),
         };
       }
-      formValues = answersForPersistence(validation.data, submitted);
+      formValues = answersForPersistence(validation.data, submittedAnswer);
       current = await updateRow(db, current.id, {
         formValues,
         status: 'running',
@@ -4255,11 +4291,24 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // The row is still done; handleResult turns loop_back into a new round at implement and
     // revise into a reset of its target.
     const finalize = (patch: UpdatePatch) =>
-      meta.id === INSIGHT_STEP &&
+      (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
       ((output as { continuation?: unknown } | null)?.continuation ||
         (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
         ? publishInsightStep(ctx, patch)
         : updateRow(db, current.id, patch);
+    if (
+      (meta.id === '08-phase-5-verify' &&
+        (output as { passed?: boolean } | null)?.passed === false) ||
+      (meta.id === '09-gate-2-verify-approval' &&
+        (output as { decision?: string } | null)?.decision === 'approve')
+    ) {
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+        current,
+        meta.id === '08-phase-5-verify' ? 'verify_failed' : 'gate2_approved',
+      );
+    }
     const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
     if (verdict) {
       const finished = await finalize({
@@ -4365,6 +4414,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       !(err instanceof StepOutputContractInvalidError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
+      if (meta.id === '08-phase-5-verify')
+        await recordGate3Check(
+          db,
+          { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+          row,
+          'verify_failed',
+        );
       const finished = await writeEnd({
         status: 'done',
         statusMessage: null,
@@ -4391,6 +4447,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ...(advised?.advice ? { guidance: advised.advice } : {}),
       };
     }
+    if (!cancelled && meta.id === '08-phase-5-verify')
+      await recordGate3Check(
+        db,
+        { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+        row,
+        'verify_failed',
+      );
     const storedError = scrubWorkerErrorPaths(errorMessage);
     const failed = await writeEnd({
       status: 'failed',

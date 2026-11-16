@@ -12,9 +12,11 @@ export function insightEventPage(
       ? ['insights']
       : eventType === 'insight.classified'
         ? ['items']
-        : eventType === 'insight.batch'
-          ? ['selected', 'items']
-          : [];
+        : eventType === 'task.markdown_report'
+          ? ['items']
+          : eventType === 'insight.batch'
+            ? ['selected', 'items']
+            : [];
   if (!payload) return payload;
   let page = payload;
   for (const key of fields) {

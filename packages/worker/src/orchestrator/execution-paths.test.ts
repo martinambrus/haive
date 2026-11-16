@@ -284,6 +284,7 @@ describe('complete registered workflow paths', () => {
       '08-phase-5-verify',
       '08c-code-review',
       '08e-insights-triage',
+      '09-gate-2-verify-approval',
       '10-gate-3-commit',
       '11b1-rag-source-selection',
       '11a-gate-4-push',

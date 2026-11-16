@@ -134,7 +134,8 @@ export function workflowBaseCandidates(
       },
       listByWorkflow,
     ).filter(
-      (id) => opts.includeConditionalInsightSteps || !isPathAddedInsightStep(executionPath, id),
+      (id) =>
+        opts.includeConditionalInsightSteps !== false || !isPathAddedInsightStep(executionPath, id),
     ),
   }));
 }

@@ -83,6 +83,7 @@ function mkCtx(
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
+    throwIfCancelled() {},
     db,
     logger,
   } as unknown as StepContext;

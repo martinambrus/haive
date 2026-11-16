@@ -1,3 +1,8 @@
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { pinnedTaskStepIds } from '@haive/shared/modularity';
+import { stepRegistry } from '../../registry.js';
+import type { StepContext } from '../../step-definition.js';
 import type { StatusSummaryItem } from '@haive/shared';
 import { collapseToLine } from '../_untrusted-repo.js';
 import type { Insight, LoadedInsight } from '@haive/shared/step';
@@ -55,4 +60,22 @@ export function insightsRow(
     body,
     defaultOpen: false,
   };
+}
+
+/** Honor stored lists before today's built-in paths. Old pins must remain commit-capable. */
+export async function gate3InsightPicksAvailable(ctx: StepContext): Promise<boolean> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { type: true, runListSnapshot: true, derivedRunPlan: true, executionPath: true },
+  });
+  ctx.throwIfCancelled();
+  if (!task) return false;
+  const pinned = pinnedTaskStepIds(task);
+  if (pinned !== null) return pinned.includes('08e-insights-triage');
+  // All live built-in workflow paths retain 08e; closure is checked only at boot.
+  return (
+    task.type === 'workflow' ||
+    (!!task.type &&
+      stepRegistry.listByWorkflow(task.type).some((s) => s.metadata.id === '08e-insights-triage'))
+  );
 }

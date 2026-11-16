@@ -543,3 +543,52 @@ has no row yet. Runtime recheck bounds and return-address handling remain unchan
 Insight rounds write no `fix_loop.started` and do not consume `maxFixRounds`. A blocking
 check inside an insight round still enters the ordinary implementation fix loop and spends
 one of its own allowances. Neither journal history nor spent fix allowances are reset.
+
+## Gate-3 insight choices
+
+Gate 3 always loads insights independently of gate 2 and the automatic switch. When
+the task run list includes 08e, every
+remaining insight, minor/nit included, is offered with an empty selection; prior reports
+are also available for explicit revisits. Form pages contain at most `INSIGHTS_AT_GATE`
+choices. Changing `insightPage` and submitting browses without an editor or commit,
+clears the page's selection and states the omitted count. Manual 08e uses the same
+navigation, including fallback pages which produced no applied edit (T687 #13).
+A stored or pinned list without 08e keeps the ordinary commit path and offers no picks;
+its insights remain summary-only. No existing pin is expanded. Gate-3 detect persists
+only the shared clipped choice projection with stable occurrence ids. Apply validates
+the selected ids against that saved page and reloads the full inventory before intent;
+a selected id no longer present refuses visibly, never becomes an empty commit approval.
+With zero insight identities, detect and apply omit `insightSummary` and
+`findingsSummary`, and the form omits the Insight summary section. The existing LLM
+recap and ledger path remain in use, including on legacy zero-summary snapshots.
+
+A nonempty pick records a required `gate3` intent and a v1 `insight_revise` continuation
+with `mode: gate3`, `stage: apply`, before any Git operation. Fresh 08e uses only that
+persisted selection and bypasses classification and its usual form. Before any pick
+starts editing, preflight requires ordered verify/review/08e destinations, gate 3 after
+08e, and gate 2 before gate 3 so a failed verify can obtain a fresh approval. Its outcome hands
+off with `stage: checks` through the existing validation recheck and fresh 08/review
+tail, including uncertain/declined writer outcomes. The owned checkpoint skips only
+gate 2 when verification never failed; configured checks on either side still run.
+Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
+reused, and empty selection retains the existing staging and commit path.
+
+A failed ran 08 check, fixable boot error or other non-cancelled 08 failure records
+required `insight.check` state before leaving its row. Successful repair never clears
+it. Only a new gate-2 approval records `gate2_approved`. While approval is pending, gate 2
+ignores task/type presets, prior-task answer reuse and every auto-submit path. It keeps
+the form's own computed defaults, rebuilding unanswered persisted schemas without preset
+overlays, forces `autoSubmit: false` and parks for the owner. A saved answer or queue
+payload alone cannot approve: the owner-authenticated submit route must have recorded an
+explicit decision for that row and rerun generation after the latest failed insight check.
+The worker validates that saved answer against the persisted schema and moves the row to
+`running` before apply, so a second owner POST during apply is refused and cannot replace
+the recorded decision. Malformed feedback returns a form-validation failure before reject
+diagnosis formatting. Required `step.form_submitted` evidence is checked again under the
+owned row/task fence before `gate2_approved` is written. Gate 2 without a latch retains its
+existing behavior. This task-wide latch survives
+Retry of the original request/source independently of continuation validity. Gate-3
+apply checks it before navigation, picks or Git and revises to gate 2 while pending.
+A pinned list without that destination refuses instead of running off-list. The quick
+path now has a dormant gate 2 activated by the same latch. Insight work itself spends
+no fix round; actual blocking checks retain the ordinary fix loop and cap.

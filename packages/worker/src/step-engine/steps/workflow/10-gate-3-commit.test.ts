@@ -51,7 +51,14 @@ function queuedDb(results: unknown[][]) {
   return {
     select: () => chain,
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: null, changedPaths: [] }) },
+      tasks: {
+        findFirst: async () => ({
+          type: 'workflow',
+          runListSnapshot: null,
+          repositoryId: null,
+          changedPaths: [],
+        }),
+      },
       users: { findFirst: async () => undefined },
     },
     update: () => ({ set: () => ({ where: async () => undefined }) }),
@@ -67,6 +74,7 @@ function mkCtx(workspacePath: string, results: unknown[][] = []): StepContext {
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
+    throwIfCancelled() {},
     db: queuedDb(results),
     logger,
   } as unknown as StepContext;
@@ -541,16 +549,20 @@ describe('10-gate-3-commit detect', () => {
 });
 
 describe('10-gate-3-commit out-of-scope insights', () => {
-  it.each([false, true])('persists the base insight bytes (git: %s)', async (hasGit) => {
-    const repo = hasGit ? await seedRepo() : await tmp('gate3-insight-');
-    const detected = await gate3CommitStep.detect!(
-      mkCtx(repo, [[], [], [], [], gateFixture.outputs, [], gateFixture.triage]),
-    );
-    expect(JSON.stringify(detected.outOfScopeInsights)).toBe(
-      JSON.stringify(gateFixture.expectedInsights),
-    );
-    expect(detected.outOfScopeInsightsOmitted).toBe(0);
-  });
+  it.each([false, true])(
+    'preserves bounded advisory bytes and offers legacy picks for explicit revisits (git: %s)',
+    async (hasGit) => {
+      const repo = hasGit ? await seedRepo() : await tmp('gate3-insight-');
+      const detected = await gate3CommitStep.detect!(
+        mkCtx(repo, [[], [], [], [], gateFixture.outputs, [], gateFixture.triage]),
+      );
+      expect(JSON.stringify(detected.outOfScopeInsights)).toBe(
+        JSON.stringify(gateFixture.expectedInsights),
+      );
+      expect(detected.outOfScopeInsightsOmitted).toBe(0);
+      expect(detected.insightChoices?.some((i) => i.title === 'Selected')).toBe(true);
+    },
+  );
 
   it('bounds every persisted insight field and drops inventory metadata', async () => {
     const repo = await tmp('gate3-insight-');
@@ -594,10 +606,10 @@ describe('10-gate-3-commit out-of-scope insights', () => {
     const rows = gate3CommitStep.form!({} as never, detected)!.statusSummary ?? [];
     expect(rows).toHaveLength(1);
     expect(rows[0]!.label).toBe('Out-of-scope findings — not acted on');
-    expect(rows[0]!.body).toContain('Anything listed here needs a follow-up task.');
+    expect(rows[0]!.body).toContain('Select improvements below');
   });
 
-  it('leaves them to gate 2 when gate 2 recorded a decision', async () => {
+  it('still offers them after gate 2 recorded a decision', async () => {
     const repo = await seedRepo();
     const detected = await gate3CommitStep.detect!(
       mkCtx(repo, [
@@ -607,8 +619,13 @@ describe('10-gate-3-commit out-of-scope insights', () => {
         [],
       ]),
     );
-    expect(detected.outOfScopeInsights).toEqual([]);
-    expect(gate3CommitStep.form!({} as never, detected)!.statusSummary).toBeUndefined();
+    expect(detected.outOfScopeInsights).toHaveLength(1);
+    expect(
+      gate3CommitStep.form!({} as never, detected)!.fields.find((f) => f.id === 'selectedInsights'),
+    ).toMatchObject({
+      defaults: [],
+      options: [{ label: expect.stringContaining('Cache lookup') }],
+    });
   });
 });
 
