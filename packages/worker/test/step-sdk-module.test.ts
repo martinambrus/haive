@@ -76,6 +76,7 @@ describe('compiled module step SDK consumer', () => {
     const [loaded] = registerModuleSteps(registry, entries);
     expect(loaded?.stepIds).toEqual(['module.sdk-fixture.report']);
     expect(registry.get('report')).toBe(step);
+    expect(registry.require('module.sdk-fixture.report').attachmentContext).toBe('none');
     expect(registry.require('module.sdk-fixture.report').metadata).toMatchObject({
       id: 'module.sdk-fixture.report',
       workflowType: 'module.sdk-fixture',

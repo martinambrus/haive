@@ -26,6 +26,7 @@ export const errors = {
 const snapshot: ChatPlanRead = { nodes: [], edges: [] };
 
 const step = {
+  attachmentContext: 'none',
   metadata: {
     id: 'report',
     workflowType: 'fixture',

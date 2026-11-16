@@ -1,4 +1,5 @@
 import * as dispatchEngine from '../src/orchestrator/dispatcher.js';
+import * as archiveExpansion from '../src/attachments/expand-archives.js';
 import * as insightAuto from '../src/step-engine/steps/workflow/_insight-auto.js';
 import * as insightLoader from '../src/step-engine/steps/workflow/_insight-loader.js';
 import * as previousStep from '../src/step-engine/steps/onboarding/_helpers.js';
@@ -1983,6 +1984,48 @@ describe('what a mining agent is told about the task', () => {
     db.query.taskAttachments = { findMany: async () => attached };
     return db as unknown as Database;
   }
+
+  it.each(['initial', 'wave', 'recovery', 'legacy replay'])(
+    'skips automatic attachment context for opted-out mining %s',
+    async (mode) => {
+      const expand = vi
+        .spyOn(archiveExpansion, 'ensureArchivesExpanded')
+        .mockResolvedValue({ expanded: 0, filesAdded: 0, notes: [] });
+      const state = freshState(mode === 'initial' ? [] : [miningRow('peer-reviewer', 1)]);
+      let step = waveStep([], ['refute-abc', 'refute-def']);
+      const legacyPrompt = '[User-attached files]\nOld saved notice\n\nreview';
+      if (mode === 'recovery' || mode === 'legacy replay') {
+        state.miningRows = [
+          miningRow('plan-expand-abc-p3', 1, {
+            status: 'failed',
+            errorMessage: 'Provider rate limit or quota exhausted',
+            userRetryRequestedAt: new Date(),
+            dispatchPrompt: mode === 'recovery' ? 'review' : null,
+          }),
+        ];
+        state.invocationRows = [{ id: 'inv-plan-expand-abc-p3', prompt: legacyPrompt }];
+        step = noRetryMiningStep([]);
+      }
+      Object.assign(step, { attachmentContext: 'none' });
+      const db = withAttachments(state);
+      const lookup = vi.spyOn(db.query.taskAttachments, 'findMany');
+      const enqueued: CliExecJobPayload[] = [];
+      const result = await run(db, step, enqueued);
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(mode === 'wave' ? 2 : 1);
+      expect(expand).not.toHaveBeenCalled();
+      expect(lookup).not.toHaveBeenCalled();
+      for (const prompt of sentPrompts(state)) {
+        expect(prompt).not.toContain('brief.pdf');
+        if (mode === 'legacy replay') expect(prompt).toContain(legacyPrompt);
+        else {
+          expect(prompt).not.toContain('[User-attached files]');
+          expect(prompt).not.toContain('_ATTACHMENTS.md');
+          expect(prompt).toContain('## Response style');
+        }
+      }
+    },
+  );
 
   it('tells every agent of a fan-out what is attached, once', async () => {
     const state = freshState([miningRow('peer-reviewer', 1)]);

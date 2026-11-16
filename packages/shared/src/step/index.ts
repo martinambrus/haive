@@ -634,6 +634,12 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly providesRoles?: readonly NonNullable<RolePortDeclarations['providesRoles']>[number][];
   readonly consumesRoles?: readonly NonNullable<RolePortDeclarations['consumesRoles']>[number][];
   readonly metadata: StepMetadata;
+  /** Automatic attachment context for this step's LLM and mining dispatches.
+   * Defaults to 'notice'. 'none' skips the notice, attachment listing and the
+   * dispatch's archive expansion when the step supplies its own bounded input.
+   * Does not remove sandbox mounts, change independent DAG dispatches or rewrite
+   * legacy mining prompts replayed verbatim. */
+  readonly attachmentContext?: 'notice' | 'none';
   /** Exact immutable host output contract; the host supplies its validator. */
   readonly outputContract?: StepOutputContractRef;
   /** Declares role capability only. Replacement admission remains a separate host decision. */

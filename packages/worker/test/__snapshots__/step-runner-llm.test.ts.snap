@@ -1,0 +1,33 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`step attachment context through the real runner > keeps the ordinary dispatch prompt byte-identical with attachmentContext=notice > ordinary attachment prompt 1`] = `
+{
+  "capabilities": [
+    "tool_use",
+  ],
+  "kind": "prompt",
+  "prompt": "[User-attached files]
+The user attached 1 reference file(s) for this task, available read-only at:
+  /haive/workdir/.haive/task-uploads/task-1/
+  - source.md — Source document
+See /haive/workdir/.haive/task-uploads/task-1/_ATTACHMENTS.md for descriptions. Read any that are relevant before proceeding.
+
+prompt with detected={"foo":"bar"}",
+}
+`;
+
+exports[`step attachment context through the real runner > keeps the ordinary dispatch prompt byte-identical with attachmentContext=undefined > ordinary attachment prompt 1`] = `
+{
+  "capabilities": [
+    "tool_use",
+  ],
+  "kind": "prompt",
+  "prompt": "[User-attached files]
+The user attached 1 reference file(s) for this task, available read-only at:
+  /haive/workdir/.haive/task-uploads/task-1/
+  - source.md — Source document
+See /haive/workdir/.haive/task-uploads/task-1/_ATTACHMENTS.md for descriptions. Read any that are relevant before proceeding.
+
+prompt with detected={"foo":"bar"}",
+}
+`;

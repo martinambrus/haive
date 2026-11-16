@@ -57,6 +57,8 @@ import { planReconcileStep } from '../src/step-engine/steps/workflow/11f-plan-re
 import { externalPlanSyncStep } from '../src/step-engine/steps/workflow/01f-external-plan-sync.js';
 import { planChatStep } from '../src/step-engine/steps/plan/01-plan-chat.js';
 import * as attachmentsContext from '../src/step-engine/attachments-context.js';
+import * as archiveExpansion from '../src/attachments/expand-archives.js';
+import * as dispatchEngine from '../src/orchestrator/dispatcher.js';
 import * as taskLedger from '../src/step-engine/task-ledger.js';
 import * as planOps from '../src/step-engine/steps/workflow/_plan-ops.js';
 import * as patchRetry from '../src/plan/patch-retry.js';
@@ -114,7 +116,9 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
                   // trailing-history count, which needs more than the one live row.
                   if (n > 1 && state.cliInvocationHistory)
                     return state.cliInvocationHistory.slice(0, n);
-                  return state.cliInvocationRow ? [state.cliInvocationRow] : [];
+                  return state.cliInvocationRow && !state.cliInvocationRow.consumedAt
+                    ? [state.cliInvocationRow]
+                    : [];
                 }
                 return [];
               },
@@ -199,6 +203,8 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
         // A cli_invocations supersede drops the row from the live/unconsumed set, so a
         // re-dispatch on re-entry sees no ended invocation and dispatches a fresh one.
         if (tableName === 'cli_invocations' && v.supersededAt) state.cliInvocationRow = null;
+        if (tableName === 'cli_invocations' && v.consumedAt && state.cliInvocationRow)
+          Object.assign(state.cliInvocationRow, v);
         return [];
       };
       return {
@@ -330,6 +336,101 @@ function makeProvider(): CliProviderRecord {
     updatedAt: new Date(),
   } as CliProviderRecord;
 }
+
+describe('step attachment context through the real runner', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function dispatch(mode: string, attachmentContext?: 'notice' | 'none') {
+    const state = freshState();
+    const step = Object.assign(baseStep(), { attachmentContext });
+    const db = makeMockDb(state);
+    const lookup = vi.fn(async () => [{ filename: 'source.md', description: 'Source document' }]);
+    Object.assign(db.query, { taskAttachments: { findMany: lookup } });
+    const expand = vi
+      .spyOn(archiveExpansion, 'ensureArchivesExpanded')
+      .mockResolvedValue({ expanded: 0, filesAdded: 0, notes: [] });
+    const augment = vi.spyOn(attachmentsContext, 'augmentPromptWithAttachments');
+    const resolve = vi.spyOn(dispatchEngine, 'resolveTaskDispatch');
+    const complete = vi.fn(async () => ({ llmOutput: {}, continueRequested: true }));
+    if (mode === 'pre-form' || mode === 'continuation') step.llm!.preForm = true;
+    if (mode === 'loop') {
+      step.loop = {
+        maxIterations: 3,
+        shouldContinue: () => false,
+        buildIterationPrompt: () => 'Next bounded pass.',
+      };
+      state.taskStepRow.iterations = [{ iteration: 0, output: {} }];
+    }
+    if (mode === 'continuation' || mode === 'retry') {
+      state.taskStepRow.status = 'waiting_cli';
+      state.taskStepRow.detectOutput = { foo: 'bar' };
+      state.cliInvocationRow = {
+        id: 'prior',
+        endedAt: new Date(),
+        createdAt: new Date(),
+        exitCode: mode === 'retry' ? null : 0,
+        errorMessage: null,
+        rawOutput: '{}',
+        parsedOutput: {},
+      };
+      if (mode === 'continuation') step.llm!.completePreForm = complete;
+    }
+    if (mode === 'repack') {
+      step.llm!.buildPrompt = () => 'x'.repeat(2000);
+      step.llm!.promptBudget = {
+        maxChars: 1500,
+        outputReserveChars: 100,
+        buildPrompt: () => 'Repacked bounded pass.',
+      };
+    }
+    const enqueue = vi.fn();
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    });
+    const prompt = String(state.cliInvocationRow?.prompt);
+    return { result, lookup, expand, augment, resolve, complete, enqueue, prompt };
+  }
+
+  it.each(['ordinary', 'pre-form', 'continuation', 'retry', 'loop', 'repack'])(
+    'omits the notice, list, lookup and expansion for an opted-out %s dispatch',
+    async (mode) => {
+      const { result, lookup, expand, augment, complete, enqueue, prompt } = await dispatch(
+        mode,
+        'none',
+      );
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(augment).not.toHaveBeenCalled();
+      expect(lookup).not.toHaveBeenCalled();
+      expect(expand).not.toHaveBeenCalled();
+      expect(prompt).not.toContain('[User-attached files]');
+      expect(prompt).not.toContain('source.md');
+      expect(prompt).not.toContain('_ATTACHMENTS.md');
+      if (mode === 'continuation') expect(complete).toHaveBeenCalledTimes(1);
+      if (mode === 'loop') expect(prompt).toContain('Next bounded pass.');
+      if (mode === 'repack') expect(prompt).toContain('Repacked bounded pass.');
+    },
+  );
+
+  it.each([undefined, 'notice'] as const)(
+    'keeps the ordinary dispatch prompt byte-identical with attachmentContext=%s',
+    async (setting) => {
+      const { result, lookup, expand, resolve } = await dispatch('ordinary', setting);
+      expect(result.status).toBe('waiting_cli');
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(expand).toHaveBeenCalledTimes(1);
+      expect(resolve.mock.calls[0]![2].input).toMatchSnapshot('ordinary attachment prompt');
+    },
+  );
+});
 
 describe('plan writers through the real runner dispatch', () => {
   afterEach(() => vi.restoreAllMocks());
