@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import type { Database } from '@haive/database';
 import { configService } from '@haive/shared';
-import { verifyTaskToken } from '@haive/shared/task-token';
+import { DEFAULT_TASK_TOKEN_TTL_SECONDS, verifyTaskToken } from '@haive/shared/task-token';
 import { resolveMcpExtraFiles } from '../src/queues/cli-exec/resolvers.js';
 import { resolveMcpSurface } from '../src/sandbox/mcp-surface.js';
 
@@ -83,6 +83,37 @@ describe('the task tokens the worker mints for the MCP surface', () => {
         }
       },
     );
+  });
+
+  it('keeps the delivered RAG token valid across sequential sub-step timeouts', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Math.floor(Date.now() / 1000);
+      const timeoutMs = 60 * 60 * 1000;
+      const { files } = await resolveMcpExtraFiles(
+        dbFor(DDEV_TASK),
+        'task-1',
+        'codex',
+        '/haive/workdir',
+        null,
+        'rag_only',
+        false,
+        true,
+        null,
+        { invocationId: 'sequential-run', taskStepId: 'step-1', timeoutMs },
+      );
+      const token = files.find((f) => f.containerPath === '/haive/haive-rag.token')!.content;
+      expect(verifyTaskToken(token, 'rag', SECRET)?.exp).toBe(
+        start + DEFAULT_TASK_TOKEN_TTL_SECONDS,
+      );
+      // The emulator reuses this same file for each sub-step, each with its own timeout.
+      vi.setSystemTime(Date.now() + 4 * timeoutMs);
+      expect(verifyTaskToken(token, 'rag', SECRET)).toMatchObject({
+        cliInvocationId: 'sequential-run',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('gives the rag server a rag token and the ddev server a ddev token, each good for its own audience only', async () => {

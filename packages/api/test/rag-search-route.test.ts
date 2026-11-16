@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 const DIMS = 8;
@@ -749,8 +751,17 @@ describe('RAG invocation attribution security', () => {
     expect(h.invocation).not.toHaveBeenCalled();
   });
 
+  const keyedInvocations = (...rows: ReturnType<typeof live>[]) => {
+    const byId = new Map<string, ReturnType<typeof live>>(rows.map((row) => [row.id, row]));
+    h.invocation.mockImplementation(async ({ where }: { where: SQL }) => {
+      const lookup = new PgDialect().sqlToQuery(where);
+      expect(lookup.sql).toBe('"cli_invocations"."id" = $1');
+      return byId.get(lookup.params[0] as string);
+    });
+  };
+
   it('attributes a credential for A only to A even when the body claims B', async () => {
-    h.invocation.mockResolvedValue(live());
+    keyedInvocations(live(a), live(b));
     expect((await call(bound(), { cliInvocationId: b, invocationId: b })).status).toBe(200);
     expect(h.recorded).toEqual([expect.objectContaining({ cliInvocationId: a })]);
   });
@@ -777,7 +788,7 @@ describe('RAG invocation attribution security', () => {
   });
 
   it('keeps concurrent fan-out invocations distinct', async () => {
-    h.invocation.mockResolvedValueOnce(live(a)).mockResolvedValueOnce(live(b));
+    keyedInvocations(live(a), live(b));
     const responses = await Promise.all([call(bound(a)), call(bound(b))]);
     expect(responses.map((r) => r.status)).toEqual([200, 200]);
     expect(h.recorded).toEqual(

@@ -34,10 +34,13 @@ import { readFileSync } from 'node:fs';
 
 const API_URL = process.env.RAG_API_URL || '';
 // A shared MCP config can name only a task token. The file is private to this run,
-// so a sibling's volume-backed config cannot choose the invocation we attribute.
+// so a sibling cannot replace this file or name an invocation without its token.
 let runToken = '';
-try { runToken = readFileSync(new URL('haive-rag.token', import.meta.url), 'utf8').trim(); } catch {}
-const TOKEN = runToken || process.env.RAG_TASK_TOKEN || '';
+try { runToken = readFileSync(new URL('haive-rag.token', import.meta.url), 'utf8').trim(); } catch (e) {
+  if (e?.code !== 'ENOENT') process.stderr.write('haive-rag: could not read invocation token file; using task token.\n');
+}
+const TASK_TOKEN = process.env.RAG_TASK_TOKEN || '';
+const TOKEN = runToken || TASK_TOKEN;
 const LSP_AVAILABLE = process.env.HAIVE_LSP_AVAILABLE === '1';
 const PROTOCOL_VERSION = '2024-11-05';
 const GROUNDING_TOOLS = LSP_AVAILABLE ? 'LSP + grep' : 'grep + direct file reads';
@@ -81,12 +84,18 @@ async function ragSearch(args) {
   if (Number.isInteger(args?.top_k)) body.top_k = args.top_k;
   let resp;
   try {
-    resp = await fetch(API_URL.replace(/\/$/, '') + '/rag/search', {
+    const request = (token) => fetch(API_URL.replace(/\/$/, '') + '/rag/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
+    resp = await request(TOKEN);
+    if (resp.status === 401 && runToken && TASK_TOKEN && TASK_TOKEN !== runToken) {
+      await resp.body?.cancel().catch(() => {});
+      // A task credential preserves retrieval but cannot prove invocation attribution.
+      resp = await request(TASK_TOKEN);
+    }
   } catch (e) {
     return { isError: true, text: 'rag_search request failed: ' + (e?.message || String(e)) };
   }

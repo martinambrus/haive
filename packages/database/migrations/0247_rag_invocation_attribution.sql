@@ -8,3 +8,5 @@ DO $$ BEGIN
     FOREIGN KEY (cli_invocation_id) REFERENCES cli_invocations(id) ON DELETE SET NULL;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+CREATE INDEX IF NOT EXISTS rag_query_log_cli_invocation_id_idx ON rag_query_log (cli_invocation_id);

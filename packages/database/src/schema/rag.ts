@@ -16,6 +16,7 @@ import { cliInvocations, tasks } from './tasks.js';
 // can show whether code (not just KB) is actually being retrieved. Lives in the
 // main haive DB — app telemetry, NOT in the per-project vector DB. Attributed to
 // a proven invocation when its credential is bound; NULL means unknown.
+// Attributed to a step by created_at time window in existing statistics and usage review.
 export const ragQueryLog = pgTable(
   'rag_query_log',
   {
@@ -46,7 +47,10 @@ export const ragQueryLog = pgTable(
       onDelete: 'set null',
     }),
   },
-  (table) => [index('rag_query_log_task_created_idx').on(table.taskId, table.createdAt)],
+  (table) => [
+    index('rag_query_log_task_created_idx').on(table.taskId, table.createdAt),
+    index('rag_query_log_cli_invocation_id_idx').on(table.cliInvocationId),
+  ],
 );
 
 export const ragQueryLogRelations = relations(ragQueryLog, ({ one }) => ({

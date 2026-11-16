@@ -554,7 +554,6 @@ export async function resolveMcpExtraFiles(
                     taskId,
                     taskStepId: run.taskStepId,
                     cliInvocationId: run.invocationId,
-                    ...runTokenLifetime(run.timeoutMs),
                   },
                   process.env.CONFIG_ENCRYPTION_KEY,
                 )
