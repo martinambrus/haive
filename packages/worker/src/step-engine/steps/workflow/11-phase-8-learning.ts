@@ -1,3 +1,6 @@
+import { CORE_DATA_INPUTS } from '@haive/shared/step-ports';
+import { IMPLEMENTATION_SUMMARY_ROLE } from '@haive/shared/step-outputs';
+import { readRole, legacyRoleOutput } from '../../read-role.js';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -467,12 +470,6 @@ export function parseGlobalCandidates(
     out.push({ id, title, body, category, tech, ...(description === null ? {} : { description }) });
   }
   return out;
-}
-
-interface ImplementOutput {
-  summary?: string;
-  filesTouched?: string[];
-  notes?: string;
 }
 
 interface VerifySlot {
@@ -1305,6 +1302,9 @@ async function ensureWorktreeKb(workspace: string): Promise<void> {
 }
 
 export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> = {
+  consumesRoles: CORE_DATA_INPUTS['11-phase-8-learning']?.filter(
+    (p) => p.role === IMPLEMENTATION_SUMMARY_ROLE,
+  ),
   metadata: {
     id: '11-phase-8-learning',
     workflowType: 'workflow',
@@ -1316,7 +1316,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
 
   async detect(ctx: StepContext): Promise<LearningDetect> {
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-    const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
+    const implement = await readRole(ctx, IMPLEMENTATION_SUMMARY_ROLE);
     const verify = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
     const commit = await loadPreviousStepOutput(ctx.db, ctx.taskId, '10-gate-3-commit');
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
@@ -1336,7 +1336,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const skills = skillIndex(
       skillDirs.length > 0 ? await readDiskSkillSummaries(worktreePath, skillDirs[0]!) : [],
     );
-    const implementOutput = (implement?.output as ImplementOutput | null) ?? {};
+    const implementOutput = legacyRoleOutput(implement);
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
     const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId);

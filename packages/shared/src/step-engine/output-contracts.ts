@@ -35,6 +35,13 @@ export const REQUIREMENTS_HUMANIZED_OUTPUT_CONTRACT = Object.freeze({
   id: 'haive.requirements.humanized',
   version: 1,
 } as const);
+export const IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT = Object.freeze({
+  id: 'haive.implementation.summary',
+  version: 1,
+} as const);
+export const IMPLEMENTATION_SUMMARY_ROLE = 'haive.implementation.summary' as const;
+export const IMPLEMENTATION_SUMMARY_DAG_STEP_ID = '06c-dag-execute' as const;
+
 export const DISCOVERY_ROLE = 'haive.discovery' as const;
 export const REQUIREMENTS_ROLES = Object.freeze({
   draft: 'haive.requirements.draft',
@@ -75,6 +82,15 @@ export const STEP_ROLE_REGISTRY = Object.freeze({
     quoteProjection: 'agent',
     legacyStepId: STEP_ROLES.codeAudit,
     hostPolicy: 'code-audit',
+  } as const),
+  // 07's salvage/bypass stubs and the DAG compatibility adapter write host text.
+  // Module producers cannot strengthen this whole-role authorship guarantee.
+  [IMPLEMENTATION_SUMMARY_ROLE]: Object.freeze({
+    id: IMPLEMENTATION_SUMMARY_ROLE,
+    contract: IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT,
+    cardinality: 'one',
+    authorship: 'mixed',
+    legacyStepId: '07-phase-2-implement',
   } as const),
   // Discovery's stub copies operator/repository text; its normal aggregate also adds
   // host headings and coverage notes. No agent-only projection covers every path.
@@ -359,7 +375,29 @@ const requirementsOutputSchema = z
 export type DiscoveryOutput = ContractShape<z.infer<typeof discoveryOutputSchema>>;
 export type RequirementsOutput = ContractShape<z.infer<typeof requirementsOutputSchema>>;
 
+const implementationSummaryOutputSchema = z
+  .object({
+    summary: z.string(),
+    filesTouched: z.array(z.string()),
+    similarSites: z
+      .array(
+        z
+          .object({
+            path: z.string(),
+            lines: z.string().optional(),
+            reason: z.string(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+export type ImplementationSummaryOutput = ContractShape<
+  z.infer<typeof implementationSummaryOutputSchema>
+>;
+
 const outputValidators = Object.freeze({
+  'haive.implementation.summary': implementationSummaryOutputSchema,
   'haive.discovery': discoveryOutputSchema,
   'haive.requirements.draft': requirementsOutputSchema,
   'haive.requirements.humanized': requirementsOutputSchema,

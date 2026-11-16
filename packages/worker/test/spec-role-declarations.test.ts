@@ -10,7 +10,9 @@ it('keeps every core role declaration aligned with its registry entry', () => {
     for (const provider of entry.providesRoles ?? []) {
       const role = STEP_ROLE_REGISTRY[provider.role];
       expect(role, `${entry.stepId} provider`).toBeDefined();
-      expect(role.legacyStepId).toBe(entry.stepId);
+      if (entry.stepId === '06c-dag-execute') {
+        expect(provider.role).toBe('haive.implementation.summary');
+      } else expect(role.legacyStepId).toBe(entry.stepId);
       expect(provider.contract).toEqual(role.contract);
     }
     for (const consumer of entry.consumesRoles ?? []) {
@@ -96,4 +98,24 @@ it('checks discovery/requirements providers and optional inputs at boot', async 
       ),
     ).toThrow('port-input-invalid');
   }
+});
+
+it('checks both implementation-summary providers and its one optional consumer at boot', async () => {
+  const { assertImplementationSummaryPortDeclarations } =
+    await import('../src/step-engine/composable-core.js');
+  expect(() => assertImplementationSummaryPortDeclarations()).not.toThrow();
+  for (const stepId of ['06c-dag-execute', '07-phase-2-implement']) {
+    expect(() =>
+      assertImplementationSummaryPortDeclarations(
+        CORE_COMPOSABLE_STEPS.map((e) => (e.stepId === stepId ? { ...e, providesRoles: [] } : e)),
+      ),
+    ).toThrow('port-provider-invalid');
+  }
+  expect(() =>
+    assertImplementationSummaryPortDeclarations(
+      CORE_COMPOSABLE_STEPS.map((e) =>
+        e.stepId === '11-phase-8-learning' ? { ...e, consumesRoles: [] } : e,
+      ),
+    ),
+  ).toThrow('port-input-invalid');
 });

@@ -424,6 +424,41 @@ names, while a raw-draft-only consumer retains its direct input. Editable declar
 pins expose each stage independently. Rollback follows the v3 policy below: stop new
 admission and retain capable readers/workers while any affected task can resume.
 
+## Implementation summary data role
+
+`haive.implementation.summary@1` declares `{summary: string, filesTouched: string[],
+similarSites?: {path: string, lines?: string, reason: string}[]}`. Storage extensions
+survive validation; role reads project only declared fields. It has cardinality one,
+mixed authorship, no quote projection and no host policy. 07's normal reply supplies
+agent prose, but salvage can supply host fallback text, no-output/bypass uses a host
+stub, and the DAG adapter supplies host empty values. A module's conforming payload
+cannot strengthen that guarantee. Generic role quotation and prompt production remain
+refused for this role.
+
+Learning has one optional `implementation-summary` input. Admission chooses the host
+route structurally from each candidate's run list: 07 when present, otherwise 06c
+when present, otherwise an explicit optional absence. A list containing both keeps
+07 as the one provider, including its later fix rounds. A module producer still needs
+a unique earlier edge or an explicit author binding; matching output shape never
+selects a producer. New task catalogs and pinned history use this structural rule. Legacy history,
+including inputs absent from older valid v3 pins, retains the canonical 07 edge or
+absence, matching the compatibility reader.
+
+06c's new successful outputs add `summary: ''` and `filesTouched: []`. The explicit
+host reader adapter also normalizes historical 06c count outputs to these values.
+This preserves what learning read from skipped/absent 07 on DAG builds; it does not
+invent a summary or file list from DAG issues. Single-path learning retains its `''`
+and array fallbacks, and v3 retains current-round ceilings and newest-row Retry
+semantics. Old tasks and inputs absent from an older valid v3 pin retain canonical
+07 reads. No output or pin is backfilled.
+
+`_impl-changes.ts` keeps its physical 07/DAG/git collection, `_similar-sites.ts` keeps
+all physical rounds and DAG issues, and fix-loop routing keeps 07 as its only target.
+An implementation-summary binding changes learning context only. It grants no
+replacement, skip, loop, root, approval or CLI-seat authority. No migration is needed.
+Rollback first disables new v3 admission; retain this contract and capable readers
+while any affected task can resume. Never erase, downgrade or regenerate its pin.
+
 ## Pinned output-role reads
 
 `@haive/shared/step-outputs` exports `STEP_ROLES`, `readStepRole(task, role, read)` and

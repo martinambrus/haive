@@ -9,6 +9,8 @@ import {
 } from '@haive/shared/data-edge-plan';
 import {
   STEP_ROLE_REGISTRY,
+  IMPLEMENTATION_SUMMARY_ROLE,
+  IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
   SPEC_ROLES,
   projectRoleOutput,
   safeParseStepOutput,
@@ -161,9 +163,14 @@ export async function readDataRole(
   if (required && (!row || row.status !== 'done'))
     throw new DataEdgePlanError(`${inputName}: required input not ready`);
   if (!row) return { state: 'absent', role, contract, producer: null };
-  const output = producerStepId.startsWith('custom.')
+  let output = producerStepId.startsWith('custom.')
     ? promptRoleOutputValue(row.output, role, contract)
     : row.output;
+  // Historical DAG rows have counts, not 07 prose/file lists. Learning read the
+  // skipped/absent 07 and got these exact empty values. Never synthesize them
+  // from issue claims or use this reporting adapter for review/fix routing.
+  if (role === IMPLEMENTATION_SUMMARY_ROLE && producerStepId === IMPLEMENTATION_SUMMARY_DAG_STEP_ID)
+    output = { summary: '', filesTouched: [] };
   const common = {
     role,
     contract,

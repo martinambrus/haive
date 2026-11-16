@@ -1,5 +1,8 @@
 import ts from 'typescript';
-import { STEP_ROLE_REGISTRY } from '../src/step-engine/output-contracts.js';
+import {
+  IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
+  STEP_ROLE_REGISTRY,
+} from '../src/step-engine/output-contracts.js';
 
 export interface ReaderSite {
   file: string;
@@ -12,6 +15,7 @@ export interface ReaderPin extends ReaderSite {
   reason: string;
 }
 const roles: string[] = [
+  IMPLEMENTATION_SUMMARY_DAG_STEP_ID,
   ...new Set(Object.values(STEP_ROLE_REGISTRY).flatMap((entry) => [entry.id, entry.legacyStepId])),
 ];
 
@@ -75,6 +79,8 @@ export function roleReaderSites(file: string, text: string): ReaderSite[] {
     file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const tableNames = [
+    'IMPLEMENTATION_SUMMARY_ROLE',
+    'IMPLEMENTATION_SUMMARY_DAG_STEP_ID',
     'STEP_ROLES',
     'SPEC_ROLES',
     'DISCOVERY_ROLE',
