@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { cleanupUser, getSql } from '../helpers/db.js';
 import { API_BASE, registerUser, uniqueEmail } from '../helpers/auth.js';
-import { waitForShellHydration } from '../helpers/shell.js';
+import { hideNextDevTools, waitForShellHydration } from '../helpers/shell.js';
 
 test.describe('app layout and navigation', () => {
   test('sidebar renders branding, email, and all nav links', async ({ page }) => {
@@ -109,6 +109,7 @@ test.describe('app layout and navigation', () => {
 
       await page.goto('/dashboard');
       await waitForShellHydration(page);
+      await hideNextDevTools(page);
       await page.locator('aside').getByRole('button', { name: 'Sign out' }).click();
 
       await expect(page).toHaveURL(/\/login$/, { timeout: 10_000 });
