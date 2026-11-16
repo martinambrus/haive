@@ -314,3 +314,51 @@ it('validates the actual DAG apply host summary without borrowing issue claims',
   expect(safeParseStepOutput(IMPLEMENTATION_SUMMARY_OUTPUT_CONTRACT, result).success).toBe(true);
   expect(result).toMatchObject({ summary: '', filesTouched: [], ran: true, issues: 3, levels: 2 });
 });
+
+it.each(['workflow', 'derived-demo'])(
+  '%s: learning verification values retain bytes through a bound module result',
+  async (type) => {
+    const verifyRole = 'haive.verify' as const;
+    const moduleId = 'module.example.verify';
+    const { ctx, put, fake } = setup([single, moduleId, learning], false, type);
+    const check = { ran: true, passed: true, command: 'test', output: 'ok' };
+    const value = {
+      resultStatus: 'passed',
+      passed: true,
+      test: check,
+      lint: check,
+      typecheck: check,
+      runtimeSmoke: null,
+      declinedConfigs: [],
+      declaredSlots: [],
+      offSlots: [],
+      slotWithoutRunner: false,
+    };
+    put(single, output);
+    put('08-phase-5-verify', value);
+    const before = await phase8LearningStep.detect!(ctx);
+    const nodes = dataPortNodes(
+      [single, moduleId, learning],
+      {},
+      new Map([
+        [
+          moduleId,
+          { providesRoles: [{ role: verifyRole, contract: { id: verifyRole, version: 1 } }] },
+        ],
+      ]),
+    );
+    const selection = type === 'workflow' ? 'static' : 'derived';
+    fake.patch(schema.tasks, ctx.taskId, {
+      executionPath: 'full_workflow',
+      dataEdgePlan: buildDataEdgePlan(selection, [
+        { executionPath: null, nodes },
+        ...(selection === 'derived' ? [{ executionPath: 'full_workflow' as const, nodes }] : []),
+      ]),
+    });
+    put(moduleId, value);
+    const after = await phase8LearningStep.detect!(ctx);
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+    put(moduleId, { ...value, resultStatus: 'not-run' }, 1);
+    expect((await phase8LearningStep.detect!(ctx)).verifyPassed).toBe(false);
+  },
+);

@@ -1,4 +1,5 @@
 import { CHECK_RESULT_ROLES } from '@haive/shared/step-outputs';
+import { checkResultOutput } from '../../read-check-result.js';
 import { CORE_DATA_INPUTS } from '@haive/shared/step-ports';
 import { IMPLEMENTATION_SUMMARY_ROLE } from '@haive/shared/step-outputs';
 import { readRole, legacyRoleOutput } from '../../read-role.js';
@@ -1320,7 +1321,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   async detect(ctx: StepContext): Promise<LearningDetect> {
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
     const implement = await readRole(ctx, IMPLEMENTATION_SUMMARY_ROLE);
-    const verify = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
+    const verify = await readRole(ctx, CHECK_RESULT_ROLES.verify);
     const commit = await loadPreviousStepOutput(ctx.db, ctx.taskId, '10-gate-3-commit');
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreePath =
@@ -1340,9 +1341,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       skillDirs.length > 0 ? await readDiskSkillSummaries(worktreePath, skillDirs[0]!) : [],
     );
     const implementOutput = legacyRoleOutput(implement);
-    const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
+    const verifyOutput = checkResultOutput(verify);
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
-    const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId);
+    const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId, ctx);
     const repositoryId =
       (
         await ctx.db.query.tasks.findFirst({
