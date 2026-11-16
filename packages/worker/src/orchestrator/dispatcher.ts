@@ -86,6 +86,13 @@ import {
   withMcpSurface,
   type McpSurface,
 } from '../sandbox/mcp-surface.js';
+import { resolveDispatchSandboxToolchain } from './sandbox-toolchain.js';
+import {
+  stripSandboxToolchain,
+  toolchainEnvironmentMatches,
+  withSandboxToolchain,
+} from '../sandbox/toolchain-prompt.js';
+import type { SandboxToolchainFact } from '../sandbox/toolchain-probe.js';
 import {
   isReachableApp,
   resolveAppReach,
@@ -200,6 +207,8 @@ export interface DispatchRequest {
    *  address. Computed by resolveTaskDispatch; exposed on the pure resolver only for
    *  deterministic unit tests. Null means say nothing about the app. */
   appReach?: AppReach | null;
+  /** Advisory interpreter facts, keyed by provider and immutable image ID. */
+  sandboxToolchain?: Record<string, SandboxToolchainFact | null>;
   /** The invocation runs in a worktree other than the one the task's app runner serves (a DAG
    *  issue coder, a merge fixer), so the app shows none of its changes. Computed with appReach. */
   appServesOtherTree?: boolean;
@@ -383,6 +392,7 @@ async function resolveTaskDispatchOnTree(
     hasRepo,
     agentIsolation,
     agentRulesInjection,
+    sandboxToolchain,
   ] = await Promise.all([
     snapshotWorkspace ? false : hasReadyLspBridge(db, taskId),
     snapshotWorkspace
@@ -403,6 +413,9 @@ async function resolveTaskDispatchOnTree(
     taskHasRepository(db, taskId),
     resolveAgentIsolationEnabled(),
     resolveAgentRulesInjectionEnabled(),
+    resolveDispatchSandboxToolchain(db, taskId, req.providers, {
+      extraEnv: req.invokeOpts.extraEnv,
+    }),
   ]);
   const appServesOtherTree =
     isReachableApp(appReach) &&
@@ -442,6 +455,7 @@ async function resolveTaskDispatchOnTree(
     globalKbDigest: globalKb.digest,
     appReach,
     appServesOtherTree,
+    sandboxToolchain,
     codexAppServer,
     hasRepo,
     agentIsolation: snapshotWorkspace ? false : agentIsolation,
@@ -778,6 +792,15 @@ function buildCliSidePlan(
   // disagree — a prompt that says "discover with rag_search" while the digest is withheld
   // describes a surface neither half is looking at.
   const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
+  const toolchainFact =
+    req.invokeOpts.disableTools === true && adapter.supportsDisableTools === true
+      ? null
+      : toolchainEnvironmentMatches(provider.wrapperContent, {
+            ...provider.envVars,
+            ...req.invokeOpts.extraEnv,
+          })
+        ? req.sandboxToolchain?.[provider.id]
+        : null;
   const rules = agentRulesFor(req, provider);
   const house = houseRulesInjection(req);
   // One decision for this plan, so the prompt and the mounts cannot disagree: the same boolean
@@ -790,15 +813,18 @@ function buildCliSidePlan(
   ): string => {
     // A stored prompt dispatched again opens with its old rules blocks; every adapter below prepends,
     // so one that newly applies would bury them where the replacement at the end cannot see them.
-    const capabilityAdapted = adaptPromptForCliCapabilities(stripHaivePreamble(prompt), {
-      supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
-      ragWired,
-      projectAgentsDir: providerMetadata.projectAgentsDir,
-      agentFileFormat: providerMetadata.agentFileFormat,
-      isolated,
-      agentBodies: req.agentBodies,
-      templatePersonas: req.templatePersonas,
-    });
+    const capabilityAdapted = adaptPromptForCliCapabilities(
+      stripSandboxToolchain(stripHaivePreamble(prompt)),
+      {
+        supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
+        ragWired,
+        projectAgentsDir: providerMetadata.projectAgentsDir,
+        agentFileFormat: providerMetadata.agentFileFormat,
+        isolated,
+        agentBodies: req.agentBodies,
+        templatePersonas: req.templatePersonas,
+      },
+    );
     // Both boundaries ride the same predicate: an invocation isolated to a worktree is
     // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
     // prompt can never claim a boundary the mount does not enforce (or omit one it does).
@@ -843,10 +869,11 @@ function buildCliSidePlan(
     // advertises a door it does not have. Applied at the same choke point as the
     // boundaries above, which is what puts it in front of a model like muse that
     // never picks the tool on its own.
+    const toolchainBounded = withSandboxToolchain(reachBounded, toolchainFact);
     const digested =
       ragWired && req.globalKbDigest
-        ? withGlobalKbDigest(reachBounded, req.globalKbDigest)
-        : reachBounded;
+        ? withGlobalKbDigest(toolchainBounded, req.globalKbDigest)
+        : toolchainBounded;
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.
@@ -922,6 +949,8 @@ function buildCliSidePlan(
         effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
       }
     }
+    if (toolchainFact)
+      spec.sandboxToolchain = { imageId: toolchainFact.imageId, prompt: effectivePrompt };
     spec.agentRules = agentRules;
     if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
@@ -967,6 +996,7 @@ function buildCliSidePlan(
     req.input.spec.synthesisPrompt,
   ]);
   const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, invokeOpts);
+  if (toolchainFact) split.invocation.sandboxToolchainImageId = toolchainFact.imageId;
   const invocation =
     assignedAgentIds.length > 0 ? { ...split.invocation, assignedAgentIds } : split.invocation;
   return {

@@ -6,7 +6,11 @@ import { guardedProbeFetch } from '@haive/shared/egress';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { resolveImageTag } from '../../sandbox/image-cache.js';
-import { ensureComposedImage } from '../../sandbox/composed-image-cache.js';
+import {
+  ensureComposedImage,
+  resolveSandboxImageComposition,
+} from '../../sandbox/composed-image-cache.js';
+import { SANDBOX_CORE_IMAGE } from '../../sandbox/image-composer.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import type { BaseCliAdapter } from '../../cli-adapters/base-adapter.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
@@ -91,6 +95,7 @@ async function ensureProviderSandboxImage(
   /** 0 answers immediately when another builder holds the image — what an interactive
    *  probe wants. Background callers pass a budget and wait it out instead. */
   waitForInFlightBuildMs = 0,
+  runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
   const resolution = resolveImageTag({
     name: provider.name as CliProviderName,
@@ -100,7 +105,7 @@ async function ensureProviderSandboxImage(
   });
   if (!resolution) return null;
 
-  const existing = await defaultDockerRunner.inspect(resolution.tag);
+  const existing = await runner.inspect(resolution.tag);
   if (existing.exists) return resolution.tag;
 
   const fresh = await db.query.cliProviders.findFirst({
@@ -113,6 +118,7 @@ async function ensureProviderSandboxImage(
       provider.id,
       resolution.tag,
       waitForInFlightBuildMs,
+      runner,
     );
     if (outcome.done === 'image_ready') {
       log.info(
@@ -155,16 +161,51 @@ export async function resolveSandboxImageTag(
     cliVersion: string | null;
     sandboxDockerfileExtra: string | null;
   },
+  runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
   if (taskId) {
-    const composedTag = await ensureComposedImage(db, taskId, {
-      name: provider.name as CliProviderName,
-      cliVersion: provider.cliVersion?.trim() || null,
-      sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
-    });
+    const composedTag = await ensureComposedImage(
+      db,
+      taskId,
+      {
+        name: provider.name as CliProviderName,
+        cliVersion: provider.cliVersion?.trim() || null,
+        sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+      },
+      runner,
+    );
     if (composedTag) return composedTag;
   }
-  return ensureProviderSandboxImage(db, provider, IN_FLIGHT_BUILD_WAIT_MS);
+  return ensureProviderSandboxImage(db, provider, IN_FLIGHT_BUILD_WAIT_MS, runner);
+}
+
+/** Advisory only: this function never ensures or builds an image, including the core. */
+export async function peekSandboxImageTag(
+  db: Database,
+  taskId: string | null,
+  provider: {
+    id: string;
+    name: string;
+    cliVersion: string | null;
+    sandboxDockerfileExtra: string | null;
+  },
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<{ tag: string; imageId: string } | null> {
+  const config = {
+    name: provider.name as CliProviderName,
+    cliVersion: provider.cliVersion?.trim() || null,
+    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+  };
+  const composition = taskId
+    ? await resolveSandboxImageComposition(db, taskId, config, runner)
+    : null;
+  const tag =
+    composition?.tag ??
+    resolveImageTag({ ...config, providerId: provider.id })?.tag ??
+    process.env.SANDBOX_IMAGE ??
+    SANDBOX_CORE_IMAGE;
+  const inspected = await runner.inspect(tag);
+  return inspected.exists && inspected.imageId ? { tag, imageId: inspected.imageId } : null;
 }
 
 export async function probeCliPath(

@@ -61,6 +61,12 @@ export async function executeSubAgentNative(
     extraEnv: secrets,
     effortLevel: payload.effortLevel,
   });
+  if (invocation.sandboxToolchainImageId)
+    spec.sandboxToolchain = {
+      imageId: invocation.sandboxToolchainImageId,
+      prompt,
+      segments: [...invocation.steps.map((step) => step.prompt), invocation.synthesis.prompt],
+    };
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
@@ -182,12 +188,16 @@ export async function executeSubAgentSequential(
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
-    (prompt) =>
-      adapter.buildCliInvocation(provider, prompt, {
+    (prompt) => {
+      const spec = adapter.buildCliInvocation(provider, prompt, {
         cwd: sandboxWorkdir,
         extraEnv: secrets,
         effortLevel: payload.effortLevel,
-      }),
+      });
+      if (invocation.sandboxToolchainImageId)
+        spec.sandboxToolchain = { imageId: invocation.sandboxToolchainImageId, prompt };
+      return spec;
+    },
     spawner,
     { timeoutMs: payload.timeoutMs },
     extractClaudeStreamSubStep,
