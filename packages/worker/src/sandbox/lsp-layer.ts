@@ -1,8 +1,10 @@
 import { assertVersionToken } from '@haive/shared';
+import { shellQuote } from './shell-quote.js';
 
 /** Optional composed-image recipes. Deliberately not activated by the production cache yet:
  * stored environment templates still own their installers until the verification cutover. */
-export type ComposedLspServer = 'intelephense' | 'vtsls' | 'pyright';
+export type ComposedLspServer =
+  'intelephense' | 'vtsls' | 'pyright' | 'gopls' | 'rust-analyzer' | 'solargraph' | 'jdtls';
 export interface SelectedLspServer {
   server: ComposedLspServer;
   version: string | null;
@@ -17,6 +19,14 @@ const ALIASES = new Map<string, ComposedLspServer>([
   ['vtsls', 'vtsls'],
   ['python', 'pyright'],
   ['pyright', 'pyright'],
+  ['go', 'gopls'],
+  ['gopls', 'gopls'],
+  ['rust', 'rust-analyzer'],
+  ['rust-analyzer', 'rust-analyzer'],
+  ['ruby', 'solargraph'],
+  ['solargraph', 'solargraph'],
+  ['java', 'jdtls'],
+  ['jdtls', 'jdtls'],
 ]);
 
 /** One canonical selection for recipes and cache identity. Absent/empty means legacy bytes.
@@ -46,7 +56,16 @@ export function normalizeLspSelection(servers: unknown, versions?: unknown): Sel
     if (!server || !selected.has(server)) continue;
     if (value === null || value === undefined || value === '') continue;
     assertVersionToken(value, `LSP ${server} version (edit the repository Tooling settings)`);
-    const pin = value;
+    if (server === 'rust-analyzer' || server === 'jdtls') {
+      throw new Error(`${server}: version pins are not supported; clear the pin in Tooling`);
+    }
+    const pin = server === 'gopls' ? value.replace(/^v/, '') : value;
+    if (
+      (server === 'gopls' || server === 'solargraph') &&
+      !/^[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$/.test(pin)
+    ) {
+      throw new Error(`${server}: an exact release version is required`);
+    }
     const previous = pins.get(server);
     if (previous && previous !== pin) throw new Error(`Conflicting LSP versions for ${server}`);
     pins.set(server, pin);
@@ -54,7 +73,10 @@ export function normalizeLspSelection(servers: unknown, versions?: unknown): Sel
   return [...selected].sort().map((server) => ({ server, version: pins.get(server) ?? null }));
 }
 
-const RECIPES: Record<ComposedLspServer, { package: string; binary: string; extras: string }> = {
+const RECIPES: Record<
+  'intelephense' | 'vtsls' | 'pyright',
+  { package: string; binary: string; extras: string }
+> = {
   intelephense: { package: 'intelephense', binary: 'intelephense', extras: '' },
   vtsls: { package: '@vtsls/language-server', binary: 'vtsls', extras: ' typescript' },
   // The npm distribution provides the same pyright-langserver executable as the old pip
@@ -90,6 +112,15 @@ export function buildLspLayer(servers: unknown, versions?: unknown): string {
     '    npm --version',
   ];
   for (const { server, version } of selection) {
+    if (
+      server === 'gopls' ||
+      server === 'rust-analyzer' ||
+      server === 'solargraph' ||
+      server === 'jdtls'
+    ) {
+      lines.push(`# haive-lsp-recipe: ${server}`, buildNativeRecipe(server, version));
+      continue;
+    }
     const recipe = RECIPES[server];
     const pin = version ? `@${version}` : '';
     lines.push(
@@ -98,4 +129,101 @@ export function buildLspLayer(servers: unknown, versions?: unknown): string {
     );
   }
   return lines.join('\n');
+}
+
+function run(commands: string[]): string {
+  return ['RUN set -eu;', ...commands].join(' \\\n    ');
+}
+
+function requireTool(binary: string, message: string): string {
+  return `command -v ${binary} >/dev/null 2>&1 || { echo ${shellQuote(message)} >&2; exit 1; };`;
+}
+
+function launcher(binary: string, script: string[]): string {
+  return `printf '%s\\n' ${['#!/bin/sh', ...script].map(shellQuote).join(' ')} > /usr/local/bin/${binary}; chmod 0755 /usr/local/bin/${binary};`;
+}
+
+/** These recipes are inactive until the environment/template cutover. Go and Ruby
+ * are verified prerequisites, never silently replaced with distro defaults. Rust
+ * owns an isolated stable toolchain; none of its launch paths traverse /root.
+ * Requirements and pin policies: see docs/architecture/sandbox.md. */
+function buildNativeRecipe(
+  server: 'gopls' | 'rust-analyzer' | 'solargraph' | 'jdtls',
+  version: string | null,
+): string {
+  const asNode = (command: string) => `su -s /bin/sh node -c ${shellQuote(command)};`;
+  const requireSu = requireTool(
+    'su',
+    `${server}: su and the sandbox node user are required for launcher verification`,
+  );
+  switch (server) {
+    case 'gopls':
+      return run([
+        requireTool('go', 'gopls: a compatible Go >=1.21 runtime is required in the base image'),
+        'go_version="$(GOTOOLCHAIN=local go env GOVERSION)";',
+        'go_major="$(printf \'%s\' "$go_version" | sed -n \'s/^go\\([0-9]*\\)\\..*/\\1/p\')";',
+        'go_minor="$(printf \'%s\' "$go_version" | sed -n \'s/^go[0-9]*\\.\\([0-9]*\\).*/\\1/p\')";',
+        '[ "${go_major:-0}" -gt 1 ] || { [ "${go_major:-0}" -eq 1 ] && [ "${go_minor:-0}" -ge 21 ]; } || { echo "gopls: Go >=1.21 is required in the base image" >&2; exit 1; };',
+        requireSu,
+        asNode('GOTOOLCHAIN=local go version'),
+        `GOTOOLCHAIN=local GOBIN=/usr/local/bin go install golang.org/x/tools/gopls@${version ? `v${version}` : 'latest'} || { echo 'gopls: selected release requires a compatible Go toolchain in the base image; update Go or pin an older gopls in Tooling' >&2; exit 1; };`,
+        'chmod 0755 /usr/local/bin/gopls;',
+        asNode('go version && gopls version'),
+      ]);
+    case 'rust-analyzer':
+      return run([
+        requireTool(
+          'curl',
+          'rust-analyzer: curl is required to install the isolated stable toolchain',
+        ),
+        requireSu,
+        'mkdir -p /opt/haive-lsp/rust;',
+        'curl -fsSL https://sh.rustup.rs -o /tmp/haive-lsp-rustup.sh;',
+        'RUSTUP_HOME=/opt/haive-lsp/rust/rustup CARGO_HOME=/opt/haive-lsp/rust/cargo sh /tmp/haive-lsp-rustup.sh -y --no-modify-path --default-toolchain stable --profile minimal --component rust-analyzer,rust-src;',
+        'rm /tmp/haive-lsp-rustup.sh;',
+        'lsp_rust_bin="$(RUSTUP_HOME=/opt/haive-lsp/rust/rustup /opt/haive-lsp/rust/cargo/bin/rustup which --toolchain stable rust-analyzer)";',
+        'lsp_rust_bin="${lsp_rust_bin%/*}";',
+        // Direct toolchain binaries avoid an unprivileged rustup proxy trying to update a root-owned toolchain.
+        `printf '%s\\n' '#!/bin/sh' 'export RUSTUP_HOME=/opt/haive-lsp/rust/rustup CARGO_HOME=/opt/haive-lsp/rust/cargo RUSTUP_TOOLCHAIN=stable' "export PATH=\\\"$lsp_rust_bin:\\$PATH\\\"" "exec \\\"$lsp_rust_bin/rust-analyzer\\\" \\\"\\$@\\\"" > /usr/local/bin/rust-analyzer;`,
+        'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/rust; chmod 0755 /usr/local/bin/rust-analyzer;',
+        asNode('rust-analyzer --version'),
+      ]);
+    case 'solargraph':
+      return run([
+        requireTool('ruby', 'solargraph: Ruby >=3.1 is required in the base image'),
+        `ruby -e ${shellQuote('abort "solargraph: Ruby >=3.1 is required in the base image" if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("3.1")')};`,
+        requireTool('gem', 'solargraph: RubyGems is required in the base image'),
+        requireTool('make', 'solargraph: make is required for native gems in the base image'),
+        requireTool('cc', 'solargraph: a C compiler is required for native gems in the base image'),
+        `ruby -rrbconfig -e ${shellQuote('abort "solargraph: Ruby development headers are required in the base image" unless File.file?(File.join(RbConfig::CONFIG.fetch("rubyhdrdir"), "ruby.h"))')};`,
+        requireSu,
+        asNode('ruby --version'),
+        `gem install solargraph${version ? ` --version ${version}` : ''} --no-document --install-dir /opt/haive-lsp/solargraph --bindir /opt/haive-lsp/solargraph/bin;`,
+        launcher('solargraph', [
+          'export GEM_HOME=/opt/haive-lsp/solargraph GEM_PATH=/opt/haive-lsp/solargraph',
+          'exec ruby /opt/haive-lsp/solargraph/bin/solargraph "$@"',
+        ]),
+        'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/solargraph;',
+        asNode('solargraph --version'),
+      ]);
+    case 'jdtls': {
+      // Upstream README requires Java 25; its Python launcher still checks only 21.
+      // Use the README floor and check the same JAVA_HOME preference as that launcher.
+      const checkJava =
+        'import os,re,shutil,subprocess,sys; sys.version_info >= (3,9) or sys.exit("jdtls: Python >=3.9 is required"); home=os.path.join(os.environ["JAVA_HOME"],"bin/java") if "JAVA_HOME" in os.environ else ""; java=home if os.path.isfile(home) else shutil.which("java"); java or sys.exit("jdtls: Java >=25 is required in the base image"); out=subprocess.check_output([java,"-version"],stderr=subprocess.STDOUT,text=True); match=re.search(r\'version\\s+"([0-9]+)\',out); (match and int(match[1]) >= 25) or sys.exit("jdtls: Java >=25 is required in the base image")';
+      return run([
+        requireTool('python3', 'jdtls: Python >=3.9 and Java >=25 are required in the base image'),
+        requireSu,
+        asNode(`python3 -c ${shellQuote(checkJava)}`),
+        requireTool('curl', 'jdtls: curl is required in the base image'),
+        requireTool('tar', 'jdtls: tar is required in the base image'),
+        'curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/haive-lsp-jdtls.tar.gz;',
+        'mkdir -p /opt/haive-lsp/jdtls;',
+        'tar -xzf /tmp/haive-lsp-jdtls.tar.gz -C /opt/haive-lsp/jdtls; rm /tmp/haive-lsp-jdtls.tar.gz;',
+        launcher('jdtls', ['exec python3 /opt/haive-lsp/jdtls/bin/jdtls "$@"']),
+        'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/jdtls;',
+        asNode('jdtls --help'),
+      ]);
+    }
+  }
 }

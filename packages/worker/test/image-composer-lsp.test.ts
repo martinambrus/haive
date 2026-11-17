@@ -78,17 +78,9 @@ describe('optional composed LSP layer', () => {
       expect(composeSandboxImage({ ...input, ...changed }).tag).not.toBe(original.tag);
   });
 
-  it.each([
-    'unknown',
-    'phpactor',
-    'solargraph',
-    'gopls',
-    'rust-analyzer',
-    'jdtls',
-    'constructor',
-    '__proto__',
-  ])('explicitly refuses selected server %s without a vetted recipe', (server) =>
-    expect(() => compose([server])).toThrow(/unsupported selected LSP server/i),
+  it.each(['unknown', 'phpactor', 'constructor', '__proto__'])(
+    'explicitly refuses selected server %s without a vetted recipe',
+    (server) => expect(() => compose([server])).toThrow(/unsupported selected LSP server/i),
   );
 
   it.each([{}, 'vtsls', [42], [null], ['vtsls', {}]].map((selection) => ({ selection })))(
