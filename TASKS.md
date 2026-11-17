@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T707 · PHP database driver lows after the generator fix
+
+status: open · kind: bug · found: PHP database driver review (#1267) · priority: P4
+
+Small leftovers, none blocking: (a) an existing PHP template with a SQLite, Postgres or MySQL database and no `ext-*` requirement keeps its saved Dockerfile without the driver until its declared dependencies change or someone edits it; a self-heal like `dockerfileTargetsUnbuildablePhp` would force a rebuild, so only do it if wanted; (b) `04-verify-environment` checks only `php --version`, so an image missing the PDO driver verifies green; add a `php -m` module check for the declared database.
+
 ### T706 · Desktop extension lows after the live check
 
 status: open · kind: bug · found: Desktop extension reviews (#1259) · priority: P4
