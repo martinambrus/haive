@@ -1163,6 +1163,25 @@ function lifecycle() {
   };
 }
 
+it('keeps readiness null when a stale pass lands its done write through the unguarded production path', async () => {
+  const f = lifecycle();
+  await f.firstRun();
+  const stale = structuredClone(f.row(ids.verify).output);
+  const staleGeneration = f.row(ids.verify).rerunGeneration;
+  await f.reset('01b1-verify-composed-lsp');
+  // The retry's own pass owns the row again; the old pass is still in flight.
+  await f.write(schema.taskSteps, ids.verify, { status: 'running' });
+  expect(f.row(ids.verify).rerunGeneration).not.toBe(staleGeneration);
+  // No expectedGeneration, as in step-runner's done write.
+  await updateOwnedStep(f.db, ids.verify, {
+    status: 'done',
+    endedAt: new Date(),
+    output: stale as never,
+  });
+  expect(f.row(ids.verify).status).toBe('done');
+  expect(await f.ready()).toBeNull();
+});
+
 it.each(['04-verify-environment', '01b-install-plugins', '01b1-verify-composed-lsp'])(
   'recovers the actual ordered pipeline after Retry %s',
   async (target) => {

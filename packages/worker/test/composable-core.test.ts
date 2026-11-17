@@ -1048,7 +1048,7 @@ it('every real workflow path has bootstrap → worktree → plugins → final be
   }
 });
 
-it('composition requires the bootstrap/worktree/plugin order for final verification', () => {
+it('composition requires the worktree and the producer order for final verification', () => {
   const sequence = [
     '01-declare-deps',
     '02-generate-dockerfile',
@@ -1059,16 +1059,39 @@ it('composition requires the bootstrap/worktree/plugin order for final verificat
     '01b1-verify-composed-lsp',
   ];
   expect(validateComposition(sequence, catalog)).toEqual([]);
-  for (const missing of ['04-verify-environment', '01-worktree-setup', '01b-install-plugins'])
-    expect(
-      validateComposition(
-        sequence.filter((id) => id !== missing),
-        catalog,
-      ).length,
-    ).toBeGreaterThan(0);
-  const reversed = [...sequence];
-  [reversed[3], reversed[4]] = [reversed[4]!, reversed[3]!];
-  expect(validateComposition(reversed, catalog)).toContainEqual(
-    expect.objectContaining({ kind: 'need-out-of-order', stepId: '01b1-verify-composed-lsp' }),
+  expect(
+    validateComposition(
+      sequence.filter((id) => id !== '01-worktree-setup'),
+      catalog,
+    ).length,
+  ).toBeGreaterThan(0);
+});
+
+describe('final composed LSP verification is optional-producer safe', () => {
+  const sequence = [
+    '01-declare-deps',
+    '02-generate-dockerfile',
+    '03-build-image',
+    '04-verify-environment',
+    '01-worktree-setup',
+    '01b-install-plugins',
+    '01b1-verify-composed-lsp',
+  ];
+  const finalId = '01b1-verify-composed-lsp';
+  it.each(['04-verify-environment', '01b-install-plugins'])(
+    'a list without %s validates but is not contract-2 eligible',
+    (removed) => {
+      const ids = sequence.filter((id) => id !== removed);
+      expect(validateComposition(ids, catalog)).toEqual([]);
+      expect(composedLspRunListEligible(ids)).toBe(false);
+    },
+  );
+  it.each(['01b-install-plugins', '04-verify-environment'])(
+    'the final step placed before %s is refused',
+    (producer) => {
+      const ids = sequence.filter((id) => id !== finalId);
+      ids.splice(ids.indexOf(producer), 0, finalId);
+      expect(validateComposition(ids, catalog).length).toBeGreaterThan(0);
+    },
   );
 });

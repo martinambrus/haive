@@ -104,6 +104,26 @@ describe('derived workflow registry/catalog parity', () => {
     }
   });
 
+  it.each(['01b-install-plugins', '04-verify-environment'])(
+    'an overlay removing %s keeps every candidate valid',
+    (removed) => {
+      const result = evaluateDerivedTaskType({
+        baseCandidates: workflowBaseCandidates((type) =>
+          stepRegistry.listByWorkflow(type).map((s) => s.metadata.id),
+        ),
+        changes: [{ remove: removed }],
+        catalog: new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const)),
+        installedStepIds: new Set(stepRegistry.all().map((s) => s.metadata.id)),
+      });
+      expect(result.issues).toEqual([]);
+      for (const c of result.candidates) {
+        expect(c.compositionIssues).toEqual([]);
+        expect(c.stepIds).not.toContain(removed);
+        expect(composedLspRunListEligible(c.stepIds)).toBe(false);
+      }
+    },
+  );
+
   it('preserves the whole pre-continuation quick and plan base lists', () => {
     const expected = {
       quick_bugfix: [
