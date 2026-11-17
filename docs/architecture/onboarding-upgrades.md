@@ -81,8 +81,9 @@ unchanged; 01b adds machine-local provider/file identity to its task output only
 Cache/peek identity, 04 and both readiness consumers ship before the writer. Canonical selection,
 pins, saved body, recipes, provider, RTK and referenced core ID determine composition. Readiness
 also requires exact current provider/plugin results, local PHP plugin-file content, immutable image
-IDs and complete reports from this task's completed 04. Versioned, bounded composed evidence lives
-in existing `task_steps.output.composedLsp`; it is rewritten completely per run, never merged.
+IDs and complete reports from this task's completed final verification step. Versioned, bounded
+composed evidence lives in existing `task_steps.output.composedLsp`; it is rewritten completely
+per run, never merged.
 A Retry nulls that output and makes readiness false. Retained effective/prior/verifying image
 references use the existing task-owned `tasks.metadata.composedLspImageRefs` key, outside portable
 settings and mirrors, and remain protected from composed reaping across Retry while the task is
@@ -94,13 +95,13 @@ core rebuilds do not invalidate an otherwise unchanged pinned launch. No column 
 migration is added for references either. Build and verify a replacement before publishing its
 reference; failure keeps the prior image and refuses to present it as newly requested pins.
 
-Ordinary workflow ordering puts 04 before 01b: initial missing plugin evidence stays unready, and
-01b completion does not retroactively validate it. A Retry of 04 cannot make contract 2 ready
-under this order, since it resets downstream 01b and that later completion changes the identity
-again. Retry 04 rebuilds and re-verifies an evicted image so launches resume, but cannot restore
-LSP readiness under the current order. Arrange a fresh verification against the final plugin
-identity before the future 01 writer is enabled. That writer must carry forward existing
-contract metadata like savedWebserver; 02 suppression stays last. See [Sandbox](sandbox.md).
+The final verification step `01b1-verify-composed-lsp` follows 01b, so readiness validates against
+the finished plugin identity: bootstrap 04 publishes the image 01b launches in, and the final step
+repeats the checks once 01b is done. Retry 04 or Retry 01b resets the final step and makes readiness
+false until it completes again. It skips absent/1 templates, and no contract-2 writer exists yet.
+That writer must carry forward existing contract metadata like savedWebserver, may enable 2 only
+for a run list holding 04, worktree setup, 01b and the final step in that order, and leaves 02
+suppression last. See [Sandbox](sandbox.md).
 A manifest bump alone cannot migrate a stored/custom Dockerfile; the later cutover must keep the
 legacy installer until replacement images exist and are verified. See [Sandbox](sandbox.md).
 

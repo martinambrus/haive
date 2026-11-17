@@ -871,8 +871,9 @@ Existing absent/1 rows retain their checks, reports, image composition and readi
 Generation, including saved-body reuse, still refuses contract 2. No manifest bump or SQL migration
 is included.
 
-04 separates runtime/client checks (the inspected environment image) from selected LSP servers
-(the exact inspected composed image ID). Its LSP runs use node, the image PATH without provider
+Verification separates runtime/client checks (the inspected environment image) from selected LSP
+servers (the exact inspected composed image ID). Bootstrap 04 and the final step below run the
+same checks. The LSP runs use node, the image PATH without provider
 or host overrides, no repository/auth mounts and no network. Each selected launcher must yield
 installed/server and toolchain versions and a JSON-RPC initialize response with capabilities.
 A launcher exit or command-v alone cannot pass. These are image/server checks; they do not claim
@@ -886,8 +887,8 @@ array, rewritten per run without merging an earlier output. It records exact sav
 hashes, template and contract, canonical selection/pins, current provider configuration identity,
 01b result and PHP plugin-file hashes, composition hash/tag, immutable environment/composed IDs,
 versions, bounded per-server reports and an explicit image-verification outcome. Only one provider
-is verified per 04 run, with at most seven selected-server reports and 2,000 captured characters per
-output stream. A later provider needs its own matching 04 evidence.
+is verified per run, with at most seven selected-server reports and 2,000 captured characters per
+output stream. A later provider needs its own matching final evidence.
 
 01b records provider configuration and local PHP plugin-file hashes only for contract 2. A
 contract-2 apply refuses changed detect-time provider/selection inputs, and refuses provider or
@@ -896,9 +897,9 @@ shell overrides, wrappers, altered PHP files, partial reports and Ruby-only sele
 advertise a callable bridge. The recorded plugin language set must cover every currently
 selected bridged server. Legacy dispatch evaluates readiness once, independent of provider
 count; only contract 2 fans out per provider. Dispatch and execution compare the complete current
-identity with 04 and the retained effective reference; execution uses the inspected
-immutable image ID. Snapshot workspaces still exclude LSP. A task without a matching completed
-04 row is unready.
+identity with the final verification and the retained effective reference; execution uses the
+inspected immutable image ID. Snapshot workspaces still exclude LSP. A task without a matching
+completed final row is unready.
 
 **A verified launch stays pinned.** The reference records the resolved RTK version, the core
 image ID and the repository's explicit RTK pin separately, plus a hash of the exact saved body,
@@ -910,8 +911,8 @@ selection/pins, explicit RTK pin or provider name/CLI version/Dockerfile extras 
 until the requested replacement is
 verified; it never silently uses the old image as those new inputs. The tag is still inspected
 and must name the verified immutable ID. Readiness uses the recorded RTK/core inputs too, while
-continuing to compare current recipes and the provider/plugin result with 04: a worker recipe
-change may withdraw tools without changing the pinned launch image.
+continuing to compare current recipes and the provider/plugin result with the final
+verification: a worker recipe change may withdraw tools without changing the pinned launch image.
 
 The provider configuration hash uses an explicit allow-list. Name, CLI version and Dockerfile
 extras configure the installer/image; wrapper body, environment, CLI arguments and executable/
@@ -930,9 +931,10 @@ check passes, in the build's existing per-tag turn. Step generation and task epo
 provider and environment row locks fence edits during the final identity comparison/publication.
 A failed requested replacement keeps effective/prior references and reports failure, and is
 never served as the old image under the requested pins. Pending verification ownership also
-survives a crash. 04 output remains disposable readiness evidence: a reset clears it and therefore
-readiness, while the task-owned references remain. A pending/reset 04 is read before completed
-rows, including a completed higher round, so a Retry cannot reuse another round's old evidence.
+survives a crash. Final output remains disposable readiness evidence: a reset clears it and
+therefore readiness, while the task-owned references remain. A pending/reset final row is read
+before completed rows, including a completed higher round, so a Retry cannot reuse another round's
+old evidence.
 The composed reaper reads live tasks' references, including prior/verifying IDs, before selection
 and again in the tag turn. A refused ownership
 read keeps images. Container checks and non-force Docker removal remain the final backstop.
@@ -947,18 +949,44 @@ cancelled task's age-based eviction fails closed if the retained image is gone. 
 post-completion workflow consumer requiring indefinite image retention. The reaper uses a bound
 `jsonb_exists` key test combined with the non-terminal-task status filter.
 
-**Activation ordering remains open.** Ordinary workflows run 04 before 01b. An initial 04 therefore
-records a missing plugin result and cannot make LSP ready, even after 01b later completes: that
-completion changes the identity. Under this order a Retry of 04 cannot make contract 2 ready:
-it resets downstream 01b again, which completes after 04 and changes the plugin identity again.
-Retry 04 rebuilds and re-verifies the image so launches resume, but cannot restore LSP
-readiness under the current order.
-The writer slice must arrange a fresh 04 verification after the
-plugin result, or another explicitly reviewed ordering, before enabling contract 2. Nothing here
-writes a contract-2 template, strips saved installers or changes an onboarding artifact version.
-Revert this consumer slice before the cache-contract slice while no writer exists. If a later
-writer has enabled contract 2, stop those writes and restore retained legacy template links/images
-before removing readers; never downgrade metadata on a body without its legacy installers.
+**Final verification follows durable plugin installation.** Bootstrap 04 stays before worktree setup:
+it publishes the retained image that 01b launches in. The deterministic, provider-sensitive step
+`01b1-verify-composed-lsp` (index 1.21) runs after 01b and before browser, app and discovery work
+on every built-in workflow path that has 01b. It is 04's implementation in a final phase: every
+detected check, no form, no model call, a fence of its own row id, rerun generation and task epoch.
+It never rewrites 04's output and never advances the engine itself. A template whose contract is
+absent or 1 skips it with no Docker probe.
+
+Contract-2 readiness reads only this step's current row: done, ended, its `verification` bound to
+the row id and rerun generation, and one entry matching the current provider, plugin and image
+identity and the retained effective reference. 04 evidence is never a fallback. Missing, pending,
+failed, skipped, reset, malformed or unsupported final evidence is unready. An unready plugin
+result, such as a skipped or missing PHP plugin, still completes the checks with `bridgeReady`
+false and guidance to upgrade the plugin files and Retry 01b; nothing retries automatically.
+
+`composedLspRunListEligible` (`@haive/shared/run-list`) accepts a run list only when 04, worktree
+setup, 01b and the final step each occur once, in that order. `taskSupportsComposedLspFinal`
+applies it to the task's effective list, dynamic or frozen static or derived, and the final
+step's detect refuses a task that fails it. Such a list is ineligible for contract 2 and is never
+rewritten. Standalone env_replicate keeps bootstrap 04 only, and run_app stays legacy.
+
+Recovery uses the existing reset order. Retry 04 or Retry 01b resets the final row, so readiness is
+false until it completes again; retained references survive every reset. Retry of the final step
+alone keeps the completed 01b result and restores readiness by rechecking the current identity,
+without reinstalling plugins. A failed replacement keeps the prior references. A missing
+environment image needs Retry 03; a missing composed image is rebuilt by 04 or the final check. A
+reference published before a lost done write cannot certify readiness: worker death, a lost handoff
+or a concurrent reset leaves no done final row, and recovery repeats the checks under the same
+ownership, epoch and generation fences.
+
+Nothing here writes a contract-2 template, strips saved installers or changes an onboarding
+artifact version, and the generator still refuses 2. Rollback: stop adding the step to new
+definitions but keep its registered implementation while any resumable pinned task names it,
+since removing it under those pins creates dead tasks. Once none remain, revert this support
+before the earlier composed readers and cache contract; no schema, metadata or image rollback is
+needed. If a later writer has enabled contract 2, stop those writes and restore retained legacy
+template links and images before removing readers; never downgrade metadata on a body without its
+legacy installers.
 
 ## PHP database drivers in generated environments
 
