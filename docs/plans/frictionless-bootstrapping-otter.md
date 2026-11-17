@@ -5,7 +5,9 @@
 > 2026-11-12:** first-admin bootstrap also shipped (`auth.ts`, `anointing-gatekeeping-ibex`),
 > as did non-public channels (T335, #1007–#1009, `calm-crafting-fiddle`). Per-install naming
 > shipped S0–S3; S4 live isolation evidence remains separate. The Docker Desktop Extension is
-> still an unverified future proposal; domain registration is an owner decision, not code.
+> implemented as a local prototype: SDK facts are verified, while full image validation and
+> native live acceptance remain open. See [Desktop extension](../architecture/release.md#docker-desktop-extension).
+> Domain registration remains an owner decision, not code.
 >
 > Status: PROPOSED, 2026-08-25. Prompted by the DeepSeek `dsh` harness (harness.pdf), whose entire
 > install is `npx @deepseek-ai/dsh web` — a browser tab opens, asks for an API key, and a full

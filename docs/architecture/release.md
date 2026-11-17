@@ -442,3 +442,190 @@ rebuilds configured own modules during preflight, before draining, and journals 
 references for rollback and recovery. See [Modules](modules.md#own-modules-on-a-published-install)
 for the prepared-source and per-customer builder contract. Channel selection and customer builder
 publication remain the vendor pipeline's responsibility; a public builder contains public core only.
+
+## Docker Desktop extension
+
+The local prototype lives in `docker/desktop-extension/`. It reuses the RUN-IT
+installers and release compose bundle. It has not been installed in Docker Desktop
+or published. Native live acceptance belongs to a session with the owner.
+
+### SDK contract verified 2026-11-17
+
+Measured: Extensions CLI v0.2.32, server API 0.4.2, Docker client/server 29.9.2.
+The JavaScript client and its lockfile-resolved types are 0.4.2; the image declares
+`>= 0.4.2, < 0.5.0`. These are measured versions; Docker's web manuals are unversioned.
+
+The [metadata contract](https://docs.docker.com/extensions/extensions-sdk/architecture/metadata/)
+requires `/metadata.json`, and permits optional UI, VM and host sections. A VM
+backend can use `vm.image` (generated Compose) or `vm.composefile` (supplied Compose).
+This extension uses a host executable backend, without a VM section: installation
+needs a real host path for the existing updater, and extension uninstall must not
+silently destroy an independently managed Haive install.
+
+[Host executables](https://docs.docker.com/extensions/extensions-sdk/guides/invoke-host-binaries/)
+are copied from the image, invoked with `ddClient.extension.host.cli.exec`, and removed
+with the extension. They run as the Desktop user. The extension uses buffered exec;
+installer and Compose output stays in a local operation log, while the UI receives
+structured status and errors. `ddClient.host.openExternal` opens the existing app;
+`desktopUI.navigate.viewContainerLogs` opens the selected API or worker container.
+See [Dashboard](https://docs.docker.com/extensions/extensions-sdk/dev/api/dashboard/)
+and [NavigationIntents](https://docs.docker.com/reference/api/extensions-sdk/NavigationIntents/).
+
+The [architecture contract](https://docs.docker.com/extensions/extensions-sdk/extensions/multi-arch/)
+uses Linux extension images even on Windows. The local image contains amd64 and arm64
+variants; each carries a native Linux, Darwin and Windows helper for that architecture.
+No shell runtime beyond the existing installer prerequisites is added to the host.
+Windows uses its native PowerShell; macOS and Linux use `sh`. The Windows process uses
+execution-policy bypass for that invocation only; it changes no machine policy.
+
+### Installation and lifecycle
+
+`Install` invokes an embedded, byte-for-byte copy of `install/install.sh` or
+`install/install.ps1`, with an install id and `--no-start`/`-NoStart`. The installer
+resolves latest/next once, pins an exact release, validates the release manifest and
+bundle hashes when declared, probes ports, generates secrets and writes its normal
+helpers. There is no second version resolver, secret generator, compose definition,
+registration route or module entitlement resolver.
+
+The id and Compose project are `haive_desktop`; the host directory is
+`~/haive_desktop` (`%USERPROFILE%\haive_desktop` on Windows). Existing directory and
+resource collision refusals remain the installer's. The helper refuses other ids,
+unpinned settings, linked bundle files and a host Docker CLI pointed at a different
+engine from Desktop's SDK. The resolved Compose model must use this install's
+resource names and published images before install completes or Start runs. Older
+shared-name bundles and source-build services are refused. During Install, a bundle refusal or generic
+installer failure names the install folder and says to remove that folder, then install
+again; the UI renders this advice in its status message. Start never gives that advice: its
+folder holds an established install's `.env` secrets, which its data volumes depend on. The helper deletes no install
+files. A failed installer can leave a non-empty partial directory, such as snapshots,
+that must be removed before retrying. An unsupported release written with no start
+also requires clearing that fresh directory before choosing a newer release. Preserve
+an established install's .env and data before any manual cleanup.
+
+`Start` runs the installed base/run bundle and its already selected GPU overlay,
+NVIDIA first, then Vulkan, matching the updater. It calls `up -d --no-build --wait`
+with a six-minute service wait, without resolving or repinning a release. Initial
+missing images are pulled by Compose. The bundle's db-migrate dependency remains the
+only migration path. The existing installer selects CPU on macOS and Windows;
+Linux keeps its existing GPU detection. The disclosure names both the host-root-equivalent
+Docker socket access and the stack's read-write mount of the home folder. Install and
+Start require consent in the UI and the literal consent marker in the helper. This is
+a guard against a UI regression; a same-user caller able to run the helper can supply
+the constant marker and already has the same host authority.
+
+`Stop` calls Compose stop for this project and retains containers, networks and every
+volume. It requires valid settings and regular compose files, but does not run the
+resolved-model/isolation check, so that precheck cannot block this escape hatch.
+Start retains the check. Stop still depends on Compose itself accepting its stop
+command. It stops Compose services; worker-created resources follow the existing worker
+shutdown behavior. Status is read-only; app opening requires a running web service and
+an API health response. The app opens at the actual selected port on `/setup`, whose
+existing first-admin/login guards remain authoritative. The extension collects no
+administrator passwords, API keys or registry credentials. Its UI installs public
+releases only; channel installs retain the existing installer and private credentials.
+
+Data volumes live in Docker Desktop's engine/VM, not in the extension image. Runtime
+volumes include `haive_desktop_{postgres,redis,mailpit,ollama}_data`; repositories,
+bundles, wrappers, caches, DDEV CA and per-task auth/IDE volumes use the existing
+`haive_desktop_` namespace. The host directory holds `.env`, the bundle, bundle record,
+normal control/uninstall helpers and snapshots. Keep `.env` while retaining data.
+The sibling `haive_desktop.extension.log` records the latest mutation (0600 on POSIX;
+Windows uses the profile's inherited ACL). No log is sent to the web UI.
+
+Updating or removing the extension replaces/removes its SDK-owned UI and executables
+only. Haive's stack, directory, log and volumes remain; a running stack keeps running.
+Upgrade Haive through the existing admin updater, with its drain, backup and rollback
+contract. Extension replacement never upgrades Haive. To stop before removing the
+extension, use Stop. To remove Haive itself, use its generated uninstaller separately:
+the default deletes runtime volumes including PostgreSQL, and purge also deletes work
+volumes and owned built images. The directory and pulled release images remain. No
+extension removal path calls down -v or prunes volumes.
+
+A cross-process directory lock serializes mutations. If a hard termination leaves
+`~/haive_desktop.extension-lock`, inspect this install's containers and ensure no
+operation remains before removing that lock directory. Normal completion and handled
+signals release it. Keep the tab open during long operations. Processes have a
+30-minute deadline; a timeout or close can leave a completed install or partially
+started stack, so refresh status and inspect logs before retrying. Cancellation kills
+the direct child only; installer grandchildren can outlive it even after lock release. No automatic
+reinstall or deletion is attempted.
+
+### Build and validation
+
+Run `bash scripts/build-desktop-extension.sh`. It creates a scratch context with an
+explicit file allowlist, embeds the unchanged installers, runs the Go tests, bundles
+the pinned JavaScript SDK, and loads a dual-architecture image as
+`haive-desktop-extension:dev` and `haive-desktop-extension:0.0.0-dev`. Local multiarch
+load requires Docker's containerd image store; the script never changes Desktop
+settings. It never starts Haive, installs the extension or pushes any image.
+
+Both builder stages retain their tags and pin the multi-platform index digest resolved
+on 2026-11-17 by `docker buildx imagetools inspect node:26-alpine` and
+`docker buildx imagetools inspect golang:1.25-alpine`:
+
+- Node: `sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5`.
+- Go: `sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59`.
+
+Dependabot covers the Dockerfile and the UI's independent npm lockfile in separate
+Docker/npm update entries, with the existing minor/patch grouping policy.
+
+`docker extension validate docker/desktop-extension/metadata.json` passes. The full
+image validator in CLI v0.2.32 additionally applies Marketplace semver and remote
+multiplatform checks. The literal dev tag fails semver. The identical 0.0.0-dev alias
+passes labels, metadata, semver and SDK compatibility but reports its DockerHub
+multiplatform failure even though both local platforms are present. No full-image
+validation pass is claimed. `--sdk-compatibility` adds a check and does not disable
+publication checks; the CLI has no skip-marketplace flag. See the current
+[validation manual](https://docs.docker.com/extensions/extensions-sdk/extensions/validate/).
+This gate remains unresolved under the no-push constraint. Do not install a different
+CLI, falsify its result or publish to work around it during local development.
+
+Unit controls live in `scripts/test/desktop-extension.test.mjs` (UI, part of
+`pnpm test:scripts`) and `docker/desktop-extension/bridge/main_test.go` (installer
+byte preservation/delegation, version syntax/pins, bundle/overlay resolution, identity,
+consent, concurrency, recovery advice, stop without resolution and legacy-resource refusal).
+The delegation test proves bytes are preserved from the embed; the build script's
+allowlisted copy supplies the checkout-to-embed identity. A real child-process test
+checks that ambient Haive, Compose and secret variables are filtered case-insensitively,
+while PATH, Docker context and ordinary variables survive. Health-gating tests pin
+literal probe and readiness expectations, including API-only and web-only cases. Go tests run
+inside the extension build with two scheduler threads and one package worker; no
+host Go dependency is needed. Native macOS/Windows execution and live stack behavior
+have not been measured by the local mocked-UI and unit checks.
+
+Measured 2026-11-17 on Docker Desktop 4.98.0 (245422), with its WSL-integrated Compose
+v5.6.1:
+a separate two-service fixture using `restart: 'no'` and
+`depends_on: { db-migrate: { condition: service_completed_successfully } }` returned
+exit 0 from `up -d --no-build --wait --wait-timeout 20`. The one-shot was exited with
+code 0 and the dependent service healthy. The fixture had no mounts, volumes or
+published ports, and both self-named containers were removed with `docker rm -fv`.
+This checks Compose's one-shot treatment, not Haive's actual first boot; repeat the
+live first-start check below on the owner's native Desktop version.
+
+### Owner-session acceptance and rollback
+
+1. Confirm this id, its host directory and its volumes are unused. Keep every other
+   stack running unchanged. Build the image; record the validation limitation above.
+2. From the Desktop host, run `docker extension install haive-desktop-extension:dev`.
+   Do not use the validator's install/uninstall flag. If Desktop policy disallows
+   unpublished extensions, stop and let the owner decide; do not change settings.
+3. In Haive's tab, verify install/start are disabled until the socket/home-mount disclosure is
+   accepted. Select a current public release and Install. Confirm an exact pinned
+   version and an isolated install directory without copying secret values.
+4. Start. Check db-migrate succeeded and the services are running; watch for a false
+   "Compose failed" after its exit-0 one-shot on the owner's Desktop/Compose version. Open app; create
+   the first administrator through the existing setup page, then verify a later
+   visit uses login. Exercise API and worker log links.
+5. Stop; verify this project's services stop and its volumes survive. Start again
+   and verify the account/data persist. Check other installs remain unchanged.
+6. Stop, then `docker extension rm haive-desktop-extension:dev`. Verify the extension
+   disappears while the directory and volumes remain. Reinstalling the extension
+   must reattach to this same install rather than reinstall it.
+
+Rollback of this code is a git revert, with no database migration. For a live trial,
+stop and remove the extension first; preserve its data and `.env`. Remove the Haive
+trial only through its generated uninstall script after separately deciding which
+data to discard. Local extension image tags may be removed afterward; do not remove
+Haive service images or unrelated Docker resources. Roll back a Haive upgrade through
+the existing updater rather than changing version pins by hand.
