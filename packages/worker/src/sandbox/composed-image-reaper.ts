@@ -29,7 +29,7 @@ export interface ComposedImageInfo {
 }
 
 /** Pure: the composed image refs to evict — older than maxAge AND not backing a
- *  running container (matched by tag or image id). Split out so the selection is
+ *  container, running or stopped (matched by tag or image id). Split out so the selection is
  *  unit-testable without docker. Images with an unparseable creation time
  *  (createdAtMs = NaN) are kept, never reaped. */
 export function selectStaleComposedImages(

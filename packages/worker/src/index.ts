@@ -116,7 +116,7 @@ async function main(): Promise<void> {
   });
   // Evict stale composed sandbox images (haive-sandbox:<hash>) — hash-cached for
   // cross-task reuse but never previously reaped, so they leaked one per build.
-  // Age-gated + skips images backing a running container; an evicted tag a live
+  // Age-gated + skips images backing any container; an evicted tag a live
   // task still needs just rebuilds on next use. Runs after the container reap
   // above so nothing composed is mid-use here.
   await reapStaleComposedImages().catch((err) => {

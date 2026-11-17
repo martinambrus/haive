@@ -1,3 +1,4 @@
+import { cliProviderNameSchema } from '@haive/shared';
 import { describe, expect, it } from 'vitest';
 import { composeSandboxImage, type ComposeInput } from '../src/sandbox/image-composer.js';
 import { composeSandboxImage as frozen } from './fixtures/pre-lsp-composer.js';
@@ -18,7 +19,7 @@ describe('composed install contract identity', () => {
       'FROM node:22-alpine\nRUN echo custom\n\n',
       'FROM haive-cli-sandbox:latest\nRUN npm install -g intelephense@1.18.4\n',
     ])
-      for (const name of ['claude-code', 'zai', 'codex', 'gemini'] as const)
+      for (const name of cliProviderNameSchema.options)
         for (const lspInstallContractVersion of [undefined, 1]) {
           const input = {
             ...base,
