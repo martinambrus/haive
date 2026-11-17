@@ -58,8 +58,8 @@ export function overviewCoverage(q: SetQuery, hits: EvalHit[]): number | null {
   );
 }
 
-/** There is no abstention stage in the current search. Any returned hit on a
- * no-answer question is a false positive. RRF is recorded, not treated as a probability. */
+/** Secondary any-hit diagnostic: search has no abstention stage. The primary
+ * offline FPR uses the tuning tau in answerabilityReport. RRF is not a probability. */
 export function noAnswerScore(hits: EvalHit[]): NonNullable<EvalPage['noAnswer']> {
   return {
     falsePositive: hits.length > 0,
@@ -134,8 +134,8 @@ export function summarizeGroup(results: QueryResult[], ks = SET_KS) {
   );
 }
 
-export function resultGroups(results: QueryResult[]) {
-  const groups: Record<string, QueryResult[]> = { all: results };
+export function resultGroups<T extends QueryResult>(results: T[]) {
+  const groups: Record<string, T[]> = { all: results };
   for (const key of ['kind', 'language', 'split'] as const) {
     for (const value of new Set(results.map((r) => r[key])))
       groups[`${key}:${value}`] = results.filter((r) => r[key] === value);
@@ -153,14 +153,7 @@ export function summarizeRun(results: QueryResult[], ks = SET_KS) {
     groups: Object.fromEntries(
       Object.entries(resultGroups(results)).map(([name, rows]) => [name, summarizeGroup(rows, ks)]),
     ),
-    answerability: Object.fromEntries(
-      ks.map((k) => [
-        k,
-        results.every((r) => denseSignal(r, k) !== undefined)
-          ? answerabilityReport(results, k)
-          : null,
-      ]),
-    ),
+    answerability: Object.fromEntries(ks.map((k) => [k, availableAnswerability(results, k)])),
     missingGolds: results.reduce((n, r) => n + (r.golds ?? []).filter((g) => !g.inStore).length, 0),
     dense: {
       overlap: bootstrapMean(dense.map((d) => d.overlap)),
@@ -173,6 +166,8 @@ export function summarizeRun(results: QueryResult[], ks = SET_KS) {
 
 const denseSignal = (r: QueryResult, k: number) =>
   r.byK[k]?.topDenseSim ?? (r.signal?.k === k ? r.signal.topDenseSim : undefined);
+const availableAnswerability = (results: QueryResult[], k: number) =>
+  results.every((r) => denseSignal(r, k) !== undefined) ? answerabilityReport(results, k) : null;
 const labelIdentity = (s: string) => (/^[a-f0-9]{64}$/.test(s) ? s : sha256(s));
 
 /** Mann–Whitney AUROC, with half credit for ties. Positives include overview. */
@@ -181,7 +176,7 @@ export function answerabilityReport(results: QueryResult[], k: number) {
     const score = denseSignal(r, k);
     if (score === undefined || !Number.isFinite(score))
       throw new Error(`missing/non-finite dense signal: ${r.id} k=${k}`);
-    return { score, positive: r.kind !== 'no-answer', split: r.split };
+    return { ...r, score, positive: r.kind !== 'no-answer' };
   });
   const tuning = rows
     .filter((r) => r.split === 'tuning' && r.positive)
@@ -198,6 +193,18 @@ export function answerabilityReport(results: QueryResult[], k: number) {
         negatives.reduce((n, q) => n + (p.score > q.score ? 1 : p.score === q.score ? 0.5 : 0), 0),
       0,
     );
+    const falsePositives = tau === null ? null : negatives.filter((p) => p.score >= tau).length;
+    const fpr =
+      falsePositives === null || !negatives.length ? null : falsePositives / negatives.length;
+    // Wilson score interval, z = Phi^-1(0.975). Unlike a bootstrap with constant
+    // outcomes it retains uncertainty at 0/n and n/n; translated queries still correlate.
+    const z2 = 1.959963984540054 ** 2;
+    const n = negatives.length;
+    const center = fpr === null ? 0 : (fpr + z2 / (2 * n)) / (1 + z2 / n);
+    const half =
+      fpr === null
+        ? 0
+        : (Math.sqrt((fpr * (1 - fpr)) / n + z2 / (4 * n * n)) * Math.sqrt(z2)) / (1 + z2 / n);
     return {
       answerable: positives.length,
       noAnswer: negatives.length,
@@ -207,10 +214,11 @@ export function answerabilityReport(results: QueryResult[], k: number) {
         tau === null || !positives.length
           ? null
           : positives.filter((p) => p.score >= tau).length / positives.length,
-      fpr:
-        tau === null || !negatives.length
-          ? null
-          : negatives.filter((p) => p.score >= tau).length / negatives.length,
+      falsePositives,
+      fpr,
+      fprCI: fpr === null ? null : bootstrapMean(negatives.map((p) => Number(p.score >= tau!))),
+      fprWilson95:
+        fpr === null ? null : { low: Math.max(0, center - half), high: Math.min(1, center + half) },
     };
   };
   return {
@@ -219,6 +227,10 @@ export function answerabilityReport(results: QueryResult[], k: number) {
     all: grade(rows),
     tuning: grade(rows.filter((r) => r.split === 'tuning')),
     heldOut: grade(rows.filter((r) => r.split === 'held-out')),
+    // Calibrate once on the entire run, never again inside a cell or marginal.
+    groups: Object.fromEntries(
+      Object.entries(resultGroups(rows)).map(([name, subset]) => [name, grade(subset)]),
+    ),
   };
 }
 
@@ -274,6 +286,17 @@ export function compareRuns(
   const b = indexed(after);
   if (!a.size || a.size !== b.size || [...a.keys()].some((id) => !b.has(id)))
     throw new Error('query sets differ');
+  // Each arm calibrates its global tau on its own tuning positives only.
+  // Compact baselines have signals at k=8 only; other k values stay unavailable.
+  const answerability = Object.fromEntries(
+    ks.map((k) => [
+      k,
+      {
+        before: availableAnswerability(before.results, k),
+        after: availableAnswerability(after.results, k),
+      },
+    ]),
+  );
   const deltas = [...a.values()].map((row) => {
     const next = b.get(row.id)!;
     for (const key of ['query', 'kind', 'language', 'split', 'labels'] as const) {
@@ -294,13 +317,19 @@ export function compareRuns(
         };
         if (row.kind === 'no-answer') {
           if (!p.noAnswer || !q.noAnswer) throw new Error('missing no-answer score');
+          const beforeTau = answerability[k]!.before?.tau;
+          const afterTau = answerability[k]!.after?.tau;
           return [
             k,
             {
-              falsePositive: delta(
-                Number(p.noAnswer.falsePositive),
-                Number(q.noAnswer.falsePositive),
-              ),
+              fpr:
+                beforeTau == null || afterTau == null
+                  ? null
+                  : delta(
+                      Number(denseSignal(row, k)! >= beforeTau),
+                      Number(denseSignal(next, k)! >= afterTau),
+                    ),
+              anyHit: delta(Number(p.noAnswer.falsePositive), Number(q.noAnswer.falsePositive)),
               maxRrf: delta(p.noAnswer.maxRrf, q.noAnswer.maxRrf),
             },
           ];
@@ -324,7 +353,11 @@ export function compareRuns(
       Object.fromEntries(
         ks.map((k) => {
           const found = rows.map((r) => deltas.find((d) => d.id === r.id)!.deltas[k]!);
-          const metrics = [...new Set(found.flatMap((d) => Object.keys(d)))];
+          const metrics = [
+            ...new Set(
+              found.flatMap((d) => Object.keys(d).filter((key) => typeof d[key] === 'number')),
+            ),
+          ];
           return [
             k,
             Object.fromEntries(
@@ -332,7 +365,7 @@ export function compareRuns(
                 const values = found.flatMap((d) =>
                   typeof d[metric] === 'number' ? [d[metric]!] : [],
                 );
-                const direction = ['falsePositive', 'maxRrf'].includes(metric) ? -1 : 1;
+                const direction = ['fpr', 'anyHit', 'maxRrf'].includes(metric) ? -1 : 1;
                 return [
                   metric,
                   {
@@ -355,6 +388,7 @@ export function compareRuns(
     samples,
     seed,
     confidence: 'paired query bootstrap, percentile 95%; deltas = after - before',
+    answerability,
     perQuery: deltas.map((d) => ({
       id: d.id,
       kind: d.kind,
@@ -366,19 +400,70 @@ export function compareRuns(
   };
 }
 
+/** Exact Markdown cell table for the plan; all metrics come from summarizeRun. */
+export function renderCellTable(hybrid: EvalRun, lexical: EvalRun): string {
+  // Enforce the same pairing contract as comparisons before presenting side by side.
+  compareRuns(lexical, hybrid, [8]);
+  const h = summarizeRun(hybrid.results, [8]);
+  const l = summarizeRun(lexical.results, [8]);
+  const num = (n: number) => n.toFixed(3);
+  const ci = (s: ReturnType<typeof bootstrapMean>) =>
+    s.mean === null ? 'unavailable' : `${num(s.mean)} [${num(s.low!)}, ${num(s.high!)}]`;
+  const rows = [
+    '| class | language | split | n | hybrid metric [95% CI] | lexical metric [95% CI] |',
+    '|---|---|---|---:|---|---|',
+  ];
+  for (const [name, group] of Object.entries(h.groups)) {
+    if (!name.startsWith('cell:')) continue;
+    const [kind, language, split] = name.slice(5).split('/');
+    const a = group[8]!;
+    const b = l.groups[name]![8]!;
+    let n: number;
+    let left: string;
+    let right: string;
+    if (kind === 'no-answer') {
+      const x = h.answerability[8]?.groups[name];
+      const y = l.answerability[8]?.groups[name];
+      n = x?.noAnswer ?? a.noAnswer.n;
+      left = x?.fprCI ? ci(x.fprCI) : 'unavailable';
+      right = y?.fprCI ? ci(y.fprCI) : 'unavailable';
+    } else if (kind === 'overview') {
+      n = a.overview.n;
+      left = ci(a.overview);
+      right = ci(b.overview);
+    } else {
+      n = a.answerable.n;
+      left = `${ci(a.answerable.recallCI)} / ${num(a.answerable.mrr)}`;
+      right = `${ci(b.answerable.recallCI)} / ${num(b.answerable.mrr)}`;
+    }
+    rows.push(`| ${kind} | ${language} | ${split} | ${n} | ${left} | ${right} |`);
+  }
+  return rows.join('\n') + '\n';
+}
+
 /** Offline summary, recomputed from compact query records. */
 async function main() {
-  const filename = process.argv[2];
-  if (!filename) throw new Error('usage: rag-eval-report.ts run.json');
-  const full = path.resolve(filename);
+  const cells = process.argv[2] === '--cells';
+  const filenames = cells ? process.argv.slice(3) : process.argv.slice(2);
+  if (filenames.length !== (cells ? 2 : 1))
+    throw new Error('usage: rag-eval-report.ts run.json | --cells hybrid.json lexical.json');
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
   const manifest = JSON.parse(
     (await readTextNoFollow(root, `${FIXTURE_DIR}/manifest.json`))!,
   ) as FixtureManifest;
   await warnChunkerDrift(root, manifest);
-  const run = JSON.parse(
-    (await readTextNoFollow(path.dirname(full), path.basename(full)))!,
-  ) as EvalRun;
-  process.stdout.write(JSON.stringify(summarizeRun(run.results), null, 2) + '\n');
+  const runs = await Promise.all(
+    filenames.map(async (filename) => {
+      const full = path.resolve(filename);
+      return JSON.parse(
+        (await readTextNoFollow(path.dirname(full), path.basename(full)))!,
+      ) as EvalRun;
+    }),
+  );
+  process.stdout.write(
+    cells
+      ? renderCellTable(runs[0]!, runs[1]!)
+      : JSON.stringify(summarizeRun(runs[0]!.results), null, 2) + '\n',
+  );
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

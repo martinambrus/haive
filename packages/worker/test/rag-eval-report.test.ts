@@ -9,6 +9,7 @@ import {
   noAnswerScore,
   overviewCoverage,
   summarizeRun,
+  renderCellTable,
   type EvalPage,
   type EvalRun,
   type QueryResult,
@@ -84,7 +85,7 @@ describe('query classes', () => {
     for (const extra of [{ language: '' }, { topic: 3 }, { rubric: [] }])
       expect(() => parseQuerySet([{ ...q, ...extra }], 's')).toThrow();
   });
-  it('defines no-answer FPR by any returned hit, separately from score magnitude', () => {
+  it('records secondary any-hit separately from score magnitude', () => {
     expect(noAnswerScore([])).toEqual({ falsePositive: false, maxRrf: 0, maxDense: 0 });
     expect(noAnswerScore([{ ...hit('irrelevant'), rrf: 0, denseSim: 0 }])).toEqual({
       falsePositive: true,
@@ -158,16 +159,16 @@ describe('paired comparisons', () => {
       ties: 3,
     });
   });
-  it('treats fewer no-answer false positives as a win and overview coverage separately', () => {
+  it('keeps any-hit secondary when dense signals are unavailable', () => {
     const a = row('n', 0, 'no-answer');
     const b = row('n', 0, 'no-answer');
     a.byK[8] = { ...page(0), score: null, noAnswer: noAnswerScore([hit('junk')]) };
     b.byK[8] = { ...page(0), score: null, noAnswer: noAnswerScore([]) };
-    expect(compareRuns(run([a]), run([b]), [8], 10).groups.all![8]!.falsePositive).toMatchObject({
-      mean: -1,
-      wins: 1,
-      losses: 0,
-    });
+    const c = compareRuns(run([a]), run([b]), [8], 10);
+    expect(c.groups.all![8]!.anyHit).toMatchObject({ mean: -1, wins: 1, losses: 0 });
+    expect(c.groups.all![8]!.fpr).toBeUndefined();
+    expect(c.answerability[8]).toEqual({ before: null, after: null });
+    expect(c.perQuery[0]!.byK[8]!.fpr).toBeNull();
     a.kind = b.kind = 'overview';
     a.byK[8]!.overview = 0.5;
     b.byK[8]!.overview = 1;
@@ -219,6 +220,96 @@ describe('dense answerability', () => {
       scored('n', 0, 'held-out', 'no-answer'),
     ];
     expect(answerabilityReport(rows, 8)).toMatchObject({ tau: 0, heldOut: { auroc: 0.5, fpr: 1 } });
+  });
+  it('grades each class/language/split cell with the global tuning tau, including compact signals', () => {
+    const rows = [
+      scored('t', 0.6, 'tuning'),
+      { ...scored('tf', 0.9, 'tuning'), language: 'fr' },
+      scored('n1', 0.5, 'held-out', 'no-answer'),
+      scored('n2', 0.6, 'held-out', 'no-answer'),
+      { ...scored('nf', 0.7, 'held-out', 'no-answer'), language: 'fr' },
+    ];
+    const summary = summarizeRun(compactRun(run(rows)).results, [8]);
+    const r = summary.answerability[8]!;
+    expect(r.tau).toBe(0.6);
+    expect(r.groups['cell:no-answer/en/held-out']).toMatchObject({
+      noAnswer: 2,
+      falsePositives: 1,
+      fpr: 0.5,
+      fprCI: { n: 2, mean: 0.5, low: 0, high: 1 },
+    });
+    expect(r.groups['cell:no-answer/fr/held-out']!.fpr).toBe(1);
+    expect(r.groups['language:fr']!.retention).toBe(1);
+    expect(r.groups['kind:identifier']!.fpr).toBeNull();
+    expect(r.groups['kind:identifier']!.fprCI).toBeNull();
+    expect(
+      answerabilityReport([scored('n', 1, 'held-out', 'no-answer')], 8).groups[
+        'cell:no-answer/en/held-out'
+      ]!.fpr,
+    ).toBeNull();
+  });
+  it('renders the documentation cell table from threshold FPR rather than any-hit', () => {
+    const rows = [scored('t', 0.6, 'tuning'), scored('n', 0.5, 'held-out', 'no-answer')];
+    rows[1]!.byK[8]!.score = null;
+    rows[1]!.byK[8]!.noAnswer = noAnswerScore([hit('irrelevant')]);
+    const table = renderCellTable(compactRun(run(rows)), compactRun(run(rows)));
+    expect(table).toContain(
+      '| no-answer | en | held-out | 1 | 0.000 [0.000, 0.000] | 0.000 [0.000, 0.000] |',
+    );
+    expect(table.split('\n').filter((line) => line.startsWith('|'))).toHaveLength(4);
+    const other = run(rows);
+    other.fixture = 'different';
+    expect(() => renderCellTable(run(rows), other)).toThrow('fixture/config mismatch');
+  });
+  it('reports Wilson 95% uncertainty and counts for small held-out negatives', () => {
+    const rows = [
+      scored('t', 0.6, 'tuning'),
+      ...Array.from({ length: 9 }, (_, i) =>
+        scored(`n${i}`, i < 5 ? 0.7 : 0.5, 'held-out', 'no-answer'),
+      ),
+    ];
+    const r = answerabilityReport(rows, 8).heldOut;
+    expect(r.falsePositives).toBe(5);
+    expect(r.fprWilson95!.low).toBeCloseTo(0.2666513, 6);
+    expect(r.fprWilson95!.high).toBeCloseTo(0.8112215, 6);
+    for (const score of [0, 1]) {
+      const edge = answerabilityReport(
+        [scored('t', 0.6, 'tuning'), scored('n', score, 'held-out', 'no-answer')],
+        8,
+      ).heldOut;
+      expect(edge.fprWilson95!.low).toBeGreaterThanOrEqual(0);
+      expect(edge.fprWilson95!.high).toBeLessThanOrEqual(1);
+      expect(edge.fprWilson95!.high - edge.fprWilson95!.low).toBeGreaterThan(0);
+    }
+  });
+  it('pairs threshold FPR with each arm globally calibrated on tuning positives and reports AUROC', () => {
+    const before = [
+      scored('t', 0.6, 'tuning'),
+      scored('p', 0.8, 'held-out'),
+      scored('n', 0.7, 'held-out', 'no-answer'),
+    ];
+    before[2]!.byK[8]!.noAnswer = noAnswerScore([hit('junk')]);
+    const after = structuredClone(before);
+    after[0]!.byK[8]!.topDenseSim = 0.8;
+    // Identical negative scores and any-hit, but the candidate's tuning tau rejects it.
+    const c = compareRuns(compactRun(run(before)), compactRun(run(after)), [8], 50);
+    expect(c.answerability[8]!.before).toMatchObject({ tau: 0.6, heldOut: { fpr: 1, auroc: 1 } });
+    expect(c.answerability[8]!.after).toMatchObject({ tau: 0.8, heldOut: { fpr: 0, auroc: 1 } });
+    expect(c.groups['cell:no-answer/en/held-out']![8]!.fpr).toMatchObject({
+      n: 1,
+      mean: -1,
+      low: -1,
+      high: -1,
+      wins: 1,
+      losses: 0,
+      ties: 0,
+    });
+    expect(c.groups.all![8]!.anyHit).toMatchObject({ mean: 0, wins: 0, ties: 1 });
+    expect(c.perQuery[2]!.byK[8]!.fpr).toBe(-1);
+    const reversed = compareRuns(run(after), run(before), [8], 50);
+    expect(reversed.groups.all![8]!.fpr).toMatchObject({ mean: 1, losses: 1 });
+    const self = compareRuns(run(before), run(before), [8], 50);
+    expect(self.groups.all![8]!.fpr).toMatchObject({ mean: 0, ties: 1 });
   });
   it('compacts without losing scores or signals and recomputes summaries', () => {
     const r = scored('t', 0.6, 'tuning');
