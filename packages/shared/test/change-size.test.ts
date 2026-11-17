@@ -192,6 +192,8 @@ it('counts every comparison in a chain and an arrow function as an expression', 
 it.each([
   ['a.py', String.raw`x = r'\"'`, String.raw`x = r'"'`],
   ['a.php', String.raw`<?php $x = '\"';`, String.raw`<?php $x = '"';`],
+  ['a.ts', String.raw`const x = "\n";`, String.raw`const x = "\\n";`],
+  ['a.py', String.raw`x = "\n"`, String.raw`x = "\\n"`],
 ])('preserves literal backslashes that have value in %s', (path, base, head) => {
   expect(file(path, base, head).total).toMatchObject({
     churn: 2,

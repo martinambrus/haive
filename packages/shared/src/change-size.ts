@@ -284,9 +284,11 @@ function literalValue(node: Node, language: LanguageName): string {
   if (!match) return node.text;
   const prefix = match[1]!.toLowerCase();
   const content = match[3]!.replace(/\\([\\"'])/g, (escape, char: string) => {
-    if (prefix.includes('r')) return escape;
+    // Only quote escapes are delimiter spelling. A doubled backslash stays as written, so
+    // `"\\n"` and `"\n"` keep distinct keys; the scan pairs `\\` before reading a quote.
+    if (prefix.includes('r') || char === '\\') return escape;
     // PHP's quote escapes depend on which delimiter was used.
-    if (language === 'php' && char !== '\\' && char !== match[2]) return escape;
+    if (language === 'php' && char !== match[2]) return escape;
     return char;
   });
   return `${prefix}:${content}`;
