@@ -165,6 +165,7 @@ async function checkRelocatedTree(ctx: StepContext, dir: string, head: string): 
     if (!gitfile) continue;
     if (gitfile.kind !== 'file' && gitfile.kind !== 'directory')
       refuse('the submodule gitfile is unreadable');
+    // Relative gitfiles rely on equal depth: .haive/no-change-cleanup/<uuid> vs .haive/worktrees/<name>.
     const childHead = await command(
       child,
       [`--work-tree=${child}`, 'rev-parse', '--verify', 'HEAD^{commit}'],
@@ -175,7 +176,7 @@ async function checkRelocatedTree(ctx: StepContext, dir: string, head: string): 
   }
 }
 
-async function checkTree(
+async function checkTreeChanges(
   ctx: StepContext,
   setup: Setup,
   head: string,
@@ -272,6 +273,89 @@ async function checkTree(
     refuse('the worktree holds uncommitted changes');
 }
 
+/** Pruning a worktree also drops its submodule admin dirs, including every ref and
+ *  stash. Prove those commits survive outside those dirs before authorizing deletion.
+ *  Remote-tracking refs are the local evidence; no network or persistent config writes. */
+async function checkSubmoduleHistory(
+  ctx: StepContext,
+  dir: string,
+  base: string | null,
+): Promise<void> {
+  const prefix = ['--no-optional-locks', `--work-tree=${dir}`];
+  const entries = await command(
+    dir,
+    [...prefix, 'ls-files', '--stage', '-z'],
+    'the submodule index is unreadable',
+  );
+  if (!entries.split('\0').some((entry) => entry.startsWith('160000 '))) return;
+  // Read all base gitlinks once, with full unquoted paths, including nested tree paths.
+  const baseEntries =
+    base === null
+      ? ''
+      : await command(
+          dir,
+          [...prefix, 'ls-tree', '-r', '-z', base],
+          'the base gitlinks are unreadable',
+        );
+  const baseLinks = new Map<string, string>();
+  for (const entry of baseEntries.split('\0')) {
+    const link = /^160000 commit ([a-f0-9]{40,64})\t([\s\S]+)$/.exec(entry);
+    if (link) baseLinks.set(link[2]!, link[1]!);
+  }
+  for (const entry of entries.split('\0')) {
+    const link = /^160000 ([a-f0-9]{40,64}) 0\t([\s\S]+)$/.exec(entry);
+    if (!link) continue;
+    const child = resolve(dir, link[2]!);
+    const gitfile = await lstatNoFollow(ctx.repoPath, relative(ctx.repoPath, `${child}/.git`), {
+      strict: true,
+    });
+    if (!gitfile) continue;
+    if (gitfile.kind !== 'file' && gitfile.kind !== 'directory')
+      refuse('the submodule gitfile is unreadable');
+    const childPrefix = ['--no-optional-locks', `--work-tree=${child}`];
+    const remotes = await command(
+      child,
+      [...childPrefix, 'remote'],
+      'the submodule remotes are unreadable',
+    );
+    const childBase = baseLinks.get(link[2]!) ?? null;
+    if (!remotes && childBase === null)
+      refuse('the submodule has no remote or base gitlink to retain its commits');
+    const unretained = await command(
+      child,
+      [
+        ...childPrefix,
+        'rev-list',
+        '--max-count=1',
+        '--all',
+        'HEAD',
+        '--not',
+        ...(remotes ? ['--remotes'] : [childBase!]),
+      ],
+      'the submodule history is unreadable',
+    );
+    if (unretained)
+      refuse(
+        remotes
+          ? 'the submodule holds commits not reachable from its remote-tracking refs'
+          : 'the submodule holds commits not reachable from the base gitlink',
+      );
+    await checkSubmoduleHistory(ctx, child, childBase);
+  }
+}
+
+async function checkTree(
+  ctx: StepContext,
+  setup: Setup,
+  head: string,
+  branchAbsent: boolean,
+  base: string,
+  relocated = false,
+): Promise<void> {
+  await checkTreeChanges(ctx, setup, head, branchAbsent, relocated);
+  await checkSubmoduleHistory(ctx, setup.worktreePath, base);
+}
+
 /** Explicit-composition only: the built-in workflow still finishes through step 12. */
 export const noChangeCleanupStep: StepDefinition<
   Setup,
@@ -323,7 +407,7 @@ export const noChangeCleanupStep: StepDefinition<
       return refuse('another checkout holds the branch');
     if (await isWorktreeLocked(ctx.repoPath, setup.worktreePath))
       return refuse('the worktree is locked; unlock it before cleanup');
-    const source = await lstatNoFollow(ctx.repoPath, split.rel, { strict: true });
+    const source = await lstatNoFollow(ctx.repoPath, split.rel, { strict: true, bigint: true });
     if (source && source.kind !== 'directory')
       return refuse('the worktree path is not a readable directory');
     const events = await ctx.db.query.taskEvents.findMany({
@@ -340,7 +424,10 @@ export const noChangeCleanupStep: StepDefinition<
       const parsed = journalSchema.safeParse(event.payload);
       if (!parsed.success) return refuse('the cleanup recovery record is unreadable');
       const saved = parsed.data;
-      const staged = await lstatNoFollow(ctx.repoPath, stageRel(saved), { strict: true });
+      const staged = await lstatNoFollow(ctx.repoPath, stageRel(saved), {
+        strict: true,
+        bigint: true,
+      });
       if (
         saved.worktreePath !== setup.worktreePath ||
         saved.branchName !== setup.branchName ||
@@ -349,7 +436,7 @@ export const noChangeCleanupStep: StepDefinition<
         const oldSource = await lstatNoFollow(
           ctx.repoPath,
           relative(ctx.repoPath, saved.worktreePath),
-          { strict: true },
+          { strict: true, bigint: true },
         );
         if (staged || (oldSource && sameIdentity(oldSource, saved)))
           return refuse('the worktree setup changed during cleanup');
@@ -379,7 +466,7 @@ export const noChangeCleanupStep: StepDefinition<
       if (contained.code !== 0) return refuse('could not read branch ancestry');
     }
     if (source) {
-      await checkTree(ctx, setup, head!, branch === null);
+      await checkTree(ctx, setup, head!, branch === null, base);
       if (!journal || journal.head !== head || journal.phase !== 'staging') {
         journal = {
           ...setup,
@@ -397,11 +484,14 @@ export const noChangeCleanupStep: StepDefinition<
       if (source && journal) {
         // The journal transaction can wait on locks. Check again after it, immediately
         // before the identity probe and move, rather than relying on the earlier read.
-        await checkTree(ctx, setup, head!, branch === null);
+        await checkTree(ctx, setup, head!, branch === null, base);
         // An atomic move precedes recursive deletion. The durable inode-bound record survives
         // explicit Retry (which clears apply receipts) and boot recovery. A partially deleted
         // staged tree is never misread as new uncommitted work or adopted by pathname alone.
-        const current = await lstatNoFollow(ctx.repoPath, split.rel, { strict: true });
+        const current = await lstatNoFollow(ctx.repoPath, split.rel, {
+          strict: true,
+          bigint: true,
+        });
         if (!current || !sameIdentity(current, journal))
           return refuse('the worktree directory changed before removal');
         // A fresh host UUID names the destination. Avoid noReplace's mkdir-then-rename
@@ -409,7 +499,10 @@ export const noChangeCleanupStep: StepDefinition<
         await renameNoFollow(ctx.repoPath, split.rel, stageRel(journal), { createParents: true });
       }
       if (journal?.phase === 'staging' && (source || hasStaged)) {
-        const staged = await lstatNoFollow(ctx.repoPath, stageRel(journal), { strict: true });
+        const staged = await lstatNoFollow(ctx.repoPath, stageRel(journal), {
+          strict: true,
+          bigint: true,
+        });
         if (!staged || !sameIdentity(staged, journal))
           return refuse('the cleanup recovery directory changed');
         try {
@@ -420,6 +513,7 @@ export const noChangeCleanupStep: StepDefinition<
             { ...setup, worktreePath: resolve(ctx.repoPath, stageRel(journal)) },
             head!,
             branch === null,
+            base,
             true,
           );
         } catch (error) {
@@ -446,7 +540,10 @@ export const noChangeCleanupStep: StepDefinition<
     await ownedCleanup(ctx, async () => {
       ctx.throwIfCancelled();
       if (journal) {
-        const current = await lstatNoFollow(ctx.repoPath, stageRel(journal), { strict: true });
+        const current = await lstatNoFollow(ctx.repoPath, stageRel(journal), {
+          strict: true,
+          bigint: true,
+        });
         if (current && !sameIdentity(current, journal))
           return refuse('the cleanup recovery directory changed');
         await removeNoFollow(ctx.repoPath, stageRel(journal), {

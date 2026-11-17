@@ -19,8 +19,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { discardNoChangeCleanupDirectories } from '../src/step-engine/no-change-cleanup.js';
+import {
+  journalSchema,
+  sameIdentity,
+  discardNoChangeCleanupDirectories,
+} from '../src/step-engine/no-change-cleanup.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import { splitWorktreePath } from '../src/repo/worktree-paths.js';
 import * as fsSafe from '@haive/shared/fs-safe';
 
 const state = vi.hoisted(() => ({ setup: {} as Record<string, unknown> }));
@@ -153,6 +158,56 @@ describe('no-change cleanup race and recovery controls', () => {
   const stage = () =>
     join(root, '.haive/no-change-cleanup', (events[0]!.payload as { id: string }).id);
 
+  it('records bigint identities without rounding in step and cancel recovery', async () => {
+    const ino = 2n ** 53n + 1n;
+    const lstat = fsSafe.lstatNoFollow;
+    vi.spyOn(fsSafe, 'lstatNoFollow').mockImplementation(async (...args) => {
+      const info = await lstat(...args);
+      if (
+        info?.kind === 'directory' &&
+        (args[1] === '.haive/worktrees/task' || args[1].startsWith('.haive/no-change-cleanup/'))
+      ) {
+        return {
+          ...info,
+          stats: {
+            ...info.stats,
+            ino: (args[2] as { bigint?: boolean })?.bigint ? ino : Number(ino),
+          },
+        } as never;
+      }
+      return info;
+    });
+    const remove = vi
+      .spyOn(fsSafe, 'removeNoFollow')
+      .mockRejectedValueOnce(new Error('pause exact removal'));
+    await expect(run()).rejects.toThrow('pause exact removal');
+    expect((events[0]!.payload as { ino: string }).ino).toBe(String(ino));
+    expect(remove.mock.calls[0]![2]?.expectedDirectory?.ino).toBe(ino);
+    const saved = journalSchema.parse(events[0]!.payload);
+    expect(
+      sameIdentity({ kind: 'directory', stats: { dev: BigInt(saved.dev), ino } } as never, saved),
+    ).toBe(true);
+    expect(
+      sameIdentity(
+        { kind: 'directory', stats: { dev: BigInt(saved.dev), ino: ino - 1n } } as never,
+        saved,
+      ),
+    ).toBe(false);
+    remove.mockResolvedValue(false);
+    cancelled = true;
+    await discardNoChangeCleanupDirectories(ctx.db, ctx.taskId);
+    expect(remove.mock.calls.at(-1)![2]?.expectedDirectory?.ino).toBe(ino);
+  });
+  it.each(['-1', '1.5', '', 'not-an-inode'])(
+    'refuses invalid journal identities %j before cleanup',
+    async (value) => {
+      await interruptBeforeMove();
+      const saved = events[0]!.payload as Record<string, unknown>;
+      for (const key of ['dev', 'ino']) {
+        expect(journalSchema.safeParse({ ...saved, [key]: value }).success).toBe(false);
+      }
+    },
+  );
   it.each(['step', 'cancel'] as const)(
     'refuses a swapped staged directory in %s removal',
     async (caller) => {
@@ -219,6 +274,131 @@ describe('no-change cleanup race and recovery controls', () => {
       rmSync(sub, { recursive: true, force: true });
     }
   }
+  it('pins equal staging depth so relative submodule gitfiles still resolve', async () => {
+    await initializeSubmodule();
+    const split = splitWorktreePath(tree)!;
+    expect(splitWorktreePath(join(tree, 'nested'))).toBeNull();
+    const rename = fsSafe.renameNoFollow;
+    vi.spyOn(fsSafe, 'renameNoFollow').mockImplementationOnce(async (...args) => {
+      expect(args[2].split('/')).toHaveLength(split.rel.split('/').length);
+      const gitfile = readFileSync(join(tree, 'mod/.git'), 'utf8');
+      const admin = git(join(tree, 'mod'), 'rev-parse', '--absolute-git-dir');
+      expect(gitfile).toMatch(/^gitdir: \.\.\//);
+      await rename(...args);
+      const stagedChild = join(root, args[2], 'mod');
+      expect(readFileSync(join(stagedChild, '.git'), 'utf8')).toBe(gitfile);
+      expect(
+        git(stagedChild, `--work-tree=${stagedChild}`, 'rev-parse', '--absolute-git-dir'),
+      ).toBe(admin);
+    });
+    expect(await run()).toMatchObject({ removed: true });
+  });
+  it.each(['branch', 'tag', 'stash', 'nested'] as const)(
+    'keeps unpushed submodule %s history until reachable from a remote',
+    async (kind) => {
+      await initializeSubmodule(kind === 'nested');
+      const child = join(tree, kind === 'nested' ? 'mod/inner' : 'mod');
+      const head = git(child, 'rev-parse', 'HEAD');
+      git(child, 'config', 'user.name', 'Test');
+      git(child, 'config', 'user.email', 'test@example.com');
+      if (kind === 'stash') {
+        writeFileSync(join(child, 'a'), 'stashed work');
+        git(child, 'stash', 'push', '-qm', 'local stash');
+      } else {
+        git(child, 'checkout', '-qb', 'private-work');
+        writeFileSync(join(child, 'a'), 'unpushed work');
+        git(child, 'commit', '-qam', 'unpushed submodule work');
+        if (kind === 'tag') {
+          git(child, 'tag', 'keep-local');
+          git(child, 'checkout', '--detach', head);
+          git(child, 'branch', '-D', 'private-work');
+        } else git(child, 'checkout', '--detach', head);
+      }
+      const tip = git(
+        child,
+        'rev-parse',
+        kind === 'stash'
+          ? 'refs/stash'
+          : kind === 'tag'
+            ? 'refs/tags/keep-local'
+            : 'refs/heads/private-work',
+      );
+      await preserved(/submodule holds commits not reachable from its remote-tracking refs/);
+      const remote = join(root, 'history-remote.git');
+      git(root, 'init', '--bare', '-q', remote);
+      git(child, 'remote', 'set-url', 'origin', remote);
+      git(child, 'push', '-q', 'origin', `${tip}:refs/heads/saved`);
+      expect(await run()).toMatchObject({ removed: true, branchDeleted: true });
+      expect(existsSync(tree)).toBe(false);
+    },
+  );
+  it.each(['journal', 'move'] as const)(
+    'rechecks submodule history after the %s and preserves it on refusal',
+    async (cut) => {
+      await initializeSubmodule();
+      const addRef = (child: string) => {
+        const tip = git(
+          child,
+          `--work-tree=${child}`,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit-tree',
+          'HEAD^{tree}',
+          '-p',
+          'HEAD',
+          '-m',
+          'private ref after check',
+        );
+        git(child, `--work-tree=${child}`, 'update-ref', 'refs/heads/private-work', tip);
+        return tip;
+      };
+      let tip = '';
+      if (cut === 'journal')
+        onRecord = () => {
+          tip = addRef(join(tree, 'mod'));
+        };
+      else {
+        const rename = fsSafe.renameNoFollow;
+        vi.spyOn(fsSafe, 'renameNoFollow').mockImplementationOnce(async (...args) => {
+          await rename(...args);
+          tip = addRef(join(root, args[2], 'mod'));
+        });
+      }
+      const remove = vi.spyOn(fsSafe, 'removeNoFollow');
+      await expect(run()).rejects.toThrow(
+        'submodule holds commits not reachable from its remote-tracking refs',
+      );
+      expect(remove).not.toHaveBeenCalled();
+      expect(git(join(tree, 'mod'), 'rev-parse', 'refs/heads/private-work')).toBe(tip);
+      expect(readFileSync(join(tree, 'mod/a'), 'utf8')).toBe('base\n');
+      expect(existsSync(stage())).toBe(false);
+    },
+  );
+  it('uses the base gitlink when a submodule has no remote, including detached HEAD', async () => {
+    await initializeSubmodule();
+    const child = join(tree, 'mod');
+    git(child, 'remote', 'remove', 'origin');
+    // The base gitlink is sufficient even though the object has never been pushed.
+    expect(await run()).toMatchObject({ removed: true });
+  });
+  it('keeps a no-remote submodule HEAD not reachable from the base gitlink', async () => {
+    await initializeSubmodule();
+    const child = join(tree, 'mod');
+    git(child, 'remote', 'remove', 'origin');
+    git(child, 'config', 'user.name', 'Test');
+    git(child, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(child, 'a'), 'private HEAD');
+    git(child, 'commit', '-qam', 'private HEAD');
+    git(tree, 'add', 'mod');
+    git(tree, 'commit', '-qm', 'new gitlink');
+    // Merge the superproject commit without changing the older base gitlink.
+    git(root, 'merge', '--no-ff', '--no-commit', 'task');
+    git(root, 'restore', '--source=HEAD', '--staged', 'mod');
+    git(root, 'commit', '-qm', 'contain branch, retain base gitlink');
+    await preserved(/submodule holds commits not reachable from the base gitlink/);
+  });
   it('removes a clean worktree with an initialized submodule', async () => {
     await initializeSubmodule();
     expect(await run()).toMatchObject({ removed: true, branchDeleted: true });

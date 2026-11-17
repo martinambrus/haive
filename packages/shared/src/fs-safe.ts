@@ -1,6 +1,6 @@
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { constants, type Dirent, type Stats } from 'node:fs';
+import { constants, type BigIntStats, type Dirent, type Stats } from 'node:fs';
 import {
   chmod,
   chown,
@@ -704,12 +704,12 @@ export async function readdirSizesNoFollow(
 
 export type EntryKind = 'file' | 'directory' | 'symlink' | 'other';
 
-export interface EntryInfo {
+export interface EntryInfo<S extends Stats | BigIntStats = Stats> {
   kind: EntryKind;
-  stats: Stats;
+  stats: S;
 }
 
-function describe(stats: Stats): EntryInfo {
+function describe<S extends Stats | BigIntStats>(stats: S): EntryInfo<S> {
   const kind: EntryKind = stats.isSymbolicLink()
     ? 'symlink'
     : stats.isDirectory()
@@ -721,12 +721,23 @@ function describe(stats: Stats): EntryInfo {
 }
 
 /** What sits at `<anchor>/<rel>` without following it; `null` when nothing does. The one read that
- *  reports a link instead of refusing it, so a caller can decide what to say about one. */
+ *  reports a link instead of refusing it, so a caller can decide what to say about one.
+ *  Use bigint for device/inode identities: Number stats can round large inode numbers. */
+export function lstatNoFollow(
+  anchor: string,
+  rel: string,
+  opts: StrictOption & { bigint: true },
+): Promise<EntryInfo<BigIntStats> | null>;
+export function lstatNoFollow(
+  anchor: string,
+  rel: string,
+  opts?: StrictOption & { bigint?: false },
+): Promise<EntryInfo | null>;
 export async function lstatNoFollow(
   anchor: string,
   rel: string,
-  opts: StrictOption = {},
-): Promise<EntryInfo | null> {
+  opts: StrictOption & { bigint?: boolean } = {},
+): Promise<EntryInfo<Stats | BigIntStats> | null> {
   const safe = toSafeRel(rel);
   return readResult(
     opts.strict,
@@ -736,7 +747,9 @@ export async function lstatNoFollow(
       const dir = await walkDir(anchor, safe, segs);
       try {
         return describe(
-          leaf === undefined ? await dir.fh.stat() : await lstat(at(dir.fh.fd, leaf)),
+          leaf === undefined
+            ? await dir.fh.stat({ bigint: opts.bigint ?? false })
+            : await lstat(at(dir.fh.fd, leaf), { bigint: opts.bigint ?? false }),
         );
       } finally {
         await closeQuietly(dir.fh);
@@ -1133,7 +1146,9 @@ export interface RemoveOptions {
   /** Remove only this directory inode. A different inode or a symlink leaf raises
    *  DirectoryIdentityError before any removal; an absent leaf still returns false.
    *  Contents are deleted through the verified held descriptor. The final name-based
-   *  rmdir is preceded by another identity check (Node has no identity-bound rmdir). */
+   *  rmdir is preceded by another identity check (Node has no identity-bound rmdir).
+   *  The residual race can remove one EMPTY directory of the wrong identity at worst:
+   *  rmdir fails with ENOTEMPTY on a non-empty directory or ENOTDIR on a symlink. */
   expectedDirectory?: FileIdentity;
   /** Delete a directory's contents as well. Without it a non-empty directory fails ENOTEMPTY, as
    *  `rmdir` does. */

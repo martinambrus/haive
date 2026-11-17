@@ -1,7 +1,8 @@
+import type { BigIntStats } from 'node:fs';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database } from '@haive/database';
-import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, removeNoFollow, type EntryInfo } from '@haive/shared/fs-safe';
 import { isBranchName } from '@haive/shared/git-args';
 import { splitWorktreePath } from '../repo/worktree-paths.js';
 
@@ -17,8 +18,8 @@ export const journalSchema = setupSchema.extend({
   version: z.literal(1),
   phase: z.enum(['staging', 'removing']),
   id: z.uuid(),
-  dev: z.string(),
-  ino: z.string(),
+  dev: z.string().regex(/^\d+$/),
+  ino: z.string().regex(/^\d+$/),
   head: z.string().regex(/^[a-f0-9]{40,64}$/),
 });
 export type Journal = z.infer<typeof journalSchema>;
@@ -29,10 +30,7 @@ export const refuse = (reason: string): never => {
   );
 };
 export const stageRel = (journal: Journal) => `.haive/no-change-cleanup/${journal.id}`;
-export const sameIdentity = (
-  info: NonNullable<Awaited<ReturnType<typeof lstatNoFollow>>>,
-  journal: Journal,
-) =>
+export const sameIdentity = (info: EntryInfo<BigIntStats>, journal: Journal) =>
   info.kind === 'directory' &&
   String(info.stats.dev) === journal.dev &&
   String(info.stats.ino) === journal.ino;
@@ -57,7 +55,10 @@ export async function discardNoChangeCleanupDirectories(
     const saved = journalSchema.parse(event.payload);
     const split = splitWorktreePath(saved.worktreePath);
     if (!split) return refuse('the cleanup recovery path is invalid');
-    const current = await lstatNoFollow(split.anchor, stageRel(saved), { strict: true });
+    const current = await lstatNoFollow(split.anchor, stageRel(saved), {
+      strict: true,
+      bigint: true,
+    });
     if (current && !sameIdentity(current, saved))
       return refuse('the cleanup recovery directory changed');
     await removeNoFollow(split.anchor, stageRel(saved), {
