@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -430,6 +431,24 @@ func TestRunCommandFiltersEnvironment(t *testing.T) {
 		want := i >= 9
 		if present[key] != want {
 			t.Errorf("%s present=%v; want %v", key, present[key], want)
+		}
+	}
+}
+
+func TestDecodeRequestTakesQuoteFreeBase64url(t *testing.T) {
+	raw := `{"action":"status","version":"latest","engine":"desktop-engine","consent":""}`
+	r, err := decodeRequest([]string{base64.RawURLEncoding.EncodeToString([]byte(raw))})
+	if err != nil || r.Action != "status" || r.Version != "latest" || r.Engine != "desktop-engine" {
+		t.Fatalf("decoded %+v, %v", r, err)
+	}
+	for _, args := range [][]string{
+		{raw},               // raw JSON is no longer accepted
+		{`{action:status}`}, // what a Windows command line leaves of raw JSON
+		{},
+		{"a", "b"},
+	} {
+		if _, err := decodeRequest(args); err == nil {
+			t.Fatalf("accepted %q", args)
 		}
 	}
 }

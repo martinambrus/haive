@@ -5,6 +5,7 @@ import {
   controls,
   appURL,
   createController,
+  encodeRequest,
 } from '../../docker/desktop-extension/ui/controller.js';
 
 const installed = {
@@ -65,6 +66,9 @@ test('unknown or failed status cannot enable mutations or app opening', () => {
   }
 });
 
+const decode = (arg) =>
+  JSON.parse(Buffer.from(arg.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+
 test('install and every start require explicit consent; status and logs do not', async () => {
   const f = fixture();
   await f.c.run('status');
@@ -72,7 +76,7 @@ test('install and every start require explicit consent; status and logs do not',
   f.c.accept(true);
   f.respond(installed);
   await f.c.run('install', 'next');
-  const request = JSON.parse(f.calls.at(-1)[1][0]);
+  const request = decode(f.calls.at(-1)[1][0]);
   assert.deepEqual(request, {
     action: 'install',
     version: 'next',
@@ -83,7 +87,7 @@ test('install and every start require explicit consent; status and logs do not',
   f.c.accept(false);
   await assert.rejects(f.c.run('start'), /unavailable/);
   await f.c.run('stop');
-  assert.equal(JSON.parse(f.calls.at(-1)[1][0]).action, 'stop');
+  assert.equal(decode(f.calls.at(-1)[1][0]).action, 'stop');
 });
 
 test('unsupported versions refuse before invoking any command', async () => {
@@ -190,4 +194,17 @@ test('install failures render folder recovery advice from resolved and rejected 
       assert.ok(!JSON.stringify(view).includes('private details'));
     }
   }
+});
+
+test('host requests travel as quote-free base64url', () => {
+  const request = {
+    action: 'install',
+    version: 'v0.2.0',
+    engine: 'e:1',
+    consent: 'accept-host-root',
+  };
+  const arg = encodeRequest(request);
+  assert.match(arg, /^[A-Za-z0-9_-]+$/);
+  const b64 = arg.replace(/-/g, '+').replace(/_/g, '/');
+  assert.deepEqual(JSON.parse(Buffer.from(b64, 'base64').toString('utf8')), request);
 });

@@ -1,6 +1,15 @@
 export const INSTALL_ID = 'haive_desktop';
 export const VERSION = /^(latest|next|v?\d+\.\d+\.\d+(-[\dA-Za-z]+([.-][\dA-Za-z]+)*)?)$/;
 
+/** Base64url without padding: Docker Desktop passes host-binary arguments to Windows through a
+ *  command line that strips double quotes, so raw JSON would arrive broken. */
+export function encodeRequest(request) {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(JSON.stringify(request)))
+    binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 export function controls(state, busy, accepted) {
   const known = state !== null && !state.error;
   return {
@@ -55,7 +64,7 @@ export function createController(ddClient, render) {
         if (!ddClient.extension.host?.cli)
           throw new Error('The extension host backend is unavailable.');
         const result = await ddClient.extension.host.cli.exec(binary, [
-          JSON.stringify({
+          encodeRequest({
             action,
             version,
             engine,

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -384,13 +385,29 @@ func runCommand(ctx context.Context, exe string, args []string, dir string, log 
 	return out.String(), err
 }
 
+// The request arrives as one base64url argument (no padding). Docker Desktop's
+// host exec reaches Windows binaries through a command line that strips the
+// double quotes of a raw JSON argument, so the payload uses quote-free
+// characters on every platform.
+func decodeRequest(args []string) (request, error) {
+	var r request
+	if len(args) != 1 {
+		return r, errors.New("expected one argument")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(args[0])
+	if err != nil {
+		return r, err
+	}
+	return r, json.Unmarshal(raw, &r)
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	var r request
-	if len(os.Args) != 2 || json.Unmarshal([]byte(os.Args[1]), &r) != nil {
+	r, err := decodeRequest(os.Args[1:])
+	if err != nil {
 		fmt.Println(`{"error":"Expected one JSON request."}`)
 		os.Exit(1)
 	}
