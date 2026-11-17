@@ -678,7 +678,7 @@ status: open · kind: bug · found: review of #1260 · priority: P4
 
 ### T703 · Check claude-code and grok reported totals on tiered prompts
 
-status: parked (diminishing returns, 2026-11-17: four normal-dispatch attempts spent $0 and measured nothing; owner allowed a temporary `config:taskTypes:customEnabled` switch and chose "keep a trace" since tasks cannot be deleted) · kind: research · found: tiered pricing plan PR 4 (#1245) · priority: P3
+status: open, Grok half only (Claude half DONE 2026-11-17: Claude Code 2.1.325 reported totals include the tier exactly on two `claude-haiku-5-5` runs over 234k prompt tokens, $0.25 notional, recorded in model-pricing.md (#1262); owner: Grok waits until all plans are finished, then one month of Grok subscription covers this check plus benchmarks)
 
 Plan `docs/plans/context-tiered-pricing.md` "PR 4": `reported` wins for claude-code and grok, so a CLI whose own price table ignores the prompt-size tier would understate tiered runs. Three direct-sandbox attempts on 2026-11-17 spent nothing and measured nothing: the first two stopped on the brief's own gates, the third reached both CLIs, and both answered "not logged in" from the per-task auth copies built outside a normal dispatch (the owner's claude-code auth works through normal dispatch, see the 2026-11-16 capped run). Evidence `.claude/tmp/codex-run/TCK-S/report3.md`. Next: drive one claude-code request over 100,000 prompt tokens on `claude-haiku-5-5` and one grok request at 200,000 or more on `grok-4.6` through a normal dispatch that writes a `cli_invocations` row (a prompt-step task type or a minimal workflow), then compare `total_cost_usd` with the stored `cost` snapshot. Notional only on subscription rows; budget about $5.
 
