@@ -51,7 +51,7 @@ describe('aggregate-only channels', () => {
       );
       expect(result.requestUsage).toMatchObject({
         requests: null,
-        coverage: 'unknown',
+        coverage: outputFormat === 'gemini-json' ? 'complete' : 'unknown',
         requestCount: outputFormat === 'gemini-json' ? 1 : null,
       });
     },

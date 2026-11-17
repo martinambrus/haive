@@ -432,6 +432,7 @@ async function runCliExecJob(
         providerName,
         tokenUsage: result.tokenUsage ?? null,
         modelIdentity: result.modelIdentity ?? null,
+        requestUsage: result.requestUsage,
       });
     } catch (err) {
       log.warn({ err, invocationId: row.id }, 'invocation cost resolution failed');

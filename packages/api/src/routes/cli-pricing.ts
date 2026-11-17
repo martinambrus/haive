@@ -38,7 +38,29 @@ const PROVIDER_NAMES = CLI_PROVIDER_LIST.map((p) => p.name) as [
  *  cache rates — so every field is independently optional. `null` means "no rate",
  *  which is NOT the same as 0: a 0 rate says the tokens are free, and a wrong "free"
  *  is the one error that silently loses money. */
-const ratesSchema = modelPriceRatesSchema;
+const ratesSchema = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    const tiers = (value as { tiers?: { aboveTokens: number }[] } | null)?.tiers;
+    if (
+      Array.isArray(tiers) &&
+      tiers.some((t, i) => {
+        const previous = tiers[i - 1]?.aboveTokens;
+        return (
+          typeof t?.aboveTokens === 'number' &&
+          typeof previous === 'number' &&
+          t.aboveTokens <= previous
+        );
+      })
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Tier thresholds must be ascending',
+        path: ['tiers'],
+      });
+    }
+  })
+  .pipe(modelPriceRatesSchema);
 
 const manualPriceSchema = z.object({
   // null = a vendor-wide rate, applying to this model id under any provider.
@@ -60,17 +82,19 @@ const syncToggleSchema = z.object({
  *  while one model's is a handful of rows. */
 cliPricingRoutes.get('/', async (c) => {
   const db = getDb();
-  const [syncRows, priceRows] = await Promise.all([
+  const [syncRows, priceRows, unknownTierInvocations] = await Promise.all([
     db.select().from(schema.cliPricingSync),
     db
       .select()
       .from(schema.cliModelPrices)
       .where(isNull(schema.cliModelPrices.effectiveTo))
       .orderBy(schema.cliModelPrices.provider, schema.cliModelPrices.modelKey),
+    loadUnknownTierInvocations(db),
   ]);
 
   const bySync = new Map(syncRows.map((r) => [r.name, r]));
   return c.json({
+    unknownTierInvocations,
     currencies: DISPLAY_CURRENCIES,
     feeds: PRICE_FEEDS,
     providers: CLI_PROVIDER_LIST.map((p) => {
@@ -100,6 +124,28 @@ cliPricingRoutes.get('/', async (c) => {
     })),
   });
 });
+
+export const UNKNOWN_TIER_INVOCATION_LIMIT = 50;
+
+/** Individual snapshots only: these bounds are never aggregated into money. */
+export function loadUnknownTierInvocations(
+  db: ReturnType<typeof getDb>,
+  limit = UNKNOWN_TIER_INVOCATION_LIMIT,
+) {
+  return db
+    .select({
+      id: schema.cliInvocations.id,
+      modelKey: sql<string>`${schema.cliInvocations.cost} ->> 'modelKey'`,
+      tier: sql<{ lowUsd?: number; highUsd?: number }>`${schema.cliInvocations.cost} -> 'tier'`,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      sql`${schema.cliInvocations.cost} ->> 'source' = 'none'
+        and ${schema.cliInvocations.cost} -> 'tier' ->> 'state' = 'unknown'`,
+    )
+    .orderBy(desc(schema.cliInvocations.endedAt), schema.cliInvocations.id)
+    .limit(limit);
+}
 
 /** Price history for one model: every row ever effective, newest first. This is what a
  *  future price-over-time chart reads; it is per-model because the whole table's
@@ -169,7 +215,7 @@ cliPricingRoutes.post('/prices', async (c) => {
   const modelKey = normalizeModelKey(body.modelKey);
   if (!modelKey) throw new HttpError(400, 'modelKey is required');
   const rates = body.rates;
-  if (!hasAnyRate(rates)) {
+  if (!hasAnyRate(rates) && !(rates.tiers ?? []).some(hasAnyRate)) {
     // A row of nulls prices nothing and would only shadow the feed row it outranks.
     throw new HttpError(400, 'at least one rate must be set');
   }

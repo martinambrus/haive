@@ -125,6 +125,8 @@ export interface TaskProviderUsage {
   /** Invocations this provider ran that carry tokens but no usable price. The UI shows
    *  this rather than silently understating the total. */
   unpricedInvocations: number;
+  /** Per-invocation uncertainty; ranges are never summed into either spend total. */
+  unknownTierCosts?: { lowUsd?: number; highUsd?: number }[];
 }
 
 export interface CostDisplay {
@@ -222,12 +224,13 @@ export async function sumProviderBreakdownWhere(
   db: Database,
   where: SQL | undefined,
 ): Promise<TaskProviderUsage[]> {
-  return providerBreakdownWhere(db, where);
+  return providerBreakdownWhere(db, where, false);
 }
 
 export async function providerBreakdownWhere(
   db: Database,
   where: SQL | undefined,
+  includeUnknownTiers = true,
 ): Promise<TaskProviderUsage[]> {
   const tu = schema.cliInvocations.tokenUsage;
   const rows = await db
@@ -249,6 +252,13 @@ export async function providerBreakdownWhere(
       costSources: sql<
         string[]
       >`coalesce(array_agg(distinct ${schema.cliInvocations.cost} ->> 'source') filter (where ${schema.cliInvocations.cost} is not null), '{}')`,
+      unknownTierCosts: includeUnknownTiers
+        ? sql<{ lowUsd?: number; highUsd?: number }[]>`coalesce(jsonb_agg(
+        jsonb_strip_nulls(jsonb_build_object('lowUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'lowUsd',
+          'highUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'highUsd'))
+        order by ${schema.cliInvocations.id}) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none'
+          and ${schema.cliInvocations.cost} -> 'tier' ->> 'state' = 'unknown'), '[]'::jsonb)`
+        : sql<{ lowUsd?: number; highUsd?: number }[]>`'[]'::jsonb`,
       unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
     })
     .from(schema.cliInvocations)
@@ -294,6 +304,7 @@ export async function providerBreakdownWhere(
       notionalCostUsd: Number(row.notionalCostUsd) || 0,
       costSource: summarizeCostSources(row.costSources),
       unpricedInvocations: Number(row.unpricedInvocations) || 0,
+      ...(includeUnknownTiers ? { unknownTierCosts: row.unknownTierCosts ?? [] } : {}),
     });
   }
   return out.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));

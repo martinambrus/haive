@@ -358,3 +358,85 @@ it('lists complete prompt tiers below base rates and preserves them when replaci
     expect.objectContaining({ rates: expect.objectContaining({ tiers }) }),
   );
 });
+
+it('edits complete manual tiers and retains an empty 1h write rate as unknown', async () => {
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  fire.type(controls(view.tree(), 'model')[0]!, 'new-model');
+  view.draw();
+  fire.type(controls(view.tree(), 'input /m')[0]!, '1');
+  view.draw();
+  fire.click(buttons(view.tree(), /^add prompt tier$/i)[0]!);
+  view.draw();
+  fire.type(controls(view.tree(), 'prompt threshold')[0]!, '100000');
+  view.draw();
+  fire.type(controls(view.tree(), 'tier 1 input /m')[0]!, '5');
+  view.draw();
+  fire.type(controls(view.tree(), 'tier 1 output /m')[0]!, '25');
+  view.draw();
+  fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+  await settle(view);
+  expect(h.post).toHaveBeenCalledWith(
+    '/cli-pricing/prices',
+    expect.objectContaining({
+      rates: expect.objectContaining({
+        tiers: [
+          {
+            aboveTokens: 100000,
+            inclusive: false,
+            inputRate: 5e-6,
+            outputRate: 25e-6,
+            cacheReadRate: null,
+            cacheWriteRate: null,
+            cacheWrite1hRate: null,
+          },
+        ],
+      }),
+    }),
+  );
+});
+it.each(['negative', 'descending'] as const)(
+  'refuses %s manual pricing edits before saving',
+  async (bad) => {
+    const view = createRenderer(() => createElement(PricingPage));
+    await settle(view);
+    fire.type(controls(view.tree(), 'model')[0]!, 'new-model');
+    view.draw();
+    fire.type(controls(view.tree(), 'input /m')[0]!, bad === 'negative' ? '-1' : '1');
+    view.draw();
+    if (bad === 'descending') {
+      for (const threshold of ['100000', '50000']) {
+        fire.click(buttons(view.tree(), /^add prompt tier$/i)[0]!);
+        view.draw();
+        const all = controls(view.tree(), 'prompt threshold');
+        fire.type(all[all.length - 1]!, threshold);
+        view.draw();
+      }
+    }
+    fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+    await settle(view);
+    expect(h.post).not.toHaveBeenCalled();
+    expect(textOf(view.tree())).toContain(bad === 'negative' ? 'non-negative' : 'ascending');
+  },
+);
+it('shows individual unknown-tier ranges and unpriced missing bounds on the admin page', async () => {
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [],
+          unknownTierInvocations: [
+            { id: 'a', modelKey: 'model-a', tier: { lowUsd: 1, highUsd: 5 } },
+            { id: 'b', modelKey: 'model-b', tier: {} },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('prompt tier unknown · $1.00–$5.00');
+  expect(textOf(view.tree())).toContain('prompt tier unknown · unpriced');
+});

@@ -5,6 +5,8 @@ import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
+import { PromptTierUnknown } from '@/components/prompt-tier-unknown';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { LatestRefresh } from '@/components/latest-refresh';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -18,6 +20,28 @@ interface ModelRates {
   cacheWriteRate: number | null;
   cacheWrite1hRate: number | null;
 }
+
+interface TierDraft {
+  aboveTokens: string;
+  inclusive: boolean;
+  rates: Record<keyof ModelRates, string>;
+}
+const RATE_LABELS: [keyof ModelRates, string][] = [
+  ['inputRate', 'Input /M'],
+  ['outputRate', 'Output /M'],
+  ['cacheReadRate', 'Cache read /M'],
+  ['cacheWriteRate', 'Cache write /M'],
+  ['cacheWrite1hRate', 'Cache write 1h /M'],
+];
+const rateDraft = (rates: ModelRates) =>
+  Object.fromEntries(
+    RATE_LABELS.map(([key]) => [key, rates[key] === null ? '' : String(rates[key]! * 1_000_000)]),
+  ) as Record<keyof ModelRates, string>;
+const tierDraft = (tier: ModelRates & { aboveTokens: number; inclusive: boolean }): TierDraft => ({
+  aboveTokens: String(tier.aboveTokens),
+  inclusive: tier.inclusive,
+  rates: rateDraft(tier),
+});
 
 interface PriceRow {
   id: string;
@@ -49,6 +73,11 @@ interface PricingResponse {
   feeds: string[];
   providers: ProviderRow[];
   prices: PriceRow[];
+  unknownTierInvocations?: {
+    id: string;
+    modelKey: string | null;
+    tier: { lowUsd?: number; highUsd?: number };
+  }[];
 }
 
 const EMPTY_RATES: ModelRates = {
@@ -71,7 +100,8 @@ function parsePerMillion(value: string): number | null {
   // Empty means "no rate", which is NOT zero: a 0 rate says the tokens are free.
   if (trimmed === '') return null;
   const n = Number(trimmed);
-  return Number.isFinite(n) && n >= 0 ? n / 1_000_000 : null;
+  if (!Number.isFinite(n) || n < 0) throw new Error('Rates must be non-negative numbers or empty');
+  return n / 1_000_000;
 }
 
 function ago(iso: string | null): string {
@@ -102,6 +132,7 @@ export default function PricingPage() {
     modelKey: string;
     note: string;
     rates: Record<keyof ModelRates, string>;
+    tiers?: TierDraft[];
   }>({
     provider: '',
     modelKey: '',
@@ -171,18 +202,26 @@ export default function PricingPage() {
       for (const key of Object.keys(rates) as (keyof ModelRates)[]) {
         rates[key] = parsePerMillion(draft.rates[key]);
       }
-      const previous = data?.prices.find(
-        (p) =>
-          p.source === 'manual' &&
-          p.provider === (draft.provider || null) &&
-          p.modelKey === draft.modelKey.trim().toLowerCase(),
-      );
+      let previousThreshold = 0;
+      const tiers = draftTiers.map((tier) => {
+        const aboveTokens = Number(tier.aboveTokens);
+        if (!Number.isSafeInteger(aboveTokens) || aboveTokens <= previousThreshold)
+          throw new Error('Tier thresholds must be positive whole numbers in ascending order');
+        previousThreshold = aboveTokens;
+        return {
+          aboveTokens,
+          inclusive: tier.inclusive,
+          ...Object.fromEntries(
+            RATE_LABELS.map(([key]) => [key, parsePerMillion(tier.rates[key])]),
+          ),
+        };
+      });
       await api.post('/cli-pricing/prices', {
         provider: draft.provider === '' ? null : draft.provider,
         modelKey: draft.modelKey,
         rates: {
           ...rates,
-          ...(previous?.rates.tiers?.length ? { tiers: previous.rates.tiers } : {}),
+          ...(tiers.length ? { tiers } : {}),
         },
         note: draft.note === '' ? null : draft.note,
       });
@@ -219,6 +258,13 @@ export default function PricingPage() {
     }
   }
 
+  const previous = data?.prices.find(
+    (p) =>
+      p.source === 'manual' &&
+      p.provider === (draft.provider || null) &&
+      p.modelKey === draft.modelKey.trim().toLowerCase(),
+  );
+  const draftTiers = draft.tiers ?? (previous?.rates.tiers ?? []).map(tierDraft);
   const prices = (data?.prices ?? []).filter(
     (p) =>
       (providerFilter === '' || (p.provider ?? '') === providerFilter) &&
@@ -313,6 +359,18 @@ export default function PricingPage() {
         </p>
       </section>
 
+      {(data?.unknownTierInvocations?.length ?? 0) > 0 && (
+        <section className="space-y-2">
+          <h3 className="text-base font-semibold text-neutral-100">Unpriced prompt tiers</h3>
+          <InlineMarkdown body="Up to 50 recent invocations. Each range describes one run and is excluded from cost totals. Missing coverage or rates leave a run unpriced. Saved snapshots keep their original prices." />
+          {data!.unknownTierInvocations!.map((run) => (
+            <div key={run.id} className="flex gap-3 text-xs">
+              <span className="font-mono text-neutral-300">{run.modelKey ?? 'Unknown model'}</span>
+              <PromptTierUnknown tier={run.tier} />
+            </div>
+          ))}
+        </section>
+      )}
       <section className="space-y-2">
         <h3 className="text-base font-semibold text-neutral-100">Add or replace a rate</h3>
         <p className="text-sm text-neutral-400">
@@ -344,15 +402,7 @@ export default function PricingPage() {
               onChange={(e) => setDraft({ ...draft, modelKey: e.target.value })}
             />
           </label>
-          {(
-            [
-              ['inputRate', 'Input /M'],
-              ['outputRate', 'Output /M'],
-              ['cacheReadRate', 'Cache read /M'],
-              ['cacheWriteRate', 'Cache write /M'],
-              ['cacheWrite1hRate', 'Cache write 1h /M'],
-            ] as [keyof ModelRates, string][]
-          ).map(([key, label]) => (
+          {RATE_LABELS.map(([key, label]) => (
             <label key={key} className="flex w-32 flex-col gap-1 text-xs text-neutral-400">
               {label}
               <Input
@@ -364,6 +414,86 @@ export default function PricingPage() {
               />
             </label>
           ))}
+          <div className="w-full space-y-3">
+            {draftTiers.map((tier, index) => (
+              <div
+                key={index}
+                className="flex flex-wrap items-end gap-3 rounded border border-neutral-800 p-3"
+              >
+                <label className="flex flex-col gap-1 text-xs text-neutral-400">
+                  Prompt threshold
+                  <Input
+                    value={tier.aboveTokens}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        tiers: draftTiers.map((t, i) =>
+                          i === index ? { ...t, aboveTokens: e.target.value } : t,
+                        ),
+                      })
+                    }
+                  />
+                </label>
+                <label className="text-xs text-neutral-400">
+                  <input
+                    type="checkbox"
+                    checked={tier.inclusive}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        tiers: draftTiers.map((t, i) =>
+                          i === index ? { ...t, inclusive: e.target.checked } : t,
+                        ),
+                      })
+                    }
+                  />
+                  Inclusive threshold
+                </label>
+                {RATE_LABELS.map(([key, label]) => (
+                  <label key={key} className="flex w-32 flex-col gap-1 text-xs text-neutral-400">
+                    {`Tier ${index + 1} ${label}`}
+                    <Input
+                      value={tier.rates[key]}
+                      placeholder="—"
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          tiers: draftTiers.map((t, i) =>
+                            i === index
+                              ? { ...t, rates: { ...t.rates, [key]: e.target.value } }
+                              : t,
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+                <Button
+                  variant="secondary"
+                  onClick={() =>
+                    setDraft({ ...draft, tiers: draftTiers.filter((_, i) => i !== index) })
+                  }
+                >
+                  Remove tier
+                </Button>
+              </div>
+            ))}
+            <Button
+              variant="secondary"
+              disabled={draftTiers.length >= 4}
+              onClick={() =>
+                setDraft({
+                  ...draft,
+                  tiers: [
+                    ...draftTiers,
+                    { aboveTokens: '', inclusive: false, rates: rateDraft(EMPTY_RATES) },
+                  ],
+                })
+              }
+            >
+              Add prompt tier
+            </Button>
+          </div>
           <label className="flex flex-col gap-1 text-xs text-neutral-400">
             Note
             <Input
@@ -452,6 +582,24 @@ export default function PricingPage() {
                     </td>
                     <td className="px-3 py-2 text-neutral-500">{ago(p.effectiveFrom)}</td>
                     <td className="px-3 py-2 text-right">
+                      {p.source === 'manual' && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() =>
+                            setDraft({
+                              provider: p.provider ?? '',
+                              modelKey: p.modelKey,
+                              note: p.note ?? '',
+                              rates: rateDraft(p.rates),
+                              tiers: (p.rates.tiers ?? []).map(tierDraft),
+                            })
+                          }
+                        >
+                          Edit
+                        </Button>
+                      )}
                       {p.source === 'manual' && (
                         <Button
                           variant="secondary"

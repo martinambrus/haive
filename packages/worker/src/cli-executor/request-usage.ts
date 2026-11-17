@@ -1,18 +1,7 @@
 /** In-process evidence only; PR 2 never stores or prices it. Input stays provider-native:
  * exclusive for Claude, inclusive for Codex/Gemini. Only a future pricer splits inclusive input. */
-export interface RequestUsage {
-  requestId: string;
-  turnId: string | null;
-  model: string | null;
-  inputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  outputTokens: number | null;
-  cacheCreation5mTokens: number | null;
-  cacheCreation1hTokens: number | null;
-}
-
-export type UnobservedSameModelUsage = Omit<RequestUsage, 'requestId' | 'turnId'>;
+import type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from '@haive/shared';
+export type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from '@haive/shared';
 
 export type UnobservedSameModelPricingBlocker =
   'unknown-cache-ttl' | 'unknown-output-usage' | 'unknown-output-request-size';
@@ -38,19 +27,6 @@ export function unobservedSameModelPricingBlockers(
   if (excess.outputTokens === null) blockers.push('unknown-output-usage');
   else if (excess.outputTokens > 0) blockers.push('unknown-output-request-size');
   return blockers;
-}
-
-export interface RequestUsageCapture {
-  requests: RequestUsage[] | null;
-  /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
-   * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */
-  unobservedSameModel?: UnobservedSameModelUsage[];
-  coverage: 'complete' | 'incomplete' | 'unknown';
-  inputConvention: 'exclusive' | 'inclusive' | 'unknown';
-  /** Exact only when the transcript proves it; Gemini reports this independently. */
-  requestCount: number | null;
-  modelCoverage: 'single' | 'mixed' | 'unknown';
-  reasons: string[];
 }
 
 export function unknownRequestUsage(reason = 'no-request-channel'): RequestUsageCapture {
