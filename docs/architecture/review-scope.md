@@ -264,13 +264,24 @@ limits yield a null file result. Unsupported extensions yield null without readi
 or spending the host byte budget. The total's `nullFiles` exposes those holes; its numeric sums
 cover only measured files.
 
-The host reader reuses `collectImplementationFiles`/`collectChangeSet`, including committed DAG
-changes, dirty/untracked additions and committed removals. It excludes test paths, documentation,
+The host reader starts with `collectImplementationFiles` (which delegates to `collectChangeSet`),
+including reported files, committed DAG changes and dirty/untracked additions. A measurement-only
+`git diff --name-only -z --no-renames <frozen-base> --` supplements that list with every tracked
+path changed against the frozen task base, including uncommitted removals and a staged move's
+old path. Together with the collector's dirty/untracked paths, this covers both sides of staged
+and unstaged moves. A file move counts the old file's full unit projection as deleted and
+the new file's as added: an unchanged three-unit file gives added 3, deleted 3, net 0 and churn 6.
+This is separate from renaming an identifier, which replaces one unit.
+It excludes test paths, documentation,
 generated markers/names, declaration files, lockfiles, vendored dependencies and build output, and
-lists touched and excluded paths. Header-based generated exclusions read the base, or the head
+lists touched and excluded paths. Path exclusions split the path once, use a set of segment
+names and linear basename checks, including generated/minified names with dotted suffixes.
+Header-based generated exclusions read the base, or the head
 for an added file, so adding a marker to existing implementation cannot hide its change.
-The inherited 100-file scope cap or a failed scope scan makes the whole measurement unknown.
-An aggregate byte budget is 16 MiB. The reader's direct `merge-base`, `ls-tree` and `cat-file`
+The inherited 100-file scope cap, a normalized measurement path union over 100 files, or a failed
+scope scan makes the whole measurement unknown. A failed supplemental diff is a retryable unknown
+and leaves no frozen attempt record. An aggregate byte budget is 16 MiB.
+The reader's direct `merge-base`, measurement `diff`, `ls-tree` and `cat-file`
 calls each have a 10 s timeout. Scope-collection git calls inside `collectImplementationFiles`
 and `collectChangeSet` keep `gitExec`'s default short timeout (10 min). All use hardened git; base
 blobs are read by object id, and working bytes use fs-safe reads anchored at the repository root
