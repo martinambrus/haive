@@ -3,7 +3,7 @@
 > **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
 > eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
 > lexical configuration have since shipped. P2(b)/(c) remain parked (T144/T147), as does index-space
-> work (T149); P3/P4 are conditional proposals. The committed shared-source eval below supplies a reproducible baseline; ranking
+> work (T149); P3 has a negative local GPU measurement below, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
 > changes still require held-out comparisons, including negative and overview results. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
 > 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
@@ -621,13 +621,126 @@ candidate against the query and yields a model-specific score (often a logit, no
 `LIMIT top_k`, which on the HNSW path also means wider than `ef_search` (F14: iterative scan can fill a filtered candidate pool, but does not fix the wrong-region
 failures F14 measured; retain the shipped `ef_search`/planner policy and restore settings
 before returning from a caller-owned transaction), a window that holds a
-whole chunk (F11), a model that reads Slovak (F13), and a runtime: Ollama has no rerank endpoint,
-and a hosted reranker is a new processor of repository code (D3). It judges each chunk's text
+whole chunk (F11), a model that reads Slovak (F13), and a runtime: the local Ollama 0.40.16
+probe below still returns 404 for reranking. D3 permits a local GPU runtime only. It judges each chunk's text
 alone, so it follows P1 rather than precedes it (S6). A page has
 one ordering key: `mergeHits` re-sorts the merged page by `rrf`, so a rerank applied inside
 `ragHybridSearch` would be undone there, and `rrf` is shown to agents and logged, so it keeps
 meaning RRF. The reranker's score is a field of its own, and the final sort, after the merge, uses
 it.
+
+
+**MEASURED (2026-11-17): do not ship BGE v2-m3 Q8_0 with this configuration.**
+One fixed model/configuration, no tuning or model selection after grading. The decision split is
+held-out. A fresh scratch database in `rrk-pg-codex1-20261117` held the same 2,141 code chunks,
+zero null vectors/hashes, all 144 positive golds, and the unchanged committed fixture fingerprint
+`4d56e5bc11b765f1c6b5539f1fc7de097df7f98d16e54314114c601c1da90068`.
+The pinned tree and all 204 anchors verified before the dry run and 157-second build. Every
+class/language/split remains in the denominator. The measured hybrid arm's metrics equal the
+committed hybrid baseline at all five page sizes, including overview and negative diagnostics.
+
+`haive-ollama` reports 0.40.16. POST `/api/rerank` with a query and documents returned HTTP
+404, `Content-Type: text/plain`, `Content-Length: 18`, body `404 page not found`. Therefore the
+experiment used a throwaway llama.cpp CUDA server, never a hosted inference endpoint:
+
+- Image `ghcr.io/ggml-org/llama.cpp@sha256:d68ec493c0ff9105ddfe2e909fff304117bc6e1fffbbd8d94182bd455983c264`;
+  build 12429, source `9fba51d2c9a1b5cb5f0c47986c031334e2d7663a`.
+- Model repo `gpustack/bge-reranker-v2-m3-GGUF`, revision
+  `3093af03b1a635e67b084b1d8c03c5f5e020fd05`, file `bge-reranker-v2-m3-Q8_0.gguf`,
+  635,676,416 bytes, SHA-256 `a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3`
+  (also verified against the pinned Hugging Face LFS oid).
+- Selected as a small multilingual cross-encoder, using the
+  [BGE model's documented multilingual capability](https://huggingface.co/BAAI/bge-reranker-v2-m3).
+  The GGUF reports an 8,192-token trained window. Runtime flags:
+  `--reranking -ngl 99 -c 2048 -b 2048 -ub 2048 -np 1 -lv 4`.
+  All 25/25 layers offloaded to GPU. Tokenizing **all** 2,141 full header-plus-body chunks
+  and 180 queries found maxima of 1,060 and 41 tokens; even adding eight special tokens,
+  1,109 is below both runtime limits. No chunk was shortened.
+- RTX 4070 Laptop, 8,188 MiB: reranker alone 533 MiB; paired-run total 3,974–3,990 MiB.
+  All 21 sampled Ollama `/api/ps` responses retained the pinned `qwen3-embedding:4b` digest
+  and reported 3,434,537,287 bytes of embedder VRAM. No live service restart or rebuild.
+
+`packages/worker/scripts/rag-eval-rerank.ts` reads a store built by the existing
+`rag-build-store.ts` protocol. It uses production hybrid retrieval at each baseline page size,
+then reranks the **merged top 50** by the runtime's `relevance_score`, saved as `rerankScore`.
+This pinned runtime emits a raw logit (a diagnostic Slovak pair scored +5.030 and −11.000),
+not a calibrated probability. RRF, dense similarity and other shipped fields stay unchanged;
+equal model scores retain merged shipped order. Failed/partial/invalid scoring falls back to
+the original baseline page for each k. All 180 requests scored all 50 pairs: 9,000 pairs,
+zero fallbacks, zero changed candidate sets, zero changed original score fields.
+
+The knowledge quota retains `applyKnowledgeReserve`'s dense-ratio admission, small-page cap,
+earned positions and append-only promotions after model ordering, with parity unit controls.
+The shared helper sorts by RRF internally, so the experiment copies only its quota selection
+rather than fabricating RRF. This fixture has **no KB/global rows**: its merge is the local page
+with an empty global arm. The evaluator refuses non-code/mixed-repository stores. This is not
+a measurement of global quotas, entry expansion, KB quality, other languages of code, private
+queries, large HNSW stores or generated answers.
+
+Recall values below are hybrid → reranked; overview/no-answer never enter recall/MRR.
+
+| group | n | recall@5 | recall@8 | recall@12 | recall@20 | MRR@8 |
+|---|---:|---|---|---|---|---|
+| all | 144 | 0.819 → 0.736 | 0.861 → 0.778 | 0.896 → 0.847 | 0.951 → 0.889 | 0.640 → 0.518 |
+| kind:identifier | 72 | 0.972 → 0.931 | 0.972 → 0.931 | 0.986 → 0.958 | 1.000 → 0.972 | 0.811 → 0.665 |
+| kind:paraphrase | 72 | 0.667 → 0.542 | 0.750 → 0.625 | 0.806 → 0.736 | 0.903 → 0.806 | 0.469 → 0.371 |
+| language:en | 48 | 0.833 → 0.813 | 0.875 → 0.854 | 0.917 → 0.896 | 1.000 → 0.896 | 0.658 → 0.576 |
+| language:fr | 48 | 0.833 → 0.750 | 0.875 → 0.792 | 0.896 → 0.833 | 0.958 → 0.896 | 0.642 → 0.526 |
+| language:sk | 48 | 0.792 → 0.646 | 0.833 → 0.688 | 0.875 → 0.813 | 0.896 → 0.875 | 0.619 → 0.452 |
+| split:tuning | 72 | 0.819 → 0.764 | 0.861 → 0.792 | 0.889 → 0.819 | 0.931 → 0.833 | 0.679 → 0.578 |
+| split:held-out | 72 | 0.819 → 0.708 | 0.861 → 0.764 | 0.903 → 0.875 | 0.972 → 0.944 | 0.600 → 0.458 |
+
+| k | hybrid recall / MRR | reranked recall / MRR | held-out recall delta [95% CI] | held-out MRR delta [95% CI] |
+|---|---|---|---|---|
+| 5 | 0.819 / 0.633 | 0.736 / 0.512 | -0.111 [-0.208, -0.028] | -0.143 [-0.242, -0.038] |
+| 8 | 0.861 / 0.640 | 0.778 / 0.518 | -0.097 [-0.194, -0.014] | -0.142 [-0.240, -0.041] |
+| 12 | 0.896 / 0.643 | 0.847 / 0.525 | -0.028 [-0.111, 0.056] | -0.135 [-0.232, -0.037] |
+| 20 | 0.951 / 0.647 | 0.889 / 0.527 | -0.028 [-0.083, 0.028] | -0.136 [-0.231, -0.038] |
+| 50 | 0.965 / 0.647 | 0.965 / 0.530 | 0.000 [0.000, 0.000] | -0.135 [-0.230, -0.037] |
+
+At k=8 on 72 held-out positive queries, reranking has **3 wins / 10 losses / 59 ties** in
+recall and **15 / 31 / 26** in MRR. The primary recall delta is −0.097 [−0.194, −0.014],
+and MRR delta −0.142 [−0.240, −0.041]. CIs use the unchanged 2,000 paired query-bootstrap
+samples, xorshift32 seed 1729, percentile 95%. Translations share topics, so these intervals
+describe the fixture, not independent-topic population uncertainty. Candidate recall@50 is
+unchanged at 0.965: the loss is ordering, not missing candidates or fallback. The shipped arm's
+pages at k below 50 are their own `ragHybridSearch` calls, while the reranked pages are cut
+from the k=50 pool; the first 8 of the two differ for 3 of 180 queries.
+
+Overview fact coverage@8 is 0.310 → 0.264 overall (18 queries), and 0.278 → 0.389 held-out
+(9 queries; paired delta +0.111 [−0.028, +0.278]). Any-hit no-answer FPR stays 1.000 in
+both arms. The existing dense-on-returned-page diagnostic's held-out FPR is 5/9 → 6/9,
+retention 0.951 → 0.926 (each arm fixes its own tuning-positive tau). Separately, using the
+maximum **reranker logit** with the same tuning-only 90% retention protocol gives tau −5.217,
+held-out FPR 6/9 (Wilson 95% [0.354, 0.879]), retention 0.877 and AUROC 0.833. These are
+descriptive answerability diagnostics; no production threshold or abstention was applied.
+
+Warmed serial latency, measured before this task's test suites, with the embedder resident:
+rerank-only p50/p95 **909/1,071 ms/query**; amortized **18.17/21.43 ms/chunk** (mean
+18.01 ms/chunk, each 50-document request divided by 50). End-to-end embedding + retrieval
++ rerank p50/p95 **991/1,150 ms**, versus **75/89 ms** for embedding + shipped k=8 retrieval.
+These totals sum the measured stages and exclude offline gold scoring/report work; they are not
+production HTTP response times. API charges: $0, local models only; electricity unmeasured.
+
+**P2(d), descriptive score-cliff look.** Among the first 20 model-ranked hits, the largest
+adjacent logit gap averages 1.582; its position has p50 3 and p95 8. Positive/overview maximum
+logits have p5/p50/p95 −6.069/−1.089/+2.978; no-answer maxima −7.586/−6.029/−2.621:
+the distributions overlap. A post-measurement illustration cutting at that largest gap with a
+minimum of three would keep 4.23/20 hits on average and lose another 0.278 held-out recall
+[−0.375, −0.181] relative to the full reranked page. No cliff policy was selected or applied.
+Neither the ordering result nor the cliff illustration supports shipping this configuration.
+
+Full local evidence is `.claude/tmp/codex-run/RRK-S/codex-1/`: pins, exact Ollama response,
+source/dist hashes, token/window verification, VRAM samples, raw runtime scores, both complete
+runs, per-query/marginal/cell CIs, latency, loss audit and cleanup proofs. Both run JSONs are
+accepted unchanged by `rag-eval-compare.ts`. `reproduce.md` gives the fresh scratch lifecycle;
+the existing fixture reproduction section still supplies the builder settings. No paid or hosted
+model call, dev-database write, live-source edit or haive service restart/rebuild was used.
+The scratch database was explicitly dropped (`pg_database` count 0), and both throwaway
+containers removed and verified absent. This PR adds only the offline evaluator and its unit
+controls. Rollback: revert the experiment commit; no product key, schema, live data or reindex
+needs undoing. P3 remains unshipped; a different local model/configuration requires a fresh,
+separately declared paired experiment rather than tuning against these held-out results.
 
 ### P4. LLM-written chunk context (last)
 
@@ -640,8 +753,6 @@ file's chunks at the next sync.
 ## Open decisions
 
 - **D2.** F2 for JS/TS: extract anonymous and object-literal functions, or leave them as gap chunks.
-- **D3.** P3: a local runtime only, or a hosted reranker accepted as a new processor of repository
-  code.
 - **D4.** S1's under-200k advice fits the global KB (~8k tokens today): deliver it whole instead of
   retrieving it, or keep retrieval (it grows, and is faceted per project).
 - **D5.** F12: index plan nodes (title and body, with their place in the tree) as a searchable
@@ -649,6 +760,10 @@ file's chunks at the next sync.
   the steps that already receive it whole. Unmeasured: no plan exists on the dev install.
 
 ## Decided
+
+- **D3** (2026-11-16, user). P3 uses a **local GPU runtime only**, sharing the RTX 4070
+  Laptop GPU (8 GB) with the embedder in `haive-ollama` 0.40.16. No hosted reranker. The
+  first pinned local configuration was measured 2026-11-17 and is not recommended to ship (P3).
 
 - **D1** (2026-10-12, user). F3: a repository's own code and its KB are exempt from both per-file
   budgets. Files under `01-env-detect`'s `customCodePaths.include` and KB files get no chunk cap
