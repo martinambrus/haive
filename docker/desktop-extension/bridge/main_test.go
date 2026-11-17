@@ -1072,6 +1072,7 @@ func TestUpgradeFence(t *testing.T) {
 		{name: "prefix is another install", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID + "_other"}, running: true},
 		{name: "own API", entrypoint: []string{"node", "packages/api/dist/index.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
 		{name: "stopped updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: false},
+		{name: "one-element entrypoint", entrypoint: []string{"docker-entrypoint.sh"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
 		{name: "no entrypoint in own container", env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
 		{name: "different updater command", entrypoint: []string{"node", "packages/updater/dist/recover-admin-cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
 		{name: "unscoped updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, running: true},
@@ -1123,7 +1124,17 @@ func TestUpgradeFence(t *testing.T) {
 						if tc.failure == "extra" {
 							return "false\nfalse\nfalse\n", nil
 						}
-						tmpl, err := template.New("inspect").Parse(args[3])
+						// Overriding and makes its arguments eager, as in older Go
+						// template engines. Short entrypoints must be safe there too.
+						tmpl, err := template.New("inspect").Funcs(template.FuncMap{
+							"and": func(values ...bool) bool {
+								result := true
+								for _, value := range values {
+									result = result && value
+								}
+								return result
+							},
+						}).Parse(args[3])
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -1159,6 +1170,12 @@ func TestUpgradeFence(t *testing.T) {
 					}
 					if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "private") {
 						t.Fatalf("wanted safe upgrade refusal, got %v", err)
+					}
+					if tc.failure == "" && !strings.Contains(err.Error(), "stop that updater container in Docker Desktop, then check the upgrade state") {
+						t.Fatalf("missing hung-updater recovery advice: %v", err)
+					}
+					if tc.failure != "" && checks != 2 {
+						t.Fatalf("failed check should retry once: checks=%d", checks)
 					}
 					if compose != 0 || mutations != 0 {
 						t.Fatalf("refusal reached compose=%d mutations=%d", compose, mutations)
@@ -1209,5 +1226,70 @@ func TestUpgradeRecheckedBeforeServiceMutation(t *testing.T) {
 				t.Fatalf("late updater was not fenced: checks=%d mutations=%d err=%v", checks, mutations, err)
 			}
 		})
+	}
+}
+
+// A failed inspect can mean a container vanished since the listing. Always list
+// again, so stale IDs are never reused. A second failure still refuses safely.
+func TestUpgradeCheckRetries(t *testing.T) {
+	for _, failure := range []string{"list", "inspect"} {
+		for _, outcome := range []string{"absent", "active", "error"} {
+			t.Run(failure+"/"+outcome, func(t *testing.T) {
+				b := fixture(t)
+				var calls []string
+				lists := 0
+				b.run = func(_ context.Context, _ string, args []string, _ string, log io.Writer) (string, error) {
+					if log != nil {
+						t.Fatal("upgrade check opened a log")
+					}
+					switch args[1] {
+					case "ls":
+						calls = append(calls, "list")
+						lists++
+						if lists == 1 && failure == "list" {
+							return "", errors.New("private list failure")
+						}
+						return strings.Repeat(string(rune('a'+lists-1)), 64), nil
+					case "inspect":
+						calls = append(calls, "inspect")
+						wantID := strings.Repeat(string(rune('a'+lists-1)), 64)
+						if len(args) != 5 || args[4] != wantID {
+							t.Fatalf("stale inspect IDs: %q", args)
+						}
+						if lists == 1 || outcome == "error" {
+							return "", errors.New("private inspection failure")
+						}
+						if outcome == "active" {
+							return "true", nil
+						}
+						return "false", nil
+					default:
+						t.Fatalf("unexpected command: %q", args)
+						return "", nil
+					}
+				}
+				err := b.checkUpgrade(context.Background())
+				wantCalls := []string{"list", "inspect", "list", "inspect"}
+				if failure == "list" {
+					wantCalls = []string{"list", "list", "inspect"}
+				}
+				if !reflect.DeepEqual(calls, wantCalls) {
+					t.Fatalf("calls=%v want=%v", calls, wantCalls)
+				}
+				if outcome == "absent" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					want := "Cannot check whether an upgrade is running"
+					if outcome == "active" {
+						want = "An upgrade is running"
+					}
+					if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "private") {
+						t.Fatalf("unsafe retry result: %v", err)
+					}
+				}
+			})
+		}
 	}
 }

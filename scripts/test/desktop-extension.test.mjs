@@ -191,6 +191,74 @@ test('extension lifecycle owns no VM stack or data volumes', () => {
   assert.ok(metadata.host.binaries[0].windows[0].path.endsWith('.exe'));
 });
 
+test('upgrade guard identity matches the updater image and every launcher', () => {
+  const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const update =
+    'Update the extension upgradeIdentity and its launcher contract in the same release';
+  const dockerfile = read('packages/updater/Dockerfile');
+  const entrypoint = dockerfile.match(/^ENTRYPOINT\s+(\[[^\n]+\])\s*$/m);
+  assert.ok(entrypoint, `Cannot parse packages/updater/Dockerfile ENTRYPOINT. ${update}.`);
+  const identity = read('docker/desktop-extension/bridge/main.go').match(
+    /^const upgradeIdentity = (.+)$/m,
+  )?.[1];
+  assert.ok(identity, `Cannot parse main.go upgradeIdentity. ${update}.`);
+  const entries = [...identity.matchAll(/\(eq \(index \. (\d+)\) "([^"]+)"\)/g)];
+  assert.deepEqual(
+    entries.map((entry) => Number(entry[1])),
+    [0, 1],
+    `Cannot parse main.go upgradeIdentity entrypoint. ${update}.`,
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry[2]),
+    JSON.parse(entrypoint[1]),
+    `packages/updater/Dockerfile ENTRYPOINT drifted from main.go upgradeIdentity. ${update}.`,
+  );
+  assert.match(
+    identity,
+    /eq \(len \.\) 2/,
+    `Update main.go upgradeIdentity length guard. ${update}.`,
+  );
+
+  const launchers = [
+    {
+      path: 'packages/api/src/routes/maintenance.ts',
+      args: /const args = \[([\s\S]*?)\n  \];/,
+      run: /'run',/,
+      env: (key) => new RegExp("'-e',\\s*`" + key + '='),
+    },
+    {
+      path: 'install/install.sh',
+      args: /\n  upgrade\)([\s\S]*?)\n    ;;/,
+      run: /exec docker run /,
+      env: (key) => new RegExp('-e ' + key + '='),
+    },
+    {
+      path: 'install/install.ps1',
+      args: /\n  'upgrade' \{[\s\S]*?\$dargs = @\(([\s\S]*?)\n    \)/,
+      run: /'run',/,
+      env: (key) => new RegExp("'-e',\\s*\"" + key + '='),
+    },
+  ];
+  for (const { path, args, run, env } of launchers) {
+    const body = read(path).match(args)?.[1];
+    const message = `Update ${path}'s updater docker run and the extension upgradeIdentity in the same release`;
+    assert.ok(body, `Cannot parse updater launch in ${path}. ${message}.`);
+    assert.match(body, run, `Missing updater docker run in ${path}. ${message}.`);
+    assert.match(
+      body,
+      /haive-updater|\n    image,/,
+      `Missing updater image in ${path}. ${message}.`,
+    );
+    for (const key of ['HAIVE_INSTALL_ID', 'COMPOSE_PROJECT_NAME']) {
+      assert.match(body, env(key), `${path} must pass -e ${key}= to the updater. ${message}.`);
+      assert.ok(
+        identity.includes(`${key}=`),
+        `Update main.go upgradeIdentity for ${key}. ${update}.`,
+      );
+    }
+  }
+});
+
 test('install failures render folder recovery advice from resolved and rejected host results', async () => {
   const directory = '/home/test/haive_desktop';
   for (const reason of [

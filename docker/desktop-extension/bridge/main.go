@@ -641,32 +641,52 @@ func (b bridge) install(ctx context.Context, version string, log io.Writer) erro
 // entrypoint and exact install/project environment identify it even while the
 // database is stopped for a snapshot. Project the environment to a boolean in
 // Docker's template: never return credentials or the whole Config to the helper.
-const upgradeIdentity = `{{$install := false}}{{range .Config.Env}}{{if or (eq . "HAIVE_INSTALL_ID=` + installID + `") (eq . "COMPOSE_PROJECT_NAME=` + installID + `")}}{{$install = true}}{{end}}{{end}}{{$updater := false}}{{with .Config.Entrypoint}}{{$updater = and (eq (len .) 2) (eq (index . 0) "node") (eq (index . 1) "packages/updater/dist/cli.js")}}{{end}}{{and .State.Running $install $updater}}`
+const upgradeIdentity = `{{$install := false}}{{range .Config.Env}}{{if or (eq . "HAIVE_INSTALL_ID=` + installID + `") (eq . "COMPOSE_PROJECT_NAME=` + installID + `")}}{{$install = true}}{{end}}{{end}}{{$updater := false}}{{with .Config.Entrypoint}}{{if eq (len .) 2}}{{$updater = and (eq (index . 0) "node") (eq (index . 1) "packages/updater/dist/cli.js")}}{{end}}{{end}}{{and .State.Running $install $updater}}`
 
 func (b bridge) checkUpgrade(ctx context.Context) error {
+	// A container may disappear between list and inspect. Retry the entire read
+	// once, including the listing, before refusing on an unreadable engine state.
+	var active bool
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		active, err = b.upgradeRunning(ctx)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if active {
+		return errors.New("An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status. If the updater is hung, stop that updater container in Docker Desktop, then check the upgrade state before retrying.")
+	}
+	return nil
+}
+
+func (b bridge) upgradeRunning(ctx context.Context) (bool, error) {
 	refusal := errors.New("Cannot check whether an upgrade is running. Install, Start and Stop are refused. Check Docker Desktop, then retry.")
 	out, err := b.run(ctx, "docker", []string{"container", "ls", "--no-trunc", "--format", "{{.ID}}"}, "", nil)
 	if err != nil {
-		return refusal
+		return false, refusal
 	}
 	ids := strings.Fields(out)
 	if len(ids) == 0 {
-		return nil
+		return false, nil
 	}
 	args := []string{"container", "inspect", "--format", upgradeIdentity}
 	for _, id := range ids {
 		if !containerIDPattern.MatchString(id) {
-			return refusal
+			return false, refusal
 		}
 		args = append(args, id)
 	}
 	out, err = b.run(ctx, "docker", args, "", nil)
 	if err != nil {
-		return refusal
+		return false, refusal
 	}
 	values := strings.Fields(out)
 	if len(values) != len(ids) {
-		return refusal
+		return false, refusal
 	}
 	active := false
 	for _, value := range values {
@@ -675,13 +695,10 @@ func (b bridge) checkUpgrade(ctx context.Context) error {
 			active = true
 		case "false":
 		default:
-			return refusal
+			return false, refusal
 		}
 	}
-	if active {
-		return errors.New("An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status.")
-	}
-	return nil
+	return active, nil
 }
 
 func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
