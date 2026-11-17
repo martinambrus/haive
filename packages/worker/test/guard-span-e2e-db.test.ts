@@ -205,7 +205,6 @@ const job = (name: string, data: Record<string, unknown>) =>
     opts: { attempts: 3 },
     moveToDelayed: async () => undefined,
   }) as unknown as Parameters<typeof processTaskJob>[0];
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe.skipIf(!url)('guarded spans end to end through the step engine, on Postgres', () => {
   let db: Database;
@@ -490,7 +489,6 @@ describe.skipIf(!url)('guarded spans end to end through the step engine, on Post
         .update(schema.taskSteps)
         .set({ updatedAt: old })
         .where(eq(schema.taskSteps.taskId, taskId));
-      await sleep(20);
     };
 
     it('a: a committed decision alone is completed by one entry job', async () => {

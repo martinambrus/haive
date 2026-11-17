@@ -791,7 +791,6 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       .update(schema.taskSteps)
       .set({ updatedAt: old })
       .where(eq(schema.taskSteps.taskId, taskId));
-    await new Promise((r) => setTimeout(r, 20));
   };
 
   it.each(SHAPES.map((shape, index) => [shape.name, index] as const))(
