@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +19,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,22 +51,25 @@ type request struct {
 }
 
 type state struct {
-	Installed bool            `json:"installed"`
-	Directory string          `json:"directory"`
-	Version   string          `json:"version,omitempty"`
-	AppURL    string          `json:"appUrl,omitempty"`
-	Healthy   bool            `json:"healthy"`
-	Services  json.RawMessage `json:"services,omitempty"`
-	Error     string          `json:"error,omitempty"`
+	Installed    bool            `json:"installed"`
+	Directory    string          `json:"directory"`
+	Version      string          `json:"version,omitempty"`
+	AppURL       string          `json:"appUrl,omitempty"`
+	Healthy      bool            `json:"healthy"`
+	Services     json.RawMessage `json:"services,omitempty"`
+	Notice       string          `json:"notice,omitempty"`
+	containerIDs map[string]string
+	Error        string `json:"error,omitempty"`
 }
 
 type runner func(context.Context, string, []string, string, io.Writer) (string, error)
 
 type bridge struct {
-	dir    string
-	os     string
-	run    runner
-	health func(string) bool
+	dir       string
+	os        string
+	run       runner
+	health    func(string) bool
+	portInUse func(int) bool
 }
 
 func validateRequest(r request) error {
@@ -109,7 +116,7 @@ func (b bridge) settings() (map[string]string, error) {
 		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if ok {
 			switch k {
-			case "HAIVE_INSTALL_ID", "COMPOSE_PROJECT_NAME", "HAIVE_VERSION", "HAIVE_WEB_PORT", "HAIVE_API_PORT":
+			case "HAIVE_INSTALL_ID", "COMPOSE_PROJECT_NAME", "HAIVE_VERSION", "HAIVE_WEB_PORT", "HAIVE_API_PORT", "HAIVE_MAILPIT_PORT":
 				m[k] = strings.Trim(v, "\r")
 			}
 		}
@@ -120,7 +127,7 @@ func (b bridge) settings() (map[string]string, error) {
 	if !pinnedPattern.MatchString(m["HAIVE_VERSION"]) {
 		return nil, errors.New("The installed release must be pinned to an exact version.")
 	}
-	for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT"} {
+	for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT", "HAIVE_MAILPIT_PORT"} {
 		var port int
 		if !portPattern.MatchString(m[key]) {
 			return nil, errors.New("Invalid installed port.")
@@ -208,6 +215,10 @@ func isolatedBundle(data []byte) error {
 }
 
 func (b bridge) inspect(ctx context.Context) (state, error) {
+	return b.inspectServices(ctx, true)
+}
+
+func (b bridge) inspectServices(ctx context.Context, includeMissing bool) (state, error) {
 	s := state{Directory: b.dir}
 	_, err := os.Lstat(filepath.Join(b.dir, ".env"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -246,22 +257,79 @@ func (b bridge) inspect(ctx context.Context) (state, error) {
 	if err != nil {
 		return s, errors.New("Compose returned unreadable status.")
 	}
-	s.Services, _ = json.Marshal(services)
-	// Do not probe a localhost port unless this project's API container is running.
-	webRunning := false
+	// Decode into an allowlist; IDs remain private for late-failure diagnostics.
+	clean := []serviceStatus{}
+	s.containerIDs = map[string]string{}
 	for _, raw := range services {
-		var service struct {
-			Service string
-			State   string
+		var item struct {
+			serviceStatus
+			ID string
 		}
-		if json.Unmarshal(raw, &service) == nil && service.Service == "api" && service.State == "running" {
-			s.Healthy = b.health("http://localhost:" + m["HAIVE_API_PORT"] + "/health")
+		if json.Unmarshal(raw, &item) != nil || item.Service == "" {
+			return s, errors.New("Compose returned unreadable status.")
 		}
-		if service.Service == "web" && service.State == "running" {
-			webRunning = true
+		s.containerIDs[item.Service] = item.ID
+		service := item.serviceStatus
+		// A stopped container must never borrow another app's localhost response.
+		if service.Service == "api" {
+			service.Health = "unhealthy"
+			if service.State == "running" && b.health("http://localhost:"+m["HAIVE_API_PORT"]+"/health") {
+				service.Health = "healthy"
+			}
+		}
+		if service.Service == "web" {
+			service.Health = "unreachable"
+			if service.State == "running" && b.health(s.AppURL) {
+				service.Health = "reachable"
+			}
+		}
+		clean = append(clean, service)
+	}
+	// ps omits services whose containers were removed. Include active services
+	// from the installed model so a missing worker cannot look like a ready stack.
+	if includeMissing {
+		configArgs, err := b.composeArgs("config", "--format", "json")
+		if err != nil {
+			return s, err
+		}
+		modelJSON, err := b.run(ctx, "docker", configArgs, b.dir, nil)
+		var model struct {
+			Services map[string]struct{ Profiles []string }
+		}
+		if err != nil || json.Unmarshal([]byte(modelJSON), &model) != nil || len(model.Services) == 0 {
+			return s, errors.New("Cannot read this install's service list. Check Docker Desktop and the installed bundle.")
+		}
+		names := []string{}
+		for name, service := range model.Services {
+			if len(service.Profiles) == 0 {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			found := false
+			for _, service := range clean {
+				if service.Service == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				clean = append(clean, serviceStatus{Service: name, State: "missing", Health: map[string]string{"api": "unhealthy", "web": "unreachable"}[name]})
+			}
 		}
 	}
-	s.Healthy = s.Healthy && webRunning
+	s.Services, _ = json.Marshal(clean)
+	apiOK, webOK := false, false
+	for _, service := range clean {
+		if service.Service == "api" {
+			apiOK = service.Health == "healthy"
+		}
+		if service.Service == "web" {
+			webOK = service.Health == "reachable"
+		}
+	}
+	s.Healthy = apiOK && webOK
 	return s, nil
 }
 
@@ -270,16 +338,53 @@ func (b bridge) installRecovery(reason string) error {
 }
 
 func (b bridge) portConflict(port string) error {
-	return fmt.Errorf("Port %s is held by another app. Stop that app or change HAIVE_WEB_PORT/HAIVE_API_PORT in %s, then Start again. See %s.extension.log.", port, filepath.Join(b.dir, ".env"), b.dir)
+	return fmt.Errorf("Port %s is held by another app. Stop that app or change HAIVE_WEB_PORT/HAIVE_API_PORT/HAIVE_MAILPIT_PORT in %s, then Start again. See %s.extension.log.", port, filepath.Join(b.dir, ".env"), b.dir)
 }
 
-// List running containers, excluding our own project, then inspect only their
-// structured published bindings. Docker ps's display Ports column is not parsed.
-func (b bridge) checkPorts(ctx context.Context, settings map[string]string) error {
+// Only these per-service fields cross the host/UI boundary. Compose ps includes
+// labels, mounts and host paths which the extension must not forward.
+type serviceStatus struct {
+	Service    string
+	State      string
+	Health     string
+	ExitCode   int
+	Publishers []publishedPort
+}
+type publishedPort struct {
+	URL           string
+	TargetPort    int
+	PublishedPort int
+	Protocol      string
+}
+
+const portTries = 50
+
+var portKeys = []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT", "HAIVE_MAILPIT_PORT"}
+
+// Check both host listener families. Bind probes also detect reserved/unavailable
+// host ports. Unsupported IPv6 is harmless on hosts with IPv6 disabled.
+func hostPortInUse(port int) bool {
+	for _, family := range []struct{ network, host string }{{"tcp4", "0.0.0.0"}, {"tcp6", "::"}} {
+		listener, err := net.Listen(family.network, net.JoinHostPort(family.host, strconv.Itoa(port)))
+		if err != nil {
+			if family.network == "tcp6" && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EPROTONOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+				continue
+			}
+			return true
+		}
+		listener.Close()
+	}
+	return false
+}
+
+// Read structured TCP bindings from all running containers. Own bindings exempt
+// the corresponding host listener; a foreign binding on that port still wins.
+func (b bridge) publishedPorts(ctx context.Context) (map[int]bool, map[int]bool, error) {
+	foreign, own := map[int]bool{}, map[int]bool{}
 	refusal := errors.New("Cannot check Docker's published ports. Refresh status and check Docker Desktop before starting. See " + b.dir + ".extension.log.")
 	out, err := b.run(ctx, "docker", []string{"ps", "--no-trunc", "--format", `{"ID":{{json .ID}},"Project":{{json (.Label "com.docker.compose.project")}}}`}, "", nil)
 	if err != nil {
-		return refusal
+		return nil, nil, refusal
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -287,44 +392,152 @@ func (b bridge) checkPorts(ctx context.Context, settings map[string]string) erro
 		}
 		var container struct{ ID, Project string }
 		if json.Unmarshal([]byte(line), &container) != nil || !containerIDPattern.MatchString(container.ID) {
-			return refusal
-		}
-		if container.Project == installID {
-			continue
+			return nil, nil, refusal
 		}
 		bindings, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container.ID}, "", nil)
 		if err != nil {
-			return refusal
+			return nil, nil, refusal
 		}
 		var ports map[string][]struct{ HostPort string }
 		if json.Unmarshal([]byte(bindings), &ports) != nil {
-			return refusal
+			return nil, nil, refusal
 		}
 		for name, published := range ports {
 			if !strings.HasSuffix(name, "/tcp") {
 				continue
 			}
 			for _, binding := range published {
-				for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT"} {
-					if binding.HostPort == settings[key] {
-						return b.portConflict(settings[key])
-					}
+				port, err := strconv.Atoi(binding.HostPort)
+				if err != nil || port < 1 || port > 65535 {
+					return nil, nil, refusal
+				}
+				if container.Project == installID {
+					own[port] = true
+				} else {
+					foreign[port] = true
 				}
 			}
 		}
+	}
+	return foreign, own, nil
+}
+
+// Prepare every selection before writing. Exhaustion leaves .env unchanged and
+// never reaches Compose up. Reserve sibling settings to avoid cross-service clashes.
+func (b bridge) repickPorts(ctx context.Context, settings map[string]string, tries int) (string, error) {
+	foreign, own, err := b.publishedPorts(ctx)
+	if err != nil {
+		return "", err
+	}
+	inUse := b.portInUse
+	if inUse == nil {
+		inUse = hostPortInUse
+	}
+	reserved := map[int]int{}
+	for _, key := range portKeys {
+		p, _ := strconv.Atoi(settings[key])
+		reserved[p]++
+	}
+	changes := map[string]string{}
+	notices := []string{}
+	for _, key := range portKeys {
+		old, _ := strconv.Atoi(settings[key])
+		reserved[old]--
+		selected := 0
+		for candidate := old; candidate <= 65535 && candidate < old+tries; candidate++ {
+			if reserved[candidate] > 0 || foreign[candidate] {
+				continue
+			}
+			if !own[candidate] && inUse(candidate) {
+				continue
+			}
+			selected = candidate
+			break
+		}
+		if selected == 0 {
+			return "", fmt.Errorf("No free port at or after %d after at most %d tries. Free a port, then Start again. See %s.extension.log.", old, tries, b.dir)
+		}
+		reserved[selected]++
+		if selected != old {
+			changes[key] = strconv.Itoa(selected)
+			service := map[string]string{"HAIVE_WEB_PORT": "web", "HAIVE_API_PORT": "api", "HAIVE_MAILPIT_PORT": "mailpit"}[key]
+			notices = append(notices, fmt.Sprintf("%s moved to %d because %d is in use", service, selected, old))
+		}
+	}
+	if len(changes) != 0 {
+		if err := b.rewritePorts(changes); err != nil {
+			return "", err
+		}
+		for key, value := range changes {
+			settings[key] = value
+		}
+	}
+	return strings.Join(notices, "; "), nil
+}
+
+// Change only the digits of each selected assignment. No line-ending conversion,
+// re-serialization, secret output, added keys or unrelated whitespace changes.
+func (b bridge) rewritePorts(changes map[string]string) error {
+	refusal := errors.New("Cannot safely update the installed port settings. Check the regular .env file and its permissions, then Start again.")
+	path := filepath.Join(b.dir, ".env")
+	if regular(path) != nil {
+		return refusal
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return refusal
+	}
+	updated := bytes.Clone(original)
+	for _, key := range portKeys {
+		value, changed := changes[key]
+		if !changed {
+			continue
+		}
+		pattern := regexp.MustCompile(`(?m)^([ \t]*` + key + `=)[0-9]{1,5}([ \t]*\r?)$`)
+		if len(pattern.FindAllIndex(updated, -1)) != 1 {
+			return refusal
+		}
+		updated = pattern.ReplaceAll(updated, []byte("${1}"+value+"${2}"))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return refusal
+	}
+	temp, err := os.CreateTemp(b.dir, ".env.extension-*")
+	if err != nil {
+		return refusal
+	}
+	defer os.Remove(temp.Name())
+	defer temp.Close()
+	if temp.Chmod(info.Mode().Perm()) != nil {
+		return refusal
+	}
+	if _, err = temp.Write(updated); err != nil {
+		return refusal
+	}
+	if temp.Sync() != nil || temp.Close() != nil {
+		return refusal
+	}
+	// Refuse a manual edit during selection/writing instead of overwriting it.
+	current, err := os.ReadFile(path)
+	if regular(path) != nil || err != nil || !bytes.Equal(original, current) {
+		return refusal
+	}
+	if os.Rename(temp.Name(), path) != nil {
+		return refusal
 	}
 	return nil
 }
 
 func (b bridge) startFailure(ctx context.Context, s state, settings map[string]string) error {
-	var services []struct{ ID, Service, State string }
+	var services []serviceStatus
 	if json.Unmarshal(s.Services, &services) == nil {
 		for _, service := range services {
-			key := map[string]string{"web": "HAIVE_WEB_PORT", "api": "HAIVE_API_PORT"}[service.Service]
-			if key == "" || service.State != "created" || !containerIDPattern.MatchString(service.ID) {
+			key := map[string]string{"web": "HAIVE_WEB_PORT", "api": "HAIVE_API_PORT", "mailpit": "HAIVE_MAILPIT_PORT"}[service.Service]
+			if key == "" || service.State != "created" || !containerIDPattern.MatchString(s.containerIDs[service.Service]) {
 				continue
 			}
-			out, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .State}}", service.ID}, "", nil)
+			out, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .State}}", s.containerIDs[service.Service]}, "", nil)
 			var detail struct{ Status, Error string }
 			if err == nil && json.Unmarshal([]byte(out), &detail) == nil && detail.Status == "created" && strings.Contains(detail.Error, portAllocationError) {
 				return b.portConflict(settings[key])
@@ -416,12 +629,13 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if err != nil {
 		return s, errors.New("No complete Haive Desktop install was found. Refresh status before continuing.")
 	}
+	notice := ""
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
 		if err = b.checkBundle(ctx); err != nil {
 			return s, err
 		}
-		if err = b.checkPorts(ctx, settings); err != nil {
+		if notice, err = b.repickPorts(ctx, settings, portTries); err != nil {
 			return s, err
 		}
 		action = []string{"up", "-d", "--no-build", "--wait", "--wait-timeout", "360"}
@@ -434,11 +648,14 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		if r.Action == "start" {
 			// Preserve whatever Compose can report, even after up --wait failed.
 			s, _ = b.inspect(ctx)
+			s.Notice = notice
 			return s, b.startFailure(ctx, s, settings)
 		}
 		return s, errors.New("Compose failed. Open service logs in Docker Desktop, or read " + logPath + ", then retry.")
 	}
-	return b.inspect(ctx)
+	s, err = b.inspectServices(ctx, r.Action != "stop")
+	s.Notice = notice
+	return s, err
 }
 
 func runCommand(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
@@ -480,6 +697,21 @@ func decodeRequest(args []string) (request, error) {
 	return r, json.Unmarshal(raw, &r)
 }
 
+// Do not follow redirects to unrelated hosts. A redirect from the app itself is
+// reachable; the API /health endpoint must return 200.
+func probeHTTP(url string) bool {
+	client := http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	res.Body.Close()
+	if strings.HasSuffix(url, "/health") {
+		return res.StatusCode == http.StatusOK
+	}
+	return res.StatusCode >= 200 && res.StatusCode < 400
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -495,15 +727,8 @@ func main() {
 		fmt.Println(`{"error":"Cannot locate the host user home directory."}`)
 		os.Exit(1)
 	}
-	b := bridge{dir: filepath.Join(home, installID), os: runtime.GOOS, run: runCommand, health: func(url string) bool {
-		client := http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		res, err := client.Get(url)
-		if err != nil {
-			return false
-		}
-		res.Body.Close()
-		return res.StatusCode == 200
-	}}
+	b := bridge{dir: filepath.Join(home, installID), os: runtime.GOOS, run: runCommand, health: probeHTTP}
+
 	s, err := b.handle(ctx, r)
 	if err != nil {
 		s.Error = err.Error()

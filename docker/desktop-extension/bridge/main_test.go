@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,14 +25,14 @@ func fixture(t *testing.T) bridge {
 		t.Fatal(err)
 	}
 	for name, data := range map[string]string{
-		".env":               "HAIVE_INSTALL_ID=" + installID + "\nCOMPOSE_PROJECT_NAME=" + installID + "\nHAIVE_VERSION=1.2.3\nHAIVE_WEB_PORT=3010\nHAIVE_API_PORT=3011\n",
+		".env":               "HAIVE_INSTALL_ID=" + installID + "\nCOMPOSE_PROJECT_NAME=" + installID + "\nHAIVE_VERSION=1.2.3\nHAIVE_WEB_PORT=3010\nHAIVE_API_PORT=3011\nHAIVE_MAILPIT_PORT=8025\n",
 		"docker-compose.yml": "services: {}", "docker-compose.run.yml": "services: {}",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return bridge{dir: dir, os: "linux", health: func(string) bool { return true }, run: func(_ context.Context, _ string, args []string, _ string, _ io.Writer) (string, error) {
+	return bridge{dir: dir, os: "linux", portInUse: func(int) bool { return false }, health: func(string) bool { return true }, run: func(_ context.Context, _ string, args []string, _ string, _ io.Writer) (string, error) {
 		if args[0] == "ps" {
 			return "", nil
 		}
@@ -198,16 +201,22 @@ func TestStatusFormatsAndHealthGating(t *testing.T) {
 		{"empty array", `[]`, true, false, false},
 		{"exited api", `{"Service":"api","State":"exited"}`, true, false, false},
 		{"api only", `{"Service":"api","State":"running"}`, true, true, false},
-		{"web only", `{"Service":"web","State":"running"}`, true, false, false},
+		{"web only", `{"Service":"web","State":"running"}`, true, true, false},
 		{"exited web", `[{"Service":"api","State":"running"},{"Service":"web","State":"exited"}]`, true, true, false},
 		{"failed health", `[{"Service":"api","State":"running"},{"Service":"web","State":"running"}]`, false, true, false},
 	} {
 		b := fixture(t)
-		b.run = func(context.Context, string, []string, string, io.Writer) (string, error) { return tc.output, nil }
+		base := b.run
+		b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+			if strings.HasSuffix(strings.Join(args, " "), "config --format json") {
+				return base(ctx, exe, args, dir, log)
+			}
+			return tc.output, nil
+		}
 		probed := false
 		b.health = func(url string) bool {
 			probed = true
-			if url != "http://localhost:3011/health" {
+			if url != "http://localhost:3011/health" && url != "http://localhost:3010" {
 				t.Fatal(url)
 			}
 			return tc.probeOK
@@ -487,19 +496,27 @@ func TestStartPortPrecheck(t *testing.T) {
 				return base(ctx, exe, args, dir, log)
 			}
 			_, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
-			if tc.want != "" {
-				if err == nil || !strings.Contains(err.Error(), "Port "+tc.want) || !strings.Contains(err.Error(), "another app") || !strings.Contains(err.Error(), "HAIVE_WEB_PORT/HAIVE_API_PORT") || !strings.Contains(err.Error(), filepath.Join(b.dir, ".env")) {
-					t.Fatalf("wrong refusal: %v", err)
-				}
-				if starts != 0 {
-					t.Fatal("started despite port clash")
-				}
-			} else if err != nil || starts != 1 {
+			if err != nil || starts != 1 {
 				t.Fatalf("start=%d err=%v", starts, err)
 			}
-			if tc.project == installID && inspections != 0 {
-				t.Fatal("inspected own project's ports")
+			selected, err := b.settings()
+			if err != nil {
+				t.Fatal(err)
 			}
+			wantWeb, wantAPI := "3010", "3011"
+			if tc.want == "3010" {
+				wantWeb = "3012"
+			}
+			if tc.want == "3011" {
+				wantAPI = "3012"
+			}
+			if selected["HAIVE_WEB_PORT"] != wantWeb || selected["HAIVE_API_PORT"] != wantAPI {
+				t.Fatal("wrong port selection")
+			}
+			if inspections != 1 {
+				t.Fatal("bindings not inspected")
+			}
+
 		})
 	}
 }
@@ -583,5 +600,268 @@ func TestStartFailureReasonMapping(t *testing.T) {
 				t.Fatalf("lost failure status: %+v", s)
 			}
 		})
+	}
+}
+
+func TestRound4RepickPreservesEnvironmentBytes(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		t.Run(fmt.Sprintf("ending-%q", ending), func(t *testing.T) {
+			b := fixture(t)
+			path := filepath.Join(b.dir, ".env")
+			data, _ := os.ReadFile(path)
+			original := strings.ReplaceAll(string(data), "\n", ending) + "# Keep every other byte: café  " + ending + "OTHER='literal $value'"
+			os.WriteFile(path, []byte(original), 0600)
+			os.Chmod(path, 0640)
+			base := b.run
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if args[0] == "ps" {
+					return fmt.Sprintf(`{"ID":%q,"Project":"other"}`, strings.Repeat("a", 64)), nil
+				}
+				if args[0] == "container" {
+					return `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3012"},{"HostPort":"8025"}]}`, nil
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			s, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, _ := os.ReadFile(path)
+			want := strings.Replace(original, "HAIVE_WEB_PORT=3010", "HAIVE_WEB_PORT=3013", 1)
+			want = strings.Replace(want, "HAIVE_MAILPIT_PORT=8025", "HAIVE_MAILPIT_PORT=8026", 1)
+			if string(actual) != want {
+				t.Fatal("environment bytes changed outside selected port values, or wrong ports")
+			}
+			if s.AppURL != "http://localhost:3013" {
+				t.Fatal("stale app URL")
+			}
+			encoded, _ := json.Marshal(s)
+			if !strings.Contains(string(encoded), "web moved to 3013 because 3010 is in use") {
+				t.Fatal("missing port move status")
+			}
+			info, _ := os.Stat(path)
+			if info.Mode().Perm() != 0640 {
+				t.Fatal("environment mode changed")
+			}
+		})
+	}
+}
+
+func TestRound4StatusIsAllowlistedAndProbesWeb(t *testing.T) {
+	b := fixture(t)
+	base := b.run
+	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if strings.HasSuffix(strings.Join(args, " "), "config --format json") {
+			return base(ctx, exe, args, dir, log)
+		}
+		return `[{"ID":"private-id","Service":"api","State":"running","Health":"","ExitCode":0,"Labels":{"private":"value"},"Mounts":["/private/path"],"Publishers":[{"URL":"0.0.0.0","TargetPort":3001,"PublishedPort":3011,"Protocol":"tcp","Extra":"private"}]},{"Service":"web","State":"running","Health":"","ExitCode":0}]`, nil
+	}
+	b.health = func(url string) bool { return strings.HasSuffix(url, "/health") }
+	s, err := b.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(s)
+	if strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), "Labels") || strings.Contains(string(encoded), "Mounts") || strings.Contains(string(encoded), `"ID"`) {
+		t.Fatal("full Compose status leaked")
+	}
+	if !strings.Contains(string(encoded), `"Health":"healthy"`) || !strings.Contains(string(encoded), `"Health":"unreachable"`) {
+		t.Fatal("missing extension probe results")
+	}
+	if s.Healthy {
+		t.Fatal("unreachable web marked healthy")
+	}
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal(s.Services, &rows) != nil || len(rows) != 2 {
+		t.Fatal("unexpected service payload")
+	}
+	want := map[string]bool{"Service": true, "State": true, "Health": true, "ExitCode": true, "Publishers": true}
+	for _, row := range rows {
+		if len(row) != len(want) {
+			t.Fatal("unexpected per-service fields")
+		}
+		for key := range row {
+			if !want[key] {
+				t.Fatal("unapproved per-service field")
+			}
+		}
+	}
+
+}
+
+func TestPortRepickOwnBindingsIgnoreHostListenerButForeignWins(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		b := fixture(t)
+		base := b.run
+		probedOwn := false
+		b.portInUse = func(port int) bool {
+			if port == 3010 {
+				probedOwn = true
+			}
+			return true
+		}
+		b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+			if args[0] == "ps" {
+				out := fmt.Sprintf(`{"ID":%q,"Project":%q}`, strings.Repeat("a", 64), installID)
+				if foreign {
+					out += "\n" + fmt.Sprintf(`{"ID":%q,"Project":"other"}`, strings.Repeat("b", 64))
+				}
+				return out, nil
+			}
+			if args[0] == "container" {
+				return `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3011"},{"HostPort":"8025"}]}`, nil
+			}
+			return base(ctx, exe, args, dir, log)
+		}
+		settings, _ := b.settings()
+		notice, err := b.repickPorts(context.Background(), settings, 2)
+		if foreign {
+			if err == nil {
+				t.Fatal("foreign binding ignored")
+			}
+		} else if err != nil || notice != "" || probedOwn {
+			t.Fatal("own-project listener treated as conflict")
+		}
+	}
+}
+
+func TestPortRepickHostListenersExhaustionAndPortCeiling(t *testing.T) {
+	if portTries != 50 {
+		t.Fatal("production bound changed")
+	}
+	for _, exhaustion := range []bool{false, true} {
+		b := fixture(t)
+		before, _ := os.ReadFile(filepath.Join(b.dir, ".env"))
+		checked := []int{}
+		b.portInUse = func(port int) bool { checked = append(checked, port); return exhaustion || port == 3010 }
+		settings, _ := b.settings()
+		_, err := b.repickPorts(context.Background(), settings, 3)
+		after, _ := os.ReadFile(filepath.Join(b.dir, ".env"))
+		if exhaustion {
+			if err == nil || !strings.Contains(err.Error(), "No free port") || string(after) != string(before) || len(checked) > 3 {
+				t.Fatal("exhaustion mutated or failed to refuse")
+			}
+		} else if err != nil || settings["HAIVE_WEB_PORT"] != "3012" {
+			t.Fatal("host listener conflict not re-picked")
+		}
+	}
+	b := fixture(t)
+	settings, _ := b.settings()
+	settings["HAIVE_WEB_PORT"] = "65535"
+	b.portInUse = func(port int) bool {
+		if port > 65535 {
+			t.Fatal("invalid port probed")
+		}
+		return true
+	}
+	if _, err := b.repickPorts(context.Background(), settings, portTries); err == nil {
+		t.Fatal("port ceiling not refused")
+	}
+}
+
+func TestExhaustionRefusesBeforeComposeOrEnvironmentWrite(t *testing.T) {
+	b := fixture(t)
+	before, _ := os.ReadFile(filepath.Join(b.dir, ".env"))
+	base := b.run
+	starts := 0
+	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if log != nil {
+			starts++
+		}
+		return base(ctx, exe, args, dir, log)
+	}
+	// A later service exhausting must not leave an earlier service's planned move.
+	b.portInUse = func(port int) bool { return port != 3012 }
+	_, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+	after, _ := os.ReadFile(filepath.Join(b.dir, ".env"))
+	if err == nil || starts != 0 || string(before) != string(after) {
+		t.Fatal("exhaustion changed install")
+	}
+}
+
+func TestEnvironmentPortRewriteRefusesAmbiguousOrLinkedAssignments(t *testing.T) {
+	for _, kind := range []string{"duplicate", "missing", "linked"} {
+		b := fixture(t)
+		path := filepath.Join(b.dir, ".env")
+		original, _ := os.ReadFile(path)
+		switch kind {
+		case "duplicate":
+			os.WriteFile(path, append(original, []byte("HAIVE_WEB_PORT=3010\n")...), 0600)
+		case "missing":
+			os.WriteFile(path, []byte(strings.ReplaceAll(string(original), "HAIVE_WEB_PORT=3010\n", "")), 0600)
+		case "linked":
+			target := filepath.Join(b.dir, "untouched")
+			os.WriteFile(target, original, 0600)
+			os.Remove(path)
+			os.Symlink(target, path)
+		}
+		before, _ := os.ReadFile(path)
+		if err := b.rewritePorts(map[string]string{"HAIVE_WEB_PORT": "3012"}); err == nil {
+			t.Fatal("unsafe rewrite accepted")
+		}
+		after, _ := os.ReadFile(path)
+		if string(before) != string(after) {
+			t.Fatal("refusal changed bytes")
+		}
+	}
+}
+
+func TestRealHostListenerProbe(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if !hostPortInUse(port) {
+		t.Fatal("host listener missed")
+	}
+	listener.Close()
+	if hostPortInUse(port) {
+		t.Fatal("released port considered busy")
+	}
+}
+
+func TestHTTPProbeTreatsAppRedirectAsReachableAndHealthRequires200(t *testing.T) {
+	for _, code := range []int{200, 302, 404, 503} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "http://unrelated.invalid/")
+			w.WriteHeader(code)
+		}))
+		if probeHTTP(server.URL) != (code < 400) || probeHTTP(server.URL+"/health") != (code == 200) {
+			t.Error("wrong probe result", code)
+		}
+		server.Close()
+		if probeHTTP(server.URL) {
+			t.Fatal("closed app reachable")
+		}
+	}
+}
+
+func TestStatusIncludesMissingActiveServicesButNotInactiveProfiles(t *testing.T) {
+	b := fixture(t)
+	base := b.run
+	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if strings.HasSuffix(strings.Join(args, " "), "config --format json") {
+			return `{"services":{"api":{},"web":{},"worker":{},"optional":{"profiles":["tools"]}}}`, nil
+		}
+		return base(ctx, exe, args, dir, log)
+	}
+	s, err := b.inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var services []serviceStatus
+	json.Unmarshal(s.Services, &services)
+	missingWorker := false
+	for _, service := range services {
+		if service.Service == "worker" && service.State == "missing" {
+			missingWorker = true
+		}
+		if service.Service == "optional" {
+			t.Fatal("inactive profile considered required")
+		}
+	}
+	if !missingWorker {
+		t.Fatal("missing active service hidden")
 	}
 }

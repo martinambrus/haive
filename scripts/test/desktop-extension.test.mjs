@@ -7,12 +7,17 @@ import {
   createController,
   encodeRequest,
   statusMessage,
+  serviceHealth,
 } from '../../docker/desktop-extension/ui/controller.js';
 
 const installed = {
   installed: true,
   version: '1.2.3',
   healthy: true,
+  services: [
+    { Service: 'api', State: 'running', Health: 'healthy' },
+    { Service: 'web', State: 'running', Health: 'reachable' },
+  ],
   appUrl: 'http://localhost:3010',
 };
 function fixture(options) {
@@ -88,6 +93,14 @@ test('install and every start require explicit consent; status and logs do not',
     consent: 'accept-host-root',
   });
   assert.equal(f.views.at(-1).controls.install, false);
+  f.respond({
+    ...installed,
+    services: [
+      { Service: 'api', State: 'exited' },
+      { Service: 'web', State: 'running', Health: 'unreachable' },
+    ],
+  });
+  await f.c.run('status');
   f.c.accept(false);
   await assert.rejects(f.c.run('start'), /unavailable/);
   await f.c.run('stop');
@@ -236,7 +249,7 @@ test('failed Start refreshes services and controls without losing the reason', a
         const result = { stdout: JSON.stringify({ error: 'Port 3010 is held by another app.' }) };
         f.respond({
           ...installed,
-          services: [{ Service: 'web', State: 'running', Health: 'healthy' }],
+          services: [{ Service: 'web', State: 'running', Health: 'reachable' }],
         });
         if (rejected) throw result;
         return result;
@@ -290,7 +303,7 @@ test('status polls during Start without enabling actions or overwriting completi
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture();
   t.after(() => f.c.dispose());
-  f.respond({ ...installed, healthy: false });
+  f.respond({ ...installed, healthy: false, services: [] });
   await f.c.run('status');
   f.c.accept(true);
   const exec = f.dd.extension.host.cli.exec;
@@ -394,7 +407,7 @@ test('created containers after a failed start can be retried after correcting po
   };
   await f.c.run('start');
   assert.equal(f.views.at(-1).controls.start, true);
-  assert.equal(f.views.at(-1).controls.stop, true);
+  assert.equal(f.views.at(-1).controls.stop, false);
   assert.equal(f.views.at(-1).state.services[0].State, 'created');
   f.c.dispose();
 });
@@ -464,4 +477,223 @@ test('starting progress counts the migration one-shot but not stopped services',
     }),
     'Starting… 2/4 services ready. See service progress below.',
   );
+});
+
+test('round 4 controls follow per-service states rather than aggregate readiness', () => {
+  const cases = [
+    ['empty', [], false, true, false],
+    ['created', [{ Service: 'web', State: 'created' }], false, true, false],
+    ['stopped', [{ Service: 'web', State: 'exited', Health: 'reachable' }], false, true, false],
+    [
+      'running unhealthy',
+      [{ Service: 'web', State: 'running', Health: 'unreachable' }],
+      true,
+      true,
+      false,
+    ],
+    [
+      'web ready, API down',
+      [
+        { Service: 'web', State: 'running', Health: 'reachable' },
+        { Service: 'api', State: 'exited' },
+      ],
+      true,
+      true,
+      true,
+    ],
+    [
+      'all ready',
+      [
+        { Service: 'web', State: 'running', Health: 'reachable' },
+        { Service: 'api', State: 'running', Health: 'healthy' },
+        { Service: 'worker', State: 'running' },
+        { Service: 'db-migrate', State: 'exited', ExitCode: 0 },
+      ],
+      true,
+      false,
+      true,
+    ],
+    [
+      'migration failed',
+      [
+        { Service: 'web', State: 'running', Health: 'reachable' },
+        { Service: 'db-migrate', State: 'exited', ExitCode: 1 },
+      ],
+      true,
+      true,
+      true,
+    ],
+    [
+      'restarting',
+      [{ Service: 'web', State: 'restarting', Health: 'reachable' }],
+      false,
+      true,
+      false,
+    ],
+  ];
+  for (const [name, services, stop, start, open] of cases) {
+    const state = { ...installed, services };
+    assert.deepEqual(
+      controls(state, false, true),
+      { install: false, stop, start, open, status: true, logs: true },
+      name,
+    );
+    assert.equal(controls(state, false, false).start, false, name);
+    for (const action of ['install', 'start', 'stop', 'open'])
+      assert.equal(controls(state, true, true)[action], false, name);
+  }
+});
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
+test('round 4 consent survives installed tab reload, unchecking, and separate viewers', async () => {
+  const storage = memoryStorage();
+  const f = fixture({ storage });
+  f.respond({ ...installed, directory: '/viewer/haive_desktop' });
+  await f.c.run('status');
+  assert.equal(f.views.at(-1).accepted, false);
+  f.c.accept(true);
+  f.c.dispose();
+  const reload = fixture({ storage });
+  reload.respond({ ...installed, directory: '/viewer/haive_desktop' });
+  await reload.c.run('status');
+  assert.equal(reload.views.at(-1).accepted, true);
+  const separate = fixture({ storage: memoryStorage() });
+  separate.respond(installed);
+  await separate.c.run('status');
+  assert.equal(separate.views.at(-1).accepted, false);
+  reload.c.accept(false);
+  reload.c.dispose();
+  const unticked = fixture({ storage });
+  unticked.respond({ ...installed, directory: '/viewer/haive_desktop' });
+  await unticked.c.run('status');
+  assert.equal(unticked.views.at(-1).accepted, false);
+  separate.c.dispose();
+  unticked.c.dispose();
+});
+
+test('round 4 a fresh install never inherits stored consent; storage failures default unticked', async () => {
+  const storage = memoryStorage();
+  const f = fixture({ storage });
+  f.respond({ ...installed, directory: '/viewer/haive_desktop' });
+  await f.c.run('status');
+  f.c.accept(true);
+  f.c.dispose();
+  const fresh = fixture({ storage });
+  await fresh.c.run('status');
+  assert.equal(fresh.views.at(-1).accepted, false);
+  assert.equal(fresh.views.at(-1).controls.install, false);
+  fresh.c.dispose();
+  for (const store of [
+    null,
+    {
+      getItem() {
+        throw Error('unavailable');
+      },
+      setItem() {
+        throw Error('unavailable');
+      },
+      removeItem() {
+        throw Error('unavailable');
+      },
+    },
+  ]) {
+    const next = fixture({ storage: store });
+    next.respond(installed);
+    await next.c.run('status');
+    assert.equal(next.views.at(-1).accepted, false);
+    next.c.accept(true);
+    assert.equal(next.views.at(-1).accepted, true);
+    next.c.dispose();
+  }
+});
+
+test('round 4 health labels identify extension probes', () => {
+  assert.equal(serviceHealth({ Service: 'api', Health: 'healthy' }), 'healthy (extension probe)');
+  assert.equal(
+    serviceHealth({ Service: 'web', Health: 'reachable' }),
+    'reachable (extension probe)',
+  );
+  assert.equal(serviceHealth({ Service: 'postgres', Health: 'healthy' }), 'healthy');
+});
+
+test('round 4 port move notice survives follow-up status and automatic polls', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  t.after(() => f.c.dispose());
+  f.respond({ ...installed, services: [] });
+  await f.c.run('status');
+  f.c.accept(true);
+  const exec = f.dd.extension.host.cli.exec;
+  f.dd.extension.host.cli.exec = async (...args) => {
+    if (decode(args[1][0]).action === 'start') {
+      f.respond({ ...installed, appUrl: 'http://localhost:3012' });
+      return {
+        stdout: JSON.stringify({
+          ...installed,
+          notice: 'web moved to 3012 because 3010 is in use',
+        }),
+      };
+    }
+    return exec(...args);
+  };
+  await f.c.run('start');
+  assert.match(f.views.at(-1).statusMessage, /web moved to 3012 because 3010 is in use/);
+  t.mock.timers.tick(30000);
+  await flush();
+  assert.match(f.views.at(-1).statusMessage, /web moved to 3012/);
+  f.c.open();
+  assert.deepEqual(f.calls.at(-1), ['open', 'http://localhost:3012/setup']);
+});
+
+test('stored installed consent restores after an initial status failure', async () => {
+  const storage = memoryStorage();
+  const prior = fixture({ storage });
+  prior.respond(installed);
+  await prior.c.run('status');
+  prior.c.accept(true);
+  prior.c.dispose();
+  const next = fixture({ storage });
+  next.respond({ error: 'Status temporarily unavailable' });
+  await next.c.run('status');
+  assert.equal(next.views.at(-1).accepted, false);
+  next.respond(installed);
+  await next.c.run('status');
+  assert.equal(next.views.at(-1).accepted, true);
+  next.c.dispose();
+});
+
+test('stored consent is scoped to engine and directory and carries through a fresh explicit install', async () => {
+  const storage = memoryStorage();
+  const f = fixture({ storage });
+  const local = { ...installed, directory: '/viewer/haive_desktop' };
+  f.respond({ installed: false, directory: local.directory });
+  await f.c.run('status');
+  f.c.accept(true);
+  f.respond(local);
+  await f.c.run('install');
+  f.c.dispose();
+  const reload = fixture({ storage });
+  reload.respond(local);
+  await reload.c.run('status');
+  assert.equal(reload.views.at(-1).accepted, true);
+  reload.c.dispose();
+  const moved = fixture({ storage });
+  moved.respond({ ...local, directory: '/another/haive_desktop' });
+  await moved.c.run('status');
+  assert.equal(moved.views.at(-1).accepted, false);
+  moved.c.dispose();
+  const engine = fixture({ storage });
+  engine.respond(local);
+  engine.dd.docker.cli.exec = async () => ({ stdout: 'another-engine' });
+  await engine.c.run('status');
+  assert.equal(engine.views.at(-1).accepted, false);
+  engine.c.dispose();
 });

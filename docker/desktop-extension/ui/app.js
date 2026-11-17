@@ -1,15 +1,16 @@
 import { createDockerDesktopClient } from '@docker/extension-api-client';
-import { createController } from './controller.js';
+import { createController, serviceHealth } from './controller.js';
 
 const ddClient = createDockerDesktopClient();
 const byId = (id) => document.getElementById(id);
 const controller = createController(
   ddClient,
-  ({ state, busy, controls, message, statusMessage }) => {
+  ({ state, busy, accepted, controls, message, statusMessage }) => {
     for (const [action, enabled] of Object.entries(controls)) byId(action).disabled = !enabled;
     byId('worker-logs').disabled = busy;
     byId('version').disabled = busy || Boolean(state?.installed);
     byId('consent').disabled = busy;
+    byId('consent').checked = accepted;
     byId('message').textContent = message;
     byId('status-summary').textContent = statusMessage;
     byId('directory').textContent = state?.directory ? `Install directory: ${state.directory}` : '';
@@ -21,7 +22,15 @@ const controller = createController(
     rows.replaceChildren();
     for (const service of state?.services ?? []) {
       const row = document.createElement('tr');
-      for (const value of [service.Service, service.State, service.Health || '—']) {
+      for (const value of [
+        service.Service,
+        service.State,
+        serviceHealth(service),
+        service.State === 'exited' ? service.ExitCode : '—',
+        (service.Publishers ?? [])
+          .map((port) => `${port.URL}:${port.PublishedPort} → ${port.TargetPort}/${port.Protocol}`)
+          .join(', ') || '—',
+      ]) {
         const cell = document.createElement('td');
         cell.textContent = value;
         row.append(cell);

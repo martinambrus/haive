@@ -19,29 +19,52 @@ export function isStarting(state) {
   );
 }
 
+export function serviceReady(service) {
+  if (service.Service === 'db-migrate') return service.State === 'exited' && service.ExitCode === 0;
+  if (service.State !== 'running') return false;
+  if (service.Service === 'api') return service.Health === 'healthy';
+  if (service.Service === 'web') return service.Health === 'reachable';
+  return !service.Health || service.Health === 'healthy';
+}
+
+export function allReady(state) {
+  return Boolean(state?.services?.length) && state.services.every(serviceReady);
+}
+
+export function serviceHealth(service) {
+  const value = service.Health || '—';
+  return ['api', 'web'].includes(service.Service) ? `${value} (extension probe)` : value;
+}
+
 export function statusMessage(state) {
   if (state?.error)
     return `Status unavailable: ${state.error} Last known service states are shown below.`;
   if (!state) return 'Reading status…';
   if (!state.installed) return 'Haive Desktop is not installed.';
   if (isStarting(state)) {
-    const ready = state.services.filter(
-      (service) =>
-        (service.State === 'running' && (!service.Health || service.Health === 'healthy')) ||
-        (service.Service === 'db-migrate' && service.State === 'exited' && service.ExitCode === 0),
-    ).length;
+    const ready = state.services.filter(serviceReady).length;
     return `Starting… ${ready}/${state.services.length} services ready. See service progress below.`;
   }
-  return state.healthy ? 'Haive is ready.' : 'Haive is not ready. Check service status below.';
+  return allReady(state) ? 'Haive is ready.' : 'Haive is not ready. Check service status below.';
 }
 
 export function controls(state, busy, accepted) {
   const known = state !== null && !state.error;
   return {
     install: !busy && known && !state.installed && accepted,
-    start: !busy && known && state.installed && !state.healthy && accepted,
-    stop: !busy && known && state.installed,
-    open: !busy && known && state.installed && state.healthy,
+    start: !busy && known && state.installed && !allReady(state) && accepted,
+    stop:
+      !busy &&
+      known &&
+      state.installed &&
+      Boolean(state.services?.some((service) => service.State === 'running')),
+    open:
+      !busy &&
+      known &&
+      state.installed &&
+      Boolean(
+        state.services?.some((service) => service.Service === 'web' && serviceReady(service)),
+      ),
     status: !busy,
     logs: !busy,
   };
@@ -55,7 +78,44 @@ export function appURL(state) {
   return url + '/setup';
 }
 
-export function createController(ddClient, render, { document: doc = globalThis.document } = {}) {
+export function createController(ddClient, render, options = {}) {
+  const { document: doc = globalThis.document } = options;
+  // Storage belongs to this viewer, never the host install. Some WebViews deny it.
+  let storage;
+  try {
+    storage = Object.hasOwn(options, 'storage') ? options.storage : globalThis.localStorage;
+  } catch {}
+  let engine = '';
+  let loadedConsentKey;
+  let portNotice = '';
+  const consentKey = (next) =>
+    `haive-desktop:consent:${JSON.stringify([engine, next?.directory || ''])}`;
+  const saveConsent = (next, value) => {
+    try {
+      if (value) storage?.setItem(consentKey(next), 'accepted');
+      else storage?.removeItem(consentKey(next));
+    } catch {}
+  };
+  const adoptState = (next) => {
+    const key = consentKey(next);
+    if (!next.installed) {
+      saveConsent(next, false);
+      if (!state || state.installed) accepted = false;
+      loadedConsentKey = undefined;
+    } else if (loadedConsentKey !== key) {
+      // An explicit tick made for this fresh Install carries into the installed
+      // view. A newly opened tab can restore consent only for an installed instance.
+      if (state?.installed !== false) {
+        accepted = false;
+        try {
+          accepted = storage?.getItem(key) === 'accepted';
+        } catch {}
+      }
+      loadedConsentKey = key;
+      saveConsent(next, accepted);
+    }
+    state = next;
+  };
   let state = null;
   let busy = false;
   let accepted = false;
@@ -71,13 +131,16 @@ export function createController(ddClient, render, { document: doc = globalThis.
         state,
         busy,
         accepted,
-        message: operationError || message || statusMessage(state),
-        statusMessage: statusMessage(state),
+        message: [operationError || message || statusMessage(state), portNotice]
+          .filter(Boolean)
+          .join(' '),
+        statusMessage: [statusMessage(state), portNotice].filter(Boolean).join(' '),
         controls: controls(state, busy, accepted),
       });
   };
   const host = async (action, version = 'latest') => {
     const engineResult = await ddClient.docker.cli.exec('info', ['--format', '{{.ID}}']);
+    engine = engineResult.stdout.trim();
     const binary = ddClient.host.platform === 'win32' ? 'haive-desktop.exe' : 'haive-desktop';
     if (!ddClient.extension.host?.cli)
       throw new Error('The extension host backend is unavailable.');
@@ -123,7 +186,7 @@ export function createController(ddClient, render, { document: doc = globalThis.
     try {
       const next = await host('status');
       if (disposed || token !== revision) return;
-      state = next;
+      adoptState(next);
     } catch (error) {
       if (disposed || token !== revision) return;
       state = {
@@ -157,6 +220,7 @@ export function createController(ddClient, render, { document: doc = globalThis.
     },
     accept(value) {
       accepted = value === true;
+      if (state?.installed) saveConsent(state, accepted);
       update();
     },
     async run(action, version = 'latest') {
@@ -180,7 +244,9 @@ export function createController(ddClient, render, { document: doc = globalThis.
       try {
         if (action === 'status') await readStatus(token);
         else {
-          state = await host(action, version);
+          const next = await host(action, version);
+          portNotice = next.notice || '';
+          adoptState(next);
           message =
             action === 'install'
               ? 'Installed. Choose Start, then Open app to create your first administrator.'
@@ -188,6 +254,7 @@ export function createController(ddClient, render, { document: doc = globalThis.
         }
       } catch (error) {
         operationError = error.message;
+        portNotice = error.state?.notice || portNotice;
         // Keep the last service snapshot when the helper returns an error-only result.
         if (error.state?.directory) state = { ...state, directory: error.state.directory };
       } finally {
