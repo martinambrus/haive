@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -15,7 +16,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func fixture(t *testing.T) bridge {
@@ -603,7 +606,7 @@ func TestStartFailureReasonMapping(t *testing.T) {
 	}
 }
 
-func TestRound4RepickPreservesEnvironmentBytes(t *testing.T) {
+func TestRepickPreservesEnvironmentBytes(t *testing.T) {
 	for _, ending := range []string{"\n", "\r\n"} {
 		t.Run(fmt.Sprintf("ending-%q", ending), func(t *testing.T) {
 			b := fixture(t)
@@ -647,7 +650,7 @@ func TestRound4RepickPreservesEnvironmentBytes(t *testing.T) {
 	}
 }
 
-func TestRound4StatusIsAllowlistedAndProbesWeb(t *testing.T) {
+func TestStatusIsAllowlistedAndProbesWeb(t *testing.T) {
 	b := fixture(t)
 	base := b.run
 	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
@@ -709,15 +712,19 @@ func TestPortRepickOwnBindingsIgnoreHostListenerButForeignWins(t *testing.T) {
 				return out, nil
 			}
 			if args[0] == "container" {
-				return `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3011"},{"HostPort":"8025"}]}`, nil
+				ports := `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3011"},{"HostPort":"8025"}]}`
+				if foreign {
+					ports += "\n" + ports
+				}
+				return ports, nil
 			}
 			return base(ctx, exe, args, dir, log)
 		}
 		settings, _ := b.settings()
 		notice, err := b.repickPorts(context.Background(), settings, 2)
 		if foreign {
-			if err == nil {
-				t.Fatal("foreign binding ignored")
+			if err == nil || !strings.Contains(err.Error(), "No free port at or after 3010 after at most 2 tries") || notice != "" || probedOwn {
+				t.Fatalf("foreign binding did not refuse with bounded exhaustion: %v", err)
 			}
 		} else if err != nil || notice != "" || probedOwn {
 			t.Fatal("own-project listener treated as conflict")
@@ -863,5 +870,185 @@ func TestStatusIncludesMissingActiveServicesButNotInactiveProfiles(t *testing.T)
 	}
 	if !missingWorker {
 		t.Fatal("missing active service hidden")
+	}
+}
+
+func assertNoEnvironmentTemps(t *testing.T, dir string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, ".env.extension-*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("temporary environment files remain: %v %v", files, err)
+	}
+}
+
+func TestEnvironmentRenameRetriesWithoutChangingOriginal(t *testing.T) {
+	for _, succeeds := range []bool{false, true} {
+		t.Run(fmt.Sprintf("succeeds-%v", succeeds), func(t *testing.T) {
+			b := fixture(t)
+			b.os = "windows"
+			path := filepath.Join(b.dir, ".env")
+			original, _ := os.ReadFile(path)
+			calls, sleeps := 0, 0
+			b.sleep = func(delay time.Duration) {
+				sleeps++
+				if delay <= 0 || delay > 200*time.Millisecond {
+					t.Fatal("retry sleep is not short")
+				}
+			}
+			b.rename = func(from, to string) error {
+				calls++
+				current, _ := os.ReadFile(path)
+				if !bytes.Equal(current, original) {
+					t.Fatal("original changed between rename tries")
+				}
+				if succeeds && calls == 3 {
+					return os.Rename(from, to)
+				}
+				return os.ErrPermission
+			}
+			err := b.rewritePorts(map[string]string{"HAIVE_WEB_PORT": "3012"})
+			if succeeds {
+				if err != nil || calls != 3 || sleeps != 2 {
+					t.Fatalf("retry did not succeed: calls=%d sleeps=%d err=%v", calls, sleeps, err)
+				}
+			} else {
+				current, _ := os.ReadFile(path)
+				if err == nil || calls != 4 || sleeps != 3 || !bytes.Equal(current, original) {
+					t.Fatalf("retry not bounded or changed original: calls=%d sleeps=%d err=%v", calls, sleeps, err)
+				}
+			}
+			assertNoEnvironmentTemps(t, b.dir)
+		})
+	}
+}
+
+func TestEnvironmentRewriteRefusesChangedBytesAndCleansTemp(t *testing.T) {
+	for _, duringRetry := range []bool{false, true} {
+		b := fixture(t)
+		b.os = "windows"
+		path := filepath.Join(b.dir, ".env")
+		original, _ := os.ReadFile(path)
+		edited := append(bytes.Clone(original), []byte("# manual edit\n")...)
+		reads, renames := 0, 0
+		b.readEnv = func(name string) ([]byte, error) {
+			reads++
+			if reads == 2 && !duringRetry {
+				os.WriteFile(path, edited, 0600)
+			}
+			return os.ReadFile(name)
+		}
+		b.rename = func(string, string) error { renames++; return os.ErrPermission }
+		b.sleep = func(time.Duration) { os.WriteFile(path, edited, 0600) }
+		err := b.rewritePorts(map[string]string{"HAIVE_WEB_PORT": "3012"})
+		current, _ := os.ReadFile(path)
+		wantRenames := 0
+		if duringRetry {
+			wantRenames = 1
+		}
+		if err == nil || !bytes.Equal(current, edited) || renames != wantRenames {
+			t.Fatalf("concurrent edit not preserved: renames=%d err=%v", renames, err)
+		}
+		assertNoEnvironmentTemps(t, b.dir)
+	}
+}
+
+func TestEnvironmentPortAssignmentLastWithoutNewline(t *testing.T) {
+	for _, ending := range []string{"\n", "\r\n"} {
+		b := fixture(t)
+		path := filepath.Join(b.dir, ".env")
+		original := "# Keep café" + ending + "OTHER='literal $value'" + ending + " \tHAIVE_WEB_PORT=3010 \t"
+		if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.rewritePorts(map[string]string{"HAIVE_WEB_PORT": "3012"}); err != nil {
+			t.Fatal(err)
+		}
+		current, _ := os.ReadFile(path)
+		if string(current) != strings.Replace(original, "3010", "3012", 1) {
+			t.Fatal("last assignment bytes changed")
+		}
+		assertNoEnvironmentTemps(t, b.dir)
+	}
+}
+
+func TestIPv6UnavailableDoesNotConflictAfterIPv4Passes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		busy bool
+	}{
+		{"unsupported", syscall.EAFNOSUPPORT, false},
+		{"unavailable", &net.AddrError{Err: "family unavailable", Addr: "::"}, false},
+		{"unexpected family error", errors.New("IPv6 unavailable"), false},
+		{"bind conflict", addressInUse, true},
+		{"access denied", os.ErrPermission, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			busy := hostPortInUseWithListen(3010, func(network, address string) (net.Listener, error) {
+				calls++
+				if network == "tcp4" {
+					return &probeListener{}, nil
+				}
+				return nil, &net.OpError{Op: "listen", Net: network, Err: &os.SyscallError{Syscall: "bind", Err: tc.err}}
+			})
+			if busy != tc.busy || calls != 2 {
+				t.Fatalf("busy=%v calls=%d", busy, calls)
+			}
+		})
+	}
+	if !hostPortInUseWithListen(3010, func(string, string) (net.Listener, error) { return nil, errors.New("IPv4 failed") }) {
+		t.Fatal("IPv4 failure must refuse")
+	}
+}
+
+type probeListener struct{}
+
+func (*probeListener) Accept() (net.Conn, error) { return nil, errors.New("unused") }
+func (*probeListener) Close() error              { return nil }
+func (*probeListener) Addr() net.Addr            { return &net.TCPAddr{} }
+
+func TestPublishedPortsInspectsAllRunningContainersTogether(t *testing.T) {
+	b := fixture(t)
+	inspections := 0
+	ids := []string{strings.Repeat("a", 64), strings.Repeat("b", 64)}
+	b.run = func(_ context.Context, _ string, args []string, _ string, _ io.Writer) (string, error) {
+		if args[0] == "ps" {
+			return fmt.Sprintf(`{"ID":%q,"Project":%q}`+"\n"+`{"ID":%q,"Project":"other"}`, ids[0], installID, ids[1]), nil
+		}
+		inspections++
+		if args[0] != "container" || args[1] != "inspect" || !reflect.DeepEqual(args[len(args)-2:], ids) {
+			t.Fatalf("not one inspect for both ids: %q", args)
+		}
+		return `{"80/tcp":[{"HostPort":"3010"}]}` + "\n" + `{"80/tcp":[{"HostPort":"3011"}]}`, nil
+	}
+	foreign, own, err := b.publishedPorts(context.Background())
+	if err != nil || inspections != 1 || !own[3010] || !foreign[3011] || own[3011] || foreign[3010] {
+		t.Fatalf("bindings lost or misattributed: own=%v foreign=%v inspections=%d err=%v", own, foreign, inspections, err)
+	}
+}
+
+func TestStatusAndStopDoNotRequireMailpitPort(t *testing.T) {
+	for _, value := range []string{"", "HAIVE_MAILPIT_PORT=invalid\n"} {
+		b := fixture(t)
+		path := filepath.Join(b.dir, ".env")
+		original, _ := os.ReadFile(path)
+		os.WriteFile(path, []byte(strings.Replace(string(original), "HAIVE_MAILPIT_PORT=8025\n", value, 1)), 0600)
+		for _, action := range []string{"status", "stop"} {
+			if _, err := b.handle(context.Background(), request{Action: action, Engine: "desktop-engine"}); err != nil {
+				t.Fatalf("%s required mailpit port: %v", action, err)
+			}
+		}
+	}
+	b := fixture(t)
+	path := filepath.Join(b.dir, ".env")
+	original, _ := os.ReadFile(path)
+	os.WriteFile(path, []byte(strings.Replace(string(original), "HAIVE_MAILPIT_PORT=8025\n", "", 1)), 0600)
+	settings, err := b.settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = b.repickPorts(context.Background(), settings, portTries); err != nil || settings["HAIVE_MAILPIT_PORT"] != "8025" {
+		t.Fatalf("missing Mailpit port did not default for Start: %v", err)
 	}
 }

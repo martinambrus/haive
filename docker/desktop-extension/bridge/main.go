@@ -70,6 +70,9 @@ type bridge struct {
 	run       runner
 	health    func(string) bool
 	portInUse func(int) bool
+	rename    func(string, string) error
+	sleep     func(time.Duration)
+	readEnv   func(string) ([]byte, error)
 }
 
 func validateRequest(r request) error {
@@ -127,7 +130,7 @@ func (b bridge) settings() (map[string]string, error) {
 	if !pinnedPattern.MatchString(m["HAIVE_VERSION"]) {
 		return nil, errors.New("The installed release must be pinned to an exact version.")
 	}
-	for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT", "HAIVE_MAILPIT_PORT"} {
+	for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT"} {
 		var port int
 		if !portPattern.MatchString(m[key]) {
 			return nil, errors.New("Invalid installed port.")
@@ -364,10 +367,14 @@ var portKeys = []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT", "HAIVE_MAILPIT_PORT"
 // Check both host listener families. Bind probes also detect reserved/unavailable
 // host ports. Unsupported IPv6 is harmless on hosts with IPv6 disabled.
 func hostPortInUse(port int) bool {
+	return hostPortInUseWithListen(port, net.Listen)
+}
+
+func hostPortInUseWithListen(port int, listen func(string, string) (net.Listener, error)) bool {
 	for _, family := range []struct{ network, host string }{{"tcp4", "0.0.0.0"}, {"tcp6", "::"}} {
-		listener, err := net.Listen(family.network, net.JoinHostPort(family.host, strconv.Itoa(port)))
+		listener, err := listen(family.network, net.JoinHostPort(family.host, strconv.Itoa(port)))
 		if err != nil {
-			if family.network == "tcp6" && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EPROTONOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+			if family.network == "tcp6" && !bindConflict(err) {
 				continue
 			}
 			return true
@@ -386,20 +393,32 @@ func (b bridge) publishedPorts(ctx context.Context) (map[int]bool, map[int]bool,
 	if err != nil {
 		return nil, nil, refusal
 	}
+	type container struct{ ID, Project string }
+	containers := []container{}
+	args := []string{"container", "inspect", "--format", "{{json .NetworkSettings.Ports}}"}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var container struct{ ID, Project string }
-		if json.Unmarshal([]byte(line), &container) != nil || !containerIDPattern.MatchString(container.ID) {
+		var item container
+		if json.Unmarshal([]byte(line), &item) != nil || !containerIDPattern.MatchString(item.ID) {
 			return nil, nil, refusal
 		}
-		bindings, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container.ID}, "", nil)
-		if err != nil {
-			return nil, nil, refusal
-		}
+		containers = append(containers, item)
+		args = append(args, item.ID)
+	}
+	if len(containers) == 0 {
+		return foreign, own, nil
+	}
+	bindings, err := b.run(ctx, "docker", args, "", nil)
+	if err != nil {
+		return nil, nil, refusal
+	}
+	// Docker emits one formatted JSON value per input container, in argument order.
+	decoder := json.NewDecoder(strings.NewReader(bindings))
+	for _, item := range containers {
 		var ports map[string][]struct{ HostPort string }
-		if json.Unmarshal([]byte(bindings), &ports) != nil {
+		if decoder.Decode(&ports) != nil {
 			return nil, nil, refusal
 		}
 		for name, published := range ports {
@@ -411,7 +430,7 @@ func (b bridge) publishedPorts(ctx context.Context) (map[int]bool, map[int]bool,
 				if err != nil || port < 1 || port > 65535 {
 					return nil, nil, refusal
 				}
-				if container.Project == installID {
+				if item.Project == installID {
 					own[port] = true
 				} else {
 					foreign[port] = true
@@ -419,12 +438,25 @@ func (b bridge) publishedPorts(ctx context.Context) (map[int]bool, map[int]bool,
 			}
 		}
 	}
+	var extra json.RawMessage
+	if decoder.Decode(&extra) != io.EOF {
+		return nil, nil, refusal
+	}
+
 	return foreign, own, nil
 }
 
 // Prepare every selection before writing. Exhaustion leaves .env unchanged and
 // never reaches Compose up. Reserve sibling settings to avoid cross-service clashes.
 func (b bridge) repickPorts(ctx context.Context, settings map[string]string, tries int) (string, error) {
+	// Mailpit is optional in .env; match Compose's default, only for Start.
+	if settings["HAIVE_MAILPIT_PORT"] == "" {
+		settings["HAIVE_MAILPIT_PORT"] = "8025"
+	}
+	port, err := strconv.Atoi(settings["HAIVE_MAILPIT_PORT"])
+	if err != nil || !portPattern.MatchString(settings["HAIVE_MAILPIT_PORT"]) || port < 1 || port > 65535 {
+		return "", errors.New("Invalid installed Mailpit port.")
+	}
 	foreign, own, err := b.publishedPorts(ctx)
 	if err != nil {
 		return "", err
@@ -483,7 +515,11 @@ func (b bridge) rewritePorts(changes map[string]string) error {
 	if regular(path) != nil {
 		return refusal
 	}
-	original, err := os.ReadFile(path)
+	read := b.readEnv
+	if read == nil {
+		read = os.ReadFile
+	}
+	original, err := read(path)
 	if err != nil {
 		return refusal
 	}
@@ -518,15 +554,32 @@ func (b bridge) rewritePorts(changes map[string]string) error {
 	if temp.Sync() != nil || temp.Close() != nil {
 		return refusal
 	}
-	// Refuse a manual edit during selection/writing instead of overwriting it.
-	current, err := os.ReadFile(path)
-	if regular(path) != nil || err != nil || !bytes.Equal(original, current) {
-		return refusal
+	rename := b.rename
+	if rename == nil {
+		rename = os.Rename
 	}
-	if os.Rename(temp.Name(), path) != nil {
-		return refusal
+	sleep := b.sleep
+	if sleep == nil {
+		sleep = time.Sleep
 	}
-	return nil
+	tries := 1
+	if b.os == "windows" {
+		tries = 4
+	}
+	for attempt := 0; attempt < tries; attempt++ {
+		// Recheck on every attempt so retries never overwrite a newly observed edit.
+		current, err := read(path)
+		if regular(path) != nil || err != nil || !bytes.Equal(original, current) {
+			return refusal
+		}
+		if rename(temp.Name(), path) == nil {
+			return nil
+		}
+		if attempt+1 < tries {
+			sleep(50 * time.Millisecond)
+		}
+	}
+	return refusal
 }
 
 func (b bridge) startFailure(ctx context.Context, s state, settings map[string]string) error {

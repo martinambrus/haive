@@ -14,7 +14,11 @@ export function isStarting(state) {
   return (
     state?.services?.some(
       (service) =>
-        ['created', 'restarting'].includes(service.State) || service.Health === 'starting',
+        ['created', 'restarting'].includes(service.State) ||
+        service.Health === 'starting' ||
+        (service.State === 'running' &&
+          ['api', 'web'].includes(service.Service) &&
+          !serviceReady(service)),
     ) ?? false
   );
 }
@@ -57,7 +61,11 @@ export function controls(state, busy, accepted) {
       !busy &&
       known &&
       state.installed &&
-      Boolean(state.services?.some((service) => service.State === 'running')),
+      Boolean(
+        state.services?.some((service) =>
+          ['running', 'restarting', 'paused'].includes(service.State),
+        ),
+      ),
     open:
       !busy &&
       known &&
@@ -79,7 +87,7 @@ export function appURL(state) {
 }
 
 export function createController(ddClient, render, options = {}) {
-  const { document: doc = globalThis.document } = options;
+  const { document: doc = globalThis.document, now = Date.now, fastWindowMs = 300000 } = options;
   // Storage belongs to this viewer, never the host install. Some WebViews deny it.
   let storage;
   try {
@@ -125,15 +133,16 @@ export function createController(ddClient, render, options = {}) {
   let disposed = false;
   let revision = 0;
   let polling = false;
+  let fastUntil;
+  let readErrors = 0;
   const update = () => {
     if (!disposed)
       render({
         state,
         busy,
         accepted,
-        message: [operationError || message || statusMessage(state), portNotice]
-          .filter(Boolean)
-          .join(' '),
+        message:
+          (operationError || message) === statusMessage(state) ? '' : operationError || message,
         statusMessage: [statusMessage(state), portNotice].filter(Boolean).join(' '),
         controls: controls(state, busy, accepted),
       });
@@ -173,7 +182,10 @@ export function createController(ddClient, render, options = {}) {
   const schedule = () => {
     clearPoll();
     if (disposed || doc?.hidden) return;
-    const fast = busy || isStarting(state);
+    const starting = busy || isStarting(state);
+    if (!starting) fastUntil = undefined;
+    else if (fastUntil === undefined) fastUntil = now() + fastWindowMs;
+    const fast = starting && now() < fastUntil && readErrors < 3;
     timer = setTimeout(
       () => {
         void refresh();
@@ -187,8 +199,10 @@ export function createController(ddClient, render, options = {}) {
       const next = await host('status');
       if (disposed || token !== revision) return;
       adoptState(next);
+      readErrors = 0;
     } catch (error) {
       if (disposed || token !== revision) return;
+      readErrors++;
       state = {
         ...state,
         directory: error.state?.directory || state?.directory,
@@ -229,6 +243,7 @@ export function createController(ddClient, render, options = {}) {
       if (action === 'install' && !VERSION.test(version))
         throw new Error('Choose latest, next, or an exact release.');
       busy = true;
+      if (action === 'start' || action === 'install') fastUntil = now() + fastWindowMs;
       operationError = '';
       const token = ++revision;
       message =
@@ -258,6 +273,7 @@ export function createController(ddClient, render, options = {}) {
         // Keep the last service snapshot when the helper returns an error-only result.
         if (error.state?.directory) state = { ...state, directory: error.state.directory };
       } finally {
+        if (action === 'start' || action === 'install') fastUntil = now() + fastWindowMs;
         if (action !== 'status') {
           // Invalidate in-flight polls, then always obtain a fresh snapshot, even on failure.
           await readStatus(++revision);

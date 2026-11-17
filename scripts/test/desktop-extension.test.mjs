@@ -412,7 +412,7 @@ test('created containers after a failed start can be retried after correcting po
   f.c.dispose();
 });
 
-test('unhealthy steady status polls every thirty seconds without overlapping reads', async (t) => {
+test('unhealthy running probes poll every five seconds without overlapping reads', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture();
   t.after(() => f.c.dispose());
@@ -428,7 +428,7 @@ test('unhealthy steady status polls every thirty seconds without overlapping rea
     new Promise((resolve) => {
       finish = async () => resolve(await exec(...args));
     });
-  t.mock.timers.tick(29999);
+  t.mock.timers.tick(4999);
   await flush();
   assert.equal(hostActions(f).length, 1);
   t.mock.timers.tick(1);
@@ -441,7 +441,7 @@ test('unhealthy steady status polls every thirty seconds without overlapping rea
   await finish();
   await flush();
   assert.equal(hostActions(f).length, 2);
-  assert.equal(f.views.at(-1).message, 'Haive is ready.');
+  assert.equal(f.views.at(-1).message, '');
 });
 
 test('disposing a controller prevents late poll replies from rendering', async (t) => {
@@ -479,10 +479,11 @@ test('starting progress counts the migration one-shot but not stopped services',
   );
 });
 
-test('round 4 controls follow per-service states rather than aggregate readiness', () => {
+test('controls follow per-service states rather than aggregate readiness', () => {
   const cases = [
     ['empty', [], false, true, false],
     ['created', [{ Service: 'web', State: 'created' }], false, true, false],
+    ['paused', [{ Service: 'web', State: 'paused' }], true, true, false],
     ['stopped', [{ Service: 'web', State: 'exited', Health: 'reachable' }], false, true, false],
     [
       'running unhealthy',
@@ -526,7 +527,7 @@ test('round 4 controls follow per-service states rather than aggregate readiness
     [
       'restarting',
       [{ Service: 'web', State: 'restarting', Health: 'reachable' }],
-      false,
+      true,
       true,
       false,
     ],
@@ -553,7 +554,7 @@ function memoryStorage() {
   };
 }
 
-test('round 4 consent survives installed tab reload, unchecking, and separate viewers', async () => {
+test('consent survives installed tab reload, unchecking, and separate viewers', async () => {
   const storage = memoryStorage();
   const f = fixture({ storage });
   f.respond({ ...installed, directory: '/viewer/haive_desktop' });
@@ -579,7 +580,7 @@ test('round 4 consent survives installed tab reload, unchecking, and separate vi
   unticked.c.dispose();
 });
 
-test('round 4 a fresh install never inherits stored consent; storage failures default unticked', async () => {
+test('a fresh install never inherits stored consent; storage failures default unticked', async () => {
   const storage = memoryStorage();
   const f = fixture({ storage });
   f.respond({ ...installed, directory: '/viewer/haive_desktop' });
@@ -615,7 +616,7 @@ test('round 4 a fresh install never inherits stored consent; storage failures de
   }
 });
 
-test('round 4 health labels identify extension probes', () => {
+test('health labels identify extension probes', () => {
   assert.equal(serviceHealth({ Service: 'api', Health: 'healthy' }), 'healthy (extension probe)');
   assert.equal(
     serviceHealth({ Service: 'web', Health: 'reachable' }),
@@ -624,7 +625,7 @@ test('round 4 health labels identify extension probes', () => {
   assert.equal(serviceHealth({ Service: 'postgres', Health: 'healthy' }), 'healthy');
 });
 
-test('round 4 port move notice survives follow-up status and automatic polls', async (t) => {
+test('port move notice survives follow-up status and automatic polls', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture();
   t.after(() => f.c.dispose());
@@ -696,4 +697,103 @@ test('stored consent is scoped to engine and directory and carries through a fre
   await engine.c.run('status');
   assert.equal(engine.views.at(-1).accepted, false);
   engine.c.dispose();
+});
+
+test('Start and Install completion poll negative running probes quickly for a bounded window', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const action of ['start', 'install']) {
+    const f = fixture();
+    const pending = {
+      ...installed,
+      healthy: false,
+      services: [
+        { Service: 'api', State: 'running', Health: 'unhealthy' },
+        { Service: 'web', State: 'running', Health: 'reachable' },
+      ],
+    };
+    f.respond(action === 'start' ? pending : { installed: false });
+    await f.c.run('status');
+    f.c.accept(true);
+    f.respond(pending);
+    await f.c.run(action);
+    assert.match(f.views.at(-1).statusMessage, /Starting… 1\/2 services ready/);
+    const count = hostActions(f).length;
+    t.mock.timers.tick(4999);
+    await flush();
+    assert.equal(hostActions(f).length, count);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(hostActions(f).length, count + 1);
+    // The production five-minute bound expires despite repeated successful reads.
+    t.mock.timers.tick(295000);
+    await flush();
+    const bounded = hostActions(f).length;
+    t.mock.timers.tick(29999);
+    await flush();
+    assert.equal(hostActions(f).length, bounded);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(hostActions(f).length, bounded + 1);
+    f.c.dispose();
+  }
+});
+
+test('created and restarting services fall back to thirty seconds after the fast window', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const state of ['created', 'restarting']) {
+    const f = fixture({ fastWindowMs: 10000 });
+    f.respond({ ...installed, services: [{ Service: 'api', State: state }] });
+    await f.c.run('status');
+    t.mock.timers.tick(10000);
+    await flush();
+    const count = hostActions(f).length;
+    t.mock.timers.tick(29999);
+    await flush();
+    assert.equal(hostActions(f).length, count);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(hostActions(f).length, count + 1);
+    f.c.dispose();
+  }
+});
+
+test('three consecutive status errors back off to thirty seconds and success restores fast polling', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  t.after(() => f.c.dispose());
+  const pending = { ...installed, services: [{ Service: 'api', State: 'created' }] };
+  f.respond(pending);
+  await f.c.run('status');
+  f.respond({ error: 'Status read failed.' });
+  for (let i = 0; i < 3; i++) {
+    const count = hostActions(f).length;
+    t.mock.timers.tick(5000);
+    await flush();
+    assert.equal(hostActions(f).length, count + 1);
+  }
+  const count = hostActions(f).length;
+  t.mock.timers.tick(29999);
+  await flush();
+  assert.equal(hostActions(f).length, count);
+  f.respond(pending);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(hostActions(f).length, count + 1);
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.equal(hostActions(f).length, count + 2);
+});
+
+test('idle status and move notices appear in only the status summary', async () => {
+  const f = fixture();
+  f.respond({ ...installed, services: [] });
+  await f.c.run('status');
+  f.c.accept(true);
+  f.respond({ ...installed, notice: 'web moved to 3010 because 3000 is in use' });
+  await f.c.run('start');
+  assert.equal(f.views.at(-1).message, '');
+  assert.match(f.views.at(-1).statusMessage, /Haive is ready.*web moved/);
+  await f.c.run('status');
+  assert.equal(f.views.at(-1).message, '');
+  f.c.dispose();
 });
