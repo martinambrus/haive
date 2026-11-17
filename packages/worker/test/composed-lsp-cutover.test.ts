@@ -1,3 +1,28 @@
+import { finishedStepResult } from '../src/step-engine/step-runner.js';
+import { installPluginsStep } from '../src/step-engine/steps/workflow/01b-install-plugins.js';
+import { createVerifyEnvironmentStep } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
+import { updateOwnedStep } from '../src/step-engine/step-ownership.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+const pluginIo = vi.hoisted(() => ({ runtime: vi.fn(), run: vi.fn() }));
+vi.mock('../src/queues/cli-exec-queue.js', () => ({
+  loadProviderRuntimeConfig: pluginIo.runtime,
+  resolveAuthMounts: async () => [],
+  resolveInvocationRepoMount: async () => ({ repoMount: null, hasWorktree: false, hasRepo: false }),
+}));
+vi.mock('../src/sandbox/sandbox-runner.js', async (original) => ({
+  ...(await original<typeof import('../src/sandbox/sandbox-runner.js')>()),
+  runInSandbox: pluginIo.run,
+}));
+vi.mock('../src/queues/cli-exec/secret-mask.js', () => ({ resolveSecretMasks: async () => [] }));
+vi.mock('../src/queues/cli-exec/gitfile-mask.js', () => ({
+  repoGitDataBoundary: async () => ({ mounts: [], masks: [] }),
+}));
+vi.mock('../src/queues/cli-exec/haive-data-boundary.js', () => ({
+  haiveDataBoundary: async () => [],
+}));
+vi.mock('../src/queues/cli-exec/worktrees-boundary.js', () => ({
+  worktreesBoundary: async () => [],
+}));
 import * as lspLayer from '../src/sandbox/lsp-layer.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
@@ -30,7 +55,7 @@ import {
   parseComposedProbeReport,
   probeComposedServer,
 } from '../src/lsp/composed-probe.js';
-import { createVerifyEnvironmentStep } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
+import { createVerifyComposedLspStep } from '../src/step-engine/steps/workflow/01b1-verify-composed-lsp.js';
 import { resolveSandboxImageTag } from '../src/queues/cli-exec/images.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
@@ -50,6 +75,7 @@ const ids = {
   provider: '33333333-3333-4333-8333-333333333333',
   plugin: '44444444-4444-4444-8444-444444444444',
   verify: '55555555-5555-4555-8555-555555555555',
+  bootstrap: '99999999-9999-4999-8999-999999999999',
 };
 const success = { exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 };
 function probeResult(server = 'gopls') {
@@ -81,6 +107,14 @@ function fixture() {
     id: ids.task,
     userId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     envTemplateId: ids.env,
+    type: 'workflow',
+    runListSnapshot: [
+      '04-verify-environment',
+      '01-worktree-setup',
+      '01b-install-plugins',
+      '01b1-verify-composed-lsp',
+    ],
+    executionPath: null,
     metadata: { feature: 'retain-me' },
     status: 'running',
     orchestrationEpoch: 3,
@@ -125,12 +159,22 @@ function fixture() {
   f.insert(schema.taskSteps, {
     id: ids.verify,
     taskId: ids.task,
+    stepId: '01b1-verify-composed-lsp',
+    stepIndex: 1.21,
+    runSeq: 11,
+    round: 0,
+    status: 'running',
+    rerunGeneration: 0,
+  });
+  f.insert(schema.taskSteps, {
+    id: ids.bootstrap,
+    taskId: ids.task,
     stepId: '04-verify-environment',
     stepIndex: 4,
     runSeq: 4,
     round: 0,
-    status: 'running',
-    rerunGeneration: 0,
+    status: 'done',
+    endedAt: new Date(50),
   });
   const db = f.db as unknown as Database;
   let image = 'sha256:verified';
@@ -203,6 +247,7 @@ function fixture() {
       output: {
         envTemplateId: ids.env,
         reports: [{ id: 'lsp-gopls', passed: true }],
+        verification: { stepRowId: ids.verify, generation: 0, epoch: 3 },
         composedLsp: { schemaVersion: 1, entries: [entry] },
       },
     });
@@ -241,7 +286,10 @@ describe('composed LSP identity and readiness', () => {
       await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner, 'sha256:other'),
     ).toBeNull();
     await f.write(schema.taskSteps, ids.verify, {
-      output: { composedLsp: { schemaVersion: 1, entries: [await f.installEvidence()] } },
+      output: {
+        verification: { stepRowId: ids.verify, generation: 0, epoch: 3 },
+        composedLsp: { schemaVersion: 1, entries: [await f.installEvidence()] },
+      },
     });
     expect(
       await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
@@ -382,6 +430,7 @@ describe('composed LSP identity and readiness', () => {
         output: {
           envTemplateId: ids.env,
           reports: [{ id: 'lsp-gopls', passed: true }],
+          verification: { stepRowId: ids.verify, generation: 0, epoch: 3 },
           composedLsp: evidence,
         },
       });
@@ -438,10 +487,16 @@ describe('composed LSP identity and readiness', () => {
   });
 });
 
-describe('per-run 04 checks and retained ownership', () => {
+describe('per-run final checks and retained ownership', () => {
   it('checks the exact composed ID as node without overriding the image PATH and rewrites the full current entry', async () => {
     const f = fixture();
-    const step = createVerifyEnvironmentStep(f.runner);
+    await f.write(schema.envTemplates, ids.env, {
+      declaredDeps: {
+        ...(f.f.rows(schema.envTemplates)[0]!.declaredDeps as object),
+        runtimes: ['node', 'python'],
+      },
+    });
+    const step = createVerifyComposedLspStep(f.runner);
     const detected = await step.detect!(f.ctx);
     const result = await step.apply(f.ctx, {
       detected,
@@ -450,7 +505,8 @@ describe('per-run 04 checks and retained ownership', () => {
       previousIterations: [],
     });
     expect(result.reports).toEqual([]);
-    expect(result.environmentReports?.map((r) => r.id)).toEqual(['bash']);
+    expect(result.environmentReports?.map((r) => r.id)).toEqual(['node', 'python', 'bash']);
+    expect(result.verification).toEqual({ stepRowId: ids.verify, generation: 0, epoch: 3 });
     expect(result.composedLsp?.entries).toHaveLength(1);
     expect(result.composedLsp?.entries[0]?.outcome).toBe('verified');
     const probe = f.run.mock.calls.find(([opts]) => opts.cmd[1] === '-e')?.[0];
@@ -480,7 +536,7 @@ describe('per-run 04 checks and retained ownership', () => {
       },
     });
     f.run.mockImplementation(async () => ({ ...probeResult(), exitCode: 1 }));
-    const step = createVerifyEnvironmentStep(f.runner);
+    const step = createVerifyComposedLspStep(f.runner);
     const detected = await step.detect!(f.ctx);
     const result = await step.apply(f.ctx, {
       detected,
@@ -672,7 +728,10 @@ it('rejects a verifier that claimed a plugin installed for another language cove
   );
   await f.write(schema.tasks, ids.task, { metadata: { composedLspImageRefs: refs } });
   await f.write(schema.taskSteps, ids.verify, {
-    output: { composedLsp: { schemaVersion: 1, entries: [entry] } },
+    output: {
+      verification: { stepRowId: ids.verify, generation: 0, epoch: 3 },
+      composedLsp: { schemaVersion: 1, entries: [entry] },
+    },
   });
   expect(
     await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
@@ -980,4 +1039,330 @@ it('launch stays pinned while the unchanged environment template is rebuilding',
   expect(
     await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
   ).toBe(false);
+});
+
+/** The real bootstrap/plugin/final applies, with Docker and mounts replaced at
+ * their existing seams. Done writes use the runner's real ownership helper. */
+function lifecycle() {
+  const f = fixture();
+  const worktree = f.f.insert(schema.taskSteps, {
+    taskId: ids.task,
+    stepId: '01-worktree-setup',
+    status: 'done',
+    round: 0,
+    stepIndex: 101,
+    runSeq: 8,
+    output: { worktreePath: '/repo' },
+  });
+  const ordered: string[] = [];
+  const row = (id: string) =>
+    f.f.rows(schema.taskSteps).find((s) => s.id === id)! as typeof schema.taskSteps.$inferSelect;
+  const context = (id: string): StepContext => ({
+    ...f.ctx,
+    taskStepId: id,
+    round: 0,
+    epoch: f.f.rows(schema.tasks)[0]!.orchestrationEpoch as number,
+    rerunGeneration: row(id).rerunGeneration,
+    emitProgress: async () => {},
+  });
+  pluginIo.runtime.mockImplementation(async () => ({
+    sandboxImage: await resolveSandboxImageTag(
+      f.db,
+      ids.task,
+      f.f.rows(schema.cliProviders)[0] as never,
+      f.runner,
+    ),
+    egressDomains: [],
+  }));
+  pluginIo.run.mockImplementation(async (spec, options) =>
+    f.runner.run({ image: options.image, cmd: [spec.command, ...spec.args] }),
+  );
+  const execute = async <D, O>(id: string, step: StepDefinition<D, O>, complete = true) => {
+    await f.write(schema.taskSteps, id, { status: 'running' });
+    const ctx = context(id);
+    const detected = await step.detect!(ctx);
+    await updateOwnedStep(f.db, id, { detectOutput: detected as never }, ctx.rerunGeneration);
+    ordered.push(row(id).stepId);
+    const output = await step.apply(ctx, {
+      detected,
+      formValues: { selectedChecks: ['bash'] },
+      iteration: 0,
+      previousIterations: [],
+    });
+    if (complete)
+      await updateOwnedStep(
+        f.db,
+        id,
+        {
+          status: 'done',
+          endedAt: new Date(),
+          output: output as never,
+        },
+        ctx.rerunGeneration,
+      );
+    return output;
+  };
+  const bootstrap = () => execute(ids.bootstrap, createVerifyEnvironmentStep(f.runner));
+  const plugin = () => execute(ids.plugin, installPluginsStep);
+  const final = (complete = true) =>
+    execute(ids.verify, createVerifyComposedLspStep(f.runner), complete);
+  const ready = () => readyComposedLspImage(f.db, ids.task, ids.provider, f.runner);
+  const reset = (id: string, recovery = false) =>
+    resetStepAndDownstream(
+      f.db,
+      ids.task,
+      id,
+      0,
+      f.f.rows(schema.tasks)[0]!.orchestrationEpoch as number,
+      recovery,
+    );
+  const pending = () =>
+    f.f
+      .rows(schema.taskSteps)
+      .filter((s) => s.status === 'pending')
+      .sort((a, b) => Number(a.runSeq) - Number(b.runSeq))
+      .map((s) => s.stepId);
+  const firstRun = async () => {
+    await f.write(schema.taskSteps, ids.plugin, {
+      status: 'pending',
+      output: null,
+      detectOutput: null,
+    });
+    const boot = await bootstrap();
+    expect(boot.composedLsp?.entries[0]?.identity.plugin.ready).toBe(false);
+    expect(await ready()).toBeNull();
+    // 01b resolves the bootstrap's retained immutable image, even while tools
+    // are unready. The production plugin apply actually executes both commands.
+    const install = await plugin();
+    expect(install.skipped).toBe(false);
+    expect(install.executed.length).toBeGreaterThan(0);
+    expect(pluginIo.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ image: 'sha256:verified' }),
+    );
+    expect(await ready()).toBeNull();
+    const bootOutput = structuredClone(row(ids.bootstrap).output);
+    expect((await final()).bridgeReady).toBe(true);
+    expect(await ready()).toBe('sha256:verified');
+    expect(row(ids.bootstrap).output).toEqual(bootOutput);
+  };
+  return {
+    ...f,
+    worktree,
+    ordered,
+    context,
+    execute,
+    bootstrap,
+    plugin,
+    final,
+    ready,
+    reset,
+    pending,
+    row,
+    firstRun,
+  };
+}
+
+it('keeps readiness null when a stale pass lands its done write through the unguarded production path', async () => {
+  const f = lifecycle();
+  await f.firstRun();
+  const stale = structuredClone(f.row(ids.verify).output);
+  const staleGeneration = f.row(ids.verify).rerunGeneration;
+  await f.reset('01b1-verify-composed-lsp');
+  // The retry's own pass owns the row again; the old pass is still in flight.
+  await f.write(schema.taskSteps, ids.verify, { status: 'running' });
+  expect(f.row(ids.verify).rerunGeneration).not.toBe(staleGeneration);
+  // No expectedGeneration, as in step-runner's done write.
+  await updateOwnedStep(f.db, ids.verify, {
+    status: 'done',
+    endedAt: new Date(),
+    output: stale as never,
+  });
+  expect(f.row(ids.verify).status).toBe('done');
+  expect(await f.ready()).toBeNull();
+});
+
+it.each(['04-verify-environment', '01b-install-plugins', '01b1-verify-composed-lsp'])(
+  'recovers the actual ordered pipeline after Retry %s',
+  async (target) => {
+    const f = lifecycle();
+    await f.firstRun();
+    expect(f.ordered).toEqual([
+      '04-verify-environment',
+      '01b-install-plugins',
+      '01b1-verify-composed-lsp',
+    ]);
+    const refs = structuredClone(f.f.rows(schema.tasks)[0]!.metadata);
+    const originalPlugin = structuredClone(f.row(ids.plugin));
+    await f.reset(target);
+    expect(f.pending()).toEqual(
+      target === '04-verify-environment'
+        ? [
+            '04-verify-environment',
+            '01-worktree-setup',
+            '01b-install-plugins',
+            '01b1-verify-composed-lsp',
+          ]
+        : target === '01b-install-plugins'
+          ? ['01b-install-plugins', '01b1-verify-composed-lsp']
+          : ['01b1-verify-composed-lsp'],
+    );
+    expect(f.f.rows(schema.tasks)[0]!.metadata).toEqual(refs);
+    expect(await f.ready()).toBeNull();
+    f.ordered.length = 0;
+    const installs = pluginIo.run.mock.calls.length;
+    if (target === '04-verify-environment') {
+      await f.bootstrap();
+      // The normal forward walk runs worktree setup again before 01b.
+      await f.write(schema.taskSteps, String(f.worktree.id), { status: 'done' });
+    }
+    if (target !== '01b1-verify-composed-lsp') await f.plugin();
+    else expect(f.row(ids.plugin)).toEqual(originalPlugin);
+    expect((await f.final()).bridgeReady).toBe(true);
+    expect(await f.ready()).toBe('sha256:verified');
+    expect(f.ordered).toEqual(
+      target === '04-verify-environment'
+        ? ['04-verify-environment', '01b-install-plugins', '01b1-verify-composed-lsp']
+        : target === '01b-install-plugins'
+          ? ['01b-install-plugins', '01b1-verify-composed-lsp']
+          : ['01b1-verify-composed-lsp'],
+    );
+    if (target === '01b1-verify-composed-lsp')
+      expect(pluginIo.run.mock.calls).toHaveLength(installs);
+  },
+);
+
+it('a published reference before a lost done write stays unready; boot recovery repeats checks without a new generation', async () => {
+  const f = lifecycle();
+  await f.firstRun();
+  await f.reset('01b1-verify-composed-lsp');
+  const generation = f.row(ids.verify).rerunGeneration;
+  const output = await f.final(false);
+  expect(output.bridgeReady).toBe(true);
+  expect(await f.ready()).toBeNull();
+  const refs = structuredClone(f.f.rows(schema.tasks)[0]!.metadata);
+  await f.reset('01b1-verify-composed-lsp', true);
+  expect(f.row(ids.verify).rerunGeneration).toBe(generation);
+  expect(f.f.rows(schema.tasks)[0]!.metadata).toEqual(refs);
+  expect((await f.final()).bridgeReady).toBe(true);
+  const calls = f.run.mock.calls.length;
+  // A completed row with a lost forward handoff already has usable evidence;
+  // its ordinary finished-row redelivery needs no new plugin installation.
+  expect(await f.ready()).toBe('sha256:verified');
+  expect(
+    await finishedStepResult(
+      f.db,
+      ids.task,
+      createVerifyComposedLspStep(f.runner),
+      f.row(ids.verify),
+    ),
+  ).toMatchObject({ status: 'done', output: f.row(ids.verify).output });
+  expect(f.run.mock.calls).toHaveLength(calls);
+});
+
+it.each(['generation', 'epoch'])(
+  'a concurrent %s reset during final probes refuses publication under the final step fence',
+  async (kind) => {
+    const f = lifecycle();
+    await f.firstRun();
+    await f.reset('01b1-verify-composed-lsp');
+    const before = parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata).entries[0]!.effective;
+    let overtaken = false;
+    f.run.mockImplementation(async (options) => {
+      if (!overtaken && options.cmd[1] === '-e') {
+        overtaken = true;
+        if (kind === 'generation') await f.reset('01b1-verify-composed-lsp');
+        else await f.write(schema.tasks, ids.task, { orchestrationEpoch: 20 });
+      }
+      return options.cmd[1] === '-e' ? probeResult() : success;
+    });
+    await expect(f.final()).rejects.toThrow(/superseded/);
+    expect(parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata).entries[0]!.effective).toEqual(
+      before,
+    );
+    expect(await f.ready()).toBeNull();
+  },
+);
+
+it('repairs a disappeared composed image with final verification, but a missing environment requires Retry 03', async () => {
+  const f = lifecycle();
+  await f.firstRun();
+  await f.reset('01b1-verify-composed-lsp');
+  let missingComposed = true;
+  f.runner.inspect = async (tag) => ({
+    exists: !(missingComposed && tag.startsWith('haive-sandbox:')),
+    imageId: missingComposed && tag.startsWith('haive-sandbox:') ? null : 'sha256:verified',
+  });
+  const build = vi.fn(async () => {
+    missingComposed = false;
+    return { ...success, imageTag: 'rebuilt', imageId: 'sha256:verified' };
+  });
+  f.runner.build = build;
+  expect((await f.final()).bridgeReady).toBe(true);
+  expect(build).toHaveBeenCalledOnce();
+  expect(await f.ready()).toBe('sha256:verified');
+  // A completed final row is not readiness once its composed image is gone again.
+  missingComposed = true;
+  expect(await f.ready()).toBeNull();
+  await f.reset('01b1-verify-composed-lsp');
+  const refs = structuredClone(f.f.rows(schema.tasks)[0]!.metadata);
+  f.runner.inspect = async (tag) => ({
+    exists: tag !== 'env:built',
+    imageId: tag === 'env:built' ? null : 'sha256:verified',
+  });
+  await expect(f.final()).rejects.toThrow(/Environment image disappeared; Retry 03/);
+  expect(f.f.rows(schema.tasks)[0]!.metadata).toEqual(refs);
+  expect(await f.ready()).toBeNull();
+});
+
+it('a missing/skipped PHP plugin completes final checks with upgrade/01b guidance and no bridge claim', async () => {
+  const f = lifecycle();
+  await f.write(schema.envTemplates, ids.env, {
+    declaredDeps: { lspInstallContractVersion: 2, lspServers: ['intelephense'] },
+  });
+  await f.write(schema.taskSteps, ids.plugin, {
+    status: 'done',
+    output: { skipped: true, missingDrupalLsp: '.claude/plugins/drupal-php-lsp' },
+  });
+  const result = await f.final();
+  expect(result.bridgeReady).toBe(false);
+  expect(result.guidance).toMatch(/Upgrade.*Retry 01b/);
+  expect(await f.ready()).toBeNull();
+});
+
+it.each([undefined, 1])(
+  'legacy contract %s skips the final step with no form or Docker calls',
+  async (contract) => {
+    const f = fixture();
+    await f.write(schema.envTemplates, ids.env, {
+      declaredDeps: {
+        ...(contract === undefined ? {} : { lspInstallContractVersion: contract }),
+        lspServers: ['gopls'],
+      },
+    });
+    const step = createVerifyComposedLspStep(f.runner);
+    expect(await step.shouldRun!(f.ctx)).toBe(false);
+    expect(step.form).toBeUndefined();
+    expect(f.run).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  '04-verify-environment',
+  '01-worktree-setup',
+  '01b-install-plugins',
+  '01b1-verify-composed-lsp',
+])('final verification refuses a frozen list missing %s before probing', async (missing) => {
+  const f = fixture();
+  const snapshot = [
+    '04-verify-environment',
+    '01-worktree-setup',
+    '01b-install-plugins',
+    '01b1-verify-composed-lsp',
+  ].filter((id) => id !== missing);
+  await f.write(schema.tasks, ids.task, { runListSnapshot: snapshot });
+  const step = createVerifyComposedLspStep(f.runner);
+  await expect(step.detect!(f.ctx)).rejects.toThrow(/effective run list/);
+  expect(f.f.rows(schema.tasks)[0]!.runListSnapshot).toEqual(snapshot);
+  expect(f.run).not.toHaveBeenCalled();
 });

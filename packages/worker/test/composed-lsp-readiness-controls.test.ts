@@ -15,6 +15,12 @@ function fixture() {
   const data = JSON.parse(captured, (key, value) =>
     key.endsWith('At') && typeof value === 'string' ? new Date(value) : value,
   );
+  const final = data.taskSteps.find(
+    (s: { stepId: string }) => s.stepId === '04-verify-environment',
+  );
+  final.stepId = '01b1-verify-composed-lsp';
+  final.rerunGeneration = 0;
+  final.output.verification = { stepRowId: final.id, generation: final.rerunGeneration, epoch: 3 };
   return data;
 }
 async function ready(data: ReturnType<typeof fixture>) {
@@ -65,7 +71,7 @@ describe('completed composed identity through the existing readiness entry point
     async (_label, path) => {
       const data = fixture();
       let current = data.taskSteps.find(
-        (s: { stepId: string }) => s.stepId === '04-verify-environment',
+        (s: { stepId: string }) => s.stepId === '01b1-verify-composed-lsp',
       ).output.composedLsp.entries[0].identity;
       for (const part of path.slice(0, -1)) current = current[part];
       const key = path.at(-1)!;
@@ -90,7 +96,7 @@ describe('completed composed identity through the existing readiness entry point
   ] as const)('refuses %s composed evidence although legacy reports passed', async (kind) => {
     const data = fixture();
     const evidence = data.taskSteps.find(
-      (s: { stepId: string }) => s.stepId === '04-verify-environment',
+      (s: { stepId: string }) => s.stepId === '01b1-verify-composed-lsp',
     ).output.composedLsp;
     const entry = evidence.entries[0];
     if (kind === 'omitted') entry.reports = [];
@@ -110,5 +116,60 @@ it('refuses a successful plugin install for a different selection', async () => 
   data.taskSteps.find(
     (s: { stepId: string }) => s.stepId === '01b-install-plugins',
   ).detectOutput.lspLanguages = ['typescript'];
+  expect(await ready(data)).toBe(false);
+});
+
+// Bootstrap image evidence cannot certify a bridge, even when it happens to
+// contain the same plugin identity. Only the designated final pass can do that.
+it.each([
+  'missing',
+  'pending',
+  'running',
+  'failed',
+  'skipped',
+  'unended',
+  'generation',
+  'row',
+  'schema',
+])('refuses %s final evidence without borrowing bootstrap output', async (kind) => {
+  const data = fixture();
+  const final = data.taskSteps.find(
+    (s: { stepId: string }) => s.stepId === '01b1-verify-composed-lsp',
+  );
+  // A self-consistent completed bootstrap row: only the step id says it is not the final.
+  const bootstrap = {
+    ...structuredClone(final),
+    id: '99999999-9999-4999-8999-999999999999',
+    stepId: '04-verify-environment',
+  };
+  bootstrap.output.verification.stepRowId = bootstrap.id;
+  data.taskSteps.push(bootstrap);
+  if (kind === 'missing')
+    data.taskSteps = data.taskSteps.filter((s: { id: string }) => s.id !== final.id);
+  else if (kind === 'unended') final.endedAt = null;
+  else if (kind === 'generation') final.rerunGeneration++;
+  else if (kind === 'row') final.output.verification.stepRowId = 'other';
+  else if (kind === 'schema') final.output.composedLsp.schemaVersion = 99;
+  else final.status = kind;
+  expect(await ready(data)).toBe(false);
+});
+
+it('does not borrow a completed higher-round final report after a lower-round Retry', async () => {
+  const data = fixture();
+  const final = data.taskSteps.find(
+    (s: { stepId: string }) => s.stepId === '01b1-verify-composed-lsp',
+  );
+  const higher = {
+    ...structuredClone(final),
+    id: '77777777-7777-4777-8777-777777777777',
+    round: 9,
+  };
+  higher.output.verification.stepRowId = higher.id;
+  data.taskSteps = [...data.taskSteps.filter((s: { id: string }) => s.id !== final.id), higher];
+  expect(await ready(data)).toBe(true);
+  data.taskSteps.push(final);
+  final.status = 'pending';
+  final.endedAt = null;
+  final.output = null;
   expect(await ready(data)).toBe(false);
 });

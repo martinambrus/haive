@@ -104,7 +104,7 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 
 1. register every core step, then the static-list asserts (provider-sensitive, CLI-dispatch,
    skippable, closed path sets);
-2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 59 entries);
+2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 60 entries);
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
@@ -311,7 +311,7 @@ composition-checked at boot. A guard test (`worker/test/composable-core.test.ts`
 unset pre-triage path, including the environment prelude. Every shipped step must have a composable
 entry, and every complete path must validate with **no issues**, including `unmet-need`; no step or
 issue is filtered out. The environment and registered workflow ordering guard stays too. The core
-catalog has 59 entries: all 54 registered workflow steps, the four environment steps,
+catalog has 60 entries: all 55 registered workflow steps, the four environment steps,
 and the explicit-composition no-change cleanup step.
 
 A requirement may declare `after: <token>`: both tokens must be available, and the current provider
@@ -1263,7 +1263,7 @@ candidate-local `dataRoleBindings` as server validation. Canvas and list share i
 choice or an invalid declaration becomes a visible issue; the step list and selected-binding
 Clear binding actions remain usable, even after a module or input disappears or changes.
 Draft port projection alone caps static lists at
-`MAX_PORT_DRAFT_STEPS` (256), over four times the 58-step stock workflow (including the environment
+`MAX_PORT_DRAFT_STEPS` (256), over four times the 59-step stock workflow (including the environment
 prelude). Invalid or reserved in-progress editor slugs use a projection-only placeholder.
 Ports show role, exact contract version, authorship, optionality and
 wired/ambiguous/dangling/optional-absent state from the shared pure `validatePortEdges`.
@@ -1663,3 +1663,20 @@ base. An advanced base is allowed when it contains every branch commit. It never
 merges, commits or pushes. Ignored files follow the existing cleanup policy and are
 not uncommitted changes and are removed too. Completion defers to this step as it
 does to ordinary cleanup.
+
+## Composed LSP final verification
+
+`01b1-verify-composed-lsp` is a deterministic, provider-sensitive workflow step at index 1.21. Every
+built-in workflow path that has 01b includes it right after 01b, before browser, app and discovery
+work. Its shouldRun skips templates whose LSP install contract is absent or 1, so they get no form
+and no Docker probe. Its composable entry requires the environment image and the worktree; 04 and
+01b order themselves before it through their own precedes lists. It dispatches no CLI and grants no
+output replacement role.
+
+Derived candidates built on the stock workflow inherit the step. An overlay that removes 01b or 04
+is accepted: it cannot become contract-2 eligible, so the final step fails closed at detect. Existing static snapshots and derived pins stay
+unchanged: a list that lacks 04, worktree setup, 01b and the final step in that order is ineligible
+for contract 2, and the step's detect refuses it without rewriting the list. run_app's dynamic modes
+and env_replicate's standalone list are unchanged. The contract-2 environment writer is still
+refused. See [Sandbox](sandbox.md) for the evidence, Retry recovery and the registered-step
+rollback requirement.

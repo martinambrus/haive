@@ -1,3 +1,5 @@
+import { COMPOSED_LSP_FINAL_STEP_ID } from '@haive/shared/run-list';
+import { taskSupportsComposedLspFinal } from '../../../lsp/final-verification.js';
 import {
   loadComposedLspIdentity,
   retainComposedImage,
@@ -50,6 +52,9 @@ export interface VerifyEnvironmentApply {
   reports: VerifyEnvironmentReport[];
   environmentReports?: VerifyEnvironmentReport[];
   composedLsp?: ComposedLspEvidence;
+  verification?: { stepRowId: string; generation: number; epoch: number };
+  bridgeReady?: boolean;
+  guidance?: string;
 }
 
 interface DeclaredDepsShape extends LspInstallContract {
@@ -166,13 +171,17 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
 
 export function createVerifyEnvironmentStep(
   runner: DockerRunner,
+  phase: 'bootstrap' | 'final' = 'bootstrap',
 ): StepDefinition<VerifyEnvironmentDetect, VerifyEnvironmentApply> {
+  const final = phase === 'final';
+  const stepId = final ? COMPOSED_LSP_FINAL_STEP_ID : '04-verify-environment';
   return {
     metadata: {
-      id: '04-verify-environment',
-      workflowType: 'env_replicate',
-      index: 4,
-      title: 'Verify environment',
+      id: stepId,
+      workflowType: final ? 'workflow' : 'env_replicate',
+      index: final ? 1.21 : 4,
+      title: final ? 'Verify composed LSP after plugins' : 'Verify environment',
+      ...(final ? { providerSensitive: true } : {}),
       description:
         'Runs smoke checks against the built image to confirm runtimes, language servers and clients are installed.',
       requiresCli: false,
@@ -181,6 +190,15 @@ export function createVerifyEnvironmentStep(
       // almost never something a user wants to do by hand or skip.
       autoSubmitDefaults: true,
     },
+
+    ...(final
+      ? {
+          async shouldRun(ctx) {
+            const env = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+            return env?.declaredDeps?.lspInstallContractVersion === 2;
+          },
+        }
+      : {}),
 
     async detect(ctx) {
       const row = await getTaskEnvTemplate(ctx.db, ctx.taskId);
@@ -191,6 +209,14 @@ export function createVerifyEnvironmentStep(
         throw new Error('image not built yet; run step 03 first');
       }
       const deps = (row.declaredDeps ?? {}) as DeclaredDepsShape;
+      if (
+        final &&
+        (deps.lspInstallContractVersion !== 2 ||
+          !(await taskSupportsComposedLspFinal(ctx.db, ctx.taskId)))
+      )
+        throw new Error(
+          'Composed LSP requires 04 → worktree setup → 01b → final verification in the effective run list; create an eligible task. Existing pins are unchanged.',
+        );
       return {
         envTemplateId: row.id,
         imageRef: row.imageTag,
@@ -201,29 +227,33 @@ export function createVerifyEnvironmentStep(
       };
     },
 
-    form(_ctx, detected): FormSchema {
-      return {
-        title: 'Smoke checks',
-        description: `Select the checks to run against ${detected.imageRef}.`,
-        fields: [
-          {
-            type: 'multi-select',
-            id: 'selectedChecks',
-            label: 'Checks',
-            required: true,
-            options: detected.checks.map((c) => ({
-              value: c.id,
-              label: `${c.label} (${c.cmd.join(' ')})`,
-            })),
-            defaults: detected.checks.map((c) => c.id),
+    ...(final
+      ? {}
+      : {
+          form(_ctx, detected): FormSchema {
+            return {
+              title: 'Smoke checks',
+              description: `Select the checks to run against ${detected.imageRef}.`,
+              fields: [
+                {
+                  type: 'multi-select',
+                  id: 'selectedChecks',
+                  label: 'Checks',
+                  required: true,
+                  options: detected.checks.map((c) => ({
+                    value: c.id,
+                    label: `${c.label} (${c.cmd.join(' ')})`,
+                  })),
+                  defaults: detected.checks.map((c) => c.id),
+                },
+              ],
+              submitLabel: 'Run smoke checks',
+            };
           },
-        ],
-        submitLabel: 'Run smoke checks',
-      };
-    },
+        }),
 
     async apply(ctx, args) {
-      const raw = args.formValues.selectedChecks;
+      const raw = final ? args.detected.checks.map((c) => c.id) : args.formValues.selectedChecks;
       const composed = args.detected.installContract === 2;
       const step = composed
         ? await ctx.db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) })
@@ -276,13 +306,19 @@ export function createVerifyEnvironmentStep(
       }
 
       if (composed) {
-        if (!args.detected.providerId || !step || !task)
+        if (
+          !args.detected.providerId ||
+          !step ||
+          !task ||
+          step.stepId !== stepId ||
+          step.taskId !== ctx.taskId
+        )
           throw new Error('Composed verification needs the current provider and owned step');
         const provider = await ctx.db.query.cliProviders.findFirst({
           where: eq(schema.cliProviders.id, args.detected.providerId),
         });
         if (!provider || provider.id !== ctx.cliProviderId)
-          throw new Error('Composed verification provider changed; Retry 04');
+          throw new Error(`Composed verification provider changed; Retry ${stepId}`);
         const fence = {
           stepId: ctx.taskStepId,
           generation: ctx.rerunGeneration ?? step.rerunGeneration,
@@ -306,7 +342,7 @@ export function createVerifyEnvironmentStep(
               identity.environmentImageId !== environmentImage?.imageId ||
               identity.tag !== composition.tag
             )
-              throw new Error('Composed verification inputs changed; Retry 04');
+              throw new Error(`Composed verification inputs changed; Retry ${stepId}`);
             await retainComposedImage(ctx.db, ctx.taskId, identity, false, fence, runner);
             const lspReports: ComposedLspReport[] = [];
             for (const selected of identity.selection)
@@ -344,6 +380,28 @@ export function createVerifyEnvironmentStep(
           reports: [],
           environmentReports: reports,
           composedLsp: evidence,
+          ...(final
+            ? {
+                verification: {
+                  stepRowId: ctx.taskStepId,
+                  generation: fence.generation,
+                  epoch: fence.epoch,
+                },
+                bridgeReady:
+                  evidence.entries.every(
+                    (e) => e.outcome === 'verified' && e.identity.plugin.ready,
+                  ) &&
+                  evidence.entries.some((e) =>
+                    e.identity.selection.some((s) => s.server !== 'solargraph'),
+                  ),
+                ...(!evidence.entries.every((e) => e.identity.plugin.ready)
+                  ? {
+                      guidance:
+                        'LSP bridge is unready. Upgrade and commit missing local PHP plugin files before creating a worktree, then Retry 01b and final verification with the selected provider.',
+                    }
+                  : {}),
+              }
+            : {}),
         };
       }
       const passed = reports.filter((r) => r.passed).length;

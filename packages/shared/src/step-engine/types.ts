@@ -251,6 +251,7 @@ export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '09_6-skill-verification',
   '11-final-review',
   '01b-install-plugins',
+  '01b1-verify-composed-lsp',
   '01-declare-deps',
   '11d-skill-sync',
 ];

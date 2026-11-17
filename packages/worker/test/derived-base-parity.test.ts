@@ -1,3 +1,7 @@
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { taskSupportsComposedLspFinal } from '../src/lsp/final-verification.js';
+import { composedLspRunListEligible } from '@haive/shared/run-list';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { EXECUTION_PATHS } from '@haive/shared';
 import {
@@ -100,6 +104,26 @@ describe('derived workflow registry/catalog parity', () => {
     }
   });
 
+  it.each(['01b-install-plugins', '04-verify-environment'])(
+    'an overlay removing %s keeps every candidate valid',
+    (removed) => {
+      const result = evaluateDerivedTaskType({
+        baseCandidates: workflowBaseCandidates((type) =>
+          stepRegistry.listByWorkflow(type).map((s) => s.metadata.id),
+        ),
+        changes: [{ remove: removed }],
+        catalog: new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const)),
+        installedStepIds: new Set(stepRegistry.all().map((s) => s.metadata.id)),
+      });
+      expect(result.issues).toEqual([]);
+      for (const c of result.candidates) {
+        expect(c.compositionIssues).toEqual([]);
+        expect(c.stepIds).not.toContain(removed);
+        expect(composedLspRunListEligible(c.stepIds)).toBe(false);
+      }
+    },
+  );
+
   it('preserves the whole pre-continuation quick and plan base lists', () => {
     const expected = {
       quick_bugfix: [
@@ -114,6 +138,7 @@ describe('derived workflow registry/catalog parity', () => {
         '01-worktree-setup',
         '01-debug-mode',
         '01b-install-plugins',
+        '01b1-verify-composed-lsp',
         '01d-browser-access',
         '01a-app-boot',
         '01c-ddev-env',
@@ -145,6 +170,7 @@ describe('derived workflow registry/catalog parity', () => {
         '01-worktree-setup',
         '01-debug-mode',
         '01b-install-plugins',
+        '01b1-verify-composed-lsp',
         '01d-browser-access',
         '01a-app-boot',
         '01c-ddev-env',
@@ -312,3 +338,68 @@ it('new derived quick candidates keep the added tail dormant, while old pins and
     );
   }
 });
+
+it.each(['static', 'derived'] as const)(
+  '%s task eligibility reads its frozen sequence without rewriting old pins',
+  async (kind) => {
+    registerStepsOnce();
+    const source = (type: string) => stepRegistry.listByWorkflow(type).map((s) => s.metadata.id);
+    for (const includeFinal of [false, true]) {
+      const baseCandidates = workflowBaseCandidates(source).map((c) => ({
+        ...c,
+        stepIds: c.stepIds.filter((id) => includeFinal || id !== '01b1-verify-composed-lsp'),
+      }));
+      const result = evaluateDerivedTaskType({
+        baseCandidates,
+        changes: [],
+        catalog: new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e])),
+        installedStepIds: new Set(stepRegistry.all().map((s) => s.metadata.id)),
+      });
+      expect(result.issues).toEqual([]);
+      const plan = {
+        version: 1,
+        base: {
+          slug: 'workflow',
+          runListStrategy: 'workflow_paths',
+          candidates: baseCandidates,
+          catalogFingerprint: 'frozen',
+        },
+        overlay: { revision: 'frozen', changes: [] },
+        requiresRepository: true,
+        composableEntries: CORE_COMPOSABLE_STEPS.filter(
+          (e) => includeFinal || e.stepId !== '01b1-verify-composed-lsp',
+        ),
+        candidates: result.candidates,
+        commonPrefix: ['00-model-health-workflow', '00a-sync-base', '00-triage'],
+        warnings: result.warnings,
+      };
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskTypeDefinitions: schema.taskTypeDefinitions,
+      });
+      const task = fake.insert(schema.tasks, {
+        type: 'custom-lsp',
+        runListSnapshot: [...baseCandidates[1]!.stepIds],
+        executionPath: 'quick_bugfix',
+        ...(kind === 'derived' ? { derivedRunPlan: plan } : {}),
+      });
+      const before = structuredClone(task);
+      expect(
+        await taskSupportsComposedLspFinal(fake.db as unknown as Database, String(task.id)),
+      ).toBe(includeFinal);
+      expect(fake.rows(schema.tasks)[0]).toEqual(before);
+      const ids = taskRunListIds(
+        {
+          workflowType: 'custom-lsp',
+          runListStrategy: kind,
+          runListSnapshot: [...baseCandidates[1]!.stepIds],
+          executionPath: 'quick_bugfix',
+          ...(kind === 'derived' ? { derivedRunPlan: plan } : {}),
+        },
+        source,
+      );
+      expect(ids).toEqual(baseCandidates[1]!.stepIds);
+      expect(composedLspRunListEligible(ids)).toBe(includeFinal);
+    }
+  },
+);

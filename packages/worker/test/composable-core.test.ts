@@ -1,7 +1,7 @@
 import { dataPortNodes } from '@haive/shared/step-ports';
 import { buildDataEdgePlan } from '@haive/shared/data-edge-plan';
 import { builtinTaskTypeRows } from '../src/step-engine/task-type-seed.js';
-import { workflowBaseCandidates } from '@haive/shared/run-list';
+import { composedLspRunListEligible, workflowBaseCandidates } from '@haive/shared/run-list';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { EXECUTION_PATHS } from '@haive/shared';
 import { taskRunListIds } from '@haive/shared/run-list';
@@ -53,8 +53,8 @@ describe('core composable catalog', () => {
     ).not.toThrow();
   });
 
-  it('holds the 59 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(59);
+  it('holds the 60 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(60);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -989,5 +989,109 @@ it('gate 3 may revise before committing; a later loop still cannot cross its com
   expect(validateComposition(order, catalog)).toEqual([]);
   expect(validateComposition([...order, '09-gate-2-verify-approval'], catalog)).toContainEqual(
     expect.objectContaining({ kind: 'loop-after-closing', closingStepId: '10-gate-3-commit' }),
+  );
+});
+
+it('every real workflow path has bootstrap → worktree → plugins → final before browser/app/discovery', () => {
+  registerStepsOnce();
+  const list = (type: string) => stepRegistry.listByWorkflow(type).map((s) => s.metadata.id);
+  for (const candidate of workflowBaseCandidates(list)) {
+    expect(composedLspRunListEligible(candidate.stepIds)).toBe(true);
+    expect(
+      candidate.stepIds.filter((id) =>
+        [
+          '04-verify-environment',
+          '01-worktree-setup',
+          '01b-install-plugins',
+          '01b1-verify-composed-lsp',
+        ].includes(id),
+      ),
+    ).toEqual([
+      '04-verify-environment',
+      '01-worktree-setup',
+      '01b-install-plugins',
+      '01b1-verify-composed-lsp',
+    ]);
+    const index = candidate.stepIds.indexOf('01b1-verify-composed-lsp');
+    for (const id of ['01d-browser-access', '01a-app-boot', '03-phase-0a-discovery'])
+      if (candidate.stepIds.includes(id))
+        expect(candidate.stepIds.indexOf(id)).toBeGreaterThan(index);
+    for (const missing of [
+      '04-verify-environment',
+      '01-worktree-setup',
+      '01b-install-plugins',
+      '01b1-verify-composed-lsp',
+    ])
+      expect(composedLspRunListEligible(candidate.stepIds.filter((id) => id !== missing))).toBe(
+        false,
+      );
+  }
+  expect(list('env_replicate')).toEqual([
+    '01-declare-deps',
+    '02-generate-dockerfile',
+    '03-build-image',
+    '04-verify-environment',
+  ]);
+  for (const tool of [null, 'ddev', 'none']) {
+    const ids = taskRunListIds(
+      {
+        workflowType: 'run_app',
+        runListStrategy: 'run_app_modes',
+        runListSnapshot: null,
+        executionPath: null,
+      },
+      list,
+      tool,
+    );
+    expect(ids).not.toContain('01b1-verify-composed-lsp');
+    expect(composedLspRunListEligible(ids)).toBe(false);
+  }
+});
+
+it('composition requires the worktree and the producer order for final verification', () => {
+  const sequence = [
+    '01-declare-deps',
+    '02-generate-dockerfile',
+    '03-build-image',
+    '04-verify-environment',
+    '01-worktree-setup',
+    '01b-install-plugins',
+    '01b1-verify-composed-lsp',
+  ];
+  expect(validateComposition(sequence, catalog)).toEqual([]);
+  expect(
+    validateComposition(
+      sequence.filter((id) => id !== '01-worktree-setup'),
+      catalog,
+    ).length,
+  ).toBeGreaterThan(0);
+});
+
+describe('final composed LSP verification is optional-producer safe', () => {
+  const sequence = [
+    '01-declare-deps',
+    '02-generate-dockerfile',
+    '03-build-image',
+    '04-verify-environment',
+    '01-worktree-setup',
+    '01b-install-plugins',
+    '01b1-verify-composed-lsp',
+  ];
+  const finalId = '01b1-verify-composed-lsp';
+  it.each(['04-verify-environment', '01b-install-plugins'])(
+    'a list without %s validates but is not contract-2 eligible',
+    (removed) => {
+      const ids = sequence.filter((id) => id !== removed);
+      expect(validateComposition(ids, catalog)).toEqual([]);
+      expect(composedLspRunListEligible(ids)).toBe(false);
+    },
+  );
+  it.each(['01b-install-plugins', '04-verify-environment'])(
+    'the final step placed before %s is refused',
+    (producer) => {
+      const ids = sequence.filter((id) => id !== finalId);
+      ids.splice(ids.indexOf(producer), 0, finalId);
+      expect(validateComposition(ids, catalog).length).toBeGreaterThan(0);
+    },
   );
 });

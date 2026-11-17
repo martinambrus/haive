@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -780,5 +781,63 @@ it.each([null, { version: 1, guardedSpans: [] }])(
     expect(reads).toEqual([]);
     expect(writes.length).toBeGreaterThan(0);
     for (const values of writes) expect(values).not.toHaveProperty('guardState');
+  },
+);
+
+it.each(['task', 'step'] as const)(
+  'LSP final evidence follows real %s Retry reset sets without losing retained references',
+  async (action) => {
+    for (const targetIndex of [0, 2, 3]) {
+      const t = setup({ status: 'failed' });
+      await t.fake.db.delete(schema.taskSteps).where(eq(schema.taskSteps.taskId, TASK));
+      const sequence = [
+        '04-verify-environment',
+        '01-worktree-setup',
+        '01b-install-plugins',
+        '01b1-verify-composed-lsp',
+      ];
+      const rows = sequence.map((stepId, index) =>
+        t.fake.insert(schema.taskSteps, {
+          taskId: TASK,
+          stepId,
+          round: 0,
+          runSeq: index + 4,
+          stepIndex: index === 0 ? 204 : 101 + index / 10,
+          status: index === targetIndex ? 'failed' : 'done',
+          rerunGeneration: 0,
+          output: { evidence: stepId },
+          endedAt: t.fake.now(),
+        }),
+      );
+      t.fake.patch(schema.tasks, TASK, {
+        currentStepId: sequence[targetIndex],
+        currentRound: 0,
+        metadata: {
+          unrelated: true,
+          composedLspImageRefs: { effective: 'keep', prior: 'keep', verifying: 'keep' },
+        },
+      });
+      const metadata = structuredClone(t.task().metadata);
+      const response =
+        action === 'task'
+          ? await t.retry()
+          : await app.request(`/${TASK}/steps/${sequence[targetIndex]}/action`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'retry', round: 0 }),
+            });
+      expect(response.status).toBe(200);
+      expect(
+        t.fake
+          .rows(schema.taskSteps)
+          .filter((r) => r.status === 'pending')
+          .map((r) => r.stepId),
+      ).toEqual(sequence.slice(targetIndex));
+      for (const row of rows.slice(targetIndex))
+        expect(t.step(String(row.id))).toMatchObject({ output: null, rerunGeneration: 1 });
+      for (const row of rows.slice(0, targetIndex))
+        expect(t.step(String(row.id)).output).toEqual(row.output);
+      expect(t.task().metadata).toEqual(metadata);
+    }
   },
 );

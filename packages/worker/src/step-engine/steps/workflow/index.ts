@@ -6,6 +6,7 @@ import { estimateStep } from './00b-estimate.js';
 import { worktreeSetupStep } from './01-worktree-setup.js';
 import { debugModeStep } from './01-debug-mode.js';
 import { installPluginsStep } from './01b-install-plugins.js';
+import { verifyComposedLspStep } from './01b1-verify-composed-lsp.js';
 import { browserAccessStep } from './01d-browser-access.js';
 import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
@@ -61,6 +62,7 @@ export {
   worktreeSetupStep,
   debugModeStep,
   installPluginsStep,
+  verifyComposedLspStep,
   browserAccessStep,
   appBootStep,
   ddevEnvStep,
@@ -116,6 +118,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(worktreeSetupStep);
   registry.register(debugModeStep);
   registry.register(installPluginsStep);
+  registry.register(verifyComposedLspStep);
   registry.register(browserAccessStep);
   registry.register(appBootStep);
   registry.register(ddevEnvStep);

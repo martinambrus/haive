@@ -332,7 +332,7 @@ export async function loadComposedLspIdentity(
   };
 }
 
-/** A reset clears 04 output, not this task-owned key. Task-row serialization and a fresh locked read
+/** A reset clears step output, not this task-owned key. Task-row serialization and a fresh locked read
  * preserve unrelated metadata. The caller holds the image-tag turn until this commits. */
 export async function retainComposedImage(
   db: Database,
