@@ -114,6 +114,8 @@ export interface PlanSequenceDetect {
   cycles: number;
   ancestorDeps: number;
   agentsUsed: number;
+  /** Admin pilot: limit this pass to its first wave, including after recovery. */
+  singleWave?: boolean;
   wave: number;
   disagreements: SequenceDisagreement[];
 }
@@ -368,7 +370,7 @@ export function computeTargets(
 async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
-    columns: { repositoryId: true },
+    columns: { repositoryId: true, metadata: true },
   });
   const repositoryId = task?.repositoryId ?? null;
   if (!repositoryId) {
@@ -410,16 +412,24 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     cycles: derived.cycles.length,
     ancestorDeps: derived.ancestorDeps.length,
     agentsUsed: state.agents,
+    ...((task?.metadata as { sequenceSingleWave?: unknown } | null)?.sequenceSingleWave === true
+      ? { singleWave: true }
+      : {}),
     wave: state.wave,
     disagreements: collectDisagreements(nodes, edges, agentOrdinals(rows)),
   };
 }
 
-function dispatchCount(targetCount: number, agentsUsed: number): number {
-  return Math.max(
-    0,
-    Math.min(SEQUENCE_AGENTS_PER_WAVE, targetCount, SEQUENCE_AGENTS_PER_PASS - agentsUsed),
-  );
+function agentLimit(detected: PlanSequenceDetect): number {
+  return detected.singleWave ? SEQUENCE_AGENTS_PER_WAVE : SEQUENCE_AGENTS_PER_PASS;
+}
+
+function dispatchCount(
+  targetCount: number,
+  agentsUsed: number,
+  limit = SEQUENCE_AGENTS_PER_PASS,
+): number {
+  return Math.max(0, Math.min(SEQUENCE_AGENTS_PER_WAVE, targetCount, limit - agentsUsed));
 }
 
 /** Is the pass over — will no further agent go out?
@@ -436,14 +446,22 @@ function dispatchCount(targetCount: number, agentsUsed: number): number {
  *  The budget being spent ends the pass exactly as running out of groups does —
  *  what is left over is reported as `remaining` and picked up by re-running the
  *  step. */
-export function sequencePassComplete(pendingTargets: number, agentsUsed: number): boolean {
-  return pendingTargets === 0 || agentsUsed >= SEQUENCE_AGENTS_PER_PASS;
+export function sequencePassComplete(
+  pendingTargets: number,
+  agentsUsed: number,
+  limit = SEQUENCE_AGENTS_PER_PASS,
+): boolean {
+  return pendingTargets === 0 || agentsUsed >= limit;
 }
+
+export const SEQUENCE_ROLE_OUTLINE_MAX_CHARS = 4_000;
+export type SequenceContextArm = 'parity' | 'role-sized';
 
 export function buildSequencePrompt(
   target: SequenceTarget,
   nodes: PlanNodeSkeleton[],
   buildOrder: ReadonlyMap<string, number>,
+  contextArm: SequenceContextArm = 'parity',
 ): string {
   const parent = nodes.find((n) => n.id === target.parentId);
   if (!parent) throw new Error(`plan node ${target.parentId} is not among the nodes to sequence`);
@@ -461,7 +479,11 @@ export function buildSequencePrompt(
     nodes,
     parent,
     SEQUENCE_CONTEXT_BUDGET - childLines.join('\n').length,
-    { buildOrder, omitChildren: true },
+    {
+      buildOrder,
+      omitChildren: true,
+      ...(contextArm === 'role-sized' ? { outlineMaxChars: SEQUENCE_ROLE_OUTLINE_MAX_CHARS } : {}),
+    },
   );
   return [
     'You are deciding the ORDER in which one part of a project plan gets built.',
@@ -479,6 +501,13 @@ export function buildSequencePrompt(
     'title alone. The lines beside each part say how much of it is shown. Every node shown carries',
     'its current build-order number as `#N`, so you can see where your part sits in the whole. A',
     'node that appears only in the outline has no id, so it cannot be named in a `depends_on`.',
+    ...(contextArm === 'role-sized'
+      ? [
+          'This role-sized context caps the title outline at 4,000 characters while keeping the',
+          'same neighborhood and child fields. Trade-off: nodes outside the neighborhood have',
+          'no ids here, so cross-subtree `depends_on` links to them cannot be named directly.',
+        ]
+      : []),
     '',
     fencedAgentBlock(context),
     '',
@@ -528,15 +557,29 @@ async function buildWave(
     const run = byParent.get(t.parentId);
     return run !== undefined && !tooWideToSequence(run);
   });
-  const slice = sendable.slice(0, dispatchCount(sendable.length, detected.agentsUsed));
+  const slice = sendable.slice(
+    0,
+    dispatchCount(sendable.length, detected.agentsUsed, agentLimit(detected)),
+  );
   if (slice.length === 0) return [];
   const edges = await loadPlanEdges(ctx.db, detected.repositoryId!);
   const buildOrder = computePlanSequence(nodes, edges).sequenceById;
+  // Read only this task's persisted opt-in, for both the initial and continuation waves.
+  // No user preference or global configuration is changed by the pilot.
+  const [task] = await ctx.db
+    .select({ metadata: schema.tasks.metadata })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  const contextArm: SequenceContextArm =
+    (task?.metadata as { sequenceContextArm?: unknown } | null)?.sequenceContextArm === 'role-sized'
+      ? 'role-sized'
+      : 'parity';
   return slice.map((target) => ({
     agentId: sequenceAgentId(target.parentId, wave),
     agentTitle: `Order: ${target.parentTitle}`,
     roleKey: 'expand',
-    prompt: buildSequencePrompt(target, nodes, buildOrder),
+    prompt: buildSequencePrompt(target, nodes, buildOrder, contextArm),
   }));
 }
 
@@ -790,13 +833,19 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
   if (detected.agentsUsed > 0) {
     // ...but the END of the pass asks once more, because by then there is
     // something to show that did not exist when the budget was agreed.
-    return sequencePassComplete(detected.targets.length, detected.agentsUsed) &&
-      detected.disagreements.length > 0
+    return sequencePassComplete(
+      detected.targets.length,
+      detected.agentsUsed,
+      agentLimit(detected),
+    ) && detected.disagreements.length > 0
       ? disagreementForm(detected)
       : null;
   }
   if (detected.targets.length === 0) return null;
 
+  const targetsToAsk = detected.singleWave
+    ? Math.min(detected.targets.length, SEQUENCE_AGENTS_PER_WAVE)
+    : detected.targets.length;
   const defects = detected.cycles + detected.ancestorDeps;
   const tooWide = detected.tooWide?.length ?? 0;
   return {
@@ -804,8 +853,11 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
     description:
       `${detected.nodeCount} nodes. ${detected.decidedRuns} group(s) are already ordered by ` +
       `dependencies they declare, and ${detected.targets.length} still need a reader to decide. ` +
-      `That is up to ${detected.targets.length} agent runs at ${SEQUENCE_AGENTS_PER_WAVE} at a ` +
+      `That is up to ${targetsToAsk} agent runs at ${SEQUENCE_AGENTS_PER_WAVE} at a ` +
       'time — the largest thing this step spends, so it is asked for rather than assumed.' +
+      (detected.singleWave
+        ? ' This pilot stops after one wave; other groups remain for a later task.'
+        : '') +
       (tooWide > 0
         ? ` ${tooWide} more group(s) have more than ${SEQUENCE_MAX_RUN_CHILDREN} children, more ` +
           'than one agent can order in a single reply, so no agent is sent for them and they ' +
@@ -826,8 +878,12 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
         options: [
           {
             value: 'sequence',
-            label: `Order the whole plan (up to ${detected.targets.length} agents)`,
-            description: 'Ask a model to order every group the declared dependencies leave open.',
+            label: detected.singleWave
+              ? `Order one wave (up to ${targetsToAsk} agents)`
+              : `Order the whole plan (up to ${detected.targets.length} agents)`,
+            description: detected.singleWave
+              ? 'Ask a model to order the first wave of groups the declared dependencies leave open.'
+              : 'Ask a model to order every group the declared dependencies leave open.',
           },
           {
             value: 'deterministic_only',
@@ -991,11 +1047,7 @@ export function createPlanSequenceStep(opts: {
       result.remaining = pending.length;
       result.decision = 'sequenced';
 
-      if (
-        pending.length > 0 &&
-        state.agents < SEQUENCE_AGENTS_PER_PASS &&
-        !args.miningWaveExhausted
-      ) {
+      if (pending.length > 0 && state.agents < agentLimit(d) && !args.miningWaveExhausted) {
         const dispatches = await buildWave(
           ctx,
           { ...d, targets: pending, agentsUsed: state.agents },
@@ -1006,7 +1058,7 @@ export function createPlanSequenceStep(opts: {
           result.dispatched = dispatches.length;
           throw new MiningWaveError(
             dispatches,
-            `build order: ${dispatches.length} group(s) (${state.agents + dispatches.length}/${SEQUENCE_AGENTS_PER_PASS})`,
+            `build order: ${dispatches.length} group(s) (${state.agents + dispatches.length}/${agentLimit(d)})`,
           );
         }
       }
@@ -1021,7 +1073,10 @@ export function createPlanSequenceStep(opts: {
       // asks for a form that will not exist and fails the step instead. Those
       // disagreements are not lost — they surface when the step is re-run.
       const disagreements = collectDisagreements(nodes, edges, agentOrdinals(rows));
-      if (disagreements.length > 0 && sequencePassComplete(pending.length, state.agents)) {
+      if (
+        disagreements.length > 0 &&
+        sequencePassComplete(pending.length, state.agents, agentLimit(d))
+      ) {
         result.disagreements = disagreements.length;
         throw new ReopenStepFormError(
           `${disagreements.length} recorded dependency(ies) contradict the order chosen without them`,

@@ -1333,6 +1333,9 @@ planRoutes.post('/:id/plan/sequence', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planSequenceRequestSchema.parse(await readOptionalJsonObject(c.req));
+  if ((body.contextArm !== undefined || body.singleWave) && c.get('userRole') !== 'admin') {
+    throw new HttpError(403, 'Admin access required for sequence context experiments');
+  }
   const root = await findPlanRoot(getDb(), repositoryId);
   if (!root) throw new HttpError(409, 'This repository has no plan to order yet');
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
@@ -1341,7 +1344,10 @@ planRoutes.post('/:id/plan/sequence', requireNewWorkAllowed, async (c) => {
     repositoryId,
     type: 'plan_sequence',
     title: `Order plan: ${repo.name}`,
-    metadata: {},
+    metadata: {
+      ...(body.contextArm ? { sequenceContextArm: body.contextArm } : {}),
+      ...(body.singleWave ? { sequenceSingleWave: true } : {}),
+    },
     cliProviderId,
     ignoreSavedStepClis: Boolean(body.cliProviderId),
   });

@@ -489,9 +489,13 @@ export const planBuildRequestSchema = z
 export type PlanBuildRequest = z.infer<typeof planBuildRequestSchema>;
 
 /** Put an EXISTING plan into build order. No mode and no brief: the plan is
- *  already there and the only input is which CLI to spend. */
+ *  already there. The context experiment is admin-only and scoped to the new task. */
 export const planSequenceRequestSchema = z.object({
   cliProviderId: z.string().uuid().optional(),
+  /** Pilot only: the API admits explicit selections only for administrators. */
+  contextArm: z.enum(['parity', 'role-sized']).optional(),
+  /** Pilot only: end this task's pass after at most one wave (12 agents). */
+  singleWave: z.literal(true).optional(),
 });
 export type PlanSequenceRequest = z.infer<typeof planSequenceRequestSchema>;
 
