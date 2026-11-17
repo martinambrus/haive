@@ -790,36 +790,37 @@ values, contract schemas or host policy hooks. Declaring replacement capability 
 does not create a runtime data edge. The task history graph stays read-only. Authoring graphs expose module data ports and
 connections and prompt data ports. Additional replacement roles remain unsupported.
 
-### Execution declarations (P6; unavailable at runtime)
+### Execution declarations
 
 A module's static task-type seed may carry the strict version-1
-`executionContract` described in [Task types](task-types.md#pinned-execution-declarations-p6-admission-only).
+`executionContract` described in [Task types](task-types.md#pinned-execution-declarations).
 Its predicate ids use `module.<id>.<local>` and must belong to the seeding
 module. The module-id portion uses the shared `MODULE_ID_PATTERN` rule,
 including digit-leading ids and the 23-character bound. On a trusted `StepDefinition`, optional `guardPredicates` maps local
 predicate ids to `{argsSchema, evaluate}`. The schema-only export below declares
 the same ids and shares each exact schema object. Boot binds and namespaces those
 callbacks, refuses unmatched declarations/evaluators, duplicates or missing functions, and
-validates stored JSON args against the registered schema. P6 never calls
-`evaluate`, records a skip or writes `guard_state`; evaluation, settled producer
-identity and crash-safe decision ownership belong to P7. Do not serialize JS,
+validates stored JSON args against the registered schema. Only the worker
+evaluates a predicate, at a guarded span's first step through the guard services
+(see Task types); the API never calls `evaluate`. Do not serialize JS,
 SQL, expressions, schemas or callbacks into the seed.
 
 An executable fix consumer declares `fixConsumer: {version: 1}` on its
 `StepDefinition` and matching composable manifest entry. Boot rejects missing,
 forged or mismatched capability metadata; the existing catalog entry JSON
 carries the validated version for API admission. This capability grants no
-output-contract replacement or host role policy. P8 must implement diagnosis,
-repair evidence, target CLI parity and the existing reset/epoch protocol before
-any task can select it for execution.
+output-contract replacement or host role policy. Every gate refuses a pin that
+selects a fix target until diagnosis, repair evidence, target CLI parity and the
+existing reset/epoch protocol exist for it.
 
 The module-owned declaration participates in source-guarded upsert, no-op
-comparison and content hashing. A declaration with guards or a selected fix
-target can be stored as a validated seed but cannot create or start a task in
-P6. No admin authoring UI is added. Absence keeps the old NULL behavior; an
+comparison and content hashing. A declaration with a selected fix
+target can be stored as a validated seed but cannot create or start a task. A
+guarded declaration creates tasks only for a static type whose predicates are
+registered. No admin authoring UI is added. Absence keeps the old NULL behavior; an
 explicit empty declaration can be pinned. Preserve every task pin on rollback.
 
-### Schema-only predicate registration (fence closed)
+### Schema-only predicate registration
 
 A module may export `./execution-predicates` as a default readonly array satisfying
 `ModuleExecutionPredicates` from `@haive/shared/modularity`. Each item contains only
@@ -864,14 +865,12 @@ Missing exports leave referenced predicates unknown and conditional validation
 fails closed; catalog JSON never reconstructs a schema. Ordinary NULL/inert pins
 keep their existing reads, locks and returned bytes.
 
-This commit opens no runtime fence and installs no scan seed. Valid guarded
-composition still ends in the existing runtime-support refusal at admission; custom
-fix targets remain refused. Registration itself evaluates nothing. There is no DDL.
+No scan seed is installed. A valid guarded composition passes admission for a static
+type; custom fix targets remain refused. Registration itself evaluates nothing. There is no DDL.
 Deploy module declarations and matching host support together. A module that declares `guardPredicates` without the `./execution-predicates` export fails worker boot ("has no declaration"). Rollback removes new
 exports/importing consumers together (a module importing a new SDK symbol needs a
-compatible host), retaining migration 0245 and every immutable pin/decision. Once
-later activation admits guard-bearing tasks, retain capable workers for all
-resumable pins; never erase or reinterpret them for rollback.
+compatible host), retaining migration 0245 and every immutable pin/decision. Retain
+capable workers for all resumable pins; never erase or reinterpret them for rollback.
 
 ### Fan-out seats
 
