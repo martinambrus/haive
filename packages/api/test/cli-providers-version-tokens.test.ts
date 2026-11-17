@@ -20,9 +20,10 @@ vi.mock('../src/queues.js', () => ({
 }));
 
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { configService, DEFAULT_AGENT_RULES } from '@haive/shared';
+import { CLI_EXEC_JOB_NAMES, configService, DEFAULT_AGENT_RULES } from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -90,6 +91,33 @@ const HOSTILE = [
   ' 1.2.3',
 ];
 describe('CLI provider version writes', () => {
+  it('queues a stored refused pin for the worker to record, and exposes its failure on reads', async () => {
+    const fake = setup({ name: 'codex', model: null, cliVersion: '$(id)' });
+    const response = await app.request(`/${PROVIDER}/sandbox-image/build`, { method: 'POST' });
+    expect(response.status).toBe(202);
+    expect(h.add).toHaveBeenCalledWith(
+      CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE,
+      expect.objectContaining({ providerId: PROVIDER }),
+      expect.anything(),
+    );
+    expect(fake.rows(schema.cliProviders)[0]?.sandboxImageBuildStatus).toBe('building');
+    // The worker's refusal write is covered by sandbox-image-refused-pin.test.ts.
+    await fake.db
+      .update(schema.cliProviders)
+      .set({
+        sandboxImageBuildStatus: 'failed',
+        sandboxImageBuildError: 'CLI version: invalid version token "$(id)"',
+      })
+      .where(eq(schema.cliProviders.id, PROVIDER));
+    const read = await app.request(`/${PROVIDER}`);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({
+      provider: {
+        sandboxImageBuildStatus: 'failed',
+        sandboxImageBuildError: expect.stringContaining('invalid version token'),
+      },
+    });
+  });
   it.each(HOSTILE)('refuses explicit create/update pin %j without writes', async (cliVersion) => {
     const fake = setup({ name: 'codex', model: null, cliVersion: '1.2.3' });
     const before = fake.rows(schema.cliProviders);
