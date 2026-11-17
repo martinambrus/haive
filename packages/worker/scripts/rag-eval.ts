@@ -21,9 +21,14 @@
  *                 gold when its source_path equals "path" and its body (the chunk after its first
  *                 line, the "[path > ...]" header) contains "anchor"; the legacy entry
  *                 { "query", "expected" (source_path substring) } still works. A gold with no such
- *                 row in the store is reported "not in store" and left out of that query's scores.
+ *                 row in the store is a miss and remains in the denominator.
  *                 One search per page size in {5, 8, 12, 20, 50} reusing one embedding; prints
- *                 recall@k, MRR@k and hit@k per kind and overall, and the p50/p95 search time
+ *                 recall/MRR per class, language, split and cell, rubric coverage for overview, and
+ *                 no-answer false-positive rate. All metrics carry seeded query-bootstrap CIs.
+ *   RAG_MANIFEST  manifest JSON path (default: manifest.json next to RAG_QUERY_SET).
+ *                 Fingerprint is computed from manifest + query bytes; any edit invalidates baselines.
+ *                 An absent default manifest permits standalone, non-comparable results.
+ *   RAG_COMPACT  1 writes minified query records without summaries, hits, ms or dense dumps
  *   RAG_LEXICAL_ONLY  1 skips the embed so the lexical-only branch runs
  *   RAG_IDENTIFIER_SEARCH  0 turns the identifier ranker off (default on)
  *   RAG_PROJECT   project name (internal mode db = haive_rag_<project>); default "default"
@@ -39,10 +44,13 @@
  *   RAG_OUT       path to write the per-query results and the summary as JSON
  *   RAG_EXPECTED  optional substring of an expected source_path to report its rank
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { fixtureFingerprint } from './rag-eval-fixture.js';
 import { createDatabase } from '@haive/database';
 import {
   embedQueryOrNull,
+  DEFAULT_RAG_SEARCH_CONFIG,
   openExistingRagDatabase,
   ragDatabaseName,
   ragHybridSearch,
@@ -55,106 +63,51 @@ import {
   vectorLiteral,
 } from '@haive/shared/rag';
 import { decideBuildMeta, readBuildMeta } from './rag-build-store.js';
-import { checkDensePool, type DensePoolCheck } from './rag-eval-dense.js';
+import { checkDensePool } from './rag-eval-dense.js';
 import {
   chunkBody,
-  fmtScoreSummary,
   goldRank,
   goldsOf,
   parseQuerySet,
-  percentile,
   rankOfExpected,
   scoreQuery,
-  summarizeScores,
   type Gold,
   type GoldOutcome,
-  type QueryScore,
-  type SetQuery,
 } from './rag-eval-metrics.js';
 
-const SET_KS = [5, 8, 12, 20, 50];
+import {
+  compactRun,
+  METRIC_VERSION,
+  SET_KS,
+  noAnswerScore,
+  overviewCoverage,
+  summarizeRun,
+  type QueryResult,
+  type EvalSettings,
+} from './rag-eval-report.js';
+
 const DENSE_LIMIT = 50;
-const EMPTY_SUMMARY = { n: 0, recall: 0, mrr: 0, hit: 0 };
-
-interface QueryResult {
-  query: string;
-  kind: string;
-  skipped: boolean;
-  golds: { path: string; anchor?: string; inStore: boolean; rank50: number | null }[];
-  byK: Record<string, { score: QueryScore | null; ms: number }>;
-  dense?: DensePoolCheck;
+// Operator-supplied files may live outside the checkout. Hold every component,
+// including the parent directories, rather than trusting a path-based open.
+async function readInputText(filename: string): Promise<string | null> {
+  const full = path.resolve(filename);
+  return await readTextNoFollow(path.parse(full).root, full.slice(path.parse(full).root.length), {
+    strict: true,
+  });
 }
 
-function loadQuerySet(path: string): SetQuery[] {
-  return parseQuerySet(JSON.parse(readFileSync(path, 'utf8')), path);
-}
-
-interface SetSummary {
-  perKind: Record<string, Record<string, ReturnType<typeof summarizeScores>>>;
-  all: Record<string, ReturnType<typeof summarizeScores>>;
-  skipped: number;
-  searchMs: Record<string, { p50: number; p95: number }>;
-  dense: {
-    n: number;
-    overlap: number;
-    indexRows: number;
-    exactRows: number;
-    hnswPlan: number;
-  } | null;
-}
-
-function summarizeSet(results: QueryResult[]): SetSummary {
-  const live = results.filter((r) => !r.skipped);
-  const kinds = [...new Set(live.map((r) => r.kind))];
-  const scoresAt = (rs: QueryResult[], k: number) =>
-    summarizeScores(rs.flatMap((r) => (r.byK[k]?.score ? [r.byK[k].score as QueryScore] : [])));
-  const perK = (rs: QueryResult[]) =>
-    Object.fromEntries(SET_KS.map((k) => [String(k), scoresAt(rs, k)]));
-  const dense = live.flatMap((r) => (r.dense ? [r.dense] : []));
-  const mean = (f: (d: DensePoolCheck) => number) =>
-    dense.reduce((a, d) => a + f(d), 0) / (dense.length || 1);
-  return {
-    perKind: Object.fromEntries(
-      kinds.map((kind) => [kind, perK(live.filter((r) => r.kind === kind))]),
-    ),
-    all: perK(live),
-    skipped: results.length - live.length,
-    searchMs: Object.fromEntries(
-      SET_KS.map((k) => {
-        const ms = live.map((r) => r.byK[k]?.ms ?? 0);
-        return [String(k), { p50: percentile(ms, 50), p95: percentile(ms, 95) }];
-      }),
-    ),
-    dense: dense.length
-      ? {
-          n: dense.length,
-          overlap: mean((d) => d.overlap),
-          indexRows: mean((d) => d.indexRows),
-          exactRows: mean((d) => d.exactRows),
-          hnswPlan: dense.filter((d) => d.defaultUsesHnsw).length,
-        }
-      : null,
-  };
-}
-
-function fmtSetSummary(s: SetSummary): string[] {
-  const lines: string[] = [];
-  for (const [kind, perK] of Object.entries({ ...s.perKind, OVERALL: s.all })) {
-    for (const k of SET_KS) lines.push(fmtScoreSummary(kind, k, perK[String(k)] ?? EMPTY_SUMMARY));
+async function loadQuerySet(filename: string) {
+  const queryText = await readInputText(filename);
+  if (queryText === null) throw new Error(`cannot read query set: ${filename}`);
+  const queries = parseQuerySet(JSON.parse(queryText), filename);
+  const explicitManifest = process.env.RAG_MANIFEST;
+  const manifestPath = explicitManifest || path.join(path.dirname(filename), 'manifest.json');
+  const manifestText = await readInputText(manifestPath);
+  if (manifestText === null) {
+    if (!explicitManifest) return { queries, fingerprint: '' };
+    throw new Error(`cannot read RAG_MANIFEST: ${manifestPath}`);
   }
-  if (s.skipped > 0) lines.push(`skipped queries (no gold in store): ${s.skipped}`);
-  for (const k of SET_KS) {
-    const t = s.searchMs[String(k)] ?? { p50: 0, p95: 0 };
-    lines.push(`search time k=${k}: p50=${t.p50.toFixed(1)}ms p95=${t.p95.toFixed(1)}ms`);
-  }
-  if (s.dense) {
-    lines.push(
-      `dense pool @${DENSE_LIMIT} (n=${s.dense.n}): index rows=${s.dense.indexRows.toFixed(1)} ` +
-        `exact rows=${s.dense.exactRows.toFixed(1)} overlap@${DENSE_LIMIT}=${s.dense.overlap.toFixed(3)} ` +
-        `default plan uses idx_rag_vector_hnsw in ${s.dense.hnswPlan}/${s.dense.n}`,
-    );
-  }
-  return lines;
+  return { queries, fingerprint: fixtureFingerprint(manifestText, queryText) };
 }
 
 async function main(): Promise<void> {
@@ -186,7 +139,9 @@ async function main(): Promise<void> {
   const forceLexicalOnly = process.env.RAG_LEXICAL_ONLY === '1';
   const identifierSearch = process.env.RAG_IDENTIFIER_SEARCH !== '0';
   const runbookBoost = Number(process.env.RAG_RUNBOOK_BOOST || 1);
-  const querySet = querySetPath ? loadQuerySet(querySetPath) : null;
+  const loaded = querySetPath ? await loadQuerySet(querySetPath) : null;
+  const querySet = loaded?.queries;
+  const fingerprint = loaded?.fingerprint ?? '';
 
   const db = createDatabase(dbUrl);
   let conn: RagConnection | null;
@@ -215,6 +170,19 @@ async function main(): Promise<void> {
       )
     ).length > 0;
   const runLexicalOnly = forceLexicalOnly || !storeHasVector;
+  const { topK: _defaultTopK, ...searchDefaults } = DEFAULT_RAG_SEARCH_CONFIG;
+  const settings: EvalSettings = {
+    embeddingModel: prefs.embeddingModel!,
+    embeddingDimensions: openConn.embeddingDimensions,
+    ks: [...SET_KS],
+    repositoryScoped: repositoryId !== undefined,
+    search: {
+      ...searchDefaults,
+      lexicalOnly: runLexicalOnly,
+      identifierSearch,
+      runbookBoost,
+    },
+  };
   const recorded = forceLexicalOnly ? null : await readBuildMeta(openConn.pg);
   if (recorded) {
     const decision = decideBuildMeta(recorded, true, {
@@ -250,7 +218,7 @@ async function main(): Promise<void> {
       openConn,
       vec ?? [],
       text,
-      { topK: k, runbookBoost, lexicalOnly: vec === null, identifierSearch },
+      { ...settings.search, topK: k, lexicalOnly: vec === null },
       undefined,
       repositoryId,
     );
@@ -278,21 +246,29 @@ async function main(): Promise<void> {
     return rows.some((r) => chunkBody(r.content, r.source_path).includes(anchor));
   }
 
-  const settings =
+  const settingsLabel =
     `lexicalOnly=${runLexicalOnly} identifierSearch=${identifierSearch} ` +
     `runbookBoost=${runbookBoost} topK=${topK} repositoryId=${repositoryId ?? '-'}`;
 
   if (querySet) {
-    console.log(`Project: ${projectName} (mode=${prefs.ragMode})   ${settings}\n`);
+    console.log(`Project: ${projectName} (mode=${prefs.ragMode})   ${settingsLabel}\n`);
     const results: QueryResult[] = [];
     for (const q of querySet) {
       const golds = goldsOf(q);
       const inStore = await Promise.all(golds.map(goldInStore));
       const vec = await embed(q.query);
       const result: QueryResult = {
+        id: q.id ?? `legacy-${results.length + 1}`,
         query: q.query,
         kind: q.kind,
-        skipped: !inStore.some(Boolean),
+        language: q.language ?? 'unknown',
+        split: q.split ?? 'unspecified',
+        labels: JSON.stringify({
+          gold: q.gold,
+          expected: q.expected,
+          rubric: q.rubric,
+          reason: q.reason,
+        }),
         golds: golds.map((g, i) => ({ ...g, inStore: inStore[i] === true, rank50: null })),
         byK: {},
       };
@@ -301,10 +277,6 @@ async function main(): Promise<void> {
         if (!inStore[i])
           console.log(`[${q.kind}] not in store  ${JSON.stringify(g)}  <- ${q.query}`);
       });
-      if (result.skipped) {
-        console.log(`[${q.kind}] SKIPPED: no gold is in the store  <- ${q.query}`);
-        continue;
-      }
       for (const k of SET_KS) {
         const { hits, lexicalOnly, ms } = await search(q.query, vec, k);
         if (lexicalOnly && !runLexicalOnly) {
@@ -315,7 +287,7 @@ async function main(): Promise<void> {
         }
         const ranks = golds.map((g) => goldRank(hits, g));
         if (k === SET_KS[SET_KS.length - 1]) {
-          result.golds.forEach((g, i) => {
+          result.golds!.forEach((g, i) => {
             g.rank50 = ranks[i] ?? null;
           });
         }
@@ -323,10 +295,25 @@ async function main(): Promise<void> {
           rank,
           inStore: inStore[i] === true,
         }));
-        result.byK[k] = { score: scoreQuery(outcomes, k), ms };
+        result.byK[k] = {
+          score: scoreQuery(outcomes, k),
+          ms,
+          topDenseSim: Math.max(0, ...hits.map((h) => h.denseSim)),
+          topLexical: !!hits[0] && (hits[0].ranks?.fts != null || hits[0].ranks?.ident != null),
+          hits: hits.map(({ sourcePath, content, rrf, denseSim }) => ({
+            sourcePath,
+            content,
+            rrf,
+            denseSim,
+          })),
+          overview: overviewCoverage(q, hits),
+          noAnswer: q.kind === 'no-answer' ? noAnswerScore(hits) : null,
+        };
       }
-      const shown = result.golds
-        .map((g) => (!g.inStore ? 'not in store' : g.rank50 === null ? 'miss' : `rank ${g.rank50}`))
+      const shown = result
+        .golds!.map((g) =>
+          !g.inStore ? 'not in store' : g.rank50 === null ? 'miss' : `rank ${g.rank50}`,
+        )
         .join(', ');
       console.log(`[${q.kind}] ${shown} (page ${SET_KS[SET_KS.length - 1]})  <- ${q.query}`);
       if (denseCheck) {
@@ -346,13 +333,27 @@ async function main(): Promise<void> {
       }
     }
     console.log('');
-    const summary = summarizeSet(results);
-    const lines = fmtSetSummary(summary);
-    for (const line of lines) console.log(line);
+    const summary = summarizeRun(results);
+    console.log(JSON.stringify(summary, null, 2));
     if (outPath) {
-      writeFileSync(
-        outPath,
-        JSON.stringify({ project: projectName, settings, results, summary }, null, 2),
+      const run = { metricVersion: METRIC_VERSION, fixture: fingerprint, settings, results };
+      const compact = process.env.RAG_COMPACT === '1';
+      const fullOut = path.resolve(outPath);
+      await writeFileNoFollow(
+        path.parse(fullOut).root,
+        fullOut.slice(path.parse(fullOut).root.length),
+        JSON.stringify(
+          compact
+            ? compactRun(run)
+            : {
+                ...run,
+                project: projectName,
+                summary,
+              },
+          null,
+          compact ? undefined : 2,
+        ) + '\n',
+        { mode: 'replace-atomic' },
       );
     }
   } else if (query) {

@@ -1,0 +1,3044 @@
+[
+  {
+    "id": "identifier-01-en",
+    "topic": "fact-01",
+    "query": "How does extractIdentifiers behave? Why are identifier segments emitted from a dotted token?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "identifier-01-fr",
+    "topic": "fact-01",
+    "query": "Comment fonctionne extractIdentifiers ? Pourquoi les segments sont-ils extraits d’un nom composé avec des points ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "identifier-01-sk",
+    "topic": "fact-01",
+    "query": "Ako funguje extractIdentifiers? Prečo sa z názvu oddeleného bodkami získavajú aj jednotlivé časti?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "paraphrase-01-en",
+    "topic": "fact-01",
+    "query": "Why are identifier segments emitted from a dotted token?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "paraphrase-01-fr",
+    "topic": "fact-01",
+    "query": "Pourquoi les segments sont-ils extraits d’un nom composé avec des points ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "paraphrase-01-sk",
+    "topic": "fact-01",
+    "query": "Prečo sa z názvu oddeleného bodkami získavajú aj jednotlivé časti?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "for (const segment of token.split('.'))"
+      }
+    ],
+    "fact": "Why are identifier segments emitted from a dotted token?"
+  },
+  {
+    "id": "identifier-02-en",
+    "topic": "fact-02",
+    "query": "How does IDENTIFIER_TSV_SENTINEL behave? What marker proves that a row received identifier-aware text indexing?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "identifier-02-fr",
+    "topic": "fact-02",
+    "query": "Comment fonctionne IDENTIFIER_TSV_SENTINEL ? Quel marqueur prouve qu’une ligne a reçu l’indexation des identifiants ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "identifier-02-sk",
+    "topic": "fact-02",
+    "query": "Ako funguje IDENTIFIER_TSV_SENTINEL? Aká značka dokazuje, že riadok má textový index s identifikátormi?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "paraphrase-02-en",
+    "topic": "fact-02",
+    "query": "What marker proves that a row received identifier-aware text indexing?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "paraphrase-02-fr",
+    "topic": "fact-02",
+    "query": "Quel marqueur prouve qu’une ligne a reçu l’indexation des identifiants ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "paraphrase-02-sk",
+    "topic": "fact-02",
+    "query": "Aká značka dokazuje, že riadok má textový index s identifikátormi?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/identifiers.ts",
+        "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+      }
+    ],
+    "fact": "What marker proves that a row received identifier-aware text indexing?"
+  },
+  {
+    "id": "identifier-03-en",
+    "topic": "fact-03",
+    "query": "How does KNOWLEDGE_SOURCE_TYPES behave? Which source categories qualify as repository knowledge?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "identifier-03-fr",
+    "topic": "fact-03",
+    "query": "Comment fonctionne KNOWLEDGE_SOURCE_TYPES ? Quelles catégories de sources constituent les connaissances du dépôt ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "identifier-03-sk",
+    "topic": "fact-03",
+    "query": "Ako funguje KNOWLEDGE_SOURCE_TYPES? Ktoré kategórie zdrojov sa považujú za znalosti repozitára?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "paraphrase-03-en",
+    "topic": "fact-03",
+    "query": "Which source categories qualify as repository knowledge?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "paraphrase-03-fr",
+    "topic": "fact-03",
+    "query": "Quelles catégories de sources constituent les connaissances du dépôt ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "paraphrase-03-sk",
+    "topic": "fact-03",
+    "query": "Ktoré kategórie zdrojov sa považujú za znalosti repozitára?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+      }
+    ],
+    "fact": "Which source categories qualify as repository knowledge?"
+  },
+  {
+    "id": "identifier-04-en",
+    "topic": "fact-04",
+    "query": "How does TASK_SOURCE_TYPE behave? Which stored embedding category is reserved for effort estimation rather than agent retrieval?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "identifier-04-fr",
+    "topic": "fact-04",
+    "query": "Comment fonctionne TASK_SOURCE_TYPE ? Quelle catégorie de vecteurs est réservée à l’estimation de l’effort plutôt qu’à la recherche des agents ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "identifier-04-sk",
+    "topic": "fact-04",
+    "query": "Ako funguje TASK_SOURCE_TYPE? Ktorá kategória uložených vektorov slúži na odhad náročnosti namiesto vyhľadávania pre agentov?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "paraphrase-04-en",
+    "topic": "fact-04",
+    "query": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "paraphrase-04-fr",
+    "topic": "fact-04",
+    "query": "Quelle catégorie de vecteurs est réservée à l’estimation de l’effort plutôt qu’à la recherche des agents ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "paraphrase-04-sk",
+    "topic": "fact-04",
+    "query": "Ktorá kategória uložených vektorov slúži na odhad náročnosti namiesto vyhľadávania pre agentov?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": "TASK_SOURCE_TYPE = 'task'"
+      }
+    ],
+    "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?"
+  },
+  {
+    "id": "identifier-05-en",
+    "topic": "fact-05",
+    "query": "How does ragDatabaseName behave? How are punctuation and case normalized in a project database name?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "identifier-05-fr",
+    "topic": "fact-05",
+    "query": "Comment fonctionne ragDatabaseName ? Comment la ponctuation et la casse sont-elles normalisées dans le nom de la base du projet ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "identifier-05-sk",
+    "topic": "fact-05",
+    "query": "Ako funguje ragDatabaseName? Ako sa normalizuje interpunkcia a veľkosť písmen v názve databázy projektu?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "paraphrase-05-en",
+    "topic": "fact-05",
+    "query": "How are punctuation and case normalized in a project database name?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "paraphrase-05-fr",
+    "topic": "fact-05",
+    "query": "Comment la ponctuation et la casse sont-elles normalisées dans le nom de la base du projet ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "paraphrase-05-sk",
+    "topic": "fact-05",
+    "query": "Ako sa normalizuje interpunkcia a veľkosť písmen v názve databázy projektu?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/connection.ts",
+        "anchor": ".replace(/[^a-z0-9]/g, '_')"
+      }
+    ],
+    "fact": "How are punctuation and case normalized in a project database name?"
+  },
+  {
+    "id": "identifier-06-en",
+    "topic": "fact-06",
+    "query": "How does embedQueryOrNull behave? What happens when the query embedding width differs from the index?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "identifier-06-fr",
+    "topic": "fact-06",
+    "query": "Comment fonctionne embedQueryOrNull ? Que se passe-t-il quand la dimension du vecteur de requête diffère de celle de l’index ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "identifier-06-sk",
+    "topic": "fact-06",
+    "query": "Ako funguje embedQueryOrNull? Čo sa stane, keď má vektor otázky inú dimenziu ako index?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "paraphrase-06-en",
+    "topic": "fact-06",
+    "query": "What happens when the query embedding width differs from the index?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "paraphrase-06-fr",
+    "topic": "fact-06",
+    "query": "Que se passe-t-il quand la dimension du vecteur de requête diffère de celle de l’index ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "paraphrase-06-sk",
+    "topic": "fact-06",
+    "query": "Čo sa stane, keď má vektor otázky inú dimenziu ako index?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (vec.length === opts.dimensions) return vec;"
+      }
+    ],
+    "fact": "What happens when the query embedding width differs from the index?"
+  },
+  {
+    "id": "identifier-07-en",
+    "topic": "fact-07",
+    "query": "How does OLLAMA_QUERY_TIMEOUT_MS behave? What is the default timeout for embedding an interactive search question?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "identifier-07-fr",
+    "topic": "fact-07",
+    "query": "Comment fonctionne OLLAMA_QUERY_TIMEOUT_MS ? Quel est le délai maximal par défaut pour vectoriser une question de recherche interactive ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "identifier-07-sk",
+    "topic": "fact-07",
+    "query": "Ako funguje OLLAMA_QUERY_TIMEOUT_MS? Aký je predvolený časový limit na vytvorenie vektora interaktívnej otázky?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "paraphrase-07-en",
+    "topic": "fact-07",
+    "query": "What is the default timeout for embedding an interactive search question?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "paraphrase-07-fr",
+    "topic": "fact-07",
+    "query": "Quel est le délai maximal par défaut pour vectoriser une question de recherche interactive ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "paraphrase-07-sk",
+    "topic": "fact-07",
+    "query": "Aký je predvolený časový limit na vytvorenie vektora interaktívnej otázky?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+      }
+    ],
+    "fact": "What is the default timeout for embedding an interactive search question?"
+  },
+  {
+    "id": "identifier-08-en",
+    "topic": "fact-08",
+    "query": "How does EMBED_BATCH_SIZE behave? How many documents are embedded together in the default batch?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "identifier-08-fr",
+    "topic": "fact-08",
+    "query": "Comment fonctionne EMBED_BATCH_SIZE ? Combien de documents sont vectorisés ensemble dans un lot par défaut ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "identifier-08-sk",
+    "topic": "fact-08",
+    "query": "Ako funguje EMBED_BATCH_SIZE? Koľko dokumentov obsahuje predvolená dávka na vytvorenie vektorov?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "paraphrase-08-en",
+    "topic": "fact-08",
+    "query": "How many documents are embedded together in the default batch?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "paraphrase-08-fr",
+    "topic": "fact-08",
+    "query": "Combien de documents sont vectorisés ensemble dans un lot par défaut ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "paraphrase-08-sk",
+    "topic": "fact-08",
+    "query": "Koľko dokumentov obsahuje predvolená dávka na vytvorenie vektorov?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "EMBED_BATCH_SIZE = 8"
+      }
+    ],
+    "fact": "How many documents are embedded together in the default batch?"
+  },
+  {
+    "id": "identifier-09-en",
+    "topic": "fact-09",
+    "query": "How does vectorLiteral behave? How many decimal places are used when serializing an embedding for SQL?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "identifier-09-fr",
+    "topic": "fact-09",
+    "query": "Comment fonctionne vectorLiteral ? Combien de décimales sont conservées lors de la sérialisation d’un vecteur pour la base ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "identifier-09-sk",
+    "topic": "fact-09",
+    "query": "Ako funguje vectorLiteral? Koľko desatinných miest sa zachová pri zápise vektora do databázy?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "paraphrase-09-en",
+    "topic": "fact-09",
+    "query": "How many decimal places are used when serializing an embedding for SQL?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "paraphrase-09-fr",
+    "topic": "fact-09",
+    "query": "Combien de décimales sont conservées lors de la sérialisation d’un vecteur pour la base ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "paraphrase-09-sk",
+    "topic": "fact-09",
+    "query": "Koľko desatinných miest sa zachová pri zápise vektora do databázy?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "values.map((v) => v.toFixed(6))"
+      }
+    ],
+    "fact": "How many decimal places are used when serializing an embedding for SQL?"
+  },
+  {
+    "id": "identifier-10-en",
+    "topic": "fact-10",
+    "query": "How does cosineSimilarity behave? How does vector similarity handle empty vectors or unequal lengths?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "identifier-10-fr",
+    "topic": "fact-10",
+    "query": "Comment fonctionne cosineSimilarity ? Comment la similarité vectorielle traite-t-elle les vecteurs vides ou de tailles différentes ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "identifier-10-sk",
+    "topic": "fact-10",
+    "query": "Ako funguje cosineSimilarity? Ako podobnosť vektorov spracuje prázdne vektory alebo rôzne dĺžky?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "paraphrase-10-en",
+    "topic": "fact-10",
+    "query": "How does vector similarity handle empty vectors or unequal lengths?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "paraphrase-10-fr",
+    "topic": "fact-10",
+    "query": "Comment la similarité vectorielle traite-t-elle les vecteurs vides ou de tailles différentes ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "paraphrase-10-sk",
+    "topic": "fact-10",
+    "query": "Ako podobnosť vektorov spracuje prázdne vektory alebo rôzne dĺžky?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/embed.ts",
+        "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+      }
+    ],
+    "fact": "How does vector similarity handle empty vectors or unequal lengths?"
+  },
+  {
+    "id": "identifier-11-en",
+    "topic": "fact-11",
+    "query": "How does applyKnowledgeReserve behave? How is the number of reserved knowledge slots limited on a small result page?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "identifier-11-fr",
+    "topic": "fact-11",
+    "query": "Comment fonctionne applyKnowledgeReserve ? Comment le nombre de places réservées aux connaissances est-il limité sur une petite page de résultats ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "identifier-11-sk",
+    "topic": "fact-11",
+    "query": "Ako funguje applyKnowledgeReserve? Ako je obmedzený počet miest vyhradených pre znalosti na malej stránke výsledkov?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "paraphrase-11-en",
+    "topic": "fact-11",
+    "query": "How is the number of reserved knowledge slots limited on a small result page?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "paraphrase-11-fr",
+    "topic": "fact-11",
+    "query": "Comment le nombre de places réservées aux connaissances est-il limité sur une petite page de résultats ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "paraphrase-11-sk",
+    "topic": "fact-11",
+    "query": "Ako je obmedzený počet miest vyhradených pre znalosti na malej stránke výsledkov?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+      }
+    ],
+    "fact": "How is the number of reserved knowledge slots limited on a small result page?"
+  },
+  {
+    "id": "identifier-12-en",
+    "topic": "fact-12",
+    "query": "How does knowledgeReserveRatio behave? How is the relative similarity threshold for promoting knowledge calculated?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "identifier-12-fr",
+    "topic": "fact-12",
+    "query": "Comment fonctionne knowledgeReserveRatio ? Comment calcule-t-on le seuil relatif de similarité pour promouvoir les connaissances ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "identifier-12-sk",
+    "topic": "fact-12",
+    "query": "Ako funguje knowledgeReserveRatio? Ako sa vypočíta relatívny prah podobnosti na uprednostnenie znalostí?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "paraphrase-12-en",
+    "topic": "fact-12",
+    "query": "How is the relative similarity threshold for promoting knowledge calculated?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "paraphrase-12-fr",
+    "topic": "fact-12",
+    "query": "Comment calcule-t-on le seuil relatif de similarité pour promouvoir les connaissances ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "paraphrase-12-sk",
+    "topic": "fact-12",
+    "query": "Ako sa vypočíta relatívny prah podobnosti na uprednostnenie znalostí?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+      }
+    ],
+    "fact": "How is the relative similarity threshold for promoting knowledge calculated?"
+  },
+  {
+    "id": "identifier-13-en",
+    "topic": "fact-13",
+    "query": "How does identifierCandidates behave? How many identifier matches may enter the fused candidate set by default?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "identifier-13-fr",
+    "topic": "fact-13",
+    "query": "Comment fonctionne identifierCandidates ? Combien de correspondances d’identifiants peuvent rejoindre les candidats fusionnés par défaut ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "identifier-13-sk",
+    "topic": "fact-13",
+    "query": "Ako funguje identifierCandidates? Koľko zhôd identifikátorov môže predvolene vstúpiť do zlúčenej množiny kandidátov?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "paraphrase-13-en",
+    "topic": "fact-13",
+    "query": "How many identifier matches may enter the fused candidate set by default?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "paraphrase-13-fr",
+    "topic": "fact-13",
+    "query": "Combien de correspondances d’identifiants peuvent rejoindre les candidats fusionnés par défaut ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "paraphrase-13-sk",
+    "topic": "fact-13",
+    "query": "Koľko zhôd identifikátorov môže predvolene vstúpiť do zlúčenej množiny kandidátov?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "identifierCandidates: 3"
+      }
+    ],
+    "fact": "How many identifier matches may enter the fused candidate set by default?"
+  },
+  {
+    "id": "identifier-14-en",
+    "topic": "fact-14",
+    "query": "How does identifierCteSql behave? How are symbol definitions ordered relative to mentions in identifier search?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "identifier-14-fr",
+    "topic": "fact-14",
+    "query": "Comment fonctionne identifierCteSql ? Comment les définitions de symboles sont-elles classées par rapport aux simples mentions ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "identifier-14-sk",
+    "topic": "fact-14",
+    "query": "Ako funguje identifierCteSql? Ako sa definície symbolov zoraďujú voči obyčajným zmienkam pri vyhľadávaní?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "paraphrase-14-en",
+    "topic": "fact-14",
+    "query": "How are symbol definitions ordered relative to mentions in identifier search?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "paraphrase-14-fr",
+    "topic": "fact-14",
+    "query": "Comment les définitions de symboles sont-elles classées par rapport aux simples mentions ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "paraphrase-14-sk",
+    "topic": "fact-14",
+    "query": "Ako sa definície symbolov zoraďujú voči obyčajným zmienkam pri vyhľadávaní?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+      }
+    ],
+    "fact": "How are symbol definitions ordered relative to mentions in identifier search?"
+  },
+  {
+    "id": "identifier-15-en",
+    "topic": "fact-15",
+    "query": "How does REPO_DENSE_SCAN behave? What graph search breadth is used for a per-repository dense read?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "identifier-15-fr",
+    "topic": "fact-15",
+    "query": "Comment fonctionne REPO_DENSE_SCAN ? Quelle largeur d’exploration du graphe est utilisée pour une recherche vectorielle par dépôt ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "identifier-15-sk",
+    "topic": "fact-15",
+    "query": "Ako funguje REPO_DENSE_SCAN? Aká šírka prehľadávania grafu sa používa pri vektorovom čítaní jedného repozitára?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "paraphrase-15-en",
+    "topic": "fact-15",
+    "query": "What graph search breadth is used for a per-repository dense read?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "paraphrase-15-fr",
+    "topic": "fact-15",
+    "query": "Quelle largeur d’exploration du graphe est utilisée pour une recherche vectorielle par dépôt ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "paraphrase-15-sk",
+    "topic": "fact-15",
+    "query": "Aká šírka prehľadávania grafu sa používa pri vektorovom čítaní jedného repozitára?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/search.ts",
+        "anchor": "['hnsw.ef_search', '200']"
+      }
+    ],
+    "fact": "What graph search breadth is used for a per-repository dense read?"
+  },
+  {
+    "id": "identifier-16-en",
+    "topic": "fact-16",
+    "query": "How does UNACCENT_UNAVAILABLE_CODES behave? Which database error codes justify persisting the verbatim lexical fallback?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "identifier-16-fr",
+    "topic": "fact-16",
+    "query": "Comment fonctionne UNACCENT_UNAVAILABLE_CODES ? Quels codes d’erreur de base justifient de conserver le repli lexical sans suppression des accents ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "identifier-16-sk",
+    "topic": "fact-16",
+    "query": "Ako funguje UNACCENT_UNAVAILABLE_CODES? Ktoré databázové kódy chýb odôvodňujú uloženie lexikálneho režimu bez odstránenia diakritiky?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "paraphrase-16-en",
+    "topic": "fact-16",
+    "query": "Which database error codes justify persisting the verbatim lexical fallback?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "paraphrase-16-fr",
+    "topic": "fact-16",
+    "query": "Quels codes d’erreur de base justifient de conserver le repli lexical sans suppression des accents ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "paraphrase-16-sk",
+    "topic": "fact-16",
+    "query": "Ktoré databázové kódy chýb odôvodňujú uloženie lexikálneho režimu bez odstránenia diakritiky?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/lexical-config.ts",
+        "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+      }
+    ],
+    "fact": "Which database error codes justify persisting the verbatim lexical fallback?"
+  },
+  {
+    "id": "identifier-17-en",
+    "topic": "fact-17",
+    "query": "How does LOCK_TTL_MS behave? How long does a repository indexing lock survive without a heartbeat?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "identifier-17-fr",
+    "topic": "fact-17",
+    "query": "Comment fonctionne LOCK_TTL_MS ? Combien de temps un verrou d’indexation survit-il sans signal de maintien ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "identifier-17-sk",
+    "topic": "fact-17",
+    "query": "Ako funguje LOCK_TTL_MS? Ako dlho zostane zámok indexovania platný bez obnovovacieho signálu?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "paraphrase-17-en",
+    "topic": "fact-17",
+    "query": "How long does a repository indexing lock survive without a heartbeat?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "paraphrase-17-fr",
+    "topic": "fact-17",
+    "query": "Combien de temps un verrou d’indexation survit-il sans signal de maintien ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "paraphrase-17-sk",
+    "topic": "fact-17",
+    "query": "Ako dlho zostane zámok indexovania platný bez obnovovacieho signálu?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "LOCK_TTL_MS = 120_000"
+      }
+    ],
+    "fact": "How long does a repository indexing lock survive without a heartbeat?"
+  },
+  {
+    "id": "identifier-18-en",
+    "topic": "fact-18",
+    "query": "How does fenceRagStore behave? How is a writer stopped from using a store after losing its repository lock?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "identifier-18-fr",
+    "topic": "fact-18",
+    "query": "Comment fonctionne fenceRagStore ? Comment empêche-t-on un processus d’écrire après la perte de son verrou de dépôt ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "identifier-18-sk",
+    "topic": "fact-18",
+    "query": "Ako funguje fenceRagStore? Ako sa zabráni procesu zapisovať po strate zámku repozitára?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "paraphrase-18-en",
+    "topic": "fact-18",
+    "query": "How is a writer stopped from using a store after losing its repository lock?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "paraphrase-18-fr",
+    "topic": "fact-18",
+    "query": "Comment empêche-t-on un processus d’écrire après la perte de son verrou de dépôt ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "paraphrase-18-sk",
+    "topic": "fact-18",
+    "query": "Ako sa zabráni procesu zapisovať po strate zámku repozitára?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/rag/sync-lock.ts",
+        "anchor": "lock.assertHeld();"
+      }
+    ],
+    "fact": "How is a writer stopped from using a store after losing its repository lock?"
+  },
+  {
+    "id": "identifier-19-en",
+    "topic": "fact-19",
+    "query": "How does ALGORITHM behave? Which authenticated cipher protects stored encrypted values?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "identifier-19-fr",
+    "topic": "fact-19",
+    "query": "Comment fonctionne ALGORITHM ? Quel chiffrement authentifié protège les valeurs stockées ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "identifier-19-sk",
+    "topic": "fact-19",
+    "query": "Ako funguje ALGORITHM? Ktorá autentifikovaná šifra chráni uložené zašifrované hodnoty?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "paraphrase-19-en",
+    "topic": "fact-19",
+    "query": "Which authenticated cipher protects stored encrypted values?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "paraphrase-19-fr",
+    "topic": "fact-19",
+    "query": "Quel chiffrement authentifié protège les valeurs stockées ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "paraphrase-19-sk",
+    "topic": "fact-19",
+    "query": "Ktorá autentifikovaná šifra chráni uložené zašifrované hodnoty?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "ALGORITHM = 'aes-256-gcm'"
+      }
+    ],
+    "fact": "Which authenticated cipher protects stored encrypted values?"
+  },
+  {
+    "id": "identifier-20-en",
+    "topic": "fact-20",
+    "query": "How does computeEmailBlindIndex behave? How is the searchable blind index for an email address derived?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "identifier-20-fr",
+    "topic": "fact-20",
+    "query": "Comment fonctionne computeEmailBlindIndex ? Comment l’index aveugle de recherche d’une adresse électronique est-il calculé ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "identifier-20-sk",
+    "topic": "fact-20",
+    "query": "Ako funguje computeEmailBlindIndex? Ako sa odvodí slepý vyhľadávací index e-mailovej adresy?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "paraphrase-20-en",
+    "topic": "fact-20",
+    "query": "How is the searchable blind index for an email address derived?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "paraphrase-20-fr",
+    "topic": "fact-20",
+    "query": "Comment l’index aveugle de recherche d’une adresse électronique est-il calculé ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "paraphrase-20-sk",
+    "topic": "fact-20",
+    "query": "Ako sa odvodí slepý vyhľadávací index e-mailovej adresy?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "createHmac('sha256', pepper).update(normalized)"
+      }
+    ],
+    "fact": "How is the searchable blind index for an email address derived?"
+  },
+  {
+    "id": "identifier-21-en",
+    "topic": "fact-21",
+    "query": "How does envelopeEncrypt behave? How does envelope encryption protect a freshly generated data key?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "identifier-21-fr",
+    "topic": "fact-21",
+    "query": "Comment fonctionne envelopeEncrypt ? Comment le chiffrement par enveloppe protège-t-il une nouvelle clé de données ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "identifier-21-sk",
+    "topic": "fact-21",
+    "query": "Ako funguje envelopeEncrypt? Ako obálkové šifrovanie chráni novovytvorený dátový kľúč?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "paraphrase-21-en",
+    "topic": "fact-21",
+    "query": "How does envelope encryption protect a freshly generated data key?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "paraphrase-21-fr",
+    "topic": "fact-21",
+    "query": "Comment le chiffrement par enveloppe protège-t-il une nouvelle clé de données ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "paraphrase-21-sk",
+    "topic": "fact-21",
+    "query": "Ako obálkové šifrovanie chráni novovytvorený dátový kľúč?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "tuning",
+    "gold": [
+      {
+        "path": "packages/shared/src/crypto/index.ts",
+        "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+      }
+    ],
+    "fact": "How does envelope encryption protect a freshly generated data key?"
+  },
+  {
+    "id": "identifier-22-en",
+    "topic": "fact-22",
+    "query": "How does normalizeTokens behave? How are fresh prompt tokens counted for providers that include cached input?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "identifier-22-fr",
+    "topic": "fact-22",
+    "query": "Comment fonctionne normalizeTokens ? Comment compte-t-on les nouveaux jetons quand le fournisseur inclut les entrées en cache ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "identifier-22-sk",
+    "topic": "fact-22",
+    "query": "Ako funguje normalizeTokens? Ako sa počítajú nové vstupné tokeny, keď poskytovateľ zahŕňa tokeny z vyrovnávacej pamäte?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "paraphrase-22-en",
+    "topic": "fact-22",
+    "query": "How are fresh prompt tokens counted for providers that include cached input?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "paraphrase-22-fr",
+    "topic": "fact-22",
+    "query": "Comment compte-t-on les nouveaux jetons quand le fournisseur inclut les entrées en cache ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "paraphrase-22-sk",
+    "topic": "fact-22",
+    "query": "Ako sa počítajú nové vstupné tokeny, keď poskytovateľ zahŕňa tokeny z vyrovnávacej pamäte?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/stats/tokens.ts",
+        "anchor": "Math.max(0, input - cacheReadTokens)"
+      }
+    ],
+    "fact": "How are fresh prompt tokens counted for providers that include cached input?"
+  },
+  {
+    "id": "identifier-23-en",
+    "topic": "fact-23",
+    "query": "How does createBoundedConcurrency behave? How does the asynchronous concurrency limiter handle a zero or fractional limit?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "identifier-23-fr",
+    "topic": "fact-23",
+    "query": "Comment fonctionne createBoundedConcurrency ? Comment le limiteur de concurrence asynchrone traite-t-il une limite nulle ou fractionnaire ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "identifier-23-sk",
+    "topic": "fact-23",
+    "query": "Ako funguje createBoundedConcurrency? Ako asynchrónny obmedzovač súbežnosti spracuje nulový alebo zlomkový limit?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "paraphrase-23-en",
+    "topic": "fact-23",
+    "query": "How does the asynchronous concurrency limiter handle a zero or fractional limit?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "paraphrase-23-fr",
+    "topic": "fact-23",
+    "query": "Comment le limiteur de concurrence asynchrone traite-t-il une limite nulle ou fractionnaire ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "paraphrase-23-sk",
+    "topic": "fact-23",
+    "query": "Ako asynchrónny obmedzovač súbežnosti spracuje nulový alebo zlomkový limit?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/bounded-concurrency.ts",
+        "anchor": "const max = Math.max(1, Math.floor(limit));"
+      }
+    ],
+    "fact": "How does the asynchronous concurrency limiter handle a zero or fractional limit?"
+  },
+  {
+    "id": "identifier-24-en",
+    "topic": "fact-24",
+    "query": "How does collapseToLine behave? How are control characters and line separators removed from a one-line title?",
+    "kind": "identifier",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "identifier-24-fr",
+    "topic": "fact-24",
+    "query": "Comment fonctionne collapseToLine ? Comment les caractères de contrôle et séparateurs de ligne sont-ils supprimés d’un titre sur une ligne ?",
+    "kind": "identifier",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "identifier-24-sk",
+    "topic": "fact-24",
+    "query": "Ako funguje collapseToLine? Ako sa z jednoriadkového názvu odstránia riadiace znaky a oddeľovače riadkov?",
+    "kind": "identifier",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "paraphrase-24-en",
+    "topic": "fact-24",
+    "query": "How are control characters and line separators removed from a one-line title?",
+    "kind": "paraphrase",
+    "language": "en",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "paraphrase-24-fr",
+    "topic": "fact-24",
+    "query": "Comment les caractères de contrôle et séparateurs de ligne sont-ils supprimés d’un titre sur une ligne ?",
+    "kind": "paraphrase",
+    "language": "fr",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "paraphrase-24-sk",
+    "topic": "fact-24",
+    "query": "Ako sa z jednoriadkového názvu odstránia riadiace znaky a oddeľovače riadkov?",
+    "kind": "paraphrase",
+    "language": "sk",
+    "split": "held-out",
+    "gold": [
+      {
+        "path": "packages/shared/src/utils/collapse-line.ts",
+        "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()"
+      }
+    ],
+    "fact": "How are control characters and line separators removed from a one-line title?"
+  },
+  {
+    "id": "overview-01-en",
+    "topic": "overview-01",
+    "query": "Explain how code names are extracted, indexed, and ranked for search.",
+    "kind": "overview",
+    "language": "en",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Why are identifier segments emitted from a dotted token?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "for (const segment of token.split('.'))"
+          }
+        ]
+      },
+      {
+        "fact": "What marker proves that a row received identifier-aware text indexing?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+          }
+        ]
+      },
+      {
+        "fact": "How many identifier matches may enter the fused candidate set by default?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "identifierCandidates: 3"
+          }
+        ]
+      },
+      {
+        "fact": "How are symbol definitions ordered relative to mentions in identifier search?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-01-fr",
+    "topic": "overview-01",
+    "query": "Expliquez l’extraction, l’indexation et le classement des noms de code pour la recherche.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Why are identifier segments emitted from a dotted token?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "for (const segment of token.split('.'))"
+          }
+        ]
+      },
+      {
+        "fact": "What marker proves that a row received identifier-aware text indexing?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+          }
+        ]
+      },
+      {
+        "fact": "How many identifier matches may enter the fused candidate set by default?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "identifierCandidates: 3"
+          }
+        ]
+      },
+      {
+        "fact": "How are symbol definitions ordered relative to mentions in identifier search?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-01-sk",
+    "topic": "overview-01",
+    "query": "Vysvetlite získavanie, indexovanie a zoraďovanie názvov kódu pri vyhľadávaní.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Why are identifier segments emitted from a dotted token?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "for (const segment of token.split('.'))"
+          }
+        ]
+      },
+      {
+        "fact": "What marker proves that a row received identifier-aware text indexing?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/identifiers.ts",
+            "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'"
+          }
+        ]
+      },
+      {
+        "fact": "How many identifier matches may enter the fused candidate set by default?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "identifierCandidates: 3"
+          }
+        ]
+      },
+      {
+        "fact": "How are symbol definitions ordered relative to mentions in identifier search?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "ORDER BY defines DESC, idf_score DESC, id"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-02-en",
+    "topic": "overview-02",
+    "query": "Explain how retrieval distinguishes knowledge from task history and reserves useful knowledge on a page.",
+    "kind": "overview",
+    "language": "en",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "Which source categories qualify as repository knowledge?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+          }
+        ]
+      },
+      {
+        "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "TASK_SOURCE_TYPE = 'task'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the number of reserved knowledge slots limited on a small result page?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+          }
+        ]
+      },
+      {
+        "fact": "How is the relative similarity threshold for promoting knowledge calculated?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-02-fr",
+    "topic": "overview-02",
+    "query": "Expliquez comment la recherche distingue connaissances et historique des tâches et réserve les connaissances utiles.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "Which source categories qualify as repository knowledge?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+          }
+        ]
+      },
+      {
+        "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "TASK_SOURCE_TYPE = 'task'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the number of reserved knowledge slots limited on a small result page?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+          }
+        ]
+      },
+      {
+        "fact": "How is the relative similarity threshold for promoting knowledge calculated?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-02-sk",
+    "topic": "overview-02",
+    "query": "Vysvetlite, ako vyhľadávanie rozlišuje znalosti od histórie úloh a vyhradzuje miesto užitočným znalostiam.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "Which source categories qualify as repository knowledge?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']"
+          }
+        ]
+      },
+      {
+        "fact": "Which stored embedding category is reserved for effort estimation rather than agent retrieval?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/connection.ts",
+            "anchor": "TASK_SOURCE_TYPE = 'task'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the number of reserved knowledge slots limited on a small result page?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))"
+          }
+        ]
+      },
+      {
+        "fact": "How is the relative similarity threshold for promoting knowledge calculated?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "Math.max(...codeSims) * knowledgeReserveRatio"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-03-en",
+    "topic": "overview-03",
+    "query": "Describe the safeguards around embedding queries and document batches.",
+    "kind": "overview",
+    "language": "en",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "What happens when the query embedding width differs from the index?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (vec.length === opts.dimensions) return vec;"
+          }
+        ]
+      },
+      {
+        "fact": "What is the default timeout for embedding an interactive search question?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+          }
+        ]
+      },
+      {
+        "fact": "How many documents are embedded together in the default batch?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "EMBED_BATCH_SIZE = 8"
+          }
+        ]
+      },
+      {
+        "fact": "How does vector similarity handle empty vectors or unequal lengths?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-03-fr",
+    "topic": "overview-03",
+    "query": "Décrivez les protections lors de la vectorisation des requêtes et des lots de documents.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "What happens when the query embedding width differs from the index?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (vec.length === opts.dimensions) return vec;"
+          }
+        ]
+      },
+      {
+        "fact": "What is the default timeout for embedding an interactive search question?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+          }
+        ]
+      },
+      {
+        "fact": "How many documents are embedded together in the default batch?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "EMBED_BATCH_SIZE = 8"
+          }
+        ]
+      },
+      {
+        "fact": "How does vector similarity handle empty vectors or unequal lengths?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-03-sk",
+    "topic": "overview-03",
+    "query": "Opíšte ochrany pri vytváraní vektorov otázok a dávok dokumentov.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "What happens when the query embedding width differs from the index?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (vec.length === opts.dimensions) return vec;"
+          }
+        ]
+      },
+      {
+        "fact": "What is the default timeout for embedding an interactive search question?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000"
+          }
+        ]
+      },
+      {
+        "fact": "How many documents are embedded together in the default batch?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "EMBED_BATCH_SIZE = 8"
+          }
+        ]
+      },
+      {
+        "fact": "How does vector similarity handle empty vectors or unequal lengths?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "if (a.length === 0 || a.length !== b.length) return 0;"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-04-en",
+    "topic": "overview-04",
+    "query": "Explain how repository indexing remains safe when a writer crashes or loses its lock.",
+    "kind": "overview",
+    "language": "en",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How long does a repository indexing lock survive without a heartbeat?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "LOCK_TTL_MS = 120_000"
+          }
+        ]
+      },
+      {
+        "fact": "How is a writer stopped from using a store after losing its repository lock?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "lock.assertHeld();"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-04-fr",
+    "topic": "overview-04",
+    "query": "Expliquez la sécurité de l’indexation quand un processus plante ou perd son verrou.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How long does a repository indexing lock survive without a heartbeat?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "LOCK_TTL_MS = 120_000"
+          }
+        ]
+      },
+      {
+        "fact": "How is a writer stopped from using a store after losing its repository lock?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "lock.assertHeld();"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-04-sk",
+    "topic": "overview-04",
+    "query": "Vysvetlite bezpečnosť indexovania, keď zapisujúci proces spadne alebo stratí zámok.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How long does a repository indexing lock survive without a heartbeat?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "LOCK_TTL_MS = 120_000"
+          }
+        ]
+      },
+      {
+        "fact": "How is a writer stopped from using a store after losing its repository lock?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/sync-lock.ts",
+            "anchor": "lock.assertHeld();"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-05-en",
+    "topic": "overview-05",
+    "query": "Give an overview of encrypted value storage, email lookup, and key protection.",
+    "kind": "overview",
+    "language": "en",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Which authenticated cipher protects stored encrypted values?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "ALGORITHM = 'aes-256-gcm'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the searchable blind index for an email address derived?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "createHmac('sha256', pepper).update(normalized)"
+          }
+        ]
+      },
+      {
+        "fact": "How does envelope encryption protect a freshly generated data key?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-05-fr",
+    "topic": "overview-05",
+    "query": "Donnez un aperçu du stockage chiffré, de la recherche des adresses électroniques et de la protection des clés.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Which authenticated cipher protects stored encrypted values?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "ALGORITHM = 'aes-256-gcm'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the searchable blind index for an email address derived?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "createHmac('sha256', pepper).update(normalized)"
+          }
+        ]
+      },
+      {
+        "fact": "How does envelope encryption protect a freshly generated data key?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-05-sk",
+    "topic": "overview-05",
+    "query": "Zhrňte šifrované ukladanie hodnôt, vyhľadávanie e-mailov a ochranu kľúčov.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "tuning",
+    "rubric": [
+      {
+        "fact": "Which authenticated cipher protects stored encrypted values?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "ALGORITHM = 'aes-256-gcm'"
+          }
+        ]
+      },
+      {
+        "fact": "How is the searchable blind index for an email address derived?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "createHmac('sha256', pepper).update(normalized)"
+          }
+        ]
+      },
+      {
+        "fact": "How does envelope encryption protect a freshly generated data key?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/crypto/index.ts",
+            "anchor": "const encryptedDek = encryptDek(dek, kekHex);"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-06-en",
+    "topic": "overview-06",
+    "query": "Outline the database-facing choices for vector serialization, graph search, and accent handling.",
+    "kind": "overview",
+    "language": "en",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How many decimal places are used when serializing an embedding for SQL?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "values.map((v) => v.toFixed(6))"
+          }
+        ]
+      },
+      {
+        "fact": "What graph search breadth is used for a per-repository dense read?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "['hnsw.ef_search', '200']"
+          }
+        ]
+      },
+      {
+        "fact": "Which database error codes justify persisting the verbatim lexical fallback?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/lexical-config.ts",
+            "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-06-fr",
+    "topic": "overview-06",
+    "query": "Présentez les choix de sérialisation vectorielle, recherche dans le graphe et gestion des accents en base.",
+    "kind": "overview",
+    "language": "fr",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How many decimal places are used when serializing an embedding for SQL?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "values.map((v) => v.toFixed(6))"
+          }
+        ]
+      },
+      {
+        "fact": "What graph search breadth is used for a per-repository dense read?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "['hnsw.ef_search', '200']"
+          }
+        ]
+      },
+      {
+        "fact": "Which database error codes justify persisting the verbatim lexical fallback?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/lexical-config.ts",
+            "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "overview-06-sk",
+    "topic": "overview-06",
+    "query": "Zhrňte databázové rozhodnutia pre zápis vektorov, prehľadávanie grafu a spracovanie diakritiky.",
+    "kind": "overview",
+    "language": "sk",
+    "split": "held-out",
+    "rubric": [
+      {
+        "fact": "How many decimal places are used when serializing an embedding for SQL?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/embed.ts",
+            "anchor": "values.map((v) => v.toFixed(6))"
+          }
+        ]
+      },
+      {
+        "fact": "What graph search breadth is used for a per-repository dense read?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/search.ts",
+            "anchor": "['hnsw.ef_search', '200']"
+          }
+        ]
+      },
+      {
+        "fact": "Which database error codes justify persisting the verbatim lexical fallback?",
+        "evidence": [
+          {
+            "path": "packages/shared/src/rag/lexical-config.ts",
+            "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "no-answer-01-en",
+    "topic": "no-answer-01",
+    "query": "Which command trains a cross-encoder reranker on this repository?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-01-fr",
+    "topic": "no-answer-01",
+    "query": "Quelle commande entraîne un reclasseur croisé sur ce dépôt ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-01-sk",
+    "topic": "no-answer-01",
+    "query": "Ktorý príkaz trénuje krížový model na pretriedenie výsledkov tohto repozitára?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-02-en",
+    "topic": "no-answer-02",
+    "query": "Where is the Elasticsearch index configured for repository search?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-02-fr",
+    "topic": "no-answer-02",
+    "query": "Où l’index Elasticsearch est-il configuré pour la recherche du dépôt ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-02-sk",
+    "topic": "no-answer-02",
+    "query": "Kde sa konfiguruje index Elasticsearch na vyhľadávanie v repozitári?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-03-en",
+    "topic": "no-answer-03",
+    "query": "How are embedding requests billed to a Stripe subscription?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-03-fr",
+    "topic": "no-answer-03",
+    "query": "Comment les requêtes de vectorisation sont-elles facturées à un abonnement Stripe ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-03-sk",
+    "topic": "no-answer-03",
+    "query": "Ako sa požiadavky na vektory účtujú v predplatnom Stripe?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-04-en",
+    "topic": "no-answer-04",
+    "query": "Which Kubernetes controller scales the vector database replicas?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-04-fr",
+    "topic": "no-answer-04",
+    "query": "Quel contrôleur Kubernetes ajuste les répliques de la base vectorielle ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-04-sk",
+    "topic": "no-answer-04",
+    "query": "Ktorý radič Kubernetes škáluje repliky vektorovej databázy?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-05-en",
+    "topic": "no-answer-05",
+    "query": "Where are LDAP group memberships mapped to repository search permissions?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-05-fr",
+    "topic": "no-answer-05",
+    "query": "Où les groupes LDAP sont-ils associés aux droits de recherche du dépôt ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-05-sk",
+    "topic": "no-answer-05",
+    "query": "Kde sa členstvo v skupinách LDAP mapuje na oprávnenia vyhľadávania?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "tuning",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-06-en",
+    "topic": "no-answer-06",
+    "query": "Which image encoder creates vectors for uploaded video frames?",
+    "kind": "no-answer",
+    "language": "en",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-06-fr",
+    "topic": "no-answer-06",
+    "query": "Quel encodeur d’images crée les vecteurs des trames vidéo téléversées ?",
+    "kind": "no-answer",
+    "language": "fr",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  },
+  {
+    "id": "no-answer-06-sk",
+    "topic": "no-answer-06",
+    "query": "Ktorý obrazový model vytvára vektory nahratých snímok videa?",
+    "kind": "no-answer",
+    "language": "sk",
+    "split": "held-out",
+    "reason": "Requested subsystem is not implemented in the pinned shared-source corpus; overlapping vocabulary is insufficient evidence."
+  }
+]

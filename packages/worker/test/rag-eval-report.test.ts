@@ -1,0 +1,364 @@
+import { describe, expect, it } from 'vitest';
+import { parseQuerySet, scoreQuery } from '../scripts/rag-eval-metrics.js';
+import { DEFAULT_RAG_SEARCH_CONFIG } from '@haive/shared/rag';
+import {
+  answerabilityReport,
+  compactRun,
+  bootstrapMean,
+  compareRuns,
+  METRIC_VERSION,
+  noAnswerScore,
+  overviewCoverage,
+  summarizeRun,
+  renderCellTable,
+  type EvalPage,
+  type EvalRun,
+  type QueryResult,
+} from '../scripts/rag-eval-report.js';
+
+const hit = (anchor: string) => ({
+  sourcePath: 'a.ts',
+  content: `[a.ts]\n${anchor}`,
+  rrf: 0.02,
+  denseSim: 0.6,
+});
+const page = (recall: number): EvalPage => ({
+  score: { recall, mrr: recall, hit: recall > 0 },
+  ms: 2,
+  hits: [],
+  overview: null,
+  noAnswer: null,
+});
+function row(id: string, recall: number, kind = 'identifier'): QueryResult {
+  return {
+    id,
+    query: id,
+    kind,
+    language: 'en',
+    split: 'held-out',
+    labels: 'fixed',
+    golds: [],
+    byK: { 8: page(recall) },
+  };
+}
+const run = (results: QueryResult[]): EvalRun => ({
+  metricVersion: METRIC_VERSION,
+  fixture: 'same-corpus-config',
+  settings: {
+    embeddingModel: 'qwen3-embedding:4b',
+    embeddingDimensions: 2560,
+    ks: [8],
+    repositoryScoped: true,
+    search: (({ topK: _topK, ...search }) => search)(DEFAULT_RAG_SEARCH_CONFIG),
+  },
+  results,
+});
+
+describe('query classes', () => {
+  it('keeps negative metadata and refuses positive labels on a no-answer question', () => {
+    const q = {
+      id: 'n',
+      query: 'missing subsystem',
+      kind: 'no-answer',
+      language: 'sk',
+      split: 'tuning',
+      reason: 'absent from corpus',
+    };
+    expect(parseQuerySet([q], 's')[0]).toEqual(q);
+    for (const extra of [{ gold: [] }, { expected: 'a' }, { reason: '' }, { split: 'random' }])
+      expect(() => parseQuerySet([{ ...q, ...extra }], 's')).toThrow();
+  });
+  it('requires multi-fact overview judgments, preserving all original facts', () => {
+    const rubric = [
+      { fact: 'x', evidence: [{ path: 'a.ts', anchor: 'x' }] },
+      { fact: 'y', evidence: [{ path: 'a.ts', anchor: 'y' }] },
+    ];
+    const [q] = parseQuerySet([{ query: 'overview', kind: 'overview', rubric }], 's');
+    expect(overviewCoverage(q!, [hit('x')])).toBe(0.5);
+    expect(overviewCoverage(q!, [hit('x y')])).toBe(1);
+    expect(overviewCoverage(q!, [])).toBe(0);
+    expect(() =>
+      parseQuerySet([{ query: 'overview', kind: 'overview', rubric: rubric.slice(0, 1) }], 's'),
+    ).toThrow();
+    expect(() =>
+      parseQuerySet(
+        [{ query: 'overview', kind: 'overview', rubric, gold: [{ path: 'a.ts', anchor: 'x' }] }],
+        's',
+      ),
+    ).toThrow();
+  });
+  it('rejects duplicate ids and invalid metadata', () => {
+    const q = { id: 'a', query: 'a', expected: 'a' };
+    expect(() => parseQuerySet([q, q], 's')).toThrow('duplicate id');
+    for (const extra of [{ language: '' }, { topic: 3 }, { rubric: [] }])
+      expect(() => parseQuerySet([{ ...q, ...extra }], 's')).toThrow();
+  });
+  it('records secondary any-hit separately from score magnitude', () => {
+    expect(noAnswerScore([])).toEqual({ falsePositive: false, maxRrf: 0, maxDense: 0 });
+    expect(noAnswerScore([{ ...hit('irrelevant'), rrf: 0, denseSim: 0 }])).toEqual({
+      falsePositive: true,
+      maxRrf: 0,
+      maxDense: 0,
+    });
+    expect(noAnswerScore([hit('irrelevant')]).maxDense).toBe(0.6);
+  });
+  it('does not let an inconsistent absent gold gain recall; an empty list has no recall target', () => {
+    expect(scoreQuery([{ rank: 1, inStore: false }], 8)?.recall).toBe(0);
+    expect(scoreQuery([], 8)).toBeNull();
+  });
+});
+
+describe('seeded bootstrap', () => {
+  it('handles empty, single and constant samples exactly', () => {
+    expect(bootstrapMean([])).toEqual({ n: 0, mean: null, low: null, high: null });
+    expect(bootstrapMean([0.5], 20)).toEqual({ n: 1, mean: 0.5, low: 0.5, high: 0.5 });
+    expect(bootstrapMean([0, 0], 20).high).toBe(0);
+  });
+  it('is reproducible and encloses the known mean for symmetric query deltas', () => {
+    const first = bootstrapMean([-1, 0, 1], 100, 1729);
+    expect(first).toEqual(bootstrapMean([-1, 0, 1], 100, 1729));
+    expect(first.mean).toBe(0);
+    expect(first.low).toBeLessThan(0);
+    expect(first.high).toBeGreaterThan(0);
+    expect(() => bootstrapMean([NaN])).toThrow();
+    expect(() => bootstrapMean([1], 0)).toThrow();
+  });
+});
+
+describe('summaries', () => {
+  it('separates class, language, split and cells and keeps misses in the answerable count', () => {
+    const negative = row('n', 0, 'no-answer');
+    negative.byK[8] = { ...page(0), score: null, noAnswer: noAnswerScore([hit('junk')]) };
+    const overview = row('o', 0, 'overview');
+    overview.language = 'fr';
+    overview.split = 'tuning';
+    overview.byK[8] = { ...page(0), score: null, overview: 0.5 };
+    const s = summarizeRun([row('a', 1), row('missing', 0), negative, overview], [8]);
+    expect(s.groups.all![8]!.answerable).toMatchObject({ n: 2, recall: 0.5 });
+    expect(s.groups.all![8]!.noAnswer).toMatchObject({ n: 1, mean: 1 });
+    expect(s.groups.all![8]!.overview).toMatchObject({ n: 1, mean: 0.5 });
+    expect(s.groups['cell:overview/fr/tuning']![8]!.overview.mean).toBe(0.5);
+    expect(s.groups['language:en']![8]!.answerable.n).toBe(2);
+    expect(s.groups['split:held-out']![8]!.answerable.n).toBe(2);
+    expect(() => summarizeRun([row('a', 1)], [5])).toThrow('missing page');
+  });
+});
+
+describe('paired comparisons', () => {
+  it.each([
+    ['embeddingModel', 'another-model'],
+    ['embeddingDimensions', 1024],
+    ['ks', [5, 8]],
+    ['repositoryScoped', false],
+  ])('refuses a changed fixed runtime field: %s', (field, value) => {
+    const before = run([row('a', 1)]);
+    const after = { ...before, settings: { ...before.settings!, [field]: value } };
+    expect(() => compareRuns(before, after, [8], 10)).toThrow(field);
+  });
+  it('refuses absent runtime settings and fixture-less standalone results clearly', () => {
+    const good = run([row('a', 1)]);
+    expect(() => compareRuns(good, { ...good, settings: undefined }, [8], 10)).toThrow('settings');
+    expect(() => compareRuns({ ...good, fixture: '' }, { ...good, fixture: '' }, [8], 10)).toThrow(
+      'not comparable: no fixture manifest',
+    );
+  });
+  it('preserves observed settings when compacting and exposes intentional arm/knob changes', () => {
+    const before = run([row('a', 1)]);
+    const after = structuredClone(before);
+    after.settings!.search.lexicalOnly = true;
+    after.settings!.search.identifierSearch = false;
+    after.settings!.search.runbookBoost = 2;
+    expect(compactRun(before).settings).toEqual(before.settings);
+    expect(compareRuns(before, after, [8], 10).settings).toEqual({
+      before: before.settings,
+      after: after.settings,
+    });
+  });
+  it('aligns by id, reports per-query deltas, wins/losses/ties and a paired CI', () => {
+    const before = run([row('a', 0), row('b', 1), row('c', 0.5)]);
+    const after = run([row('c', 0.5), row('b', 0), row('a', 1)]);
+    const comparison = compareRuns(before, after, [8], 100);
+    expect(comparison.perQuery[0]!.byK[8]).toEqual({ recall: 1, mrr: 1 });
+    expect(comparison.groups.all![8]!.recall).toMatchObject({
+      n: 3,
+      mean: 0,
+      wins: 1,
+      losses: 1,
+      ties: 1,
+    });
+    const self = compareRuns(before, before, [8], 100);
+    expect(self.groups.all![8]!.recall).toMatchObject({
+      mean: 0,
+      low: 0,
+      high: 0,
+      wins: 0,
+      losses: 0,
+      ties: 3,
+    });
+  });
+  it('keeps any-hit secondary when dense signals are unavailable', () => {
+    const a = row('n', 0, 'no-answer');
+    const b = row('n', 0, 'no-answer');
+    a.byK[8] = { ...page(0), score: null, noAnswer: noAnswerScore([hit('junk')]) };
+    b.byK[8] = { ...page(0), score: null, noAnswer: noAnswerScore([]) };
+    const c = compareRuns(run([a]), run([b]), [8], 10);
+    expect(c.groups.all![8]!.anyHit).toMatchObject({ mean: -1, wins: 1, losses: 0 });
+    expect(c.groups.all![8]!.fpr).toBeUndefined();
+    expect(c.answerability[8]).toEqual({ before: null, after: null });
+    expect(c.perQuery[0]!.byK[8]!.fpr).toBeNull();
+    a.kind = b.kind = 'overview';
+    a.byK[8]!.overview = 0.5;
+    b.byK[8]!.overview = 1;
+    expect(compareRuns(run([a]), run([b]), [8], 10).groups.all![8]!.coverage!.mean).toBe(0.5);
+  });
+  it('refuses missing queries, duplicates, changed labels, old metrics, different corpus and missing scores', () => {
+    const good = run([row('a', 1)]);
+    const bad = [
+      run([]),
+      run([row('a', 1), row('a', 1)]),
+      { ...good, metricVersion: 1 },
+      { ...good, fixture: 'different' },
+      run([{ ...row('a', 1), labels: 'changed' }]),
+      run([{ ...row('a', 1), byK: {} }]),
+      run([{ ...row('a', 1), query: 'changed' }]),
+    ];
+    for (const candidate of bad) expect(() => compareRuns(good, candidate, [8], 10)).toThrow();
+  });
+});
+
+describe('dense answerability', () => {
+  const scored = (id: string, score: number, split: string, kind = 'identifier'): QueryResult => ({
+    ...row(id, 1, kind),
+    split,
+    byK: { 8: { ...page(1), topDenseSim: score, topLexical: false } },
+  });
+  it('fixes tau on tuning positives and grades held-out without threshold leakage', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => scored(`t${i}`, i / 10, 'tuning'));
+    rows.push(scored('p', 0.15, 'held-out'), scored('n', 0.2, 'held-out', 'no-answer'));
+    const r = answerabilityReport(rows, 8);
+    expect(r.tau).toBe(0.1);
+    expect(r.tuning.retention).toBe(0.9);
+    expect(r.heldOut.retention).toBe(1);
+    expect(r.heldOut.fpr).toBe(1);
+    expect(r.heldOut.auroc).toBe(0);
+    rows[11]!.byK[8]!.topDenseSim = 0.15;
+    expect(answerabilityReport(rows, 8).heldOut.auroc).toBe(0.5);
+    rows[11]!.byK[8]!.topDenseSim = 0.05;
+    expect(answerabilityReport(rows, 8).heldOut).toMatchObject({ auroc: 1, fpr: 0 });
+    expect(answerabilityReport([], 8).tau).toBeNull();
+    expect(() => answerabilityReport([row('missing', 1)], 8)).toThrow('dense signal');
+    rows[0]!.byK[8]!.topDenseSim = NaN;
+    expect(() => answerabilityReport(rows, 8)).toThrow('dense signal');
+  });
+  it('keeps ties at tau and includes overview as answerable', () => {
+    const rows = [
+      scored('t', 0, 'tuning', 'overview'),
+      scored('p', 0, 'held-out'),
+      scored('n', 0, 'held-out', 'no-answer'),
+    ];
+    expect(answerabilityReport(rows, 8)).toMatchObject({ tau: 0, heldOut: { auroc: 0.5, fpr: 1 } });
+  });
+  it('grades each class/language/split cell with the global tuning tau, including compact signals', () => {
+    const rows = [
+      scored('t', 0.6, 'tuning'),
+      { ...scored('tf', 0.9, 'tuning'), language: 'fr' },
+      scored('n1', 0.5, 'held-out', 'no-answer'),
+      scored('n2', 0.6, 'held-out', 'no-answer'),
+      { ...scored('nf', 0.7, 'held-out', 'no-answer'), language: 'fr' },
+    ];
+    const summary = summarizeRun(compactRun(run(rows)).results, [8]);
+    const r = summary.answerability[8]!;
+    expect(r.tau).toBe(0.6);
+    expect(r.groups['cell:no-answer/en/held-out']).toMatchObject({
+      noAnswer: 2,
+      falsePositives: 1,
+      fpr: 0.5,
+      fprCI: { n: 2, mean: 0.5, low: 0, high: 1 },
+    });
+    expect(r.groups['cell:no-answer/fr/held-out']!.fpr).toBe(1);
+    expect(r.groups['language:fr']!.retention).toBe(1);
+    expect(r.groups['kind:identifier']!.fpr).toBeNull();
+    expect(r.groups['kind:identifier']!.fprCI).toBeNull();
+    expect(
+      answerabilityReport([scored('n', 1, 'held-out', 'no-answer')], 8).groups[
+        'cell:no-answer/en/held-out'
+      ]!.fpr,
+    ).toBeNull();
+  });
+  it('renders the documentation cell table from threshold FPR rather than any-hit', () => {
+    const rows = [scored('t', 0.6, 'tuning'), scored('n', 0.5, 'held-out', 'no-answer')];
+    rows[1]!.byK[8]!.score = null;
+    rows[1]!.byK[8]!.noAnswer = noAnswerScore([hit('irrelevant')]);
+    const table = renderCellTable(compactRun(run(rows)), compactRun(run(rows)));
+    expect(table).toContain(
+      '| no-answer | en | held-out | 1 | 0.000 [0.000, 0.000] | 0.000 [0.000, 0.000] |',
+    );
+    expect(table.split('\n').filter((line) => line.startsWith('|'))).toHaveLength(4);
+    const other = run(rows);
+    other.fixture = 'different';
+    expect(() => renderCellTable(run(rows), other)).toThrow('fixture/config mismatch');
+  });
+  it('reports Wilson 95% uncertainty and counts for small held-out negatives', () => {
+    const rows = [
+      scored('t', 0.6, 'tuning'),
+      ...Array.from({ length: 9 }, (_, i) =>
+        scored(`n${i}`, i < 5 ? 0.7 : 0.5, 'held-out', 'no-answer'),
+      ),
+    ];
+    const r = answerabilityReport(rows, 8).heldOut;
+    expect(r.falsePositives).toBe(5);
+    expect(r.fprWilson95!.low).toBeCloseTo(0.2666513, 6);
+    expect(r.fprWilson95!.high).toBeCloseTo(0.8112215, 6);
+    for (const score of [0, 1]) {
+      const edge = answerabilityReport(
+        [scored('t', 0.6, 'tuning'), scored('n', score, 'held-out', 'no-answer')],
+        8,
+      ).heldOut;
+      expect(edge.fprWilson95!.low).toBeGreaterThanOrEqual(0);
+      expect(edge.fprWilson95!.high).toBeLessThanOrEqual(1);
+      expect(edge.fprWilson95!.high - edge.fprWilson95!.low).toBeGreaterThan(0);
+    }
+  });
+  it('pairs threshold FPR with each arm globally calibrated on tuning positives and reports AUROC', () => {
+    const before = [
+      scored('t', 0.6, 'tuning'),
+      scored('p', 0.8, 'held-out'),
+      scored('n', 0.7, 'held-out', 'no-answer'),
+    ];
+    before[2]!.byK[8]!.noAnswer = noAnswerScore([hit('junk')]);
+    const after = structuredClone(before);
+    after[0]!.byK[8]!.topDenseSim = 0.8;
+    // Identical negative scores and any-hit, but the candidate's tuning tau rejects it.
+    const c = compareRuns(compactRun(run(before)), compactRun(run(after)), [8], 50);
+    expect(c.answerability[8]!.before).toMatchObject({ tau: 0.6, heldOut: { fpr: 1, auroc: 1 } });
+    expect(c.answerability[8]!.after).toMatchObject({ tau: 0.8, heldOut: { fpr: 0, auroc: 1 } });
+    expect(c.groups['cell:no-answer/en/held-out']![8]!.fpr).toMatchObject({
+      n: 1,
+      mean: -1,
+      low: -1,
+      high: -1,
+      wins: 1,
+      losses: 0,
+      ties: 0,
+    });
+    expect(c.groups.all![8]!.anyHit).toMatchObject({ mean: 0, wins: 0, ties: 1 });
+    expect(c.perQuery[2]!.byK[8]!.fpr).toBe(-1);
+    const reversed = compareRuns(run(after), run(before), [8], 50);
+    expect(reversed.groups.all![8]!.fpr).toMatchObject({ mean: 1, losses: 1 });
+    const self = compareRuns(run(before), run(before), [8], 50);
+    expect(self.groups.all![8]!.fpr).toMatchObject({ mean: 0, ties: 1 });
+  });
+  it('compacts without losing scores or signals and recomputes summaries', () => {
+    const r = scored('t', 0.6, 'tuning');
+    r.dense = { indexRows: 50, exactRows: 50, overlap: 1, defaultUsesHnsw: false };
+    const compact = compactRun(run([r]));
+    expect(compact.results[0]!.dense).toBeUndefined();
+    expect(compact.results[0]!.signal).toEqual({ k: 8, topDenseSim: 0.6, topLexical: false });
+    expect(compact.results[0]!.byK[8]).toEqual({
+      score: page(1).score,
+      overview: null,
+      noAnswer: null,
+    });
+    expect(summarizeRun(compact.results, [8]).groups.all![8]!.answerable.recall).toBe(1);
+  });
+});
