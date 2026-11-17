@@ -1625,7 +1625,10 @@ taskRoutes.post('/:id/action', async (c) => {
                   ),
                 )
             : [];
-        await resetRowsForRerun(tx, id, guards, new Date(), { rowsHeld: true });
+        await resetRowsForRerun(tx, id, guards, new Date(), {
+          rowsHeld: true,
+          executionContract: task.executionContract,
+        });
         await clearMessages(tx);
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');

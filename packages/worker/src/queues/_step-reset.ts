@@ -49,6 +49,7 @@ export async function resetStepAndDownstream(
   expectedEpoch?: number,
   recovery = false,
   heldStepIds: readonly string[] = [],
+  executionContract?: unknown,
 ): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
@@ -95,14 +96,17 @@ export async function resetStepAndDownstream(
 
   // The immutable pin alone opts into wider guard invalidation. Ordinary tasks
   // retain the original lock footprint and held-row read.
-  const [taskPin] = await db
-    .select({ executionContract: schema.tasks.executionContract })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId))
-    .limit(1);
+  // Production callers pass their loaded pin. Direct callers may omit it.
+  if (executionContract === undefined) {
+    const [taskPin] = await db
+      .select({ executionContract: schema.tasks.executionContract })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .limit(1);
+    executionContract = taskPin?.executionContract;
+  }
   const guarded =
-    taskPin?.executionContract != null &&
-    parseExecutionContract(taskPin.executionContract).guardedSpans.length > 0;
+    executionContract != null && parseExecutionContract(executionContract).guardedSpans.length > 0;
 
   let newEpoch = 0;
   let extraReset = 0;
@@ -157,16 +161,21 @@ export async function resetStepAndDownstream(
           ? or(resetScope, inArray(schema.taskSteps.id, [...heldStepIds]))
           : resetScope,
       );
-      // Read only held rows. For ordinary tasks the read is exactly the reset ids,
-      // as on main; heldStepIds are locked for the handoff but are not reset.
+      // Ordinary tasks use main's id-only reset read. Guarded tasks read their
+      // task-scoped held batch; heldStepIds alone do not make a row resettable.
       const loaded = await tx
         .select()
         .from(schema.taskSteps)
         .where(
-          and(
-            eq(schema.taskSteps.taskId, taskId),
-            inArray(schema.taskSteps.id, guarded ? locked.map((r) => r.id) : allStepIds),
-          ),
+          guarded
+            ? and(
+                eq(schema.taskSteps.taskId, taskId),
+                inArray(
+                  schema.taskSteps.id,
+                  locked.map((r) => r.id),
+                ),
+              )
+            : inArray(schema.taskSteps.id, allStepIds),
         );
       const held = guardResetRows(
         loaded,

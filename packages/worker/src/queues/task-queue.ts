@@ -2453,6 +2453,9 @@ export async function handleResult(
             next.metadata.id,
             nextRound,
             ctx.orchestrationEpoch,
+            false,
+            [],
+            ctx.executionContract,
           );
           if (reset === 'superseded') return;
           if (reset) ctx.orchestrationEpoch = reset.newEpoch;
@@ -2746,6 +2749,9 @@ export async function handleResult(
         target.metadata.id,
         nextRound,
         ctx.orchestrationEpoch,
+        false,
+        [],
+        ctx.executionContract,
       );
       if (reentryReset === 'superseded') {
         logger.info(
@@ -2879,6 +2885,9 @@ export async function handleResult(
         result.targetStepId,
         targetRound,
         ctx.orchestrationEpoch,
+        false,
+        [],
+        ctx.executionContract,
       );
       if (reset === 'superseded') {
         logger.info(
@@ -4606,6 +4615,7 @@ export async function reconcileOrphanedSteps(
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
       iterationCount: schema.taskSteps.iterationCount,
+      executionContract: schema.tasks.executionContract,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -4661,7 +4671,16 @@ export async function reconcileOrphanedSteps(
       // stale when it is redelivered; re-drive at that new epoch.
       // At the epoch this pass read, like the fence above: a Retry the api took during boot keeps
       // the task.
-      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round, s.epoch, true);
+      const reset = await resetStepAndDownstream(
+        db,
+        s.taskId,
+        s.stepId,
+        s.round,
+        s.epoch,
+        true,
+        [],
+        s.executionContract,
+      );
       if (!reset || reset === 'superseded') continue;
       await deps.enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
       logger.info(

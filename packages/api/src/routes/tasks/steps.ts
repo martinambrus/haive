@@ -239,17 +239,21 @@ export async function resetRowsForRerun(
   taskId: string,
   rows: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { rowsHeld?: boolean; preserveGuards?: boolean } = {},
+  opts: { rowsHeld?: boolean; preserveGuards?: boolean; executionContract?: unknown } = {},
 ): Promise<(typeof schema.taskSteps.$inferSelect)[]> {
   if (rows.length === 0) return [];
-  const [taskPin] = await tx
-    .select({ executionContract: schema.tasks.executionContract })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId))
-    .limit(1);
+  let executionContract = opts.executionContract;
+  // Production callers pass their loaded pin. Direct callers may omit it.
+  if (executionContract === undefined) {
+    const [taskPin] = await tx
+      .select({ executionContract: schema.tasks.executionContract })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .limit(1);
+    executionContract = taskPin?.executionContract;
+  }
   const guarded =
-    taskPin?.executionContract != null &&
-    parseExecutionContract(taskPin.executionContract).guardedSpans.length > 0;
+    executionContract != null && parseExecutionContract(executionContract).guardedSpans.length > 0;
   const ids = rows.map((r) => r.id);
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
   // their runs are swept without waiting, and a held one refuses the action as a held row does.
@@ -481,6 +485,7 @@ async function moveTaskToStep(
   opts: {
     fromFailed?: boolean;
     preserveGuards?: boolean;
+    executionContract?: unknown;
     liftPause?: { read: Date; role: string | undefined; actorUserId: string };
   } = {},
 ) {
@@ -488,6 +493,7 @@ async function moveTaskToStep(
   await refuseReviveBesideLive(tx, taskId);
   const extra = await resetRowsForRerun(tx, taskId, leftActive, now, {
     preserveGuards: opts.preserveGuards,
+    executionContract: opts.executionContract,
   });
   const [bumped] = await tx
     .update(schema.tasks)
@@ -526,6 +532,7 @@ async function moveTaskToStep(
   const lateExtra = await resetRowsForRerun(tx, taskId, late, now, {
     rowsHeld: true,
     preserveGuards: opts.preserveGuards,
+    executionContract: opts.executionContract,
   });
   return {
     epoch: bumped.epoch,
@@ -584,7 +591,9 @@ export async function retryTaskAtStep(
     await refuseReviveBesideLive(tx, taskId);
     // Runs first and step rows after, the order a pass takes them in.
     const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
-    const extra = await resetRowsForRerun(tx, taskId, reset, now);
+    const extra = await resetRowsForRerun(tx, taskId, reset, now, {
+      executionContract: task.executionContract,
+    });
     reset.push(...extra);
     // An empty `reset` takes no batch above; the statements below write rows outside it.
     await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
@@ -608,6 +617,7 @@ export async function retryTaskAtStep(
       );
     const result = await moveTaskToStep(tx, taskId, target, [], now, {
       fromFailed: true,
+      executionContract: task.executionContract,
       liftPause: opts.liftPause,
     });
     const touched = [...reset, ...result.leftActive];
@@ -1304,6 +1314,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         id,
         [step, ...downstreamToReset, ...leftActive],
         now,
+        { executionContract: task.executionContract },
       );
       leftActive.push(...extra);
       // Per-step "Override and run": only the clicked step bypasses the
@@ -1362,7 +1373,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
       newEpoch = bumped[0].epoch;
       const late = await rowsActivatedMeanwhile(tx, id, []);
-      const lateExtra = await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
+      const lateExtra = await resetRowsForRerun(tx, id, late, now, {
+        rowsHeld: true,
+        executionContract: task.executionContract,
+      });
       late.push(...lateExtra);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
@@ -1555,15 +1569,19 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           task.executionContract != null &&
           parseExecutionContract(task.executionContract).guardedSpans.length > 0;
         const extra = guarded
-          ? await resetRowsForRerun(tx, id, downstreamToReset, now)
+          ? await resetRowsForRerun(tx, id, downstreamToReset, now, {
+              executionContract: task.executionContract,
+            })
           : await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
               preserveGuards: true,
+              executionContract: task.executionContract,
             });
         if (guarded) {
           // A nonempty downstream reset holds the task's entire step batch.
           // Never wait on another run while holding that batch: refuse contention.
           await resetRowsForRerun(tx, id, leftActive, now, {
             preserveGuards: true,
+            executionContract: task.executionContract,
             rowsHeld: downstreamToReset.length > 0,
           });
         }
@@ -1627,7 +1645,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
         newEpoch = bumped[0].epoch;
         const late = await rowsActivatedMeanwhile(tx, id, [step.id]);
-        await resetRowsForRerun(tx, id, late, now, { rowsHeld: true, preserveGuards: true });
+        await resetRowsForRerun(tx, id, late, now, {
+          rowsHeld: true,
+          preserveGuards: true,
+          executionContract: task.executionContract,
+        });
         await tx.insert(schema.taskEvents).values({
           taskId: id,
           taskStepId: step.id,
@@ -1741,7 +1763,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         })
         .where(eq(schema.taskSteps.id, step.id));
       await startIfNeverStarted(tx, step.id);
-      const result = await moveTaskToStep(tx, id, step, leftActive, now, { preserveGuards: true });
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, {
+        preserveGuards: true,
+        executionContract: task.executionContract,
+      });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -1863,7 +1888,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         })
         .where(eq(schema.taskSteps.id, step.id));
       await startIfNeverStarted(tx, step.id);
-      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, {
+        executionContract: task.executionContract,
+      });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -1968,7 +1995,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, {
+        executionContract: task.executionContract,
+      });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -2390,7 +2419,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       // pending-row switch invalidates downstream pending durable work.
       await lockRowsForMove(tx, id, leftActive, now);
       if (!movesTask) {
-        const extra = await resetRowsForRerun(tx, id, leftActive, now);
+        const extra = await resetRowsForRerun(tx, id, leftActive, now, {
+          executionContract: task.executionContract,
+        });
         leftActive.push(...extra);
         pendingResetExtras = extra;
       }
@@ -2435,7 +2466,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         })
         .where(eq(schema.taskSteps.id, step.id));
       const moved = movesTask
-        ? await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now)
+        ? await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now, {
+            executionContract: task.executionContract,
+          })
         : null;
       // After the step row and, when the task moves, the task row, as a pass and a Retry take them.
       await saveChoice(tx);
