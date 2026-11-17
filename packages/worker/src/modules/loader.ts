@@ -10,6 +10,8 @@ import {
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   modulePackageId,
+  moduleExecutionPredicates,
+  type ModuleExecutionPredicates,
   type ComposableStepEntry,
   type ExecutionCompositionIssue,
   type ModuleManifest,
@@ -51,6 +53,7 @@ export type WorkerModuleEntry = {
   source?: ModuleSource;
   manifest: unknown;
   steps?: readonly StepDefinition[];
+  executionPredicates?: ModuleExecutionPredicates;
   ensureSchema?: (ctx: ModuleSchemaContext) => Promise<void>;
   jobs?: (ctx: ModuleJobContext) => Promise<() => Promise<void>>;
   teardown?: (ctx: ModuleTeardownContext) => Promise<void>;
@@ -110,6 +113,7 @@ export function registerModuleSteps(
   return entries.map((entry, index) => {
     const manifest = manifests[index]!;
     const moduleId = manifest.id;
+    const declarations = moduleExecutionPredicates(moduleId, entry.executionPredicates);
     const localDefs = new Map<string, StepDefinition>();
     const stepIds: string[] = [];
     const predicates = new Map<string, NonNullable<StepDefinition['guardPredicates']>[string]>();
@@ -143,10 +147,24 @@ export function registerModuleSteps(
           throw new Error(
             `Module ${moduleId} invalid or duplicate executable predicate ${predicateId}`,
           );
+        const declaration = declarations.get(id);
+        if (!declaration)
+          throw new Error(
+            `Module ${moduleId} executable predicate ${predicateId} has no declaration`,
+          );
+        // Identity includes refinements/transforms that a serialized schema cannot compare.
+        // Both exports must import the same schema constant from a schema-only file.
+        if (declaration.argsSchema !== predicate.argsSchema)
+          throw new Error(`Module ${moduleId} predicate ${predicateId} schema mismatch`);
         predicates.set(id, predicate);
       }
       localDefs.set(localId, def);
       stepIds.push(id);
+    }
+
+    for (const id of declarations.keys()) {
+      if (!predicates.has(id))
+        throw new Error(`Module ${moduleId} predicate ${id} has no evaluator`);
     }
 
     for (const localId of Object.keys(manifest.miningSeats ?? {})) {

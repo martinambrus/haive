@@ -81,7 +81,7 @@ export interface TaskTypeAvailabilityInput {
     composable: ReadonlyMap<string, ComposableStepEntry>;
   } | null;
   generic: boolean;
-  /** Trusted registration only. API storage readers deliberately have no executable map. */
+  /** Trusted schema-only registration from installed module code, never stored JSON. */
   predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
   derived?: { stepIds: readonly string[]; dependencyStepIds?: readonly string[]; valid: boolean };
 }
@@ -188,15 +188,10 @@ export function resolveTaskTypeAvailability(
       definition.stepIds.every((id) => catalog.composable.has(id)));
   const parsed = executionContractSchema.safeParse(definition.executionContract);
   const guarded = parsed.success && parsed.data.guardedSpans.length > 0;
+  // Guards must validate even without a map: an undeclared predicate fails closed.
   const planned =
     parsed.success &&
-    input.predicates !== undefined &&
-    (guarded || parsed.data.fixTarget !== undefined);
-  // API catalog references cannot stand in for executable predicate schemas. In
-  // this process guards remain unavailable, rather than checking an unconditional
-  // projection (which would reject the two mutually exclusive cleanup paths).
-  if (guarded && !input.predicates)
-    return executionContractAvailability(definition.executionContract);
+    (guarded || (input.predicates !== undefined && parsed.data.fixTarget !== undefined));
   if (checked || planned) {
     const issues = validateComposition(definition.stepIds, catalog.composable, {
       requiresRepository: definition.requiresRepository,

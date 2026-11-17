@@ -38,6 +38,7 @@ const LOCAL_STEPS = ['report', 'extra', 'plain'];
 const STEP_WITHOUT_ENTRY = 'internal';
 
 function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModule {
+  const argsSchema = z.strictObject({});
   const steps = [...LOCAL_STEPS, STEP_WITHOUT_ENTRY].map(
     (local) =>
       ({
@@ -45,7 +46,7 @@ function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModu
         ...(local === 'report'
           ? {
               guardPredicates: {
-                planned: { argsSchema: z.strictObject({}), evaluate: async () => true },
+                planned: { argsSchema, evaluate: async () => true },
               },
             }
           : {}),
@@ -72,6 +73,7 @@ function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModu
         ...(taskTypes ? { taskTypes } : {}),
       },
       steps,
+      executionPredicates: [{ id: 'planned', argsSchema }],
     },
   ]);
   return loaded!;

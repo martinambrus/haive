@@ -1,3 +1,6 @@
+import { z } from 'zod';
+import { moduleManifestSchema } from '@haive/shared/modularity';
+import { registerModuleExecutionPredicates } from '../src/modules/execution-predicates.js';
 import { eq } from 'drizzle-orm';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
@@ -76,7 +79,7 @@ function setup(contract: unknown = null) {
     displayName: 'Test',
     source: 'admin',
     runListStrategy: 'static',
-    stepIds: ['report'],
+    stepIds: ['report', 'tail'],
     enabled: true,
     selectable: true,
     requiresRepository: false,
@@ -99,11 +102,43 @@ function setup(contract: unknown = null) {
       requires: [],
       provides: [],
       dispatchesCli: false,
+      fixConsumer: { version: 1 },
+    },
+  });
+  fake.insert(schema.stepCatalog, {
+    stepId: 'tail',
+    source: 'core',
+    workflowType: 'test',
+    stepIndex: 2,
+    composable: true,
+    dispatchesCli: false,
+    entry: {
+      stepId: 'tail',
+      label: 'Tail',
+      group: 'test',
+      requires: [],
+      provides: [],
+      dispatchesCli: false,
     },
   });
   return fake;
 }
 beforeEach(() => {
+  // Keep these runtime-refusal fixtures structurally valid under schema-aware
+  // admission: report is capable, and the unguarded tail keeps every path nonempty.
+  registerModuleExecutionPredicates(
+    [{ executionPredicates: [{ id: 'planned', argsSchema: z.strictObject({}) }] }],
+    [
+      {
+        manifest: moduleManifestSchema.parse({
+          id: 'fx',
+          name: 'Fx',
+          version: '1',
+          schemaVersion: 1,
+        }),
+      },
+    ],
+  );
   h.add.mockClear();
   h.kill.mockClear();
 });

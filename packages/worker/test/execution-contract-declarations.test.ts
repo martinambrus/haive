@@ -42,6 +42,9 @@ function load(step = def, entry: unknown = composable) {
         schemaVersion: 1,
         composableSteps: [entry, { ...composable, stepId: 'report', fixConsumer: undefined }],
       },
+      executionPredicates: [
+        { id: 'planned', argsSchema: def.guardPredicates!.planned!.argsSchema },
+      ],
       steps: [
         step,
         {

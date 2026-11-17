@@ -192,6 +192,9 @@ for (const entry of Object.values(local.selection())) {
 }
 
 const apiImports = apiModules.flatMap((pkg, i) => [
+  ...(pkg.exports['./execution-predicates'] !== undefined
+    ? [`import p${i} from '${pkg.name}/execution-predicates';`]
+    : []),
   `import m${i} from '${pkg.name}/manifest';`,
   ...(pkg.exports['./routes'] !== undefined ? [`import r${i} from '${pkg.name}/routes';`] : []),
   ...(pkg.exports['./integrations'] !== undefined
@@ -200,8 +203,10 @@ const apiImports = apiModules.flatMap((pkg, i) => [
 ]);
 const apiEntries = apiModules.map((pkg, i) => {
   const routes = pkg.exports['./routes'] !== undefined ? `, routes: r${i}` : '';
+  const predicates =
+    pkg.exports['./execution-predicates'] !== undefined ? `, executionPredicates: p${i}` : '';
   const integrations = pkg.exports['./integrations'] !== undefined ? `, integrations: i${i}` : '';
-  return `  { packageName: '${pkg.name}', source: '${pkg.source}', manifest: m${i}${routes}${integrations} },`;
+  return `  { packageName: '${pkg.name}', source: '${pkg.source}', manifest: m${i}${routes}${integrations}${predicates} },`;
 });
 // A registry with no entry needs no type, and the file then carries no import at all.
 const apiBody =
@@ -233,9 +238,10 @@ for (const pkg of apiModules) {
   }
 }
 
-const workerParts = ['steps', 'ensure-schema', 'jobs', 'teardown'];
+const workerParts = ['steps', 'execution-predicates', 'ensure-schema', 'jobs', 'teardown'];
 const workerKeys = {
   steps: 'steps',
+  'execution-predicates': 'executionPredicates',
   'ensure-schema': 'ensureSchema',
   jobs: 'jobs',
   teardown: 'teardown',
@@ -244,12 +250,15 @@ const workerImports = apiModules.flatMap((pkg, i) => [
   `import m${i} from '${pkg.name}/manifest';`,
   ...workerParts
     .filter((part) => pkg.exports[`./${part}`] !== undefined)
-    .map((part) => `import ${part[0]}${i} from '${pkg.name}/${part}';`),
+    .map(
+      (part) =>
+        `import ${part === 'execution-predicates' ? 'p' : part[0]}${i} from '${pkg.name}/${part}';`,
+    ),
 ]);
 const workerEntries = apiModules.map((pkg, i) => {
   const parts = workerParts
     .filter((part) => pkg.exports[`./${part}`] !== undefined)
-    .map((part) => `, ${workerKeys[part]}: ${part[0]}${i}`)
+    .map((part) => `, ${workerKeys[part]}: ${part === 'execution-predicates' ? 'p' : part[0]}${i}`)
     .join('');
   return `  { packageName: '${pkg.name}', source: '${pkg.source}', manifest: m${i}${parts} },`;
 });
