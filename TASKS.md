@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T700 · No-change cleanup trusts a remote-tracking ref whose remote is inside the worktree
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1243 · priority: P4
+
+The submodule history check accepts any commit reachable from `refs/remotes/*`. That proves the commit reached another store only if the remote is one. A remote URL of `.`, a path inside the worktree or inside `.git/worktrees/<id>/modules/…`, a relative `.gitmodules` URL resolving into the worktree, or a hand-run `git update-ref refs/remotes/...` leaves the only copy in the store that pruning deletes. It needs deliberate setup: the sandbox masks `.git` and the worker creates no such remote. Fix when touched: for each remote, read `git remote get-url --all` (and `--push`); resolve a local path or `file://` URL against the submodule and realpath it; refuse when it lies inside the worktree, its staged path or the common dir's `worktrees/` tree, or cannot be resolved. Control: `remote set-url origin .` with a pushed local branch is refused.
+
 ### T699 · No-change cleanup does not check a deinitialized submodule's history
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1243 · priority: P4
