@@ -235,6 +235,31 @@ export interface CleanTranscript {
   elided?: { segments: number; chars: number; afterIndex: number };
 }
 
+/** Observed text returned by tools; weightedChars estimates repeated context exposure,
+ * never billable tokens. Unknown lifetimes (including elided logs) are null. */
+export interface ReadExposureCount {
+  reads: number;
+  chars: number;
+  weightedChars: number | null;
+}
+
+export interface InvocationReadExposure {
+  version: number;
+  coverage: 'full' | 'partial' | 'none';
+  turns: number | null;
+  compactions: number;
+  resultSeen: boolean;
+  results: ReadExposureCount;
+  /** Known repository reads, including combined repository output. Unknown scope is excluded. */
+  fileReads: ReadExposureCount;
+  files: Array<ReadExposureCount & { path: string }>;
+  outside: ReadExposureCount;
+  multiFile: ReadExposureCount;
+  unattributed: ReadExposureCount;
+  overflow: ReadExposureCount & { omitted: number };
+  byTool: Record<string, ReadExposureCount>;
+}
+
 /** What one CLI invocation USED, persisted to `cli_invocations.tool_usage`: native tool calls,
  *  MCP tool calls, native sub-agent spawns, `Skill` calls, and the agent-definition / skill
  *  FILES the agent opened on its own. Tallied by the same pass that extracts tokenUsage and
@@ -255,12 +280,14 @@ export interface CleanTranscript {
  *  the path, and it is what lets the backfill's `tool_usage IS NULL` predicate converge instead
  *  of re-examining the same unobservable rows on every boot. */
 export interface InvocationToolUsage {
+  /** Absent on historical records until the versioned backfill examines them. */
+  reads?: InvocationReadExposure;
   /** 'stream' = tallied live while the CLI ran; 'backfill' = parsed from the stored transcript. */
   source: 'stream' | 'backfill';
   /** 'full' = every event the CLI emitted was parsed (says nothing about whether the run
-   *  FINISHED); 'partial' = a backfill of a head+tail-elided `stream_log`, so every counter is
-   *  a floor while `loaded` (from the init event in the head) is still complete; 'none' = not
-   *  observable on this path, every list below empty. */
+   *  FINISHED); 'partial' = a backfill of a head+tail-elided `stream_log`, so raw counters are
+   *  floors (read exposure weights are unknown) while `loaded` from the init event is complete;
+   *  'none' = not observable on this path, every list below empty. */
   coverage: 'full' | 'partial' | 'none';
   /** Native tool calls by the CLI's own tool name (`Bash`, `Read`, grok's `read_file`, …).
    *  MCP-wrapped calls are NEVER here — see `mcp` — so sum(tools) + sum(mcp[].calls) is the

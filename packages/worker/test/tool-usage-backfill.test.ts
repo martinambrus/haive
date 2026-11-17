@@ -23,9 +23,13 @@ const CLAUDE_INIT = {
   agents: ['peer-reviewer', 'claude'],
   skills: ['project-context'],
 };
+let toolId = 0;
 const toolUse = (name: string, input: Record<string, unknown>) => ({
   type: 'assistant',
-  message: { model: 'claude-opus-5', content: [{ type: 'tool_use', id: 't', name, input }] },
+  message: {
+    model: 'claude-opus-5',
+    content: [{ type: 'tool_use', id: `t-${toolId++}`, name, input }],
+  },
 });
 
 function claudeTranscript(): string {
@@ -152,12 +156,13 @@ describe('toolUsageFromStreamLog', () => {
     expect(usage.coverage).toBe('none');
     expect(usage.tools).toEqual({});
     expect(usage.loaded).toEqual({ agents: [], skills: [], mcpServers: [], toolCount: 2 });
+    expect(usage.reads).toMatchObject({ coverage: 'none', resultSeen: true });
   });
 
   it('records a gemini envelope and a missing transcript as not observable', () => {
     const gemini = `${JSON.stringify({ response: 'Done.', stats: { models: {} } })}\n`;
     expect(toolUsageFromStreamLog('gemini', gemini, WORKDIR).coverage).toBe('none');
-    expect(toolUsageFromStreamLog('claude-code', null, WORKDIR)).toEqual({
+    expect(toolUsageFromStreamLog('claude-code', null, WORKDIR)).toMatchObject({
       source: 'backfill',
       coverage: 'none',
       tools: {},

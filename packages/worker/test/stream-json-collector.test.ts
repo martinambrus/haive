@@ -808,11 +808,12 @@ describe('createStreamJsonCollector.getToolUsage', () => {
     agents: ['peer-reviewer', 'claude'],
     skills: ['project-context'],
   };
+  let toolId = 0;
   const toolUse = (name: string, input: Record<string, unknown>) => ({
     type: 'assistant',
     message: {
       model: 'claude-opus-5',
-      content: [{ type: 'tool_use', id: 'toolu_1', name, input }],
+      content: [{ type: 'tool_use', id: `toolu_${toolId++}`, name, input }],
     },
   });
 

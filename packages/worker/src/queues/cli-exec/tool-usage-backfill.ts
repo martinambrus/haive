@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type InvocationToolUsage } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
@@ -8,6 +8,7 @@ import {
   unobservedToolUsage,
   type ToolUsageTally,
 } from '../../cli-executor/tool-usage.js';
+import { READ_EXPOSURE_VERSION } from '../../cli-executor/read-exposure.js';
 import { isElidedStreamLog } from './stream-log-buffer.js';
 
 /* ------------------------------------------------------------------ */
@@ -21,9 +22,10 @@ import { isElidedStreamLog } from './stream-log-buffer.js';
  * Runs at boot as a convergent data migration with a time budget (a large install converges
  * over a few boots instead of holding one boot for the whole rewrite), and from
  * `scripts/backfill-tool-usage.ts` for a one-shot full run. Idempotent by construction: it
- * selects `tool_usage IS NULL` and writes every examined row, so a re-run finds nothing — a
- * row whose transcript carries no tool events gets `coverage: 'none'` rather than staying
- * NULL, which is the whole reason that value exists (see the column's note). */
+ * selects unexamined tool usage and missing/older reads versions. Missing reads get a
+ * versioned terminal coverage state even without a transcript. An older version is kept
+ * when its transcript is unavailable; only replayable versions are upgraded, so a re-run
+ * finds nothing after successful writes. Existing counters, assignment and source survive. */
 
 const log = logger.child({ module: 'tool-usage-backfill' });
 
@@ -52,20 +54,7 @@ export function timestampLiteral(date: Date): string {
  *  the exec fallback's. Exactly the events the live collectors feed, nothing more, so a
  *  backfilled record and a live one read the same run identically. */
 function feedTranscriptLine(tally: ToolUsageTally, event: Record<string, unknown>): void {
-  if (event.type === 'system' && event.subtype === 'init') {
-    tally.claudeInit(event);
-    return;
-  }
-  if (event.type === 'assistant') {
-    const message = isRecord(event.message) ? event.message : null;
-    const content = message && Array.isArray(message.content) ? message.content : [];
-    for (const block of content) {
-      if (isRecord(block) && block.type === 'tool_use' && typeof block.name === 'string') {
-        tally.claudeToolUse(block.name, block.input);
-      }
-    }
-    return;
-  }
+  tally.claudeEvent(event);
   if (event.type === 'item.completed' && isRecord(event.item)) {
     tally.codexExecItem(event.item);
     return;
@@ -128,14 +117,14 @@ export interface ToolUsageBackfillResult {
   budgetExhausted: boolean;
 }
 
-/** Examine every ended invocation whose `tool_usage` is still NULL, newest first, and write
- *  what its transcript says it used.
+/** Examine ended invocations with unexamined usage or missing/older read exposure, newest
+ *  first. Add reads to an existing record without rewriting its other facts.
  *
  *  Keyset-paged on `(ended_at, id)` in BOTH modes, so a dry run cannot spin on rows it never
  *  writes and an apply run does not depend on the predicate shrinking underneath it. The write
- *  is a compare-and-swap on `tool_usage IS NULL`: a completion write that raced this one wins.
- *  A row whose transcript throws is logged with its id and skipped — it stays NULL and visible,
- *  which is a bug signal rather than a data state, since every input path here is defensive. */
+ *  compares against the selected tool_usage and pending version: any concurrent change wins.
+ *  A row whose replay or update throws is logged with its id and skipped — it stays pending
+ *  and visible, a bug signal rather than a data state, since input paths here are defensive. */
 export async function backfillToolUsage(
   db: Database,
   opts: ToolUsageBackfillOptions,
@@ -153,7 +142,17 @@ export async function backfillToolUsage(
     budgetExhausted: false,
   };
   const inv = schema.cliInvocations;
-  const base = and(isNull(inv.toolUsage), isNotNull(inv.endedAt));
+  // Missing or malformed reads converge even without a transcript. Keep a versioned
+  // record if its transcript was swept: an upgrade cannot reconstruct that evidence.
+  const needsReads = or(
+    isNull(inv.toolUsage),
+    sql`jsonb_typeof(${inv.toolUsage}->'reads') IS DISTINCT FROM 'object'`,
+    sql`CASE WHEN jsonb_typeof(${inv.toolUsage}->'reads'->'version') = 'number'
+      THEN (${inv.toolUsage}->'reads'->>'version')::numeric < ${READ_EXPOSURE_VERSION}
+        AND ${inv.streamLog} is not null
+      ELSE true END`,
+  );
+  const base = and(needsReads, isNotNull(inv.endedAt));
   // The cursor's timestamp travels as a LITERAL with an explicit cast, never as a JS Date: inside
   // a raw `sql` tuple drizzle hands the value to postgres.js unmapped, and postgres.js has no
   // serializer for `timestamp without time zone`, so a Date bound there fails the Bind step
@@ -162,6 +161,7 @@ export async function backfillToolUsage(
   // zone-less ISO form is.
   let cursor: { endedAt: string; id: string } | null = null;
 
+  let firstPageEmpty = false;
   for (;;) {
     if (Date.now() - startedAt > opts.budgetMs) {
       result.budgetExhausted = true;
@@ -172,6 +172,7 @@ export async function backfillToolUsage(
         id: inv.id,
         endedAt: inv.endedAt,
         streamLog: inv.streamLog,
+        toolUsage: inv.toolUsage,
         providerName: schema.cliProviders.name,
       })
       .from(inv)
@@ -186,33 +187,49 @@ export async function backfillToolUsage(
       )
       .orderBy(desc(inv.endedAt), desc(inv.id))
       .limit(opts.batchSize);
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      firstPageEmpty = cursor === null;
+      break;
+    }
 
     for (const row of rows) {
       cursor = { endedAt: timestampLiteral(row.endedAt as Date), id: row.id };
-      let usage: InvocationToolUsage;
       try {
-        usage = toolUsageFromStreamLog(row.providerName ?? null, row.streamLog, workdir);
+        const usage = toolUsageFromStreamLog(row.providerName ?? null, row.streamLog, workdir);
+        result.examined += 1;
+        result[usage.coverage] += 1;
+        const proposed = row.toolUsage == null ? usage : { ...row.toolUsage, reads: usage.reads };
+        opts.onRow?.(row.id, row.providerName ?? null, proposed);
+        if (!opts.apply) continue;
+        const written = await db
+          .update(inv)
+          .set({ toolUsage: proposed })
+          .where(
+            and(
+              eq(inv.id, row.id),
+              needsReads,
+              row.toolUsage == null
+                ? or(isNull(inv.toolUsage), sql`${inv.toolUsage} = 'null'::jsonb`)
+                : eq(inv.toolUsage, row.toolUsage),
+            ),
+          )
+          .returning({ id: inv.id });
+        result.written += written.length;
       } catch (err) {
-        log.error({ err, invocationId: row.id }, 'tool usage backfill could not read a transcript');
+        log.error(
+          { err, invocationId: row.id },
+          'tool usage backfill could not replay or update a row',
+        );
         continue;
       }
-      result.examined += 1;
-      result[usage.coverage] += 1;
-      opts.onRow?.(row.id, row.providerName ?? null, usage);
-      if (!opts.apply) continue;
-      const written = await db
-        .update(inv)
-        .set({ toolUsage: usage })
-        .where(and(eq(inv.id, row.id), isNull(inv.toolUsage)))
-        .returning({ id: inv.id });
-      result.written += written.length;
     }
   }
 
-  const [pending] = await db.select({ n: count() }).from(inv).where(base);
-  // A dry run wrote nothing, so what it examined still matches the selection.
-  result.remaining = Math.max(0, Number(pending?.n ?? 0) - (opts.apply ? 0 : result.examined));
+  if (!firstPageEmpty) {
+    const [pending] = await db.select({ n: count() }).from(inv).where(base);
+    // A dry run wrote nothing, so what it examined still matches the selection.
+    result.remaining = Math.max(0, Number(pending?.n ?? 0) - (opts.apply ? 0 : result.examined));
+  }
   result.elapsedMs = Date.now() - startedAt;
   return result;
 }

@@ -173,6 +173,7 @@ export function createStreamJsonCollector(
     }
     if (typeof event.type !== 'string') return;
     eventCount++;
+    toolUsage.claudeEvent(event);
 
     const type = event.type as string;
     if (type === 'system' && event.subtype === 'init') initialized = true;
@@ -205,7 +206,6 @@ export function createStreamJsonCollector(
     // First one wins: a session emits exactly one, and a later one would be a new
     // session rather than a correction.
     if (type === 'system' && subtype === 'init' && requestedModel === null) {
-      toolUsage.claudeInit(event);
       if (typeof event.model === 'string' && event.model.trim()) {
         requestedModel = event.model.trim();
       }
@@ -416,7 +416,6 @@ export function createStreamJsonCollector(
             // Tallied whether or not anyone is watching: the progress line is only rendered
             // for a run with a status callback, but what the run USED is a fact about it
             // either way — sub-agent and step-summary runs have no callback.
-            toolUsage.claudeToolUse(toolName, input);
             if (onProgress) {
               const desc = describeToolUse(toolName, input);
               if (desc) onProgress(desc);

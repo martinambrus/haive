@@ -2,7 +2,7 @@
  * One-off, idempotent maintenance script: the whole-install form of the boot-time
  * `backfillToolUsage` data migration.
  *
- * Reads every ended cli_invocations row whose tool_usage is still NULL and writes what its
+ * Reads ended cli_invocations with unexamined usage or missing/older reads and writes what its
  * stored stream_log says the run used — through the SAME tally the live collectors feed, so a
  * backfilled record and a live one read a run identically. The boot migration does the same
  * under a 10 s budget per boot; this runs to completion in one go.
@@ -10,9 +10,13 @@
  * Safety:
  *  - Dry-run by default: prints counts by coverage and provider plus a sample of records,
  *    writes nothing. Set APPLY=1 to write.
- *  - Every targeted row was NULL by selection, so no backup file is needed: the rollback is one
- *    statement, `UPDATE cli_invocations SET tool_usage = NULL WHERE tool_usage->>'source' = 'backfill'`.
- *  - Idempotent: a written row no longer matches the selection, so a second run finds nothing.
+ *  - Rollback after reverting the code: clear backfill-created tool_usage records and remove
+ *    only reads from existing records, preserving their other facts:
+ *    UPDATE cli_invocations SET tool_usage = CASE WHEN tool_usage->>'source' = 'backfill'
+ *      THEN NULL ELSE tool_usage - 'reads' END
+ *      WHERE tool_usage->>'source' = 'backfill' OR tool_usage ? 'reads';
+ *  - Idempotent: a successful write leaves the selection. Older versioned reads without a
+ *    retained transcript are preserved and excluded from upgrades. A failed row stays pending.
  *
  * Run (inside the worker container; `tsx` is not on the shell's PATH there, `pnpm exec` finds it):
  *   docker exec haive-worker sh -lc 'cd /app/packages/worker && pnpm exec tsx scripts/backfill-tool-usage.ts'         # dry run

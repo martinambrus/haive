@@ -167,10 +167,10 @@ export const DATA_MIGRATIONS: DataMigration[] = [
   // BEFORE the backfill, which re-examines the rows this one NULLs in the same boot. Convergent:
   // once re-read under the id check, no row matches again.
   { id: 'resetMalformedToolUsageIds', kind: 'convergent', run: resetMalformedToolUsageIds },
-  // Reads stored transcripts into `cli_invocations.tool_usage` where it is still NULL. Budgeted
-  // and keyset-paged, so a large install converges over a few boots rather than holding one
-  // boot for the whole rewrite; every examined row is written (an unobservable one as
-  // `coverage: 'none'`), which is what makes the selection shrink to nothing.
+  // Replays unexamined usage and missing/older read exposure, budgeted and keyset-paged.
+  // Missing reads get a versioned terminal state (including unobservable coverage: none).
+  // Older versioned reads survive a swept transcript; successful writes leave the selection,
+  // while a failed replay or update stays pending for another boot.
   { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
   { id: 'seedRepositoryCliTargets', kind: 'convergent', run: seedRepositoryCliTargets },
   { id: 'recomputeSyncedApplicableSets', kind: 'convergent', run: recomputeSyncedApplicableSets },
