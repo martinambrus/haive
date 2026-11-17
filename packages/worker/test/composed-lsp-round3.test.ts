@@ -46,7 +46,7 @@ function execute(script: string, dir: string) {
 describe('round 3 composed LSP regressions', () => {
   it('ensures node on a composed Ubuntu body before the first su (no host account writes)', () => {
     withPath((dir, stub) => {
-      for (const name of ['uvx', 'rg', 'nano', 'tmux', 'rtk', 'npm', 'groupmod']) stub(name);
+      for (const name of ['uvx', 'rg', 'nano', 'tmux', 'rtk', 'npm', 'groupmod', 'rm']) stub(name);
       symlinkSync(process.execPath, join(dir, 'node'));
       symlinkSync('/usr/bin/sed', join(dir, 'sed'));
       stub('id', '[ "$2" = ubuntu ] && exit 0\n[ "$2" = node ] && [ -f "$TEST_DIR/node-ready" ]');

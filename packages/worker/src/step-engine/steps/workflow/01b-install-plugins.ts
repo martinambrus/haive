@@ -1,3 +1,5 @@
+import { currentPhpPluginFilesHash, lspProviderIdentity } from '../../../lsp/composed-evidence.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
@@ -38,6 +40,7 @@ const DRUPAL_LSP_BASE_BY_PROVIDER: Record<string, string> = {
 };
 
 interface InstallPluginsDetect {
+  composedLspProviderHash?: string;
   providerName: string | null;
   providerSupportsPlugins: boolean;
   lspLanguages: LspLanguage[];
@@ -59,6 +62,8 @@ async function drupalLspTreeInWorktree(ctx: StepContext, base: string): Promise<
 }
 
 interface InstallPluginsApply {
+  composedLspProviderHash?: string;
+  composedLspFilesHash?: string | null;
   skipped: boolean;
   skipReason: string | null;
   missingDrupalLsp?: string | null;
@@ -146,6 +151,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     }
 
     const lspLanguages = await loadConfiguredLspLanguages(ctx.db, ctx.taskId);
+    const lspTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    const composedLspProviderHash =
+      lspTemplate?.declaredDeps?.lspInstallContractVersion === 2
+        ? lspProviderIdentity(provider)
+        : undefined;
 
     const sandboxWorkdir = SANDBOX_WORKDIR;
     const drupalRelBase = wantsLocalPhpLsp(lspLanguages)
@@ -170,6 +180,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
 
     const skip = commands.length === 0;
     return {
+      ...(composedLspProviderHash ? { composedLspProviderHash } : {}),
       providerName: provider.name,
       providerSupportsPlugins: true,
       lspLanguages,
@@ -229,6 +240,19 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     if (!provider) {
       throw new Error(`CLI provider ${ctx.cliProviderId} not found`);
     }
+    const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    const composed = envTemplate?.declaredDeps?.lspInstallContractVersion === 2;
+    if (
+      composed &&
+      (detected.composedLspProviderHash !== lspProviderIdentity(provider) ||
+        JSON.stringify([...detected.lspLanguages].sort()) !==
+          JSON.stringify([...(await loadConfiguredLspLanguages(ctx.db, ctx.taskId))].sort()))
+    )
+      throw new Error('LSP plugin inputs changed since detection; Retry 01b');
+    const initialFilesHash =
+      composed && detected.drupalLspPath
+        ? await currentPhpPluginFilesHash(ctx.db, ctx.taskId)
+        : null;
     const runtime = await loadProviderRuntimeConfig(ctx.db, provider.id, ctx.taskId);
     const sandboxImage = runtime.sandboxImage;
     // Per-invocation isolation: mount only the feature worktree at the workdir root.
@@ -304,7 +328,29 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       }
     }
 
+    if (composed) {
+      const currentProvider = await ctx.db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider.id),
+      });
+      const currentFiles = detected.drupalLspPath
+        ? await currentPhpPluginFilesHash(ctx.db, ctx.taskId)
+        : null;
+      if (
+        !currentProvider ||
+        lspProviderIdentity(currentProvider) !== lspProviderIdentity(provider) ||
+        currentFiles !== initialFilesHash ||
+        JSON.stringify([...detected.lspLanguages].sort()) !==
+          JSON.stringify([...(await loadConfiguredLspLanguages(ctx.db, ctx.taskId))].sort())
+      )
+        throw new Error('LSP plugin inputs changed during installation; Retry 01b');
+    }
     return {
+      ...(composed
+        ? {
+            composedLspProviderHash: lspProviderIdentity(provider),
+            composedLspFilesHash: initialFilesHash,
+          }
+        : {}),
       skipped: false,
       skipReason: null,
       missingDrupalLsp: detected.missingDrupalLsp ?? null,

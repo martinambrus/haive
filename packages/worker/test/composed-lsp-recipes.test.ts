@@ -238,9 +238,14 @@ describe('environment LSP install-contract field before cutover', () => {
     (version) => {
       const deps = { lspServers: ['gopls'], lspInstallContractVersion: version };
       expect(() => renderDockerfile('ubuntu:24.04', deps)).toThrow(/LSP install contract/i);
-      expect(() => buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0])).toThrow(
-        /LSP install contract/i,
-      );
+      if (version === 2) {
+        expect(
+          buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0]).map((c) => c.id),
+        ).toEqual(['bash']);
+      } else
+        expect(() => buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0])).toThrow(
+          /LSP install contract/i,
+        );
     },
   );
 });

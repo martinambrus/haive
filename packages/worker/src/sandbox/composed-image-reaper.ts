@@ -1,3 +1,5 @@
+import type { Database } from '@haive/database';
+import { retainedComposedImageRefs } from '../lsp/composed-evidence.js';
 import { spawn } from 'node:child_process';
 import { logger } from '@haive/shared';
 import { COMPOSED_IMAGE_REPO } from './image-composer.js';
@@ -9,8 +11,8 @@ const log = logger.child({ module: 'composed-image-reaper' });
 // Composed sandbox images (`haive-sandbox:<hash>`) are hash-cached for cross-task
 // reuse and nothing ever removed them, so they accumulate one image per unique
 // (env-template, provider, rtk) build forever. Evict tags older than this that no
-// container uses. Removal is safe: a live task that still needs an evicted
-// tag simply rebuilds it on next use (a cache miss — self-healing, never broken).
+// container uses and no task retains. Legacy cache misses rebuild on next use;
+// verified contract-2 effective/prior/verifying references are retained across resets.
 // Override with HAIVE_COMPOSED_IMAGE_MAX_AGE_DAYS.
 const DEFAULT_MAX_AGE_DAYS = 14;
 
@@ -37,22 +39,30 @@ export function selectStaleComposedImages(
   runningImageRefs: ReadonlySet<string>,
   nowMs: number,
   maxAgeMs: number,
+  retainedImageRefs: ReadonlySet<string> = new Set(),
 ): string[] {
   return images
-    .filter((img) => !runningImageRefs.has(img.ref) && !runningImageRefs.has(img.id))
+    .filter(
+      (img) =>
+        !runningImageRefs.has(img.ref) &&
+        !runningImageRefs.has(img.id) &&
+        !retainedImageRefs.has(img.ref) &&
+        !retainedImageRefs.has(img.id),
+    )
     .filter((img) => Number.isFinite(img.createdAtMs) && nowMs - img.createdAtMs >= maxAgeMs)
     .map((img) => img.ref);
 }
 
 /** Reap stale composed sandbox images. Runs at worker boot as a backstop
  *  (mirrors reapOrphanEnvTemplates): best-effort, never throws, returns the
- *  count removed. Boot-time is sufficient because cli-exec/terminal containers —
- *  the only users of composed images — are reaped just before this runs, and the
- *  age threshold keeps every recently-built image regardless. */
+ *  count removed. Containers and durable task-owned references both protect images;
+ *  ownership is checked again in the same tag turn as verification/publication.
+ *  An unreadable ownership set keeps every image for the next boot. */
 export async function reapStaleComposedImages(
   maxAgeMs: number = composedImageMaxAgeMs(),
   nowMs: number = Date.now(),
   runner: DockerRunner = defaultDockerRunner,
+  db?: Database,
 ): Promise<number> {
   try {
     const refs = await listComposedImageRefs();
@@ -61,18 +71,26 @@ export async function reapStaleComposedImages(
       inspectComposedImages(refs),
       listContainerImageRefs(),
     ]);
-    const stale = selectStaleComposedImages(images, running, nowMs, maxAgeMs);
+    const retained = db ? await retainedComposedImageRefs(db) : new Set<string>();
+    const stale = selectStaleComposedImages(images, running, nowMs, maxAgeMs, retained);
     if (stale.length === 0) return 0;
 
     let reaped = 0;
     for (const ref of stale) {
       await withImageTagLock(ref, async () => {
+        const held = db ? await retainedComposedImageRefs(db) : retained;
         const candidate = images.find((image) => image.ref === ref)!;
         const current = await runner.inspect(ref);
         // The listing may predate a build that held this turn. Never remove its
         // replacement using the old image's age. No force: Docker is the final
         // authority for containers created after our snapshot, stopped included.
-        if (!current.exists || current.imageId !== candidate.id) return;
+        if (
+          !current.exists ||
+          current.imageId !== candidate.id ||
+          held.has(ref) ||
+          held.has(candidate.id)
+        )
+          return;
         const rm = await runner.remove(ref, { force: false });
         if (rm.ok) reaped += 1;
         else log.warn({ ref, stderr: rm.stderr }, 'stale composed image removal failed (kept)');

@@ -1,3 +1,4 @@
+import { lspProviderIdentity } from '../lsp/composed-evidence.js';
 import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
@@ -48,7 +49,7 @@ import {
 } from '../step-engine/steps/_retrieval-guidance.js';
 import { withGlobalKbDigest, type GlobalKbDigest } from '../step-engine/steps/_global-kb-digest.js';
 import type { HouseRulesStamp } from '@haive/shared/global-kb';
-import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
+import { readyLspBridgesByProvider } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import {
@@ -183,6 +184,7 @@ export interface DispatchRequest {
    *  bridge implemented by Haive. Fail-closed when omitted so a provider's
    *  coarse capability alone never advertises tools that are not configured. */
   lspConfigured?: boolean;
+  lspByProvider?: Record<string, boolean>;
   /** Invocation-specific worktree override. Must match the worktreeRel later
    *  placed on CliExecJobPayload so prompt and mount use the same boundary. */
   worktreeRel?: string;
@@ -400,7 +402,13 @@ async function resolveTaskDispatchOnTree(
     agentRulesInjection,
     sandboxToolchain,
   ] = await Promise.all([
-    snapshotWorkspace ? false : hasReadyLspBridge(db, taskId),
+    snapshotWorkspace
+      ? Object.fromEntries(req.providers.map((p) => [p.id, false]))
+      : readyLspBridgesByProvider(
+          db,
+          taskId,
+          req.providers.map((p) => ({ id: p.id, hash: lspProviderIdentity(p) })),
+        ),
     snapshotWorkspace
       ? false
       : resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
@@ -457,7 +465,8 @@ async function resolveTaskDispatchOnTree(
     snapshotWorkspace,
     ...req,
     input: neutraliseUnresolvedTemplateMarkers(req),
-    lspConfigured,
+    lspConfigured: Object.values(lspConfigured).some(Boolean),
+    lspByProvider: lspConfigured,
     // Production callers cannot accidentally claim a boundary the mount will
     // not apply (or omit one it will): the DB-backed target wins any input.
     worktreeGitBoundary,
@@ -631,7 +640,7 @@ async function resolveAgentIsolation(
     !metadata.projectAgentsDir ||
     metadata.agentFileFormat !== 'markdown' ||
     !adapter.supportsLsp ||
-    resolved.lspConfigured !== true
+    (resolved.lspByProvider?.[provider.id] ?? resolved.lspConfigured) !== true
   ) {
     return { instructionsNameAgentPath: false };
   }
@@ -826,7 +835,8 @@ function buildCliSidePlan(
     const capabilityAdapted = adaptPromptForCliCapabilities(
       stripSandboxToolchain(stripHaivePreamble(prompt)),
       {
-        supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
+        supportsLsp:
+          adapter.supportsLsp && (req.lspByProvider?.[provider.id] ?? req.lspConfigured) === true,
         ragWired,
         projectAgentsDir: providerMetadata.projectAgentsDir,
         agentFileFormat: providerMetadata.agentFileFormat,

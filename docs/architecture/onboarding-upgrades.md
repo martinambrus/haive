@@ -72,20 +72,35 @@ Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from L
 The optional `env_templates.declared_deps.lspInstallContractVersion` describes who installs servers:
 absent or 1 means the saved environment Dockerfile owns installation; 2 selects composed-image
 installation in cache/peek identity for supported Claude-binary LSP providers. No production writer
-emits 2 yet. The generator (saved-body reuse
-included) and environment smoke planner refuse it and unknown versions until both are supported.
-Explicit 1 leaves the Dockerfile and checks byte identical to unversioned inputs, though adding
-metadata deliberately would change the template hash because that hash includes declaredDeps.
-The field adds no SQL column/migration. Plugin artifacts and their manifest versions are unchanged.
-Cache/peek contract consumers ship first: absent/1 preserves existing image bodies/tags, while 2
-hashes its installation owner and canonical requested selection/pins with the saved body, recipes,
-provider, RTK and referenced core ID. Unknown contracts/CLIs refuse. This adds no evidence or
-readiness support: the later cutover adds those consumers and writes new contracts last. 01 must carry forward an existing contract, as it carries savedWebserver, before
-comparing rebuilt declaredDeps; 02 suppression comes last. The planned composed evidence lives
-in the existing task_steps.output.composedLsp JSONB of 04 steps, with immutable image/provider/
-plugin identities and per-server reports, so that design also adds no SQL column/migration.
-A Retry nulls that output, so it is readiness evidence only; the retained image reference lives
-elsewhere.
+emits 2 yet. The generator (saved-body reuse included) continues refusing it and unknown versions.
+04 now accepts 2 and splits environment runtime/client checks from composed-image LSP protocol
+checks. Explicit 1 leaves Dockerfile bytes and smoke checks identical to unversioned inputs.
+The contract field adds no SQL column/migration. Plugin artifact bytes and manifest versions stay
+unchanged; 01b adds machine-local provider/file identity to its task output only for contract 2.
+
+Cache/peek identity, 04 and both readiness consumers ship before the writer. Canonical selection,
+pins, saved body, recipes, provider, RTK and referenced core ID determine composition. Readiness
+also requires exact current provider/plugin results, local PHP plugin-file content, immutable image
+IDs and complete reports from this task's completed 04. Versioned, bounded composed evidence lives
+in existing `task_steps.output.composedLsp`; it is rewritten completely per run, never merged.
+A Retry nulls that output and makes readiness false. Retained effective/prior/verifying image
+references use the existing task-owned `tasks.metadata.composedLspImageRefs` key, outside portable
+settings and mirrors, and remain protected from composed reaping across Retry while the task is
+non-terminal.
+Completed and cancelled tasks release that protection. Failed tasks remain revivable and protect
+all three reference roles without an age bound; existing containers also protect their images.
+Resolved RTK/core inputs stay recorded with each reference, so cache refreshes and
+core rebuilds do not invalidate an otherwise unchanged pinned launch. No column or
+migration is added for references either. Build and verify a replacement before publishing its
+reference; failure keeps the prior image and refuses to present it as newly requested pins.
+
+Ordinary workflow ordering puts 04 before 01b: initial missing plugin evidence stays unready, and
+01b completion does not retroactively validate it. A Retry of 04 cannot make contract 2 ready
+under this order, since it resets downstream 01b and that later completion changes the identity
+again. Retry 04 rebuilds and re-verifies an evicted image so launches resume, but cannot restore
+LSP readiness under the current order. Arrange a fresh verification against the final plugin
+identity before the future 01 writer is enabled. That writer must carry forward existing
+contract metadata like savedWebserver; 02 suppression stays last. See [Sandbox](sandbox.md).
 A manifest bump alone cannot migrate a stored/custom Dockerfile; the later cutover must keep the
 legacy installer until replacement images exist and are verified. See [Sandbox](sandbox.md).
 

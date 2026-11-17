@@ -103,3 +103,16 @@ it('inspects the core once for an entire provider batch', async () => {
   );
   expect(inspect.mock.calls.filter(([tag]) => tag === SANDBOX_CORE_IMAGE)).toHaveLength(1);
 });
+
+it.each(['launch', 'peek'] as const)('ordinary %s reads task/template only once', async (kind) => {
+  const db = database('FROM ubuntu:24.04');
+  const task = vi.spyOn(db.query.tasks, 'findFirst');
+  const env = vi.spyOn(db.query.envTemplates, 'findFirst');
+  const tools = vi.spyOn(db.query.toolPackageVersions, 'findFirst');
+  const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
+  if (kind === 'launch') await resolveSandboxImageTag(db, 't', provider, runner);
+  else await peekSandboxImageTag(db, 't', provider, runner);
+  expect([task.mock.calls.length, env.mock.calls.length, tools.mock.calls.length]).toEqual([
+    1, 1, 1,
+  ]);
+});

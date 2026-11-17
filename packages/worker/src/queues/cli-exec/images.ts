@@ -1,3 +1,4 @@
+import { ComposedImageNotVerifiedError } from '../../lsp/composed-image-refs.js';
 import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -11,7 +12,7 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { resolveImageTag } from '../../sandbox/image-cache.js';
 import {
-  ensureComposedImage,
+  withResolvedComposedImage,
   resolveSandboxImageComposition,
 } from '../../sandbox/composed-image-cache.js';
 import { SANDBOX_CORE_IMAGE } from '../../sandbox/image-composer.js';
@@ -170,17 +171,37 @@ export async function resolveSandboxImageTag(
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
   if (taskId) {
-    const composedTag = await ensureComposedImage(
+    const composition = await resolveSandboxImageComposition(
       db,
       taskId,
-      {
-        name: provider.name as CliProviderName,
-        cliVersion: provider.cliVersion || null,
-        sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
-      },
+      { ...provider, name: provider.name as CliProviderName },
       runner,
+      true,
+      undefined,
+      { verifiedProviderId: provider.id },
     );
-    if (composedTag) return composedTag;
+    if (composition?.installContract === 2) {
+      const effective = composition.effective!;
+      const current = await runner.inspect(effective.tag);
+      if (!current.exists || current.imageId !== effective.imageId)
+        throw new Error(
+          'Verified composed image changed or disappeared; verification after the plugin result is required',
+        );
+      const currentProvider = await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider.id),
+      });
+      if (
+        !currentProvider ||
+        currentProvider.name !== provider.name ||
+        currentProvider.cliVersion !== provider.cliVersion ||
+        currentProvider.sandboxDockerfileExtra !== provider.sandboxDockerfileExtra
+      )
+        throw new Error(
+          'Composed image provider changed during resolution; resolve again with the current provider settings',
+        );
+      return effective.imageId;
+    }
+    if (composition) return withResolvedComposedImage(composition, async (c) => c.tag, runner);
   }
   return ensureProviderSandboxImage(db, provider, IN_FLIGHT_BUILD_WAIT_MS, runner);
 }
@@ -208,22 +229,43 @@ export async function peekSandboxImageTag(
     cliVersion: provider.cliVersion || null,
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   };
-  const composition = taskId
-    ? await resolveSandboxImageComposition(
-        db,
-        taskId,
-        config,
-        runner,
-        false,
-        async () => (await batch.inspectCore()).imageId,
-      )
-    : null;
+  let composition: Awaited<ReturnType<typeof resolveSandboxImageComposition>>;
+  try {
+    composition = taskId
+      ? await resolveSandboxImageComposition(
+          db,
+          taskId,
+          config,
+          runner,
+          false,
+          async () => (await batch.inspectCore()).imageId,
+          { verifiedProviderId: provider.id },
+        )
+      : null;
+  } catch (err) {
+    if (err instanceof ComposedImageNotVerifiedError) return null;
+    throw err;
+  }
   const tag =
     composition?.tag ??
     resolveImageTag({ ...config, providerId: provider.id })?.tag ??
     process.env.SANDBOX_IMAGE ??
     SANDBOX_CORE_IMAGE;
   const inspected = await (tag === SANDBOX_CORE_IMAGE ? batch.inspectCore() : runner.inspect(tag));
+  if (composition?.installContract === 2) {
+    const effective = composition.effective!;
+    const currentProvider = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider.id),
+    });
+    if (
+      effective.imageId !== inspected.imageId ||
+      !currentProvider ||
+      currentProvider.name !== provider.name ||
+      currentProvider.cliVersion !== provider.cliVersion ||
+      currentProvider.sandboxDockerfileExtra !== provider.sandboxDockerfileExtra
+    )
+      return null;
+  }
   return inspected.exists && inspected.imageId ? { tag, imageId: inspected.imageId } : null;
 }
 
