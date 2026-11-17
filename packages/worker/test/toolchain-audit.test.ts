@@ -17,6 +17,20 @@ const spec = {
 };
 const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: newId }) });
 
+it('rejects a mismatched stamped offset before any invocation audit write', async () => {
+  const update = vi.fn(() => ({ set: () => ({ where: async () => {} }) }));
+  const db = { update } as unknown as Database;
+  const payload = {
+    ...spec,
+    args: [`Moved prompt\n${prompt}`],
+    sandboxToolchain: { imageId: oldId, block, offset: 0 },
+  };
+  await expect(
+    recheckInvocationToolchain(payload, 'image:tag', 'run-id', runner, null, {}, db),
+  ).rejects.toThrow('Sandbox toolchain advisory does not match its stamped prompt position');
+  expect(update).not.toHaveBeenCalled();
+});
+
 it('awaits a block-only, invocation-scoped audit update before returning the executable prompt', async () => {
   let release!: () => void;
   let stored = prompt;

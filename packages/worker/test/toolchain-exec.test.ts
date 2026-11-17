@@ -201,6 +201,7 @@ for (const rules of ['agent', 'house']) {
           { PATH: '/custom' },
         ],
       ] as const) {
+        const queuedPayload = structuredClone(s);
         const { spec: clean } = await recheckSandboxToolchain(s, 'image:tag', r, wrapper, extraEnv);
         const expected = prefix + body;
         if (mode === 'argv') expect(clean.args).toEqual([expected]);
@@ -210,8 +211,11 @@ for (const rules of ['agent', 'house']) {
           expect(clean.stdinPrompt).toBe(antigravityStdinPrompt(expected));
         if (mode === 'file') expect(clean.promptFile?.content).toBe(expected);
         if (mode === 'app-server') expect(clean.codexAppServer?.prompt).toBe(expected);
-        // A second recheck of the executable spec cannot consume either quote.
-        expect((await recheckSandboxToolchain(clean, 'image:tag', r)).spec).toEqual(clean);
+        // Queue redelivery carries the original stamped payload, with the same environment.
+        expect((await recheckSandboxToolchain(s, 'image:tag', r, wrapper, extraEnv)).spec).toEqual(
+          clean,
+        );
+        expect(s).toEqual(queuedPayload);
       }
     },
   );

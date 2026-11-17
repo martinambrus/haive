@@ -1,7 +1,8 @@
 import * as toolchain from '../src/sandbox/toolchain-prompt.js';
 import { expect, it, vi } from 'vitest';
 import { resolveDispatch, type DispatchRequest } from '../src/orchestrator/dispatcher.js';
-import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import type { CliCommandSpec, CliProviderRecord } from '../src/cli-adapters/types.js';
+import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
 import { codexExecFallbackSpec } from '../src/cli-adapters/codex.js';
 const ID = `sha256:${'a'.repeat(64)}`;
@@ -30,6 +31,98 @@ const request = (preferredProviderId: string, extra = {}): DispatchRequest => ({
   invokeOpts: {},
   ...extra,
 });
+
+// Read the adapter's actual delivery fields, decoding only its JSON message framing.
+function executablePrompts(spec: CliCommandSpec): string[] {
+  const decode = (text: string): string => {
+    if (!text.startsWith('{')) return text;
+    const content = JSON.parse(text).message.content;
+    return typeof content === 'string' ? content : content[0].text;
+  };
+  return [
+    ...spec.args.filter((arg) => arg.includes('<haive_agent_rules>')),
+    ...(spec.stdinPrompt !== undefined ? [decode(spec.stdinPrompt)] : []),
+    ...(spec.stdinInitial !== undefined ? [decode(spec.stdinInitial)] : []),
+    ...(spec.promptFile ? [spec.promptFile.content] : []),
+    ...(spec.codexAppServer ? [spec.codexAppServer.prompt] : []),
+  ];
+}
+
+it.each(
+  cliAdapterRegistry
+    .list()
+    .flatMap(({ providerName: name }) =>
+      [false, true].flatMap((steeringRequested) =>
+        ['small', 'large'].map((size) => ({ name, steeringRequested, size })),
+      ),
+    ),
+)(
+  'rechecks registry adapter $name with steering=$steeringRequested and a $size prompt',
+  async ({ name, steeringRequested, size }) => {
+    const block = toolchain.sandboxToolchainBlock(
+      toolchain.withSandboxToolchain('', { imageId: ID, php: 'absent' }),
+    )!;
+    const quote = `Keep 💡 "rules" and this full advisory quote:\n${block}\n\nEnd.`;
+    const provider = { ...providers[0]!, name, model: 'test-model', rulesContent: quote };
+    const plan = resolveDispatch({
+      providers: [provider],
+      preferredProviderId: provider.id,
+      input: {
+        kind: 'prompt',
+        prompt: size === 'large' ? 'x'.repeat(70_000) : 'Check code',
+        capabilities: [],
+      },
+      invokeOpts: {},
+      agentRulesInjection: true,
+      sandboxToolchain: { [provider.id]: { imageId: ID, php: 'absent' } },
+      steeringRequested,
+      codexAppServer: {
+        [provider.id]: {
+          status: 'supported',
+          providerCliVersion: null,
+          binaryVersion: null,
+          stage: null,
+          detail: null,
+          source: 'probe',
+          at: '2026-11-17T00:00:00.000Z',
+        },
+      },
+    });
+    if (plan.invocation?.kind !== 'cli') throw new Error('expected CLI');
+    const queued = plan.invocation.spec;
+    const prompt = plan.effectivePrompt!;
+    const stamp = queued.sandboxToolchain!;
+    expect(stamp.imageId).toBe(ID);
+    expect(stamp.block).toBe(block);
+    const ownedAt = prompt.lastIndexOf(block);
+    expect(ownedAt).toBeGreaterThan(prompt.indexOf(block));
+    expect(stamp.offset).toBe([...prompt.slice(0, ownedAt)].length);
+    expect(stamp.offset).toBeLessThan(ownedAt); // The astral character precedes the owned block.
+    expect(executablePrompts(queued)).toEqual([prompt]);
+    const characters = [...prompt];
+    const separator = block + '\n\n';
+    if (stamp.offset === undefined) throw new Error('expected positional stamp');
+    const separatorLength = [...separator].length;
+    expect(characters.slice(stamp.offset, stamp.offset + separatorLength).join('')).toBe(separator);
+    const expected =
+      characters.slice(0, stamp.offset).join('') +
+      characters.slice(stamp.offset + separatorLength).join('');
+    const checked = await toolchain.recheckSandboxToolchain(
+      queued,
+      'image:tag',
+      fakeDockerRunner({
+        inspect: async () => ({ exists: true, imageId: `sha256:${'b'.repeat(64)}` }),
+      }),
+    );
+    expect(checked.image).toBe(`sha256:${'b'.repeat(64)}`);
+    expect(checked.spec.sandboxToolchain).toBeUndefined();
+    expect(executablePrompts(checked.spec)).toEqual([expected]);
+    expect(expected).toContain(quote);
+    if (checked.spec.codexAppServer)
+      expect(codexExecFallbackSpec(checked.spec)?.stdinPrompt).toBe(expected);
+  },
+);
+
 it('adds the selected provider image fact and replaces a stored block once', () => {
   const sandboxToolchain = { p0: { imageId: ID, php: 'absent' }, p1: null };
   const req = request('p0', { sandboxToolchain });
