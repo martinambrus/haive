@@ -594,6 +594,7 @@ interface TaskProviderUsage {
   /** Invocations with tokens but no usable rate — excluded from costUsd, shown so a low
    *  total is explained rather than silently understated. */
   unpricedInvocations: number;
+  unknownTierCount?: number;
   unknownTierCosts?: { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[];
 }
 
@@ -3564,7 +3565,11 @@ function TaskTotalTime({
                     )}
                   </span>
                   <span className="flex flex-wrap items-center gap-x-3 font-mono text-neutral-400">
-                    <PromptTierUnknownList tiers={p.unknownTierCosts ?? []} display={costDisplay} />
+                    <PromptTierUnknownList
+                      tiers={p.unknownTierCosts ?? []}
+                      total={p.unknownTierCount}
+                      display={costDisplay}
+                    />
                     <span>in {formatTokens(p.inputTokens)}</span>
                     <span>out {formatTokens(p.outputTokens)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>

@@ -104,7 +104,7 @@ function parsePerMillion(value: string): number | null {
   if (trimmed === '') return null;
   const n = Number(trimmed);
   if (!Number.isFinite(n) || n < 0) throw new Error('Rates must be non-negative numbers or empty');
-  return n / 1_000_000;
+  return Number((n / 1_000_000).toPrecision(12));
 }
 
 function ago(iso: string | null): string {

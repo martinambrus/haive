@@ -487,3 +487,30 @@ it('prices whole-run cache writes by observed TTL and withholds bounds when a re
   expect(cost.unpricedBuckets).toContain('cacheWrite');
   expect(cost.tier).not.toHaveProperty('lowUsd');
 });
+
+it.each(['5m', '1h'] as const)(
+  'uses the configured %s TTL for base-only whole-run writes with no split',
+  (cacheTtl) => {
+    const usage = { inputTokens: 10, outputTokens: 5, cacheCreationTokens: 100 };
+    const whole = {
+      ...request('proof', 10, 5),
+      cacheCreationTokens: 100,
+      cacheCreation5mTokens: null,
+      cacheCreation1hTokens: null,
+    };
+    const cost = computeInvocationCost(usage, rates, {
+      cacheTtl,
+      modelKey: 'model',
+      requestUsage: {
+        ...capture([], false),
+        requests: null,
+        coverage: 'incomplete',
+        requestCount: null,
+        reasons: ['prompt-mismatch'],
+        wholeRun: { usage: whole, requestCount: null },
+      },
+    });
+    const flat = computeInvocationCost(usage, base, { cacheTtl });
+    expect(cost).toMatchObject({ ...flat, tier: { state: 'exact' } });
+  },
+);

@@ -1,7 +1,11 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createDatabase, schema } from '@haive/database';
-import { providerBreakdownWhere, sumProviderBreakdownWhere } from '@haive/shared/stats-server';
+import {
+  providerBreakdownWhere,
+  sumProviderBreakdownWhere,
+  UNKNOWN_TIER_COST_LIMIT,
+} from '@haive/shared/stats-server';
 import {
   loadUnknownTierInvocations,
   UNKNOWN_TIER_INVOCATION_LIMIT,
@@ -89,6 +93,19 @@ describe.skipIf(!url)('tier inventories and spend queries on migrated PostgreSQL
         unpricedInvocations: 3,
         invocations: 6,
       });
+      expect(UNKNOWN_TIER_COST_LIMIT).toBe(50);
+      expect(card!.unknownTierCount).toBe(2);
+      const [capped] = await providerBreakdownWhere(scoped, eq(schema.tasks.id, task!.id), true, 1);
+      expect(capped).toMatchObject({
+        unknownTierCount: 2,
+        invocations: 6,
+        costUsd: 7,
+        notionalCostUsd: 3,
+        unpricedInvocations: 3,
+      });
+      expect(capped!.unknownTierCosts).toEqual([
+        { id: ids[2], modelKey: 'model', lowUsd: 1, highUsd: 5 },
+      ]);
       expect(card!.unknownTierCosts).toEqual([
         { id: ids[2], modelKey: 'model', lowUsd: 1, highUsd: 5 },
         { id: ids[3], modelKey: 'model' },
@@ -96,6 +113,7 @@ describe.skipIf(!url)('tier inventories and spend queries on migrated PostgreSQL
       const [stats] = await sumProviderBreakdownWhere(scoped, eq(schema.tasks.id, task!.id));
       expect(stats).toMatchObject({ costUsd: 7, notionalCostUsd: 3, unpricedInvocations: 3 });
       expect(stats).not.toHaveProperty('unknownTierCosts');
+      expect(stats).not.toHaveProperty('unknownTierCount');
       expect(UNKNOWN_TIER_INVOCATION_LIMIT).toBe(50);
       expect(await loadUnknownTierInvocations(scoped)).toEqual([
         { id: ids[2], modelKey: 'model', tier: costs[2]!.tier },

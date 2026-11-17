@@ -250,7 +250,6 @@ export function computeTieredCost(
     canonicalModelKey(aggregateModel) !== model ||
     (!whole && (!count(requestCount) || requestCount < 1)) ||
     (requestCount !== null && (!count(requestCount) || requestCount < 1)) ||
-    !ttlKnown(aggregateUsage) ||
     !['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'].every(
       (k) => aggregateUsage[k as keyof typeof raw] === raw[k as keyof typeof raw],
     )
@@ -259,13 +258,17 @@ export function computeTieredCost(
   const totalPrompt = prompt(raw);
   const possible = [
     rates,
-    ...(rates.tiers ?? []).filter((t) =>
-      t.inclusive ? totalPrompt >= t.aboveTokens : totalPrompt > t.aboveTokens,
-    ),
+    ...(rates.tiers ?? []).filter((t) => selectedPriceTier({ ...rates, tiers: [t] }, totalPrompt)),
   ];
+  // Only a base-only proof may fall back to the configured TTL, just like the
+  // untiered path. Higher tiers and bounds still require the observed TTL split.
+  const fallbackTtl = possible.length === 1 && !ttlKnown(aggregateUsage);
+  if (!ttlKnown(aggregateUsage) && !fallbackTtl) return result();
   if (requestCount === 1 || possible.length === 1) {
     const { aboveTokens, price } = selected(totalPrompt);
-    const cost = priceRequest(aggregateUsage, price);
+    const cost = fallbackTtl
+      ? priced(nativeBuckets(aggregateUsage), rateBuckets(price))
+      : priceRequest(aggregateUsage, price);
     tier.state = 'exact';
     tier.split =
       requestCount === null

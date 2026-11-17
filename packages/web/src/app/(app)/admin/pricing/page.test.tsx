@@ -481,6 +481,16 @@ it('prefills small rates without floating point tails and warns that tier-only o
     ['cache read /m', '0.05'],
   ])
     expect(controls(view.tree(), label!)[0]!.props.value).toBe(expected);
+  fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+  await settle(view);
+  expect(h.post).toHaveBeenCalledWith(
+    '/cli-pricing/prices',
+    expect.objectContaining({
+      rates: expect.objectContaining({ ...rates, tiers: [expect.objectContaining(rates)] }),
+    }),
+  );
+  fire.click(buttons(view.tree(), /^edit$/i)[0]!);
+  view.draw();
   expect(textOf(view.tree())).not.toContain('All base rates are empty.');
   for (const label of [
     'input /m',

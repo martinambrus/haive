@@ -36,3 +36,9 @@ it('labels and caps the task inventory, disclosing omitted invocations', async (
   expect(text).toContain('1 more invocations with prompt tier unknown');
   expect(text.match(/Excluded from cost totals/g)).toHaveLength(2);
 });
+
+it('discloses the server total when the SQL inventory is capped', async () => {
+  const { PromptTierUnknownList } = await import('./prompt-tier-unknown');
+  const text = renderToStaticMarkup(<PromptTierUnknownList tiers={[{ id: 'shown' }]} total={3} />);
+  expect(text).toContain('2 more invocations with prompt tier unknown');
+});

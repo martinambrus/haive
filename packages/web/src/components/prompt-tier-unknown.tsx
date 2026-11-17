@@ -31,12 +31,15 @@ export const UNKNOWN_TIER_DISPLAY_LIMIT = 50;
 export function PromptTierUnknownList({
   tiers,
   display,
+  total,
   limit = UNKNOWN_TIER_DISPLAY_LIMIT,
 }: {
   tiers: { id?: string; modelKey?: string | null; lowUsd?: number; highUsd?: number }[];
   display?: CostDisplay | null;
+  total?: number;
   limit?: number;
 }) {
+  const omitted = Math.max(0, (total ?? tiers.length) - Math.min(tiers.length, limit));
   return (
     <>
       {tiers.slice(0, limit).map((tier, index) => (
@@ -48,9 +51,7 @@ export function PromptTierUnknownList({
           <PromptTierUnknown tier={tier} display={display} />
         </span>
       ))}
-      {tiers.length > limit && (
-        <span>{tiers.length - limit} more invocations with prompt tier unknown</span>
-      )}
+      {omitted > 0 && <span>{omitted} more invocations with prompt tier unknown</span>}
     </>
   );
 }

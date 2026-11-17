@@ -26,7 +26,8 @@ export interface RequestUsageCapture {
   reasons: string[];
   /** Structural whole-run evidence, independent of request prompt reconciliation.
    * A single intact completion covers these buckets; requestCount stays null unless
-   * the transcript and billing ledger also prove the inventory has no hidden calls. */
+   * the observed usage reconciles in every bucket or all observed usage is zero
+   * (the wrapper placeholder convention). A present ledger must match the run total. */
   wholeRun?: {
     usage: UnobservedSameModelUsage;
     requestCount: number | null;

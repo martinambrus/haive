@@ -55,7 +55,7 @@ function totalApiDurationMs(trace: SubAgentStepTrace[]): number | null {
 export type PromptToCliSpec = (prompt: string) => CliCommandSpec;
 
 /** Unwraps a claude-stream-json sub-step (amp). Injected by the caller because that parser lives
- *  in queues/cli-exec, which this layer does not import. Null when stdout is not such a stream. */
+ *  in queues/cli-exec; dependency injection avoids a runtime import of that parser. Null when stdout is not such a stream. */
 export type ClaudeStreamExtractor = (stdout: string) => {
   text: string | null;
   tokenUsage: CliTokenUsage | null;

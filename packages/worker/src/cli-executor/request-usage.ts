@@ -6,15 +6,10 @@ export type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from
 export type UnobservedSameModelPricingBlocker =
   'unknown-cache-ttl' | 'unknown-output-usage' | 'unknown-output-request-size';
 
-/** Conservative PR 3 contract, reserved for its tier pricer. A nonempty result means
- * the excess has NO selected rate: the whole computed invocation must stay unpriced
- * (source none), never add only its priced buckets. Unknown TTL is not the run's
- * configured TTL, and excess output has no observed request prompt whose tier it can
- * inherit. Neither the base rate nor an observed main request's tier is a default.
- * Unknown usage/TTL also forbids finite cost bounds. Known output with unknown request
- * size may be bounded only once PR 3 proves all required buckets/rates are known.
- * An empty result is not tier proof: the pricer must still prove the prompt-side tier
- * from complete evidence (including aggregate bounds), as for any other usage. */
+/** Diagnostics for aggregate usage outside the request inventory. The tier pricer
+ * validates its own evidence: unknown TTL/output prevent finite bounds, while known
+ * output without a request size may be bounded over all reachable rates. This helper
+ * does not select rates or establish request coverage. */
 export function unobservedSameModelPricingBlockers(
   excess: UnobservedSameModelUsage,
 ): UnobservedSameModelPricingBlocker[] {
@@ -146,7 +141,10 @@ export function claudeRequestUsage(
   const five = ttl ? tokenCount(ttl.ephemeral_5m_input_tokens) : null;
   const hour = ttl ? tokenCount(ttl.ephemeral_1h_input_tokens) : null;
   const ttlKnown = five !== null && hour !== null && five + hour === cacheCreationTokens;
-  if (u.cache_creation !== undefined && !ttlKnown) return null;
+  // Some wrappers default-fill both TTL counters with zero beside positive writes.
+  // Keep the authoritative write total and mark that split unknown.
+  const defaultFilled = cacheCreationTokens > 0 && five === 0 && hour === 0;
+  if (u.cache_creation !== undefined && !ttlKnown && !defaultFilled) return null;
   return {
     requestId,
     turnId: null,

@@ -391,3 +391,84 @@ it('prices the actual codex app-server request collector mixed-tier output throu
     10000e-7 + 90000e-8 + 11 * 5e-7 + 20001 * 5e-7 + 80000e-8 + 29 * 2.5e-6,
   );
 });
+
+it.each([
+  undefined,
+  { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+  { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 },
+])(
+  'prices a base-only whole run with cache writes like flat rates (%j)',
+  async (cache_creation) => {
+    const collector = createStreamJsonCollector();
+    collector.onChunk(
+      [
+        { type: 'system', subtype: 'init', model: 'model' },
+        {
+          type: 'assistant',
+          message: { id: 'a', model: 'model', usage: { input_tokens: 0, output_tokens: 0 } },
+        },
+        {
+          type: 'result',
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 100,
+            ...(cache_creation ? { cache_creation } : {}),
+          },
+        },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n') + '\n',
+    );
+    const evidence = {
+      tokenUsage: collector.getTokenUsage(),
+      requestUsage: collector.getRequestUsage(),
+    };
+    expect(evidence.requestUsage.wholeRun).toBeDefined();
+    const actual = await resolve('muse', evidence);
+    const flat = await resolve('muse', evidence, db('litellm', base));
+    expect(actual).toMatchObject({
+      costUsd: flat!.costUsd,
+      source: flat!.source,
+      billable: flat!.billable,
+      tier: { state: 'exact' },
+    });
+  },
+);
+
+it.each([
+  { observed: [250000], total: 1000, proof: false, count: null },
+  { observed: [1000], total: 250000, proof: true, count: null },
+  { observed: [0], total: 250000, proof: true, count: 1 },
+  { observed: [0, 0, 0], total: 250000, proof: true, count: 3 },
+  { observed: [250000], total: 250000, proof: true, count: 1 },
+])(
+  'hardens whole-run prompt and request count evidence: %j',
+  async ({ observed, total, proof, count }) => {
+    const collector = createStreamJsonCollector();
+    collector.onChunk(
+      [
+        { type: 'system', subtype: 'init', model: 'model' },
+        ...observed.map((input, i) => ({
+          type: 'assistant',
+          message: {
+            id: `r${i}`,
+            model: 'model',
+            usage: { input_tokens: input, output_tokens: input === 0 ? 0 : 5 },
+          },
+        })),
+        { type: 'result', usage: { input_tokens: total, output_tokens: 5 } },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n') + '\n',
+    );
+    const requestUsage = collector.getRequestUsage();
+    if (!proof) expect(requestUsage.wholeRun).toBeUndefined();
+    else expect(requestUsage.wholeRun!.requestCount).toBe(count);
+    const cost = await resolve('muse', { tokenUsage: collector.getTokenUsage(), requestUsage });
+    expect(cost!.tier!.state).toBe(proof && count === 1 ? 'exact' : 'unknown');
+    if (!proof) expect(cost!.tier).not.toHaveProperty('lowUsd');
+    else if (count !== 1)
+      expect(cost!.tier).toMatchObject({ lowUsd: expect.any(Number), highUsd: expect.any(Number) });
+  },
+);

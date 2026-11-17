@@ -592,6 +592,11 @@ export function createStreamJsonCollector(
         sum('cacheReadTokens') === (resultUsage.cacheReadTokens ?? 0) &&
         sum('cacheCreationTokens') === (resultUsage.cacheCreationTokens ?? 0);
       if (!promptMatches) reasons.add('prompt-mismatch');
+      const observedAllZero = requests.every((r) =>
+        [r.inputTokens, r.cacheReadTokens, r.cacheCreationTokens, r.outputTokens].every(
+          (n) => n === 0,
+        ),
+      );
       const outputKnown =
         promptMatches &&
         resultOutputKnown &&
@@ -690,7 +695,14 @@ export function createStreamJsonCollector(
         malformedLineCount === 0 &&
         requestIssues.size === 0 &&
         modelCoverage === 'single' &&
-        strictWholeRun?.outputTokens != null;
+        strictWholeRun?.outputTokens != null &&
+        requests.every(
+          (r) =>
+            r.inputTokens + r.cacheReadTokens + r.cacheCreationTokens <=
+            strictWholeRun!.inputTokens +
+              strictWholeRun!.cacheReadTokens +
+              strictWholeRun!.cacheCreationTokens,
+        );
       const wholeMatches = (billed: RequestUsage | null) =>
         billed != null &&
         ['inputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'outputTokens'].every(
@@ -708,7 +720,7 @@ export function createStreamJsonCollector(
         wholeRunIntact && wholeLedgerMatches
           ? {
               usage: { ...strictWholeRun!, model: mainModel },
-              requestCount: requests.length,
+              requestCount: outputKnown || observedAllZero ? requests.length : null,
             }
           : undefined;
       const complete = reasons.size === 0;
