@@ -1,8 +1,8 @@
 # What Parsimony offers Haive: measured change size, and the statistics to read it
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **Not started** 2026-10-17. Five findings from Parsimony (parsimony.lasu.dev,
-> github.com/La5u/Parsimony), turned into phases. Nothing is approved; one decision is made: the
+> **P0 implemented; live acceptance pending** 2026-11-16. Five findings from Parsimony (parsimony.lasu.dev,
+> github.com/La5u/Parsimony), turned into phases. P1–P3 remain proposals; the
 > counter parses with tree-sitter (2026-10-17). P0 gates everything else: without a counter there is
 > no number for any later phase to read.
 
@@ -40,18 +40,26 @@ or units and keeps no size per step or model.
 
 ## Findings and phases
 
-| # | Finding | Phase |
-|---|---------|-------|
-| 1 | We cannot say whether `07a-code-simplify` shrinks code, or how often its fixup has to put behaviour back | P0 |
-| 3 | How to count: syntax units with null-on-parse-failure and an implementation-only scope, not lines | P0 (the counter's design) |
-| 2 | Change size per step and per CLI/model belongs in statistics, read only on tasks that succeeded | P1 |
-| 4 | The statistics rules (medians, explicit failures, paired comparison, size never ranks alone) apply to the numbers Haive already shows | P2 |
-| 5 | A fair comparison across models needs the same task replayed by each | P3 |
+| #   | Finding                                                                                                                               | Phase                     |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 1   | We cannot say whether `07a-code-simplify` shrinks code, or how often its fixup has to put behaviour back                              | P0                        |
+| 3   | How to count: syntax units with null-on-parse-failure and an implementation-only scope, not lines                                     | P0 (the counter's design) |
+| 2   | Change size per step and per CLI/model belongs in statistics, read only on tasks that succeeded                                       | P1                        |
+| 4   | The statistics rules (medians, explicit failures, paired comparison, size never ranks alone) apply to the numbers Haive already shows | P2                        |
+| 5   | A fair comparison across models needs the same task replayed by each                                                                  | P3                        |
 
 Finding 3 is the counter's design rather than a phase of its own: P0 cannot be built without it, and
 nothing else uses it first.
 
 ## P0 — A change-size counter, and 07a measured before and after
+
+**Status (2026-11-16).** Counter and host-side before/simplifier/fixup measurements implemented.
+Unit and fixture-worktree controls cover the three sizes, replay idempotency, frozen before-images
+and unknown measurements that preserve the step outcome. The remaining acceptance check is one
+real workflow after merge with simplification enabled, reading all three sizes from the row.
+Dependency deployment requires `pnpm docker rebuild` with no service after merge.
+The metric and persistence contract are recorded under
+[Implementation change sizes](../architecture/review-scope.md#implementation-change-sizes).
 
 **Goal.** Answer one open question with data: does `07a-code-simplify` make the change smaller, and
 what does it cost? Today the per-task toggle is on or off with no evidence either way.
@@ -101,6 +109,7 @@ failed/interrupted measurement stays explicitly unknown, and rerunning apply doe
 an event or replace its frozen before-image.
 
 **Check.**
+
 - Unit tests for the counter: per-language fixtures, including the `has_negative` pair from the
   Parsimony page (the loop and the one-liner must differ by the expected count), a formatting-only
   change that scores 0, a parse failure that yields `null`, and an excluded test file.
@@ -222,4 +231,6 @@ the live workflow reads them. Revert the commit and delete the replay rows.
 
 - Parsimony was read from its front page and `docs/method.md` only, not its code. The repository's
   license is not stated in `method.md`, so no code is copied until it is checked.
-- Whether `web-tree-sitter` grammars load cleanly in the worker image is not measured.
+- Runtime and all five grammars load from a reproduction of the production worker's dependency
+  COPY layout. An actual production image build and the post-merge live workflow are not yet
+  measured.

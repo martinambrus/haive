@@ -232,3 +232,81 @@ inside their own data fence, capped at 100 paths with omissions and unavailable 
 disclosed. Empty notices add no prompt whitespace. Stored patches, content and arbitrary
 record prose never enter a prompt or the task ledger. Capture and content availability
 are described in [Fix loop](fix-loop.md#test-edits-during-a-repair).
+
+## Implementation change sizes
+
+`@haive/shared/change-size` is a server-only subpath, absent from root and web-safe barrels.
+The asynchronous initializer loads `web-tree-sitter` **0.25.10** (MIT, published 2025-09-22)
+and precompiled grammars from `@vscode/tree-sitter-wasm` **0.3.1** (MIT, published 2026-04-07).
+Both versions are exact lockfile pins, with no install-time native build. The worker's production
+COPY steps retain the root pnpm store and shared package dependency symlinks, including WASM.
+Initialization can also take runtime/grammar bytes. The initialized calculation takes only file
+paths and base/head text or bytes, uses loaded grammars and performs no filesystem IO.
+
+Metric version **1** supports Python, PHP (including `.module`, `.inc`, `.install`, `.theme`, `.profile` and `.engine`), JavaScript/JSX and
+TypeScript/TSX. Its projection counts statements, declarations, expressions, comparisons, names,
+literals and an `EndBlock` after each statement/class block. Python assignments avoid counting
+an expression-statement grammar wrapper twice; comprehensions include their loop/filter clauses.
+PHP variables count once, without the nested name wrapper. JavaScript/TypeScript declarations
+include declarators; syntax-only parameter/argument wrappers and punctuation do not count.
+Interpolated strings retain expression names. Simple string quote delimiters, comments and
+formatting do not count. Literal/name replacements add one and delete one; structural churn
+ignores their values. This is Haive's syntax metric, not Python AST parity or a cross-language
+ranking. The pinned `has_negative` fixtures count 21 units for the loop and 14 for the generator.
+
+Myers alignment gives minimum added/deleted counts; net is added minus deleted and churn is their
+sum. Above 512 edits or one million alignment operations, monotone unique-line anchors approximate
+unmatched spans as replacements and set `approximate` on the file and total. An empty side after
+trimming equal ends gives an exact insertion/deletion count regardless of the edit budget. Input is capped at
+1 MiB per side and 100,000 units; parsing cancels through a progress callback after 250 ms.
+Invalid UTF-8, binary input, syntax errors, missing grammars, unreadable bytes and exceeded parsing
+limits yield a null file result. Unsupported extensions yield null without reading their bytes
+or spending the host byte budget. The total's `nullFiles` exposes those holes; its numeric sums
+cover only measured files.
+
+The host reader starts with `collectImplementationFiles` (which delegates to `collectChangeSet`),
+including reported files, committed DAG changes and dirty/untracked additions. A measurement-only
+`git diff --name-only -z --no-renames <frozen-base> --` supplements that list with every tracked
+path changed against the frozen task base, including uncommitted removals and a staged move's
+old path. Together with the collector's dirty/untracked paths, this covers both sides of staged
+and unstaged moves. A file move counts the old file's full unit projection as deleted and
+the new file's as added: an unchanged three-unit file gives added 3, deleted 3, net 0 and churn 6.
+This is separate from renaming an identifier, which replaces one unit.
+It excludes test paths, documentation,
+generated markers/names, declaration files, lockfiles, vendored dependencies and build output, and
+lists touched and excluded paths. Path exclusions split the path once, use a set of segment
+names and linear basename checks, including generated/minified names with dotted suffixes.
+Header-based generated exclusions read the base, or the head
+for an added file, so adding a marker to existing implementation cannot hide its change.
+The inherited 100-file scope cap, a normalized measurement path union over 100 files, or a failed
+scope scan makes the whole measurement unknown. A failed supplemental diff is a retryable unknown
+and leaves no frozen attempt record. An aggregate byte budget is 16 MiB.
+The reader's direct `merge-base`, measurement `diff`, `ls-tree` and `cat-file`
+calls each have a 10 s timeout. Scope-collection git calls inside `collectImplementationFiles`
+and `collectChangeSet` keep `gitExec`'s default short timeout (10 min). All use hardened git; base
+blobs are read by object id, and working bytes use fs-safe reads anchored at the repository root
+while the integration directory stays held. Reported paths are normalized with `toSafeRel` and
+deduplicated before reading; an invalid name contributes one null file. No measurement runs
+inside the agent sandbox.
+
+`07a-code-simplify` records `changeSizeBefore` at detect and carries `changeSize.before`,
+`afterSimplify` and `afterFixup` in output. Each pass measures the diff against the frozen task
+fork point, not against the preceding pass. The fixup size stays explicitly unknown if it has
+not run. Measurements retain a base commit and a hash over ordered path/base/head byte hashes for the
+supported files read, including untracked working bytes. No source contents are stored.
+
+Versioned `change_size.measured` task events retain attempt evidence when output is reset. Their
+deterministic primary keys include task, step row, round, rerun generation, invocation, pass and
+phase. Detect has no invocation yet and uses the attempt's before key. After records retain the
+before event reference and before measurement. A primary-key conflict keeps the first record;
+a replay reads it before measuring again, including when the first measurement was unknown.
+Counter loading is lazy, so a missing dependency cannot break the step registry import.
+Import/initialization failures have the distinct reason `Change-size counter unavailable.`.
+They and other environment/failed-scan faults return a retryable unknown without inserting
+an attempt row, so a later call can measure. Original errors are logged through structured
+`err` diagnostics. Per-file containment refusals and confirmed absence remain file-level results;
+other read or git failures make the whole measurement unknown. Cancellation is checked per file
+and before persistence, and `TaskCancelledError` passes through every catch without freezing
+a partial measurement. Other measurement or retention failures leave an explicit unknown and
+do not change the simplifier result, its fixup routing or the step's success/failure. Reverting the implementation
+removes measurement writes; existing additive jsonb keys and event rows can remain harmlessly.
