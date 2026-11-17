@@ -730,6 +730,25 @@ describe('verified inputs stay pinned until requested inputs move', () => {
       });
     },
   );
+  it.each(['body', 'name', 'cliVersion', 'extras'] as const)(
+    'refuses launch when requested %s changes after verification',
+    async (field) => {
+      const f = fixture();
+      await f.installEvidence();
+      if (field === 'body')
+        await f.write(schema.envTemplates, ids.env, {
+          generatedDockerfile: 'FROM ubuntu:24.04\nRUN echo changed\n',
+        });
+      else
+        await f.write(schema.cliProviders, ids.provider, {
+          [field === 'extras' ? 'sandboxDockerfileExtra' : field]:
+            field === 'name' ? 'zai' : field === 'cliVersion' ? '2.0.0' : 'RUN echo changed',
+        });
+      await expect(
+        resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner),
+      ).rejects.toThrow(/Requested composed image inputs changed/);
+    },
+  );
   it('rejects a newly requested repository RTK pin', async () => {
     const f = fixture();
     const repo = '66666666-6666-4666-8666-666666666666';
@@ -762,7 +781,6 @@ describe('provider identity allow-list', () => {
     'modelProvisionError',
     'rulesContent',
     'authGeneration',
-    'newOperationalColumn',
   ])('ignores %s and preserves plugin/effective identity', async (field) => {
     const f = fixture();
     const before = await f.installEvidence();
@@ -770,10 +788,9 @@ describe('provider identity allow-list', () => {
     expect(lspProviderIdentity({ ...provider, [field]: 'changed' })).toBe(
       lspProviderIdentity(provider),
     );
-    if (field !== 'newOperationalColumn')
-      await f.write(schema.cliProviders, ids.provider, {
-        [field]: field === 'modelLimits' ? { model: 'x', vision: false } : 'changed',
-      });
+    await f.write(schema.cliProviders, ids.provider, {
+      [field]: field === 'modelLimits' ? { model: 'x', vision: false } : 'changed',
+    });
     expect((await f.identity())?.plugin.ready).toBe(true);
     expect(await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner)).toBe(
       before.identity.imageId,
@@ -797,14 +814,43 @@ describe('provider identity allow-list', () => {
   });
 });
 
-it.each(['completed', 'failed', 'cancelled'] as const)(
-  'releases retained images for a %s task',
+it.each(['completed', 'cancelled', 'failed'] as const)(
+  'releases only terminal tasks and retains every image role for %s',
   async (status) => {
     const f = fixture();
     const entry = await f.installEvidence();
-    expect(await retainedComposedImageRefs(retentionDb(f))).toContain(entry.identity.imageId);
+    const ref = {
+      tag: entry.identity.tag,
+      imageId: entry.identity.imageId,
+      identityHash: evidenceHash(entry.identity),
+      inputs: entry.identity.inputs,
+    };
+    let refs = updateImageReferences(
+      parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata),
+      ids.provider,
+      { ...ref, tag: 'effective:next', imageId: 'sha256:next' },
+      true,
+    );
+    refs = updateImageReferences(
+      refs,
+      ids.provider,
+      { ...ref, tag: 'verifying:candidate', imageId: 'sha256:candidate' },
+      false,
+    );
+    await f.write(schema.tasks, ids.task, { metadata: { composedLspImageRefs: refs } });
+    const allRoles = new Set([
+      ref.tag,
+      ref.imageId,
+      'effective:next',
+      'sha256:next',
+      'verifying:candidate',
+      'sha256:candidate',
+    ]);
+    expect(await retainedComposedImageRefs(retentionDb(f))).toEqual(allRoles);
     await f.write(schema.tasks, ids.task, { status });
-    expect(await retainedComposedImageRefs(retentionDb(f))).toEqual(new Set());
+    expect(await retainedComposedImageRefs(retentionDb(f))).toEqual(
+      status === 'failed' ? allRoles : new Set(),
+    );
   },
 );
 

@@ -22,6 +22,7 @@ import {
 } from '../sandbox/lsp-layer.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { TERMINAL_TASK_STATUSES } from '../step-engine/step-ownership.js';
 
 export const MAX_COMPOSED_LSP_REPORTS = 7;
 
@@ -42,24 +43,58 @@ export function evidenceHash(value: unknown): string {
     .digest('hex');
 }
 
+// Composition: installer family/version and owner-authored Dockerfile additions.
+// Plugin execution: wrapper body, environment/arguments and executable routing.
+// Plugin storage: auth mode and isolation choose its task auth-volume namespace.
+export const LSP_PROVIDER_IDENTITY_FIELDS = [
+  'name',
+  'cliVersion',
+  'sandboxDockerfileExtra',
+  'wrapperContent',
+  'envVars',
+  'cliArgs',
+  'executablePath',
+  'wrapperPath',
+  'authMode',
+  'isolateAuth',
+] as const satisfies readonly (keyof typeof schema.cliProviders.$inferSelect)[];
+
+// IDs/ownership/enabled are checked separately. The remaining fields govern model
+// dispatch, network access, display, provisioning/auth health or timestamps, not
+// image or installed plugin bytes. The schema coverage test requires a conscious
+// classification here or above whenever a provider column is added.
+export const LSP_PROVIDER_IDENTITY_IGNORED_FIELDS = [
+  'id',
+  'userId',
+  'enabled',
+  'label',
+  'supportsSubagents',
+  'networkPolicy',
+  'egressDomains',
+  'effortLevel',
+  'model',
+  'modelfile',
+  'modelProvisionStatus',
+  'modelProvisionError',
+  'modelLimits',
+  'sandboxImageTag',
+  'sandboxImageBuildStatus',
+  'sandboxImageBuildError',
+  'sandboxImageBuiltAt',
+  'disableThinking',
+  'authStatus',
+  'authLastCheckedAt',
+  'authMessage',
+  'rulesContent',
+  'createdAt',
+  'updatedAt',
+  'authGeneration',
+] as const satisfies readonly (keyof typeof schema.cliProviders.$inferSelect)[];
+
 export function lspProviderIdentity(provider: Record<string, unknown>): string {
-  // Composition: installer family/version and owner-authored Dockerfile additions.
-  // Plugin execution: wrapper body, environment/arguments and executable routing.
-  // Plugin storage: auth mode and isolation choose its task auth-volume namespace.
-  // IDs/ownership/enabled are checked separately; model, rules, learned limits,
-  // provisioning/auth health and timestamps affect neither image nor plugin bytes.
-  return evidenceHash({
-    name: provider.name,
-    cliVersion: provider.cliVersion,
-    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
-    wrapperContent: provider.wrapperContent,
-    envVars: provider.envVars,
-    cliArgs: provider.cliArgs,
-    executablePath: provider.executablePath,
-    wrapperPath: provider.wrapperPath,
-    authMode: provider.authMode,
-    isolateAuth: provider.isolateAuth,
-  });
+  return evidenceHash(
+    Object.fromEntries(LSP_PROVIDER_IDENTITY_FIELDS.map((field) => [field, provider[field]])),
+  );
 }
 
 export interface ComposedLspIdentity {
@@ -371,7 +406,7 @@ export async function retainedComposedImageRefs(db: Database): Promise<Set<strin
     .from(schema.tasks)
     .where(
       and(
-        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
         sql`jsonb_exists(${schema.tasks.metadata}, ${COMPOSED_IMAGE_REFS_KEY})`,
       ),
     );
