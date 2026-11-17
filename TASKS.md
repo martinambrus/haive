@@ -670,6 +670,18 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T706 · Desktop extension lows after the live check
+
+status: open · kind: bug · found: Desktop extension reviews (#1259) · priority: P4
+
+Small leftovers, none blocking: (a) `TestStatusAndStopDoNotRequireMailpitPort` asserts no `.env` bytes before/after; add a busy-8025-without-key refusal case and an invalid `HAIVE_MAILPIT_PORT` Start case; (b) the crash-loop flicker reopens the 5 s window per starting episode (bounded, polling never stalls); (c) Windows `.env` rename retry budget (~150 ms) is unmeasured against antivirus, and a read error during retry refuses rather than retries; (d) drift test takes the first `ENTRYPOINT` line and gives a bare SyntaxError on a non-JSON array; (e) the hung-updater refusal could name the updater's recovery command. Native Windows/macOS acceptance beyond the 2026-11-17 owner check stays manual.
+
+### T705 · Updater and Desktop extension share one lock
+
+status: open · kind: feature · found: Greptile P1 on #1259 · priority: P3
+
+The extension refuses Install/Start/Stop while this install's updater container runs and re-checks right before `compose up`, but a window remains between that final check and the Compose call: an upgrade launched in that instant can still have PostgreSQL restarted during `phaseSnapshot` (`packages/updater/src/run.ts`). Closing it needs a lock both sides take (the updater and its launchers, plus the extension's `<install>.extension-lock`), honored by the updater from some release onward; older updaters keep today's container-identity guard. Design the lock location (the updater container must see it) and its recovery after a crash.
+
 ### T704 · Installer port probe matches only the first port of a published range
 
 status: open · kind: bug · found: review of #1260 · priority: P4
