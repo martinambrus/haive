@@ -1,0 +1,267 @@
+import { createHash } from 'node:crypto';
+import { and, eq, isNull } from 'drizzle-orm';
+import { lockStepRows, schema } from '@haive/database';
+import {
+  executionContractPaths,
+  parseExecutionContract,
+  type ExecutionContract,
+} from '@haive/shared/modularity';
+import type { StepContext, StepDefinition } from '@haive/shared/step';
+import { z } from 'zod';
+
+const generation = z.number().int().nonnegative();
+const reference = z.strictObject({
+  stepRowId: z.uuid(),
+  spanId: z.string().min(1).max(128),
+  generation,
+});
+const boundary = z.strictObject({
+  stepRowId: z.uuid(),
+  stepId: z.string().min(1).max(128),
+  round: generation,
+  generation,
+});
+const decisionSchema = z.strictObject({
+  version: z.literal(1),
+  taskId: z.uuid(),
+  round: generation,
+  spanId: z.string().min(1).max(128),
+  generation,
+  contractHash: z.string().regex(/^[a-f0-9]{64}$/),
+  boundary: boundary.nullable(),
+  predicate: z
+    .strictObject({ id: z.string().min(1).max(128), result: z.boolean(), source: reference })
+    .nullable(),
+  required: reference.nullable(),
+  run: z.boolean(),
+});
+export type GuardDecision = z.infer<typeof decisionSchema>;
+type Predicate = NonNullable<StepDefinition['guardPredicates']>[string];
+type StepRow = typeof schema.taskSteps.$inferSelect;
+type Span = ExecutionContract['guardedSpans'][number];
+
+/** A retryable protocol fault. Never expose a predicate's error text or substitute false. */
+export class GuardDecisionError extends Error {
+  readonly code = 'guard-decision-invalid';
+  constructor(reason: string) {
+    super(`guard-decision-invalid: ${reason}`);
+    this.name = 'GuardDecisionError';
+  }
+}
+export function parseGuardDecision(raw: unknown): GuardDecision {
+  const parsed = decisionSchema.safeParse(raw);
+  if (!parsed.success) throw new GuardDecisionError('malformed-state');
+  return parsed.data;
+}
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, item) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+      : item,
+  );
+const ref = (row: StepRow | undefined, span: Span) => {
+  if (!row) throw new GuardDecisionError('shared-decision-unavailable');
+  return { stepRowId: row.id, spanId: span.id, generation: row.rerunGeneration };
+};
+const producerRef = (row: StepRow) => ({
+  stepRowId: row.id,
+  stepId: row.stepId,
+  round: row.round,
+  generation: row.rerunGeneration,
+});
+const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+
+/** PR4a dormant service: no production caller, admission/START still refuse guards.
+ *
+ * Called at a span ENTRY, before any admission or step work. The caller must already
+ * have its pending entry row and an epoch/generation. This only writes guard_state;
+ * it neither skips a member nor moves a pointer, records output/recaps or queues work.
+ *
+ * All extant step rows are held in the reset protocol's id order, then the task fence.
+ * Trusted predicates do bounded, read-only structural queries through the supplied
+ * transaction. Their context identifies the settled predecessor (including its exact
+ * taskStepId, round and generation), so task-only DAG lookups are unnecessary. They
+ * must throw for absent/unreadable producer data. There is no false-on-error path.
+ *
+ * A failed transaction may evaluate again; only committed decisions are exactly once.
+ * Recovery epochs reuse them. PR4b must invalidate affected decisions during explicit
+ * resets before this service can be wired into execution. Stale states fail closed.
+ */
+export async function evaluateGuardDecision(
+  ctx: StepContext,
+  spanId: string,
+  predicates: ReadonlyMap<string, Predicate>,
+): Promise<GuardDecision | null> {
+  const initial = await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
+  if (!initial) throw new GuardDecisionError('task-unavailable');
+  if (initial.executionContract == null) return null;
+  const initialContract = parseExecutionContract(initial.executionContract);
+  if (!initialContract.guardedSpans.length && !initialContract.fixTarget) return null;
+  if (ctx.epoch == null || ctx.rerunGeneration == null)
+    throw new GuardDecisionError('missing-fence');
+  ctx.throwIfCancelled();
+  return ctx.db.transaction(async (tx) => {
+    // Never wait for or update an unheld step after taking the task lock.
+    const held = await lockStepRows(tx, eq(schema.taskSteps.taskId, ctx.taskId));
+    const [task] = await tx
+      .select()
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .for('share');
+    if (
+      !task ||
+      task.userId !== ctx.userId ||
+      task.status !== 'running' ||
+      task.deadAt != null ||
+      task.orchestrationEpoch !== ctx.epoch ||
+      task.currentRound !== ctx.round
+    )
+      throw new GuardDecisionError('task-fence-lost');
+    const contract = parseExecutionContract(task.executionContract);
+    if (contract.fixTarget) throw new GuardDecisionError('custom-fix-unavailable');
+    const ids = task.runListSnapshot;
+    if (!ids || new Set(ids).size !== ids.length)
+      throw new GuardDecisionError('missing-run-list-pin');
+    // Reuse PR3's strict endpoint/dependency/shared-args/schema checks; never a live catalog.
+    executionContractPaths(ids, new Map(), contract, predicates);
+    const spans = [...contract.guardedSpans].sort(
+      (a, b) => ids.indexOf(a.firstStepId) - ids.indexOf(b.firstStepId),
+    );
+    const span = spans.find((s) => s.id === spanId);
+    if (!span) throw new GuardDecisionError('unknown-span');
+    const hash = createHash('sha256').update(canonical({ ids, contract })).digest('hex');
+    const rows = (
+      await tx.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, ctx.taskId))
+    ).filter((r) => held.some((h) => h.id === r.id));
+    const entry = (s: Span) =>
+      rows.find((r) => r.stepId === s.firstStepId && r.round === ctx.round);
+    const current = entry(span);
+    if (
+      !current ||
+      current.id !== ctx.taskStepId ||
+      current.status !== 'pending' ||
+      current.rerunGeneration !== ctx.rerunGeneration ||
+      task.currentStepId !== span.firstStepId
+    )
+      throw new GuardDecisionError('entry-fence-lost');
+    const predecessor = (s: Span) => {
+      const id = ids[ids.indexOf(s.firstStepId) - 1];
+      const row = rows
+        .filter((r) => r.stepId === id && r.round <= ctx.round)
+        .sort((a, b) => b.round - a.round)[0];
+      if (!row || row.status !== 'done') throw new GuardDecisionError('producer-not-settled');
+      return row;
+    };
+    const loaded = new Map<string, GuardDecision>();
+    const read = (s: Span): GuardDecision => {
+      const known = loaded.get(s.id);
+      if (known) return known;
+      const row = entry(s);
+      if (!row || row.guardState == null)
+        throw new GuardDecisionError('shared-decision-unavailable');
+      const saved = parseGuardDecision(row.guardState);
+      if (
+        saved.taskId !== task.id ||
+        saved.round !== ctx.round ||
+        saved.spanId !== s.id ||
+        saved.generation !== row.rerunGeneration ||
+        saved.contractHash !== hash
+      )
+        throw new GuardDecisionError('stale-decision');
+      const requiredSpan =
+        s.requiresSpan === undefined ? undefined : spans.find((p) => p.id === s.requiresSpan)!;
+      const required = requiredSpan ? read(requiredSpan) : null;
+      if (!same(saved.required, requiredSpan ? ref(entry(requiredSpan)!, requiredSpan) : null))
+        throw new GuardDecisionError('stale-required-decision');
+      if (required?.run === false) {
+        if (saved.run || saved.predicate !== null || saved.boundary !== null)
+          throw new GuardDecisionError('invalid-dependent-decision');
+      } else {
+        if (
+          !saved.predicate ||
+          saved.predicate.id !== s.predicateId ||
+          saved.run !== (saved.predicate.result === (s.when ?? true))
+        )
+          throw new GuardDecisionError('invalid-predicate-decision');
+        const sourceSpan = spans.find((p) => p.id === saved.predicate!.source.spanId);
+        if (
+          !sourceSpan ||
+          sourceSpan.predicateId !== s.predicateId ||
+          ids.indexOf(sourceSpan.firstStepId) > ids.indexOf(s.firstStepId) ||
+          !same(saved.predicate.source, ref(entry(sourceSpan)!, sourceSpan))
+        )
+          throw new GuardDecisionError('stale-predicate-source');
+        if (sourceSpan.id === s.id) {
+          if (!same(saved.boundary, producerRef(predecessor(s))))
+            throw new GuardDecisionError('stale-producer');
+        } else {
+          const source = read(sourceSpan);
+          if (!same(saved.predicate, source.predicate) || !same(saved.boundary, source.boundary))
+            throw new GuardDecisionError('shared-result-mismatch');
+        }
+      }
+      loaded.set(s.id, saved);
+      return saved;
+    };
+    if (current.guardState != null) return read(span);
+    const requiredSpan =
+      span.requiresSpan === undefined ? undefined : spans.find((s) => s.id === span.requiresSpan)!;
+    const required = requiredSpan ? read(requiredSpan) : null;
+    let predicate: GuardDecision['predicate'] = null;
+    let settled: GuardDecision['boundary'] = null;
+    if (required?.run !== false) {
+      // A dependency-suppressed earlier span has no predicate result to reuse.
+      const earlier = spans
+        .slice(0, spans.indexOf(span))
+        .filter((s) => s.predicateId === span.predicateId)
+        .map(read);
+      const shared = earlier.find((d) => d.predicate !== null);
+      if (shared) {
+        predicate = shared.predicate;
+        settled = shared.boundary;
+      } else {
+        const producer = predecessor(span);
+        let result: unknown;
+        try {
+          result = await predicates.get(span.predicateId)!.evaluate(
+            {
+              ...ctx,
+              db: tx as unknown as StepContext['db'],
+              taskStepId: producer.id,
+              round: producer.round,
+              rerunGeneration: producer.rerunGeneration,
+              host: undefined,
+            },
+            structuredClone(span.args),
+          );
+        } catch {
+          throw new GuardDecisionError('predicate-evaluation-failed');
+        }
+        if (typeof result !== 'boolean')
+          throw new GuardDecisionError('predicate-evaluation-failed');
+        predicate = { id: span.predicateId, result, source: ref(current, span) };
+        settled = producerRef(producer);
+      }
+    }
+    ctx.throwIfCancelled();
+    const decision: GuardDecision = {
+      version: 1,
+      taskId: task.id,
+      round: ctx.round,
+      spanId,
+      generation: current.rerunGeneration,
+      contractHash: hash,
+      boundary: settled,
+      predicate,
+      required: requiredSpan ? ref(entry(requiredSpan)!, requiredSpan) : null,
+      run: required?.run !== false && predicate!.result === (span.when ?? true),
+    };
+    const written = await tx
+      .update(schema.taskSteps)
+      .set({ guardState: decision })
+      .where(and(eq(schema.taskSteps.id, current.id), isNull(schema.taskSteps.guardState)))
+      .returning({ id: schema.taskSteps.id });
+    if (written.length !== 1) throw new GuardDecisionError('decision-write-lost');
+    return decision;
+  });
+}
