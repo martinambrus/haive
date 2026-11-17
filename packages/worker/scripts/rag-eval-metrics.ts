@@ -15,6 +15,12 @@ export interface SetQuery {
   kind: string;
   expected?: string;
   gold?: Gold[];
+  id?: string;
+  topic?: string;
+  language?: string;
+  split?: string;
+  rubric?: { fact: string; evidence: Gold[] }[];
+  reason?: string;
 }
 
 function parseGold(g: unknown, where: string): Gold {
@@ -32,12 +38,78 @@ export function parseQuerySet(raw: unknown, path: string): SetQuery[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error(`${path}: expected a non-empty JSON array`);
   }
+  const ids = new Set<string>();
   return raw.map((q: unknown, i: number) => {
-    const e = q as { query?: unknown; expected?: unknown; kind?: unknown; gold?: unknown };
+    const e = q as {
+      query?: unknown;
+      expected?: unknown;
+      kind?: unknown;
+      gold?: unknown;
+      id?: unknown;
+      topic?: unknown;
+      language?: unknown;
+      split?: unknown;
+      rubric?: unknown;
+      reason?: unknown;
+    };
     const kind = typeof e?.kind === 'string' ? e.kind : 'all';
     if (typeof e?.query !== 'string' || e.query.trim() === '') {
       throw new Error(`${path}[${i}]: "query" and "expected" must not be empty`);
     }
+    const metadata: Partial<SetQuery> = {};
+    for (const key of ['id', 'topic', 'language', 'split'] as const) {
+      if (e[key] !== undefined) {
+        if (typeof e[key] !== 'string' || !e[key].trim())
+          throw new Error(`${path}[${i}]: invalid ${key}`);
+        metadata[key] = e[key];
+      }
+    }
+    if (metadata.id) {
+      if (ids.has(metadata.id)) throw new Error(`${path}[${i}]: duplicate id ${metadata.id}`);
+      ids.add(metadata.id);
+    }
+    if (metadata.split && !['tuning', 'held-out'].includes(metadata.split)) {
+      throw new Error(`${path}[${i}]: invalid split`);
+    }
+    if (kind === 'no-answer') {
+      if (
+        e.gold !== undefined ||
+        e.expected !== undefined ||
+        e.rubric !== undefined ||
+        typeof e.reason !== 'string' ||
+        !e.reason.trim()
+      )
+        throw new Error(`${path}[${i}]: no-answer needs a reason and no positive labels`);
+      return { query: e.query, kind, ...metadata, reason: e.reason };
+    }
+    if (kind === 'overview') {
+      if (
+        e.gold !== undefined ||
+        e.expected !== undefined ||
+        !Array.isArray(e.rubric) ||
+        e.rubric.length < 2
+      ) {
+        throw new Error(`${path}[${i}]: overview needs a multi-fact rubric, not gold`);
+      }
+      const rubric = e.rubric.map((r: unknown, j: number) => {
+        const fact = r as { fact?: unknown; evidence?: unknown };
+        if (
+          typeof fact?.fact !== 'string' ||
+          !fact.fact.trim() ||
+          !Array.isArray(fact.evidence) ||
+          !fact.evidence.length
+        ) {
+          throw new Error(`${path}[${i}].rubric[${j}]: invalid fact/evidence`);
+        }
+        return {
+          fact: fact.fact,
+          evidence: fact.evidence.map((g) => parseGold(g, `${path}[${i}].rubric[${j}]`)),
+        };
+      });
+      return { query: e.query, kind, ...metadata, rubric };
+    }
+    if (e.rubric !== undefined)
+      throw new Error(`${path}[${i}]: rubric only supported for overview`);
     if (e.gold !== undefined) {
       if (!Array.isArray(e.gold) || e.gold.length === 0) {
         throw new Error(`${path}[${i}]: "gold" must be a non-empty array`);
@@ -45,6 +117,7 @@ export function parseQuerySet(raw: unknown, path: string): SetQuery[] {
       return {
         query: e.query,
         kind,
+        ...metadata,
         gold: e.gold.map((g, j) => parseGold(g, `${path}[${i}].gold[${j}]`)),
       };
     }
@@ -54,11 +127,12 @@ export function parseQuerySet(raw: unknown, path: string): SetQuery[] {
     if (e.expected === '') {
       throw new Error(`${path}[${i}]: "query" and "expected" must not be empty`);
     }
-    return { query: e.query, expected: e.expected, kind };
+    return { query: e.query, expected: e.expected, kind, ...metadata };
   });
 }
 
 export function goldsOf(q: SetQuery): Gold[] {
+  if (q.kind === 'overview' || q.kind === 'no-answer') return [];
   return q.gold ?? [{ path: q.expected ?? '' }];
 }
 
@@ -94,13 +168,15 @@ export interface QueryScore {
   hit: boolean;
 }
 
-/** Null when no gold of the query is in the store: there is nothing to retrieve. */
+/** Every original gold stays in the denominator, including spans lost by the indexer.
+ * Null only for an empty label list (overview/no-answer are scored separately). */
 export function scoreQuery(outcomes: GoldOutcome[], k: number): QueryScore | null {
-  const live = outcomes.filter((o) => o.inStore);
-  if (live.length === 0) return null;
-  const ranks = live.flatMap((o) => (o.rank !== null && o.rank <= k ? [o.rank] : []));
+  if (outcomes.length === 0) return null;
+  const ranks = outcomes.flatMap((o) =>
+    o.inStore && o.rank !== null && o.rank >= 1 && o.rank <= k ? [o.rank] : [],
+  );
   return {
-    recall: ranks.length / live.length,
+    recall: ranks.length / outcomes.length,
     mrr: ranks.length > 0 ? 1 / Math.min(...ranks) : 0,
     hit: ranks.length > 0,
   };

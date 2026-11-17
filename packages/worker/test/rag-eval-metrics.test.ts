@@ -99,16 +99,20 @@ describe('scoreQuery', () => {
     expect(scoreQuery(outcomes, 1)).toEqual({ recall: 0, mrr: 0, hit: false });
   });
 
-  it('leaves a gold that is not in the store out of the denominator', () => {
+  it('keeps a gold that is not in the store in the denominator', () => {
     const outcomes = [
       { rank: 3, inStore: true },
       { rank: null, inStore: false },
     ];
-    expect(scoreQuery(outcomes, 5)).toEqual({ recall: 1, mrr: 1 / 3, hit: true });
+    expect(scoreQuery(outcomes, 5)).toEqual({ recall: 0.5, mrr: 1 / 3, hit: true });
   });
 
-  it('is null when no gold is in the store', () => {
-    expect(scoreQuery([{ rank: null, inStore: false }], 5)).toBeNull();
+  it('counts a query whose entire gold is absent as a miss', () => {
+    expect(scoreQuery([{ rank: null, inStore: false }], 5)).toEqual({
+      recall: 0,
+      mrr: 0,
+      hit: false,
+    });
   });
 });
 
@@ -159,11 +163,44 @@ describe('parseQuerySet gold entries', () => {
 describe('checkDensePool', () => {
   it('leaves per-task embeddings out of both pools, as the production dense query does', async () => {
     const sent: string[] = [];
-    const tx = { unsafe: async (q: string) => (sent.push(q), []) };
+    const tx = {
+      unsafe: async (q: string) => (
+        sent.push(q),
+        q.startsWith('EXPLAIN') ? [{ plan: 'Index Scan using idx_rag_vector_hnsw' }] : []
+      ),
+    };
     const pg = { begin: async (_mode: string, fn: (t: typeof tx) => unknown) => fn(tx) };
     await checkDensePool(pg as never, '[0.1]', 2, 50, 'repo-1');
     const reads = sent.filter((q) => q.includes('ORDER BY'));
     expect(reads.length).toBeGreaterThan(0);
     for (const q of reads) expect(q).toContain("source_type <> 'task'");
   });
+});
+
+it('checks the shipped per-repository dense settings and keeps SET LOCAL inside read-only transactions', async () => {
+  const sent: string[] = [];
+  const tx = {
+    unsafe: async (q: string) => (
+      sent.push(q),
+      q.startsWith('EXPLAIN') ? [{ plan: 'Index Scan using idx_rag_vector_hnsw' }] : []
+    ),
+  };
+  const pg = {
+    begin: async (mode: string, fn: (t: typeof tx) => unknown) => {
+      expect(mode).toBe('read only');
+      return fn(tx);
+    },
+  };
+  await checkDensePool(pg as never, '[0.1]', 2, 50, 'repo-1');
+  expect(sent.filter((q) => q === 'SET LOCAL hnsw.ef_search = 200')).toHaveLength(3);
+  expect(sent).toContain('SET LOCAL enable_sort = off');
+  expect(sent).toContain('SET LOCAL enable_indexonlyscan = off');
+});
+
+it('refuses to call an exact repository-index scan an HNSW comparison', async () => {
+  const tx = { unsafe: async () => [{ plan: 'Index Scan using idx_rag_repository_id' }] };
+  const pg = { begin: async (_mode: string, fn: (t: typeof tx) => unknown) => fn(tx) };
+  await expect(checkDensePool(pg as never, '[0.1]', 2, 50, 'repo-1')).rejects.toThrow(
+    'exact-vs-exact',
+  );
 });
