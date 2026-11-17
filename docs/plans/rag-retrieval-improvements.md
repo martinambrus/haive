@@ -730,12 +730,17 @@ minimum of three would keep 4.23/20 hits on average and lose another 0.278 held-
 [−0.375, −0.181] relative to the full reranked page. No cliff policy was selected or applied.
 Neither the ordering result nor the cliff illustration supports shipping this configuration.
 
-Full local evidence is `.claude/tmp/codex-run/RRK-S/codex-1/`: pins, exact Ollama response,
-source/dist hashes, token/window verification, VRAM samples, raw runtime scores, both complete
-runs, per-query/marginal/cell CIs, latency, loss audit and cleanup proofs. Both run JSONs are
-accepted unchanged by `rag-eval-compare.ts`. `reproduce.md` gives the fresh scratch lifecycle;
-the existing fixture reproduction section still supplies the builder settings. No paid or hosted
-model call, dev-database write, live-source edit or haive service restart/rebuild was used.
+Both runs are committed in compact form under
+`packages/worker/test/fixtures/rag-eval/rerank-bge-m3/` (`hybrid.json`, `rerank.json`), with the
+runtime and model pins in `reranker-pin.json`.
+`tsx scripts/rag-eval-compare.ts <dir>/hybrid.json <dir>/rerank.json` recomputes every paired
+delta above, including the held-out recall@8 −0.097 [−0.194, −0.014]. To rerun inference: build
+the scratch store exactly as the fixture reproduction below describes; start the pinned image
+digest with `--reranking -c 2048 -b 2048 -ub 2048 -np 1 -ngl 99` and the pinned GGUF (check its
+SHA-256), in a self-named throwaway container on loopback; then run `rag-eval-rerank.ts` with
+`RAG_RERANK_URL` and `RAG_RERANK_PIN` pointing at it. Every chunk/query pair fit the 2,048-token
+window (largest 1,109). No paid or hosted model call, dev-database write, live-source edit or
+haive service restart/rebuild was used.
 The scratch database was explicitly dropped (`pg_database` count 0), and both throwaway
 containers removed and verified absent. This PR adds only the offline evaluator and its unit
 controls. Rollback: revert the experiment commit; no product key, schema, live data or reindex
