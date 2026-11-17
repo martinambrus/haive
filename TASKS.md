@@ -670,6 +670,15 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T702 · Guarded composition validation edges
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume when guarded runtime wiring (predicates through the api) starts, or on a related change) · kind: fix · found: review of #1247 · priority: P4
+
+1. The admin detail and static PATCH routes in `api/src/routes/task-types.ts` pass a stored inert execution contract (no spans, no fix target) to the contract walk instead of the ordinary walk. The verdict matches; issue indexes differ. Fall through to the ordinary walk in `validateComposition` when the contract is inert.
+2. `describeIssue` (`api/src/lib/task-type-definition.ts`) prints only kind and step id, dropping a data-edge issue's `message`. Unreachable until the api supplies predicates; print the message then.
+3. No data-level control puts a pinned producer and consumer on opposite `when` branches of one predicate, and the scan fixture has no cross-span pinned data edge (only a synthetic control covers `requiresSpan` for data). Add both.
+4. A span skipped on every feasible path (`when: false` plus `requiresSpan` on the true branch of the same predicate) validates. Consider refusing it.
+
 ### T701 · Admin unpriced-run inventory links to tasks the admin may not own
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1245 · priority: P4
