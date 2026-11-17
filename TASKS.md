@@ -676,6 +676,12 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T709 · Composed LSP cutover: writer, template replacement, live check, lows
+
+status: open · kind: feature · found: composed LSP final verification (#1269) · priority: P2
+
+Final verification step shipped (#1269): `01b1-verify-composed-lsp` runs after 01b and is the only source of contract-2 readiness; legacy templates skip it. Remaining, in order: (1) the contract-2 writer, DEFAULT-ON for new eligible environments (owner decision), with 02 installer suppression and provider-lock admission: a contract-2 task is refused, not silently degraded, when switched to a provider without a verified recipe (Claude Code only today); (2) explicit replacement of stored legacy templates, never automatic; (3) live check on the private ledger-export-cli fixture repository. Lows from the #1269 reviews: (a) `04-verify-environment.ts` `guidance` text is PHP-specific but shown for any unready plugin; (b) `bridgeReady` (`04-verify-environment.ts:390-396`) duplicates the readiness predicate in `configured-lsp.ts`; (c) `api/src/lib/provider-disable-impact.ts:83` counts the final step once more per in-flight workflow task; (d) a task already past 01b at deploy gets a cosmetic `runSeq` tie with 01d on a later Retry; (e) test gaps: no Retry of `01-worktree-setup`, no `advanceStep` over a done final row, the Postgres lock order in `composed-evidence.ts` is untested by the fake DB; (f) the swap of 04 and worktree setup is no longer refused at composition (only the final step's detect refuses that order).
+
 ### T707 · PHP database driver lows after the generator fix
 
 status: open · kind: bug · found: PHP database driver review (#1267) · priority: P4
