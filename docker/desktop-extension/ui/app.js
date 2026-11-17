@@ -3,29 +3,33 @@ import { createController } from './controller.js';
 
 const ddClient = createDockerDesktopClient();
 const byId = (id) => document.getElementById(id);
-const controller = createController(ddClient, ({ state, busy, controls, message }) => {
-  for (const [action, enabled] of Object.entries(controls)) byId(action).disabled = !enabled;
-  byId('worker-logs').disabled = busy;
-  byId('version').disabled = busy || Boolean(state?.installed);
-  byId('consent').disabled = busy;
-  byId('message').textContent = message;
-  byId('directory').textContent = state?.directory ? `Install directory: ${state.directory}` : '';
-  byId('release').textContent = state?.version ? `Pinned release: ${state.version}` : '';
-  byId('operation-log').textContent = state?.directory
-    ? `Operation log on your computer: ${state.directory}.extension.log`
-    : '';
-  const rows = byId('services');
-  rows.replaceChildren();
-  for (const service of state?.services ?? []) {
-    const row = document.createElement('tr');
-    for (const value of [service.Service, service.State, service.Health || '—']) {
-      const cell = document.createElement('td');
-      cell.textContent = value;
-      row.append(cell);
+const controller = createController(
+  ddClient,
+  ({ state, busy, controls, message, statusMessage }) => {
+    for (const [action, enabled] of Object.entries(controls)) byId(action).disabled = !enabled;
+    byId('worker-logs').disabled = busy;
+    byId('version').disabled = busy || Boolean(state?.installed);
+    byId('consent').disabled = busy;
+    byId('message').textContent = message;
+    byId('status-summary').textContent = statusMessage;
+    byId('directory').textContent = state?.directory ? `Install directory: ${state.directory}` : '';
+    byId('release').textContent = state?.version ? `Pinned release: ${state.version}` : '';
+    byId('operation-log').textContent = state?.directory
+      ? `Operation log on your computer: ${state.directory}.extension.log`
+      : '';
+    const rows = byId('services');
+    rows.replaceChildren();
+    for (const service of state?.services ?? []) {
+      const row = document.createElement('tr');
+      for (const value of [service.Service, service.State, service.Health || '—']) {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.append(cell);
+      }
+      rows.append(row);
     }
-    rows.append(row);
-  }
-});
+  },
+);
 
 const reportError = (error) => {
   byId('message').textContent = error.message || 'Operation failed.';
@@ -52,3 +56,5 @@ for (const link of document.querySelectorAll('a[data-external]')) {
   });
 }
 controller.run('status').catch(reportError);
+
+window.addEventListener('pagehide', () => controller.dispose(), { once: true });

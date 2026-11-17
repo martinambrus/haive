@@ -30,9 +30,14 @@ var installers embed.FS
 const installID = "haive_desktop"
 const consent = "accept-host-root"
 
+// Docker exposes no allocation error code in container State. Keep this wording
+// dependency in one place; unknown errors retain the generic operation-log advice.
+const portAllocationError = "port is already allocated"
+
 var versionPattern = regexp.MustCompile(`^(latest|next|v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?)$`)
 var pinnedPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`)
 var portPattern = regexp.MustCompile(`^[0-9]{1,5}$`)
+var containerIDPattern = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
 
 type request struct {
 	Action  string `json:"action"`
@@ -264,6 +269,71 @@ func (b bridge) installRecovery(reason string) error {
 	return fmt.Errorf("%s Remove the folder %q, then install again.", reason, b.dir)
 }
 
+func (b bridge) portConflict(port string) error {
+	return fmt.Errorf("Port %s is held by another app. Stop that app or change HAIVE_WEB_PORT/HAIVE_API_PORT in %s, then Start again. See %s.extension.log.", port, filepath.Join(b.dir, ".env"), b.dir)
+}
+
+// List running containers, excluding our own project, then inspect only their
+// structured published bindings. Docker ps's display Ports column is not parsed.
+func (b bridge) checkPorts(ctx context.Context, settings map[string]string) error {
+	refusal := errors.New("Cannot check Docker's published ports. Refresh status and check Docker Desktop before starting. See " + b.dir + ".extension.log.")
+	out, err := b.run(ctx, "docker", []string{"ps", "--no-trunc", "--format", `{"ID":{{json .ID}},"Project":{{json (.Label "com.docker.compose.project")}}}`}, "", nil)
+	if err != nil {
+		return refusal
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var container struct{ ID, Project string }
+		if json.Unmarshal([]byte(line), &container) != nil || !containerIDPattern.MatchString(container.ID) {
+			return refusal
+		}
+		if container.Project == installID {
+			continue
+		}
+		bindings, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container.ID}, "", nil)
+		if err != nil {
+			return refusal
+		}
+		var ports map[string][]struct{ HostPort string }
+		if json.Unmarshal([]byte(bindings), &ports) != nil {
+			return refusal
+		}
+		for name, published := range ports {
+			if !strings.HasSuffix(name, "/tcp") {
+				continue
+			}
+			for _, binding := range published {
+				for _, key := range []string{"HAIVE_WEB_PORT", "HAIVE_API_PORT"} {
+					if binding.HostPort == settings[key] {
+						return b.portConflict(settings[key])
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (b bridge) startFailure(ctx context.Context, s state, settings map[string]string) error {
+	var services []struct{ ID, Service, State string }
+	if json.Unmarshal(s.Services, &services) == nil {
+		for _, service := range services {
+			key := map[string]string{"web": "HAIVE_WEB_PORT", "api": "HAIVE_API_PORT"}[service.Service]
+			if key == "" || service.State != "created" || !containerIDPattern.MatchString(service.ID) {
+				continue
+			}
+			out, err := b.run(ctx, "docker", []string{"container", "inspect", "--format", "{{json .State}}", service.ID}, "", nil)
+			var detail struct{ Status, Error string }
+			if err == nil && json.Unmarshal([]byte(out), &detail) == nil && detail.Status == "created" && strings.Contains(detail.Error, portAllocationError) {
+				return b.portConflict(settings[key])
+			}
+		}
+	}
+	return errors.New("Compose failed. Open service logs in Docker Desktop, or read " + b.dir + ".extension.log, then retry.")
+}
+
 func (b bridge) install(ctx context.Context, version string, log io.Writer) error {
 	if _, err := os.Lstat(filepath.Join(b.dir, ".env")); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("An install already exists. Use Start or the app's Upgrade page; installation never upgrades.")
@@ -342,12 +412,16 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		}
 		return b.inspect(ctx)
 	}
-	if _, err = b.settings(); err != nil {
+	settings, err := b.settings()
+	if err != nil {
 		return s, errors.New("No complete Haive Desktop install was found. Refresh status before continuing.")
 	}
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
 		if err = b.checkBundle(ctx); err != nil {
+			return s, err
+		}
+		if err = b.checkPorts(ctx, settings); err != nil {
 			return s, err
 		}
 		action = []string{"up", "-d", "--no-build", "--wait", "--wait-timeout", "360"}
@@ -357,6 +431,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	if _, err = b.run(ctx, "docker", args, b.dir, log); err != nil {
+		if r.Action == "start" {
+			// Preserve whatever Compose can report, even after up --wait failed.
+			s, _ = b.inspect(ctx)
+			return s, b.startFailure(ctx, s, settings)
+		}
 		return s, errors.New("Compose failed. Open service logs in Docker Desktop, or read " + logPath + ", then retry.")
 	}
 	return b.inspect(ctx)

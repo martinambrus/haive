@@ -10,11 +10,36 @@ export function encodeRequest(request) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+export function isStarting(state) {
+  return (
+    state?.services?.some(
+      (service) =>
+        ['created', 'restarting'].includes(service.State) || service.Health === 'starting',
+    ) ?? false
+  );
+}
+
+export function statusMessage(state) {
+  if (state?.error)
+    return `Status unavailable: ${state.error} Last known service states are shown below.`;
+  if (!state) return 'Reading status…';
+  if (!state.installed) return 'Haive Desktop is not installed.';
+  if (isStarting(state)) {
+    const ready = state.services.filter(
+      (service) =>
+        (service.State === 'running' && (!service.Health || service.Health === 'healthy')) ||
+        (service.Service === 'db-migrate' && service.State === 'exited' && service.ExitCode === 0),
+    ).length;
+    return `Starting… ${ready}/${state.services.length} services ready. See service progress below.`;
+  }
+  return state.healthy ? 'Haive is ready.' : 'Haive is not ready. Check service status below.';
+}
+
 export function controls(state, busy, accepted) {
   const known = state !== null && !state.error;
   return {
     install: !busy && known && !state.installed && accepted,
-    start: !busy && known && state.installed && accepted,
+    start: !busy && known && state.installed && !state.healthy && accepted,
     stop: !busy && known && state.installed,
     open: !busy && known && state.installed && state.healthy,
     status: !busy,
@@ -30,24 +55,118 @@ export function appURL(state) {
   return url + '/setup';
 }
 
-export function createController(ddClient, render) {
+export function createController(ddClient, render, { document: doc = globalThis.document } = {}) {
   let state = null;
   let busy = false;
   let accepted = false;
   let message = '';
-  const update = () =>
-    render({ state, busy, accepted, message, controls: controls(state, busy, accepted) });
+  let operationError = '';
+  let timer;
+  let disposed = false;
+  let revision = 0;
+  let polling = false;
+  const update = () => {
+    if (!disposed)
+      render({
+        state,
+        busy,
+        accepted,
+        message: operationError || message || statusMessage(state),
+        statusMessage: statusMessage(state),
+        controls: controls(state, busy, accepted),
+      });
+  };
+  const host = async (action, version = 'latest') => {
+    const engineResult = await ddClient.docker.cli.exec('info', ['--format', '{{.ID}}']);
+    const binary = ddClient.host.platform === 'win32' ? 'haive-desktop.exe' : 'haive-desktop';
+    if (!ddClient.extension.host?.cli)
+      throw new Error('The extension host backend is unavailable.');
+    let result;
+    try {
+      result = await ddClient.extension.host.cli.exec(binary, [
+        encodeRequest({
+          action,
+          version,
+          engine: engineResult.stdout.trim(),
+          consent: accepted ? 'accept-host-root' : '',
+        }),
+      ]);
+    } catch (error) {
+      // Only the bridge's structured result may reach the UI, never SDK stderr.
+      try {
+        result = { stdout: error.stdout };
+        JSON.parse(result.stdout);
+      } catch {
+        throw new Error('Operation failed. Refresh status and check Docker Desktop logs.');
+      }
+    }
+    const next = JSON.parse(result.stdout);
+    if (next.error) throw Object.assign(new Error(next.error), { state: next });
+    return next;
+  };
+  const clearPoll = () => {
+    clearTimeout(timer);
+  };
+  const schedule = () => {
+    clearPoll();
+    if (disposed || doc?.hidden) return;
+    const fast = busy || isStarting(state);
+    timer = setTimeout(
+      () => {
+        void refresh();
+      },
+      fast ? 5000 : 30000,
+    );
+    timer.unref?.();
+  };
+  const readStatus = async (token) => {
+    try {
+      const next = await host('status');
+      if (disposed || token !== revision) return;
+      state = next;
+    } catch (error) {
+      if (disposed || token !== revision) return;
+      state = {
+        ...state,
+        directory: error.state?.directory || state?.directory,
+        error: error.message,
+      };
+    }
+    update();
+  };
+  const refresh = async () => {
+    if (disposed || polling || doc?.hidden) return;
+    polling = true;
+    try {
+      await readStatus(revision);
+    } finally {
+      polling = false;
+      schedule();
+    }
+  };
+  const visibilityChanged = () => {
+    clearPoll();
+    if (!doc?.hidden) void refresh();
+  };
+  doc?.addEventListener('visibilitychange', visibilityChanged);
   const controller = {
+    dispose() {
+      disposed = true;
+      clearPoll();
+      doc?.removeEventListener('visibilitychange', visibilityChanged);
+    },
     accept(value) {
       accepted = value === true;
       update();
     },
     async run(action, version = 'latest') {
-      if (busy) return;
+      if (disposed || busy) return;
       if (!controls(state, busy, accepted)[action]) throw new Error('This action is unavailable.');
       if (action === 'install' && !VERSION.test(version))
         throw new Error('Choose latest, next, or an exact release.');
       busy = true;
+      operationError = '';
+      const token = ++revision;
       message =
         action === 'install'
           ? 'Installing the release bundle. This can take several minutes; keep this tab open.'
@@ -57,51 +176,29 @@ export function createController(ddClient, render) {
               ? 'Stopping Haive services…'
               : 'Reading status…';
       update();
+      schedule();
       try {
-        const engineResult = await ddClient.docker.cli.exec('info', ['--format', '{{.ID}}']);
-        const engine = engineResult.stdout.trim();
-        const binary = ddClient.host.platform === 'win32' ? 'haive-desktop.exe' : 'haive-desktop';
-        if (!ddClient.extension.host?.cli)
-          throw new Error('The extension host backend is unavailable.');
-        const result = await ddClient.extension.host.cli.exec(binary, [
-          encodeRequest({
-            action,
-            version,
-            engine,
-            consent: accepted ? 'accept-host-root' : '',
-          }),
-        ]);
-        state = JSON.parse(result.stdout);
-        if (state.error) throw new Error(state.error);
-        message =
-          action === 'install'
-            ? 'Installed. Choose Start, then Open app to create your first administrator.'
-            : state.healthy
-              ? 'Haive is ready.'
-              : state.installed
-                ? 'Installed. Check service status below.'
-                : 'Haive Desktop is not installed.';
-      } catch (error) {
-        // Host failures can reject with an ExecResult. Show only our structured
-        // error, never third-party stderr or an install's environment values.
-        let failed;
-        try {
-          failed = JSON.parse(error.stdout);
-        } catch {
-          /* no structured host result */
+        if (action === 'status') await readStatus(token);
+        else {
+          state = await host(action, version);
+          message =
+            action === 'install'
+              ? 'Installed. Choose Start, then Open app to create your first administrator.'
+              : '';
         }
-        state = {
-          directory: failed?.directory || state?.directory,
-          error:
-            failed?.error ||
-            (error instanceof Error
-              ? error.message
-              : 'Operation failed. Refresh status and check Docker Desktop logs.'),
-        };
-        message = state.error;
+      } catch (error) {
+        operationError = error.message;
+        // Keep the last service snapshot when the helper returns an error-only result.
+        if (error.state?.directory) state = { ...state, directory: error.state.directory };
       } finally {
+        if (action !== 'status') {
+          // Invalidate in-flight polls, then always obtain a fresh snapshot, even on failure.
+          await readStatus(++revision);
+        }
         busy = false;
+        if (action === 'status' || operationError) message = '';
         update();
+        schedule();
       }
     },
     open() {

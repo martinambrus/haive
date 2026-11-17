@@ -30,6 +30,9 @@ func fixture(t *testing.T) bridge {
 		}
 	}
 	return bridge{dir: dir, os: "linux", health: func(string) bool { return true }, run: func(_ context.Context, _ string, args []string, _ string, _ io.Writer) (string, error) {
+		if args[0] == "ps" {
+			return "", nil
+		}
 		if reflect.DeepEqual(args, []string{"info", "--format", "{{.ID}}"}) {
 			return "desktop-engine\n", nil
 		}
@@ -450,5 +453,135 @@ func TestDecodeRequestTakesQuoteFreeBase64url(t *testing.T) {
 		if _, err := decodeRequest(args); err == nil {
 			t.Fatalf("accepted %q", args)
 		}
+	}
+}
+
+func TestStartPortPrecheck(t *testing.T) {
+	for _, tc := range []struct{ name, project, ports, want string }{
+		{"web IPv4", "dev", `{"3000/tcp":[{"HostIp":"0.0.0.0","HostPort":"3010"}]}`, "3010"},
+		{"api IPv6", "dev", `{"3001/tcp":[{"HostIp":"::","HostPort":"3011"}]}`, "3011"},
+		{"unlabelled app", "", `{"80/tcp":[{"HostPort":"3010"}]}`, "3010"},
+		{"own project", installID, `{"3000/tcp":[{"HostPort":"3010"}]}`, ""},
+		{"unpublished", "dev", `{"3010/tcp":null}`, ""},
+		{"container port only", "dev", `{"3010/tcp":[{"HostPort":"9999"}]}`, ""},
+		{"UDP only", "dev", `{"80/udp":[{"HostPort":"3010"}]}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fixture(t)
+			base := b.run
+			starts, inspections := 0, 0
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if args[0] == "ps" {
+					return fmt.Sprintf(`{"ID":%q,"Project":%q}`, strings.Repeat("a", 64), tc.project), nil
+				}
+				if args[0] == "container" {
+					inspections++
+					if !strings.Contains(strings.Join(args, " "), ".NetworkSettings.Ports") {
+						t.Fatal(args)
+					}
+					return tc.ports, nil
+				}
+				if log != nil {
+					starts++
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			_, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), "Port "+tc.want) || !strings.Contains(err.Error(), "another app") || !strings.Contains(err.Error(), "HAIVE_WEB_PORT/HAIVE_API_PORT") || !strings.Contains(err.Error(), filepath.Join(b.dir, ".env")) {
+					t.Fatalf("wrong refusal: %v", err)
+				}
+				if starts != 0 {
+					t.Fatal("started despite port clash")
+				}
+			} else if err != nil || starts != 1 {
+				t.Fatalf("start=%d err=%v", starts, err)
+			}
+			if tc.project == installID && inspections != 0 {
+				t.Fatal("inspected own project's ports")
+			}
+		})
+	}
+}
+
+func TestPortPrecheckFailsClosedAndStopSkipsIt(t *testing.T) {
+	for _, kind := range []string{"list failed", "list malformed", "inspect failed", "inspect malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			b := fixture(t)
+			base := b.run
+			starts, listings := 0, 0
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if args[0] == "ps" {
+					listings++
+					if kind == "list failed" {
+						return "", errors.New("private daemon error")
+					}
+					if kind == "list malformed" {
+						return "bad", nil
+					}
+					return fmt.Sprintf(`{"ID":%q,"Project":"other"}`, strings.Repeat("a", 64)), nil
+				}
+				if args[0] == "container" {
+					if kind == "inspect failed" {
+						return "", errors.New("private inspect error")
+					}
+					return "bad", nil
+				}
+				if log != nil && args[len(args)-1] != "stop" {
+					starts++
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			_, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+			if err == nil || !strings.Contains(err.Error(), "published ports") || strings.Contains(err.Error(), "private") || starts != 0 {
+				t.Fatalf("%v starts=%d", err, starts)
+			}
+			if _, err := b.handle(context.Background(), request{Action: "stop", Engine: "desktop-engine"}); err != nil {
+				t.Fatal(err)
+			}
+			if listings != 1 {
+				t.Fatal("Stop ran port precheck")
+			}
+		})
+	}
+}
+
+func TestStartFailureReasonMapping(t *testing.T) {
+	for _, tc := range []struct{ name, service, status, detail, want string }{
+		{"web allocation", "web", "created", "Bind for 0.0.0.0:3010 failed: port is already allocated", "Port 3010"},
+		{"api allocation", "api", "created", "port is already allocated", "Port 3011"},
+		{"generic", "api", "created", "private daemon details", "Compose failed"},
+		{"stale error on running container", "web", "running", "port is already allocated", "Compose failed"},
+		{"unrelated service", "redis", "created", "port is already allocated", "Compose failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fixture(t)
+			base := b.run
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if args[0] == "ps" {
+					return "", nil
+				}
+				if log != nil {
+					return "", errors.New("private compose failure")
+				}
+				if strings.HasSuffix(strings.Join(args, " "), "ps --all --format json") {
+					return fmt.Sprintf(`[{"ID":%q,"Service":%q,"State":%q,"Health":"","ExitCode":0}]`, strings.Repeat("b", 64), tc.service, tc.status), nil
+				}
+				if args[0] == "container" {
+					if !strings.Contains(strings.Join(args, " "), ".State") {
+						t.Fatal(args)
+					}
+					return fmt.Sprintf(`{"Status":%q,"Error":%q}`, tc.status, tc.detail), nil
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			s, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), b.dir+".extension.log") || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "Remove the folder") {
+				t.Fatalf("wrong reason: %v", err)
+			}
+			if !s.Installed || !strings.Contains(string(s.Services), tc.service) {
+				t.Fatalf("lost failure status: %+v", s)
+			}
+		})
 	}
 }
