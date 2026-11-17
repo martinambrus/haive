@@ -231,6 +231,19 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
     });
     expect(handoff).not.toHaveBeenCalled();
   });
+  it('F6 an unsettled predecessor is a refusal, never a retry', async () => {
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'pending' })
+      .where(eq(schema.taskSteps.id, rows.plan!.id));
+    const handoff = vi.fn();
+    expect(await advanceGuardSpan(ctx, 'work', predicates, handoff)).toEqual({
+      kind: 'refused',
+      reason: 'producer-not-settled',
+    });
+    expect(handoff).not.toHaveBeenCalled();
+    expect(evaluate).not.toHaveBeenCalled();
+  });
   it('rolls back a partial-skip crash and replays the already committed decision', async () => {
     await decide();
     const before = await read();

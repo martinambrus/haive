@@ -123,7 +123,15 @@ export function deadTaskResolution(
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
   try {
-    assertWorkerExecutionContractSupported(task.executionContract);
+    assertWorkerExecutionContractSupported(
+      task.executionContract,
+      {
+        runListStrategy: strategy,
+        runListSnapshot: task.runListSnapshot,
+        derivedRunPlan: task.derivedRunPlan,
+      },
+      registry,
+    );
     assertDataEdgeSupport(task, registry);
   } catch (error) {
     if (error instanceof ExecutionContractError)

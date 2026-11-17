@@ -319,9 +319,8 @@ export async function decideLoadedGuardDecision(
   return { decision, entry: current, replay: false };
 }
 
-/** PR4a dormant service: no production caller, admission/START still refuse guards.
- *
- * Called at a span ENTRY, before any admission or step work. The caller must already
+/** Decides a guarded span at its ENTRY, before any admission or step work. Called from the
+ * span-entry hook in guard-entry.ts. The caller must already
  * have its pending entry row and an epoch/generation. This only writes guard_state;
  * it neither skips a member nor moves a pointer, records output/recaps or queues work.
  *

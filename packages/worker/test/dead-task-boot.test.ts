@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { ExecutionContractError } from '@haive/shared/modularity';
 import {
   TASK_START_LOCK_TIMEOUT_MS,
   NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
@@ -46,6 +48,8 @@ import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import type { AdvanceStepResult } from '../src/step-engine/index.js';
+import { rolePlan } from './replacement-fixtures.js';
+import { assertWorkerExecutionContractSupported } from '../src/step-engine/execution-contract-support.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import {
@@ -429,6 +433,9 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       .onConflictDoNothing();
     stub(A, 1);
     stub(B, 2);
+    stub('j4a-fx-provider', 0, 'module.fx', {
+      guardPredicates: { guard: { argsSchema: z.strictObject({}), evaluate: async () => true } },
+    });
     stub(FIX_LOOP_TARGET_STEP_ID, 0, LOOP_TYPE);
     stub(REVIEW, 1, LOOP_TYPE, {
       fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'the review found a defect' }) },
@@ -939,44 +946,108 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       expect(await events(id, 'task.failed')).toHaveLength(0);
     });
 
+    const PRED = 'module.fx.guard';
+    const LATE_PRED = 'module.late.guard';
+    const gspan = (over: Record<string, unknown> = {}) => ({
+      id: 'planned',
+      firstStepId: B,
+      lastStepId: B,
+      predicateId: PRED,
+      args: {},
+      ...over,
+    });
+    const SUPPORTED = { version: 1, guardedSpans: [gspan()] };
+    const UNSUPPORTED: [string, unknown, Partial<typeof schema.tasks.$inferInsert>][] = [
+      [
+        'a custom fix target',
+        { version: 1, guardedSpans: [], fixTarget: { stepId: A, capabilityVersion: 1 } },
+        {},
+      ],
+      [
+        'an unregistered predicate',
+        { version: 1, guardedSpans: [gspan({ predicateId: 'module.fx.absent' })] },
+        {},
+      ],
+      ['no run list snapshot', SUPPORTED, { runListSnapshot: null }],
+      ['a derived run plan', SUPPORTED, { derivedRunPlan: rolePlan(1) }],
+      [
+        'an entry at the first index',
+        { version: 1, guardedSpans: [gspan({ firstStepId: A, lastStepId: B })] },
+        {},
+      ],
+    ];
+    const refusalOf = (
+      raw: unknown,
+      over: Partial<typeof schema.tasks.$inferInsert>,
+      registry: typeof stepRegistry = stepRegistry,
+    ): string => {
+      try {
+        assertWorkerExecutionContractSupported(
+          raw,
+          {
+            runListStrategy: over.derivedRunPlan != null ? 'derived' : 'static',
+            runListSnapshot: over.runListSnapshot === undefined ? [A, B] : over.runListSnapshot,
+            derivedRunPlan: over.derivedRunPlan ?? null,
+          },
+          registry,
+        );
+      } catch (error) {
+        if (error instanceof ExecutionContractError) return error.message;
+        throw error;
+      }
+      throw new Error('the shape was expected to be refused');
+    };
+    const noRedrive = async () => {
+      const enqueue = vi.fn();
+      const swept = await redriveStalledTasks(
+        db,
+        {
+          enqueueStart: enqueue,
+          enqueueAdvance: enqueue,
+          failTask: vi.fn(),
+          queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+          queuedInvocationIds: async () => new Set(),
+        },
+        { staleMs: 0 },
+      );
+      expect(swept).toBe(0);
+      expect(enqueue).not.toHaveBeenCalled();
+    };
+    const stepRows = (id: string) =>
+      db
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.taskId, id))
+        .orderBy(asc(schema.taskSteps.stepId));
+
     describe.each([TASK_JOB_NAMES.START, TASK_JOB_NAMES.ADVANCE_STEP])(
       '%s execution refusal',
       (name) => {
-        it.each([
-          {
-            version: 1,
-            guardedSpans: [
-              {
-                id: 'a',
-                firstStepId: A,
-                lastStepId: B,
-                predicateId: 'module.fx.planned',
-                args: {},
-              },
-            ],
-          },
-          { version: 1, guardedSpans: [], fixTarget: { stepId: A, capabilityVersion: 1 } },
-        ])(
-          'marks an unsupported execution pin dead exactly once and excludes stalled redrive',
-          async (executionContract) => {
-            const start = name === TASK_JOB_NAMES.START;
-            const id = await make({
-              status: start ? 'queued' : 'running',
-              currentStepId: start ? null : A,
-              repositoryId,
-              executionContract,
-            });
+        const start = name === TASK_JOB_NAMES.START;
+        const payload = (taskId: string) => ({
+          taskId,
+          userId,
+          ...(start ? {} : { stepId: A, round: 0, epoch: 3 }),
+        });
+        const shell = (over: Partial<typeof schema.tasks.$inferInsert>) =>
+          make({
+            status: start ? 'queued' : 'running',
+            currentStepId: start ? null : A,
+            repositoryId,
+            ...over,
+          });
+
+        it.each(UNSUPPORTED)(
+          'marks %s dead exactly once and excludes stalled redrive',
+          async (_shape, executionContract, over) => {
+            const id = await shell({ executionContract, ...over });
+            if (!start) await row(id, A, 'pending');
             const before = await task(id);
+            const rowsBefore = await stepRows(id);
             const adds = h.adds.length;
-            const payload = {
-              taskId: id,
-              userId,
-              ...(start ? {} : { stepId: A, round: 0, epoch: 3 }),
-            };
-            await processTaskJob(job(name, payload));
+            await processTaskJob(job(name, payload(id)));
             const after = await task(id);
-            const reason =
-              'invalid-execution-contract: guarded spans or custom fix target not yet supported by this worker';
+            const reason = refusalOf(executionContract, over);
             expect(after).toEqual({
               ...before,
               deadAt: expect.any(Date),
@@ -990,44 +1061,35 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
               }),
             ]);
             expect(h.kills.filter((kill) => kill.taskId === id)).toHaveLength(1);
-            await processTaskJob(job(name, payload));
+            await processTaskJob(job(name, payload(id)));
             expect(await task(id)).toEqual(after);
             expect(await events(id)).toHaveLength(1);
             expect(h.kills.filter((kill) => kill.taskId === id)).toHaveLength(1);
-            const enqueue = vi.fn();
-            expect(
-              await redriveStalledTasks(
-                db,
-                {
-                  enqueueStart: enqueue,
-                  enqueueAdvance: enqueue,
-                  failTask: vi.fn(),
-                  queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
-                  queuedInvocationIds: async () => new Set(),
-                },
-                { staleMs: 0 },
-              ),
-            ).toBe(0);
-            expect(enqueue).not.toHaveBeenCalled();
+            expect(await stepRows(id)).toEqual(rowsBefore);
+            await noRedrive();
             expect(h.adds).toHaveLength(adds);
             expect(after.executionContract).toEqual(executionContract);
           },
         );
+
+        it.each([
+          ['a supported guarded pin', SUPPORTED],
+          ['no contract at all', null],
+        ])('does not mark %s dead', async (_shape, executionContract) => {
+          const id = await shell({ executionContract });
+          await processTaskJob(job(name, payload(id)));
+          expect(await task(id)).toMatchObject({ deadAt: null, deadReason: null });
+          expect(await events(id, 'task.dead')).toHaveLength(0);
+          expect(h.kills.filter((kill) => kill.taskId === id)).toHaveLength(0);
+          expect((await task(id)).executionContract).toEqual(executionContract);
+        });
       },
     );
 
     it('boot fences a live task in the middle of an unsupported span before orphan recovery or duplicate advance', async () => {
       const executionContract = {
         version: 1,
-        guardedSpans: [
-          {
-            id: 'planned',
-            firstStepId: A,
-            lastStepId: B,
-            predicateId: 'module.fx.planned',
-            args: {},
-          },
-        ],
+        guardedSpans: [gspan({ predicateId: 'module.fx.absent' })],
       };
       const id = await make({ repositoryId, currentStepId: B, executionContract });
       const first = await row(id, A, 'done', { output: { summary: 'retained' } });
@@ -1044,7 +1106,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         orchestrationEpoch: before.orchestrationEpoch,
         executionContract,
         deadAt: expect.any(Date),
-        deadReason: expect.stringContaining('invalid-execution-contract'),
+        deadReason: refusalOf(executionContract, {}),
       });
       expect((await runOf(orphan.id)).supersededAt).toBeInstanceOf(Date);
       const advances = vi.fn();
@@ -1065,21 +1127,74 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       expect(h.adds).toEqual([]);
     });
 
-    it('keeps an unsupported execution pin dead at direct revival without remapping it', async () => {
-      const id = await makeDead({
+    it('boot leaves a live task in the middle of a supported span alive', async () => {
+      const id = await make({
         repositoryId,
-        executionContract: {
-          version: 1,
-          guardedSpans: [],
-          fixTarget: { stepId: A, capabilityVersion: 1 },
+        currentStepId: B,
+        executionContract: SUPPORTED,
+      });
+      await row(id, A, 'done', { output: { summary: 'retained' } });
+      const active = await row(id, B, 'waiting_cli');
+      const orphan = await run(id, active.id, { startedAt: DEAD_AT });
+      const { sent, deps } = recorder();
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+      expect(await task(id)).toMatchObject({ deadAt: null, deadReason: null });
+      expect(await events(id, 'task.dead')).toHaveLength(0);
+      expect(await runOf(orphan.id)).toMatchObject({ supersededAt: null });
+      expect(sent).toEqual([]);
+    });
+
+    it.each(UNSUPPORTED)(
+      'keeps %s dead at direct revival without remapping it',
+      async (_shape, executionContract, over) => {
+        const id = await makeDead({ repositoryId, executionContract, ...over });
+        const before = await task(id);
+        const { sent, deps } = recorder();
+        expect(await reviveDeadTask(db, await view(id), deps)).toBeNull();
+        expect(await task(id)).toEqual(before);
+        expect(await events(id)).toHaveLength(0);
+        expect(sent).toEqual([]);
+      },
+    );
+
+    it('revives a dead task that pins a supported guarded span', async () => {
+      const id = await makeDead({ repositoryId, executionContract: SUPPORTED });
+      const { sent, deps } = recorder();
+      expect(await reviveDeadTask(db, await view(id), deps)).toBe('advance');
+      expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect((await task(id)).executionContract).toEqual(SUPPORTED);
+      expect(await events(id, 'task.revived')).toHaveLength(1);
+      expect(sent).toEqual([{ kind: 'advance', taskId: id, stepId: A, round: 0, epoch: 4 }]);
+    });
+
+    it('stays dead across two boot passes while its predicate is unregistered, then revives once it is', async () => {
+      const executionContract = {
+        version: 1,
+        guardedSpans: [gspan({ predicateId: LATE_PRED })],
+      };
+      const id = await makeDead({ repositoryId, executionContract });
+      const before = await task(id);
+      const first = recorder();
+      for (let pass = 0; pass < 2; pass++) {
+        await expect(reconcileDeadTasks(db, first.deps)).resolves.toMatchObject({
+          marked: 0,
+          revived: 0,
+        });
+        expect(await task(id)).toEqual(before);
+        expect(await events(id)).toHaveLength(0);
+      }
+      expect(first.sent).toEqual([]);
+
+      stub('j4a-late-provider', 0, 'module.late', {
+        guardPredicates: {
+          guard: { argsSchema: z.strictObject({}), evaluate: async () => true },
         },
       });
-      const before = await task(id);
-      const { sent, deps } = recorder();
-      expect(await reviveDeadTask(db, await view(id), deps)).toBeNull();
-      expect(await task(id)).toEqual(before);
-      expect(await events(id)).toHaveLength(0);
-      expect(sent).toEqual([]);
+      const second = recorder();
+      await expect(reconcileDeadTasks(db, second.deps)).resolves.toMatchObject({ revived: 1 });
+      expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(await events(id, 'task.revived')).toHaveLength(1);
+      expect(second.sent).toEqual([{ kind: 'advance', taskId: id, stepId: A, round: 0, epoch: 4 }]);
     });
 
     it('a stray START leaves a deferred created draft untouched', async () => {

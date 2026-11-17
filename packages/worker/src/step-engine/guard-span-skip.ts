@@ -84,7 +84,7 @@ export function planGuardSkip(input: SkipInput, rows: readonly StepRow[]) {
   return { pending, receipt, nextStepId: ids[last + 1] ?? null };
 }
 
-/** DORMANT: no production caller. All members must already exist; never create
+/** Called from the span-entry hook in guard-entry.ts. All members must already exist; never create
  * rows after the lock batch. Atomic across the entire span, with no output,
  * recap, event, task pointer or queue write. The existing finished-row handoff
  * protocol can recover a lost enqueue from the unchanged entry pointer. */
@@ -195,17 +195,13 @@ export async function skipGuardSpan(
   });
 }
 
-const TRANSIENT_GUARD_REASONS = new Set([
-  'producer-not-settled',
-  'decision-write-lost',
-  'skip-write-lost',
-]);
+const TRANSIENT_GUARD_REASONS = new Set(['decision-write-lost', 'skip-write-lost']);
 
 export const isRetryableGuardError = (err: unknown): boolean =>
   (err instanceof GuardDecisionError && TRANSIENT_GUARD_REASONS.has(err.reason)) ||
   ['55P03', '57014', '40P01', '40001'].some((code) => hasPgCode(err, code));
 
-/** Unwired caller seam. A failed handoff propagates so the owner retries; a crash
+/** Called from the span-entry hook in guard-entry.ts. A failed handoff propagates so the owner retries; a crash
  * before/after enqueue replays committed skips without predicate or step work.
  * `handoff` must implement the normal epoch/pointer-fenced finished-row handoff. */
 export async function advanceGuardSpan(
