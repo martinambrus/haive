@@ -299,11 +299,26 @@ parent, and a person's spot check of the parents where the arms differ. The step
 by design (a disagreement is "two independent judgements … only a person can say which is right"), so
 that check is the grade. D1 picks the arm. Rollback: revert the builder call; no schema change.
 
-**Status: the parity arm shipped in #397**, zero-token verified on three committed plan snapshots and
-synthetic 250-child runs (docs/architecture/plan-canvas.md has the sizes). **As built:** context and
-child list share one bound, `SEQUENCE_CONTEXT_BUDGET`, and the helper drops its most distant ancestors
-when a deep chain would break it; `omitLinks` is gone with its last caller. The role-sized arm and the
-live waves that choose between the arms (D1) are open.
+**Status: the parity arm shipped in #397**, zero-token verified on three committed plan
+snapshots and synthetic 250-child runs (docs/architecture/plan-canvas.md has the sizes). **As
+built:** context and child list share one bound, `SEQUENCE_CONTEXT_BUDGET`, and the helper drops
+its most distant ancestors when a deep chain would break it; `omitLinks` is gone with its last
+caller. The role-sized arm is now an opt-in pilot: an admin-only `contextArm` request on the
+existing sequence endpoint is persisted on that task, and the worker reads it for every wave.
+The admin-only `singleWave: true` option stops the pilot after up to twelve agents through
+normal dispatch, surviving recovery without changing another task. Detection reads the selected
+arm and the budget form names it before approval. The shared arm tuple supplies request
+validation and the worker type; an unknown stored arm keeps parity and warns once per task per
+worker process (among its 256 most recent). Both step ids have apply-level single-wave controls, including disagreement-form
+reopening with pending targets; changing its reopen limit to the default fails both controls.
+The role-sized arm caps only the outline at 4,000 characters (the prompt interpolates the cap
+constant), keeps the parity neighborhood and child fields, and states the cross-subtree
+trade-off. Omission defaults to parity; its prompt snapshot was captured on the parent revision.
+Zero-token synthetic checks pass, including 250 children, a 200-deep chain and exclusion of a group with
+more than 500 children. The three original #397 snapshots (7,983, 4,106 and 1,044 nodes) have not been
+recovered in this environment, so their arm comparison is still outstanding. No live wave has
+run, no model tokens have been used, and D1 remains open. The live waves must use separate
+repository/plan copies.
 
 ### P2. Tell the fixer what the same check said last round (prompt only)
 
