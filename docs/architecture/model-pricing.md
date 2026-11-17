@@ -14,14 +14,14 @@ Rates live in `cli_model_prices`, effective-dated and append-only. A sync CLOSES
 - **OpenRouter** `/api/v1/models` for the gateway's OWN resale rates, provider-scoped to `openrouter` and never priced from a vendor rate — it bills its margin at the routed model's price, wrong by a different factor per model.
 - **Ollama** the model pages themselves (`cli-versions/ollama-model-prices.ts` fetching, `cli-providers/ollama-pricing.ts` parsing), because Ollama publishes no price document and no pricing API — `ollama.com/pricing` lists plans and difficulty grades, not rates. Bounded to CONFIGURED CLOUD models, one page each per tick, never the whole library; cloud-only is a GUARD, since a stored rate on a `local`-basis run would be summed as real spend. MEASURED 2026-08-23 across the 10 configured cloud models: 1 (`kimi-k3`, $3.00 input / $0.30 cached / $15.00 output per 1M) publishes a cost block and 9 do not. Absence is a RESULT, not a failure — it is the common path and must never log an error or every tick cries wolf. A block that EXISTS and cannot be read fails loud and writes nothing. Amounts are paired with the label that follows them, never by position (an automated read of that page during diagnosis returned input $0.30 / cached $3.00, the two swapped), and `cached <= input` is asserted because a violation means the pairing is wrong. Selectors live in ONE constant marked volatile — this is HTML, it will reword.
 
-Prompt-size price tiers are stored inside each rate jsonb as complete rate sets: `tiers: [{ aboveTokens, inclusive, inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate }]`. The shared ingress schema (`modelPriceRatesSchema` / `normalizePriceRates`) accepts finite nonnegative rates or explicit nulls, rejects unsafe, nonpositive or duplicate thresholds, caps tiers at four and sorts them ascending. Missing, null and empty tier arrays compare equal in `ratesEqual`, so untiered rows do not churn. This is a jsonb type extension only: no SQL migration or snapshot backfill. PR 1 stores tiers; it does not select tiers in `computeInvocationCost`. `tierRatesFor` is a pure helper with no production caller until per-request pricing lands.
+Prompt-size price tiers are stored inside each rate jsonb as complete rate sets: `tiers: [{ aboveTokens, inclusive, inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate }]`. The shared ingress schema (`modelPriceRatesSchema` / `normalizePriceRates`) accepts finite nonnegative rates or explicit nulls, rejects unsafe, nonpositive or duplicate thresholds, caps tiers at four and sorts them ascending. Missing, null and empty tier arrays compare equal in `ratesEqual`, so untiered rows do not churn. This is a jsonb type extension only: no SQL migration or snapshot backfill. `computeInvocationCost` prices tiered models from request evidence or a structural whole-run proof. `tierRatesFor` and tier snapshot metadata share one boundary selector; untiered rates keep their original arithmetic and snapshot shape.
 
-PR 2 captures request evidence on the worker's in-process `ExecutionOutcome.requestUsage`
+The worker captures request evidence on its in-process `ExecutionOutcome.requestUsage`
 (`cli-executor/request-usage.ts`), beside the unchanged `tokenUsage`. A request keeps its
 stable identity, turn when observable, model, input/cache buckets, nullable output and
 observable 5-minute/1-hour cache-write split. The capture declares its input convention:
 Claude input excludes cache; Codex/Gemini input includes it. Collection never subtracts
-cache from inclusive input; only a future pricer may do so, once.
+cache from inclusive input; the tier pricer subtracts both cached buckets once.
 
 Coverage is conservative. Claude deduplicates by assistant message id, checks each prompt
 bucket against whole-run result usage, and requires one result, valid identity/model and
@@ -54,21 +54,14 @@ The collector already sums each steered turn's `result.usage` (#1160); cost and 
 remain the last cumulative values. Several result events still mean incomplete request
 coverage: a reconciled run total alone does not independently prove each turn's inventory.
 
-The PR 3 contract is conservative: same-model excess has no assumed rate. The pure
-`unobservedSameModelPricingBlockers` helper (`cli-executor/request-usage.ts`) pins the
-extra blockers for its future tier pricer. Positive cache-write excess with null TTL
-buckets is `unknown-cache-ttl`; it never inherits the invocation's configured TTL.
-Null excess output is `unknown-output-usage`; positive observed excess output is
-`unknown-output-request-size`, because its request prompts are unobserved. Neither
-base rates nor observed main-request tiers can be assigned to that output by default.
-For a model with a tiered rate, any blocker keeps the whole computed invocation unpriced
-(`source: 'none'`, non-billable), including otherwise priceable observed requests; an untiered
-rate keeps today's path. Unknown usage or TTL forbids finite
-bounds; known output with unknown request size may have bounds only after PR 3 proves
-all required buckets and rates are known. No blocker is itself proof of a prompt tier:
-PR 3 must still decide it from complete evidence, including conservative aggregate
-bounds where applicable. This helper defines policy only; it does not change today's
-costs, snapshots, request coverage or statistics.
+Same-model excess has no assumed request tier. The tier pricer refuses finite bounds
+when its output or cache-write TTL is unknown. Known excess buckets extend a conservative
+envelope over all potentially applicable rates, including both TTLs independently; a missing
+required rate keeps the whole invocation unpriced. The diagnostic
+`unobservedSameModelPricingBlockers` helper names unknown TTL, unknown output and positive
+output with an unknown request size. Its last condition permits bounds, never a borrowed
+main-request rate. Untiered rates keep the original path. A trustworthy whole-run total is
+independent evidence; it is not inferred from these diagnostics or incomplete request sums.
 
 Codex app-server uses the measured 0.154.0 notification shapes already covered by the
 session tests. They carry no stable request id and several requests share a turn, so the
@@ -84,8 +77,8 @@ carries the sum of `stats.models.*.api.totalRequests`, only when every count is 
 nonnegative integer; a missing or invalid count stays null. Sequential sub-agent runs
 namespace request ids across processes and carry coverage and counts through both the
 success and early-failure returns. Request evidence is kept outside the serialized trace.
-Mixed-model runs remain incomplete, preserving every observed request model for the
-later pricing work rather than assigning all tokens to the invocation's model.
+Mixed-model runs remain incomplete, preserving every observed request model without
+assigning all tokens to the invocation's model.
 
 Nothing new is persisted in PR 2: no schema, `token_usage`, raw trace, cost, snapshot or
 statistics change. `handleCliExecJob` now returns an in-memory outcome to direct callers:
@@ -110,7 +103,7 @@ Unreadable or unclassifiable data (`unsupported-tier`, `invalid-tier`, `unsuppor
 
 `pickLivePrice` refuses the selected marker rather than falling through to another stale feed. Computed pricing then resolves to `source: 'none'`, while manual rates and valid CLI-reported totals retain precedence. A supported refresh removes the marker. Whole-feed network failures retain last-good rows/cache, and stored invocation snapshots are untouched. New snapshots copy nested rates by value. MEASURED on the saved public feeds fetched 2026-11-14 with the real parsers: LiteLLM 232 mapped rows, 64 tiered, zero unsupported; OpenRouter 471 models, 77 tiered, 11 unsupported (three time-window, eight variable-price), zero unreadable.
 
-Manual prices round-trip complete tiers through the admin API. `/admin/pricing` displays tiers read-only below base rates, including the boundary and both cache-write TTL rates; unsupported rows are labelled unpriced. Replacing a manual row's base rates in the existing form preserves its stored tiers. Existing manual rows without tiers remain untiered; admins can enter tiered manual rates through the API, with the tier editor deferred to the later pricing work.
+Manual prices round-trip complete tiers through the admin API. `/admin/pricing` displays tiers below base rates, including the boundary and both cache-write TTL rates; unsupported rows are labelled unpriced. The manual form adds, edits and removes up to four complete tiers. Thresholds must be ascending positive safe integers and rates finite nonnegative numbers or null. An empty field means unknown, including the 1h-write rate, and never inherits a base or 5m rate. Editing a manual row loads its tiers; replacing only its base rates preserves them. Existing manual rows without tiers remain untiered.
 
 Lookup is EXACT on a normalized model key (trim + lowercase, nothing else), deliberately NOT the longest-substring matcher `resolveContextWindow` uses: a wrong context window skews a cosmetic percentage, a wrong price is wrong money, and `claude` alone matches both opus and haiku (~15x apart). Variant markers are kept verbatim (`glm-5.3[1m]`, `deepseek-v4-pro:cloud`) because a context or hosting variant is usually its own SKU. An unmatched id is UNPRICED, never guessed — which is why the manual-override path is load-bearing rather than a nicety (`glm-5.3` is in no feed).
 
@@ -226,7 +219,7 @@ exit codes, and `fallbackOutputZeroRuns` isolates the zero-output population.
 The retained Ollama recording proves assistant output values of 0 and completed result output
 of 141. Its thinking counter is an estimate ending at 198. Without the result, 141 cannot be
 reconstructed from this evidence; replay counts that under-reporting rather than manufacturing
-an exact output count. No real database was replayed during this fix.
+an exact output count. That earlier coverage fix did not replay a real database.
 
 MEASURED 2026-11-14 by the session, read-only across all 6,444 retained logs
 (`TPR-S/measure-2.json`, before this containment change): claude-code had 2,748/3,153
@@ -246,3 +239,122 @@ predates the complete-only gate and must not be read as a complete-run excess co
 The absent-ledger counter and excess magnitude inventory were added later; neither has
 been measured against a real database in this fix. The measurements above are supplied
 session evidence, not a new database run.
+
+## Per-request tier computation and snapshots
+
+`computeInvocationCost` keeps the untiered path byte-identical, with no `tier` key.
+Tiered rates use complete process-local `RequestUsageCapture` evidence, whose types
+live in shared pricing and are re-exported by the worker collector module. The worker
+passes the capture into `resolveInvocationCost`; only the resulting cost snapshot is
+persisted. Neither the request inventory nor recovery triggers new model calls.
+
+A request's prompt is input + cache read + cache creation for exclusive-input CLIs,
+and input alone for Codex/Gemini's inclusive convention. Pricing subtracts inclusive
+cache reads and writes once. The highest crossed complete tier prices every bucket,
+output included. A strict boundary uses `>`; LiteLLM xAI uses `>=`. OpenRouter x-ai
+remains strict. No invocation total is used as an individual request size.
+
+Complete captures reconcile each input bucket and all known output with whole-run
+usage, request count, stable request ids, input convention and the priced model.
+Mixed models, missing both request and whole-run proof, a steered run with multiple
+result events, recovered completion without its request evidence, malformed streams and
+unknown cache-write TTL stay unpriced, except for the base-only whole-run case below.
+Observable 5m and 1h writes are priced separately; a missing required rate leaves
+that bucket unpriced rather than applying another TTL's rate.
+
+`InvocationCost.tier` records `state: 'exact' | 'unknown'` and a per-tier `split`.
+The split groups native input/cache counts, known output, request counts and observed
+cost by `aboveTokens` (null for base). On an unknown split, these are partial known
+values, never a billable total. The cost is exact when every output is known, no output remains to allocate, or
+all unknown-output requests share a tier (even with known-output requests in other tiers).
+Equal output rates also determine the cost without inventing an allocation across tiers;
+the split retains only observed output in that case. With exact prompts spanning tiers and unknown output
+allocation, input cost stays exact and only remaining output is bounded by the
+minimum/maximum applicable output rate. Known per-request output remains assigned.
+
+Whole-run evidence is separate from request reconciliation. A valid run total below
+the first reachable tier proves every request stayed at base; equality is base only for
+strict boundaries. When only base rates are reachable and the TTL split is unknown,
+cache writes use the invocation's configured TTL and base rate, matching untiered pricing.
+An absent split or a wrapper's default-filled zero split beside positive writes is unknown;
+a valid split still prices each TTL separately. A proven single request can use its entire run prompt above a threshold.
+A multi-request total over a threshold never selects one tier; every potentially billable
+bucket is bounded across reachable tiers, and a required null rate omits both bounds.
+
+The channels provide these proofs:
+
+- Claude stream-json (Claude Code, Grok and the Muse/OpenRouter/z.ai/Ollama wrappers)
+  carries an independent `wholeRun` only for one valid result, an initialized intact stream,
+  no malformed or contradictory request lines, and one observed model. Assistant usage can
+  be zero or fail prompt reconciliation. A present billing ledger must reconcile the result's
+  whole-run buckets for the main model or a corroborating alias; hidden same-name excess
+  prevents this proof. Every observed request prompt must be at most the whole-run prompt.
+  Request count uses the intact assistant-id inventory only when all observed usage reconciles
+  with the result or every observed usage bucket is zero (the wrapper placeholder convention);
+  otherwise it stays unknown. This enables the below-threshold rule independently of count,
+  and the single-request rule only with that additional count evidence. Complete per-request captures still
+  take the more precise path first.
+- Codex app-server prices its fully reconciled request inventory. Mixed tiers are exact when
+  each request reports output; gaps, bad watermarks or a malformed stream withhold proof.
+- Codex exec JSONL carries `wholeRun` from one thread start and exactly one valid
+  `turn.completed`, no malformed lines or failure, and its explicitly requested model. Its input includes cached tokens.
+  It does not prove how many model requests occurred: even one turn or agent message is
+  insufficient. It supports the below-threshold rule and conservative bounds above it,
+  without a fabricated request count (an exact snapshot may have an empty split).
+- Gemini's single-model stats envelope validates whole-run token buckets, cached input,
+  any reported total, and a positive safe `api.totalRequests`. It supplies both proofs.
+- Amp names no model in its stream, so it cannot establish the required single-model
+  proof. Antigravity and plain-text channels also have no verified whole-run proof. These
+  channels stay unknown for tiered computed pricing, as does recovery without retained
+  process-local evidence.
+
+Sequential sub-steps preserve each whole-run proof and sum its buckets only when every
+part supplies one with the same model and input convention. A missing request count stays
+unknown; it is never replaced with sub-step count. A steered, malformed or recovered part
+cannot acquire proof through aggregation. Observable cache-write TTLs are kept separately.
+
+Threshold semantics follow the rate source: Anthropic's prompt includes input, cache reads
+and cache writes and crosses strictly above 100,000; OpenRouter is strict for every vendor,
+including x-ai, and feed-order overrides inherit absent keys per bucket before storage.
+LiteLLM chooses the highest crossed full-prompt threshold with absent keys inherited from
+base at parse time; its xAI vendor alone uses the inclusive “reaches” boundary. OpenAI's
+“>272K input tokens” is treated as per-request, following LiteLLM and OpenRouter. This is
+an assumption pending confirmation against a metered OpenAI usage export; the measured
+local Codex usage is subscription and the risk is notional. Gemini's “<=200k / >200k”
+boundary is strict, and cached tokens are assumed to count toward its prompt threshold,
+as in LiteLLM's calculator. That cached-token interpretation is also an assumption.
+
+Same-model ledger excess has no observed request size and never borrows a main
+request's tier. Unknown excess output or TTL forbids bounds; fully known excess
+buckets can only extend a conservative envelope over all possible rates. Every
+required rate must be known for a finite envelope. Unknown coverage or a missing
+required rate omits both bounds and renders unpriced.
+
+An unknown split snapshots `source: 'none'`, `billable: false`, `costUsd: 0`, plus
+`lowUsd`/`highUsd` only when proven. The task provider card and admin pricing page say
+"prompt tier unknown" beside each invocation's individual range, or "unpriced" without
+bounds. Ranges are never added to spend or subscription counterfactuals. The task
+rollup caps the SQL aggregate at 50 invocations per provider group before building the JSON
+array, carrying each id, model and individual bounds plus the uncapped unknown-tier count.
+The task card labels that inventory and discloses any omitted count. Statistics rollups skip that
+inventory and keep their existing payload and totals. Admin pricing lists at most 50 recent
+unknown runs. The manual editor trims decimal rate prefills and parsed per-token rates
+to 12 significant digits so ordinary decimal rates round-trip, and warns when tier-only manual
+rates shadow the feed while leaving every base rate unknown.
+`resolveCostDecision`, real-spend and notional SQL precedence remain unchanged.
+
+No SQL migration or backfill is needed: both snapshots and rates already use jsonb.
+Existing snapshots are immutable. To roll back, revert the code; old readers ignore
+the retained tier key, and previously unknown snapshots stay unpriced. Any historical
+re-snapshot would require a separate reviewed change. Administrators with older
+manual rates for a tiered model should re-enter its tiers in the manual editor.
+
+MEASURED 2026-11-17 with SELECT-only access: 1,213 stored invocations matched live tiered
+models. Of the retained, replayable evidence, 222 Codex exec invocations were unknown under
+the earlier tier implementation and are now exact at base; 41 Codex app-server invocations
+remain exact. This is a hypothetical channel comparison, not a re-snapshot: zero stored
+snapshots changed. The population also contains 143 missing token records, 237 missing logs,
+six truncated logs and 214 runs whose reported-cost precedence avoids computed pricing.
+Retained logs mix stdout and stderr, so replay cannot prove absence of arbitrary malformed
+stdout lines; its proof count is an upper bound for retained evidence. No logs or invocation
+ids were written to the measurement artifact.
