@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T703 · Check claude-code and grok reported totals on tiered prompts
+
+status: parked: diminishing returns (2026-11-17, three $0 attempts; resume with a row-producing path) · kind: research · found: tiered pricing plan PR 4 (#1245) · priority: P3
+
+Plan `docs/plans/context-tiered-pricing.md` "PR 4": `reported` wins for claude-code and grok, so a CLI whose own price table ignores the prompt-size tier would understate tiered runs. Three direct-sandbox attempts on 2026-11-17 spent nothing and measured nothing: the first two stopped on the brief's own gates, the third reached both CLIs, and both answered "not logged in" from the per-task auth copies built outside a normal dispatch (the owner's claude-code auth works through normal dispatch, see the 2026-11-16 capped run). Evidence `.claude/tmp/codex-run/TCK-S/report3.md`. Next: drive one claude-code request over 100,000 prompt tokens on `claude-haiku-5-5` and one grok request at 200,000 or more on `grok-4.6` through a normal dispatch that writes a `cli_invocations` row (a prompt-step task type or a minimal workflow), then compare `total_cost_usd` with the stored `cost` snapshot. Notional only on subscription rows; budget about $5.
+
 ### T702 · Guarded composition validation edges
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume when guarded runtime wiring (predicates through the api) starts, or on a related change) · kind: fix · found: review of #1247 · priority: P4
