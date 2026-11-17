@@ -3,8 +3,14 @@ import { runInNewContext } from 'node:vm';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { COMPOSED_LSP_PROBE } from '../src/lsp/composed-probe.js';
+import { buildLspLayer } from '../src/sandbox/lsp-layer.js';
 
-function initialize(response: unknown, mode: 'response' | 'exit' | 'timeout' = 'response') {
+function initialize(
+  response: unknown,
+  mode: 'response' | 'exit' | 'timeout' = 'response',
+  server = 'gopls',
+  env: Record<string, string> = {},
+) {
   const stdout = new EventEmitter(),
     stderr = new EventEmitter(),
     stdin = new EventEmitter();
@@ -34,15 +40,29 @@ function initialize(response: unknown, mode: 'response' | 'exit' | 'timeout' = '
     },
   });
   const spawn = vi.fn((_command: string) => child);
+  const execFileSync = vi.fn((command: string, args: string[]) => {
+    if (command === 'npm' && args[0] === 'root') {
+      const prefixIndex = args.indexOf('--prefix');
+      const prefix =
+        prefixIndex >= 0 ? args[prefixIndex + 1]! : (env.NPM_CONFIG_PREFIX ?? '/usr/local');
+      return path.join(prefix, 'lib/node_modules');
+    }
+    return command === 'node' ? 'v22.0.0' : 'gopls v0.18.0';
+  });
+  const readFileSync = vi.fn((file: string) =>
+    JSON.stringify({
+      version: file.startsWith('/usr/local/lib/node_modules/') ? '1.2.3' : '0.0.0-other-prefix',
+    }),
+  );
   runInNewContext(COMPOSED_LSP_PROBE, {
     require: (name: string) =>
       name === 'node:child_process'
-        ? { spawn, execFileSync: () => 'gopls v0.18.0' }
+        ? { spawn, execFileSync }
         : name === 'node:fs'
-          ? { mkdirSync: vi.fn() }
+          ? { mkdirSync: vi.fn(), readFileSync }
           : path,
     Buffer,
-    process: { argv: ['node', 'gopls'], exit: vi.fn() },
+    process: { argv: ['node', server], env, exit: vi.fn() },
     console: { log },
     setTimeout: (fn: () => void) => {
       deadline = fn;
@@ -50,9 +70,39 @@ function initialize(response: unknown, mode: 'response' | 'exit' | 'timeout' = '
     },
     clearTimeout: vi.fn(),
   });
-  return { messages, spawn, child, request };
+  return { messages, spawn, child, request, readFileSync };
 }
 describe('composed image protocol probe with process and clock seams', () => {
+  it.each([
+    ['intelephense', 'intelephense'],
+    ['vtsls', '@vtsls/language-server'],
+    ['pyright', 'pyright'],
+  ])(
+    'reads %s from the recipe prefix despite an image npm prefix override',
+    (server, packageName) => {
+      const result = initialize(
+        { jsonrpc: '2.0', id: 1, result: { capabilities: {} } },
+        'response',
+        server,
+        { NPM_CONFIG_PREFIX: '/opt/npm' },
+      );
+      expect(buildLspLayer([server])).toContain(
+        `npm install -g --prefix /usr/local ${packageName}`,
+      );
+      expect(result.messages).toEqual([
+        expect.objectContaining({
+          server,
+          passed: true,
+          skipped: false,
+          installedVersion: '1.2.3',
+        }),
+      ]);
+      expect(result.readFileSync).toHaveBeenCalledWith(
+        `/usr/local/lib/node_modules/${packageName}/package.json`,
+        'utf8',
+      );
+    },
+  );
   it('requires a framed initialize response, not an installed launcher alone', () => {
     const result = initialize({
       jsonrpc: '2.0',

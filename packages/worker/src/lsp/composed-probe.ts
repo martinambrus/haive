@@ -1,6 +1,6 @@
 import type { DockerRunner } from '../sandbox/docker-runner.js';
 import type { ComposedLspReport } from './composed-evidence.js';
-import type { ComposedLspServer } from '../sandbox/lsp-layer.js';
+import { LSP_NPM_PREFIX, type ComposedLspServer } from '../sandbox/lsp-layer.js';
 
 /** Executes entirely inside the image, as node. A launcher exit/command-v alone cannot
  * satisfy this probe: it must return an initialize result with capabilities. */
@@ -31,7 +31,7 @@ try {
   toolchainVersion = capture(path.join(bin,'rustc'), ['--version']);
  } else toolchainVersion = capture(...spec[3]);
  if (spec[2]) {
-  const root = capture('npm', ['root','-g']);
+  const root = path.join(${JSON.stringify(LSP_NPM_PREFIX)}, 'lib/node_modules');
   installedVersion = JSON.parse(fs.readFileSync(path.join(root, spec[2], 'package.json'), 'utf8')).version;
  } else if (server === 'jdtls') {
   installedVersion = fs.readdirSync('/opt/haive-lsp/jdtls/plugins').find(n => /^org.eclipse.jdt.ls.core_.*\.jar$/.test(n));

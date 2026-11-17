@@ -28,15 +28,14 @@ export interface ComposedImageReferences {
   entries: ProviderReferences[];
 }
 
-export function parseImageReferences(metadata: unknown): ComposedImageReferences {
+export function parseImageReferences(
+  metadata: unknown,
+  limit = MAX_COMPOSED_LSP_PROVIDERS,
+): ComposedImageReferences {
   const raw = (metadata as Record<string, unknown> | null)?.[COMPOSED_IMAGE_REFS_KEY] as
     ComposedImageReferences | undefined;
   if (!raw) return { schemaVersion: 1, entries: [] };
-  if (
-    raw.schemaVersion !== 1 ||
-    !Array.isArray(raw.entries) ||
-    raw.entries.length > MAX_COMPOSED_LSP_PROVIDERS
-  )
+  if (raw.schemaVersion !== 1 || !Array.isArray(raw.entries) || raw.entries.length > limit)
     throw new Error('Invalid retained composed image references');
   for (const e of raw.entries) {
     if (typeof e.providerId !== 'string')
