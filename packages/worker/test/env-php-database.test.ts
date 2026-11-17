@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { scanRepoForDeps } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 
@@ -64,11 +64,12 @@ describe('PHP database packages', () => {
 });
 
 describe('Composer database requirements through the existing manifest scan', () => {
+  // Each test writes its own composer.json, so each gets its own directory.
   let root: string;
-  beforeAll(async () => {
+  beforeEach(async () => {
     root = await mkdtemp(path.join(os.tmpdir(), 'php-db-'));
   });
-  afterAll(async () => {
+  afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   });
 
