@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
   kill: vi.fn(async (_taskId: string) => 0),
-  allowGuardPin: false,
+  guardPin: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -19,16 +19,6 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
-
-vi.mock('../src/lib/execution-contract-admission.js', async (original) => {
-  const actual = await original<typeof import('../src/lib/execution-contract-admission.js')>();
-  return {
-    ...actual,
-    assertExecutionContractUsable: (pin: unknown) => {
-      if (!h.allowGuardPin) actual.assertExecutionContractUsable(pin);
-    },
-  };
-});
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
@@ -51,7 +41,7 @@ app.onError(errorHandler);
 vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
-  h.allowGuardPin = false;
+  h.guardPin = false;
   h.add.mockClear();
   h.kill.mockClear();
 });
@@ -84,7 +74,7 @@ function setup(target: Record<string, unknown>) {
     repositoryId: USER,
     status: 'failed',
     errorMessage: 'boom',
-    executionContract: h.allowGuardPin
+    executionContract: h.guardPin
       ? {
           version: 1,
           guardedSpans: [
@@ -521,11 +511,10 @@ describe('a task Retry re-runs the step the task stopped on', () => {
   });
 });
 
-// Storage-level reset controls under an ordinary pin: the execution-contract
-// admission refusals remain covered separately and are never enabled here.
+// Storage-level reset controls under a guarded pin, through the real admission gate.
 describe('guard storage on task Retry', () => {
   beforeEach(() => {
-    h.allowGuardPin = true;
+    h.guardPin = true;
   });
   it.each(['retry_ai', 'resume'] as const)(
     '%s distinguishes a new rerun from recovery of stored decisions',
@@ -598,7 +587,7 @@ describe('guard reset review controls', () => {
   it.each(['skipped', 'done'] as const)(
     'F1 Resume regenerates the producer and invalidates a %s entry and owned skips',
     async (status) => {
-      h.allowGuardPin = true;
+      h.guardPin = true;
       const t = setup({ status: 'done', degradedNote: 'partial agents' });
       t.fake.patch(schema.taskSteps, LATER_ROW, { status: 'done', rerunGeneration: 2 });
       const entry = t.fake.insert(schema.taskSteps, {
@@ -664,7 +653,7 @@ describe('guard reset review controls', () => {
   it.each(['task retry', 'step retry', 'pending provider switch'] as const)(
     'F4 %s kills the sandbox of an extra guard row activated after selection',
     async (action) => {
-      h.allowGuardPin = true;
+      h.guardPin = true;
       const switching = action === 'pending provider switch';
       const t = setup({ status: switching ? 'pending' : 'failed', iterationCount: 0 });
       if (switching)
@@ -728,7 +717,7 @@ describe('guard reset review controls', () => {
   it.each(['reoffer', 'settle'] as const)(
     'F5 %s clears a guard state when it advances its generation',
     async (action) => {
-      h.allowGuardPin = true;
+      h.guardPin = true;
       const t = setup({ status: 'waiting_form', guardState: { run: true }, rerunGeneration: 4 });
       await t.fake.db.transaction((tx) =>
         action === 'reoffer'

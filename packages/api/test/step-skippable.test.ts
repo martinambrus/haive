@@ -59,4 +59,60 @@ describe('isStepSkippable', () => {
       isStepSkippable(new Map(), WORKTREE, { type: 'custom', runListSnapshot: [WORKTREE] }),
     ).toBe(false);
   });
+
+  describe('span entries', () => {
+    const SKIPPABLE = '11g-save-database';
+    const pin = (firstStepId: string, lastStepId = firstStepId) => ({
+      version: 1,
+      guardedSpans: [
+        { id: 's', firstStepId, lastStepId, predicateId: 'module.fx.planned', args: {} },
+      ],
+    });
+
+    it('refuses a step that opens a guarded span even when its catalog row opts in', () => {
+      expect(
+        isStepSkippable(flags, SKIPPABLE, { type: 'workflow', executionContract: pin(SKIPPABLE) }),
+      ).toBe(false);
+    });
+
+    it('refuses the worktree entry of a span on a run_app task', () => {
+      expect(
+        isStepSkippable(flags, WORKTREE, {
+          type: 'run_app',
+          runListSnapshot: null,
+          executionContract: pin(WORKTREE),
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps a skippable step that only closes or sits inside a span skippable', () => {
+      expect(
+        isStepSkippable(flags, SKIPPABLE, {
+          type: 'workflow',
+          executionContract: pin('07-phase-2-implement', SKIPPABLE),
+        }),
+      ).toBe(true);
+    });
+
+    it('F5 refuses a skippable step when the pin is malformed, and allows it with a null pin', () => {
+      expect(
+        isStepSkippable(flags, SKIPPABLE, {
+          type: 'workflow',
+          executionContract: { version: 99 },
+        }),
+      ).toBe(false);
+      expect(isStepSkippable(flags, SKIPPABLE, { type: 'workflow', executionContract: null })).toBe(
+        true,
+      );
+    });
+
+    it.each([
+      ['no pin', undefined],
+      ['a null pin', null],
+      ['an empty pin', { version: 1, guardedSpans: [] }],
+      ['a span elsewhere', pin('07-phase-2-implement')],
+    ])('keeps a skippable step skippable under %s', (_label, executionContract) => {
+      expect(isStepSkippable(flags, SKIPPABLE, { type: 'workflow', executionContract })).toBe(true);
+    });
+  });
 });

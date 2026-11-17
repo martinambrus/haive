@@ -88,6 +88,7 @@ import {
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
+  isGuardOwnedSkip,
   isStepSkippable,
   liftReadPause,
   propagateModelHealthCliToTaskDefault,
@@ -1260,6 +1261,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw new HttpError(404, 'Step not found');
+
+  if (body.action === 'retry' && isGuardOwnedSkip(step, task.executionContract))
+    throw new HttpError(
+      409,
+      'Step was skipped by a guard; retry the span entry instead',
+      'guard-owned-skip',
+    );
 
   if (body.action === 'retry') {
     // Retry resets a step (and its downstream) back to pending so the worker

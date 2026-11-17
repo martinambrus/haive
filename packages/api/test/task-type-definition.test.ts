@@ -116,7 +116,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
   it.each([
     ['disabled', { enabled: false }, 403, 'is disabled', undefined],
-    ['active contract', {}, 409, 'not yet supported by this worker', 'invalid-execution-contract'],
+    ['active contract', {}, 409, 'invalid-execution-contract', 'invalid-execution-contract'],
   ] as const)(
     'keeps %s admission priority with an unsupported contract',
     async (_name, over, status, message, code) => {

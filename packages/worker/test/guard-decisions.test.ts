@@ -9,7 +9,11 @@ import {
   evaluateGuardDecision,
   parseGuardDecision,
 } from '../src/step-engine/guard-decisions.js';
-import { assertExecutionContractSupported, type ExecutionContract } from '@haive/shared/modularity';
+import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  type ExecutionContract,
+} from '@haive/shared/modularity';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { schema } from '@haive/database';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
@@ -35,14 +39,20 @@ it('refuses malformed durable decisions instead of treating them as false', () =
     expect(() => parseGuardDecision(value)).toThrow('guard-decision-invalid');
 });
 
-it('keeps the shared execution fence closed and the decision service has no skip or handoff writer', () => {
+it('the decision service has no skip or handoff writer and the shared fence refuses a guarded pin outside a static pinned list', () => {
   const executionContract = {
     version: 1,
     guardedSpans: [
       { id: 'x', firstStepId: 'x', lastStepId: 'x', predicateId: 'module.fx.planned', args: {} },
     ],
   };
-  expect(() => assertExecutionContractSupported(executionContract)).toThrow('not yet supported');
+  let caught: unknown;
+  try {
+    assertExecutionContractSupported(executionContract, { staticPinnedList: false });
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ExecutionContractError);
   const source = readFileSync(
     new URL('../src/step-engine/guard-decisions.ts', import.meta.url),
     'utf8',

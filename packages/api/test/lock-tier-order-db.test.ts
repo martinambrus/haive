@@ -18,20 +18,9 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   queued: [] as { name: string; payload: unknown }[],
   thrown: undefined as unknown,
-  allowGuarded: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-// Exercise dormant guarded reset/locking below the unchanged production refusal.
-vi.mock('../src/lib/execution-contract-admission.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../src/lib/execution-contract-admission.js')>();
-  return {
-    assertExecutionContractUsable: (raw: unknown) => {
-      if (!h.allowGuarded) real.assertExecutionContractUsable(raw);
-    },
-  };
-});
-
 vi.mock('../src/queues.js', () => {
   const queue = () => ({
     add: async (name: string, payload: unknown) => {
@@ -260,7 +249,6 @@ describe.skipIf(!url)(
     beforeEach(async () => {
       h.queued = [];
       h.thrown = undefined;
-      h.allowGuarded = false;
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
     });
 
@@ -687,7 +675,6 @@ describe.skipIf(!url)(
         ],
       };
       const seedGuardedResume = async (leftActive = false) => {
-        h.allowGuarded = true;
         const taskId = await seedTask('running', {
           currentStepId: ENTRY.stepId,
           currentRound: 0,

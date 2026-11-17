@@ -16,6 +16,8 @@ import {
   type ComposableStepEntry,
   type TaskTypeModuleState,
 } from '../src/modularity/index.js';
+import { inspectDerivedDefinition } from '../src/modularity-server/derived-task-types.js';
+import { replacementAdmissionFixture } from './derived-admission-fixtures.js';
 
 function entry(
   stepId: string,
@@ -104,17 +106,17 @@ describe('resolveTaskTypeAvailability', () => {
         });
       },
     );
-    it('ordinary invalid composition wins over the contract error', () => {
-      expect(
-        resolveTaskTypeAvailability({
-          ...input,
-          definition: { ...input.definition, stepIds: ['c'] },
-        }),
-      ).toMatchObject({
-        available: false,
-        reason: 'invalid-composition',
-        issues: [expect.objectContaining({ kind: 'unmet-need' })],
+    it('reports the first issue by contract validity: malformed keeps ordinary composition first, an invalid fix target leads', () => {
+      const result = resolveTaskTypeAvailability({
+        ...input,
+        definition: { ...input.definition, stepIds: ['c'] },
       });
+      expect(result).toMatchObject({ available: false, reason: 'invalid-composition' });
+      expect('issues' in result && result.issues?.[0]?.kind).toBe(
+        'version' in executionContract && executionContract.version === 99
+          ? 'unmet-need'
+          : 'invalid-execution-contract',
+      );
     });
     it.each([catalog, null])(
       'keeps the contract error once higher priority checks pass (%j)',
@@ -179,15 +181,10 @@ describe('resolveTaskTypeAvailability', () => {
               generic: true,
               predicates,
             }),
-          ).toEqual({
+          ).toMatchObject({
             available: false,
             reason: 'invalid-composition',
-            issues: [
-              {
-                kind: 'invalid-execution-contract',
-                reason: expect.stringContaining('not yet supported by this worker'),
-              },
-            ],
+            issues: [{ kind: 'invalid-execution-contract' }],
           });
         }
       }
@@ -1141,5 +1138,87 @@ describe('derived availability precedence', () => {
     expect(
       resolveTaskTypeAvailability({ ...input, modules: new Map([['acme', moduleRow('Acme')]]) }),
     ).toEqual({ available: false, reason: 'invalid-composition' });
+  });
+});
+
+describe('invalid fix-target-only declaration leads on static and derived definitions', () => {
+  const invalidFixTarget = {
+    version: 1,
+    guardedSpans: [],
+    fixTarget: { stepId: 'not-in-the-list', capabilityVersion: 1 },
+  };
+  function derivedAvailability(executionContract: unknown) {
+    const f = replacementAdmissionFixture();
+    const inspected = inspectDerivedDefinition(
+      { ...f.definition, executionContract },
+      f.base,
+      f.catalog,
+    );
+    return resolveTaskTypeAvailability({
+      definition: {
+        source: 'admin',
+        enabled: true,
+        selectable: true,
+        runListStrategy: 'derived',
+        stepIds: null,
+        requiresRepository: true,
+        executionContract,
+      },
+      switches: on,
+      modules: null,
+      catalog: null,
+      generic: true,
+      derived: {
+        stepIds: inspected.stepIds,
+        dependencyStepIds: inspected.dependencyStepIds,
+        valid: inspected.plan !== null,
+        executionIssues: inspected.issues.flatMap((issue) =>
+          issue.kind === 'invalid-execution-contract' && typeof issue.reason === 'string'
+            ? [{ kind: 'invalid-execution-contract' as const, reason: issue.reason }]
+            : [],
+        ),
+      },
+    });
+  }
+  function staticAvailability(executionContract: unknown, stepIds: string[]) {
+    return resolveTaskTypeAvailability({
+      definition: definition({ source: 'admin', stepIds, executionContract }),
+      switches: on,
+      modules: noRows,
+      catalog,
+      generic: true,
+    });
+  }
+  const firstKind = (result: ReturnType<typeof resolveTaskTypeAvailability>) =>
+    'issues' in result ? result.issues?.[0]?.kind : undefined;
+
+  it.each([
+    ['static with an ordinary unmet need', () => staticAvailability(invalidFixTarget, ['c'])],
+    ['static with a clean list', () => staticAvailability(invalidFixTarget, ['a', 'b'])],
+    ['derived', () => derivedAvailability(invalidFixTarget)],
+  ])('%s reports invalid-execution-contract first', (_name, run) => {
+    const result = run();
+    expect(result).toMatchObject({ available: false, reason: 'invalid-composition' });
+    expect(firstKind(result)).toBe('invalid-execution-contract');
+  });
+  it('a valid fix-target-only declaration stays refused on both without a predicate map', () => {
+    const capable = new Map(composable);
+    capable.set('a', { ...capable.get('a')!, fixConsumer: { version: 1 } });
+    capable.set('b', { ...capable.get('b')!, loopTargetStepId: '07-phase-2-implement' });
+    const valid = {
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId: 'a', capabilityVersion: 1 },
+    };
+    const staticResult = resolveTaskTypeAvailability({
+      definition: definition({ source: 'admin', executionContract: valid }),
+      switches: on,
+      modules: noRows,
+      catalog: { ...catalog, composable: capable },
+      generic: true,
+    });
+    expect(staticResult).toMatchObject({ available: false });
+    expect(firstKind(staticResult)).toBe('invalid-execution-contract');
+    expect(derivedAvailability(valid)).toMatchObject({ available: false });
   });
 });

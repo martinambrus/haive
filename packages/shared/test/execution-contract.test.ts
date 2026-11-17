@@ -6,6 +6,7 @@ import type { ComposableStepEntry } from '../src/modularity/contracts.js';
 import {
   parseExecutionContract,
   assertExecutionContractSupported,
+  ExecutionContractError,
   type ExecutionContract,
   MAX_EXECUTION_PREDICATES,
 } from '../src/modularity/execution-contract.js';
@@ -271,15 +272,95 @@ describe('pinned execution contract', () => {
       ]),
     );
   });
-  it('refuses active contracts until runtime support; plain and empty contracts pass', () => {
-    for (const raw of [null, undefined, contract()])
-      expect(() => assertExecutionContractSupported(raw)).not.toThrow();
-    for (const raw of [
-      contract([span('x', 'setup')]),
-      { ...contract(), fixTarget: { stepId: 'fix', capabilityVersion: 1 } },
-    ])
-      expect(() => assertExecutionContractSupported(raw)).toThrow(
-        'not yet supported by this worker',
-      );
+  describe('span entry position in the support assertion', () => {
+    const fails = (raw: unknown, scope: Parameters<typeof assertExecutionContractSupported>[1]) => {
+      try {
+        assertExecutionContractSupported(raw, scope);
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+    const admitted = [
+      [
+        'entry at index 1',
+        contract([span('a', 'entry')]),
+        { staticPinnedList: true, stepIds: ['a', 'entry', 'b'] },
+      ],
+      ['entry position unknown', contract([span('a', 'entry')]), { staticPinnedList: true }],
+      ['empty contract', contract(), { staticPinnedList: true, stepIds: ['entry', 'a'] }],
+      ['null', null, { staticPinnedList: true, stepIds: ['entry', 'a'] }],
+    ] as const;
+    it.each(admitted)('admits %s', (_name, raw, scope) => {
+      expect(fails(raw, scope)).toBeUndefined();
+    });
+    const refused = [
+      [
+        'entry at index 0',
+        contract([span('a', 'entry')]),
+        { staticPinnedList: true, stepIds: ['entry', 'a', 'b'] },
+      ],
+      [
+        'entry absent from the list',
+        contract([span('a', 'entry')]),
+        { staticPinnedList: true, stepIds: ['a', 'b'] },
+      ],
+      [
+        'first of two spans at index 0',
+        contract([span('a', 'entry'), span('b', 'later', 'module.scan.merged')]),
+        { staticPinnedList: true, stepIds: ['entry', 'x', 'later'] },
+      ],
+      [
+        'second of two spans at index 0',
+        contract([span('b', 'later', 'module.scan.merged'), span('a', 'entry')]),
+        { staticPinnedList: true, stepIds: ['entry', 'x', 'later'] },
+      ],
+      [
+        'valid entry outside a static pinned list',
+        contract([span('a', 'entry')]),
+        { staticPinnedList: false, stepIds: ['a', 'entry', 'b'] },
+      ],
+    ] as const;
+    it.each(refused)('refuses %s', (_name, raw, scope) => {
+      const error = fails(raw, scope);
+      expect(error).toBeInstanceOf(ExecutionContractError);
+      expect((error as ExecutionContractError).code).toBe('invalid-execution-contract');
+    });
+    it('puts the boundary between index 0 and index 1', () => {
+      const raw = contract([span('a', 'entry')]);
+      const at = (stepIds: string[]) => fails(raw, { staticPinnedList: true, stepIds });
+      const atZero = at(['entry', 'a']);
+      expect(atZero).toBeInstanceOf(ExecutionContractError);
+      expect((atZero as ExecutionContractError).code).toBe('invalid-execution-contract');
+      expect(at(['a', 'entry'])).toBeUndefined();
+    });
+  });
+  it('admits guarded spans only for a static pinned list; fix targets and malformed pins always refuse', () => {
+    const scopes = [{ staticPinnedList: true }, { staticPinnedList: false }] as const;
+    for (const scope of scopes)
+      for (const raw of [null, undefined, contract()])
+        expect(() => assertExecutionContractSupported(raw, scope)).not.toThrow();
+    const guardedPin = contract([span('x', 'setup')]);
+    expect(() =>
+      assertExecutionContractSupported(guardedPin, { staticPinnedList: true }),
+    ).not.toThrow();
+    const refusals = [
+      [guardedPin, { staticPinnedList: false }],
+      [{ ...contract(), fixTarget: { stepId: 'fix', capabilityVersion: 1 } }, scopes[0]],
+      [{ ...contract(), fixTarget: { stepId: 'fix', capabilityVersion: 1 } }, scopes[1]],
+      [{ ...guardedPin, fixTarget: { stepId: 'fix', capabilityVersion: 1 } }, scopes[0]],
+      [{ version: 99 }, scopes[0]],
+      [{ version: 99 }, scopes[1]],
+    ] as const;
+    for (const [raw, scope] of refusals) {
+      let caught: unknown;
+      try {
+        assertExecutionContractSupported(raw, scope);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ExecutionContractError);
+      expect(caught).toMatchObject({ code: 'invalid-execution-contract' });
+    }
   });
 });

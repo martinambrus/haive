@@ -1,5 +1,6 @@
 import {
   assertExecutionContractSupported,
+  type ContractAdmissionScope,
   ExecutionContractError,
   executionContractSchema,
   type ExecutionPredicateDeclaration,
@@ -118,9 +119,12 @@ export function moduleIdsOfTaskType(
   return [...ids].sort();
 }
 
-function executionContractAvailability(raw: unknown): TaskTypeAvailability {
+function executionContractAvailability(
+  raw: unknown,
+  scope: ContractAdmissionScope,
+): TaskTypeAvailability {
   try {
-    assertExecutionContractSupported(raw);
+    assertExecutionContractSupported(raw, scope);
   } catch (error) {
     if (!(error instanceof ExecutionContractError)) throw error;
     return {
@@ -162,7 +166,9 @@ export function resolveTaskTypeAvailability(
         reason: 'invalid-composition',
         issues: input.derived.executionIssues,
       };
-    const execution = executionContractAvailability(definition.executionContract);
+    const execution = executionContractAvailability(definition.executionContract, {
+      staticPinnedList: false,
+    });
     if (!execution.available) return execution;
     return input.derived?.valid ? execution : { available: false, reason: 'invalid-composition' };
   }
@@ -186,7 +192,7 @@ export function resolveTaskTypeAvailability(
     }
   }
   if (catalog === null || definition.runListStrategy !== 'static' || definition.stepIds === null) {
-    return executionContractAvailability(definition.executionContract);
+    return executionContractAvailability(definition.executionContract, { staticPinnedList: false });
   }
   const missingSteps = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
   if (missingSteps.length > 0) {
@@ -200,9 +206,9 @@ export function resolveTaskTypeAvailability(
   const parsed = executionContractSchema.safeParse(definition.executionContract);
   const guarded = parsed.success && parsed.data.guardedSpans.length > 0;
   // Guards must validate even without a map: an undeclared predicate fails closed.
-  let planned = parsed.success && (guarded || parsed.data.fixTarget !== undefined);
+  const planned = parsed.success && (guarded || parsed.data.fixTarget !== undefined);
   if (checked || planned) {
-    let issues: ExecutionCompositionIssue[] = validateComposition(
+    const issues: ExecutionCompositionIssue[] = validateComposition(
       definition.stepIds,
       catalog.composable,
       {
@@ -212,21 +218,6 @@ export function resolveTaskTypeAvailability(
           : {}),
       },
     );
-    // A capable target still redirects loop emitters during validation. An invalid
-    // fix-target-only declaration keeps ordinary composition priority, then the
-    // runtime support refusal; predicate registration must not change that order.
-    if (
-      planned &&
-      !guarded &&
-      issues.some((issue) => issue.kind === 'invalid-execution-contract')
-    ) {
-      planned = false;
-      issues = checked
-        ? validateComposition(definition.stepIds, catalog.composable, {
-            requiresRepository: definition.requiresRepository,
-          })
-        : [];
-    }
     if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
   }
   if (planned) {
@@ -252,7 +243,10 @@ export function resolveTaskTypeAvailability(
         ];
     if (issues.length) return { available: false, reason: 'invalid-composition', issues };
   }
-  return executionContractAvailability(definition.executionContract);
+  return executionContractAvailability(definition.executionContract, {
+    staticPinnedList: true,
+    stepIds: definition.stepIds,
+  });
 }
 
 const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unknown()));

@@ -1,4 +1,4 @@
-import { pinnedTaskStepIds } from '@haive/shared/modularity';
+import { executionContractSchema, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
@@ -941,6 +941,23 @@ export async function enrichStepsWithActiveRole<
   });
 }
 
+function spanEntryIds(executionContract: unknown): Set<string> {
+  const parsed = executionContractSchema.safeParse(executionContract);
+  return new Set(parsed.success ? parsed.data.guardedSpans.map((span) => span.firstStepId) : []);
+}
+
+/** A skipped row a guard owns: it carries guard state and is not a span entry. */
+export function isGuardOwnedSkip(
+  step: { status: string; stepId: string; guardState: unknown },
+  executionContract: unknown,
+): boolean {
+  return (
+    step.status === 'skipped' &&
+    step.guardState != null &&
+    !spanEntryIds(executionContract).has(step.stepId)
+  );
+}
+
 /** Whether the user Skip action is permitted on a step. Beyond the catalog's allow_skip (steps
  *  whose StepDefinition opts in via allowSkip), 01-worktree-setup may be skipped on a run_app task,
  *  which runs from the project root instead of an isolated branch/worktree, and on a task whose run
@@ -953,8 +970,15 @@ export function isStepSkippable(
     runListSnapshot?: readonly string[] | null;
     derivedRunPlan?: unknown;
     executionPath?: string | null;
+    executionContract?: unknown;
   },
 ): boolean {
+  if (
+    task.executionContract != null &&
+    !executionContractSchema.safeParse(task.executionContract).success
+  )
+    return false;
+  if (spanEntryIds(task.executionContract).has(stepId)) return false;
   if (stepId === '00-triage' && task.derivedRunPlan != null && task.executionPath == null)
     return false;
   if (flags.get(stepId)?.allowSkip === true) return true;
@@ -976,7 +1000,13 @@ export async function enrichStepsWithSkipFlag<
   // enforces the same rule). Task-aware so the worktree can be skipped where the run list allows.
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { type: true, runListSnapshot: true, derivedRunPlan: true, executionPath: true },
+    columns: {
+      type: true,
+      runListSnapshot: true,
+      derivedRunPlan: true,
+      executionPath: true,
+      executionContract: true,
+    },
   });
   const withFlags = (s: T, manuallySkipped: boolean) => ({
     ...s,
