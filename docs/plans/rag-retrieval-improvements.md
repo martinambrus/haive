@@ -840,7 +840,9 @@ The existing dense-on-returned-page diagnostic's held-out FPR is 5/9 → 6/9, wi
 0.951 → 0.963. Separately, the maximum **Qwen3 relevance score**, using the same tuning-only
 90% retention protocol, yields tau 0.657756, held-out FPR 2/9 (Wilson 95% [0.063, 0.547]),
 retention 0.926 and AUROC 0.956. This small, correlated negative set cannot establish an
-abstention policy; no threshold was applied to retrieval.
+abstention policy; no threshold was applied to retrieval. The committed records keep ranks and
+`topDenseSim` but not the model scores, so this score-based result is a local measurement they
+cannot reproduce; `answerabilityReport` on them recomputes the dense-score diagnostic instead.
 
 Warmed serial latency with the embedder resident: rerank-only p50/p95 **1,045/1,208 ms/query**;
 amortized **20.91/24.17 ms/chunk** (50-document requests divided by 50).
@@ -849,7 +851,7 @@ Embedding + retrieval + rerank p50/p95 is **1,133/1,304 ms**, versus **90/108 ms
 production HTTP timings. The 180-query evaluator took 252 seconds. Timing finished before
 any test suite ran. API charges were $0; inference was local only; electricity was unmeasured.
 
-**P2(d), descriptive only.** The largest adjacent relevance-score drop in the first 20
+**P2(d), descriptive only, local measurement (model scores are not committed).** The largest adjacent relevance-score drop in the first 20
 averages 0.355, with position p50/p95 4/14. Maximum positive/overview scores have
 p5/p50/p95 0.451/0.997/1.000, versus 0.010/0.049/0.927 for no-answer; their ranges overlap.
 A post-measurement illustration cutting at that gap, minimum three, keeps 6.14/20 hits on
