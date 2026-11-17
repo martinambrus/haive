@@ -497,10 +497,10 @@ async function main() {
   await warnChunkerDrift(root, manifest);
   const runs = await Promise.all(
     filenames.map(async (filename) => {
+      // Held from the filesystem root: a linked parent cannot redirect an operator path.
       const full = path.resolve(filename);
-      return JSON.parse(
-        (await readTextNoFollow(path.dirname(full), path.basename(full)))!,
-      ) as EvalRun;
+      const fsRoot = path.parse(full).root;
+      return JSON.parse((await readTextNoFollow(fsRoot, full.slice(fsRoot.length)))!) as EvalRun;
     }),
   );
   process.stdout.write(
