@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T696 · Grok's tool exposure measures 148.83% of its prompt exposure in the read-exposure replay
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: investigate · found: read-exposure tally (#1241) replay · priority: P4
+
+The SELECT-only replay of stored runs puts grok's all-tool exposure at 148.83% of its weighted prompt exposure (every other provider family is under 35%). Tool output cannot exceed the prompt it was carried in, so either grok's per-request turn counts or its tool-result capture double-counts. Grok is 223 of 5,819 replayed runs, so the headline file share (13.33%, Claude-family plus grok) moves little. Check when touched: compare grok's stream tool results with its reported per-request input tokens on one stored run.
+
 ### T695 · Toolchain advisory position mismatch surfaces as developer jargon in the step's failure text
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1240 · priority: P4
