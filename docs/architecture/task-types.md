@@ -882,8 +882,9 @@ for every resumable task.
 
 `worker/src/step-engine/guard-decisions.ts` adds an unwired decision service.
 The API admission, worker START/advance, boot and revival fences remain closed.
-No production caller invokes it. No span skipping, task pointer movement, recap,
-output, event or enqueue writer ships here. Ordinary NULL and explicit empty
+No production caller invokes it or the dormant span skip/advance service described
+below. The decision service itself writes no skip, task pointer, recap, output,
+event or enqueue. Ordinary NULL and explicit empty
 contracts return without opening a transaction. No scan seed is installed.
 
 A future caller supplies the owned pending span-entry row, round, rerun generation
@@ -919,7 +920,10 @@ The transaction first sets LOCAL statement_timeout to 5000 ms and lock_timeout t
 expiry becomes predicate-evaluation-failed and rolls back. An in-flight SQL query
 can delay rollback until its own server statement deadline. The predicate signal
 also aborts when its lifetime ends, and its timer is always cleared. These limits
-are injectable for controls; they do not preempt synchronous JavaScript.
+are injectable for controls and must be positive safe integers at most
+2147483647 ms (the common Node/Postgres maximum); invalid limits refuse as
+invalid-deadline. They do not preempt synchronous JavaScript. A late query through
+the predicate's rolled-back transaction rejects with UNSAFE_TRANSACTION.
 
 The strict v1 record in existing task_steps.guard_state binds task, round, span,
 entry generation, the SHA-256 hash of the pinned list/contract (object keys sort
@@ -937,14 +941,123 @@ including across process/client and recovery-epoch changes. A rollback before th
 write, after it or at commit leaves no decision and may evaluate again. This is
 exactly-once committed persistence, not exactly-once invocation of a callback.
 Malformed, stale and inconsistent references refuse rather than recomputing.
-Explicit-reset invalidation, mid-span recovery and skip ownership belong to PR4b;
-this service must stay unwired until those controls and the rollout gates ship.
 It currently requires same-round span-entry decisions and a pinned static list.
+A stored decision also replays on its skipped entry; no predicate runs again.
 
 No migration is needed: 0245 already appended the nullable column. Rollback reverts
 this dormant code and leaves 0245, guard_state and every execution pin intact.
 Once execution is enabled, retain capable workers for all resumable guard-bearing
 tasks; never erase a pin or decision to permit an older worker.
+
+## Owned span skips (dormant)
+
+`worker/src/step-engine/guard-span-skip.ts` provides the unwired skip writer and
+advance caller seam. Admission, START/advance, boot and revival still refuse
+nonempty execution contracts; a source-tree control refuses production callers
+of either guard service. No scan seed or runtime activation ships here.
+
+The skip writer takes the same bounded id-ordered task-step batch, then the task
+FOR SHARE fence, validates owner, live status, epoch, round, pointer and entry
+generation, and revalidates the stored decision and its producer/dependency
+references. It requires run:false and never evaluates a missing decision. Every
+member must already exist in the same round among the held rows. The activation must
+materialize every member row before the decision/skip lock batch, never after
+taking step locks or the task fence; missing members return a non-retry refusal. A pending member
+must have no detect/form/output, apply receipt, recap, iterations, active wait or
+started/ended timing, and no unsuperseded invocation (including recap invocations)
+or agent-mining row. A non-pristine member refuses the entire transaction.
+
+All member skips commit in one transaction, stamping ended_at and updated_at at
+the same instant so finished-row redelivery deduplicates step.skipped by endedAt.
+The entry retains its strict decision;
+other members receive version-1 guard-skip receipts binding task, round, span,
+entry row/generation, contract hash and their own generation. Already skipped
+members replay only with the matching receipt and empty work fields; ended_at
+and updated_at do not participate in replay identity. A duplicate
+writes nothing, a partial transaction rolls back in full, and stale jobs cannot
+adopt a newer generation's skip. No output, recap, event, task pointer or queue
+write occurs in this transaction. The unchanged entry pointer remains a durable
+handoff recovery anchor. The advance seam calls a supplied, epoch/pointer-fenced
+finished-row handoff only after commit. Failure before enqueue or loss of its
+acknowledgement can retry from the same decisions/skips without step work. A
+future runtime integration must use that fenced handoff and retain duplicate
+advance checks. Only producer-not-settled, decision-write-lost and skip-write-lost protocol reasons, plus SQLSTATE
+55P03/57014/40P01/40001 (including raw lock batch errors), return retry.
+Predicate errors without a transient SQLSTATE, including deadline expiry and
+non-boolean results, refuse. Other GuardDecisionError reasons also return
+{kind: refused, reason} without handoff:
+member-not-pristine, missing-member, stale producer/decision/dependency identities,
+malformed-state, invalid-span and lost owner/epoch/pointer fences cannot heal by
+redelivering the same job. Unknown errors propagate. The activation must handle refusal
+explicitly rather than scheduling another retry indefinitely. In particular,
+`refused` from a predicate deadline means this pass stops and an existing redrive
+path decides what happens next; it is not an instruction to immediately retry.
+
+The runner's `holdReopenedForm` and its `nextGeneration` branch are one generation
+write, not two independent bumps. Today they cannot run on a guard entry: the
+admission, START/advance, run-list, boot and revival fences remain closed. They
+are not safe by composition alone once the activation opens those fences. In particular,
+`08e-insights-triage` is composable and may be `firstStepId`; its automatic-to-manual
+fallback sets `newAttempt` when a journal intent exists, and the runner advances
+rerun_generation without rewriting guard_state. A run:true entry would then carry
+an old-generation decision. The activation must reconcile this in-place batch transition and
+its dependent/shared references under the ownership protocol before enabling the
+seam, and control crash/replay of that transition. Do not claim the external reset
+helpers cover this runner-owned write or blindly reevaluate an already-run span.
+
+Explicit upstream Retry/rerun clears forward guard decisions and skip receipts
+in the same round, including pending decisions observed after the ordered lock
+batch. Owned skipped members reopen pending with a new rerun generation, alongside
+the ordinary reset. A row whose guard state appeared after the initial read is
+swept with NOWAIT on its runs and agents before it is reset; a busy run rolls the
+transaction back rather than reversing the run/step lock order. Selection follows
+run_seq with legacy step_index fallback,
+conservatively invalidating all forward decisions rather than reinterpreting
+predicates. Task Retry and the owner step Retry share the API reset helper; worker
+revise/recheck/fix resets use the same loaded-row selection. A full START Retry
+also invalidates recorded branches. Resume of a degraded done fan-out invalidates
+its regenerated downstream producers, decisions and owned skips by the same rule.
+Resume preserves guards only on rows whose work it retains (left-active recovery
+and the loop arm). Recovery preserves decisions and member generations; guard-owned skips are excluded from recovery resets. Stop,
+BullMQ boot requeue, stalled handoff redrive and dead revival do not erase them.
+The immutable execution contract and run-list pin never change.
+
+The pin gates wider reads and locks: ordinary worker resets keep main's exact
+inArray(allStepIds + heldStepIds) lock and inArray(id, allStepIds) reset read;
+ordinary API resets keep their existing task-wide lock and caller-ids-only read.
+Neither reset emits a no-op guard_state SET for an ordinary pin. Both reset helpers
+accept an optional executionContract: callers pass their already-loaded immutable
+pin, so ordinary production resets add no statement. Worker orphan reconcile carries
+the pin in its existing joined task/step read. Only when the argument is undefined
+does the worker project the pin before its transaction, or the API project it on
+the supplied transaction handle, respectively. Explicit null and empty contracts
+do not trigger a fallback read. START uses its already-loaded pin and adds no
+ordinary full-step SELECT. Only
+guarded tasks widen to same-round rows at or after the target (run_seq, else
+step_index), with explicit owned handoff ids still held as before. The API's
+existing task-wide lock remains necessary for its later bulk writes. No reset
+lock_timeout is added, preserving ordinary behavior; the dormant guard services'
+bounded timeouts remain unchanged.
+
+The API helper returns extra rows with their pre-reset liveness. Retry, task moves,
+fan-out Resume and pending provider changes include these in audit/touched sets
+and post-commit sandbox cleanup. A separate retained Resume reset after the batch
+sweeps runs with NOWAIT, never waiting backward across the run/step lock order.
+On guarded pins, reofferParkedSteps and settleActiveStepsIn clear guard_state
+alongside every rerun_generation bump: retained form/detection data is not a reusable old-generation
+guard decision. Production callers supply the already-loaded pin, so ordinary
+START adds no pin read and ordinary park SET clauses also omit guard_state. Direct
+helper callers may omit the pin and get a cheap projection pre-read. Guard-aware
+resets retain ownership of their forward cascades.
+
+Real-Postgres controls cover duplicate/stale requests, a crash after the first
+member UPDATE, enqueue cuts, both API Retry paths, worker rerun, Stop/provider
+Resume, orphan boot reset, stalled handoff and dead revival. Capability refusals
+are isolated at the test seam for these dormant recovery controls; production
+refusal controls remain unchanged. Unit variants exercise pristine-state and
+receipt checks. No DDL is added. Rollback reverts the dormant services/reset
+support and retains migration 0245, nullable guard_state and all immutable pins;
+once execution is enabled, retain capable workers for every resumable pin.
 
 ## Derived overlays (PR4 of 4)
 
