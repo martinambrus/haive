@@ -468,6 +468,9 @@ export type SequenceContextArm = (typeof SEQUENCE_CONTEXT_ARMS)[number];
 
 // Only invalid stored pilot values enter this set. Warn once per task in this
 // worker process, even when detect and continuation waves read it repeatedly.
+// Bounded: the oldest entry is dropped and may warn again rather than the set
+// growing for the process lifetime.
+const WARNED_CONTEXT_ARM_TASKS_MAX = 256;
 const warnedContextArmTasks = new Set<string>();
 function storedContextArm(ctx: StepContext, metadata: unknown): SequenceContextArm {
   const value = (metadata as { sequenceContextArm?: unknown } | null)?.sequenceContextArm;
@@ -476,6 +479,8 @@ function storedContextArm(ctx: StepContext, metadata: unknown): SequenceContextA
   // Missing and unrecognised values keep parity so older tasks and code reverts
   // remain runnable; an unknown explicit value must not silently select an arm.
   if (value !== undefined && !warnedContextArmTasks.has(ctx.taskId)) {
+    while (warnedContextArmTasks.size >= WARNED_CONTEXT_ARM_TASKS_MAX)
+      warnedContextArmTasks.delete(warnedContextArmTasks.values().next().value!);
     warnedContextArmTasks.add(ctx.taskId);
     ctx.logger.warn(
       { taskId: ctx.taskId, contextArm: 'parity' },
