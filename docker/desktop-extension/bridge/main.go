@@ -157,10 +157,10 @@ func (b bridge) checkBundle(ctx context.Context) error {
 	}
 	out, err := b.run(ctx, "docker", args, b.dir, nil)
 	if err != nil {
-		return b.installRecovery("Cannot resolve the installed bundle. Docker Compose 2.24 or later is required.")
+		return errors.New("Cannot resolve the installed bundle. Docker Compose 2.24 or later is required.")
 	}
 	if err := isolatedBundle([]byte(out)); err != nil {
-		return b.installRecovery(err.Error())
+		return err
 	}
 	return nil
 }
@@ -334,8 +334,10 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		if err != nil {
 			return s, err
 		}
+		// Only a fresh install may be told to remove its folder: on Start the folder
+		// holds an established install's secrets and data.
 		if err = b.checkBundle(ctx); err != nil {
-			return s, err
+			return s, b.installRecovery(err.Error())
 		}
 		return b.inspect(ctx)
 	}

@@ -377,8 +377,12 @@ func TestStopSkipsBundleValidationButStartRequiresIt(t *testing.T) {
 			if configs != 0 || stops != 1 {
 				t.Fatalf("stop checked bundle: configs=%d stops=%d", configs, stops)
 			}
-			if _, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"}); err == nil {
+			_, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"})
+			if err == nil {
 				t.Fatal("start skipped bundle check")
+			}
+			if strings.Contains(err.Error(), "Remove the folder") {
+				t.Fatalf("start advised removing an established install: %v", err)
 			}
 			if configs != 1 || starts != 0 {
 				t.Fatalf("start mutated invalid bundle: configs=%d starts=%d", configs, starts)
