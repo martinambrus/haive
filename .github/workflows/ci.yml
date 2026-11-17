@@ -383,8 +383,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 159 rows × the measured 10 s model + 120 s setup = 1710 s green.
-    # 40 minutes covers 1.5 × row time (2385 s); 42 includes setup and 810 s over green.
+    # 160 rows × the measured 10 s model + 120 s setup = 1720 s green.
+    # 40 minutes covers 1.5 × row time (2400 s); 42 includes setup and 800 s over green.
     timeout-minutes: 42
     services:
       postgres:
@@ -539,6 +539,7 @@ jobs:
           worker test/project-state-writer-postgres.test.ts T266_DATABASE_URL test_t266_ci pgvector
           worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
           worker test/guard-decisions-db.test.ts GUARD_DECISIONS_TEST_URL guard_decisions_test pg
+          worker test/guard-span-skip-db.test.ts GUARD_SPAN_SKIP_TEST_URL guard_span_skip_test pg
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
           worker test/module-task-type-seed.test.ts MODULE_TASK_TYPE_SEED_TEST_URL module_task_type_seed_test pg
           worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test pg

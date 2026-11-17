@@ -1,3 +1,4 @@
+import { guardResetRows } from '@haive/shared/modularity';
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import {
   isUniqueViolationOf,
@@ -81,15 +82,17 @@ export async function resetStepAndDownstream(
   const downstreamToReset = downstream
     .filter(
       (r) =>
-        r.status !== 'pending' ||
+        (r.status !== 'pending' && !(recovery && r.guardState != null && r.status === 'skipped')) ||
         // Save decisions are stored outside task_steps, without an apply receipt.
         // Resetting a pristine save row too is harmless and avoids a cross-table race.
-        (!recovery && (r.applyReceipt != null || r.stepId === '11g-save-database')),
+        (!recovery &&
+          (r.applyReceipt != null || r.guardState != null || r.stepId === '11g-save-database')),
     )
     .map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 
   let newEpoch = 0;
+  let extraReset = 0;
   try {
     await db.transaction(async (tx) => {
       const now = new Date();
@@ -123,13 +126,59 @@ export async function resetStepAndDownstream(
       // The rows the loop writes, in id order: the loop takes them in the order of an unordered read,
       // while the api's writers (a Stop, a repository delete) take theirs by id. After the sweeps,
       // since a pass holds a run and then wants its step row.
-      await lockStepRows(tx, inArray(schema.taskSteps.id, [...allStepIds, ...heldStepIds]));
+      // The whole task batch also covers heldStepIds supplied by an owned handoff.
+      const locked = await lockStepRows(
+        tx,
+        heldStepIds.length
+          ? or(eq(schema.taskSteps.taskId, taskId), inArray(schema.taskSteps.id, [...heldStepIds]))
+          : eq(schema.taskSteps.taskId, taskId),
+      );
       // Held by this tx now, so this read is current. The reads above predate the lock: a fold from
       // them would overwrite what a peer added to carried_* or idle_ms before the lock was granted.
-      const held = await tx
+      const loaded = await tx
         .select()
         .from(schema.taskSteps)
-        .where(inArray(schema.taskSteps.id, allStepIds));
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            inArray(
+              schema.taskSteps.id,
+              locked.map((r) => r.id),
+            ),
+          ),
+        );
+      const held = guardResetRows(
+        loaded,
+        loaded.filter((r) => allStepIds.includes(r.id)),
+        recovery,
+      );
+      // Guard state may have been committed since the pre-lock downstream read.
+      // An extra row can already have a run: take it without waiting while we
+      // hold steps, or roll this reset back instead of crossing the run/step order.
+      const extraIds = held.filter((r) => !allStepIds.includes(r.id)).map((r) => r.id);
+      if (extraIds.length) {
+        await tx
+          .select({ id: schema.cliInvocations.id })
+          .from(schema.cliInvocations)
+          .where(
+            and(
+              or(
+                inArray(schema.cliInvocations.taskStepId, extraIds),
+                inArray(schema.cliInvocations.summaryForStepId, extraIds),
+              ),
+              isNull(schema.cliInvocations.supersededAt),
+            ),
+          )
+          .for('no key update', { noWait: true });
+        await tx
+          .select({ id: schema.taskStepAgentMinings.id })
+          .from(schema.taskStepAgentMinings)
+          .where(inArray(schema.taskStepAgentMinings.taskStepId, extraIds))
+          .for('update', { noWait: true });
+        allStepIds.push(...extraIds);
+        extraReset = extraIds.length;
+        await sweepRuns();
+      }
       // Clearing formSchema is essential: the runner only re-renders the form when the
       // persisted schema is null. formValues is cleared so the regenerated form re-decides.
       // Zero the live timing per row, but first fold the finishing run's work/idle/user
@@ -152,6 +201,7 @@ export async function resetStepAndDownstream(
               ? {}
               : {
                   applyReceipt: null,
+                  guardState: null,
                   rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
                 }),
             // The recap describes the run being discarded; left behind it reads as the new
@@ -214,7 +264,7 @@ export async function resetStepAndDownstream(
     throw err;
   }
 
-  return { downstreamReset: downstreamToReset.length, newEpoch };
+  return { downstreamReset: downstreamToReset.length + extraReset, newEpoch };
 }
 
 /** Auto-resume a task that FAILED on a provider outage (session/rate-limit or 5xx), once the

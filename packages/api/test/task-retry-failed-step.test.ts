@@ -493,3 +493,73 @@ describe('a task Retry re-runs the step the task stopped on', () => {
     ]);
   });
 });
+
+// Storage-level reset controls under an ordinary pin: the execution-contract
+// admission refusals remain covered separately and are never enabled here.
+describe('guard storage on task Retry', () => {
+  it.each(['retry_ai', 'resume'] as const)(
+    '%s distinguishes a new rerun from recovery of stored decisions',
+    async (action) => {
+      const t = setup({ status: 'failed', iterationCount: 1, iterations: [] });
+      t.fake.patch(schema.taskSteps, LATER_ROW, { guardState: { run: false }, rerunGeneration: 2 });
+      const response = await app.request(`/${TASK}/steps/step-b/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action, round: 0 }),
+      });
+      expect(response.status).toBe(200);
+      expect(t.step(LATER_ROW)).toMatchObject(
+        action === 'resume'
+          ? { guardState: { run: false }, rerunGeneration: 2 }
+          : { guardState: null, rerunGeneration: 3 },
+      );
+    },
+  );
+  it('clears pending forward decisions, preserving another round', async () => {
+    const t = setup({ status: 'failed' });
+    t.fake.patch(schema.taskSteps, LATER_ROW, { guardState: { run: false }, rerunGeneration: 4 });
+    const history = t.fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: 'step-c',
+      title: 'history',
+      round: 1,
+      runSeq: 3,
+      stepIndex: 3,
+      status: 'pending',
+      guardState: { run: true },
+      rerunGeneration: 2,
+    });
+    expect((await t.retry()).status).toBe(200);
+    expect(t.step(LATER_ROW)).toMatchObject({
+      status: 'pending',
+      guardState: null,
+      rerunGeneration: 5,
+    });
+    expect(t.step(history.id as string)).toMatchObject({
+      guardState: { run: true },
+      rerunGeneration: 2,
+    });
+  });
+  it('a full START restart clears stored branches and their skips', async () => {
+    const t = setup({ status: 'pending' });
+    t.fake.patch(schema.tasks, TASK, { currentStepId: null });
+    t.fake.patch(schema.taskSteps, TARGET_ROW, { guardState: { run: false }, rerunGeneration: 4 });
+    t.fake.patch(schema.taskSteps, LATER_ROW, {
+      status: 'skipped',
+      guardState: { kind: 'guard-skip' },
+      rerunGeneration: 7,
+    });
+    expect((await t.retry()).status).toBe(200);
+    expect(t.step(TARGET_ROW)).toMatchObject({
+      status: 'pending',
+      guardState: null,
+      rerunGeneration: 5,
+    });
+    expect(t.step(LATER_ROW)).toMatchObject({
+      status: 'pending',
+      guardState: null,
+      rerunGeneration: 8,
+    });
+    expect(queued()).toEqual([{ name: TASK_JOB_NAMES.START, data: expect.any(Object) }]);
+  });
+});

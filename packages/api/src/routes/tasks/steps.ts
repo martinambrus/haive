@@ -1,3 +1,4 @@
+import { guardResetRows } from '@haive/shared/modularity';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
 import {
@@ -235,7 +236,7 @@ export async function resetRowsForRerun(
   taskId: string,
   rows: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { rowsHeld?: boolean } = {},
+  opts: { rowsHeld?: boolean; preserveGuards?: boolean } = {},
 ): Promise<void> {
   if (rows.length === 0) return;
   const ids = rows.map((r) => r.id);
@@ -248,10 +249,31 @@ export async function resetRowsForRerun(
   // resolveDagPhase re-derives the same failure and the step re-halts identically. No-op when
   // the task has no DAG / no stuck issue.
   await resetDagCurrentLevelForRetry(tx, taskId);
-  if (!opts.rowsHeld) await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
+  const locked = opts.rowsHeld ? rows : await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   // This transaction holds the rows now (the batch above, or the caller's lock under rowsHeld), so
   // this read is current; `rows` is the caller's read from before the transaction began.
-  const held = await tx.select().from(schema.taskSteps).where(inArray(schema.taskSteps.id, ids));
+  const loaded = await tx
+    .select()
+    .from(schema.taskSteps)
+    .where(
+      inArray(
+        schema.taskSteps.id,
+        locked.map((r) => r.id),
+      ),
+    );
+  const held = guardResetRows(
+    loaded,
+    loaded.filter((r) => ids.includes(r.id)),
+    opts.preserveGuards === true,
+  );
+  // A guard decision (and even its first run) can land after the caller's read.
+  // These extra rows were not in the first run sweep. We hold steps now, so
+  // refuse a busy run rather than wait in the reverse lock order.
+  const extraIds = held.filter((r) => !ids.includes(r.id)).map((r) => r.id);
+  if (extraIds.length) {
+    await refusingWhenLocked(() => sweepRunsOf(tx, extraIds, now, { noWait: true }));
+    ids.push(...extraIds);
+  }
   for (const r of held) {
     const contrib = computeFoldContribution(r, now.getTime());
     await tx
@@ -263,7 +285,12 @@ export async function resetRowsForRerun(
         formValues: null,
         output: null,
         applyReceipt: null,
-        rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
+        ...(opts.preserveGuards ? {} : { guardState: null }),
+        ...(opts.preserveGuards && r.guardState != null
+          ? {}
+          : {
+              rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
+            }),
         // The recap describes the run being discarded. Left behind it reads as the new
         // run's recap the moment the step goes green again.
         summary: null,
@@ -320,6 +347,7 @@ export function rowsLeftActive<
     runSeq?: number | null;
     stepIndex?: number;
     applyReceipt?: unknown;
+    guardState?: unknown;
   },
 >(
   rows: T[],
@@ -343,8 +371,12 @@ export function rowsLeftActive<
 /** Save decisions live outside the step row and have no apply receipt. Reset even
  * a pristine pending save row: advancing its generation is harmless and avoids
  * racing publication of a decision in another metadata table. */
-function hasDurableApplyState(row: { stepId?: string; applyReceipt?: unknown }): boolean {
-  return row.applyReceipt != null || row.stepId === '11g-save-database';
+function hasDurableApplyState(row: {
+  stepId?: string;
+  applyReceipt?: unknown;
+  guardState?: unknown;
+}): boolean {
+  return row.applyReceipt != null || row.guardState != null || row.stepId === '11g-save-database';
 }
 
 /** A statement that could not take a lock without waiting: the pass that holds it is mid-write, and
@@ -419,12 +451,13 @@ async function moveTaskToStep(
   now: Date,
   opts: {
     fromFailed?: boolean;
+    preserveGuards?: boolean;
     liftPause?: { read: Date; role: string | undefined; actorUserId: string };
   } = {},
 ) {
   // The task leaves `failed` here for every caller, so the revival checks sit here too.
   await refuseReviveBesideLive(tx, taskId);
-  await resetRowsForRerun(tx, taskId, leftActive, now);
+  await resetRowsForRerun(tx, taskId, leftActive, now, { preserveGuards: opts.preserveGuards });
   const [bumped] = await tx
     .update(schema.tasks)
     .set({
@@ -459,7 +492,10 @@ async function moveTaskToStep(
       )
     : null;
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
-  await resetRowsForRerun(tx, taskId, late, now, { rowsHeld: true });
+  await resetRowsForRerun(tx, taskId, late, now, {
+    rowsHeld: true,
+    preserveGuards: opts.preserveGuards,
+  });
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late], resumeAudit };
 }
 
@@ -1469,7 +1505,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
         // set is reset too, as Retry resets one: the resume moves the task away from it.
-        await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now);
+        await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
+          preserveGuards: true,
+        });
         const [held] = await tx
           .select()
           .from(schema.taskSteps)
@@ -1530,7 +1568,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
         newEpoch = bumped[0].epoch;
         const late = await rowsActivatedMeanwhile(tx, id, [step.id]);
-        await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
+        await resetRowsForRerun(tx, id, late, now, { rowsHeld: true, preserveGuards: true });
         await tx.insert(schema.taskEvents).values({
           taskId: id,
           taskStepId: step.id,
@@ -1641,7 +1679,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         })
         .where(eq(schema.taskSteps.id, step.id));
       await startIfNeverStarted(tx, step.id);
-      const result = await moveTaskToStep(tx, id, step, leftActive, now);
+      const result = await moveTaskToStep(tx, id, step, leftActive, now, { preserveGuards: true });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -2307,6 +2345,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           status: 'pending',
           detectOutput: null,
           applyReceipt: null,
+          guardState: null,
           rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
           formSchema: null,
           formValues: withoutGateAnswer,

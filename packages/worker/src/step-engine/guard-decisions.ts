@@ -80,6 +80,13 @@ export const GUARD_DECISION_BOUNDS = {
   predicateTimeoutMs: 5_000,
 } as const;
 type Bounds = { [K in keyof typeof GUARD_DECISION_BOUNDS]: number };
+export function validateGuardBounds(limits: Partial<Bounds> = {}): Bounds {
+  const bounds = { ...GUARD_DECISION_BOUNDS, ...limits };
+  for (const ms of Object.values(bounds))
+    if (!Number.isSafeInteger(ms) || ms <= 0 || ms > 2_147_483_647)
+      throw new GuardDecisionError('invalid-deadline');
+  return bounds;
+}
 const unavailable = (): never => {
   throw new Error('guard predicate capability unavailable');
 };
@@ -170,7 +177,8 @@ export async function decideLoadedGuardDecision(
   if (
     !current ||
     current.id !== ctx.taskStepId ||
-    current.status !== 'pending' ||
+    (current.status !== 'pending' &&
+      !(current.status === 'skipped' && current.guardState != null)) ||
     current.rerunGeneration !== ctx.rerunGeneration ||
     task.currentStepId !== span.firstStepId
   )
@@ -233,7 +241,12 @@ export async function decideLoadedGuardDecision(
     loaded.set(s.id, saved);
     return saved;
   };
-  if (current.guardState != null) return { decision: read(span), entry: current, replay: true };
+  if (current.guardState != null) {
+    const decision = read(span);
+    if (current.status === 'skipped' && decision.run)
+      throw new GuardDecisionError('entry-fence-lost');
+    return { decision, entry: current, replay: true };
+  }
   const requiredSpan =
     span.requiresSpan === undefined ? undefined : spans.find((s) => s.id === span.requiresSpan)!;
   const required = requiredSpan ? read(requiredSpan) : null;
@@ -316,8 +329,8 @@ export async function decideLoadedGuardDecision(
  * must throw for absent/unreadable producer data. There is no false-on-error path.
  *
  * A failed transaction may evaluate again; only committed decisions are exactly once.
- * Recovery epochs reuse them. PR4b must invalidate affected decisions during explicit
- * resets before this service can be wired into execution. Stale states fail closed.
+ * Recovery epochs reuse them; explicit resets invalidate forward decisions.
+ * Stored suppressed decisions also replay on their skipped entry. Stale states fail closed.
  */
 export async function evaluateGuardDecision(
   ctx: StepContext,
@@ -333,9 +346,7 @@ export async function evaluateGuardDecision(
   if (ctx.epoch == null || ctx.rerunGeneration == null)
     throw new GuardDecisionError('missing-fence');
   ctx.throwIfCancelled();
-  const bounds = { ...GUARD_DECISION_BOUNDS, ...limits };
-  for (const ms of Object.values(bounds))
-    if (!Number.isSafeInteger(ms) || ms <= 0) throw new GuardDecisionError('invalid-deadline');
+  const bounds = validateGuardBounds(limits);
   return ctx.db.transaction(async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${bounds.statementTimeoutMs}ms'`));
     await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${bounds.lockTimeoutMs}ms'`));

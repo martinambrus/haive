@@ -262,9 +262,9 @@ export async function settleActiveSteps(
 }
 
 /** `settleActiveSteps` inside the caller's transaction. */
-export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise<void> {
+export async function settleActiveStepsIn(tx: DbHandle, taskId: string) {
   const now = new Date();
-  await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
+  const held = await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   await failStuckSteps(tx, taskId, 'user', now, false);
   const rows = await tx
     .update(schema.taskSteps)
@@ -292,6 +292,7 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
     )
     .returning(reofferedTiming);
   await carryReofferedRuns(tx, rows);
+  return held;
 }
 
 /** A plain read, never `.for()`: a Stop writes the task row after the step rows, as a Retry does,

@@ -154,7 +154,7 @@ import {
 } from './_helpers.js';
 import { resolveCostDisplay } from '@haive/shared/stats-server';
 import { fileRoutes } from './files.js';
-import { retryTaskAtStep, stepRoutes } from './steps.js';
+import { resetRowsForRerun, retryTaskAtStep, stepRoutes } from './steps.js';
 import {
   insertUpgradeTask,
   refuseBesideLiveUpgrade,
@@ -1604,7 +1604,24 @@ taskRoutes.post('/:id/action', async (c) => {
         await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await supersedeLiveRuns(tx, id, { failTask: false });
-        await settleActiveStepsIn(tx, id);
+        const held = await settleActiveStepsIn(tx, id);
+        // A full START retry invalidates every recorded guard branch, including
+        // still-pending decisions and skips in rounds the restart may revisit.
+        const guards = held.length
+          ? await tx
+              .select()
+              .from(schema.taskSteps)
+              .where(
+                and(
+                  inArray(
+                    schema.taskSteps.id,
+                    held.map((r) => r.id),
+                  ),
+                  isNotNull(schema.taskSteps.guardState),
+                ),
+              )
+          : [];
+        await resetRowsForRerun(tx, id, guards, new Date(), { rowsHeld: true });
         await clearMessages(tx);
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
