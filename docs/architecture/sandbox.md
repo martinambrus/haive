@@ -959,3 +959,47 @@ writes a contract-2 template, strips saved installers or changes an onboarding a
 Revert this consumer slice before the cache-contract slice while no writer exists. If a later
 writer has enabled contract 2, stop those writes and restore retained legacy template links/images
 before removing readers; never downgrade metadata on a body without its legacy installers.
+
+## PHP database drivers in generated environments
+
+For non-DDEV environments that install PHP, `02-generate-dockerfile` installs the
+version-matched database extension beside `php<v>-cli`: `sqlite` selects
+`php<v>-sqlite3`, `postgres` selects `php<v>-pgsql`, and `mysql` or `mariadb`
+selects `php<v>-mysql`. These use the same normalized/floored PHP version and apt
+source as the interpreter, including the Ubuntu ondrej PPA path.
+
+`01-declare-deps` already reads root `composer.json.require`. That reader also
+maps `ext-pdo_sqlite`/`ext-sqlite3`, `ext-pdo_pgsql`/`ext-pgsql`, and
+`ext-pdo_mysql`/`ext-mysqli` to the three fixed package suffixes. It persists a
+sorted, deduplicated `phpDatabaseExtensions` only for selected non-DDEV PHP
+runtimes with such requirements. Requirements may add drivers beyond the declared
+database. `require-dev` is outside this detector's scope. No extra manifest read
+or general extension detector is added. DDEV still owns its PHP and database;
+its Dockerfile and declared-dependency identity are unchanged.
+
+Deployment does not rewrite saved Dockerfiles, mark existing PHP templates stale,
+or force a rebuild. `envTemplateHash` hashes saved Dockerfile text plus canonical
+declared deps, rather than generator source. Rendering the corrected Dockerfile
+changes that hash, but a saved Dockerfile and matching prior-task form text remain
+reusable when their declared deps match. Rebuilding an old saved body alone will
+still build the old body. To update one, submit the corrected Dockerfile and
+rebuild it. A new Composer-driver key discovered on dependency declaration takes
+the existing changed-deps path: invalidate the old body/image, or fork the row
+when other live tasks share it, then regenerate and build. There is no schema or
+generator-version migration.
+
+Onboarding has no environment-image build step. `01-env-detect` and
+`02-detection-confirmation` discover/confirm the stack, while
+`04-tooling-infrastructure` configures tooling. The built-in workflow includes
+`01-declare-deps`, `02-generate-dockerfile`, `03-build-image`, and
+`04-verify-environment` as its unfiltered environment prelude. Declaration and
+Dockerfile review need form answers unless auto-continue can reuse a completed
+task's answers (or explicit pre-answers exist); build and verify opt into default submission
+under auto-continue and reuses an existing ready, present image unless forced.
+Non-DDEV run-app tasks also use generation/build; DDEV run-app tasks instead use
+`01c-ddev-env`. The composed sandbox reads the ready template's saved Dockerfile.
+
+Undo: revert the code commit. No schema/data rollback is needed. Already-built
+images keep their installed modules; remove the package from the editable body
+and rebuild only if removing it is desired. The optional declared-deps key is
+ignored by the older generator.
