@@ -567,7 +567,7 @@ the constant marker and already has the same host authority.
 
 `Stop` calls Compose stop for this project and retains containers, networks and every
 volume. It requires valid settings and regular compose files, but does not run the
-resolved-model/isolation check, so that precheck cannot block this escape hatch.
+resolved-model/isolation check. The upgrade guard below still applies to Stop.
 Start retains the check. Stop still depends on Compose itself accepting its stop
 command. It stops Compose services; worker-created resources follow the existing worker
 shutdown behavior. Status is read-only. The UI re-reads it after every Install, Start
@@ -600,8 +600,10 @@ The helper returns only each service's name, state, health, exit code and publis
 ports (interface, target/host port and protocol); Compose labels, mounts, container
 IDs and host paths never cross to the UI. Container IDs needed for late failure
 inspection remain private. The table shows those fields, with a `Starting…` summary
-and ready/total progress while any service is starting, including negative running
-API/web probes. Idle status and port notices appear only in the summary live region;
+and ready/total progress during the fast window while any service is starting,
+including negative running API/web probes. After the window expires, the summary
+reads `Still not ready (N/M)` and retains the ready count with thirty-second polling.
+Idle status and port notices appear only in the summary live region;
 the operation region contains distinct progress or error text. The count includes
 a successful exit-0 `db-migrate` one-shot. Errors remain visible alongside the
 current status until the next manual action. API health is `healthy`/`unhealthy` from a bounded `/health` request
@@ -632,7 +634,39 @@ the default deletes runtime volumes including PostgreSQL, and purge also deletes
 volumes and owned built images. The directory and pulled release images remain. No
 extension removal path calls down -v or prunes volumes.
 
-A cross-process directory lock serializes mutations. If a hard termination leaves
+Before Install, Start or Stop, the host helper checks for a running updater for
+`haive_desktop`. This first check precedes the installer, port rewriting and any
+Compose command; Start and Stop make a final check immediately before the Compose
+call that changes services. An active updater refuses the action with guidance to
+wait for completion and refresh. If the updater is hung, stop that updater container
+in Docker Desktop, then check the upgrade state in the existing updater journal
+before retrying. A failed or malformed Docker listing/inspection retries the whole
+list-and-inspect check once with fresh container IDs; a second error refuses the
+action. This also covers a container removed between listing and inspection.
+Status remains read-only. Install continues to use `--no-start`/`-NoStart`; only
+Start invokes Compose up.
+
+The API's in-app upgrade and the generated POSIX/PowerShell `haive` helpers launch
+the updater outside Compose, without updater or Compose project labels. The helper
+therefore identifies the released image's exact `node packages/updater/dist/cli.js`
+entrypoint together with an exact `HAIVE_INSTALL_ID=haive_desktop` or
+`COMPOSE_PROJECT_NAME=haive_desktop` environment entry and `State.Running`. It lists
+running container IDs and inspects them in one batch. The Docker template projects
+these fields to booleans: no environment values, credentials or full inspect output
+are returned to the helper or UI. This works while PostgreSQL is stopped for its
+volume archive and the API/journal cannot be queried. Other installs and stopped
+updaters do not block these actions. This is a check of the released container launch
+contract, not an atomic mutex with the updater: a new upgrade can still begin after
+the final check, a crashed updater's unfinished journal is not read, and a custom
+entrypoint or host-run updater is outside this detection contract. A shared host lock
+would need participation by the updater and its launchers; released updaters do not
+honor the extension's lock. Changing the updater entrypoint or its install
+environment requires updating the extension in the same release. A script test pins
+the Dockerfile entrypoint to the extension guard and both install identity environment
+arguments in the API and generated POSIX/PowerShell upgrade launchers. The updater
+and its launch protocol are unchanged.
+
+A cross-process directory lock serializes extension mutations. If a hard termination leaves
 `~/haive_desktop.extension-lock`, inspect this install's containers and ensure no
 operation remains before removing that lock directory. Normal completion and handled
 signals release it. Keep the tab open during long operations. Processes have a
@@ -695,7 +729,13 @@ A real local listener and local HTTP redirect fixture exercise the actual bind/p
 seams; the remaining cases mock I/O. UI tests cover the service control matrix,
 consent reload/uncheck/viewer separation/storage failures/fresh install, labelled
 probes, restarting/paused Stop controls, move notices surviving polls, bounded fast
-polling after Start/Install, and error-cadence backoff. Go tests run in a throwaway
+polling after Start/Install, expired readiness wording for either negative running
+probe, and error-cadence backoff. Upgrade controls cover refusal of all three
+mutations for this install's updater, unchanged behavior for other installs/stopped
+updaters, failed/malformed Docker reads, one complete retry with fresh IDs, safe
+one-element entrypoints even with eager template evaluation, batched boolean
+projection without secrets, hung-updater recovery advice, and a new updater observed
+on the final pre-mutation check. Go tests run in a throwaway
 golang container with copied install/ files, and again inside the extension build
 with two scheduler threads and one package worker; no host Go dependency is needed. Native macOS/Windows execution and live stack behavior
 have not been measured by the local mocked-UI and unit checks.
@@ -727,6 +767,8 @@ live first-start check below on the owner's native Desktop version.
    are occupied, Start must refuse without changing `.env` or running Compose up.
    Watch five-second service progress, including running API/web with negative probes,
    and thirty-second polling after five minutes or three consecutive read failures.
+   After the fast window expires, a continued negative API/web probe must read
+   `Still not ready (N/M)`, with the ready count preserved.
    Confirm the summary is announced once. Hide/show the tab and confirm polling
    suspends/resumes. A late allocation race retains its reason
    and a Created service's status. Stop stays enabled for running, restarting and paused
@@ -742,8 +784,13 @@ live first-start check below on the owner's native Desktop version.
    "Compose failed" after its exit-0 one-shot on the owner's Desktop/Compose version. Open app; create
    the first administrator through the existing setup page, then verify a later
    visit uses login. Exercise API and worker log links.
-6. Stop; verify this project's services stop and its volumes survive. Start again
-   and verify the account/data persist. Check other installs remain unchanged.
+6. During an in-app upgrade for this install, try Start and Stop: both must refuse
+   with the upgrade message and leave services alone, including while the updater
+   archives PostgreSQL. A direct Install request must also refuse before delegation.
+   A Docker inspection failure that persists after one retry must refuse these
+   actions, while another install's updater must not block this one. After the updater finishes, Stop; verify this
+   project's services stop and its volumes survive. Start again and verify the
+   account/data persist. Check other installs remain unchanged.
 7. Stop, then `docker extension rm haive-desktop-extension:dev`. Verify the extension
    disappears while the directory and volumes remain. Reinstalling the extension
    must reattach to this same install rather than reinstall it.
