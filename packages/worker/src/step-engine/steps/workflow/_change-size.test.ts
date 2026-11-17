@@ -300,13 +300,13 @@ it('supplements the review list from the exact frozen base without rename detect
   const { measureImplementationSize, CHANGE_SIZE_HOST_LIMITS } = await import('./_change-size.js');
   const frozen = 'b'.repeat(40);
   fake.git.mockImplementation(async (args: string[]) => ({
-    stdout: args[0] === 'diff' ? 'old.py\0new.py\0' : '',
+    stdout: args.includes('diff') ? 'old.py\0new.py\0' : '',
   }));
   const { ctx } = context();
   const measured = await measureImplementationSize(ctx, '/repo/work', frozen);
   expect(measured.result?.touched).toEqual(['a.py', 'b.py', 'old.py', 'new.py']);
   expect(fake.git).toHaveBeenCalledWith(
-    ['diff', '--name-only', '-z', '--no-renames', frozen, '--'],
+    ['--no-optional-locks', 'diff', '--name-only', '-z', '--no-renames', frozen, '--'],
     expect.objectContaining({ cwd: '/proc/self/fd/123', signal: ctx.signal, timeout: 10000 }),
   );
   expect(fake.git.mock.calls.some(([args]) => args[0] === 'merge-base')).toBe(false);
@@ -316,7 +316,7 @@ it('supplements the review list from the exact frozen base without rename detect
 it('keeps the measurement path union bounded even when the review list omitted deletions', async () => {
   const { measureImplementationSize } = await import('./_change-size.js');
   fake.git.mockImplementation(async (args: string[]) => ({
-    stdout: args[0] === 'diff' ? 'old.py\0new.py\0' : '',
+    stdout: args.includes('diff') ? 'old.py\0new.py\0' : '',
   }));
   const { ctx } = context();
   expect(await measureImplementationSize(ctx, '/repo/work', oid, { maxFiles: 3 })).toMatchObject({
@@ -330,7 +330,7 @@ it('does not freeze a failed frozen-base path scan as a complete measurement', a
   const { recordChangeSize } = await import('./_change-size.js');
   const err = Object.assign(new Error('scan timed out'), { code: 'ETIMEDOUT' });
   fake.git.mockImplementation(async (args: string[]) => {
-    if (args[0] === 'diff') throw err;
+    if (args.includes('diff')) throw err;
     return { stdout: args[0] === 'merge-base' ? oid : '' };
   });
   const { ctx, events } = context();

@@ -120,7 +120,15 @@ export async function measureImplementationSize(
       // The review collector omits uncommitted deletions hidden by rename detection.
       // Measure every tracked old/new path directly against the frozen base, with
       // renames represented as full deletion + addition (zero net for an unchanged move).
-      const changed = await git(['diff', '--name-only', '-z', '--no-renames', baseCommit, '--']);
+      const changed = await git([
+        '--no-optional-locks',
+        'diff',
+        '--name-only',
+        '-z',
+        '--no-renames',
+        baseCommit,
+        '--',
+      ]);
       const files: FileTexts[] = [];
       const identities: unknown[] = [];
       let bytes = 0;
