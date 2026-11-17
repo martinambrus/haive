@@ -218,7 +218,16 @@ before `missing-step` so a removed module is named instead of "a step is not ins
 synced catalog the step and composition checks are skipped for existing strategies, except prompt
 steps using role declarations/tokens or structured mode: these refuse admission with 409
 `prompt-role-catalog-unsynced` before any task is written. Derived admission
-requires a coherent synced catalog. Over HTTP: disabled, not selectable and the
+requires a coherent synced catalog. Derived inspection and structural saves carry the
+stored execution contract and trusted predicate schemas through every candidate's
+composition check. An unavailable guard predicate or endpoint yields the stable
+`invalid-execution-contract` issue (400 at structural save, 409 at locked admission),
+before data-edge construction; module-policy refusals retain their earlier priority.
+No task pin is rewritten. The editor renders both the per-candidate composition wrapper
+and the named top-level refusal with the contract reason, deduplicating identical
+path/reason pairs within each validation panel. The top-level issue stays available
+to structural-save and admission callers. The composition-message switch is exhaustive
+over ordinary and execution-contract issues. Over HTTP: disabled, not selectable and the
 switches are 403; the module reasons, a missing step and a bad composition are 409 naming what is wrong.
 The switch over reasons ends in an exhaustive `never`, so a new reason cannot fall through to a create.
 
@@ -884,6 +893,16 @@ for already queued work. Stop, Cancel and step Abort
 remain available; NULL and explicit empty execution contracts retain their
 existing behavior. This adds no guard evaluation, skip writer or custom fix execution.
 
+Deployment is worker first: deploy workers carrying the independent
+`worker/src/step-engine/execution-contract-support.ts` refusal before deploying an API
+that can admit active contracts. START/advance run-list construction and boot/revival
+check this worker-local capability even if shared/API admission has become permissive.
+An unsupported admitted task is marked dead with its immutable pin and resumable state
+retained; it never executes an unguarded list. Both admission and worker
+fences stay closed. A future activation must wire the worker runtime before lifting the
+local refusal, then enable API admission. Workers predating the execution contract fence (#1222)
+cannot safely receive admitted guarded tasks; upgrade them first.
+
 Rollback stops creation of contract-bearing types and retains nullable columns,
 the applied migration and every immutable pin. Never erase or remap a pin to
 make rollback appear safe; once P7/P8 admit active pins, retain capable workers
@@ -1005,16 +1024,18 @@ explicitly rather than scheduling another retry indefinitely. In particular,
 path decides what happens next; it is not an instruction to immediately retry.
 
 The runner's `holdReopenedForm` and its `nextGeneration` branch are one generation
-write, not two independent bumps. Today they cannot run on a guard entry: the
-admission, START/advance, run-list, boot and revival fences remain closed. They
-are not safe by composition alone once the activation opens those fences. In particular,
-`08e-insights-triage` is composable and may be `firstStepId`; its automatic-to-manual
-fallback sets `newAttempt` when a journal intent exists, and the runner advances
-rerun_generation without rewriting guard_state. A run:true entry would then carry
-an old-generation decision. The activation must reconcile this in-place batch transition and
-its dependent/shared references under the ownership protocol before enabling the
-seam, and control crash/replay of that transition. Do not claim the external reset
-helpers cover this runner-owned write or blindly reevaluate an already-run span.
+write, not two independent bumps. A guarded in-place new attempt consumes folded mining
+rows first, takes the task's id-ordered step batch, then checks the owner, live task,
+epoch, pointer, round and expected generation under the task SHARE fence. In that same
+transaction it rebinds the retained run:true decision and its shared-predicate,
+requiresSpan and producer references to the new generation, clears old form inputs
+and sets the durable form hold. It preserves committed branch results and owned skips;
+it never evaluates a predicate or reopens a suppressed span. Missing ownership,
+stale references and suppressed entries refuse and roll consumption back. A crash
+before commit rolls everything back; a lost acknowledgement cannot bump the old pass
+again. Recovery sees the held new generation. Explicit upstream reset still clears
+that generation's decision and form through the normal reset helper. Production
+execution remains fenced; this reconciliation does not activate guarded execution.
 
 Explicit upstream Retry/rerun clears forward guard decisions and skip receipts
 in the same round, including pending decisions observed after the ordered lock
@@ -1028,8 +1049,12 @@ predicates. Task Retry and the owner step Retry share the API reset helper; work
 revise/recheck/fix resets use the same loaded-row selection. A full START Retry
 also invalidates recorded branches. Resume of a degraded done fan-out invalidates
 its regenerated downstream producers, decisions and owned skips by the same rule.
-Resume preserves guards only on rows whose work it retains (left-active recovery
-and the loop arm). Recovery preserves decisions and member generations; guard-owned skips are excluded from recovery resets. Stop,
+A degraded done producer's Resume rescans forward from the clicked row under the
+ordered batch even when its initial downstream reset set was empty. Decisions and
+owned skips committed between that read and the lock are reset; the clicked producer's
+saved work and generation remain intact. Extra runs/agents use NOWAIT, and a busy run
+rolls back the entire Resume. Resume preserves guards only on rows whose work it retains
+(left-active recovery and the loop arm). Recovery preserves decisions and member generations; guard-owned skips are excluded from recovery resets. Stop,
 BullMQ boot requeue, stalled handoff redrive and dead revival do not erase them.
 The immutable execution contract and run-list pin never change.
 

@@ -1048,10 +1048,14 @@ than retrying forever. Limits are capped at
 2147483647 ms; late predicate writes through an ended handle are refused.
 A predicate-deadline `refused` stops this pass; an existing redrive path decides
 what happens next, rather than an immediate retry loop. Before the activation opens the
-execution fence, reconcile runner-owned in-place generation changes as well:
-08e can be a span entry, and `holdReopenedForm` applies `nextGeneration` without
-rewriting guard_state today. The current closed fences prevent production
-reachability; composition does not prevent it after activation (see Task types).
+execution fence, retain the runner's in-place generation reconciliation:
+08e can be a span entry. `holdReopenedForm` consumes mining rows before taking the
+ordered step batch and the task owner/epoch/pointer fence, then atomically rebinds
+its retained decision and dependent/shared/producer references with the generation
+bump and durable form hold. Committed skips and branch results remain unchanged.
+Crash rollback and stale-pass refusal prevent duplicate bumps or lost held forms.
+No predicate is reevaluated. The admission and worker-local capability fences stay
+closed (see Task types for worker-first deployment and rollback).
 
 Explicit upstream reruns (API task/step Retry and worker revise/recheck/fix reset)
 clear forward decisions and their skips, including pending entries read after the
@@ -1060,8 +1064,15 @@ ordinary reset and epoch fence. Newly included rows have their runs and agents
 swept under NOWAIT, so a busy writer rolls back the reset rather than crossing
 lock tiers. A full START Retry invalidates recorded branches
 too. A degraded done fan-out's Resume cascade regenerates downstream producers,
-so it invalidates their decisions/skips too; only retained left-active and loop
-Resume work preserves guards. Recovery keeps guard state and generations and
+so it invalidates their decisions/skips too. The forward rescan starts at the
+clicked producer under the ordered batch even when the initial downstream reset
+selection was empty. One boolean both supplies the batch-forcing rescan anchor
+and marks that batch held for the retained-row sweep. Guarded done-producer controls
+with an empty initial downstream reset set interleave Resume with a Retry-order peer
+and a decision writer (step batch before task SHARE), and exercise NOWAIT refusal
+beside a pass and Stop holding a retained row's run. They assert no 40P01,
+committed-decision invalidation and complete rollback on contention. Only retained
+left-active and loop Resume work preserves guards. Recovery keeps guard state and generations and
 leaves guard-owned skipped members closed. Park re-offer and START settlement
 clear guard_state whenever they advance rerun_generation, preventing stale replay. Stop, BullMQ boot requeue, orphan reconcile, stalled
 redrive and dead revival preserve the stored branch; an epoch takeover alone
