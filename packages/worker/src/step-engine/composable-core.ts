@@ -109,7 +109,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     group: 'env',
     dispatchesCli: false,
     requires: [{ needs: 'env-image', reason: 'Checks the built, ready image.' }],
-    provides: [],
+    provides: ['env-verified'],
     precedes: [
       'app-runtime',
       'implementation',
@@ -184,7 +184,7 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
     group: 'setup',
     dispatchesCli: false,
     requires: [needWorktree],
-    provides: [],
+    provides: ['plugins-installed'],
     precedes: [
       'discovery',
       'spec',
@@ -193,6 +193,36 @@ export const CORE_COMPOSABLE_STEPS: readonly CoreComposableStepEntry[] = [
       'learnings',
       'skills-synced',
       'app-runtime',
+    ],
+  },
+  {
+    stepId: '01b1-verify-composed-lsp',
+    label: 'Verify composed LSP after plugins',
+    group: 'setup',
+    dispatchesCli: false,
+    requires: [
+      { needs: 'env-image', reason: 'Rechecks the current environment image.' },
+      {
+        needs: 'worktree',
+        after: 'env-verified',
+        reason: 'The bootstrap image must precede worktree setup.',
+      },
+      {
+        needs: 'plugins-installed',
+        after: 'worktree',
+        reason: 'Verifies the durable plugin result in the task worktree.',
+      },
+    ],
+    provides: ['composed-lsp-verified'],
+    precedes: [
+      'browser-choice',
+      'app-runtime',
+      'discovery',
+      'spec',
+      'implementation',
+      'commit',
+      'learnings',
+      'cleaned',
     ],
   },
   {

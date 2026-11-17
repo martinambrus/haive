@@ -194,6 +194,7 @@ export const TIME_CATEGORY_BY_STEP: Readonly<Record<string, TimeCategory>> = Obj
   '01-worktree-setup': 'setup',
   '01a-app-boot': 'setup',
   '01b-install-plugins': 'setup',
+  '01b1-verify-composed-lsp': 'setup',
   '01c-ddev-env': 'setup',
   '01c1-restore-database': 'setup',
   '01d-browser-access': 'setup',

@@ -1,3 +1,4 @@
+import { COMPOSED_LSP_FINAL_STEP_ID } from '@haive/shared/run-list';
 import {
   composedEntryMatches,
   loadComposedLspIdentity,
@@ -331,14 +332,20 @@ export async function readyComposedLspImage(
     const step = await db.query.taskSteps.findFirst({
       where: and(
         eq(schema.taskSteps.taskId, taskId),
-        eq(schema.taskSteps.stepId, '04-verify-environment'),
+        eq(schema.taskSteps.stepId, COMPOSED_LSP_FINAL_STEP_ID),
       ),
       orderBy: [desc(schema.taskSteps.endedAt), desc(schema.taskSteps.round)],
     });
-    const evidence = (step?.output as { composedLsp?: ComposedLspEvidence } | null)?.composedLsp;
+    const output = step?.output as {
+      composedLsp?: ComposedLspEvidence;
+      verification?: { stepRowId?: unknown; generation?: unknown };
+    } | null;
+    const evidence = output?.composedLsp;
     if (
       step?.status !== 'done' ||
       !step.endedAt ||
+      output?.verification?.stepRowId !== step.id ||
+      output.verification.generation !== step.rerunGeneration ||
       evidence?.schemaVersion !== 1 ||
       !Array.isArray(evidence.entries) ||
       evidence.entries.length !== 1 ||

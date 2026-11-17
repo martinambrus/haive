@@ -41,6 +41,7 @@ const SPINE: readonly string[] = [
   '01-debug-mode',
   '01a-app-boot',
   '01b-install-plugins',
+  '01b1-verify-composed-lsp',
   '01d-browser-access',
   '01c-ddev-env',
   '01c1-restore-database',

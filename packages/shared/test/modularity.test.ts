@@ -43,6 +43,7 @@ const CORE_STEP_IDS = [
   '01_5-ripgrep-config',
   '01a-app-boot',
   '01b-install-plugins',
+  '01b1-verify-composed-lsp',
   '01c-ddev-env',
   '01c1-restore-database',
   '01d-browser-access',
@@ -129,8 +130,8 @@ const CORE_STEP_IDS = [
 
 describe('step id grammar', () => {
   it('has the full core fixture', () => {
-    expect(CORE_STEP_IDS).toHaveLength(104);
-    expect(new Set(CORE_STEP_IDS).size).toBe(104);
+    expect(CORE_STEP_IDS).toHaveLength(105);
+    expect(new Set(CORE_STEP_IDS).size).toBe(105);
   });
 
   it.each(CORE_STEP_IDS)('parses core id %s', (id) => {

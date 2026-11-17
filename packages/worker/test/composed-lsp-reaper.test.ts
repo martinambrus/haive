@@ -1,3 +1,6 @@
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { retainedComposedImageRefs } from '../src/lsp/composed-evidence.js';
@@ -143,3 +146,61 @@ it('uses a bound jsonb_exists key test for retained references', async () => {
   expect(query?.sql).toContain('jsonb_exists(');
   expect(query?.params).toContain('composedLspImageRefs');
 });
+
+it.each(['04-verify-environment', '01b-install-plugins', '01b1-verify-composed-lsp'])(
+  'retains the launch image after real %s Retry clears final evidence',
+  async (target) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+      taskStepAgentMinings: schema.taskStepAgentMinings,
+      taskDagPlans: schema.taskDagPlans,
+      taskDagIssues: schema.taskDagIssues,
+    });
+    const task = fake.insert(schema.tasks, {
+      status: 'running',
+      orchestrationEpoch: 3,
+      metadata: metadata('effective'),
+    });
+    const sequence = [
+      '04-verify-environment',
+      '01-worktree-setup',
+      '01b-install-plugins',
+      '01b1-verify-composed-lsp',
+    ];
+    for (const [index, stepId] of sequence.entries())
+      fake.insert(schema.taskSteps, {
+        taskId: task.id,
+        stepId,
+        runSeq: index,
+        stepIndex: index === 0 ? 204 : 101 + index / 10,
+        round: 0,
+        status: 'done',
+        output: { evidence: stepId },
+      });
+    await resetStepAndDownstream(fake.db as unknown as Database, String(task.id), target, 0, 3);
+    expect(
+      fake
+        .rows(schema.taskSteps)
+        .filter((s) => s.status === 'pending')
+        .map((s) => s.stepId),
+    ).toEqual(sequence.slice(sequence.indexOf(target)));
+    expect(
+      fake.rows(schema.taskSteps).find((s) => s.stepId === '01b1-verify-composed-lsp')!.output,
+    ).toBeNull();
+    const remove = vi.fn(async () => ({ ok: true, stderr: '' }));
+    expect(
+      await reapStaleComposedImages(
+        1,
+        Date.UTC(2026, 1),
+        fakeDockerRunner({
+          inspect: async () => ({ exists: true, imageId: 'sha256:old' }),
+          remove,
+        }),
+        taskDb(() => fake.rows(schema.tasks)[0]!.metadata),
+      ),
+    ).toBe(0);
+    expect(remove).not.toHaveBeenCalled();
+  },
+);

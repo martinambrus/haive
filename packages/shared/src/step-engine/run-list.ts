@@ -197,3 +197,22 @@ export function baseCandidateParityIssues(
     return [{ executionPath, expected: a, actual: b }];
   });
 }
+
+/** Required installation order for composed LSP adoption. Existing pins are
+ * inspected as stored; this predicate never inserts or reorders their steps. */
+export const COMPOSED_LSP_FINAL_STEP_ID = '01b1-verify-composed-lsp';
+export function composedLspRunListEligible(stepIds: readonly string[]): boolean {
+  const sequence = [
+    '04-verify-environment',
+    '01-worktree-setup',
+    '01b-install-plugins',
+    COMPOSED_LSP_FINAL_STEP_ID,
+  ];
+  let previous = -1;
+  for (const id of sequence) {
+    const index = stepIds.indexOf(id);
+    if (index <= previous || stepIds.lastIndexOf(id) !== index) return false;
+    previous = index;
+  }
+  return true;
+}
