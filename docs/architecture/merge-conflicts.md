@@ -453,7 +453,8 @@ repository's `core.ignoreStat`, which marks every file a checkout writes) or ski
 checkout among them), in its own index or in a checked-out submodule's, counts as unreadable, since
 status never sees an edit to such a file. `13-pr-wait`'s finalize, which has no such choice, keeps a
 dirty or unreadable worktree and still finishes the task, and the completion of a custom type
-without step 12 reaps its worktree only while clean. Ignored files are not counted. `run_app`'s
+without either cleanup step (step 12 or `12-no-change-cleanup`) reaps its worktree only
+while clean. Ignored files are not counted. `run_app`'s
 Finish and Cancel still remove the worktree: Cancel is the discard action, and `run_app` has no step
 that could ask.
 
@@ -469,3 +470,22 @@ settle. A dependent of the unmerged empty issue is unconfirmed and blocked,
 transitively, before its worktree or invocation exists. With the default policy an
 empty accepted branch still fails the step. Merge refusal, abort failure, conflict
 exhaustion and a provider-refused merge fixer halt under either policy.
+
+## No-change cleanup
+
+`12-no-change-cleanup` removes only the recorded task worktree and branch when all
+branch commits are contained in the current local base. It requires a worktree and
+clean tree, never a commit token; `12-worktree-cleanup` keeps its commit requirement.
+It never merges, commits or pushes. Dirty/unreadable trees, hidden index entries,
+open Git operations, locked/different/shared checkouts and uncontained commits
+refuse removal. Ignored files are not counted as changes and are removed too; the
+step description states this. An advanced base may contain the branch without the
+step doing any merge. Composition only makes the step available; no guarded-span
+runtime or built-in run-list change is enabled.
+
+The clean-tree check runs after journaling and again through the staged gitfile;
+a failed staged check restores the tree and refuses. Inode-bound staging, durable
+removal authorization and owned recovery cuts are described in
+[Worker restarts](worker-restarts.md#no-change-cleanup-recovery). Git's prune command
+cannot select a worktree: the registration sweep has the same repository-wide scope
+as setup and ordinary worktree removal. It removes no neighboring worktree directory.
