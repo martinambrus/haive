@@ -1,0 +1,19 @@
+{
+  "image": "ghcr.io/ggml-org/llama.cpp@sha256:d68ec493c0ff9105ddfe2e909fff304117bc6e1fffbbd8d94182bd455983c264",
+  "build": "12429",
+  "commit": "9fba51d2c9a1b5cb5f0c47986c031334e2d7663a",
+  "repo": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+  "revision": "a02f48bb4f057028298c21fa033da2b30d7742d5",
+  "file": "qwen3-reranker-0.6b-q8_0.gguf",
+  "sha256": "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+  "scoreScale": "softmax([yes_logit,no_logit])[0] = sigmoid(yes_logit - no_logit), uncalibrated relevance_score in [0,1]",
+  "context": 2048,
+  "ubatch": 2048,
+  "gpuLayers": 99,
+  "parallel": 1,
+  "verbosity": 4,
+  "promptTemplate": "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: {query}\n<Document>: {document}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "modelCardRevision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+  "fileBytes": 639153184,
+  "batch": 2048
+}
