@@ -85,7 +85,7 @@ export function readerCommandPaths(command: unknown): Paths {
     } else if (c === "'" || c === '"') {
       quote = c;
       active = true;
-    } else if (/[$`*?(){}\\]/.test(c)) return 'unattributed';
+    } else if (/[$`*?[(){}\\]/.test(c)) return 'unattributed';
     else if (/\s/.test(c)) {
       if (active) tokens.push(token);
       token = '';

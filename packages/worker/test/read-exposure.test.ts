@@ -113,6 +113,7 @@ describe('read exposure', () => {
   it.each([
     'cat "$file"',
     'cat *.ts',
+    'cat src/[ab].ts',
     'cat ~/.claude/skills/x/SKILL.md',
     'cat "~/.codex/skills/x/SKILL.md"',
     'cat src/a.ts > ~/out',
