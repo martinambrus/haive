@@ -1,15 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
-import { z } from 'zod';
-import { schema, type Database } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import {
   lstatNoFollow,
   openFileNoFollow,
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
-import { isBranchName } from '@haive/shared/git-args';
+import {
+  EVENT,
+  setupSchema,
+  journalSchema,
+  refuse,
+  stageRel,
+  sameIdentity,
+  type Setup,
+  type Journal,
+} from '../../no-change-cleanup.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { assertOwnsStep, StepSupersededError, taskWriteTarget } from '../../step-ownership.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -20,45 +28,17 @@ import { readUncommittedChanges } from '../../../repo/worktree-changes.js';
 import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import { splitWorktreePath } from '../../../repo/worktree-paths.js';
 
-const EVENT = 'worktree.no_change_cleanup';
-const setupSchema = z.object({
-  mode: z.literal('worktree'),
-  worktreePath: z.string(),
-  branchName: z.string().refine(isBranchName),
-  baseBranch: z.string().refine(isBranchName),
-});
-type Setup = z.infer<typeof setupSchema>;
-const journalSchema = setupSchema.extend({
-  version: z.literal(1),
-  id: z.uuid(),
-  dev: z.string(),
-  ino: z.string(),
-  head: z.string().regex(/^[a-f0-9]{40,64}$/),
-});
-type Journal = z.infer<typeof journalSchema>;
-
-const refuse = (reason: string): never => {
-  throw new Error(
-    `No-change cleanup refused: ${reason}. Keep the worktree and branch; resolve the problem, then Retry.`,
-  );
-};
 const command = async (dir: string, args: string[], reason: string) => {
   const result = await gitRun(dir, args);
   if (result.code !== 0) refuse(reason);
   return result.stdout.trim();
 };
-const stageRel = (journal: Journal) => `.haive/no-change-cleanup/${journal.id}`;
-const sameIdentity = (
-  info: NonNullable<Awaited<ReturnType<typeof lstatNoFollow>>>,
-  journal: Journal,
-) =>
-  info.kind === 'directory' &&
-  String(info.stats.dev) === journal.dev &&
-  String(info.stats.ino) === journal.ino;
 
-async function record(ctx: StepContext, journal: Journal): Promise<void> {
+/** Step first, task last, like Retry. Keep the fence through each filesystem/ref mutation;
+ * no pool reads or writes may be made by fn while this transaction holds those rows. */
+async function ownedCleanup<T>(ctx: StepContext, fn: (tx: DbTx) => Promise<T>): Promise<T> {
   ctx.throwIfCancelled();
-  await ctx.db.transaction(async (tx) => {
+  return ctx.db.transaction(async (tx) => {
     await assertOwnsStep(tx, ctx.taskStepId);
     const [task] = await tx
       .select({ id: schema.tasks.id })
@@ -66,6 +46,13 @@ async function record(ctx: StepContext, journal: Journal): Promise<void> {
       .where(taskWriteTarget(ctx.taskId, ctx.epoch == null ? undefined : { epoch: ctx.epoch }))
       .for('share');
     if (!task) throw new StepSupersededError(ctx.taskStepId);
+    ctx.throwIfCancelled();
+    return fn(tx);
+  });
+}
+
+async function record(ctx: StepContext, journal: Journal): Promise<void> {
+  await ownedCleanup(ctx, async (tx) => {
     await tx.insert(schema.taskEvents).values({
       taskId: ctx.taskId,
       taskStepId: ctx.taskStepId,
@@ -217,32 +204,6 @@ async function checkTree(
     refuse('the worktree holds uncommitted changes');
 }
 
-/** Cancel is a discard action. Called only after the task's sandbox listing is empty;
- * failures keep cancellation unfinished so its ordinary redrive retries this removal. */
-export async function discardNoChangeCleanupDirectories(
-  db: Database,
-  taskId: string,
-): Promise<void> {
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { status: true, runListSnapshot: true },
-  });
-  if (task?.status !== 'cancelled' || !task.runListSnapshot?.includes('12-no-change-cleanup'))
-    return;
-  const events = await db.query.taskEvents.findMany({
-    where: and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, EVENT)),
-  });
-  for (const event of events) {
-    const saved = journalSchema.parse(event.payload);
-    const split = splitWorktreePath(saved.worktreePath);
-    if (!split) return refuse('the cleanup recovery path is invalid');
-    const current = await lstatNoFollow(split.anchor, stageRel(saved), { strict: true });
-    if (current && !sameIdentity(current, saved))
-      return refuse('the cleanup recovery directory changed');
-    await removeNoFollow(split.anchor, stageRel(saved), { recursive: true });
-  }
-}
-
 /** Explicit-composition only: the built-in workflow still finishes through step 12. */
 export const noChangeCleanupStep: StepDefinition<
   Setup,
@@ -254,7 +215,7 @@ export const noChangeCleanupStep: StepDefinition<
     index: 14,
     title: 'No-change worktree cleanup',
     description:
-      'Removes a clean task worktree and its branch only when the base already contains every branch commit.',
+      'Removes a clean task worktree and its branch only when the base already contains every branch commit. Ignored files are removed too.',
     requiresCli: false,
   },
   async detect(ctx) {
@@ -306,21 +267,31 @@ export const noChangeCleanupStep: StepDefinition<
       orderBy: [desc(schema.taskEvents.createdAt)],
     });
     let journal: Journal | undefined;
+    let hasStaged = false;
     for (const event of events) {
       const parsed = journalSchema.safeParse(event.payload);
       if (!parsed.success) return refuse('the cleanup recovery record is unreadable');
       const saved = parsed.data;
+      const staged = await lstatNoFollow(ctx.repoPath, stageRel(saved), { strict: true });
       if (
         saved.worktreePath !== setup.worktreePath ||
         saved.branchName !== setup.branchName ||
         saved.baseBranch !== setup.baseBranch
-      )
-        return refuse('the worktree setup changed during cleanup');
-      const staged = await lstatNoFollow(ctx.repoPath, stageRel(saved), { strict: true });
+      ) {
+        const oldSource = await lstatNoFollow(
+          ctx.repoPath,
+          relative(ctx.repoPath, saved.worktreePath),
+          { strict: true },
+        );
+        if (staged || (oldSource && sameIdentity(oldSource, saved)))
+          return refuse('the worktree setup changed during cleanup');
+        continue;
+      }
       if (staged) {
         if (source || !sameIdentity(staged, saved))
           return refuse('the cleanup recovery directory changed');
         journal = saved;
+        hasStaged = true;
         break;
       }
       if (!source || sameIdentity(source, saved)) {
@@ -329,11 +300,11 @@ export const noChangeCleanupStep: StepDefinition<
       }
     }
     let head = branch ?? journal?.head;
-    if (!head && source) {
+    if (!branch && source) {
       head = await removedBranchHead(ctx, setup.worktreePath);
     }
-    if (head) {
-      if (journal && branch && branch !== journal.head)
+    if (head && (source || hasStaged || branch)) {
+      if (hasStaged && journal && branch && branch !== journal.head)
         return refuse('the branch changed during cleanup');
       const contained = await gitRun(ctx.repoPath, ['merge-base', '--is-ancestor', head, base]);
       if (contained.code === 1) return refuse('branch commits are not contained in the base');
@@ -341,10 +312,11 @@ export const noChangeCleanupStep: StepDefinition<
     }
     if (source) {
       await checkTree(ctx, setup, head!, branch === null);
-      if (!journal) {
+      if (!journal || journal.head !== head || journal.phase !== 'staging') {
         journal = {
           ...setup,
           version: 1,
+          phase: 'staging',
           id: randomUUID(),
           dev: String(source.stats.dev),
           ino: String(source.stats.ino),
@@ -352,44 +324,90 @@ export const noChangeCleanupStep: StepDefinition<
         };
         await record(ctx, journal);
       }
+    }
+    await ownedCleanup(ctx, async (tx) => {
+      if (source && journal) {
+        // The journal transaction can wait on locks. Check again after it, immediately
+        // before the identity probe and move, rather than relying on the earlier read.
+        await checkTree(ctx, setup, head!, branch === null);
+        // An atomic move precedes recursive deletion. The durable inode-bound record survives
+        // explicit Retry (which clears apply receipts) and boot recovery. A partially deleted
+        // staged tree is never misread as new uncommitted work or adopted by pathname alone.
+        const current = await lstatNoFollow(ctx.repoPath, split.rel, { strict: true });
+        if (!current || !sameIdentity(current, journal))
+          return refuse('the worktree directory changed before removal');
+        // A fresh host UUID names the destination. Avoid noReplace's mkdir-then-rename
+        // reservation, which a crash between syscalls could leave as an unowned dir.
+        await renameNoFollow(ctx.repoPath, split.rel, stageRel(journal), { createParents: true });
+      }
+      if (journal?.phase === 'staging' && (source || hasStaged)) {
+        const staged = await lstatNoFollow(ctx.repoPath, stageRel(journal), { strict: true });
+        if (!staged || !sameIdentity(staged, journal))
+          return refuse('the cleanup recovery directory changed');
+        try {
+          // Its gitfile still locates the admin dir after the move. This also checks
+          // a crash after rename but before the verification/removal authorization.
+          await checkTree(
+            ctx,
+            { ...setup, worktreePath: resolve(ctx.repoPath, stageRel(journal)) },
+            head!,
+            branch === null,
+          );
+        } catch (error) {
+          try {
+            await renameNoFollow(ctx.repoPath, stageRel(journal), split.rel, { noReplace: true });
+          } catch {
+            return refuse(
+              `the staged worktree could not be restored; recover it from ${stageRel(journal)}`,
+            );
+          }
+          throw error;
+        }
+        journal = { ...journal, phase: 'removing' };
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          eventType: EVENT,
+          payload: journal,
+        });
+      }
+    });
+    // Commit authorization before the first unlink. A crash/failed removal can then
+    // resume a partial tree, while an unverified move must still pass the clean check.
+    await ownedCleanup(ctx, async () => {
       ctx.throwIfCancelled();
-      // An atomic move precedes recursive deletion. The durable inode-bound record survives
-      // explicit Retry (which clears apply receipts) and boot recovery. A partially deleted
-      // staged tree is never misread as new uncommitted work or adopted by pathname alone.
-      const current = await lstatNoFollow(ctx.repoPath, split.rel, { strict: true });
-      if (!current || !sameIdentity(current, journal))
-        return refuse('the worktree directory changed before removal');
-      // A fresh host UUID names the destination. Avoid noReplace's mkdir-then-rename
-      // reservation, which a crash between syscalls could leave as an unowned dir.
-      await renameNoFollow(ctx.repoPath, split.rel, stageRel(journal), { createParents: true });
-    }
-    ctx.throwIfCancelled();
-    if (journal) {
-      const current = await lstatNoFollow(ctx.repoPath, stageRel(journal), { strict: true });
-      if (current && !sameIdentity(current, journal))
-        return refuse('the cleanup recovery directory changed');
-      await removeNoFollow(ctx.repoPath, stageRel(journal), { recursive: true });
-    }
-    await command(
-      ctx.repoPath,
-      ['worktree', 'prune', '--expire', 'now'],
-      'could not clear the removed worktree registration',
-    );
-    if (branch) {
-      // Compare-and-delete the proven tip, also verifying the base did not rewind.
-      // No branch -D, merge, commit or push; no upstream/default-HEAD ancestry shortcut.
-      const result = await gitRun(
+      if (journal) {
+        const current = await lstatNoFollow(ctx.repoPath, stageRel(journal), { strict: true });
+        if (current && !sameIdentity(current, journal))
+          return refuse('the cleanup recovery directory changed');
+        await removeNoFollow(ctx.repoPath, stageRel(journal), {
+          recursive: true,
+          repairPermissions: true,
+        });
+      }
+      // Git prune has no worktree/path argument. This repo-wide registration sweep
+      // matches 01-worktree-setup and removeWorktreeDir; it deletes no live tree.
+      await command(
         ctx.repoPath,
-        ['update-ref', '--no-deref', '--stdin'],
-        undefined,
-        {
-          input: Buffer.from(
-            `start\nverify ${baseRef} ${base}\ndelete ${branchRef} ${branch}\nprepare\ncommit\n`,
-          ),
-        },
+        ['worktree', 'prune', '--expire', 'now'],
+        'could not clear the removed worktree registration',
       );
-      if (result.code !== 0) return refuse('the branch or base changed before branch removal');
-    }
+      if (branch) {
+        // Compare-and-delete the proven tip, also verifying the base did not rewind.
+        // No branch -D, merge, commit or push; no upstream/default-HEAD ancestry shortcut.
+        const result = await gitRun(
+          ctx.repoPath,
+          ['update-ref', '--no-deref', '--stdin'],
+          undefined,
+          {
+            input: Buffer.from(
+              `start\nverify ${baseRef} ${base}\ndelete ${branchRef} ${branch}\nprepare\ncommit\n`,
+            ),
+          },
+        );
+        if (result.code !== 0) return refuse('the branch or base changed before branch removal');
+      }
+    });
     return {
       removed: true,
       branchDeleted: true,

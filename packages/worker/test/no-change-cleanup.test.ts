@@ -20,7 +20,7 @@ import { StepRegistry } from '../src/step-engine/registry.js';
 import { registerAllSteps } from '../src/step-engine/steps/index.js';
 import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import * as fsSafe from '@haive/shared/fs-safe';
-import { discardNoChangeCleanupDirectories } from '../src/step-engine/steps/core/12-no-change-cleanup.js';
+import { discardNoChangeCleanupDirectories } from '../src/step-engine/no-change-cleanup.js';
 
 const state = vi.hoisted(() => ({ setup: {} as Record<string, unknown> }));
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (original) => ({
@@ -91,7 +91,7 @@ describe('no-change cleanup with real Git', () => {
     events = [];
     const query = {
       tasks: { findFirst: async () => null },
-      taskEvents: { findMany: async () => events },
+      taskEvents: { findMany: async () => [...events].reverse() },
     };
     const select = () => {
       const builder = {
@@ -139,7 +139,7 @@ describe('no-change cleanup with real Git', () => {
     async (kind) => {
       writeFileSync(join(tree, kind === 'untracked' ? 'new' : 'a'), 'changed\n');
       if (kind === 'staged') git(tree, 'add', 'a');
-      await preserved(/uncommitted|dirty/i);
+      await preserved(/the worktree holds uncommitted/);
     },
   );
   it.each([
@@ -154,33 +154,33 @@ describe('no-change cleanup with real Git', () => {
     const file = git(tree, 'rev-parse', '--git-path', marker);
     if (marker.startsWith('rebase-') || marker === 'sequencer') mkdirSync(file);
     else writeFileSync(file, git(root, 'rev-parse', 'main') + '\n');
-    await preserved(/operation|merge|rebase|cherry|revert|sequencer/i);
+    await preserved(/a Git operation is open/);
   });
   it('refuses branch commits not contained in base', async () => {
     writeFileSync(join(tree, 'a'), 'own\n');
     git(tree, 'commit', '-qam', 'own');
-    await preserved(/not contained|own commits/i);
+    await preserved(/branch commits are not contained in the base/);
   });
   it('refuses an unreadable index', async () => {
     writeFileSync(git(tree, 'rev-parse', '--git-path', 'index'), 'broken');
-    await preserved(/unreadable|could not read/i);
+    await preserved(/the worktree is unreadable/);
   });
   it('refuses a missing gitfile rather than discovering the parent repo', async () => {
     rmSync(join(tree, '.git'));
-    await preserved(/unreadable|gitfile|could not read/i);
+    await preserved(/the worktree gitfile is unreadable/);
   });
   it('refuses a symlink at the worktree path', async () => {
     const saved = tree + '-saved';
     cpSync(tree, saved, { recursive: true });
     rmSync(tree, { recursive: true });
     symlinkSync(saved, tree);
-    await preserved(/unreadable|symbolic|directory|link/i);
+    await preserved(/the worktree path is not a readable directory/);
   });
   it.each(['--assume-unchanged', '--skip-worktree'])(
     'refuses hidden index entries (%s)',
     async (flag) => {
       git(tree, 'update-index', flag, 'a');
-      await preserved(/unreadable|could not read/i);
+      await preserved(/the worktree is unreadable/);
     },
   );
   it('allows an advanced base that contains the branch', async () => {
@@ -205,30 +205,30 @@ describe('no-change cleanup with real Git', () => {
   it('still refuses dirty work after the branch is gone', async () => {
     git(root, 'update-ref', '-d', 'refs/heads/task');
     writeFileSync(join(tree, 'a'), 'keep this\n');
-    await preserved(/uncommitted|dirty/i);
+    await preserved(/the worktree holds uncommitted/);
   });
   it('refuses staged work even when the worktree bytes match the removed branch tip', async () => {
     git(root, 'update-ref', '-d', 'refs/heads/task');
     writeFileSync(join(tree, 'a'), 'staged work\n');
     git(tree, 'add', 'a');
     writeFileSync(join(tree, 'a'), 'base\n');
-    await preserved(/uncommitted|dirty/i);
+    await preserved(/the worktree holds uncommitted/);
   });
   it('keeps a deleted branch’s own commits recoverable through the worktree log', async () => {
     writeFileSync(join(tree, 'a'), 'own\n');
     git(tree, 'commit', '-qam', 'own');
     git(root, 'update-ref', '-d', 'refs/heads/task');
-    await preserved(/not contained|own commits/i);
+    await preserved(/branch commits are not contained in the base/);
   });
   it('refuses an unreadable removed-branch log', async () => {
     const log = git(tree, 'rev-parse', '--git-path', 'logs/HEAD');
     git(root, 'update-ref', '-d', 'refs/heads/task');
     writeFileSync(log, 'unreadable');
-    await preserved(/could not read|unreadable/i);
+    await preserved(/could not read the removed branch history/);
   });
   it('refuses a symbolic branch without deleting its target', async () => {
     git(root, 'symbolic-ref', 'refs/heads/task', 'refs/heads/main');
-    await preserved(/different branch|symbolic|another checkout/i);
+    await preserved(/the worktree is on a different branch/);
   });
   it('refuses missing base history before touching the worktree', async () => {
     state.setup.baseBranch = 'missing';
@@ -281,7 +281,7 @@ describe('no-change cleanup with real Git', () => {
     writeFileSync(join(tree, 'a'), 'late edit\n');
     await expect(
       step().apply(ctx, { detected, formValues: {}, iteration: 0, previousIterations: [] }),
-    ).rejects.toThrow(/uncommitted|dirty/i);
+    ).rejects.toThrow(/the worktree holds uncommitted/);
     expect(readFileSync(join(tree, 'a'), 'utf8')).toBe('late edit\n');
   });
 });
