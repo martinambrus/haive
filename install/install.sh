@@ -555,15 +555,16 @@ parse_release_manifest() {
 # project already holds this installer's default mailpit port — MEASURED, `ddev-router`
 # publishing 127.0.0.1:8025-8026. A second Haive install collides on all three.
 #
-# `ss` sees every listener, including non-docker ones, and is the authority where present.
-# Docker's own published-port list is the fallback, because the collisions that actually
-# happen here are with other containers. Neither present means no probe: compose then reports
-# the bind failure itself, which is a worse message but not a wrong outcome.
+# A port is taken if `ss` lists a listener OR docker lists it as published. Both are asked:
+# under Docker Desktop (WSL, macOS) a published port lives in the engine's VM and `ss` does not
+# show it. Neither present means no probe: compose then reports the bind failure itself, which
+# is a worse message but not a wrong outcome. A published range matches on its first port only.
 port_in_use() {
   if command -v ss >/dev/null 2>&1; then
     ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0
-    return 1
   fi
+  # Always also ask docker: under Docker Desktop (WSL, macOS) a published port lives in the
+  # engine's VM, and the host's listener table does not show it.
   if command -v docker >/dev/null 2>&1; then
     docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE "(^|[^0-9])$1->" && return 0
   fi

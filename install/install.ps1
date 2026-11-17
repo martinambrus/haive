@@ -451,11 +451,11 @@ function Test-PortInUse([int]$port) {
   try {
     # The authority on Windows: it sees every listener, not only the containerised ones.
     if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-      return [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+      if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { return $true }
     }
   } catch { }
-  # Fallback for a stripped-down host: the collisions that actually happen here are with other
-  # containers, so docker's own published-port list catches them.
+  # Always also ask docker: Docker Desktop publishes a container port from its engine VM, which
+  # the Windows listener table does not show, so a running Haive's ports looked free.
   $ports = (Invoke-Native docker @('ps','--format','{{.Ports}}') -Capture).Output
   return [bool]($ports -match "(^|[^0-9])$port->")
 }
