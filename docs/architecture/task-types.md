@@ -226,10 +226,12 @@ The execution-contract support refusal remains the final `invalid-composition` c
 and also runs without a synced catalog. For a derived definition it retains its named
 `invalid-execution-contract` issue even if the overlay is invalid, after module policy.
 `definitionForCreate` reports that issue directly rather than evaluating the contract again.
-When executable predicate schemas are available from trusted code, availability checks
-composition and pinned data edges on feasible paths first. API catalog JSON carries no
-predicate schema or executable authority: guarded definitions remain unavailable there
-with the named runtime-support refusal. Admin static detail and structural edits carry
+Trusted predicate schemas come from installed modules’ schema-only
+`./execution-predicates` exports, loaded at API boot without importing `./steps`.
+Availability checks composition and pinned data edges on feasible paths before the
+unchanged runtime-support refusal. A missing map/export does not skip conditional
+validation: referenced predicates are unknown and fail closed. API catalog JSON
+carries no schema or executable authority; guarded definitions remain unavailable. Admin static detail and structural edits carry
 the stored contract into validation; strict create/editor/draft schemas still expose no
 execution-contract authoring. Availability and the seeder keep inert declarations on the ordinary composition walk; the admin
 detail and static PATCH routes still pass a stored inert contract to the contract walk, which
@@ -786,8 +788,13 @@ boolean selecting the expected result, defaulting to true; `when: false` consume
 false branch of that same decision, not a separate predicate. `requiresSpan` still
 requires the earlier span to run, including on a false predicate branch.
 
-Trusted executable predicates come from the module's step code, with an args
-schema; stored ids or source strings grant no executable authority. Composition
+Trusted predicate schemas come from the module’s optional schema-only
+`./execution-predicates` export. Worker boot binds each declaration to the matching
+`guardPredicates` callback in step code and requires the exact same args-schema
+object in both exports; missing declarations/evaluators, duplicate or non-local ids
+and schema mismatch refuse boot. See [Modules](modules.md#schema-only-predicate-registration-fence-closed)
+for the SDK shape and comparison rationale. Stored ids or source strings grant no
+executable authority. API never loads step code or evaluates predicates. Composition
 projects every feasible predicate combination through the existing token,
 ordering, entailment, loop-target and closing checks. A skipped producer cannot
 supply a later mandatory requirement. The walk permits at most eight independent
@@ -808,9 +815,13 @@ always runs whenever its consumer does; being in different spans is not itself a
 error. Explicit author choices must remain earlier and exactly compatible; the
 validator never chooses a different producer on a filtered path. Optional null
 bindings stay absent. No task pin, fingerprint, retry reader or recovery path is
-rewritten by these planner checks. Predicate schemas are supplied by executable
+rewritten by these planner checks. Predicate schemas are supplied by trusted schema-only
 module registration, never reconstructed from stored JSON; validation never calls
-predicate evaluation. Guard decisions, skipping and custom-fix execution remain
+predicate evaluation. The API passes its boot map to public/admin availability,
+stored static detail and structural edits, guarded author-binding checks and the
+final locked `buildDataEdgePlan` call inside `definitionForCreate`. All INSERT
+callers share that writer. Schema registration changes no pin bytes or recovery
+protocol and leaves the execution fence closed. Guard decisions, skipping and custom-fix execution remain
 fenced off until their runtime PRs.
 
 An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
