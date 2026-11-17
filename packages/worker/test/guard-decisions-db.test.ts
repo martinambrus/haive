@@ -3,7 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import type { StepContext, StepDefinition } from '@haive/shared/step';
+import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
 
@@ -187,7 +187,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         throw new Error('untrusted diagnostic');
       });
       await expect(evaluateGuardDecision(ctx, 'work', predicates)).rejects.toThrow(
-        'predicate-evaluation-failed',
+        mode === 'non-boolean' ? 'predicate-non-boolean' : 'predicate-evaluation-failed',
       );
       expect(await snapshot()).toEqual(before);
       evaluate.mockResolvedValue(false);
@@ -197,6 +197,212 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       });
     },
   );
+  it('hashes the contract using a fixed code-unit vector, including nested free keys', async () => {
+    const vector = {
+      version: 1,
+      guardedSpans: [{ ...span('work', 'work'), args: { a: 2, ä: 3, B: 1 } }],
+    };
+    await db
+      .update(schema.tasks)
+      .set({ executionContract: vector })
+      .where(eq(schema.tasks.id, taskId));
+    predicates.set(predicateId, { argsSchema: z.record(z.string(), z.number()), evaluate });
+    const decision = await evaluateGuardDecision(ctx, 'work', predicates);
+    // Literal SHA-256 of code-unit-sorted {ids, contract}; never computed by the service here.
+    expect(decision!.contractHash).toBe(
+      '653e97ad68f54eb1094d5fa0270c37d564bd36f179bd4f490b936986374fc542',
+    );
+  });
+  it('passes only structural identity, transaction and cancellation capabilities', async () => {
+    await evaluateGuardDecision(ctx, 'work', predicates);
+    const producer = evaluate.mock.calls[0]![0];
+    expect(producer.db).not.toBe(db);
+    expect(producer.logger).toBe(ctx.logger);
+    expect(producer.signal).toBeInstanceOf(AbortSignal);
+    expect(producer).not.toHaveProperty('host');
+    for (const field of ['repoPath', 'workspacePath', 'sandboxWorkdir'] as const) {
+      try {
+        expect(producer[field]).toBeUndefined();
+      } catch (err) {
+        // A throwing getter is also an acceptable refusal, but an assertion error is not.
+        expect(err).toMatchObject({ message: 'guard predicate capability unavailable' });
+      }
+    }
+    expect(Object.keys(producer).sort()).toEqual(
+      [
+        'db',
+        'logger',
+        'round',
+        'rerunGeneration',
+        'signal',
+        'taskId',
+        'taskStepId',
+        'throwIfCancelled',
+        'userId',
+      ].sort(),
+    );
+  });
+  it('preserves predicate causes and logs the original error through the sanitising logger', async () => {
+    const err = Object.assign(new Error('private predicate text'), {
+      params: [randomBytes(24).toString('hex')],
+      query: 'select $1',
+      cause: Object.assign(new Error('private driver text'), { code: 'XX001' }),
+    });
+    const warn = vi.spyOn(ctx.logger, 'warn');
+    evaluate.mockRejectedValue(err);
+    try {
+      const failure = await evaluateGuardDecision(ctx, 'work', predicates).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({
+        cause: err,
+        message: 'guard-decision-invalid: predicate-evaluation-failed',
+      });
+      expect(warn).toHaveBeenCalledWith(
+        { err, taskId, spanId: 'work' },
+        'guard predicate evaluation failed',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect((await row('work'))!.guardState).toBeNull();
+  });
+  it('rethrows TaskCancelledError by identity and rolls back predicate writes', async () => {
+    const before = await snapshot();
+    const cancelled = new TaskCancelledError();
+    evaluate.mockImplementation(async (producer) => {
+      await producer.db
+        .update(schema.taskSteps)
+        .set({ statusMessage: 'must roll back' })
+        .where(eq(schema.taskSteps.id, rows.plan!.id));
+      throw cancelled;
+    });
+    await expect(evaluateGuardDecision(ctx, 'work', predicates)).rejects.toBe(cancelled);
+    expect(await snapshot()).toEqual(before);
+  });
+  // These tests exercise real transaction/connection locks, so use small real deadlines.
+  const limits = { statementTimeoutMs: 200, lockTimeoutMs: 100, predicateTimeoutMs: 100 };
+  async function watchdog<T>(run: Promise<T>): Promise<T | 'watchdog'> {
+    let timer: ReturnType<typeof setTimeout>;
+    try {
+      return await Promise.race([
+        run,
+        new Promise<'watchdog'>((resolve) => {
+          timer = setTimeout(() => resolve('watchdog'), 800);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+  async function assertLocksReleased() {
+    await db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.taskId, taskId))
+        .for('no key update', { noWait: true });
+      await tx
+        .select()
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, taskId))
+        .for('update', { noWait: true });
+    });
+  }
+  it.each(['never-settles', 'emitProgress'])(
+    'bounds a %s predicate, rolls back and releases every task lock',
+    async (mode) => {
+      const before = await snapshot();
+      const release = Promise.withResolvers<boolean>();
+      let progressWrite: Promise<unknown> | undefined;
+      ctx.emitProgress = vi.fn(async () => {
+        progressWrite = db
+          .update(schema.taskSteps)
+          .set({ statusMessage: 'outside write' })
+          .where(eq(schema.taskSteps.id, rows.work!.id))
+          .execute();
+        await Promise.race([progressWrite, release.promise]);
+      });
+      let producerSignal: AbortSignal | undefined;
+      evaluate.mockImplementation(async (producer) => {
+        producerSignal = producer.signal;
+        await producer.db
+          .update(schema.taskSteps)
+          .set({ statusMessage: 'must roll back' })
+          .where(eq(schema.taskSteps.id, rows.plan!.id));
+        if (mode === 'emitProgress') await producer.emitProgress('must refuse');
+        else await release.promise;
+        return true;
+      });
+      const run = evaluateGuardDecision(ctx, 'work', predicates, limits).catch(
+        (error: unknown) => error,
+      );
+      try {
+        const failure = await watchdog(run);
+        expect(failure).toMatchObject({
+          message: 'guard-decision-invalid: predicate-evaluation-failed',
+        });
+        expect(ctx.emitProgress).not.toHaveBeenCalled();
+        expect(producerSignal!.aborted).toBe(true);
+        await assertLocksReleased();
+        expect(await snapshot()).toEqual(before);
+      } finally {
+        release.resolve(true);
+        await run;
+        await progressWrite;
+      }
+    },
+  );
+  it('sets statement_timeout before any predicate SQL and rolls back a cancelled query', async () => {
+    const before = await snapshot();
+    evaluate.mockImplementation(async (producer) => {
+      await producer.db
+        .update(schema.taskSteps)
+        .set({ statusMessage: 'must roll back' })
+        .where(eq(schema.taskSteps.id, rows.plan!.id));
+      await producer.db.execute(sql`SELECT pg_sleep(1)`);
+      return true;
+    });
+    const failure = await evaluateGuardDecision(ctx, 'work', predicates, {
+      ...limits,
+      statementTimeoutMs: 50,
+      predicateTimeoutMs: 500,
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      message: 'guard-decision-invalid: predicate-evaluation-failed',
+    });
+    expect(hasPgCode((failure as Error).cause, '57014')).toBe(true);
+    await assertLocksReleased();
+    expect(await snapshot()).toEqual(before);
+  });
+  it('bounds the initial step-lock batch before evaluating a predicate', async () => {
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, rows.work!.id))
+        .for('update');
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    const run = evaluateGuardDecision(ctx, 'work', predicates, limits).catch(
+      (error: unknown) => error,
+    );
+    try {
+      const failure = await watchdog(run);
+      expect(hasPgCode(failure, '55P03')).toBe(true);
+      expect(evaluate).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await holder;
+      await run;
+    }
+    await assertLocksReleased();
+    expect((await row('work'))!.guardState).toBeNull();
+  });
   it.each(['before-write', 'after-write', 'commit'])(
     'rolls back a persistence crash at %s, then commits once on replay',
     async (cut) => {

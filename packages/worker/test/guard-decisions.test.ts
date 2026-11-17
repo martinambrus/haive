@@ -1,6 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { expect, it, vi } from 'vitest';
-import { evaluateGuardDecision, parseGuardDecision } from '../src/step-engine/guard-decisions.js';
+import {
+  GUARD_DECISION_BOUNDS,
+  evaluateGuardDecision,
+  parseGuardDecision,
+} from '../src/step-engine/guard-decisions.js';
 import { assertExecutionContractSupported } from '@haive/shared/modularity';
 
 it('ordinary and inert tasks return without a transaction, predicate or state write', async () => {
@@ -35,12 +39,27 @@ it('keeps the execution fence closed and the decision service has no skip or han
     'utf8',
   );
   expect(source).not.toMatch(/status\s*:\s*['"]skipped['"]|\.insert\(|\.delete\(|\.add\(/);
-  for (const file of [
-    '../src/queues/task-queue.ts',
-    '../src/queues/run-list.ts',
-    '../src/step-engine/step-runner.ts',
-  ])
-    expect(readFileSync(new URL(file, import.meta.url), 'utf8')).not.toContain(
-      'evaluateGuardDecision',
-    );
+  const packages = new URL('../../', import.meta.url);
+  function check(dir: URL): void {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const file = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
+      if (entry.isDirectory()) check(file);
+      else if (
+        file.pathname !== new URL('../src/step-engine/guard-decisions.ts', import.meta.url).pathname
+      )
+        expect(readFileSync(file, 'utf8'), file.pathname).not.toMatch(
+          /evaluateGuardDecision|guard-decisions/,
+        );
+    }
+  }
+  for (const entry of readdirSync(packages, { withFileTypes: true }))
+    if (entry.isDirectory()) check(new URL(`${entry.name}/src/`, packages));
+});
+
+it('pins the production SQL, lock and predicate bounds', () => {
+  expect(GUARD_DECISION_BOUNDS).toEqual({
+    statementTimeoutMs: 5_000,
+    lockTimeoutMs: 1_000,
+    predicateTimeoutMs: 5_000,
+  });
 });

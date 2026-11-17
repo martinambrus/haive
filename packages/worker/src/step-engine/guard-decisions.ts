@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { lockStepRows, schema } from '@haive/database';
 import {
   executionContractPaths,
   parseExecutionContract,
   type ExecutionContract,
 } from '@haive/shared/modularity';
-import type { StepContext, StepDefinition } from '@haive/shared/step';
+import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 
 const generation = z.number().int().nonnegative();
@@ -43,8 +43,8 @@ type Span = ExecutionContract['guardedSpans'][number];
 /** A retryable protocol fault. Never expose a predicate's error text or substitute false. */
 export class GuardDecisionError extends Error {
   readonly code = 'guard-decision-invalid';
-  constructor(reason: string) {
-    super(`guard-decision-invalid: ${reason}`);
+  constructor(reason: string, options?: ErrorOptions) {
+    super(`guard-decision-invalid: ${reason}`, options);
     this.name = 'GuardDecisionError';
   }
 }
@@ -56,7 +56,7 @@ export function parseGuardDecision(raw: unknown): GuardDecision {
 const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, item) =>
     item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
       : item,
   );
 const ref = (row: StepRow | undefined, span: Span) => {
@@ -70,6 +70,18 @@ const producerRef = (row: StepRow) => ({
   generation: row.rerunGeneration,
 });
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+
+/** Server deadlines bound SQL (including rollback queued behind a query); the JS
+ * deadline also covers a predicate that never issues or finishes a database query. */
+export const GUARD_DECISION_BOUNDS = {
+  statementTimeoutMs: 5_000,
+  lockTimeoutMs: 1_000,
+  predicateTimeoutMs: 5_000,
+} as const;
+type Bounds = { [K in keyof typeof GUARD_DECISION_BOUNDS]: number };
+const unavailable = (): never => {
+  throw new Error('guard predicate capability unavailable');
+};
 
 /** PR4a dormant service: no production caller, admission/START still refuse guards.
  *
@@ -91,6 +103,7 @@ export async function evaluateGuardDecision(
   ctx: StepContext,
   spanId: string,
   predicates: ReadonlyMap<string, Predicate>,
+  limits: Partial<Bounds> = {},
 ): Promise<GuardDecision | null> {
   const initial = await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
   if (!initial) throw new GuardDecisionError('task-unavailable');
@@ -100,7 +113,12 @@ export async function evaluateGuardDecision(
   if (ctx.epoch == null || ctx.rerunGeneration == null)
     throw new GuardDecisionError('missing-fence');
   ctx.throwIfCancelled();
+  const bounds = { ...GUARD_DECISION_BOUNDS, ...limits };
+  for (const ms of Object.values(bounds))
+    if (!Number.isSafeInteger(ms) || ms <= 0) throw new GuardDecisionError('invalid-deadline');
   return ctx.db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${bounds.statementTimeoutMs}ms'`));
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${bounds.lockTimeoutMs}ms'`));
     // Never wait for or update an unheld step after taking the task lock.
     const held = await lockStepRows(tx, eq(schema.taskSteps.taskId, ctx.taskId));
     const [task] = await tx
@@ -222,23 +240,58 @@ export async function evaluateGuardDecision(
       } else {
         const producer = predecessor(span);
         let result: unknown;
+        const lifetime = new AbortController();
+        const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          result = await predicates.get(span.predicateId)!.evaluate(
+          // Do not spread the runner context: its paths are agent-writable and its
+          // progress closure uses the pool, self-waiting on this transaction's locks.
+          const context = Object.defineProperties(
             {
-              ...ctx,
-              db: tx as unknown as StepContext['db'],
+              taskId: task.id,
               taskStepId: producer.id,
+              userId: task.userId,
               round: producer.round,
               rerunGeneration: producer.rerunGeneration,
-              host: undefined,
+              db: tx as unknown as StepContext['db'],
+              logger: ctx.logger,
+              signal,
+              throwIfCancelled() {
+                ctx.throwIfCancelled();
+                signal.throwIfAborted();
+              },
             },
-            structuredClone(span.args),
-          );
-        } catch {
-          throw new GuardDecisionError('predicate-evaluation-failed');
+            {
+              repoPath: { get: unavailable },
+              workspacePath: { get: unavailable },
+              sandboxWorkdir: { get: unavailable },
+              emitProgress: { value: async () => unavailable() },
+            },
+          ) as unknown as StepContext;
+          const deadline = new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              const err = new Error('guard predicate deadline exceeded');
+              lifetime.abort(err);
+              reject(err);
+            }, bounds.predicateTimeoutMs);
+          });
+          result = await Promise.race([
+            predicates.get(span.predicateId)!.evaluate(context, structuredClone(span.args)),
+            deadline,
+          ]);
+        } catch (err) {
+          if (err instanceof TaskCancelledError) throw err;
+          ctx.logger.warn({ err, taskId: task.id, spanId }, 'guard predicate evaluation failed');
+          throw new GuardDecisionError('predicate-evaluation-failed', { cause: err });
+        } finally {
+          clearTimeout(timer);
+          lifetime.abort();
         }
-        if (typeof result !== 'boolean')
-          throw new GuardDecisionError('predicate-evaluation-failed');
+        if (typeof result !== 'boolean') {
+          const err = new GuardDecisionError('predicate-non-boolean');
+          ctx.logger.warn({ err, taskId: task.id, spanId }, 'guard predicate evaluation failed');
+          throw err;
+        }
         predicate = { id: span.predicateId, result, source: ref(current, span) };
         settled = producerRef(producer);
       }
