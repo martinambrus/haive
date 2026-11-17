@@ -1031,12 +1031,64 @@ deadline and no usable path, progress writer or host capability. Deadline and
 predicate failures roll back and release locks rather than persisting false.
 SQL already in flight remains subject to the server-side statement deadline.
 
-No Retry/reset/boot behavior changes in this PR. A changed entry, dependency or
-producer generation makes an existing record stale and refuses replay. PR4b must
-add dependent-decision invalidation to explicit reset paths and complete all
-mid-span recovery controls before wiring the service into START/advance. Existing
-execution-contract admission and runtime refusals remain authoritative meanwhile.
-Rollback leaves the existing nullable 0245 column and immutable task pins intact.
+A still-unwired span skip writer exists: all pristine members commit skipped
+under the same ordered batch then task fence, with no output or recap. Non-entry
+members carry generation-bound guard-skip receipts; duplicate and partial replay
+must match the stored entry decision. The writer moves no task pointer and queues
+nothing. Its unchanged entry pointer is the recovery anchor for a post-commit
+finished-row handoff. Failure before enqueue or acknowledgement loss retries the
+same decision without step execution. Skips stamp ended_at and updated_at;
+redelivery keeps that pass identity and appends one step.skipped event. Replay
+checks exact receipts and empty work fields, excluding terminal timestamps.
+The dormant advance caller retries only transient producer/write races
+and SQLSTATE 55P03/57014/40P01/40001. Permanent guard errors return a separate
+refused outcome with the reason and no handoff. The activation must materialize all span
+member rows before the decision/skip lock batch; a missing member refuses rather
+than retrying forever. Limits are capped at
+2147483647 ms; late predicate writes through an ended handle are refused.
+A predicate-deadline `refused` stops this pass; an existing redrive path decides
+what happens next, rather than an immediate retry loop. Before the activation opens the
+execution fence, reconcile runner-owned in-place generation changes as well:
+08e can be a span entry, and `holdReopenedForm` applies `nextGeneration` without
+rewriting guard_state today. The current closed fences prevent production
+reachability; composition does not prevent it after activation (see Task types).
+
+Explicit upstream reruns (API task/step Retry and worker revise/recheck/fix reset)
+clear forward decisions and their skips, including pending entries read after the
+ordered batch. They advance affected generations in the same transaction as the
+ordinary reset and epoch fence. Newly included rows have their runs and agents
+swept under NOWAIT, so a busy writer rolls back the reset rather than crossing
+lock tiers. A full START Retry invalidates recorded branches
+too. A degraded done fan-out's Resume cascade regenerates downstream producers,
+so it invalidates their decisions/skips too; only retained left-active and loop
+Resume work preserves guards. Recovery keeps guard state and generations and
+leaves guard-owned skipped members closed. Park re-offer and START settlement
+clear guard_state whenever they advance rerun_generation, preventing stale replay. Stop, BullMQ boot requeue, orphan reconcile, stalled
+redrive and dead revival preserve the stored branch; an epoch takeover alone
+cannot re-evaluate it. Changed entry, dependency or producer generations still
+refuse stale replay. These services remain unwired; execution-contract admission,
+START/advance, boot and revival refusals remain authoritative. Tests isolate the
+capability check to exercise generic recovery beneath that closed fence.
+Rollback leaves nullable 0245 guard_state and immutable task pins intact. After
+activation retain capable workers while any guarded task can resume.
+
+Ordinary worker reset locks and reads retain main's exact id sets, including
+owned handoff locks without resetting those held-only rows. Guarded pins alone
+widen the batch to the target and later rows in its round. Other fix-loop rounds
+are never disturbed. The API retains its pre-existing task-wide batch, but reads
+only requested ids on ordinary pins and same-round forward held rows on guarded
+pins. Ordinary resets omit guard_state from SET and ordinary START adds no full
+step-row SELECT. Both reset helpers accept the caller's immutable executionContract
+and only project it when the argument is undefined (worker before its transaction,
+API on its supplied transaction). Every production caller supplies the loaded pin;
+orphan reconcile adds it to the existing joined read. Ordinary resets therefore
+add no statement; literal all-table query captures pin the main statement list,
+lock predicates, reads and complete SET key sets for null and inert pins.
+No reset lock_timeout is added. API resets report extra rows
+with their pre-reset statuses, so every caller includes their sandbox cleanup
+and audit even if a guard row was claimed after its initial selection. Retained
+Resume rows reset after a held batch use NOWAIT run sweeps to avoid reversing
+lock tiers.
 
 ## No-change cleanup recovery
 

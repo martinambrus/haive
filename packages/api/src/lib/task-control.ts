@@ -1,3 +1,4 @@
+import { parseExecutionContract } from '@haive/shared/modularity';
 import {
   and,
   eq,
@@ -213,6 +214,22 @@ const reofferedTiming = {
   foldedAt: sql<number>`floor(extract(epoch from now()) * 1000)`.mapWith(Number),
 };
 
+/** Production callers pass their immutable pin, avoiding another START read.
+ * Direct helper callers can omit it and get a cheap projection pre-read. */
+async function hasGuardedPin(tx: DbHandle, taskId: string, executionContract: unknown) {
+  if (executionContract === undefined) {
+    const [task] = await tx
+      .select({ executionContract: schema.tasks.executionContract })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .limit(1);
+    executionContract = task?.executionContract;
+  }
+  return (
+    executionContract != null && parseExecutionContract(executionContract).guardedSpans.length > 0
+  );
+}
+
 /** Put a restarting task's parked rows, other than `exclude`, back to `pending` with what they
  *  held: a form keeps its schema and answers, a runtime park its detection. A fix-loop gate loses
  *  its saved decision and stops at its form, so the gate asks again. */
@@ -221,7 +238,9 @@ export async function reofferParkedSteps(
   taskId: string,
   now: Date,
   exclude: readonly string[],
+  executionContract?: unknown,
 ) {
+  const guarded = await hasGuardedPin(tx, taskId, executionContract);
   const parked = and(
     eq(schema.taskSteps.taskId, taskId),
     or(
@@ -236,6 +255,7 @@ export async function reofferParkedSteps(
     .set({
       status: 'pending',
       applyReceipt: null,
+      ...(guarded ? { guardState: null } : {}),
       rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
       ...parkFolded,
       waitingStartedAt: null,
@@ -257,20 +277,27 @@ export async function reofferParkedSteps(
 export async function settleActiveSteps(
   db: ReturnType<typeof getDb>,
   taskId: string,
+  executionContract?: unknown,
 ): Promise<void> {
-  await db.transaction((tx) => settleActiveStepsIn(tx, taskId));
+  await db.transaction((tx) => settleActiveStepsIn(tx, taskId, executionContract));
 }
 
 /** `settleActiveSteps` inside the caller's transaction. */
-export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise<void> {
+export async function settleActiveStepsIn(
+  tx: DbHandle,
+  taskId: string,
+  executionContract?: unknown,
+) {
+  const guarded = await hasGuardedPin(tx, taskId, executionContract);
   const now = new Date();
-  await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
+  const held = await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   await failStuckSteps(tx, taskId, 'user', now, false);
   const rows = await tx
     .update(schema.taskSteps)
     .set({
       status: 'pending',
       applyReceipt: null,
+      ...(guarded ? { guardState: null } : {}),
       rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
       ...parkFolded,
       waitingStartedAt: null,
@@ -292,6 +319,7 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
     )
     .returning(reofferedTiming);
   await carryReofferedRuns(tx, rows);
+  return held;
 }
 
 /** A plain read, never `.for()`: a Stop writes the task row after the step rows, as a Retry does,

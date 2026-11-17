@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GUARD_DECISION_BOUNDS,
@@ -54,15 +54,25 @@ it('keeps the execution fence closed and the decision service has no skip or han
       const file = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
       if (entry.isDirectory()) check(file);
       else if (
-        file.pathname !== new URL('../src/step-engine/guard-decisions.ts', import.meta.url).pathname
+        !['guard-decisions.ts', 'guard-span-skip.ts'].some(
+          (name) =>
+            file.pathname === new URL(`../src/step-engine/${name}`, import.meta.url).pathname,
+        )
       )
         expect(readFileSync(file, 'utf8'), file.pathname).not.toMatch(
-          /evaluateGuardDecision|guard-decisions/,
+          /evaluateGuardDecision|guard-decisions|skipGuardSpan|advanceGuardSpan|guard-span-skip/,
         );
     }
   }
-  for (const entry of readdirSync(packages, { withFileTypes: true }))
-    if (entry.isDirectory()) check(new URL(`${entry.name}/src/`, packages));
+  for (const root of [
+    packages,
+    new URL('../../../modules/', import.meta.url),
+    new URL('../../../external-modules/', import.meta.url),
+  ])
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const source = new URL(`${entry.name}/src/`, root);
+      if (entry.isDirectory() && existsSync(source)) check(source);
+    }
 });
 
 it('pins the production SQL, lock and predicate bounds', () => {
@@ -448,6 +458,17 @@ describe('guard decisions from loaded rows', () => {
     expect(await decide()).toEqual(saved);
     expect(evaluate).toHaveBeenCalledOnce();
   });
+  it.each([true, false])(
+    'only replays a skipped entry with run:false (predicate=%s)',
+    async (result) => {
+      evaluate.mockResolvedValue(result);
+      const saved = await save();
+      rows.work!.status = 'skipped';
+      if (result) await expect(decide()).rejects.toThrow('entry-fence-lost');
+      else expect(await decide()).toEqual(saved);
+      expect(evaluate).toHaveBeenCalledOnce();
+    },
+  );
 
   it('reuses the earliest shared predicate for the opposite branch', async () => {
     const first = await save();

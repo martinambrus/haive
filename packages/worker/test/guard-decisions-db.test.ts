@@ -201,6 +201,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
     const before = await snapshot();
     const release = Promise.withResolvers<boolean>();
     let producerSignal: AbortSignal | undefined;
+    const lateWrite = Promise.withResolvers<unknown>();
     evaluate.mockImplementation(async (producer) => {
       producerSignal = producer.signal;
       await producer.db
@@ -208,6 +209,15 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         .set({ statusMessage: 'must roll back' })
         .where(eq(schema.taskSteps.id, rows.plan!.id));
       await release.promise;
+      try {
+        await producer.db
+          .update(schema.taskSteps)
+          .set({ statusMessage: 'late write refused' })
+          .where(eq(schema.taskSteps.id, rows.plan!.id));
+        lateWrite.resolve('unexpected success');
+      } catch (err) {
+        lateWrite.resolve(err);
+      }
       return true;
     });
     const run = evaluateGuardDecision(ctx, 'work', predicates, limits).catch(
@@ -225,6 +235,8 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       release.resolve(true);
       await run;
     }
+    expect(await lateWrite.promise).toSatisfy((err) => hasPgCode(err, 'UNSAFE_TRANSACTION'));
+    expect(await snapshot()).toEqual(before);
   });
   it('sets statement_timeout before any predicate SQL and rolls back a cancelled query', async () => {
     const before = await snapshot();

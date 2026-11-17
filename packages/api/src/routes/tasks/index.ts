@@ -1,3 +1,4 @@
+import { parseExecutionContract } from '@haive/shared/modularity';
 import { markdownReportPage } from './_markdown-report.js';
 import { z } from 'zod';
 import { insightEventPage } from './_insight-event-page.js';
@@ -154,7 +155,7 @@ import {
 } from './_helpers.js';
 import { resolveCostDisplay } from '@haive/shared/stats-server';
 import { fileRoutes } from './files.js';
-import { retryTaskAtStep, stepRoutes } from './steps.js';
+import { resetRowsForRerun, retryTaskAtStep, stepRoutes } from './steps.js';
 import {
   insertUpgradeTask,
   refuseBesideLiveUpgrade,
@@ -1604,7 +1605,30 @@ taskRoutes.post('/:id/action', async (c) => {
         await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await supersedeLiveRuns(tx, id, { failTask: false });
-        await settleActiveStepsIn(tx, id);
+        const held = await settleActiveStepsIn(tx, id, task.executionContract);
+        // A full START retry invalidates every recorded guard branch, including
+        // still-pending decisions and skips in rounds the restart may revisit.
+        const guards =
+          task.executionContract != null &&
+          parseExecutionContract(task.executionContract).guardedSpans.length > 0 &&
+          held.length
+            ? await tx
+                .select()
+                .from(schema.taskSteps)
+                .where(
+                  and(
+                    inArray(
+                      schema.taskSteps.id,
+                      held.map((r) => r.id),
+                    ),
+                    isNotNull(schema.taskSteps.guardState),
+                  ),
+                )
+            : [];
+        await resetRowsForRerun(tx, id, guards, new Date(), {
+          rowsHeld: true,
+          executionContract: task.executionContract,
+        });
         await clearMessages(tx);
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
@@ -1616,7 +1640,7 @@ taskRoutes.post('/:id/action', async (c) => {
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
       await stopActiveCliInvocations(db, id, { failTask: false });
-      await settleActiveSteps(db, id);
+      await settleActiveSteps(db, id, task.executionContract);
       await appendTaskEvent(db, id, null, 'task.retried', { by: userId });
       await enqueueStart(id, userId);
       return c.json({ ok: true, status: 'queued' });

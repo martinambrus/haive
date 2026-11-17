@@ -124,6 +124,7 @@ export async function handoffInsightContinuation(
         ctx.orchestrationEpoch,
         false,
         [source.id],
+        ctx.executionContract,
       );
       if (reset === 'superseded') throw new StepSupersededError(source.id);
       if (!(await lockOwnedStep(tx, source.id))) throw new StepSupersededError(source.id);
