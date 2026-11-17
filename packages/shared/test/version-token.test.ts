@@ -38,3 +38,17 @@ it('names the field and shows a bounded JSON-quoted invalid value', () => {
     expect((err as Error).message).not.toContain('x'.repeat(81));
   }
 });
+
+it.each([0x2028, 0x009b, 0x007f, 0x0085, 0x200b, 0x202e, 0x2060, 0x2069, 0xfeff])(
+  'escapes invisible and control characters in the refusal preview (codepoint %i)',
+  (codepoint) => {
+    const character = String.fromCharCode(codepoint);
+    const escaped = `\\u${codepoint.toString(16).padStart(4, '0')}`;
+    expect(() => assertVersionToken(`1${character}2`, 'Stored pin')).toThrow(`"1${escaped}2"`);
+    try {
+      assertVersionToken(`1${character}2`);
+    } catch (err) {
+      expect((err as Error).message).not.toContain(character);
+    }
+  },
+);

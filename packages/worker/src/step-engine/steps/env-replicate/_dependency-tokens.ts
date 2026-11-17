@@ -1,7 +1,8 @@
 import { assertVersionToken } from '@haive/shared';
 
 /** Called on both newly declared and already stored dependencies. Empty pins retain the
- *  unpinned contract; nonempty input is checked before any runtime-specific resolution. */
+ *  unpinned contract; nonempty input is checked before any runtime-specific resolution.
+ *  Database versions are not Dockerfile operands; apply and the DDEV renderer check them. */
 export function assertDependencyTokens(deps: {
   versions?: Record<string, string | null>;
   lspServerVersions?: Record<string, string | null>;
@@ -37,13 +38,4 @@ export function assertDependencyTokens(deps: {
     assertVersionToken(manager, 'Package manager name');
   }
   if (deps.database?.kind) assertVersionToken(deps.database.kind, 'Database kind');
-  if (
-    deps.database?.version !== undefined &&
-    deps.database.version !== null &&
-    deps.database.version !== ''
-  )
-    assertVersionToken(
-      deps.database.version,
-      'Database version (databaseVersion; edit the declared dependencies)',
-    );
 }

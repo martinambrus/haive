@@ -1,7 +1,11 @@
 import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getCliProviderMetadata, splitSecretLikeEnv, type CliProviderName } from '@haive/shared';
-import type { CliProbePathResult } from '@haive/shared';
+import {
+  getCliProviderMetadata,
+  splitSecretLikeEnv,
+  type CliProviderName,
+  type CliProbePathResult,
+} from '@haive/shared';
 import { guardedProbeFetch } from '@haive/shared/egress';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';

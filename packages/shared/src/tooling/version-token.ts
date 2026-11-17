@@ -20,7 +20,10 @@ export function assertVersionToken(value: unknown, label = 'Version'): asserts v
   if (!isVersionToken(value)) {
     const preview =
       typeof value === 'string'
-        ? JSON.stringify(value.length > 80 ? `${value.slice(0, 80)}…` : value)
+        ? JSON.stringify(value.length > 80 ? `${value.slice(0, 80)}…` : value).replace(
+            /[\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g,
+            (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+          )
         : typeof value === 'object'
           ? value === null
             ? 'null'

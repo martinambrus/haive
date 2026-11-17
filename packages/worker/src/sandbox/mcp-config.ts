@@ -1,6 +1,6 @@
-import { assertVersionToken } from '@haive/shared';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  assertVersionToken,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   mcpAcceptanceMark,
   type CliProviderName,

@@ -1,4 +1,3 @@
-import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '@haive/shared';
 import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -6,6 +5,8 @@ import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
+  isVersionToken,
+  VERSION_TOKEN_REQUIREMENT,
   CLI_EXEC_JOB_NAMES,
   TERMINAL_REQUEST_CHANNEL,
   type TerminalCloseProviderRequest,

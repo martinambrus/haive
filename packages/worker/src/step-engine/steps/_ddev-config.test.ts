@@ -439,6 +439,9 @@ describe('renderDdevConfig + slugifyDdevName', () => {
   // left DDEV on its own default while the declared Node version reached only the CLI
   // sandbox image. See docs/plans/patient-pinning-kernighan.md.
   it('writes the declared Node version, as a major or a full version', () => {
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: ' 22 ' })).toContain(
+      'nodejs_version: \"22\"',
+    );
     expect(renderDdevConfig({ name: 'x', nodejsVersion: '22' })).toContain('nodejs_version: "22"');
     expect(renderDdevConfig({ name: 'x', nodejsVersion: '22.11.0' })).toContain(
       'nodejs_version: "22.11.0"',
@@ -448,13 +451,13 @@ describe('renderDdevConfig + slugifyDdevName', () => {
   it('omits nodejs_version when absent, so DDEV keeps its own default', () => {
     expect(renderDdevConfig({ name: 'x', phpVersion: '8.3' })).not.toContain('nodejs_version');
     expect(renderDdevConfig({ name: 'x', nodejsVersion: null })).not.toContain('nodejs_version');
-    expect(() => renderDdevConfig({ name: 'x', nodejsVersion: '  ' })).toThrow(/version token/);
+    expect(renderDdevConfig({ name: 'x', nodejsVersion: '  ' })).not.toContain('nodejs_version');
   });
 
   // DDEV feeds the field to nvm, which takes no ranges. `engines.node` reaches here through
-  // detection drops non-token constraints. Safe but nonnumeric tokens still omit the line.
+  // sanitizeVersion; older stored values may still carry constraints. Omit those lines.
   it('omits a Node version nvm could not install rather than breaking ddev start', () => {
-    for (const bad of ['latest', 'lts', '22.x']) {
+    for (const bad of ['latest', 'lts', '22.x', '20 || ^22', '^22', '>=18', 'lts/hydrogen', '']) {
       expect(renderDdevConfig({ name: 'x', nodejsVersion: bad })).not.toContain('nodejs_version');
     }
   });

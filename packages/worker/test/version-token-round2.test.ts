@@ -4,12 +4,18 @@ import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION } from '@haive/shared';
+import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION, validateFormValues } from '@haive/shared';
 import {
   declareDepsStep,
   scanRepoForDeps,
+  loadOnboardingDetection,
+  reconcileStaleDeps,
+  type DeclareDepsFormValues,
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
-import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import {
+  generateDockerfileStep,
+  renderDockerfile,
+} from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 import { renderDdevConfig, type DdevConfigInput } from '../src/step-engine/steps/_ddev-config.js';
 import { resolveImageTag, renderDockerfile as renderImage } from '../src/sandbox/image-cache.js';
 import { ddevEnvStep } from '../src/step-engine/steps/workflow/01c-ddev-env.js';
@@ -174,20 +180,15 @@ it('refuses raw database and both browser pins before any dependency write', asy
   ).rejects.toThrow(/version token/);
 });
 
-it.each([
-  'type',
-  'phpVersion',
-  'nodejsVersion',
-  'dbType',
-  'dbVersion',
-  'webserverType',
-  'docroot',
-] as const)('refuses YAML injection in %s before returning any config', (field) => {
-  const token = '8.0"\nhooks:\n  pre-start:\n    - exec-host: id #';
-  expect(() =>
-    renderDdevConfig({ name: 'safe', dbType: 'mysql', [field]: token } as DdevConfigInput),
-  ).toThrow(/version token/);
-});
+it.each(['type', 'phpVersion', 'dbVersion', 'webserverType', 'docroot'] as const)(
+  'refuses YAML injection in %s before returning any config',
+  (field) => {
+    const token = '8.0"\nhooks:\n  pre-start:\n    - exec-host: id #';
+    expect(() =>
+      renderDdevConfig({ name: 'safe', dbType: 'mysql', [field]: token } as DdevConfigInput),
+    ).toThrow(/version token/);
+  },
+);
 
 it('keeps valid DDEV rendering byte-identical to main', () => {
   expect(
@@ -280,3 +281,139 @@ it('refuses a stored database injection in the workflow before a config is offer
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+it.each(['>=18.17.0 <21', '^18.12.0 || ^20.0.0'])(
+  'keeps the numeric leading Node major from %s as main did',
+  async (constraint) => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), 'version-node-major-'));
+    try {
+      await writeFile(
+        path.join(repo, 'package.json'),
+        JSON.stringify({ engines: { node: constraint } }),
+      );
+      const detected = await scanRepoForDeps(repo);
+      expect(detected.runtimes.find((r) => r.language === 'node')?.version).toBe('18');
+      expect(defaults(setup(repo).ctx, detected).nodeVersion).toBe('18');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+it('trims onboarding pins and ignores blank runtime values before language detection', async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), 'version-onboarding-padded-'));
+  try {
+    const { ctx } = setup(repo, {
+      phpVersion: ' 8.3 ',
+      databaseType: 'postgres',
+      databaseVersion: ' 15 ',
+      nodeVersion: '   ',
+      rubyVersion: '\t',
+    });
+    const detected = await declareDepsStep.detect!(ctx);
+    expect(detected.runtimes).toMatchObject([{ language: 'php', version: '8.3' }]);
+    expect(detected.runtimes).toHaveLength(1);
+    expect(detected.database).toEqual({ kind: 'postgres', version: '15' });
+    expect(defaults(ctx, detected)).toMatchObject({ phpVersion: '8.3', databaseVersion: '15' });
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+it('omits non-interpolated DDEV fields without refusing legacy data', () => {
+  const unsafe = '8.0"\nhooks: injected';
+  for (const dbType of [undefined, null, 'none', 'mysql ', 'sql server', unsafe]) {
+    expect(renderDdevConfig({ name: 'safe', dbType, dbVersion: unsafe })).not.toContain(
+      'database:',
+    );
+  }
+  expect(renderDdevConfig({ name: 'safe', nodejsVersion: unsafe })).not.toContain('nodejs_version');
+});
+
+it.each(['${PG_VERSION:-15}', '15@sha256:abcdef'])(
+  'drops the detected Compose pin %s and repairs reused runtime/database answers before apply',
+  async (version) => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), 'version-compose-reuse-'));
+    try {
+      await writeFile(
+        path.join(repo, 'compose.yml'),
+        `services:\n  db:\n    image: postgres:${version}\n`,
+      );
+      await writeFile(path.join(repo, 'package.json'), JSON.stringify({ engines: { node: '22' } }));
+      const { ctx, fake } = setup(repo);
+      const detected = await declareDepsStep.detect!(ctx);
+      expect(detected.database).toEqual({ kind: 'postgres', version: null });
+      const reused = {
+        ...defaults(ctx, detected),
+        databaseVersion: version,
+        nodeVersion: '18.17.0 <21',
+        phpVersion: '^7.3|^8.0',
+        pythonVersion: '>=3.12',
+        javaVersion: '${java.version}',
+        goVersion: '>=1.23',
+        rustVersion: '>=1.80',
+        rubyVersion: '~> 3.2.0',
+      } as DeclareDepsFormValues;
+      const reconciled = reconcileStaleDeps(detected, reused);
+      for (const field of [
+        'databaseVersion',
+        'nodeVersion',
+        'phpVersion',
+        'pythonVersion',
+        'javaVersion',
+        'goVersion',
+        'rustVersion',
+        'rubyVersion',
+      ])
+        expect(reconciled[field]).toBe('');
+      expect(reused.databaseVersion).toBe(version);
+      const validated = validateFormValues(declareDepsStep.form!(ctx, detected)!, reconciled);
+      expect(validated.success).toBe(true);
+      if (!validated.success) throw new Error(validated.issues.join('; '));
+      expect(validated.data).toMatchObject({ nodeVersion: '22', databaseVersion: '' });
+      await declareDepsStep.apply(ctx, {
+        detected,
+        formValues: validated.data,
+        iteration: 0,
+        previousIterations: [],
+      } as never);
+      expect(fake.rows(schema.envTemplates)[0]!.declaredDeps).toMatchObject({
+        versions: { node: '22' },
+        database: { kind: 'postgres', version: null },
+      });
+      expect(() =>
+        renderDockerfile('ubuntu:24.04', { database: { kind: 'postgres', version } }),
+      ).not.toThrow();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  },
+);
+
+it('ignores blank onboarding database and runtime values', async () => {
+  const { ctx } = setup('', { nodeVersion: '   ', phpVersion: '', databaseVersion: '\t ' });
+  expect(await loadOnboardingDetection(ctx.db, REPO)).toMatchObject({
+    languages: [],
+    runtimeVersions: {},
+    databaseVersion: null,
+  });
+});
+
+it.each(['${PG_VERSION:-15}', '15@sha256:abcdef'])(
+  'allows stored database version %s through Dockerfile detect where it is not interpolated',
+  async (version) => {
+    const { ctx, fake } = setup('');
+    fake.insert(schema.envTemplates, {
+      id: TASK,
+      baseImage: 'ubuntu:24.04',
+      declaredDeps: { database: { kind: 'postgres', version } },
+    });
+    await ctx.db
+      .update(schema.tasks)
+      .set({ envTemplateId: TASK })
+      .where((await import('drizzle-orm')).eq(schema.tasks.id, TASK));
+    await expect(generateDockerfileStep.detect!(ctx)).resolves.toMatchObject({
+      declaredDeps: { database: { version } },
+    });
+  },
+);

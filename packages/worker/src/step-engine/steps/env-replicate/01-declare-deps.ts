@@ -7,12 +7,10 @@ import {
   isVersionToken,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
-} from '@haive/shared';
-import type {
-  FormSchema,
-  FormValues,
-  OnboardingEnvironmentMirror,
-  OnboardingToolingMirror,
+  type FormSchema,
+  type FormValues,
+  type OnboardingEnvironmentMirror,
+  type OnboardingToolingMirror,
 } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -210,8 +208,8 @@ export async function loadOnboardingDetection(
   }
   const runtimeVersions: Partial<Record<LanguageKey, string>> = {};
   for (const { field, language } of ONBOARDING_VERSION_KEYS) {
-    const v = values[field];
-    if (typeof v === 'string' && v.length > 0) {
+    const v = str(field);
+    if (v) {
       if (isVersionToken(v)) runtimeVersions[language] = v;
       languages.add(language);
     }
@@ -219,7 +217,7 @@ export async function loadOnboardingDetection(
 
   return {
     databaseType: str('databaseType'),
-    databaseVersion: isVersionToken(values.databaseVersion) ? values.databaseVersion : null,
+    databaseVersion: isVersionToken(str('databaseVersion')) ? str('databaseVersion') : null,
     webserver: str('webserver'),
     languages: Array.from(languages),
     runtimeVersions,
@@ -761,6 +759,11 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       repoLspServers = repoRow[0]?.lspServers ?? null;
     }
 
+    if (values.databaseVersion)
+      assertVersionToken(
+        values.databaseVersion,
+        'Database version (databaseVersion; edit the declared dependencies)',
+      );
     assertDependencyTokens({
       lspServerVersions: repoLspVersions ?? undefined,
       chromeDevtoolsMcpVersion: repoChromeMcpVersion,
@@ -955,8 +958,9 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
  *  never fires, so the DDEV stack the repo now carries is never brought up.
  *
  *  Only a reused 'none' — the "nothing found" sentinel of either select — is
- *  refreshed from this task's detection. A tool or database the user picked is
- *  never overwritten, including when it has since disappeared from the repo.
+ *  refreshed from this task's detection. A tool or database kind the user picked
+ *  is never overwritten, including when it has since disappeared from the repo.
+ *  Non-token versions from older answers are blanked to take safe form defaults.
  *  Manual mode never reaches here (reuse is auto-continue-gated) and already shows
  *  the freshly detected values as its form defaults. */
 export function reconcileStaleDeps(
@@ -964,6 +968,12 @@ export function reconcileStaleDeps(
   reused: DeclareDepsFormValues,
 ): DeclareDepsFormValues {
   const patch: Partial<DeclareDepsFormValues> = {};
+  // Old answers can carry manifest constraints or Compose substitutions. Blanking
+  // them lets form validation supply this detection's safe defaults before apply.
+  for (const { id } of VERSION_FIELDS) {
+    if (reused[id] && !isVersionToken(reused[id])) patch[id] = '';
+  }
+  if (reused.databaseVersion && !isVersionToken(reused.databaseVersion)) patch.databaseVersion = '';
 
   if (reused.containerTool === 'none' && detected.containerTool !== 'none') {
     patch.containerTool = detected.containerTool;
@@ -975,7 +985,7 @@ export function reconcileStaleDeps(
 
   if (reused.databaseKind === 'none' && detected.database.kind !== 'none') {
     patch.databaseKind = detected.database.kind;
-    if (!reused.databaseVersion && detected.database.version) {
+    if (!(patch.databaseVersion ?? reused.databaseVersion) && detected.database.version) {
       patch.databaseVersion = detected.database.version;
     }
   }
@@ -1269,10 +1279,13 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   return {
     // Manifests describe constraints as well as pins. Non-tokens carry no usable pin;
     // leave the language detected so the form offers its established fallback.
-    runtimes: runtimes.map((r) => ({
-      ...r,
-      version: isVersionToken(r.version) ? r.version : null,
-    })),
+    runtimes: runtimes.map((r) => {
+      // The renderer historically used the first dotted component when numeric,
+      // e.g. engines ">=18.17.0 <21" (already stripped to "18.17.0 <21") chose 18.
+      const major = r.language === 'node' ? r.version?.split('.')[0] : null;
+      if (isVersionToken(r.version)) return r;
+      return { ...r, version: isVersionToken(major) && !/\D/.test(major) ? major : null };
+    }),
     containerTool,
     webserver,
     ddevProjectName: ddev.projectName,

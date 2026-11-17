@@ -290,15 +290,8 @@ export function slugifyDdevName(name: string): string {
  *  DDEV fills the rest with its own defaults. Used by 01c-ddev-env to create DDEV for a
  *  project that declares it but has no config yet. */
 export function renderDdevConfig(input: DdevConfigInput): string {
-  // Name is slugified below; every other interpolated scalar is checked raw.
-  for (const field of [
-    'type',
-    'phpVersion',
-    'nodejsVersion',
-    'dbType',
-    'dbVersion',
-    'webserverType',
-  ] as const) {
+  // Name is slugified below; validate the scalars we actually interpolate.
+  for (const field of ['type', 'phpVersion', 'webserverType'] as const) {
     const value = input[field];
     if (value !== undefined && value !== null && value !== '')
       assertVersionToken(value, `DDEV ${field}`);
@@ -313,8 +306,9 @@ export function renderDdevConfig(input: DdevConfigInput): string {
   // the regex parser, which can't read an empty-quoted scalar).
   if (input.docroot) lines.push(`docroot: "${input.docroot}"`);
   if (input.phpVersion) lines.push(`php_version: "${input.phpVersion}"`);
-  const nodejsVersion = input.nodejsVersion ?? '';
+  const nodejsVersion = (input.nodejsVersion ?? '').trim();
   if (nodejsVersion && isDdevNodejsVersion(nodejsVersion)) {
+    assertVersionToken(nodejsVersion, 'DDEV nodejsVersion');
     lines.push(`nodejs_version: "${nodejsVersion}"`);
   }
   lines.push(`webserver_type: ${input.webserverType || 'nginx-fpm'}`);
@@ -322,7 +316,10 @@ export function renderDdevConfig(input: DdevConfigInput): string {
   if (dbType) {
     lines.push('database:');
     lines.push(`  type: ${dbType}`);
-    if (input.dbVersion) lines.push(`  version: "${input.dbVersion}"`);
+    if (input.dbVersion) {
+      assertVersionToken(input.dbVersion, 'DDEV dbVersion');
+      lines.push(`  version: "${input.dbVersion}"`);
+    }
   }
   if (input.nodeInspect) {
     lines.push('web_environment:');

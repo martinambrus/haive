@@ -1,7 +1,7 @@
-import { assertVersionToken } from '@haive/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  assertVersionToken,
   type OnboardingToolingMirror,
   CONFIG_KEYS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,

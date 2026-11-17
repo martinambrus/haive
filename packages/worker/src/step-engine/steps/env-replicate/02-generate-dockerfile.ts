@@ -1,8 +1,7 @@
-import { assertVersionToken } from '@haive/shared';
 import { assertDependencyTokens } from './_dependency-tokens.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { assertVersionToken, type FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {

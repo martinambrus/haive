@@ -1,4 +1,3 @@
-import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '@haive/shared';
 import { isDeepStrictEqual } from 'node:util';
 import { UserPostgresDsnError } from '@haive/shared/egress';
 import { Hono } from 'hono';
@@ -16,6 +15,8 @@ import {
   recoverCliMembership,
 } from '@haive/shared/project-state';
 import {
+  isVersionToken,
+  VERSION_TOKEN_REQUIREMENT,
   CHECKOUT_HOLDING_TASK_STATUSES,
   LSP_KEY_SET,
   LSP_SERVER_OPTIONS,
