@@ -70,6 +70,7 @@ describe('resolveTaskTypeAvailability', () => {
       catalog,
       generic: true,
       modules: noRows,
+      predicates: new Map(),
     };
     it.each([
       ['disabled', { enabled: false }, on],
@@ -153,6 +154,45 @@ describe('resolveTaskTypeAvailability', () => {
       });
     });
   });
+
+  it.each(['builtin', 'admin', 'module:fx', 'test'])(
+    'keeps fix-target-only runtime refusal independent of predicate registration (%s)',
+    (source) => {
+      const capable = new Map(composable);
+      capable.set('a', { ...capable.get('a')!, fixConsumer: { version: 1 } });
+      capable.set('b', { ...capable.get('b')!, loopTargetStepId: '07-phase-2-implement' });
+      for (const predicates of [undefined, new Map()]) {
+        for (const syncedCatalog of [catalog, null, { ...catalog, composable: capable }]) {
+          expect(
+            resolveTaskTypeAvailability({
+              definition: definition({
+                source,
+                executionContract: {
+                  version: 1,
+                  guardedSpans: [],
+                  fixTarget: { stepId: 'a', capabilityVersion: 1 },
+                },
+              }),
+              switches: on,
+              modules: new Map([['fx', moduleRow('Fx')]]),
+              catalog: syncedCatalog,
+              generic: true,
+              predicates,
+            }),
+          ).toEqual({
+            available: false,
+            reason: 'invalid-composition',
+            issues: [
+              {
+                kind: 'invalid-execution-contract',
+                reason: expect.stringContaining('not yet supported by this worker'),
+              },
+            ],
+          });
+        }
+      }
+    },
+  );
 
   it('is available for a healthy admin type', () => {
     expect(

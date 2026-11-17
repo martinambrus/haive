@@ -112,6 +112,25 @@ describe('gen-modules: installed = depended on by api', () => {
     );
   });
 
+  it('imports schema-only execution predicates in both hosts while steps stay worker-only', (t) => {
+    const tree = makeTree(t, {
+      modules: {
+        foo: { exports: ['./manifest', './steps', './execution-predicates', './ensure-schema'] },
+      },
+      api: names('foo'),
+      worker: names('foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    for (const rel of REGISTRIES.slice(0, 2)) {
+      assert.match(tree.read(rel), /import p0 from '@haive\/module-foo\/execution-predicates';/);
+      assert.match(tree.read(rel), /executionPredicates: p0/);
+    }
+    assert.doesNotMatch(tree.read(REGISTRIES[0]), /module-foo\/steps|module-foo\/ensure-schema/);
+    assert.match(tree.read(REGISTRIES[1]), /steps: s0/);
+    assert.match(tree.read(REGISTRIES[1]), /ensureSchema: e0/);
+  });
+
   it('writes empty registries for a tree with no module', (t) => {
     const tree = makeTree(t);
     const out = tree.run('gen-modules.mjs');

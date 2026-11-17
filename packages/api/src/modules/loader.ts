@@ -28,6 +28,7 @@ import {
   moduleManifestSchema,
   modulePackageId,
   type ModuleManifest,
+  type ModuleExecutionPredicates,
   type ModuleSource,
 } from '@haive/shared/modularity';
 import {
@@ -55,6 +56,7 @@ import {
   requestModuleRetry,
   setModuleActive,
 } from './activation.js';
+import { registerModuleExecutionPredicates } from './execution-predicates.js';
 import { moduleSourceRoutes } from './sources.js';
 import { registerModuleMiningSeats } from './mining-seats.js';
 import { setModuleExecutors } from './integration-executors.js';
@@ -65,6 +67,7 @@ export type ApiModuleEntry = {
   packageName: string;
   source?: ModuleSource;
   manifest: unknown;
+  executionPredicates?: ModuleExecutionPredicates;
   routes?: (ctx: ModuleRouteContext) => Hono<AppEnv>;
   integrations?: ModuleIntegrationExecutors;
 };
@@ -190,6 +193,7 @@ export async function mountModules(
       hasRoutes: entry.routes !== undefined,
     });
   }
+  registerModuleExecutionPredicates(entries, loaded);
   registerModuleIntegrations(loaded);
   registerModuleMiningSeats(loaded);
   setModuleExecutors(entries.map((entry) => entry.integrations));

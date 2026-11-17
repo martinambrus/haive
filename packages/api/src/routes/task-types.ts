@@ -30,6 +30,7 @@ import {
   type StepCatalogRead,
 } from '@haive/shared/modularity-server';
 import { derivedBaseEligibility } from '@haive/shared/run-list';
+import { executionPredicates } from '../modules/execution-predicates.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { buildUpcomingCliSteps } from './tasks/_helpers.js';
@@ -86,6 +87,7 @@ function availabilityOf(
     modules,
     catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
+    predicates: executionPredicates(),
     ...(derived
       ? {
           derived: {
@@ -424,6 +426,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
       ? validateComposition(row.stepIds ?? [], mergePromptStepCatalog(catalog, row).composable, {
           requiresRepository: row.requiresRepository,
           executionContract: row.executionContract,
+          predicates: executionPredicates(),
         })
       : [];
   const promptStepIssues =
@@ -492,6 +495,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
         diagnostics.candidates,
         diagnostics.catalog.composable,
         body.dataRoleBindings,
+        { catalog: diagnostics.catalog.composable, predicates: executionPredicates() },
       );
       if (portIssues.length)
         return { invalid: { error: 'Invalid data role bindings', issues: portIssues } } as const;
@@ -552,12 +556,15 @@ adminTaskTypeRoutes.post('/', async (c) => {
   });
   const issues = validateComposition(body.stepIds, composable, {
     requiresRepository: body.requiresRepository,
+    executionContract: undefined,
+    predicates: executionPredicates(),
   });
   if (issues.length > 0) return c.json({ error: 'Invalid step composition', issues }, 400);
   const portIssues = dataRoleDraftIssues(
     [{ executionPath: null, stepIds: body.stepIds }],
     composable,
     body.dataRoleBindings,
+    { catalog: composable, predicates: executionPredicates() },
   );
   if (portIssues.length)
     return c.json({ error: 'Invalid data role bindings', issues: portIssues }, 400);
@@ -640,7 +647,11 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         diagnostics.candidates,
         diagnostics.catalog.composable,
         dataRoleBindingsSchema.parse(merged.dataRoleBindings ?? []),
-        { executionContract: merged.executionContract, catalog: diagnostics.catalog.composable },
+        {
+          executionContract: merged.executionContract,
+          catalog: diagnostics.catalog.composable,
+          predicates: executionPredicates(),
+        },
       );
       if (
         (body.changes !== undefined ||
@@ -737,6 +748,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         const issues = validateComposition(stepIds, composable, {
           requiresRepository,
           executionContract: row.executionContract,
+          predicates: executionPredicates(),
         });
         if (issues.length > 0) {
           return { invalid: { error: 'Invalid step composition', issues } } as const;
@@ -746,7 +758,11 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         [{ executionPath: null, stepIds }],
         composable,
         dataRoleBindingsSchema.parse(body.dataRoleBindings ?? row.dataRoleBindings ?? []),
-        { executionContract: row.executionContract, catalog: composable },
+        {
+          executionContract: row.executionContract,
+          catalog: composable,
+          predicates: executionPredicates(),
+        },
       );
       if (
         portIssues.length &&

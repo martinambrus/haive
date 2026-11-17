@@ -6,7 +6,8 @@ A module is a package named `@haive/module-<id>` (a workspace folder under `modu
 the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
 loaders refuse at boot a manifest whose id does not match its name), whose
 `package.json` exports `./manifest` (which may also declare integration providers and categories, see
-[Integrations](integrations.md)) and any of `./routes` and `./integrations` (api, the executors of
+[Integrations](integrations.md)) and optionally `./execution-predicates` (api and worker, schema-only),
+`./routes` and `./integrations` (api, the executors of
 those providers), `./steps`, `./ensure-schema`,
 `./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
@@ -796,8 +797,9 @@ A module's static task-type seed may carry the strict version-1
 Its predicate ids use `module.<id>.<local>` and must belong to the seeding
 module. The module-id portion uses the shared `MODULE_ID_PATTERN` rule,
 including digit-leading ids and the 23-character bound. On a trusted `StepDefinition`, optional `guardPredicates` maps local
-predicate ids to `{argsSchema, evaluate}`. Boot namespaces and registers those
-callbacks, refuses duplicates or missing executable/schema functions, and
+predicate ids to `{argsSchema, evaluate}`. The schema-only export below declares
+the same ids and shares each exact schema object. Boot binds and namespaces those
+callbacks, refuses unmatched declarations/evaluators, duplicates or missing functions, and
 validates stored JSON args against the registered schema. P6 never calls
 `evaluate`, records a skip or writes `guard_state`; evaluation, settled producer
 identity and crash-safe decision ownership belong to P7. Do not serialize JS,
@@ -816,6 +818,60 @@ comparison and content hashing. A declaration with guards or a selected fix
 target can be stored as a validated seed but cannot create or start a task in
 P6. No admin authoring UI is added. Absence keeps the old NULL behavior; an
 explicit empty declaration can be pinned. Preserve every task pin on rollback.
+
+### Schema-only predicate registration (fence closed)
+
+A module may export `./execution-predicates` as a default readonly array satisfying
+`ModuleExecutionPredicates` from `@haive/shared/modularity`. Each item contains only
+`{id, argsSchema}`. `id` is local (`[0-9a-z_-]+`), never `module.<id>.<local>`;
+both hosts namespace it with the validated manifest id. Duplicate ids, namespaced
+or invalid ids, missing `safeParse`, extra item keys (including `evaluate`) and
+non-array exports refuse boot. An absent export contributes an empty map.
+
+For example, in a schema-only `execution-predicates.ts`:
+
+```ts
+import { z } from 'zod';
+import type { ModuleExecutionPredicates } from '@haive/shared/modularity';
+
+export const plannedArgs = z.strictObject({ producerStepId: z.string() });
+export default [{ id: 'planned', argsSchema: plannedArgs }] satisfies ModuleExecutionPredicates;
+```
+
+Publish JavaScript and declarations for this entry in `package.json` exports, just
+as for `./manifest`. The entry and its transitive imports must contain schemas only:
+no step imports, evaluator, worker dependency or top-level effects. The generator
+imports it into both API and worker registries; `./steps` stays worker-only. The
+API does not inspect a step graph or evaluate a predicate. Installed-package name,
+module-id, dependency and exact-version parity keep the existing boot/build checks.
+
+The executable step imports `plannedArgs` from that schema-only file and declares
+`guardPredicates: {planned: {argsSchema: plannedArgs, evaluate}}`. Worker boot
+requires exactly one evaluator for every declaration and one declaration for every
+evaluator, and refuses duplicate evaluators and invalid local ids. Schema comparison
+uses object identity within the worker process: the exports must reuse the same
+schema constant, including when schemas have refinements, transforms or closures.
+A separately constructed lookalike refuses too. JSON-schema equivalence cannot
+prove equivalent executable validation, and no schema is serialized or hashed into
+storage. Modules should keep this shared entry unbundled across their exports so
+both imports resolve the same object.
+
+The API's validated boot map feeds public/admin availability, stored static
+composition validation, structural PATCH checks and the
+locked v3 pin builder. The create routes also pass it, as forward wiring: their bodies carry no
+execution contract yet, so it validates nothing there today. Module lifecycle checks and their locks retain precedence.
+Missing exports leave referenced predicates unknown and conditional validation
+fails closed; catalog JSON never reconstructs a schema. Ordinary NULL/inert pins
+keep their existing reads, locks and returned bytes.
+
+This commit opens no runtime fence and installs no scan seed. Valid guarded
+composition still ends in the existing runtime-support refusal at admission; custom
+fix targets remain refused. Registration itself evaluates nothing. There is no DDL.
+Deploy module declarations and matching host support together. A module that declares `guardPredicates` without the `./execution-predicates` export fails worker boot ("has no declaration"). Rollback removes new
+exports/importing consumers together (a module importing a new SDK symbol needs a
+compatible host), retaining migration 0245 and every immutable pin/decision. Once
+later activation admits guard-bearing tasks, retain capable workers for all
+resumable pins; never erase or reinterpret them for rollback.
 
 ### Fan-out seats
 

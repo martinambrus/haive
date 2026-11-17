@@ -660,7 +660,9 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   /** Executable promise to consume the host fix protocol at this exact version.
    * Declaring it grants no output replacement authority. P6 admits no custom target. */
   readonly fixConsumer?: FixConsumer;
-  /** Trusted executable predicates, keyed by module-local id. P6 validates but never evaluates. */
+  /** Trusted callbacks keyed by module-local id. Each argsSchema must be the exact
+   * object declared by the module’s schema-only ./execution-predicates export.
+   * Admission validates schemas without evaluating callbacks. */
   readonly guardPredicates?: Readonly<
     Record<
       string,

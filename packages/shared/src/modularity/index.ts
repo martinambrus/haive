@@ -12,3 +12,4 @@ export * from './derived-task-types.js';
 export * from './execution-contract.js';
 export * from '../step-engine/role-port-declarations.js';
 export { guardResetRows } from './guard-reset.js';
+export * from './execution-predicates.js';

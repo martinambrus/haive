@@ -254,7 +254,7 @@ describe('contract-aware availability', () => {
         issues: [
           expect.objectContaining({
             kind: 'invalid-execution-contract',
-            reason: expect.stringContaining('not yet supported'),
+            reason: expect.stringContaining(trusted ? 'not yet supported' : 'unknown-predicate'),
           }),
         ],
       });

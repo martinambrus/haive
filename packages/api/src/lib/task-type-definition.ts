@@ -33,6 +33,7 @@ import {
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
 import { readDerivedDefinition, readStepCatalog } from '@haive/shared/modularity-server';
+import { executionPredicates } from '../modules/execution-predicates.js';
 import { HttpError } from '../context.js';
 
 const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
@@ -234,6 +235,7 @@ export async function definitionForCreate(
     modules,
     catalog,
     generic: opts.generic,
+    predicates: executionPredicates(),
     ...(derived
       ? {
           derived: {
@@ -398,6 +400,7 @@ export async function definitionForCreate(
         MAX_DATA_EDGE_STEPS,
         {
           executionContract: def.executionContract,
+          predicates: executionPredicates(),
           catalog: catalog?.composable ?? storedCatalog.composable,
         },
       );
