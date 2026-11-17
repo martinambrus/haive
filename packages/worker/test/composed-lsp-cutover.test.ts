@@ -25,7 +25,11 @@ import {
   type ComposedLspEntry,
   type ComposedLspIdentity,
 } from '../src/lsp/composed-evidence.js';
-import { parseComposedProbeReport, probeComposedServer } from '../src/lsp/composed-probe.js';
+import {
+  COMPOSED_PROBE_OUTPUT_MAX_CHARS,
+  parseComposedProbeReport,
+  probeComposedServer,
+} from '../src/lsp/composed-probe.js';
 import { createVerifyEnvironmentStep } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
 import { resolveSandboxImageTag } from '../src/queues/cli-exec/images.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -584,13 +588,21 @@ describe('bounded protocol reports', () => {
     expect(parseComposedProbeReport('gopls', result).passed).toBe(false);
   });
   it('caps captured report output', () => {
+    expect(COMPOSED_PROBE_OUTPUT_MAX_CHARS).toBe(2000);
     expect(
-      parseComposedProbeReport('gopls', {
-        ...success,
-        stdout: 'x'.repeat(2200),
-        stderr: 'y'.repeat(2200),
-      }),
-    ).toMatchObject({ passed: false, stdout: 'x'.repeat(2000), stderr: 'y'.repeat(2000) });
+      parseComposedProbeReport(
+        'gopls',
+        { ...success, stdout: 'x'.repeat(9), stderr: 'y'.repeat(9) },
+        8,
+      ),
+    ).toMatchObject({ passed: false, stdout: 'x'.repeat(8), stderr: 'y'.repeat(8) });
+    expect(
+      parseComposedProbeReport(
+        'gopls',
+        { ...success, stdout: 'x'.repeat(8), stderr: 'y'.repeat(8) },
+        8,
+      ),
+    ).toMatchObject({ stdout: 'x'.repeat(8), stderr: 'y'.repeat(8) });
   });
   it('uses the immutable image and a sandbox-user protocol check', async () => {
     const run = vi.fn(async (_opts: unknown) => probeResult());

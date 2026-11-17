@@ -76,6 +76,9 @@ child.stderr.on('data', data => { stderrBytes += data.length; if (stderrBytes > 
 send({jsonrpc:'2.0',id:1,method:'initialize',params:{processId:null,rootUri:'file:///tmp/haive-lsp-probe',capabilities:{},workspaceFolders:[]}});
 `;
 
+/** Characters of probe stdout and stderr kept in a report. */
+export const COMPOSED_PROBE_OUTPUT_MAX_CHARS = 2000;
+
 export function parseComposedProbeReport(
   server: ComposedLspServer,
   result: {
@@ -85,6 +88,7 @@ export function parseComposedProbeReport(
     stderr: string;
     error?: string;
   },
+  maxOutputChars = COMPOSED_PROBE_OUTPUT_MAX_CHARS,
 ): ComposedLspReport {
   let raw: Partial<ComposedLspReport> = {};
   try {
@@ -110,8 +114,8 @@ export function parseComposedProbeReport(
     skipped: raw.skipped === true,
     installedVersion,
     toolchainVersion,
-    stdout: result.stdout.slice(0, 2000),
-    stderr: (result.error ?? result.stderr).slice(0, 2000),
+    stdout: result.stdout.slice(0, maxOutputChars),
+    stderr: (result.error ?? result.stderr).slice(0, maxOutputChars),
   };
 }
 
