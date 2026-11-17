@@ -218,6 +218,7 @@ it('runs merge, scratch, model and KB cleanup before rethrowing a refused discar
 it('does not discard or release claims while sandbox absence is unknown', async () => {
   h.sandboxes = null;
   await expect(processTaskJob(job)).rejects.toThrow('docker could not list them');
+  expect(h.calls).not.toContain('discardJournalRead');
   expect(h.calls).not.toContain('releaseTaskMergeClaims');
   expect(h.calls).not.toContain('task.cancel_finished');
   expect(h.calls).toContain('reconcileKbAuthorEntryOnTaskEnd');

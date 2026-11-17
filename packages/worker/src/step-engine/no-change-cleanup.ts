@@ -15,8 +15,7 @@ export const setupSchema = z.object({
 export type Setup = z.infer<typeof setupSchema>;
 export const journalSchema = setupSchema.extend({
   version: z.literal(1),
-  // Absent on the original journal format, whose staged tree was already removable.
-  phase: z.enum(['staging', 'removing']).optional(),
+  phase: z.enum(['staging', 'removing']),
   id: z.uuid(),
   dev: z.string(),
   ino: z.string(),

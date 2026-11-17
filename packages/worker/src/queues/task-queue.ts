@@ -4791,6 +4791,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
+  let discardFailed = false;
   let discardFailure: unknown;
   if (sandboxesGone) {
     await recordLeftOpenMerges(db, payload.taskId);
@@ -4805,6 +4806,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     try {
       await discardNoChangeCleanupDirectories(db, payload.taskId);
     } catch (err) {
+      discardFailed = true;
       discardFailure = err;
     }
   }
@@ -4818,7 +4820,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       'the cancelled task still has a sandbox container or docker could not list them; its merge dir claims are kept and the stalled re-drive repeats the cancel',
     );
   }
-  if (discardFailure) throw discardFailure;
+  if (discardFailed) throw discardFailure;
   // The teardown above reads this task's rows, so whoever deletes them waits for this record.
   await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });
 }
