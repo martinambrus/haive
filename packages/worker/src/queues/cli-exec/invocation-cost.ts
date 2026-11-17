@@ -17,6 +17,7 @@ import {
   type LivePriceRow,
   type ModelIdentity,
   type PriceFeed,
+  type RequestUsageCapture,
 } from '@haive/shared';
 import { log } from './_shared.js';
 
@@ -40,6 +41,7 @@ export async function resolveInvocationCost(
     providerName: string | null;
     tokenUsage: CliTokenUsage | null;
     modelIdentity: ModelIdentity | null;
+    requestUsage?: RequestUsageCapture;
   },
 ): Promise<InvocationCost | null> {
   const { tokenUsage, modelIdentity } = input;
@@ -113,11 +115,13 @@ export async function resolveInvocationCost(
     const computed = computeInvocationCost(tokenUsage, chosen.rates, {
       cacheTtl,
       inputIncludesCache: inputIncludesCache(providerName),
+      requestUsage: input.requestUsage,
+      modelKey,
     });
     // A partial total is worse than no total: it looks like a cost and is not one. Such
     // a row is recorded unpriced, keeping the rates and the offending buckets so the
     // admin page can say WHICH rate is missing rather than just "unknown".
-    if (computed.unpricedBuckets.length > 0) {
+    if (computed.unpricedBuckets.length > 0 || computed.tier?.state === 'unknown') {
       return {
         costUsd: 0,
         currency: 'USD',
@@ -128,9 +132,11 @@ export async function resolveInvocationCost(
         rates: structuredClone(chosen.rates),
         cacheTtl,
         unpricedBuckets: computed.unpricedBuckets,
+        ...(computed.tier ? { tier: computed.tier } : {}),
       };
     }
     return {
+      ...(computed.tier ? { tier: computed.tier } : {}),
       costUsd: computed.costUsd,
       currency: 'USD',
       source: decision.source,

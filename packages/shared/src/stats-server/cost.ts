@@ -101,6 +101,8 @@ export function notionalCostRowSql() {
   )`;
 }
 
+export const UNKNOWN_TIER_COST_LIMIT = 50;
+
 export interface TaskProviderUsage {
   /** CliProviderName of the invocations. */
   provider: string;
@@ -125,6 +127,10 @@ export interface TaskProviderUsage {
   /** Invocations this provider ran that carry tokens but no usable price. The UI shows
    *  this rather than silently understating the total. */
   unpricedInvocations: number;
+  /** Total before the per-provider inventory cap. */
+  unknownTierCount?: number;
+  /** Per-invocation uncertainty; ranges are never summed into either spend total. */
+  unknownTierCosts?: { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[];
 }
 
 export interface CostDisplay {
@@ -222,15 +228,47 @@ export async function sumProviderBreakdownWhere(
   db: Database,
   where: SQL | undefined,
 ): Promise<TaskProviderUsage[]> {
-  return providerBreakdownWhere(db, where);
+  return providerBreakdownWhere(db, where, false);
 }
 
 export async function providerBreakdownWhere(
   db: Database,
   where: SQL | undefined,
+  includeUnknownTiers = true,
+  unknownTierLimit = UNKNOWN_TIER_COST_LIMIT,
 ): Promise<TaskProviderUsage[]> {
   const tu = schema.cliInvocations.tokenUsage;
+  const scoped = and(
+    where,
+    isNull(schema.cliInvocations.supersededAt),
+    or(
+      isNotNull(schema.cliInvocations.taskStepId),
+      isNotNull(schema.cliInvocations.summaryForStepId),
+    ),
+  );
+  const unknown = sql`${schema.cliInvocations.cost} ->> 'source' = 'none'
+    and ${schema.cliInvocations.cost} -> 'tier' ->> 'state' = 'unknown'`;
+  // Rank only unknown invocations, within the same provider/auth groups as the
+  // money rollup. Filtering the aggregate input bounds jsonb_agg itself, while
+  // counts and money still cover every scoped invocation.
+  const inventory = db.$with('unknown_tier_inventory').as(
+    db
+      .select({
+        id: schema.cliInvocations.id,
+        rank: sql<number>`row_number() over (partition by ${schema.cliProviders.name}, ${schema.cliProviders.authMode} order by ${schema.cliInvocations.id})`.as(
+          'rank',
+        ),
+      })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .leftJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .where(and(scoped, unknown, includeUnknownTiers ? undefined : sql`false`)),
+  );
   const rows = await db
+    .with(inventory)
     .select({
       provider: schema.cliProviders.name,
       authMode: schema.cliProviders.authMode,
@@ -249,6 +287,18 @@ export async function providerBreakdownWhere(
       costSources: sql<
         string[]
       >`coalesce(array_agg(distinct ${schema.cliInvocations.cost} ->> 'source') filter (where ${schema.cliInvocations.cost} is not null), '{}')`,
+      unknownTierCount: sql<number>`count(*) filter (where ${unknown})::int`,
+      unknownTierCosts: includeUnknownTiers
+        ? sql<
+            { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[]
+          >`coalesce(jsonb_agg(
+        jsonb_strip_nulls(jsonb_build_object('id', ${schema.cliInvocations.id},
+          'modelKey', ${schema.cliInvocations.cost} ->> 'modelKey', 'lowUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'lowUsd',
+          'highUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'highUsd'))
+        order by ${schema.cliInvocations.id}) filter (where ${inventory.rank} <= ${unknownTierLimit}), '[]'::jsonb)`
+        : sql<
+            { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[]
+          >`'[]'::jsonb`,
       unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
     })
     .from(schema.cliInvocations)
@@ -257,16 +307,8 @@ export async function providerBreakdownWhere(
     // here can never drop a row that the un-joined query would have returned.
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
-    .where(
-      and(
-        where,
-        isNull(schema.cliInvocations.supersededAt),
-        or(
-          isNotNull(schema.cliInvocations.taskStepId),
-          isNotNull(schema.cliInvocations.summaryForStepId),
-        ),
-      ),
-    )
+    .leftJoin(inventory, eq(inventory.id, schema.cliInvocations.id))
+    .where(scoped)
     .groupBy(schema.cliProviders.name, schema.cliProviders.authMode);
 
   const out: TaskProviderUsage[] = [];
@@ -294,6 +336,12 @@ export async function providerBreakdownWhere(
       notionalCostUsd: Number(row.notionalCostUsd) || 0,
       costSource: summarizeCostSources(row.costSources),
       unpricedInvocations: Number(row.unpricedInvocations) || 0,
+      ...(includeUnknownTiers
+        ? {
+            unknownTierCosts: row.unknownTierCosts ?? [],
+            unknownTierCount: Number(row.unknownTierCount) || 0,
+          }
+        : {}),
     });
   }
   return out.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));

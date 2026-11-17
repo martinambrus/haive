@@ -13,6 +13,8 @@
  * providers ever show real money.
  */
 
+import { computeTieredCost } from './tiered-cost.js';
+import type { RequestUsageCapture } from './request-usage.js';
 import { z } from 'zod';
 import type { AuthMode, CliProviderName } from '../types/index.js';
 import { getCliProviderMetadata, resolveCostBasis } from './catalog.js';
@@ -106,14 +108,19 @@ function basePriceRates(rates: ModelPriceRates): BasePriceRates {
   return Object.fromEntries(PRICE_RATE_KEYS.map((key) => [key, rates[key]])) as BasePriceRates;
 }
 
-/** Pure boundary helper reserved for per-request pricing in PR 3. Returns a copy. */
-export function tierRatesFor(rates: ModelPriceRates, promptTokens: number): BasePriceRates {
-  let selected: BasePriceRates = rates;
+/** One boundary rule for both tier metadata and rates. */
+export function selectedPriceTier(rates: ModelPriceRates, promptTokens: number): PriceTier | null {
+  let selected: PriceTier | null = null;
   for (const tier of rates.tiers ?? []) {
     if (tier.inclusive ? promptTokens >= tier.aboveTokens : promptTokens > tier.aboveTokens)
       selected = tier;
   }
-  return basePriceRates(selected);
+  return selected;
+}
+
+/** Complete rates for a request's prompt, copied by value. */
+export function tierRatesFor(rates: ModelPriceRates, promptTokens: number): BasePriceRates {
+  return basePriceRates(selectedPriceTier(rates, promptTokens) ?? rates);
 }
 
 /** Where a stored rate came from. `manual` is admin-entered (a negotiated or
@@ -460,6 +467,7 @@ export type CacheTtl = '5m' | '1h';
 
 export interface CostComputation {
   costUsd: number;
+  tier?: InvocationTier;
   perBucket: Record<CostBucket, number>;
   /** Buckets that carried tokens but had no rate. NON-EMPTY MEANS `costUsd` IS
    *  INCOMPLETE and must not be shown as a cost — the caller reports the
@@ -510,6 +518,30 @@ function bucketCost(
   return tokens * rate;
 }
 
+export interface CostComputationOptions {
+  cacheTtl?: CacheTtl;
+  inputIncludesCache?: boolean;
+  requestUsage?: RequestUsageCapture;
+  modelKey?: string | null;
+}
+
+/** Exact tier splits use native input counts. Unknown splits contain only the
+ * observed/allocated buckets; their partial costUsd values are never summed. */
+export interface InvocationTier {
+  state: 'exact' | 'unknown';
+  split: {
+    aboveTokens: number | null;
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    costUsd: number;
+  }[];
+  lowUsd?: number;
+  highUsd?: number;
+}
+
 /** Price the four token buckets. Pure arithmetic — no clamping of a "suspicious"
  *  total, no fallback rate. `cacheTtl: '1h'` requires `cacheWrite1hRate`: falling
  *  back to the 5-minute rate would understate a 1-hour write by roughly 40%, so a
@@ -517,8 +549,9 @@ function bucketCost(
 export function computeInvocationCost(
   usage: PricedTokens,
   rates: ModelPriceRates,
-  opts: { cacheTtl?: CacheTtl; inputIncludesCache?: boolean } = {},
+  opts: CostComputationOptions = {},
 ): CostComputation {
+  if (rates.tiers?.length) return computeTieredCost(usage, rates, opts);
   const cacheRead = Math.max(0, usage.cacheReadTokens ?? 0);
   const cacheWrite = Math.max(0, usage.cacheCreationTokens ?? 0);
   const rawInput = Math.max(0, usage.inputTokens);
@@ -619,6 +652,7 @@ export function resolveCostDecision(input: {
  *  Keep in sync with the `$type` on that column (the database package cannot import
  *  this module — shared imports database, not the reverse). */
 export interface InvocationCost {
+  tier?: InvocationTier;
   costUsd: number;
   /** Always 'USD' today; the display currency is applied at read time. */
   currency: string;

@@ -1,3 +1,4 @@
+import { requestedFromSpec } from '../queues/cli-exec/model-identity.js';
 import type { CliTokenUsage } from '@haive/shared';
 import type {
   CliCommandSpec,
@@ -54,7 +55,7 @@ function totalApiDurationMs(trace: SubAgentStepTrace[]): number | null {
 export type PromptToCliSpec = (prompt: string) => CliCommandSpec;
 
 /** Unwraps a claude-stream-json sub-step (amp). Injected by the caller because that parser lives
- *  in queues/cli-exec, which this layer does not import. Null when stdout is not such a stream. */
+ *  in queues/cli-exec; dependency injection avoids a runtime import of that parser. Null when stdout is not such a stream. */
 export type ClaudeStreamExtractor = (stdout: string) => {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
@@ -76,7 +77,11 @@ export async function runSequentialSubAgent(
   const collected: Record<string, unknown> = {};
   const trace: SubAgentStepTrace[] = [];
   // Separate from trace: trace is serialized into raw_output, request evidence is not.
-  const requestParts: { id: string; usage: RequestUsageCapture }[] = [];
+  const requestParts: {
+    id: string;
+    usage: RequestUsageCapture;
+    tokenUsage: CliTokenUsage | null;
+  }[] = [];
   let tokenUsage: CliTokenUsage | null = null;
 
   for (const step of invocation.steps) {
@@ -87,7 +92,11 @@ export async function runSequentialSubAgent(
       opts,
       extractClaudeStream,
     );
-    requestParts.push({ id: step.id, usage: requestUsage });
+    requestParts.push({
+      id: step.id,
+      usage: requestUsage,
+      tokenUsage: traceEntry.tokenUsage ?? null,
+    });
     trace.push(traceEntry);
     tokenUsage = sumTokenUsage(tokenUsage, traceEntry.tokenUsage ?? null);
     if (traceEntry.exitCode !== 0 || traceEntry.error) {
@@ -114,7 +123,11 @@ export async function runSequentialSubAgent(
     opts,
     extractClaudeStream,
   );
-  requestParts.push({ id: invocation.synthesis.id, usage: requestUsage });
+  requestParts.push({
+    id: invocation.synthesis.id,
+    usage: requestUsage,
+    tokenUsage: synthesisTrace.tokenUsage ?? null,
+  });
   trace.push(synthesisTrace);
   tokenUsage = sumTokenUsage(tokenUsage, synthesisTrace.tokenUsage ?? null);
 
@@ -148,7 +161,8 @@ async function runOneStep(
   let apiDurationMs: number | null = null;
   let outputLimit: string | undefined;
   if (spec.outputFormat === 'codex-jsonl') {
-    const extracted = extractCodexJsonlOutput(result.stdout);
+    const extracted = extractCodexJsonlOutput(result.stdout, requestedFromSpec(spec));
+    requestUsage = extracted.requestUsage;
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
     tokenUsage = extracted.tokenUsage;
     if (

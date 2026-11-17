@@ -128,6 +128,26 @@ describe('unsupported feed rates', () => {
       providerName: 'codex',
       tokenUsage: { inputTokens: 1, outputTokens: 1 } as never,
       modelIdentity: null,
+      requestUsage: {
+        coverage: 'complete' as const,
+        inputConvention: 'inclusive' as const,
+        modelCoverage: 'single' as const,
+        reasons: [],
+        requestCount: 1,
+        requests: [
+          {
+            requestId: 'r',
+            turnId: 't',
+            model: 'x',
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation5mTokens: 0,
+            cacheCreation1hTokens: 0,
+          },
+        ],
+      },
     };
     expect(await resolveInvocationCost(db, input)).toMatchObject({
       source: 'none',

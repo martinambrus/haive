@@ -1,5 +1,7 @@
 'use client';
 
+import { PromptTierUnknownList } from '@/components/prompt-tier-unknown';
+
 import { DerivedTaskWarnings } from '@/components/derived-task-warnings';
 import { PostLoginRetryDialog } from '@/components/post-login-retry-dialog';
 import { LinkButton } from '@/components/ui';
@@ -592,6 +594,8 @@ interface TaskProviderUsage {
   /** Invocations with tokens but no usable rate — excluded from costUsd, shown so a low
    *  total is explained rather than silently understated. */
   unpricedInvocations: number;
+  unknownTierCount?: number;
+  unknownTierCosts?: { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[];
 }
 
 interface LinkedTask {
@@ -3554,13 +3558,18 @@ function TaskTotalTime({
                     {p.unpricedInvocations > 0 && (
                       <span
                         className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300"
-                        title={`${p.unpricedInvocations} invocation(s) ran a model with no rate on record, so their cost is not included. Add a rate on the admin pricing page.`}
+                        title={`${p.unpricedInvocations} invocation(s) could not be priced, so their cost is not included. Check prompt-tier coverage and rates on the admin pricing page.`}
                       >
                         {p.unpricedInvocations} unpriced
                       </span>
                     )}
                   </span>
                   <span className="flex flex-wrap items-center gap-x-3 font-mono text-neutral-400">
+                    <PromptTierUnknownList
+                      tiers={p.unknownTierCosts ?? []}
+                      total={p.unknownTierCount}
+                      display={costDisplay}
+                    />
                     <span>in {formatTokens(p.inputTokens)}</span>
                     <span>out {formatTokens(p.outputTokens)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>

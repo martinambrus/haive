@@ -18,6 +18,9 @@ vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
+vi.mock('next/link', () => ({
+  default: (props: Record<string, unknown>) => createElement('a', props),
+}));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => body,
@@ -357,4 +360,186 @@ it('lists complete prompt tiers below base rates and preserves them when replaci
     '/cli-pricing/prices',
     expect.objectContaining({ rates: expect.objectContaining({ tiers }) }),
   );
+});
+
+it('edits complete manual tiers and retains an empty 1h write rate as unknown', async () => {
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  fire.type(controls(view.tree(), 'model')[0]!, 'new-model');
+  view.draw();
+  fire.type(controls(view.tree(), 'input /m')[0]!, '1');
+  view.draw();
+  fire.click(buttons(view.tree(), /^add prompt tier$/i)[0]!);
+  view.draw();
+  fire.type(controls(view.tree(), 'prompt threshold')[0]!, '100000');
+  view.draw();
+  fire.type(controls(view.tree(), 'tier 1 input /m')[0]!, '5');
+  view.draw();
+  fire.type(controls(view.tree(), 'tier 1 output /m')[0]!, '25');
+  view.draw();
+  fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+  await settle(view);
+  expect(h.post).toHaveBeenCalledWith(
+    '/cli-pricing/prices',
+    expect.objectContaining({
+      rates: expect.objectContaining({
+        tiers: [
+          {
+            aboveTokens: 100000,
+            inclusive: false,
+            inputRate: 5e-6,
+            outputRate: 25e-6,
+            cacheReadRate: null,
+            cacheWriteRate: null,
+            cacheWrite1hRate: null,
+          },
+        ],
+      }),
+    }),
+  );
+});
+it.each(['negative', 'descending'] as const)(
+  'refuses %s manual pricing edits before saving',
+  async (bad) => {
+    const view = createRenderer(() => createElement(PricingPage));
+    await settle(view);
+    fire.type(controls(view.tree(), 'model')[0]!, 'new-model');
+    view.draw();
+    fire.type(controls(view.tree(), 'input /m')[0]!, bad === 'negative' ? '-1' : '1');
+    view.draw();
+    if (bad === 'descending') {
+      for (const threshold of ['100000', '50000']) {
+        fire.click(buttons(view.tree(), /^add prompt tier$/i)[0]!);
+        view.draw();
+        const all = controls(view.tree(), 'prompt threshold');
+        fire.type(all[all.length - 1]!, threshold);
+        view.draw();
+      }
+    }
+    fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+    await settle(view);
+    expect(h.post).not.toHaveBeenCalled();
+    expect(textOf(view.tree())).toContain(bad === 'negative' ? 'non-negative' : 'ascending');
+  },
+);
+it('shows individual unknown-tier ranges and unpriced missing bounds on the admin page', async () => {
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [],
+          unknownTierInvocations: [
+            { id: 'a', modelKey: 'model-a', tier: { lowUsd: 1, highUsd: 5 } },
+            { id: 'b', modelKey: 'model-b', tier: {} },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('prompt tier unknown · $1.00–$5.00');
+  expect(textOf(view.tree())).toContain('prompt tier unknown · unpriced');
+});
+
+it('prefills small rates without floating point tails and warns that tier-only overrides shadow base prices', async () => {
+  const rates = {
+    inputRate: 1e-7,
+    outputRate: 2e-7,
+    cacheReadRate: 5e-8,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [
+            {
+              id: 'x',
+              provider: null,
+              modelKey: 'tiered',
+              source: 'manual',
+              rates: { ...rates, tiers: [{ ...rates, aboveTokens: 100000, inclusive: false }] },
+              currency: 'USD',
+              note: null,
+              effectiveFrom: '2026-11-01T00:00:00Z',
+            },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  fire.click(buttons(view.tree(), /^edit$/i)[0]!);
+  view.draw();
+  for (const [label, expected] of [
+    ['input /m', '0.1'],
+    ['output /m', '0.2'],
+    ['cache read /m', '0.05'],
+  ])
+    expect(controls(view.tree(), label!)[0]!.props.value).toBe(expected);
+  fire.click(buttons(view.tree(), /^save rate$/i)[0]!);
+  await settle(view);
+  expect(h.post).toHaveBeenCalledWith(
+    '/cli-pricing/prices',
+    expect.objectContaining({
+      rates: expect.objectContaining({ ...rates, tiers: [expect.objectContaining(rates)] }),
+    }),
+  );
+  fire.click(buttons(view.tree(), /^edit$/i)[0]!);
+  view.draw();
+  expect(textOf(view.tree())).not.toContain('All base rates are empty.');
+  for (const label of [
+    'input /m',
+    'output /m',
+    'cache read /m',
+    'cache write /m',
+    'cache write 1h /m',
+  ]) {
+    fire.type(controls(view.tree(), label)[0]!, '');
+    view.draw();
+  }
+  expect(textOf(view.tree())).toContain(
+    'This manual rate overrides the feed, so requests below the first tier will be unpriced.',
+  );
+});
+
+it('links each visible short invocation id to its task with an accessible full-id label', async () => {
+  const id = '12345678-abcd-4321-9876-123456789abc';
+  const other = '87654321-abcd-4321-9876-123456789abc';
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [],
+          unknownTierInvocations: [
+            { id, taskId: 'task-a', modelKey: 'same-model', tier: { lowUsd: 1, highUsd: 5 } },
+            { id: other, taskId: 'task-b', modelKey: 'same-model', tier: {} },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  for (const [invocation, task] of [
+    [id, 'task-a'],
+    [other, 'task-b'],
+  ]) {
+    const links = findAll(
+      view.tree(),
+      (host) => host.tag === 'a' && host.props.href === `/tasks/${task}`,
+    );
+    expect(links).toHaveLength(1);
+    expect(textOf(links[0]!)).toBe(invocation!.slice(0, 8));
+    expect(links[0]!.props['aria-label']).toBe(`View task for invocation ${invocation}`);
+  }
 });

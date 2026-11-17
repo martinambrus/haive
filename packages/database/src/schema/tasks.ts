@@ -1033,6 +1033,20 @@ export const cliInvocations = pgTable(
      *  written before this column existed and whenever the cost pass could not run;
      *  reads fall back to the legacy token_usage filter for those. */
     cost: jsonb('cost').$type<{
+      tier?: {
+        state: 'exact' | 'unknown';
+        split: {
+          aboveTokens: number | null;
+          requests: number;
+          inputTokens: number;
+          outputTokens: number;
+          cacheReadTokens: number;
+          cacheCreationTokens: number;
+          costUsd: number;
+        }[];
+        lowUsd?: number;
+        highUsd?: number;
+      };
       costUsd: number;
       currency: string;
       source: 'manual' | 'reported' | 'computed' | 'none';

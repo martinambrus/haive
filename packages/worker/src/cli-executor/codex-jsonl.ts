@@ -1,4 +1,5 @@
-import type { CliTokenUsage, InvocationToolUsage } from '@haive/shared';
+import type { CliTokenUsage, InvocationToolUsage, RequestUsageCapture } from '@haive/shared';
+import { unknownRequestUsage, record, tokenCount } from './request-usage.js';
 import { sumTokenUsage, tokenUsageFromCodexUsage } from './usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from './tool-usage.js';
 
@@ -35,6 +36,8 @@ export interface CodexJsonlCollector {
    *  premature-end message. Null when a result exists. */
   getNoResultReason: () => string | null;
   getMalformedLineCount: () => number;
+  /** exec has whole-turn totals, never a proven model-request count. */
+  getRequestUsage: (model: string | null) => RequestUsageCapture;
   /** The message of a `turn.failed` event ('' when it carried none), else null. Unlike
    *  getNoResultReason it is set even when an agent_message streamed before the failure. */
   getTurnFailure: () => string | null;
@@ -57,6 +60,9 @@ export function createCodexJsonlCollector(
   let usageSum: CliTokenUsage | null = null;
   let lastError: string | null = null;
   let turnFailure: string | null = null;
+  let startedThreads = 0;
+  let completedTurns = 0;
+  let strictCompletion = false;
 
   function processLine(line: string): void {
     const trimmed = line.trim();
@@ -68,10 +74,14 @@ export function createCodexJsonlCollector(
       malformedLineCount++;
       return;
     }
-    if (typeof event.type !== 'string') return;
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
+      malformedLineCount++;
+      return;
+    }
     eventCount++;
 
     const type = event.type;
+    if (type === 'thread.started') startedThreads++;
     if (type === 'item.completed') {
       const item = event.item as Record<string, unknown> | undefined;
       // Completed items only: every item also arrives as `item.started` first, and counting
@@ -84,6 +94,12 @@ export function createCodexJsonlCollector(
       return;
     }
     if (type === 'turn.completed') {
+      completedTurns++;
+      const u = record(event.usage);
+      const input = tokenCount(u?.input_tokens);
+      const output = tokenCount(u?.output_tokens);
+      const cached = tokenCount(u?.cached_input_tokens === undefined ? 0 : u.cached_input_tokens);
+      strictCompletion = input !== null && output !== null && cached !== null && cached <= input;
       usageSum = sumTokenUsage(usageSum, tokenUsageFromCodexUsage(event.usage));
       return;
     }
@@ -134,6 +150,38 @@ export function createCodexJsonlCollector(
       if (lastError) return `codex turn failed: ${lastError}`;
       return 'codex emitted no agent_message (stream ended prematurely — likely timeout or abort)';
     },
+    getRequestUsage(model: string | null): RequestUsageCapture {
+      flush();
+      const capture = unknownRequestUsage();
+      if (
+        !model ||
+        startedThreads !== 1 ||
+        completedTurns !== 1 ||
+        malformedLineCount > 0 ||
+        !strictCompletion ||
+        !usageSum ||
+        turnFailure !== null ||
+        lastError !== null
+      )
+        return capture;
+      return {
+        ...capture,
+        inputConvention: 'inclusive',
+        modelCoverage: 'single',
+        wholeRun: {
+          usage: {
+            model,
+            inputTokens: usageSum.inputTokens,
+            outputTokens: usageSum.outputTokens,
+            cacheReadTokens: usageSum.cacheReadTokens ?? 0,
+            cacheCreationTokens: 0,
+            cacheCreation5mTokens: 0,
+            cacheCreation1hTokens: 0,
+          },
+          requestCount: null,
+        },
+      };
+    },
     getMalformedLineCount(): number {
       return malformedLineCount;
     },
@@ -152,18 +200,23 @@ export interface ExtractedCodexOutput {
   text: string | null;
   tokenUsage: CliTokenUsage | null;
   eventCount: number;
+  requestUsage: RequestUsageCapture;
   turnFailure: string | null;
 }
 
 /** Full-buffer JSONL extraction for the sequential sub-agent runner: feeds
  *  the collector once. eventCount === 0 means the stdout was not codex JSONL
  *  (older binary ignoring --json) — callers fall back to raw stdout. */
-export function extractCodexJsonlOutput(stdout: string): ExtractedCodexOutput {
+export function extractCodexJsonlOutput(
+  stdout: string,
+  model: string | null = null,
+): ExtractedCodexOutput {
   const collector = createCodexJsonlCollector();
   collector.onChunk(stdout);
   const text = collector.getResult();
   return {
     text,
+    requestUsage: collector.getRequestUsage(model),
     tokenUsage: collector.getTokenUsage(),
     eventCount: collector.isJsonl() ? 1 : 0,
     turnFailure: collector.getTurnFailure(),

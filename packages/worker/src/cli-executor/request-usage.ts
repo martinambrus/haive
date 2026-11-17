@@ -1,31 +1,20 @@
-/** In-process evidence only; PR 2 never stores or prices it. Input stays provider-native:
- * exclusive for Claude, inclusive for Codex/Gemini. Only a future pricer splits inclusive input. */
-export interface RequestUsage {
-  requestId: string;
-  turnId: string | null;
-  model: string | null;
-  inputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  outputTokens: number | null;
-  cacheCreation5mTokens: number | null;
-  cacheCreation1hTokens: number | null;
-}
-
-export type UnobservedSameModelUsage = Omit<RequestUsage, 'requestId' | 'turnId'>;
+/** In-process evidence only; collection never stores or prices it. Input stays provider-native:
+ * exclusive for Claude, inclusive for Codex/Gemini. Only the pricer splits inclusive input. */
+import type {
+  PricedTokens,
+  RequestUsage,
+  RequestUsageCapture,
+  UnobservedSameModelUsage,
+} from '@haive/shared';
+export type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from '@haive/shared';
 
 export type UnobservedSameModelPricingBlocker =
   'unknown-cache-ttl' | 'unknown-output-usage' | 'unknown-output-request-size';
 
-/** Conservative PR 3 contract, reserved for its tier pricer. A nonempty result means
- * the excess has NO selected rate: the whole computed invocation must stay unpriced
- * (source none), never add only its priced buckets. Unknown TTL is not the run's
- * configured TTL, and excess output has no observed request prompt whose tier it can
- * inherit. Neither the base rate nor an observed main request's tier is a default.
- * Unknown usage/TTL also forbids finite cost bounds. Known output with unknown request
- * size may be bounded only once PR 3 proves all required buckets/rates are known.
- * An empty result is not tier proof: the pricer must still prove the prompt-side tier
- * from complete evidence (including aggregate bounds), as for any other usage. */
+/** Diagnostics for aggregate usage outside the request inventory. The tier pricer
+ * validates its own evidence: unknown TTL/output prevent finite bounds, while known
+ * output without a request size may be bounded over all reachable rates. This helper
+ * does not select rates or establish request coverage. */
 export function unobservedSameModelPricingBlockers(
   excess: UnobservedSameModelUsage,
 ): UnobservedSameModelPricingBlocker[] {
@@ -38,19 +27,6 @@ export function unobservedSameModelPricingBlockers(
   if (excess.outputTokens === null) blockers.push('unknown-output-usage');
   else if (excess.outputTokens > 0) blockers.push('unknown-output-request-size');
   return blockers;
-}
-
-export interface RequestUsageCapture {
-  requests: RequestUsage[] | null;
-  /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
-   * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */
-  unobservedSameModel?: UnobservedSameModelUsage[];
-  coverage: 'complete' | 'incomplete' | 'unknown';
-  inputConvention: 'exclusive' | 'inclusive' | 'unknown';
-  /** Exact only when the transcript proves it; Gemini reports this independently. */
-  requestCount: number | null;
-  modelCoverage: 'single' | 'mixed' | 'unknown';
-  reasons: string[];
 }
 
 export function unknownRequestUsage(reason = 'no-request-channel'): RequestUsageCapture {
@@ -67,7 +43,7 @@ export function unknownRequestUsage(reason = 'no-request-channel'): RequestUsage
 /** Process-local sub-step evidence. Namespace identities because each CLI process can reuse ids.
  * Any missing channel, convention or model prevents a complete aggregate. */
 export function aggregateRequestUsage(
-  parts: { id: string; usage?: RequestUsageCapture }[],
+  parts: { id: string; usage?: RequestUsageCapture; tokenUsage?: PricedTokens | null }[],
 ): RequestUsageCapture {
   if (!parts.length) return unknownRequestUsage('no-substeps');
   const captures = parts.map((p) => p.usage ?? unknownRequestUsage());
@@ -82,9 +58,19 @@ export function aggregateRequestUsage(
   );
   const conventions = new Set(captures.map((c) => c.inputConvention));
   const inputConvention = conventions.size === 1 ? captures[0]!.inputConvention : 'unknown';
-  const modelCoverage = captures.some((c) => c.modelCoverage === 'mixed')
-    ? 'mixed'
-    : requestModelCoverage(requests);
+  const models = new Set(
+    captures.flatMap(
+      (c) => c.wholeRun?.usage.model ?? c.aggregateModel ?? c.requests?.map((r) => r.model) ?? [],
+    ),
+  );
+  const modelCoverage =
+    captures.some((c) => c.modelCoverage === 'mixed') || models.size > 1
+      ? 'mixed'
+      : models.size === 1 &&
+          !models.has(null) &&
+          captures.every((c) => c.modelCoverage === 'single')
+        ? 'single'
+        : requestModelCoverage(requests);
   const complete =
     captures.every((c) => c.coverage === 'complete') &&
     inputConvention !== 'unknown' &&
@@ -93,6 +79,11 @@ export function aggregateRequestUsage(
     ? captures.reduce((n, c) => n + c.requestCount!, 0)
     : null;
   return {
+    parts: parts.map((p, i) => ({
+      id: p.id,
+      tokenUsage: p.tokenUsage ?? null,
+      usage: captures[i]!,
+    })),
     requests: captures.some((c) => c.requests !== null) ? requests : null,
     ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
     coverage: complete ? 'complete' : requests.length ? 'incomplete' : 'unknown',
@@ -145,7 +136,10 @@ export function claudeRequestUsage(
   const five = ttl ? tokenCount(ttl.ephemeral_5m_input_tokens) : null;
   const hour = ttl ? tokenCount(ttl.ephemeral_1h_input_tokens) : null;
   const ttlKnown = five !== null && hour !== null && five + hour === cacheCreationTokens;
-  if (u.cache_creation !== undefined && !ttlKnown) return null;
+  // Some wrappers default-fill both TTL counters with zero beside positive writes.
+  // Keep the authoritative write total and mark that split unknown.
+  const defaultFilled = cacheCreationTokens > 0 && five === 0 && hour === 0;
+  if (u.cache_creation !== undefined && !ttlKnown && !defaultFilled) return null;
   return {
     requestId,
     turnId: null,

@@ -115,6 +115,7 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
   let apiDurationMs: number | null = null;
   const modelNames: string[] = [];
   let requestCount: number | null = 0;
+  let aggregateComplete = true;
   const stats = doc.stats as Record<string, unknown> | undefined;
   const models =
     stats && typeof stats === 'object' ? (stats.models as Record<string, unknown>) : undefined;
@@ -122,6 +123,8 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
     for (const name of Object.keys(models)) {
       if (name.trim()) modelNames.push(name.trim());
     }
+    if (Array.isArray(models) || modelNames.length !== Object.keys(models).length)
+      aggregateComplete = false;
     for (const entry of Object.values(models)) {
       const api = (entry as Record<string, unknown> | null)?.api as
         Record<string, unknown> | undefined;
@@ -134,7 +137,24 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       if (latency !== null) apiDurationMs = (apiDurationMs ?? 0) + latency;
       const tokens = (entry as Record<string, unknown> | null)?.tokens as
         Record<string, unknown> | undefined;
-      if (!tokens || typeof tokens !== 'object') continue;
+      if (!tokens || typeof tokens !== 'object') {
+        aggregateComplete = false;
+        continue;
+      }
+      const strictPrompt = tokenCount(tokens.prompt);
+      const strictCandidates = tokenCount(tokens.candidates);
+      const strictThoughts = tokenCount(tokens.thoughts === undefined ? 0 : tokens.thoughts);
+      const strictCached = tokenCount(tokens.cached === undefined ? 0 : tokens.cached);
+      if (
+        strictPrompt === null ||
+        strictCandidates === null ||
+        strictThoughts === null ||
+        strictCached === null ||
+        strictCached > strictPrompt ||
+        (tokens.total !== undefined &&
+          tokenCount(tokens.total) !== strictPrompt + strictCandidates + strictThoughts)
+      )
+        aggregateComplete = false;
       const prompt = num(tokens.prompt) ?? 0;
       const candidates = num(tokens.candidates) ?? 0;
       const thoughts = num(tokens.thoughts) ?? 0;
@@ -149,6 +169,12 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       tokenUsage = sumTokenUsage(tokenUsage, modelUsage);
     }
   }
+  aggregateComplete =
+    aggregateComplete &&
+    tokenUsage !== null &&
+    modelNames.length === 1 &&
+    requestCount !== null &&
+    requestCount > 0;
   return {
     responseText: doc.response,
     tokenUsage,
@@ -156,6 +182,25 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
     apiDurationMs,
     requestUsage: {
       ...unknownRequestUsage('aggregate-only'),
+      ...(aggregateComplete
+        ? {
+            coverage: 'complete' as const,
+            reasons: [],
+            aggregateModel: modelNames[0]!,
+            wholeRun: {
+              requestCount,
+              usage: {
+                model: modelNames[0]!,
+                inputTokens: tokenUsage!.inputTokens,
+                outputTokens: tokenUsage!.outputTokens,
+                cacheReadTokens: tokenUsage!.cacheReadTokens ?? 0,
+                cacheCreationTokens: 0,
+                cacheCreation5mTokens: 0,
+                cacheCreation1hTokens: 0,
+              },
+            },
+          }
+        : {}),
       inputConvention: 'inclusive',
       requestCount: modelNames.length > 0 ? requestCount : null,
       modelCoverage:

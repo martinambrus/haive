@@ -70,6 +70,11 @@ function fixture() {
         return chain;
       },
     }),
+    // The provider rollup ranks unknown-tier rows in a CTE; `with` hands back this fake.
+    $with: () => ({ as: () => ({}) }),
+    with() {
+      return this;
+    },
   } as unknown as Database;
   const request = async (params = '', role: 'user' | 'admin' = 'user') => {
     const app = new Hono<AppEnv>();

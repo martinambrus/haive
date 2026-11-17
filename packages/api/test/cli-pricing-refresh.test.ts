@@ -49,7 +49,17 @@ beforeEach(() => {
   });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
-  h.db = fake.db;
+  // Pricing-history tests use the stateful fake. The new JSON tier inventory has
+  // separate PostgreSQL verification; it is empty in these write/read fixtures.
+  h.db = {
+    ...fake.db,
+    select: (fields?: Parameters<typeof fake.db.select>[0]) => ({
+      from: (table: typeof schema.cliInvocations) =>
+        table === schema.cliInvocations
+          ? { where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }
+          : fake.db.select(fields).from(table),
+    }),
+  };
   h.add.mockReset().mockResolvedValue({ id: '1' });
   h.getJob.mockReset();
   h.getJobs.mockReset().mockResolvedValue([]);
@@ -316,5 +326,63 @@ describe('manual context tiers', () => {
     expect(
       await (h.db as ReturnType<typeof createFakeDb>['db']).select().from(schema.cliModelPrices),
     ).toHaveLength(0);
+  });
+});
+
+describe('manual prompt-tier pricing', () => {
+  const rates = {
+    inputRate: 1e-7,
+    outputRate: 5e-7,
+    cacheReadRate: null,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const tier = { ...rates, aboveTokens: 100_000, inclusive: false, inputRate: 5e-7 };
+  async function save(
+    tiers: unknown,
+    baseRates: Record<keyof typeof rates, number | null> = rates,
+  ) {
+    const token = await signAccessToken({ sub: ADMIN, role: 'admin', tv: 0 });
+    return app.request('/pricing/prices', {
+      method: 'POST',
+      headers: { cookie: `${ACCESS_COOKIE}=${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'codex',
+        modelKey: 'model',
+        rates: { ...baseRates, tiers },
+      }),
+    });
+  }
+  it('accepts a tier-only price while retaining unknown base buckets', async () => {
+    const res = await save([tier], {
+      inputRate: null,
+      outputRate: null,
+      cacheReadRate: null,
+      cacheWriteRate: null,
+      cacheWrite1hRate: null,
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ rates: { inputRate: null, tiers: [tier] } });
+  });
+  it('round-trips complete tiers with a missing 1h-write rate remaining null', async () => {
+    const res = await save([tier]);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({
+      rates: { tiers: [{ ...tier, cacheWrite1hRate: null }] },
+    });
+  });
+  it.each(
+    [
+      [{ ...tier, inputRate: -1 }],
+      [{ ...tier, aboveTokens: 0 }],
+      [tier, tier],
+      [tier, { ...tier, aboveTokens: 50_000 }],
+      [{ ...tier, outputRate: 'invalid' }],
+      [null, tier],
+      [tier, null],
+    ].map((tiers) => [tiers]),
+  )('refuses invalid manual tier edits %j', async (tiers) => {
+    const res = await save(tiers);
+    expect(res.status).toBe(400);
   });
 });

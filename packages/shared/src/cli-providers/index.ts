@@ -18,3 +18,5 @@ export * from './login-candidate.js';
 
 export * from './ollama-pull-policy.js';
 export * from './ollama-modelfile.js';
+
+export type * from './request-usage.js';
