@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
+import type { RagSearchConfig } from '@haive/shared/rag';
 import { FIXTURE_DIR, sha256, warnChunkerDrift, type FixtureManifest } from './rag-eval-fixture.js';
 import {
   goldRank,
@@ -42,9 +43,19 @@ export interface QueryResult {
   byK: Record<string, EvalPage>;
   dense?: { indexRows: number; exactRows: number; overlap: number; defaultUsesHnsw: boolean };
 }
+export interface EvalSettings {
+  embeddingModel: string;
+  embeddingDimensions: number;
+  ks: number[];
+  repositoryScoped: boolean;
+  /** Experiment variables: arm and ranking knobs may differ between paired runs. */
+  search: Omit<RagSearchConfig, 'topK'>;
+}
 export interface EvalRun {
   metricVersion: number;
   fixture: string;
+  /** Optional for reading legacy outputs; comparisons require observed settings. */
+  settings?: EvalSettings;
   results: QueryResult[];
 }
 
@@ -239,6 +250,7 @@ export function compactRun(run: EvalRun): EvalRun {
   return {
     metricVersion: run.metricVersion,
     fixture: run.fixture,
+    settings: run.settings,
     results: run.results.map(({ dense: _dense, golds, ...r }) => ({
       ...r,
       labels: labelIdentity(r.labels),
@@ -272,8 +284,38 @@ export function compareRuns(
 ) {
   if (before.metricVersion !== METRIC_VERSION || after.metricVersion !== METRIC_VERSION)
     throw new Error('metric version mismatch; rerun both arms');
-  if (!before.fixture || before.fixture !== after.fixture)
-    throw new Error('fixture/config mismatch');
+  if (!before.fixture || !after.fixture)
+    throw new Error(
+      'not comparable: no fixture manifest; run with RAG_MANIFEST to compare fixture results',
+    );
+  if (before.fixture !== after.fixture) throw new Error('fixture/config mismatch');
+  for (const run of [before, after]) {
+    const s = run.settings;
+    if (!s || typeof s !== 'object')
+      throw new Error('missing observed settings; rerun or restore provenance');
+    if (typeof s.embeddingModel !== 'string' || !s.embeddingModel.trim())
+      throw new Error('invalid settings.embeddingModel');
+    if (!Number.isInteger(s.embeddingDimensions) || s.embeddingDimensions <= 0)
+      throw new Error('invalid settings.embeddingDimensions');
+    if (!Array.isArray(s.ks) || !s.ks.length || s.ks.some((k) => !Number.isInteger(k) || k < 1))
+      throw new Error('invalid settings.ks');
+    if (typeof s.repositoryScoped !== 'boolean')
+      throw new Error('invalid settings.repositoryScoped');
+    if (!s.search || typeof s.search !== 'object') throw new Error('missing settings.search');
+  }
+  // Corpus/labels are fingerprinted separately. Freeze the embedder, page protocol
+  // and repository-scoped search policy; retain both arms' ranking knobs below.
+  for (const field of [
+    'embeddingModel',
+    'embeddingDimensions',
+    'ks',
+    'repositoryScoped',
+  ] as const) {
+    if (JSON.stringify(before.settings![field]) !== JSON.stringify(after.settings![field]))
+      throw new Error(`fixed settings.${field} mismatch`);
+  }
+  for (const k of ks)
+    if (!before.settings!.ks.includes(k)) throw new Error(`settings.ks does not include k=${k}`);
   const indexed = (run: EvalRun) => {
     const out = new Map<string, QueryResult>();
     for (const row of run.results) {
@@ -385,6 +427,7 @@ export function compareRuns(
   return {
     metricVersion: METRIC_VERSION,
     fixture: before.fixture,
+    settings: { before: before.settings, after: after.settings },
     samples,
     seed,
     confidence: 'paired query bootstrap, percentile 95%; deltas = after - before',

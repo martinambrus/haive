@@ -104,8 +104,8 @@
     }
   },
   "baselineBytes": {
-    "hybrid": 135800,
-    "lexical": 127907
+    "hybrid": 136172,
+    "lexical": 128278
   },
   "postMeasurementFixtureHelper": {
     "committedAt": "a987f7e58",
@@ -113,5 +113,6 @@
     "fixtureFingerprintSourceSha256": "da9ea2f65b0b771e01302dc28c9665a7b815a66c303c049f75ff646a5b337f47",
     "note": "rag-eval-fixture.ts was extended after measurement with the history-free anchor snapshot and warn-only HEAD drift helpers. The fingerprint expression sha256(manifest + newline + queries) is unchanged, now a named export (fixtureFingerprint); the committed baselines still match it. The hashes map above records the measured runtime bytes; this committed-file hash records the extended helper, not the measured file."
   },
-  "postMeasurementReportNote": "Round 3 extends offline reports with per-cell tau FPR, Wilson intervals and paired threshold FPR/AUROC; the measured runtime report hash above is preserved. Both compact baseline files and the manifest/query fingerprint are unchanged; no new retrieval measurement."
+  "postMeasurementReportNote": "Round 3 extends offline reports with per-cell tau FPR, Wilson intervals and paired threshold FPR/AUROC; the measured runtime report hash above is preserved. Both compact baseline files and the manifest/query fingerprint are unchanged; no new retrieval measurement.",
+  "postMeasurementSettingsNote": "Round 4 restores structured settings to both compact baselines from the original codex-2 full-run settings, page keys, manifest script config, recorded runtime hashes/defaults and store width inspection (2141|0|2560|2560). Model/dimensions and page protocol are fixed for comparison; lexicalOnly and ranking knobs are explicit experiment variables. Query records, scores, signals, fixture fingerprint and measured runtime hashes are unchanged; no remeasurement."
 }

@@ -27,6 +27,7 @@
  *                 no-answer false-positive rate. All metrics carry seeded query-bootstrap CIs.
  *   RAG_MANIFEST  manifest JSON path (default: manifest.json next to RAG_QUERY_SET).
  *                 Fingerprint is computed from manifest + query bytes; any edit invalidates baselines.
+ *                 An absent default manifest permits standalone, non-comparable results.
  *   RAG_COMPACT  1 writes minified query records without summaries, hits, ms or dense dumps
  *   RAG_LEXICAL_ONLY  1 skips the embed so the lexical-only branch runs
  *   RAG_IDENTIFIER_SEARCH  0 turns the identifier ranker off (default on)
@@ -43,12 +44,13 @@
  *   RAG_OUT       path to write the per-query results and the summary as JSON
  *   RAG_EXPECTED  optional substring of an expected source_path to report its rank
  */
-import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { fixtureFingerprint } from './rag-eval-fixture.js';
 import { createDatabase } from '@haive/database';
 import {
   embedQueryOrNull,
+  DEFAULT_RAG_SEARCH_CONFIG,
   openExistingRagDatabase,
   ragDatabaseName,
   ragHybridSearch,
@@ -71,7 +73,6 @@ import {
   scoreQuery,
   type Gold,
   type GoldOutcome,
-  type SetQuery,
 } from './rag-eval-metrics.js';
 
 import {
@@ -82,11 +83,31 @@ import {
   overviewCoverage,
   summarizeRun,
   type QueryResult,
+  type EvalSettings,
 } from './rag-eval-report.js';
 
 const DENSE_LIMIT = 50;
-function loadQuerySet(path: string): SetQuery[] {
-  return parseQuerySet(JSON.parse(readFileSync(path, 'utf8')), path);
+// Operator-supplied files may live outside the checkout. Hold every component,
+// including the parent directories, rather than trusting a path-based open.
+async function readInputText(filename: string): Promise<string | null> {
+  const full = path.resolve(filename);
+  return await readTextNoFollow(path.parse(full).root, full.slice(path.parse(full).root.length), {
+    strict: true,
+  });
+}
+
+async function loadQuerySet(filename: string) {
+  const queryText = await readInputText(filename);
+  if (queryText === null) throw new Error(`cannot read query set: ${filename}`);
+  const queries = parseQuerySet(JSON.parse(queryText), filename);
+  const explicitManifest = process.env.RAG_MANIFEST;
+  const manifestPath = explicitManifest || path.join(path.dirname(filename), 'manifest.json');
+  const manifestText = await readInputText(manifestPath);
+  if (manifestText === null) {
+    if (!explicitManifest) return { queries, fingerprint: '' };
+    throw new Error(`cannot read RAG_MANIFEST: ${manifestPath}`);
+  }
+  return { queries, fingerprint: fixtureFingerprint(manifestText, queryText) };
 }
 
 async function main(): Promise<void> {
@@ -118,16 +139,9 @@ async function main(): Promise<void> {
   const forceLexicalOnly = process.env.RAG_LEXICAL_ONLY === '1';
   const identifierSearch = process.env.RAG_IDENTIFIER_SEARCH !== '0';
   const runbookBoost = Number(process.env.RAG_RUNBOOK_BOOST || 1);
-  const querySet = querySetPath ? loadQuerySet(querySetPath) : null;
-  const fingerprint = querySetPath
-    ? fixtureFingerprint(
-        readFileSync(
-          process.env.RAG_MANIFEST || path.join(path.dirname(querySetPath), 'manifest.json'),
-          'utf8',
-        ),
-        readFileSync(querySetPath, 'utf8'),
-      )
-    : '';
+  const loaded = querySetPath ? await loadQuerySet(querySetPath) : null;
+  const querySet = loaded?.queries;
+  const fingerprint = loaded?.fingerprint ?? '';
 
   const db = createDatabase(dbUrl);
   let conn: RagConnection | null;
@@ -156,6 +170,19 @@ async function main(): Promise<void> {
       )
     ).length > 0;
   const runLexicalOnly = forceLexicalOnly || !storeHasVector;
+  const { topK: _defaultTopK, ...searchDefaults } = DEFAULT_RAG_SEARCH_CONFIG;
+  const settings: EvalSettings = {
+    embeddingModel: prefs.embeddingModel!,
+    embeddingDimensions: openConn.embeddingDimensions,
+    ks: [...SET_KS],
+    repositoryScoped: repositoryId !== undefined,
+    search: {
+      ...searchDefaults,
+      lexicalOnly: runLexicalOnly,
+      identifierSearch,
+      runbookBoost,
+    },
+  };
   const recorded = forceLexicalOnly ? null : await readBuildMeta(openConn.pg);
   if (recorded) {
     const decision = decideBuildMeta(recorded, true, {
@@ -191,7 +218,7 @@ async function main(): Promise<void> {
       openConn,
       vec ?? [],
       text,
-      { topK: k, runbookBoost, lexicalOnly: vec === null, identifierSearch },
+      { ...settings.search, topK: k, lexicalOnly: vec === null },
       undefined,
       repositoryId,
     );
@@ -219,12 +246,12 @@ async function main(): Promise<void> {
     return rows.some((r) => chunkBody(r.content, r.source_path).includes(anchor));
   }
 
-  const settings =
+  const settingsLabel =
     `lexicalOnly=${runLexicalOnly} identifierSearch=${identifierSearch} ` +
     `runbookBoost=${runbookBoost} topK=${topK} repositoryId=${repositoryId ?? '-'}`;
 
   if (querySet) {
-    console.log(`Project: ${projectName} (mode=${prefs.ragMode})   ${settings}\n`);
+    console.log(`Project: ${projectName} (mode=${prefs.ragMode})   ${settingsLabel}\n`);
     const results: QueryResult[] = [];
     for (const q of querySet) {
       const golds = goldsOf(q);
@@ -309,22 +336,24 @@ async function main(): Promise<void> {
     const summary = summarizeRun(results);
     console.log(JSON.stringify(summary, null, 2));
     if (outPath) {
-      const run = { metricVersion: METRIC_VERSION, fixture: fingerprint, results };
+      const run = { metricVersion: METRIC_VERSION, fixture: fingerprint, settings, results };
       const compact = process.env.RAG_COMPACT === '1';
-      writeFileSync(
-        outPath,
+      const fullOut = path.resolve(outPath);
+      await writeFileNoFollow(
+        path.parse(fullOut).root,
+        fullOut.slice(path.parse(fullOut).root.length),
         JSON.stringify(
           compact
             ? compactRun(run)
             : {
                 ...run,
                 project: projectName,
-                settings,
                 summary,
               },
           null,
           compact ? undefined : 2,
         ) + '\n',
+        { mode: 'replace-atomic' },
       );
     }
   } else if (query) {

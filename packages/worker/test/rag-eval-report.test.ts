@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseQuerySet, scoreQuery } from '../scripts/rag-eval-metrics.js';
+import { DEFAULT_RAG_SEARCH_CONFIG } from '@haive/shared/rag';
 import {
   answerabilityReport,
   compactRun,
@@ -43,6 +44,13 @@ function row(id: string, recall: number, kind = 'identifier'): QueryResult {
 const run = (results: QueryResult[]): EvalRun => ({
   metricVersion: METRIC_VERSION,
   fixture: 'same-corpus-config',
+  settings: {
+    embeddingModel: 'qwen3-embedding:4b',
+    embeddingDimensions: 2560,
+    ks: [8],
+    repositoryScoped: true,
+    search: (({ topK: _topK, ...search }) => search)(DEFAULT_RAG_SEARCH_CONFIG),
+  },
   results,
 });
 
@@ -137,6 +145,35 @@ describe('summaries', () => {
 });
 
 describe('paired comparisons', () => {
+  it.each([
+    ['embeddingModel', 'another-model'],
+    ['embeddingDimensions', 1024],
+    ['ks', [5, 8]],
+    ['repositoryScoped', false],
+  ])('refuses a changed fixed runtime field: %s', (field, value) => {
+    const before = run([row('a', 1)]);
+    const after = { ...before, settings: { ...before.settings!, [field]: value } };
+    expect(() => compareRuns(before, after, [8], 10)).toThrow(field);
+  });
+  it('refuses absent runtime settings and fixture-less standalone results clearly', () => {
+    const good = run([row('a', 1)]);
+    expect(() => compareRuns(good, { ...good, settings: undefined }, [8], 10)).toThrow('settings');
+    expect(() => compareRuns({ ...good, fixture: '' }, { ...good, fixture: '' }, [8], 10)).toThrow(
+      'not comparable: no fixture manifest',
+    );
+  });
+  it('preserves observed settings when compacting and exposes intentional arm/knob changes', () => {
+    const before = run([row('a', 1)]);
+    const after = structuredClone(before);
+    after.settings!.search.lexicalOnly = true;
+    after.settings!.search.identifierSearch = false;
+    after.settings!.search.runbookBoost = 2;
+    expect(compactRun(before).settings).toEqual(before.settings);
+    expect(compareRuns(before, after, [8], 10).settings).toEqual({
+      before: before.settings,
+      after: after.settings,
+    });
+  });
   it('aligns by id, reports per-query deltas, wins/losses/ties and a paired CI', () => {
     const before = run([row('a', 0), row('b', 1), row('c', 0.5)]);
     const after = run([row('c', 0.5), row('b', 0), row('a', 1)]);

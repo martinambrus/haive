@@ -3,7 +3,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseQuerySet } from '../scripts/rag-eval-metrics.js';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
-import { METRIC_VERSION, SET_KS, type EvalRun } from '../scripts/rag-eval-report.js';
+import {
+  compareRuns,
+  compactRun,
+  METRIC_VERSION,
+  SET_KS,
+  type EvalRun,
+} from '../scripts/rag-eval-report.js';
 import {
   fixtureFingerprint,
   hasPinnedCommit,
@@ -70,6 +76,7 @@ describe('committed reproducible retrieval fixture without history', () => {
     }
   });
   it('retains both measured arms with every original query and every page', async () => {
+    const runs: EvalRun[] = [];
     for (const mode of ['hybrid', 'lexical']) {
       const raw = await readTextNoFollow(
         root,
@@ -77,6 +84,28 @@ describe('committed reproducible retrieval fixture without history', () => {
       );
       expect(Buffer.byteLength(raw!)).toBeLessThanOrEqual(150_000);
       const run = JSON.parse(raw!) as EvalRun;
+      runs.push(run);
+      expect(run.settings).toEqual({
+        embeddingModel: 'qwen3-embedding:4b',
+        embeddingDimensions: 2560,
+        ks: SET_KS,
+        repositoryScoped: true,
+        search: {
+          candidatePool: 50,
+          rrfK: 60,
+          denseFloor: 0.3,
+          codeDenseFloor: 0.2,
+          denseWeight: 0.7,
+          lexWeight: 0.3,
+          runbookBoost: 1,
+          lexicalOnly: mode === 'lexical',
+          knowledgeReserve: 2,
+          knowledgeReserveRatio: 0.75,
+          identifierSearch: true,
+          identifierCandidates: 3,
+        },
+      });
+      expect(compactRun(run).settings).toEqual(run.settings);
       expect(run).not.toHaveProperty('summary');
       expect(run.metricVersion).toBe(METRIC_VERSION);
       expect(run.fixture).toBe(fixture.fingerprint);
@@ -112,6 +141,9 @@ describe('committed reproducible retrieval fixture without history', () => {
         }
       }
     }
+    expect(compareRuns(runs[1]!, runs[0]!, [8], 10).groups.all![8]!.recall!.mean).toBeCloseTo(
+      0.4583333333,
+    );
   });
 
   it('fails on absent anchors, excluded paths, and cross-split evidence leakage', async () => {
