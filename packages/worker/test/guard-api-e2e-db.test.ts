@@ -207,6 +207,8 @@ const job = (name: string, data: Record<string, unknown>) =>
     name,
     data,
     timestamp: Date.now(),
+    attemptsMade: 0,
+    opts: { attempts: 3 },
     moveToDelayed: async () => undefined,
   }) as unknown as Parameters<typeof processTaskJob>[0];
 
