@@ -29,6 +29,30 @@ export async function ensureComposedImage(
   provider: ComposedImageProvider,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
+  const composition = await resolveSandboxImageComposition(db, taskId, provider, runner, true);
+  if (!composition) return null;
+
+  const inspected = await runner.inspect(composition.tag);
+  if (inspected.exists) {
+    log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
+    return composition.tag;
+  }
+
+  log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache miss, building');
+  await buildComposedImage(composition, runner);
+  return composition.tag;
+}
+
+/** Shared composition calculation. A peek uses inspect only; only the ensure path may
+ * heal/build the base. A missing composed image must not fall through to another image. */
+export async function resolveSandboxImageComposition(
+  db: Database,
+  taskId: string,
+  provider: ComposedImageProvider,
+  runner: DockerRunner = defaultDockerRunner,
+  buildBase = false,
+  peekBaseImageId?: () => Promise<string | null>,
+): Promise<SandboxImageComposition | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true, repositoryId: true },
@@ -62,23 +86,17 @@ export async function ensureComposedImage(
     rtkVersion = rtkCache?.versions?.[0] ?? rtkCache?.latestVersion ?? null;
   }
 
-  const baseImageId = await resolveBaseImageId(runner);
-  const composition = composeSandboxImage({
+  const baseImageId = buildBase
+    ? await resolveBaseImageId(runner)
+    : peekBaseImageId
+      ? await peekBaseImageId()
+      : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
+  return composeSandboxImage({
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,
     baseImageId,
     rtkVersion,
   });
-
-  const inspected = await runner.inspect(composition.tag);
-  if (inspected.exists) {
-    log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
-    return composition.tag;
-  }
-
-  log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache miss, building');
-  await buildComposedImage(composition, runner);
-  return composition.tag;
 }
 
 /**

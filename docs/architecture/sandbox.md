@@ -451,6 +451,54 @@ a command that starts its own server on the app's port gets `EADDRINUSE`. Playwr
 `reuseExistingServer` reuses the forwarded app instead. No base-URL env var is set, since one could
 override a value a project chose on purpose.
 
+**Interpreter facts are advisory and belong to an immutable image.** For PHP projects, dispatch
+peeks at each enabled provider's effective image (composed task image, provider image, then base
+fallback) without ensuring or building anything. The peek and build share the composition calculation.
+Peeks are memoized per task/provider configuration for ten seconds in a bounded cache, and one batch
+inspects the core image once. The global KB and advisory lookup share a dispatch's task facets;
+house-rule selection still reads fresh facets on every dispatch.
+
+A shared promise cache keys `php` probes by inspected image ID, never by tag: `command -v` returning
+Haive's reserved missing-tool status proves absence; shell/Docker failures and timeouts prove nothing.
+A found PHP reports its version only when the output is a bounded version string. Unknown results
+remain unknown in the cache for 60 seconds, with one pino warning per attempt containing only the
+image ID, exit code and timeout flag. At most two probes run concurrently and the cache holds at most
+128 entries. The dispatch batch waits at most 2.5 seconds. There is no global peek admission cap.
+
+The probe runs as `node` with the image's PATH, no mounts or provider environment, no network, a
+read-only filesystem, `--pull never`, `--cap-drop ALL` and `no-new-privileges`. With resource limits
+enabled it has 64 MiB / 0.25 CPU / 16 PID caps; disabling the sandbox resource governor omits these
+cgroup flags. Captured stdout and stderr share a 1 KiB limit; exceeding it removes the probe and
+leaves the fact unknown. The host run timeout is 1.5 seconds and Docker cleanup awaits removal of
+the named container. Inside the container, `timeout` or a shell watchdog kills a blocking probe after
+one second even if the worker dies. The fallback kills the probe child and lets the waiting PID 1 shell exit. Boot and shutdown reaping include this install's labelled probes
+in every Docker state, including Created and Exited.
+
+Provider wrappers or PATH/shell-startup overrides omit the fact. A short per-provider prompt block
+reaches ordinary prompts; an unknown fact adds no bytes. Queue stamps carry only the advisory block,
+immutable image ID and its zero-based Unicode character offset in the stored prompt. An argv-size
+fallback drops it before house and provider rules. If a leading block cannot be located, dispatch
+rebuilds without the fact and never emits a blockless stamp. Execution inspects the chosen image
+again and pins the launch to its immutable ID. A changed or unreadable image, or an environment
+override introduced at execution, removes the owned advisory and its trailing blank line at the
+stamped character offset. JSON user-message inputs are decoded before checking that position.
+Full advisory quotes in agent rules, house rules and task text remain intact. The same rule applies
+to Codex app-server turns and their exec fallback. Execution verifies the separator at that offset;
+a mismatched positional payload is refused before any audit write or CLI send, without stripping
+a different copy; the invocation fails once, and a Retry dispatches again with a freshly measured
+stamp. Before execution, the stored invocation prompt loses the separator only
+when the text at the stamped offset still equals it; a redelivery with the same stamp then changes
+nothing. A failed audit update prevents sending the changed prompt. Older stamps without offsets
+retain their first-match or counted-ordinal removal and audit behavior, and older full-prompt stamps remain readable.
+
+Native and sequential sub-agent inputs have no production builder today. Their exec-time stamps
+carry copy counts and, when needed, match ordinals to preserve quotes between independently adapted
+prompts. Wiring these kinds requires deriving ordinals from the assembled text, since joins can
+complete quoted separators, and a separate audit rule for their stored invocation prompts.
+Project-local tools and the project's runtime may differ from the image; these facts do not install
+PHP or replace deterministic checks. The probe uses non-login `sh`, so PATH changes in login startup
+files remain outside the observation.
+
 ## Provider eligibility for interactive shells
 
 A task or repository shell uses the provider named in its WebSocket URL; it need not be the

@@ -20,7 +20,7 @@ vi.mock('../src/repo/worktree-git-boundary.js', async (importOriginal) => ({
 }));
 vi.mock('../src/orchestrator/global-kb-context.js', () => ({
   resolveGlobalKbContext: async (_db: unknown, _taskId: string, opts: { houseRules: boolean }) => {
-    h.asked.push(opts);
+    h.asked.push({ houseRules: opts.houseRules });
     return h.context;
   },
 }));

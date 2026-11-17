@@ -89,6 +89,8 @@ export type CliOutputFormat =
   | 'gemini-json';
 
 export interface CliCommandSpec {
+  /** Advisory fact identity and original prompt, for the final image recheck. */
+  sandboxToolchain?: import('../sandbox/toolchain-prompt.js').SandboxToolchainStamp;
   planSnapshot?: import('../plan/chat-snapshot.js').PlanChatSnapshot;
   command: string;
   args: string[];
@@ -205,6 +207,8 @@ export interface SubAgentInvocationStep {
 }
 
 export interface SubAgentInvocation {
+  /** The dispatch image, rechecked before any sub-agent or synthesis process starts. */
+  sandboxToolchainImageId?: string;
   mode: SubAgentInvocationMode;
   steps: SubAgentInvocationStep[];
   synthesis: SubAgentInvocationStep;

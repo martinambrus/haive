@@ -80,7 +80,7 @@ const settle = <T>(promise: Promise<T>): Promise<Settled<T>> =>
 export async function resolveGlobalKbContext(
   db: Database,
   taskId: string,
-  opts: { houseRules: boolean },
+  opts: { houseRules: boolean; resolveFacets?: () => Promise<ProjectFacetSet> },
   bounds: typeof DISPATCH_KB_BOUNDS = DISPATCH_KB_BOUNDS,
 ): Promise<GlobalKbContext> {
   const wantRules = opts.houseRules;
@@ -103,7 +103,7 @@ export async function resolveGlobalKbContext(
     const idleStatus = rulesSwitchedOff ? 'disabled' : 'ok';
     if (!digestEnabled && !readRules) return settled(idleStatus);
 
-    const projectFacets = await resolveTaskFacets(db, taskId);
+    const projectFacets = await (opts.resolveFacets?.() ?? resolveTaskFacets(db, taskId));
     const options: GlobalKbCallOptions = {
       connectTimeoutSeconds: bounds.connectTimeoutSeconds,
       deadlineMs: bounds.deadlineMs,

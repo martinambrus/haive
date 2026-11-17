@@ -1,3 +1,4 @@
+import { prepareSandboxToolchainPrompts } from '../../sandbox/toolchain-prompt.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { type CliExecJobPayload, type CliProviderName } from '@haive/shared';
@@ -55,12 +56,21 @@ export async function executeSubAgentNative(
     throw new Error(`subagent_native expected native invocation, got ${invocation.mode}`);
   }
 
-  const prompt = assembleNativePrompt(invocation);
+  const prepared = prepareSandboxToolchainPrompts(
+    [...invocation.steps.map((step) => step.prompt), invocation.synthesis.prompt],
+    invocation.sandboxToolchainImageId,
+  );
+  const prompt = assembleNativePrompt({
+    ...invocation,
+    steps: invocation.steps.map((step, i) => ({ ...step, prompt: prepared.prompts[i]! })),
+    synthesis: { ...invocation.synthesis, prompt: prepared.prompts.at(-1)! },
+  });
   const spec = adapter.buildCliInvocation(provider, prompt, {
     cwd: sandboxWorkdir,
     extraEnv: secrets,
     effortLevel: payload.effortLevel,
   });
+  if (prepared.stamp) spec.sandboxToolchain = prepared.stamp;
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
@@ -182,12 +192,16 @@ export async function executeSubAgentSequential(
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
-    (prompt) =>
-      adapter.buildCliInvocation(provider, prompt, {
+    (prompt) => {
+      const prepared = prepareSandboxToolchainPrompts([prompt], invocation.sandboxToolchainImageId);
+      const spec = adapter.buildCliInvocation(provider, prepared.prompts[0]!, {
         cwd: sandboxWorkdir,
         extraEnv: secrets,
         effortLevel: payload.effortLevel,
-      }),
+      });
+      if (prepared.stamp) spec.sandboxToolchain = prepared.stamp;
+      return spec;
+    },
     spawner,
     { timeoutMs: payload.timeoutMs },
     extractClaudeStreamSubStep,

@@ -1,3 +1,4 @@
+import { recheckInvocationToolchain } from './toolchain-audit.js';
 import { CommittedSnapshotError, snapshotToolProfile } from '../../repo/committed-snapshot.js';
 import { assertSnapshotOwner } from '../../plan/chat-snapshot.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -716,6 +717,17 @@ export async function executeCliSpec(
    *  and optional for the same reason as `appReach`. */
   onSteeringUnavailable?: () => Promise<void>,
 ): Promise<ExecutionOutcome> {
+  // App-server reads its turn BEFORE the spawner runs, so validate its prompt here too.
+  const checked = await recheckInvocationToolchain(
+    spec,
+    sandboxImage,
+    invocationId,
+    undefined,
+    wrapperContent,
+    secrets,
+  );
+  spec = checked.spec;
+  sandboxImage = checked.image;
   const mergedSpec: CliCommandSpec = {
     ...spec,
     args: mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args,
@@ -1615,6 +1627,17 @@ export function createSandboxSpawner(
   appReach: AppReach | null = null,
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
+    // The actual image can have changed while queued. Recheck at the last spawn seam,
+    // then use its immutable ID for this launch, never the mutable tag just inspected.
+    const checked = await recheckInvocationToolchain(
+      spec,
+      sandboxImage,
+      invocationId,
+      undefined,
+      wrapperContent,
+    );
+    spec = checked.spec;
+    const executionImage = checked.image;
     if (spec.planSnapshot) {
       if (!taskId || !invocationId) throw new Error('Plan snapshot requires an owned invocation.');
       const db = getDb();
@@ -1651,7 +1674,7 @@ export function createSandboxSpawner(
     });
     allMounts.push(...mirrors.mounts);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
-    if (sandboxImage) runnerOptions.image = sandboxImage;
+    if (executionImage) runnerOptions.image = executionImage;
     if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
     if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
     if (egressDomains.length > 0) runnerOptions.egressDomains = egressDomains;

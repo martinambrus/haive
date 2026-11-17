@@ -109,10 +109,10 @@ describe('reapAllCliSandboxes shutdown budget', () => {
       CUT,
     );
     const [ctx] = h.log.warn.mock.calls[0] as [{ unlisted: string[] }];
-    expect(ctx.unlisted).toHaveLength(5);
+    expect(ctx.unlisted).toHaveLength(6);
 
     const ps = verbs('ps');
-    expect(ps).toHaveLength(5);
+    expect(ps).toHaveLength(6);
     for (const c of ps) expect(c.kill).toHaveBeenCalledWith('SIGKILL');
 
     await vi.advanceTimersByTimeAsync(40_000);
@@ -190,14 +190,14 @@ describe('kill timers', () => {
 
   it('W1a clears the listing timer when the listing exits', async () => {
     await reapAllCliSandboxes('x');
-    expect(verbs('ps')).toHaveLength(5);
+    expect(verbs('ps')).toHaveLength(6);
     await expectNoTimerLeft();
   });
 
   it('W1b clears the listing timer when the listing cannot spawn', async () => {
     h.fake.route = (verb) => ({ stdout: '', hang: false, error: verb === 'ps' });
     await reapAllCliSandboxes('x');
-    expect(verbs('ps')).toHaveLength(5);
+    expect(verbs('ps')).toHaveLength(6);
     await expectNoTimerLeft();
   });
 
@@ -250,3 +250,20 @@ describe.each(['haive', 'tib_second'])('terminal shell ownership for install %s'
     ]);
   });
 });
+
+it.each(['worker boot', 'worker SIGTERM'])(
+  'reaps owned probes in every state at %s',
+  async (reason) => {
+    h.fake.route = (verb, filter) => ({
+      stdout:
+        verb === 'ps' && filter === 'label=haive.toolchain-probe'
+          ? `created\t${installId()}\nexited\t${installId()}\nforeign\telsewhere\n`
+          : '',
+      hang: false,
+    });
+    expect(await reapAllCliSandboxes(reason)).toBe(2);
+    const probe = verbs('ps').find(({ args }) => args.includes('label=haive.toolchain-probe'));
+    expect(probe?.args).toContain('-a');
+    expect(verbs('rm')[0]?.args).toEqual(['rm', '-f', '-v', 'created', 'exited']);
+  },
+);

@@ -89,6 +89,14 @@ export interface DockerRunOpts {
   workdir?: string;
   entrypoint?: string | null;
   network?: string;
+  /** Read-only image filesystem, used by advisory interpreter probes. */
+  readOnly?: boolean;
+  /** Image acquisition policy; probes only use already-inspected local images. */
+  pull?: 'never' | 'missing' | 'always';
+  capDrop?: string[];
+  securityOpt?: string[];
+  /** Optional combined stdout/stderr capture cap; exceeding it kills and removes the run. */
+  maxOutputBytes?: number;
   /** Extra networks to attach AFTER create, before start (docker run takes only
    *  one --network). Triggers a create -> network connect -> start -a flow.
    *  Used to give the sandbox an internal api-only NIC regardless of its policy
@@ -192,6 +200,7 @@ async function spawnAndCollect(
   args: string[],
   opts: {
     timeoutMs: number;
+    maxOutputBytes?: number;
     onStdoutChunk?: (chunk: string) => void;
     onStderrChunk?: (chunk: string) => void;
     signal?: AbortSignal;
@@ -217,6 +226,8 @@ async function spawnAndCollect(
     let stderr = '';
     let timedOut = false;
     let errorMessage: string | undefined;
+    let outputBytes = 0;
+    let outputLimited = false;
 
     const interactive = opts.interactive === true;
     // A prompt delivered over stdin needs the pipe just as much as a steerable
@@ -282,7 +293,19 @@ async function spawnAndCollect(
     // stdout/stderr are always 'pipe' (positions 1,2), so never null; the
     // optional chaining only satisfies the widened ChildProcess type that the
     // computed stdio array (vs a literal) infers.
+    const withinOutputLimit = (chunk: Buffer): boolean => {
+      if (outputLimited) return false;
+      outputBytes += chunk.length;
+      if (opts.maxOutputBytes !== undefined && outputBytes > opts.maxOutputBytes) {
+        outputLimited = true;
+        errorMessage = 'Docker output exceeded capture limit';
+        child.kill('SIGKILL');
+        return false;
+      }
+      return true;
+    };
     child.stdout?.on('data', (chunk: Buffer) => {
+      if (!withinOutputLimit(chunk)) return;
       if (debugStream) debugStream.write(chunk);
       const text = stdoutDecoder.write(chunk);
       if (text) {
@@ -291,6 +314,7 @@ async function spawnAndCollect(
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
+      if (!withinOutputLimit(chunk)) return;
       const text = stderrDecoder.write(chunk);
       if (text) {
         stderr += text;
@@ -304,12 +328,12 @@ async function spawnAndCollect(
       clearTimeout(timer);
       if (opts.signal) opts.signal.removeEventListener('abort', abortHandler);
       const tail = stdoutDecoder.end();
-      if (tail) {
+      if (tail && !outputLimited) {
         stdout += tail;
         opts.onStdoutChunk?.(tail);
       }
       const stderrTail = stderrDecoder.end();
-      if (stderrTail) {
+      if (stderrTail && !outputLimited) {
         stderr += stderrTail;
         opts.onStderrChunk?.(stderrTail);
       }
@@ -434,6 +458,10 @@ export const defaultDockerRunner: DockerRunner = {
         flagArgs.push('--label', `${k}=${v}`);
       }
     }
+    if (opts.readOnly) flagArgs.push('--read-only');
+    if (opts.pull) flagArgs.push('--pull', opts.pull);
+    for (const capability of opts.capDrop ?? []) flagArgs.push('--cap-drop', capability);
+    for (const security of opts.securityOpt ?? []) flagArgs.push('--security-opt', security);
     if (opts.user) flagArgs.push('--user', opts.user);
     if (opts.workdir) flagArgs.push('-w', opts.workdir);
     if (opts.network) flagArgs.push('--network', opts.network);
@@ -488,6 +516,7 @@ export const defaultDockerRunner: DockerRunner = {
       runArgs.push('--name', name, ...flagArgs, opts.image, ...opts.cmd);
       const result = await spawnAndCollect('docker', runArgs, {
         timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+        maxOutputBytes: opts.maxOutputBytes,
         onStdoutChunk: opts.onStdoutChunk,
         onStderrChunk: opts.onStderrChunk,
         signal: opts.signal,
@@ -533,6 +562,7 @@ export const defaultDockerRunner: DockerRunner = {
     startArgs.push(name);
     const result = await spawnAndCollect('docker', startArgs, {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+      maxOutputBytes: opts.maxOutputBytes,
       onStdoutChunk: opts.onStdoutChunk,
       onStderrChunk: opts.onStderrChunk,
       signal: opts.signal,

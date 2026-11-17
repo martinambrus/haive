@@ -56,8 +56,8 @@ where the repository copy also loads.
   vision) would otherwise bury the old block and leave two. The isolation scan reads the prompt
   with that block removed for the same reason. A marker anywhere else is text the prompt carries
   and can neither suppress nor replace the injection. `stripHaivePreamble` removes this block and
-  then a stored house-rules block, each only at position 0. The six blocks the adapters prepend
-  below them (model capability, global KB titles, app reach, MCP surface, the DDEV-generated and
+  then a stored house-rules block, each only at position 0. The seven blocks the adapters prepend
+  below them (model capability, global KB titles, app reach, sandbox toolchain, MCP surface, the DDEV-generated and
   worktree git boundaries) follow the same rule: each counts as present only within the run of
   `<haive_*>` blocks that opens the prompt, each closed on a line of its own
   (`hasLeadingHaiveBlock`), so a marker quoted in a diff or an earlier prompt never suppresses one
@@ -73,7 +73,7 @@ where the repository copy also loads.
   byte-identical; a failed read means off.
 - **Never a new failure.** When the rules push a prompt that fits past `PROMPT_ARGV_LIMIT_BYTES` for
   an adapter that takes its prompt only as an argument, the dispatch is rebuilt without them and
-  says so; a house-rules block is dropped before them. No shipped adapter is argv-only since gemini
+  says so; the sandbox advisory is dropped first, then the house-rules block, then agent rules. No shipped adapter is argv-only since gemini
   moved to stdin; the rebuild stays as a guard.
 - **Recorded per run.** `spec.agentRules` (`{ hash, injected, reason? }`, the hash of the
   normalised effective rules, kept even when they were not injected) rides the job to exec and is

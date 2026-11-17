@@ -1,3 +1,4 @@
+import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
   resolveTaskCommittedSnapshots,
@@ -86,6 +87,15 @@ import {
   withMcpSurface,
   type McpSurface,
 } from '../sandbox/mcp-surface.js';
+import { resolveDispatchSandboxToolchain } from './sandbox-toolchain.js';
+import {
+  stripSandboxToolchain,
+  sandboxToolchainBlock,
+  sandboxToolchainOffset,
+  toolchainEnvironmentMatches,
+  withSandboxToolchain,
+} from '../sandbox/toolchain-prompt.js';
+import type { SandboxToolchainFact } from '../sandbox/toolchain-probe.js';
 import {
   isReachableApp,
   resolveAppReach,
@@ -200,6 +210,8 @@ export interface DispatchRequest {
    *  address. Computed by resolveTaskDispatch; exposed on the pure resolver only for
    *  deterministic unit tests. Null means say nothing about the app. */
   appReach?: AppReach | null;
+  /** Advisory interpreter facts, keyed by provider and immutable image ID. */
+  sandboxToolchain?: Record<string, SandboxToolchainFact | null>;
   /** The invocation runs in a worktree other than the one the task's app runner serves (a DAG
    *  issue coder, a merge fixer), so the app shows none of its changes. Computed with appReach. */
   appServesOtherTree?: boolean;
@@ -372,6 +384,9 @@ async function resolveTaskDispatchOnTree(
   req: DispatchRequest,
   snapshotWorkspace: ResolvedCommittedSnapshots | null,
 ): Promise<DispatchPlan> {
+  // Enforcement reads current facets, shared with the advisory only within this dispatch.
+  let taskFacets: ReturnType<typeof resolveTaskFacets> | undefined;
+  const resolveFacets = () => (taskFacets ??= resolveTaskFacets(db, taskId));
   const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
   const [
     lspConfigured,
@@ -383,6 +398,7 @@ async function resolveTaskDispatchOnTree(
     hasRepo,
     agentIsolation,
     agentRulesInjection,
+    sandboxToolchain,
   ] = await Promise.all([
     snapshotWorkspace ? false : hasReadyLspBridge(db, taskId),
     snapshotWorkspace
@@ -397,12 +413,19 @@ async function resolveTaskDispatchOnTree(
           req.customTools,
           req.integrations,
         ),
-    resolveGlobalKbContext(db, taskId, { houseRules: houseRules !== undefined }),
+    resolveGlobalKbContext(db, taskId, {
+      houseRules: houseRules !== undefined,
+      resolveFacets,
+    }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
     taskHasRepository(db, taskId),
     resolveAgentIsolationEnabled(),
     resolveAgentRulesInjectionEnabled(),
+    resolveDispatchSandboxToolchain(db, taskId, req.providers, {
+      extraEnv: req.invokeOpts.extraEnv,
+      resolveFacets,
+    }),
   ]);
   const appServesOtherTree =
     isReachableApp(appReach) &&
@@ -442,6 +465,7 @@ async function resolveTaskDispatchOnTree(
     globalKbDigest: globalKb.digest,
     appReach,
     appServesOtherTree,
+    sandboxToolchain,
     codexAppServer,
     hasRepo,
     agentIsolation: snapshotWorkspace ? false : agentIsolation,
@@ -778,6 +802,15 @@ function buildCliSidePlan(
   // disagree — a prompt that says "discover with rag_search" while the digest is withheld
   // describes a surface neither half is looking at.
   const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
+  let toolchainFact =
+    req.invokeOpts.disableTools === true && adapter.supportsDisableTools === true
+      ? null
+      : toolchainEnvironmentMatches(provider.wrapperContent, {
+            ...provider.envVars,
+            ...req.invokeOpts.extraEnv,
+          })
+        ? req.sandboxToolchain?.[provider.id]
+        : null;
   const rules = agentRulesFor(req, provider);
   const house = houseRulesInjection(req);
   // One decision for this plan, so the prompt and the mounts cannot disagree: the same boolean
@@ -790,15 +823,18 @@ function buildCliSidePlan(
   ): string => {
     // A stored prompt dispatched again opens with its old rules blocks; every adapter below prepends,
     // so one that newly applies would bury them where the replacement at the end cannot see them.
-    const capabilityAdapted = adaptPromptForCliCapabilities(stripHaivePreamble(prompt), {
-      supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
-      ragWired,
-      projectAgentsDir: providerMetadata.projectAgentsDir,
-      agentFileFormat: providerMetadata.agentFileFormat,
-      isolated,
-      agentBodies: req.agentBodies,
-      templatePersonas: req.templatePersonas,
-    });
+    const capabilityAdapted = adaptPromptForCliCapabilities(
+      stripSandboxToolchain(stripHaivePreamble(prompt)),
+      {
+        supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
+        ragWired,
+        projectAgentsDir: providerMetadata.projectAgentsDir,
+        agentFileFormat: providerMetadata.agentFileFormat,
+        isolated,
+        agentBodies: req.agentBodies,
+        templatePersonas: req.templatePersonas,
+      },
+    );
     // Both boundaries ride the same predicate: an invocation isolated to a worktree is
     // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
     // prompt can never claim a boundary the mount does not enforce (or omit one it does).
@@ -843,10 +879,11 @@ function buildCliSidePlan(
     // advertises a door it does not have. Applied at the same choke point as the
     // boundaries above, which is what puts it in front of a model like muse that
     // never picks the tool on its own.
+    const toolchainBounded = withSandboxToolchain(reachBounded, toolchainFact);
     const digested =
       ragWired && req.globalKbDigest
-        ? withGlobalKbDigest(reachBounded, req.globalKbDigest)
-        : reachBounded;
+        ? withGlobalKbDigest(toolchainBounded, req.globalKbDigest)
+        : toolchainBounded;
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.
@@ -899,7 +936,14 @@ function buildCliSidePlan(
     let agentRules = rules.stamp;
     let houseRules = house.stamp;
     let spec: CliCommandSpec | undefined;
+    let toolchainBlock: string | null = null;
     while (spec === undefined) {
+      toolchainBlock = toolchainFact ? sandboxToolchainBlock(effectivePrompt) : null;
+      if (toolchainFact && !toolchainBlock) {
+        toolchainFact = null;
+        effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
+        continue;
+      }
       try {
         spec = adapter.buildCliInvocation(provider, effectivePrompt, {
           ...invokeOpts,
@@ -907,10 +951,12 @@ function buildCliSidePlan(
         });
       } catch (err) {
         // An argv-only adapter must never fail just because rules push a prompt
-        // that fits past that limit: drop the house rules, then the agent rules, and say so.
+        // that fits past that limit: drop the advisory, house rules, then agent rules.
         // This pre-budget contract applies to required steps too; input that still cannot fit fails.
         if (!(err instanceof PromptTooLargeError)) throw err;
-        if (houseBlock !== null) {
+        if (toolchainFact) {
+          toolchainFact = null;
+        } else if (houseBlock !== null) {
           houseBlock = null;
           houseRules = house.droppedStamp;
         } else if (agentRules.injected) {
@@ -922,6 +968,12 @@ function buildCliSidePlan(
         effectivePrompt = adaptPrompt(sourcePrompt, rulesText, houseBlock);
       }
     }
+    if (toolchainFact && toolchainBlock)
+      spec.sandboxToolchain = {
+        imageId: toolchainFact.imageId,
+        block: toolchainBlock,
+        offset: sandboxToolchainOffset(effectivePrompt),
+      };
     spec.agentRules = agentRules;
     if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
@@ -953,20 +1005,48 @@ function buildCliSidePlan(
     };
   }
 
+  // Splitters can prepend prose (sequential roles and synthesis instructions). Apply the
+  // advisory after splitting so each executable prompt still owns a leading block.
+  const subAgentFact = toolchainFact;
+  toolchainFact = null;
   const subAgentSpec = {
     ...req.input.spec,
-    // No step builds a sub-agent spec, so these carry no rules block rather than one per prompt.
     subAgents: req.input.spec.subAgents.map((subAgent) => ({
       ...subAgent,
       prompt: adaptPrompt(subAgent.prompt, null, null),
     })),
     synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt, null, null),
   };
+  toolchainFact = subAgentFact;
   const assignedAgentIds = assignedPersonaIds(req, [
     ...req.input.spec.subAgents.map((subAgent) => subAgent.prompt),
     req.input.spec.synthesisPrompt,
   ]);
   const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, invokeOpts);
+  const cleanInvocation = split.invocation;
+  if (toolchainFact) {
+    split.invocation = {
+      ...cleanInvocation,
+      steps: cleanInvocation.steps.map((step) => ({
+        ...step,
+        prompt: withSandboxToolchain(step.prompt, toolchainFact),
+      })),
+      synthesis: {
+        ...cleanInvocation.synthesis,
+        prompt: withSandboxToolchain(cleanInvocation.synthesis.prompt, toolchainFact),
+      },
+    };
+    if (
+      [...split.invocation.steps, split.invocation.synthesis].some(
+        (step) => !sandboxToolchainBlock(step.prompt),
+      )
+    ) {
+      toolchainFact = null;
+      split.invocation = cleanInvocation;
+    } else {
+      split.invocation.sandboxToolchainImageId = toolchainFact.imageId;
+    }
+  }
   const invocation =
     assignedAgentIds.length > 0 ? { ...split.invocation, assignedAgentIds } : split.invocation;
   return {

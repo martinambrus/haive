@@ -17,6 +17,7 @@ export const SHUTDOWN_REAP_BUDGET_MS = 3_000;
 /** Kills all running haive-managed sandbox containers — both CLI exec
  *  sandboxes (label `haive.task.id`) and per-task terminal shells
  *  (label `haive.role=terminal-shell`, name prefix `haive-shell-`).
+ *  Toolchain probes are reaped in every state, including Created and Exited.
  *  Used on worker boot and shutdown to clean up containers orphaned by an
  *  earlier worker pid that died mid-job (e.g. tsx watch restart, SIGKILL).
  *  Single-worker assumption — DO NOT call from a multi-worker deployment
@@ -56,16 +57,19 @@ async function reapOwnedSandboxes(
   signal?: AbortSignal,
   pending?: { unlisted: Set<string>; unremoved: Set<string> },
 ): Promise<number> {
-  const list = (filter: string): Promise<string[]> => {
+  const list = (filter: string, all = false): Promise<string[]> => {
     pending?.unlisted.add(filter);
-    return listSandboxIdsByFilter(filter, signal).finally(() => pending?.unlisted.delete(filter));
+    return listSandboxIdsByFilter(filter, signal, all).finally(() =>
+      pending?.unlisted.delete(filter),
+    );
   };
-  const [labelIds, shellIds, ddevIds, appRunnerIds, ideIds] = await Promise.all([
+  const [labelIds, shellIds, ddevIds, appRunnerIds, ideIds, probeIds] = await Promise.all([
     list('label=haive.task.id'),
     list(`name=${containerPrefix(CONTAINER_FAMILY.shell)}`),
     list('label=haive.ddev'),
     list(`label=${APP_RUNNER_LABEL}`),
     list(`label=${IDE_RUNNER_LABEL}`),
+    list('label=haive.toolchain-probe', true),
   ]);
   // The durable per-task runners (DDEV DinD + non-DDEV app-runner + browser IDE)
   // carry haive.task.id but are NOT orphaned CLI sandboxes — they're long-lived
@@ -75,7 +79,9 @@ async function reapOwnedSandboxes(
   // IDE's own idle reaper grace-stops it after the tab closes. Preserve them all;
   // only the short-lived CLI sandboxes + terminal shells get reaped.
   const durable = new Set([...ddevIds, ...appRunnerIds, ...ideIds]);
-  const ids = Array.from(new Set([...labelIds, ...shellIds])).filter((id) => !durable.has(id));
+  const ids = Array.from(new Set([...labelIds, ...shellIds, ...probeIds])).filter(
+    (id) => !durable.has(id),
+  );
   if (ids.length === 0 || signal?.aborted) return 0;
   log.warn(
     { count: ids.length, preserved: durable.size, reason },
@@ -97,11 +103,16 @@ async function reapOwnedSandboxes(
  * read out with `--format` rather than added to `--filter` because a docker filter cannot express
  * "this value OR absent", and absent is exactly what every container predating the label is.
  */
-function listSandboxIdsByFilter(filter: string, signal?: AbortSignal): Promise<string[]> {
+function listSandboxIdsByFilter(
+  filter: string,
+  signal?: AbortSignal,
+  all = false,
+): Promise<string[]> {
   return new Promise((resolve) => {
     let stdout = '';
     const child = spawn('docker', [
       'ps',
+      ...(all ? ['-a'] : []),
       '--filter',
       filter,
       '--format',
