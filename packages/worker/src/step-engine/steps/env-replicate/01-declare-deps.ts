@@ -261,6 +261,8 @@ interface DetectedRuntime {
 
 export interface DeclareDepsDetect {
   runtimes: DetectedRuntime[];
+  /** Apt package suffixes required by Composer's production database extensions. */
+  phpDatabaseExtensions?: string[];
   containerTool: ContainerTool;
   /** DDEV webserver_type default for the config 01c generates. apache-fpm when a
    *  .htaccess is found (honors Apache rewrite/SAPI behavior), else nginx-fpm. */
@@ -835,6 +837,13 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         ...(resolvedRuby ? { ruby: resolvedRuby } : {}),
       },
       packageManagers,
+      // Only persist requirements that this image installs. DDEV owns its PHP
+      // extensions; absent requirements keep existing template identities intact.
+      ...(values.runtimes.includes('php') &&
+      values.containerTool !== 'ddev' &&
+      args.detected.phpDatabaseExtensions?.length
+        ? { phpDatabaseExtensions: args.detected.phpDatabaseExtensions }
+        : {}),
       preinstallDeps: values.preinstallDeps ?? true,
       containerTool: values.containerTool,
       // DDEV is the only consumer of webserver_type (01c-ddev-env reads this when it
@@ -1117,6 +1126,7 @@ function detectContainerToolIntent(text: string): ContainerTool | null {
 export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDetect> {
   const runtimes: DetectedRuntime[] = [];
   const suggestedLsp = new Set<LspKey>();
+  const phpDatabaseExtensions = new Set<string>();
 
   const packageJson = await readJsonIfExists(repoPath, 'package.json');
   if (packageJson) {
@@ -1146,6 +1156,21 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     });
     // Detect CMS frameworks that use non-standard PHP extensions (.inc, .module, etc.)
     const allDeps = Object.keys(requireField ?? {});
+    // These apt packages provide both the native and PDO modules. Keep this
+    // allowlist in the existing manifest reader rather than scanning again.
+    const databaseExtensions: Record<string, string> = {
+      'ext-pdo_sqlite': 'sqlite3',
+      'ext-sqlite3': 'sqlite3',
+      'ext-pdo_pgsql': 'pgsql',
+      'ext-pgsql': 'pgsql',
+      'ext-pdo_mysql': 'mysql',
+      'ext-mysqli': 'mysql',
+    };
+    for (const dep of allDeps) {
+      if (!Object.hasOwn(databaseExtensions, dep)) continue;
+      const extension = databaseExtensions[dep];
+      if (extension) phpDatabaseExtensions.add(extension);
+    }
     isCmsPhpProject = allDeps.some(
       (dep) =>
         dep.startsWith('drupal/') ||
@@ -1288,6 +1313,9 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     }),
     containerTool,
     webserver,
+    ...(phpDatabaseExtensions.size > 0
+      ? { phpDatabaseExtensions: [...phpDatabaseExtensions].sort() }
+      : {}),
     ddevProjectName: ddev.projectName,
     database: { ...database, version: isVersionToken(database.version) ? database.version : null },
     suggestedLsp: Array.from(suggestedLsp),

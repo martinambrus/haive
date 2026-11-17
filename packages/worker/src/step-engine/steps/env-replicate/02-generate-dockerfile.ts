@@ -231,6 +231,7 @@ interface DeclaredDepsShape extends LspInstallContract {
   preinstallDeps?: boolean;
   containerTool?: string;
   database?: { kind?: string; version?: string | null };
+  phpDatabaseExtensions?: string[];
   lspServers?: string[];
   /** Per-LSP version pins, keyed by lsp key (e.g. intelephense, vtsls, pyright,
    *  gopls, solargraph). Bare version string; absent/empty = latest/unpinned.
@@ -471,6 +472,23 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     const phpVersion = clampPhpToInstallable(requestedPhp);
     const bumped = phpVersion !== requestedPhp;
     const needsSuryPpa = isUbuntuBase(baseImage) && phpVersion !== '8.3';
+    // Install drivers beside the interpreter, after the same source setup and
+    // with the same normalized/floored version. A database client alone cannot
+    // serve PDO. Composer may require more than the declared database's driver.
+    const databaseExtension =
+      deps.database?.kind === 'sqlite'
+        ? 'sqlite3'
+        : deps.database?.kind === 'postgres'
+          ? 'pgsql'
+          : deps.database?.kind === 'mysql' || deps.database?.kind === 'mariadb'
+            ? 'mysql'
+            : null;
+    const extensions = new Set(deps.phpDatabaseExtensions ?? []);
+    if (databaseExtension) extensions.add(databaseExtension);
+    // Only fixed package suffixes reach the shell, including for stored deps.
+    const databasePackages = ['mysql', 'pgsql', 'sqlite3']
+      .filter((extension) => extensions.has(extension))
+      .map((extension) => `php${phpVersion}-${extension}`);
     if (bumped) {
       // PHP < 5.6 is EOL and carried by no maintained apt repo (ondrej/sury
       // both floor at 5.6, as does DDEV), so the apt install would fail. Floor
@@ -495,7 +513,13 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
       lines.push('    && apt-get update \\');
     }
     lines.push(
-      `    && apt-get install -y --no-install-recommends php${phpVersion}-cli php${phpVersion}-xml php${phpVersion}-mbstring php${phpVersion}-zip`,
+      `    && apt-get install -y --no-install-recommends ${[
+        `php${phpVersion}-cli`,
+        `php${phpVersion}-xml`,
+        `php${phpVersion}-mbstring`,
+        `php${phpVersion}-zip`,
+        ...databasePackages,
+      ].join(' ')}`,
     );
     lines.push('COPY --from=composer:2 /usr/bin/composer /usr/bin/composer');
     lines.push('');
