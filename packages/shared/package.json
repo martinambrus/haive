@@ -287,7 +287,7 @@
     "ioredis": "^6.0.0",
     "pino": "^10.4.0",
     "postgres": "^4.1.1",
-    "web-tree-sitter": "0.25.10",
+    "web-tree-sitter": "0.27.2",
     "zod": "^4.6.6"
   },
   "devDependencies": {
