@@ -108,6 +108,50 @@ function run(h: Harness) {
 const NGINX_DEPS = { containerTool: 'ddev', webserver: 'nginx-fpm' };
 
 describe('01-declare-deps apply on a shared env template', () => {
+  it.each([
+    ['none', ['php'], true],
+    ['ddev', ['php'], false],
+    ['none', ['node'], false],
+  ] as const)(
+    'persists Composer drivers for %s with %j: %s',
+    async (containerTool, runtimes, persists) => {
+      const h = makeHarness(null, []);
+      await declareDepsStep.apply(h.ctx, {
+        detected: { ...detected, phpDatabaseExtensions: ['pgsql', 'sqlite3'] },
+        formValues: { ...formValues, containerTool, runtimes: [...runtimes] },
+        iteration: 0,
+        previousIterations: [],
+      } as Parameters<typeof declareDepsStep.apply>[1]);
+      const deps = h.inserted[0]?.declaredDeps as Record<string, unknown>;
+      if (persists) expect(deps.phpDatabaseExtensions).toEqual(['pgsql', 'sqlite3']);
+      else expect(deps).not.toHaveProperty('phpDatabaseExtensions');
+    },
+  );
+
+  it('invalidates saved Dockerfile and image when Composer drivers change', async () => {
+    const probe = makeHarness(null, []);
+    const args = {
+      detected,
+      formValues: { ...formValues, containerTool: 'none' },
+      iteration: 0,
+      previousIterations: [],
+    } as Parameters<typeof declareDepsStep.apply>[1];
+    await declareDepsStep.apply(probe.ctx, args);
+    const deps = probe.inserted[0]?.declaredDeps as Record<string, unknown>;
+    const h = makeHarness({ id: 'tpl-solo', baseImage: 'ubuntu:24.04', declaredDeps: deps }, []);
+    await declareDepsStep.apply(h.ctx, {
+      ...args,
+      detected: { ...detected, phpDatabaseExtensions: ['sqlite3'] },
+    });
+    expect(h.updated[0]).toMatchObject({
+      generatedDockerfile: null,
+      builtImageId: null,
+      lastBuiltAt: null,
+      dockerfileHash: null,
+      declaredDeps: { phpDatabaseExtensions: ['sqlite3'] },
+    });
+  });
+
   it('forks a row of its own when the shared definition would change', async () => {
     const h = makeHarness(
       { id: 'tpl-shared', baseImage: 'ubuntu:24.04', declaredDeps: NGINX_DEPS },
