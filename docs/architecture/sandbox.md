@@ -820,8 +820,11 @@ help; none proves LSP protocol activation.
 
 Missing/incompatible native prerequisites emit `# <server> SKIPPED: <reason>` to the build log
 and finish that recipe RUN without installation. This includes missing su, Go below 1.21, Ruby
-below 3.0/missing headers and incompatible Java/Python. A skip is never installed evidence and
-must fail the future readiness match for that selected server. Once installation starts, registry
+below 3.0/missing headers and incompatible Java/Python. A skip is never installed evidence.
+Before each skip-capable native recipe the layer removes its recipe-owned
+`/usr/local/bin/<server>` launcher, and the probe opens that exact path, so an old
+launcher inherited from the saved base cannot turn a skip into success. Other PATH candidates
+cannot satisfy the probe. Once installation starts, registry
 resolution/download/build and post-install launcher failures still fail the image; legacy's
 unguarded go/gem/rustup/curl RUNs also fail in those cases. Node/npm supply still fails when its
 shared provider/runtime requirement cannot be met. Such failures prevent a replacement task
@@ -857,24 +860,102 @@ per waiter (accepted while composed builds are rare; the provider path's in-flig
 model if it matters). The existing provider export and
 lock semantics remain. Composed boot reaping takes that lock, compares the current immutable image
 ID with its age snapshot, lists stopped as well as running containers, and removes without force,
-so Docker refuses an image still used by any container. A failed replacement throws without
-removing the previous cached image or writing any row/reference; an old image is never returned
-as the newly requested pins. The existing age-based boot eviction remains, with no new durable
-image-reference or verification lease in this slice.
+so Docker refuses an image still used by any container. Legacy replacement builds still throw
+without removing a previous cached image. Contract 2 now adds verification and task-owned
+publication, described below.
 
-No writer emits contract 2; existing templates retain their saved installers and pins, and
-verification/readiness still target the environment image. Generation (including saved-body reuse)
-and environment smoke planning continue refusing 2 and unknown contracts. No SQL migration,
-evidence storage, image-reference publication switch or manifest bump is included.
+## Composed LSP verification and retained images
 
-The remaining cutover is consumer-first: (b) split 04 runtime and composed LSP checks and store
-versioned provider/image/plugin identity evidence in existing `task_steps.output.composedLsp`
-JSONB, then teach dispatcher and cli-exec readiness to match it; (c) carry an existing row's
-contract through 01's reconstructed declaredDeps like savedWebserver, add the new-template writer,
-and suppress 02's generated installers last. That evidence is per-run and fail-closed: Retry at
-or before 04 nulls output, so 04 must write its complete entry every run; the retained image
-reference and reaper protection must live on a row a reset never touches, never in step output.
-Preserve legacy/custom and shared templates and switch image references only after build AND
-verification. A manifest bump alone cannot migrate environment installers. Revert this cache-reader
-slice independently before a later writer activates it; no row or image-reference migration is
-needed for existing rows. Real builds and live LSP acceptance remain deferred as described above.
+Contract 2 has readers and verification, with no 01 contract writer and no 02 installer suppression.
+Existing absent/1 rows retain their checks, reports, image composition and readiness rules.
+Generation, including saved-body reuse, still refuses contract 2. No manifest bump or SQL migration
+is included.
+
+04 separates runtime/client checks (the inspected environment image) from selected LSP servers
+(the exact inspected composed image ID). Its LSP runs use node, the image PATH without provider
+or host overrides, no repository/auth mounts and no network. Each selected launcher must yield
+installed/server and toolchain versions and a JSON-RPC initialize response with capabilities.
+A launcher exit or command-v alone cannot pass. These are image/server checks; they do not claim
+that a logged-in CLI has activated its plugin. Missing, skipped and omitted checks fail readiness.
+No real image build or logged-in CLI acceptance was performed for this slice; native downloads,
+real protocol compatibility and the moving-input release decisions above remain activation gates.
+
+Legacy `output.reports` stays unchanged. Contract-2 `output.environmentReports` carries runtime
+checks and `output.composedLsp` carries schemaVersion 1 and a complete provider-identified entries
+array, rewritten per run without merging an earlier output. It records exact saved-body and recipe
+hashes, template and contract, canonical selection/pins, current provider configuration identity,
+01b result and PHP plugin-file hashes, composition hash/tag, immutable environment/composed IDs,
+versions, bounded per-server reports and an explicit image-verification outcome. Only one provider
+is verified per 04 run, with at most seven selected-server reports and 2,000 captured characters per
+output stream. A later provider needs its own matching 04 evidence.
+
+01b records provider configuration and local PHP plugin-file hashes only for contract 2. A
+contract-2 apply refuses changed detect-time provider/selection inputs, and refuses provider or
+file changes during installation. Missing/omitted plugin results, unbound older results, PATH or
+shell overrides, wrappers, altered PHP files, partial reports and Ruby-only selections never
+advertise a callable bridge. The recorded plugin language set must cover every currently
+selected bridged server. Legacy dispatch evaluates readiness once, independent of provider
+count; only contract 2 fans out per provider. Dispatch and execution compare the complete current
+identity with 04 and the retained effective reference; execution uses the inspected
+immutable image ID. Snapshot workspaces still exclude LSP. A task without a matching completed
+04 row is unready.
+
+**A verified launch stays pinned.** The reference records the resolved RTK version, the core
+image ID and the repository's explicit RTK pin separately, plus a hash of the exact saved body,
+canonical selection/pins and provider image settings. Launch and peek resolve against those
+recorded inputs. An RTK cache refresh, a core rebuild or an ordinary recipe change cannot move
+the launch to another tag or make it fail. A template rebuild with the same saved body also keeps
+the pinned launch, while readiness still requires a ready template. A changed saved body,
+selection/pins, explicit RTK pin or provider name/CLI version/Dockerfile extras refuses launch
+until the requested replacement is
+verified; it never silently uses the old image as those new inputs. The tag is still inspected
+and must name the verified immutable ID. Readiness uses the recorded RTK/core inputs too, while
+continuing to compare current recipes and the provider/plugin result with 04: a worker recipe
+change may withdraw tools without changing the pinned launch image.
+
+The provider configuration hash uses an explicit allow-list. Name, CLI version and Dockerfile
+extras configure the installer/image; wrapper body, environment, CLI arguments and executable/
+wrapper paths determine which plugin command runs; auth mode and isolation choose its plugin
+storage namespace. Provider id/ownership/enabled are checked separately. Learned model limits,
+provisioning status/errors, rules text, auth generation/health and timestamps do not change this
+hash, since they change neither the image nor the plugin installation. The exported
+allow-list and explicit ignore list must cover every provider schema column exactly once; a
+coverage test fails when a new column has not been classified.
+
+**Image ownership survives Retry.** Existing `tasks.metadata.composedLspImageRefs` is versioned,
+provider-keyed and bounded to 16 provider entries, each with effective, prior and verifying refs.
+The worker updates only that key from a freshly locked task row, preserving unrelated metadata.
+It reserves the candidate before checking it and publishes only after every environment/server
+check passes, in the build's existing per-tag turn. Step generation and task epoch fence Retry;
+provider and environment row locks fence edits during the final identity comparison/publication.
+A failed requested replacement keeps effective/prior references and reports failure, and is
+never served as the old image under the requested pins. Pending verification ownership also
+survives a crash. 04 output remains disposable readiness evidence: a reset clears it and therefore
+readiness, while the task-owned references remain. A pending/reset 04 is read before completed
+rows, including a completed higher round, so a Retry cannot reuse another round's old evidence.
+The composed reaper reads live tasks' references, including prior/verifying IDs, before selection
+and again in the tag turn. A refused ownership
+read keeps images. Container checks and non-force Docker removal remain the final backstop.
+Publication bounds retained history. Completed and cancelled tasks release durable reaper
+protection; their metadata remains audit history. Failed tasks are revivable through Retry and
+allowance auto-resume, so they continue protecting effective, prior and verifying references,
+without an age bound, as do paused, queued, running and parked tasks. The status filter shares
+`TERMINAL_TASK_STATUSES` with step ownership. Existing task shells, including stopped containers,
+remain protected by the container check. The terminal launcher can read a reference after task
+end, but that does not reserve an image forever: a cold shell opened after a completed or
+cancelled task's age-based eviction fails closed if the retained image is gone. There is no
+post-completion workflow consumer requiring indefinite image retention. The reaper uses a bound
+`jsonb_exists` key test combined with the non-terminal-task status filter.
+
+**Activation ordering remains open.** Ordinary workflows run 04 before 01b. An initial 04 therefore
+records a missing plugin result and cannot make LSP ready, even after 01b later completes: that
+completion changes the identity. Under this order a Retry of 04 cannot make contract 2 ready:
+it resets downstream 01b again, which completes after 04 and changes the plugin identity again.
+Retry 04 rebuilds and re-verifies the image so launches resume, but cannot restore LSP
+readiness under the current order.
+The writer slice must arrange a fresh 04 verification after the
+plugin result, or another explicitly reviewed ordering, before enabling contract 2. Nothing here
+writes a contract-2 template, strips saved installers or changes an onboarding artifact version.
+Revert this consumer slice before the cache-contract slice while no writer exists. If a later
+writer has enabled contract 2, stop those writes and restore retained legacy template links/images
+before removing readers; never downgrade metadata on a body without its legacy installers.
