@@ -1,3 +1,4 @@
+import { assertVersionToken } from '@haive/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -124,6 +125,12 @@ export async function resolveMcpSurface(
     }
   }
 
+  if (chromeDevtools && chromeVersion !== null && chromeVersion !== '') {
+    assertVersionToken(
+      chromeVersion,
+      'chrome-devtools-mcp version (edit the repository Tooling settings)',
+    );
+  }
   const secret = process.env.CONFIG_ENCRYPTION_KEY;
   const ddevEnabled =
     isDdevTask &&

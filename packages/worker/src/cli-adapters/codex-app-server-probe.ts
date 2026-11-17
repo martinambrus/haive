@@ -273,7 +273,7 @@ export function ensureCodexAppServerVerdict(
   provider: CliProviderRecord,
   adapter: BaseCliAdapter,
 ): Promise<CodexAppServerVerdict | null> {
-  const key = `${taskId}:${provider.id}:${provider.cliVersion?.trim() ?? ''}`;
+  const key = `${taskId}:${provider.id}:${provider.cliVersion ?? ''}`;
   const running = inFlight.get(key);
   if (running) return running;
   const run = probeAndRecord(db, taskId, provider, adapter).finally(() => inFlight.delete(key));
@@ -301,7 +301,7 @@ async function probeAndRecord(
     // for a multi-minute build. The run itself installs the same CLI version, so the binary matches.
     const image = resolveImageTag({
       name: provider.name,
-      cliVersion: provider.cliVersion?.trim() || null,
+      cliVersion: provider.cliVersion || null,
       providerId: provider.id,
       sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
     });

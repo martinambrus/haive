@@ -569,7 +569,7 @@ export async function executeByKind(
         if (surface.chromeDevtools.enabled) {
           await warmNpmPackage(
             sandboxImage,
-            `chrome-devtools-mcp@${surface.chromeDevtools.version?.trim() || 'latest'}`,
+            `chrome-devtools-mcp@${surface.chromeDevtools.version || 'latest'}`,
           );
         }
         // filesystem ships on every non-rag invocation but was only ever cached by

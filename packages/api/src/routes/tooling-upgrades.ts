@@ -1,3 +1,4 @@
+import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '@haive/shared';
 import { isDeepStrictEqual } from 'node:util';
 import { UserPostgresDsnError } from '@haive/shared/egress';
 import { Hono } from 'hono';
@@ -267,6 +268,8 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
     if (requested && !requested.has(component)) continue;
     const latest = newestFor(tool, versionMap);
     if (!latest || !isNewer(latest, installed)) continue;
+    if (!isVersionToken(latest))
+      throw new HttpError(400, `Invalid cached tool version token; ${VERSION_TOKEN_REQUIREMENT}`);
     applied.push({ component, from: installed, to: latest });
     if (component === 'rtk') nextRtk = latest;
     else if (component === 'chrome-devtools-mcp') nextChrome = latest;
@@ -278,6 +281,11 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   // staleDockerfile check re-renders + rebuilds the env image (and the composed
   // image rebuilds on its hash change). No eager build is triggered.
   if (applied.length > 0) {
+    assertToolingVersionPins({
+      rtkVersion: nextRtk,
+      chromeDevtoolsMcpVersion: nextChrome,
+      lspServerVersions: nextLsp,
+    });
     await db.transaction(async (tx) => {
       await tx
         .update(schema.repositories)
@@ -688,6 +696,22 @@ function normalizeAppAuth(raw: unknown): typeof schema.repositories.$inferInsert
     : null;
 }
 
+function assertToolingVersionPins(pins: {
+  rtkVersion?: string | null;
+  chromeDevtoolsMcpVersion?: string | null;
+  lspServerVersions?: Record<string, string | null>;
+}): void {
+  for (const [label, value] of [
+    ['RTK', pins.rtkVersion],
+    ['chrome-devtools-mcp', pins.chromeDevtoolsMcpVersion],
+    ...Object.values(pins.lspServerVersions ?? {}).map((v) => ['LSP', v] as const),
+  ] as const) {
+    if (value !== undefined && value !== null && value !== '' && !isVersionToken(value)) {
+      throw new HttpError(400, `Invalid ${label} version token; ${VERSION_TOKEN_REQUIREMENT}`);
+    }
+  }
+}
+
 const PORTABLE_SETTING_UPDATE_KEYS = [
   'rtkEnabled',
   'rtkVersion',
@@ -758,6 +782,8 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
   // save of nothing that reports success.
   const body = toolingPatchBodySchema.parse(requireJsonObject(await c.req.json()));
+
+  assertToolingVersionPins(body);
 
   if (
     body.ragEmbedAction &&
@@ -866,13 +892,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     }
     if (typeof body.rtkEnabled === 'boolean')
       Object.assign(updates, rtkEnabledUpdate(body.rtkEnabled));
-    if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
+    if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion || null;
     if (body.chromeDevtoolsMcpVersion !== undefined) {
-      const trimmed = body.chromeDevtoolsMcpVersion?.trim() || null;
-      if (trimmed === null) {
+      const version = body.chromeDevtoolsMcpVersion || null;
+      if (version === null) {
         updates.chromeDevtoolsMcpVersion = null;
       } else {
-        const checked = normalizeChromeDevtoolsMcpVersion(trimmed);
+        const checked = normalizeChromeDevtoolsMcpVersion(version);
         if (!checked.ok)
           throw new HttpError(400, `Invalid chrome-devtools-mcp version: ${checked.reason}`);
         updates.chromeDevtoolsMcpVersion = checked.value;
@@ -885,7 +911,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       const clean: Record<string, string | null> = {};
       for (const [k, v] of Object.entries(body.lspServerVersions)) {
         if (!LSP_KEY_SET.has(k)) continue;
-        const val = typeof v === 'string' ? v.trim() : '';
+        const val = v ?? '';
         if (val) clean[k] = val;
       }
       updates.lspServerVersions = clean;

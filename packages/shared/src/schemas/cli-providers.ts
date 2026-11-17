@@ -1,3 +1,4 @@
+import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '../tooling/version-token.js';
 import { z } from 'zod';
 
 export const cliProviderNameSchema = z.enum([
@@ -97,7 +98,13 @@ export const createCliProviderRequestSchema = z.object({
   envVars: z.record(z.string(), z.string()).optional(),
   cliArgs: z.array(z.string()).optional(),
   authMode: cliAuthModeSchema,
-  cliVersion: z.string().nullable().optional(),
+  cliVersion: z
+    .string()
+    .refine((v) => v === '' || isVersionToken(v), {
+      message: `Invalid CLI version token; ${VERSION_TOKEN_REQUIREMENT}`,
+    })
+    .nullable()
+    .optional(),
   effortLevel: z.string().nullable().optional(),
   // Optional model override (e.g. an Ollama model name like
   // `qwen3-coder:480b-cloud` or `mannix/gemma4-98e:CD-Q6_K`).

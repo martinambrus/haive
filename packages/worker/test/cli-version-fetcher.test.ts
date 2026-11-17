@@ -69,3 +69,26 @@ describe('fetchVersionsFromSource', () => {
     expect(res?.versions).toEqual(['2.8.6', '2.8.5']);
   });
 });
+
+describe('registry version token boundaries', () => {
+  it('refuses a hostile npm or PyPI latest token', async () => {
+    for (const token of ['9.9.9$(id)', '1.2.3\n', '-latest']) {
+      mockFetch({ versions: { '1.2.3': {} }, 'dist-tags': { latest: token } });
+      await expect(fetchVersionsFromSource({ kind: 'npm', package: 'codex' })).rejects.toThrow(
+        /version token/,
+      );
+      mockFetch({ releases: { '1.2.3': {} }, info: { version: token } });
+      await expect(fetchPypiVersions('pyright')).rejects.toThrow(/version token/);
+    }
+  });
+  it('drops hostile entries from version lists', async () => {
+    mockFetch({
+      versions: { '1.2.3': {}, '9.9.9$(id)': {}, '8.8.8\n': {} },
+      'dist-tags': { latest: '1.2.3' },
+    });
+    expect(await fetchVersionsFromSource({ kind: 'npm', package: 'codex' })).toEqual({
+      versions: ['1.2.3'],
+      latestVersion: '1.2.3',
+    });
+  });
+});

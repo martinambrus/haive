@@ -1,3 +1,4 @@
+import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '../tooling/version-token.js';
 import { reviewWatermarks } from './review-watermarks.js';
 import { stripManagedKnowledgeGlobs, trimGlobSlashes } from '../knowledge-paths.js';
 import { normalizeReviewDimensionIds } from '../review/dimensions.js';
@@ -162,9 +163,6 @@ export const isPortableSettingName = (name: string): boolean =>
 const NEVER_UNSET: ReadonlySet<string> = new Set(['rtk-enabled', 'scope-exclude-globs']);
 export const isUnsettableSetting = (name: string): boolean => !NEVER_UNSET.has(name);
 
-const nonEmptyText = (value: unknown): string | null =>
-  typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
-
 export type SettingCheck = { ok: true; value: unknown } | { ok: false; reason?: string };
 
 export type AgentRulesCheck = { ok: true; value: string } | { ok: false; reason: string };
@@ -208,14 +206,9 @@ export type ChromeDevtoolsMcpVersionCheck =
  *  Dockerfile RUN line (02-generate-dockerfile.ts), so it must read as a plain npm version or
  *  dist-tag and nothing either a shell or a Dockerfile RUN line would act on. */
 export function normalizeChromeDevtoolsMcpVersion(value: unknown): ChromeDevtoolsMcpVersionCheck {
-  const text = nonEmptyText(value);
-  if (text === null) return refuse('is not non-empty text');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(text)) {
-    return refuse(
-      'is not a plain npm version or dist-tag (letters, digits, dot, dash, underscore, max 64 chars)',
-    );
-  }
-  return { ok: true, value: text };
+  return isVersionToken(value)
+    ? { ok: true, value }
+    : refuse(`is not a plain version or dist-tag; ${VERSION_TOKEN_REQUIREMENT}`);
 }
 
 /** A setting as the column stores it, by the same rules the repository routes apply to what a person
@@ -234,8 +227,9 @@ export function normalizeSetting(name: string, value: unknown): SettingCheck {
     case 'rtk-enabled':
       return typeof value === 'boolean' ? valid(value) : { ok: false };
     case 'rtk-version': {
-      const text = nonEmptyText(value);
-      return text === null ? { ok: false } : valid(text);
+      return isVersionToken(value)
+        ? valid(value)
+        : refuse(`invalid version token; ${VERSION_TOKEN_REQUIREMENT}`);
     }
     case 'chrome-devtools-mcp-version': {
       const checked = normalizeChromeDevtoolsMcpVersion(value);
@@ -249,8 +243,10 @@ export function normalizeSetting(name: string, value: unknown): SettingCheck {
       if (!isVersionMap(value)) return { ok: false };
       const clean: Record<string, string> = {};
       for (const [key, version] of Object.entries(value)) {
-        const text = nonEmptyText(version);
-        if (LSP_KEY_SET.has(key) && text !== null) clean[key] = text;
+        if (!LSP_KEY_SET.has(key) || version === null || version === '') continue;
+        if (!isVersionToken(version))
+          return refuse(`invalid LSP version token; ${VERSION_TOKEN_REQUIREMENT}`);
+        clean[key] = version;
       }
       return valid(clean);
     }

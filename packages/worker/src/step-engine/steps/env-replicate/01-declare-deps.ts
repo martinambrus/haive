@@ -1,3 +1,4 @@
+import { assertDependencyTokens } from './_dependency-tokens.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -758,6 +759,24 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       repoLspServers = repoRow[0]?.lspServers ?? null;
     }
 
+    assertDependencyTokens({
+      lspServerVersions: repoLspVersions ?? undefined,
+      chromeDevtoolsMcpVersion: repoChromeMcpVersion,
+      versions: {
+        node: values.nodeVersion || null,
+        php: values.phpVersion || null,
+        python: values.pythonVersion || null,
+        java: values.javaVersion || null,
+        go: values.goVersion || null,
+        rust: values.rustVersion || null,
+        ruby: values.rubyVersion || null,
+      },
+      browser: {
+        version:
+          values.browserType === 'edge' ? values.browserVersion_edge : values.browserVersion_chrome,
+      },
+    });
+
     const packageManagers: Partial<Record<LanguageKey, PackageManager | null>> = {};
     for (const detected of args.detected.runtimes) {
       if (values.runtimes.includes(detected.language)) {
@@ -847,6 +866,8 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
+
+    assertDependencyTokens(declaredDeps);
 
     // A changed base image or declared-deps set makes the previously saved
     // Dockerfile (and any image built from it) stale — it was rendered from

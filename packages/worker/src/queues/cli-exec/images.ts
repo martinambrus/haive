@@ -99,7 +99,7 @@ async function ensureProviderSandboxImage(
 ): Promise<string | null> {
   const resolution = resolveImageTag({
     name: provider.name as CliProviderName,
-    cliVersion: provider.cliVersion?.trim() || null,
+    cliVersion: provider.cliVersion || null,
     providerId: provider.id,
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   });
@@ -169,7 +169,7 @@ export async function resolveSandboxImageTag(
       taskId,
       {
         name: provider.name as CliProviderName,
-        cliVersion: provider.cliVersion?.trim() || null,
+        cliVersion: provider.cliVersion || null,
         sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
       },
       runner,
@@ -199,7 +199,7 @@ export async function peekSandboxImageTag(
 ): Promise<{ tag: string; imageId: string } | null> {
   const config = {
     name: provider.name as CliProviderName,
-    cliVersion: provider.cliVersion?.trim() || null,
+    cliVersion: provider.cliVersion || null,
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   };
   const composition = taskId
@@ -586,7 +586,7 @@ export async function markProvidersReady(
     const configTag = (r: (typeof rows)[number]) =>
       resolveImageTag({
         name: r.name as CliProviderName,
-        cliVersion: r.cliVersion?.trim() || null,
+        cliVersion: r.cliVersion || null,
         providerId: r.id,
         sandboxDockerfileExtra: r.sandboxDockerfileExtra,
       })?.tag;

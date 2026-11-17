@@ -1,3 +1,4 @@
+import { assertVersionToken, isVersionToken } from '@haive/shared';
 import { logger, type VersionSource } from '@haive/shared';
 
 const log = logger.child({ module: 'cli-version-fetcher' });
@@ -31,7 +32,7 @@ const MAX_VERSIONS_PER_PROVIDER = 200;
 const UNSTABLE_SUFFIX_RE = /-(?:alpha|beta|rc|nightly|preview|dev|pre|canary|next)/i;
 
 function filterStable(versions: string[]): string[] {
-  return versions.filter((v) => !UNSTABLE_SUFFIX_RE.test(v));
+  return versions.filter((v) => isVersionToken(v) && !UNSTABLE_SUFFIX_RE.test(v));
 }
 
 function sortSemverDesc(versions: string[]): string[] {
@@ -70,6 +71,7 @@ export async function fetchNpmVersions(pkg: string): Promise<FetchedVersions> {
   const sorted = sortSemverDesc(stable).slice(0, MAX_VERSIONS_PER_PROVIDER);
   const distTags = body['dist-tags'] ?? {};
   const latest = distTags['stable'] ?? distTags['latest'] ?? sorted[0] ?? null;
+  if (latest !== null) assertVersionToken(latest, 'Registry latest version');
   log.debug({ pkg, count: sorted.length, latest }, 'fetched npm versions');
   return { versions: sorted, latestVersion: latest };
 }
@@ -105,6 +107,7 @@ export async function fetchPypiVersions(pkg: string): Promise<FetchedVersions> {
   const sorted = sortSemverDesc(stable).slice(0, MAX_VERSIONS_PER_PROVIDER);
   // PyPI reports the canonical latest as info.version; fall back to the sorted head.
   const latest = body.info?.version ?? sorted[0] ?? null;
+  if (latest !== null) assertVersionToken(latest, 'Registry latest version');
   log.debug({ pkg, count: sorted.length, latest }, 'fetched pypi versions');
   return { versions: sorted, latestVersion: latest };
 }

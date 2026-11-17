@@ -1,3 +1,4 @@
+import { assertVersionToken } from '@haive/shared';
 import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
@@ -292,7 +293,12 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     // and chrome-devtools-mcp must be pointed at the installed binary via
     // --executable-path — --channel=stable looks for Google Chrome, which the
     // Debian sandbox lacks (the cause of past "Could not connect to Chrome").
-    const cdmSpec = `chrome-devtools-mcp@${opts.chromeDevtoolsMcpVersion?.trim() || 'latest'}`;
+    const version = opts.chromeDevtoolsMcpVersion || 'latest';
+    assertVersionToken(
+      version,
+      'chrome-devtools-mcp version (edit the repository Tooling settings)',
+    );
+    const cdmSpec = `chrome-devtools-mcp@${version}`;
     // The browser-verification gallery has the tester save screenshots into the worktree
     // via take_screenshot's `filePath`. Since 1.7 that path is validated against the MCP
     // `roots` the CLIENT negotiated, and a client that negotiates NONE leaves os.tmpdir()

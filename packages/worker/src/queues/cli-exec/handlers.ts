@@ -784,7 +784,7 @@ export async function handleBuildSandboxImageJob(
     return { ok: false, providerId: payload.providerId, error: 'provider not found' };
   }
 
-  const cliVersion = provider.cliVersion?.trim() || null;
+  const cliVersion = provider.cliVersion || null;
   const resolution = resolveImageTag({
     name: provider.name as CliProviderName,
     cliVersion,
@@ -987,7 +987,7 @@ async function writeWhileWanted(
     const wants =
       resolveImageTag({
         name: row.name as CliProviderName,
-        cliVersion: row.cliVersion?.trim() || null,
+        cliVersion: row.cliVersion || null,
         providerId,
         sandboxDockerfileExtra: row.sandboxDockerfileExtra,
       })?.tag ?? null;

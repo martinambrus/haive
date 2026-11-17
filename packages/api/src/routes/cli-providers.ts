@@ -1,3 +1,4 @@
+import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '@haive/shared';
 import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -116,7 +117,13 @@ export async function nextAvailableCloneLabel(
 
 // A pin below a CLI's minRunnableVersion fails every run it is ever given, so it is refused here
 // rather than discovered at the first task.
+function assertCliVersionToken(version: string): void {
+  if (!isVersionToken(version))
+    throw new HttpError(400, `Invalid CLI version token; ${VERSION_TOKEN_REQUIREMENT}`);
+}
+
 export function assertCliVersionRunnable(name: CliProviderName, version: string): void {
+  assertCliVersionToken(version);
   if (isRunnableCliVersion(name, version)) return;
   throw new HttpError(
     400,
@@ -128,7 +135,9 @@ export function assertCliVersionRunnable(name: CliProviderName, version: string)
 // The picker offers only versions a run can use; the cached list stays raw, so a floor takes
 // effect without waiting for the next refresh.
 function runnableVersionsOf(name: string, versions: string[] | null): string[] {
-  return (versions ?? []).filter((v) => isRunnableCliVersion(name as CliProviderName, v));
+  return (versions ?? []).filter(
+    (v) => isVersionToken(v) && isRunnableCliVersion(name as CliProviderName, v),
+  );
 }
 
 async function resolveCliVersionForSave(
@@ -145,7 +154,9 @@ async function resolveCliVersionForSave(
   const row = await db.query.cliPackageVersions.findFirst({
     where: eq(schema.cliPackageVersions.name, name),
   });
-  return row?.latestVersion ?? null;
+  const latest = row?.latestVersion ?? null;
+  if (latest !== null) assertCliVersionToken(latest);
+  return latest;
 }
 
 function assertOllamaHasModel(name: CliProviderName, model: string | null | undefined): void {
@@ -281,7 +292,7 @@ cliProviderRoutes.get('/catalog', async (c) => {
     versionMap.set(row.name, {
       name: row.name,
       versions: runnableVersionsOf(row.name, row.versions),
-      latestVersion: row.latestVersion,
+      latestVersion: isVersionToken(row.latestVersion) ? row.latestVersion : null,
       fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
       fetchError: row.fetchError,
     });
@@ -340,7 +351,7 @@ cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
     ? {
         name: row.name,
         versions: runnableVersionsOf(row.name, row.versions),
-        latestVersion: row.latestVersion,
+        latestVersion: isVersionToken(row.latestVersion) ? row.latestVersion : null,
         fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
         fetchError: row.fetchError,
       }
@@ -1004,6 +1015,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
   });
   if (!source) throw new HttpError(404, 'CLI provider not found');
+  if (source.cliVersion) assertCliVersionToken(source.cliVersion);
   assertOllamaHasModel(source.name, source.model);
   await assertOllamaSaveAllowed(c.get('userRole'), source);
 

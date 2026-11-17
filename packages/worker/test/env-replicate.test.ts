@@ -398,14 +398,10 @@ describe('renderDockerfile', () => {
     expect(out).toContain('php8.3-cli');
   });
 
-  it('strips caret prefix and patch from composer-style php constraint', () => {
-    const out = renderDockerfile('ubuntu:24.04', {
-      runtimes: ['php'],
-      versions: { php: '^8.1.10' },
-    });
-    expect(out).toContain('# PHP 8.1');
-    expect(out).toContain('php8.1-cli');
-    expect(out).toContain('ppa:ondrej/php');
+  it('refuses a PHP constraint instead of stripping it into a different pin', () => {
+    expect(() =>
+      renderDockerfile('ubuntu:24.04', { runtimes: ['php'], versions: { php: '^8.1.10' } }),
+    ).toThrow(/version token/);
   });
 
   it('adds the requested LSP language servers', () => {

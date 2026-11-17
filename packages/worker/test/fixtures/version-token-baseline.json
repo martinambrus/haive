@@ -1,0 +1,1109 @@
+{
+  "source": "origin/main 6681a5cddfdc9a4935c180c8d4d0b79a45b89554",
+  "environments": [
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "1.2.3",
+          "intelephense-extended": "1.2.3",
+          "vtsls": "1.2.3",
+          "pyright": "1.2.3",
+          "gopls": "1.2.3",
+          "solargraph": "1.2.3",
+          "rust-analyzer": "1.2.3",
+          "jdtls": "1.2.3"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "1.2.3"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@1.2.3\nRUN npm install -g intelephense@1.2.3\nRUN npm install -g @vtsls/language-server@1.2.3 typescript\nRUN pip install --break-system-packages pyright==1.2.3\nRUN go install golang.org/x/tools/gopls@v1.2.3\nRUN gem install solargraph -v 1.2.3\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@1.2.3\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "v1.0.1",
+          "intelephense-extended": "v1.0.1",
+          "vtsls": "v1.0.1",
+          "pyright": "v1.0.1",
+          "gopls": "v1.0.1",
+          "solargraph": "v1.0.1",
+          "rust-analyzer": "v1.0.1",
+          "jdtls": "v1.0.1"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "v1.0.1"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@v1.0.1\nRUN npm install -g intelephense@v1.0.1\nRUN npm install -g @vtsls/language-server@v1.0.1 typescript\nRUN pip install --break-system-packages pyright==v1.0.1\nRUN go install golang.org/x/tools/gopls@vv1.0.1\nRUN gem install solargraph -v v1.0.1\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@v1.0.1\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "1.18.4",
+          "intelephense-extended": "1.18.4",
+          "vtsls": "1.18.4",
+          "pyright": "1.18.4",
+          "gopls": "1.18.4",
+          "solargraph": "1.18.4",
+          "rust-analyzer": "1.18.4",
+          "jdtls": "1.18.4"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "1.18.4"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@1.18.4\nRUN npm install -g intelephense@1.18.4\nRUN npm install -g @vtsls/language-server@1.18.4 typescript\nRUN pip install --break-system-packages pyright==1.18.4\nRUN go install golang.org/x/tools/gopls@v1.18.4\nRUN gem install solargraph -v 1.18.4\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@1.18.4\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "latest",
+          "intelephense-extended": "latest",
+          "vtsls": "latest",
+          "pyright": "latest",
+          "gopls": "latest",
+          "solargraph": "latest",
+          "rust-analyzer": "latest",
+          "jdtls": "latest"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "latest"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@latest\nRUN npm install -g intelephense@latest\nRUN npm install -g @vtsls/language-server@latest typescript\nRUN pip install --break-system-packages pyright==latest\nRUN go install golang.org/x/tools/gopls@vlatest\nRUN gem install solargraph -v latest\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@latest\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "2.0.0-rc.1",
+          "intelephense-extended": "2.0.0-rc.1",
+          "vtsls": "2.0.0-rc.1",
+          "pyright": "2.0.0-rc.1",
+          "gopls": "2.0.0-rc.1",
+          "solargraph": "2.0.0-rc.1",
+          "rust-analyzer": "2.0.0-rc.1",
+          "jdtls": "2.0.0-rc.1"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "2.0.0-rc.1"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@2.0.0-rc.1\nRUN npm install -g intelephense@2.0.0-rc.1\nRUN npm install -g @vtsls/language-server@2.0.0-rc.1 typescript\nRUN pip install --break-system-packages pyright==2.0.0-rc.1\nRUN go install golang.org/x/tools/gopls@v2.0.0-rc.1\nRUN gem install solargraph -v 2.0.0-rc.1\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@2.0.0-rc.1\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "lspServers": [
+          "intelephense",
+          "intelephense-extended",
+          "vtsls",
+          "pyright",
+          "gopls",
+          "solargraph",
+          "rust-analyzer",
+          "jdtls"
+        ],
+        "lspServerVersions": {
+          "intelephense": "1.0.0+build.5",
+          "intelephense-extended": "1.0.0+build.5",
+          "vtsls": "1.0.0+build.5",
+          "pyright": "1.0.0+build.5",
+          "gopls": "1.0.0+build.5",
+          "solargraph": "1.0.0+build.5",
+          "rust-analyzer": "1.0.0+build.5",
+          "jdtls": "1.0.0+build.5"
+        },
+        "browserTesting": true,
+        "chromeDevtoolsMcpVersion": "1.0.0+build.5"
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.7\nRUN curl -fsSL https://go.dev/dl/go1.26.7.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.98.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby (whatever the base suite ships)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential\n\n# Language servers\nRUN npm install -g intelephense@1.0.0+build.5\nRUN npm install -g intelephense@1.0.0+build.5\nRUN npm install -g @vtsls/language-server@1.0.0+build.5 typescript\nRUN pip install --break-system-packages pyright==1.0.0+build.5\nRUN go install golang.org/x/tools/gopls@v1.0.0+build.5\nRUN gem install solargraph -v 1.0.0+build.5\nRUN rustup component add rust-analyzer\nRUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\\n    && mkdir -p /opt/jdtls \\\n    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\\n    && rm /tmp/jdtls.tar.gz \\\n    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Ubuntu has no chromium deb (snap only) — take the browser from Google apt\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends google-chrome-stable xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/google-chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp@1.0.0+build.5\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {},
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "runtimes": ["node", "php", "python", "go", "rust", "ruby", "java"],
+        "versions": {
+          "node": "22",
+          "php": "8.3",
+          "python": "3.12",
+          "go": "1.26",
+          "rust": "1.90.0",
+          "ruby": "3.4.6",
+          "java": "1.8"
+        },
+        "extraPackages": ["vim", "libc++-dev"]
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep vim libc++-dev\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# PHP 8.3\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends php8.3-cli php8.3-xml php8.3-mbstring php8.3-zip\nCOPY --from=composer:2 /usr/bin/composer /usr/bin/composer\n\n# Python 3.12\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n\n# Go 1.26.0\nRUN curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | tar -C /usr/local -xz\nENV PATH=\"/usr/local/go/bin:${PATH}\"\n\n# Rust 1.90.0\nRUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.90.0 --profile minimal\nENV PATH=\"/root/.cargo/bin:${PATH}\"\n\n# Ruby 3.4.6 (prebuilt interpreter; apt ships only one per suite)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update && apt-get install -y --no-install-recommends libyaml-0-2 build-essential\nRUN mkdir -p /opt/hostedtoolcache/Ruby/3.4.6 \\\n    && curl -fsSL https://github.com/ruby/ruby-builder/releases/download/toolcache/ruby-3.4.6-ubuntu-24.04.tar.gz \\\n       | tar -xz -C /opt/hostedtoolcache/Ruby/3.4.6\nENV PATH=\"/opt/hostedtoolcache/Ruby/3.4.6/x64/bin:${PATH}\"\n\n# Java 8\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends openjdk-8-jdk-headless maven gradle\nENV JAVA_HOME=\"/usr/lib/jvm/java-8-openjdk-amd64\" PATH=\"/usr/lib/jvm/java-8-openjdk-amd64/bin:${PATH}\"\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "browserTesting": true,
+        "browser": {
+          "type": "chrome",
+          "version": "140.0.7339.207"
+        }
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Chrome pinned to 140.0.7339.207 (Chrome for Testing)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \\\n    && chmod a+r /etc/apt/keyrings/google-chrome.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\" > /etc/apt/sources.list.d/google-chrome.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends unzip xvfb x11vnc socat procps fonts-dejavu \\\n    && DEPS=$(apt-cache show google-chrome-stable | awk '/^Depends:/{sub(/^Depends: /,\"\"); print; exit}') \\\n    && apt-get satisfy -y --no-install-recommends \"$DEPS\"\nRUN --mount=type=cache,target=/opt/cft-cache,sharing=locked \\\n    f=/opt/cft-cache/chrome-linux64-140.0.7339.207.zip; \\\n    [ -s \"$f\" ] || curl -fsSL -o \"$f\" \"https://storage.googleapis.com/chrome-for-testing-public/140.0.7339.207/linux64/chrome-linux64.zip\"; \\\n    mkdir -p /opt/chrome && unzip -q -o \"$f\" -d /opt/chrome \\\n    && ln -sf /opt/chrome/chrome-linux64/chrome /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    },
+    {
+      "base": "ubuntu:24.04",
+      "deps": {
+        "browserTesting": true,
+        "browser": {
+          "type": "edge",
+          "version": "149.0.4022.98-1"
+        }
+      },
+      "output": "FROM ubuntu:24.04\n\nENV DEBIAN_FRONTEND=noninteractive\n\nRUN rm -f /etc/apt/apt.conf.d/docker-clean \\\n    && echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache\n\n# Auto-keep existing conffiles so apt never blocks the build on a prompt\nRUN echo 'Dpkg::Options { \"--force-confold\"; \"--force-confdef\"; };' > /etc/apt/apt.conf.d/99haive-noninteractive\n\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    apt-get update \\\n    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg bash jq ripgrep\n\n# Node.js 22 (build-essential + python3 needed by node-gyp for native modules)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\\n    && corepack enable\n\n# Browser testing: headed browser + Xvfb/x11vnc/socat + puppeteer-core\n# Microsoft Edge pinned to 149.0.4022.98-1 (Chromium-based, CDP)\nRUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\\n    install -m 0755 -d /etc/apt/keyrings \\\n    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft-edge.gpg \\\n    && chmod a+r /etc/apt/keyrings/microsoft-edge.gpg \\\n    && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main\" > /etc/apt/sources.list.d/microsoft-edge.list \\\n    && apt-get update \\\n    && apt-get install -y --no-install-recommends microsoft-edge-stable=149.0.4022.98-1 xvfb x11vnc socat procps fonts-dejavu \\\n    && ln -sf /usr/bin/microsoft-edge /usr/bin/chromium\nRUN npm install -g chrome-devtools-mcp\nRUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1\nENV CHROME_PATH=/usr/bin/chromium\nRUN /usr/bin/chromium --version | tee /etc/haive-browser-version\n\nWORKDIR /workspace\n\nCMD [\"bash\"]\n"
+    }
+  ],
+  "compositions": [
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "1.2.3"
+      },
+      "output": {
+        "tag": "haive-sandbox:e69f3fdad38a374c",
+        "hash": "e69f3fdad38a374c",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.2.3/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.2.3/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for v1.2.3\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    },
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "v1.0.1"
+      },
+      "output": {
+        "tag": "haive-sandbox:e9c03e86896e1b33",
+        "hash": "e9c03e86896e1b33",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/vv1.0.1/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/vv1.0.1/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for vv1.0.1\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    },
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "1.18.4"
+      },
+      "output": {
+        "tag": "haive-sandbox:8d9f0ad6c5f3e23e",
+        "hash": "8d9f0ad6c5f3e23e",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.18.4/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.18.4/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for v1.18.4\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    },
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "latest"
+      },
+      "output": {
+        "tag": "haive-sandbox:ac189ec70aff2a40",
+        "hash": "ac189ec70aff2a40",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/vlatest/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/vlatest/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for vlatest\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    },
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "2.0.0-rc.1"
+      },
+      "output": {
+        "tag": "haive-sandbox:cd93cf12891d7176",
+        "hash": "cd93cf12891d7176",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v2.0.0-rc.1/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v2.0.0-rc.1/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for v2.0.0-rc.1\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    },
+    {
+      "input": {
+        "envTemplateDockerfile": null,
+        "provider": {
+          "name": "codex",
+          "cliVersion": "2.0.0-rc.1",
+          "sandboxDockerfileExtra": null
+        },
+        "rtkVersion": "1.0.0+build.5"
+      },
+      "output": {
+        "tag": "haive-sandbox:07ce93eda8c092d5",
+        "hash": "07ce93eda8c092d5",
+        "dockerfileBody": "FROM haive-cli-sandbox:latest\n\nRUN set -eux; \\\n    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\\n    if command -v apk >/dev/null 2>&1; then \\\n        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\\n    elif command -v apt-get >/dev/null 2>&1; then \\\n        apt-get update; \\\n        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\\n        if ! command -v uvx >/dev/null 2>&1; then \\\n            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\\n        fi; \\\n        rm -rf /var/lib/apt/lists/*; \\\n    else \\\n        echo \"haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped\" >&2; \\\n    fi; \\\n    if ! command -v rtk >/dev/null 2>&1; then \\\n        arch=\"$(uname -m)\"; \\\n        case \"$arch\" in \\\n          x86_64) \\\n            cd /tmp; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.0.0+build.5/rtk-x86_64-unknown-linux-musl.tar.gz\" -o \"rtk-x86_64-unknown-linux-musl.tar.gz\"; \\\n            curl -fsSL \"https://github.com/rtk-ai/rtk/releases/download/v1.0.0+build.5/checksums.txt\" -o checksums.txt; \\\n            sum_line=\"$(awk -v f=\"rtk-x86_64-unknown-linux-musl.tar.gz\" '$2==f' checksums.txt)\"; \\\n            test -n \"$sum_line\" || { echo \"rtk: rtk-x86_64-unknown-linux-musl.tar.gz not in checksums.txt for v1.0.0+build.5\" >&2; exit 1; }; \\\n            echo \"$sum_line\" | sha256sum -c -; \\\n            tar -xzf \"rtk-x86_64-unknown-linux-musl.tar.gz\" -C /tmp; \\\n            install -m 0755 \"$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)\" /usr/local/bin/rtk; \\\n            rm -rf \"/tmp/rtk-x86_64-unknown-linux-musl.tar.gz\" /tmp/checksums.txt /tmp/rtk-*; \\\n            /usr/local/bin/rtk --version; \\\n            ;; \\\n          *) \\\n            echo \"rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)\" >&2; \\\n            ;; \\\n        esac; \\\n    fi\n\nRUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi\nRUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi\nRUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version\nRUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml\n",
+        "hasEnvTemplate": false,
+        "hasCliInstall": true,
+        "hasExtras": false
+      }
+    }
+  ],
+  "providers": [
+    {
+      "name": "claude-code",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.2.3 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@v1.0.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.18.4 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@latest && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@2.0.0-rc.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.0.0+build.5 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@1.2.3 && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@v1.0.1 && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@1.18.4 && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@latest && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@2.0.0-rc.1 && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "codex",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @openai/codex@1.0.0+build.5 && codex --version",
+          "RUN mkdir -p /root/.codex && printf '%s\\n' 'check_for_update_on_startup = false' > /root/.codex/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@1.2.3 && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@v1.0.1 && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@1.18.4 && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@latest && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@2.0.0-rc.1 && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "gemini",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @google/gemini-cli@1.0.0+build.5 && gemini --version",
+          "RUN mkdir -p /etc/gemini-cli && printf '%s\\n' '{\"experimental\":{\"enableAgents\":false},\"general\":{\"enableAutoUpdate\":false,\"enableAutoUpdateNotification\":false},\"skills\":{\"disabled\":[\"skill-creator\",\"antigravity-support\"]}}' > /etc/gemini-cli/settings.json"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@1.2.3 && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@v1.0.1 && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@1.18.4 && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@latest && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@2.0.0-rc.1 && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "amp",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @sourcegraph/amp@1.0.0+build.5 && amp --version",
+          "ENV AMP_SKIP_UPDATE_CHECK=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.2.3 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@v1.0.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.18.4 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@latest && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@2.0.0-rc.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "zai",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.0.0+build.5 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "antigravity",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+          "ENV AGY_CLI_DISABLE_AUTO_UPDATE=true",
+          "RUN mkdir -p /home/node/.gemini/config && chown node:node /home/node/.gemini/config"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.2.3 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@v1.0.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.18.4 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@latest && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@2.0.0-rc.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "ollama",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.0.0+build.5 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.2.3 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@v1.0.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.18.4 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@latest && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@2.0.0-rc.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "muse",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.0.0+build.5 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- 1.2.3",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- v1.0.1",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- 1.18.4",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- latest",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- 2.0.0-rc.1",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "grok",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN curl -fsSL https://x.ai/cli/install.sh | HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -s -- 1.0.0+build.5",
+          "RUN mkdir -p /root/.grok && printf '%s\\n' '[cli]' 'auto_update = false' > /root/.grok/config.toml"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "1.2.3",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.2.3 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "v1.0.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@v1.0.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "1.18.4",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.18.4 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "latest",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@latest && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "2.0.0-rc.1",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@2.0.0-rc.1 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    },
+    {
+      "name": "openrouter",
+      "version": "1.0.0+build.5",
+      "output": {
+        "lines": [
+          "RUN if ! command -v npm >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*; fi",
+          "RUN if ! id -u node >/dev/null 2>&1; then if id -u ubuntu >/dev/null 2>&1; then usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; else groupadd -g 1000 node 2>/dev/null || groupadd node; useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; fi; fi",
+          "RUN npm install -g @anthropic-ai/claude-code@1.0.0+build.5 && claude --version",
+          "ENV DISABLE_AUTOUPDATER=1"
+        ],
+        "supported": true
+      }
+    }
+  ]
+}
