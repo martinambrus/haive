@@ -9,7 +9,12 @@ const base = {
 };
 // Kept structurally compatible so the controls execute against the pre-feature composer too.
 function compose(lspServers?: unknown, lspServerVersions?: unknown) {
-  return composeSandboxImage({ ...base, lspServers, lspServerVersions } as ComposeInput);
+  return composeSandboxImage({
+    ...base,
+    lspInstallContractVersion: 2,
+    lspServers,
+    lspServerVersions,
+  } as ComposeInput);
 }
 
 describe('optional composed LSP layer', () => {
@@ -54,6 +59,7 @@ describe('optional composed LSP layer', () => {
       composeSandboxImage({
         ...base,
         provider: { ...base.provider, name: 'codex' },
+        lspInstallContractVersion: 2,
         lspServers: ['vtsls'],
       }),
     ).toThrow('codex does not expose Haive LSP plugin support');
@@ -67,7 +73,12 @@ describe('optional composed LSP layer', () => {
   );
 
   it('still incorporates base identity, provider, RTK and extras with LSP selected', () => {
-    const input = { ...base, envTemplateDockerfile: null, lspServers: ['vtsls'] } as ComposeInput;
+    const input = {
+      ...base,
+      envTemplateDockerfile: null,
+      lspInstallContractVersion: 2,
+      lspServers: ['vtsls'],
+    } as ComposeInput;
     const original = composeSandboxImage(input);
     for (const changed of [
       { baseImageId: 'sha256:changed' },

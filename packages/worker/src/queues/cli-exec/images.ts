@@ -15,6 +15,8 @@ import {
   resolveSandboxImageComposition,
 } from '../../sandbox/composed-image-cache.js';
 import { SANDBOX_CORE_IMAGE } from '../../sandbox/image-composer.js';
+import { withImageTagLock } from '../../sandbox/image-tag-lock.js';
+export { withImageTagLock } from '../../sandbox/image-tag-lock.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import type { BaseCliAdapter } from '../../cli-adapters/base-adapter.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
@@ -623,24 +625,6 @@ export async function markProvidersReady(
     const replaced = moving.flatMap((r) => (r.tag && r.tag !== imageTag ? [r.tag] : []));
     return { self, replaced: [...new Set(replaced)] };
   });
-}
-
-const tagTurns = new Map<string, Promise<void>>();
-
-/** Run `fn` once every earlier call for `tag` in this process has settled. A removal reads that no
- *  provider names the tag before it removes the image, and a cache hit marked ready in between
- *  would be left naming an image that is gone. */
-export function withImageTagLock<T>(tag: string, fn: () => Promise<T>): Promise<T> {
-  const turn = (tagTurns.get(tag) ?? Promise.resolve()).then(fn);
-  const settled = turn.then(
-    () => {},
-    () => {},
-  );
-  tagTurns.set(tag, settled);
-  void settled.then(() => {
-    if (tagTurns.get(tag) === settled) tagTurns.delete(tag);
-  });
-  return turn;
 }
 
 export async function removeOrphanedPreviousImage(
