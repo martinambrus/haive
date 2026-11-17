@@ -878,6 +878,74 @@ the applied migration and every immutable pin. Never erase or remap a pin to
 make rollback appear safe; once P7/P8 admit active pins, retain capable workers
 for every resumable task.
 
+## Guard decisions (PR4a; dormant)
+
+`worker/src/step-engine/guard-decisions.ts` adds an unwired decision service.
+The API admission, worker START/advance, boot and revival fences remain closed.
+No production caller invokes it. No span skipping, task pointer movement, recap,
+output, event or enqueue writer ships here. Ordinary NULL and explicit empty
+contracts return without opening a transaction. No scan seed is installed.
+
+A future caller supplies the owned pending span-entry row, round, rerun generation
+and epoch. The service reads the immutable task contract and run-list snapshot,
+locks extant task steps in id order, reads the task FOR SHARE, then validates
+the PR3 span/predicate rules under those locks. It refuses foreign owners, off-pointer
+work, stopped, failed, dead or completed tasks and stale epochs/generations. It never creates a
+missing entry row. It considers only held rows and never waits for another step
+row after taking the task fence.
+
+A fresh predicate receives a narrowed transaction-bound context identifying the latest
+settled predecessor row at or below the decision round: exact taskStepId, producer
+round and producer generation. It must query structural rows using that identity,
+including task_dag_plans.task_step_id, rather than task-only plan selection.
+Missing, skipped, failed or unfinished producers refuse; trusted predicates must
+throw for absent/unreadable structural data. Only a literal boolean is accepted;
+exceptions and non-booleans roll back rather than becoming false. Failures keep their
+original cause and log through the sanitising logger with task/span identity; public
+errors contain no predicate text. TaskCancelledError passes through unchanged, and
+non-booleans have the separate predicate-non-boolean reason. Failures persist no
+decision row.
+
+The context carries only task/user/producer ids, producer round and generation,
+the transaction, logger, cancellation signal and cancellation check. Repository,
+workspace and sandbox path getters throw; emitProgress rejects, so it cannot wait
+on its own held row through the runner's pool connection. No host service or CLI
+configuration is supplied. This is defence in depth for trusted module code, not
+a sandbox: predicates must use structural reads only, with no external effects or
+detached work.
+
+The transaction first sets LOCAL statement_timeout to 5000 ms and lock_timeout to
+1000 ms before its step batch. Predicate evaluation races a 5000 ms deadline;
+expiry becomes predicate-evaluation-failed and rolls back. An in-flight SQL query
+can delay rollback until its own server statement deadline. The predicate signal
+also aborts when its lifetime ends, and its timer is always cleared. These limits
+are injectable for controls; they do not preempt synchronous JavaScript.
+
+The strict v1 record in existing task_steps.guard_state binds task, round, span,
+entry generation, the SHA-256 hash of the pinned list/contract (object keys sort
+recursively by code unit, integer-like keys numerically as JavaScript objects
+order them, independent of locale), producer identity and
+predicate source/result. A requiresSpan reference binds its earlier entry and
+generation. Dependency suppression records run:false without evaluating another
+predicate. Disjoint spans reuse an earlier committed result for the same predicate;
+when:false consumes its opposite branch. An earlier dependency-suppressed span has
+no result to reuse, so the first eligible span evaluates at its own predecessor.
+
+Evaluation and the one guard_state UPDATE share the transaction and ordered locks.
+Concurrent duplicate requests serialize; a committed replay reads the same result,
+including across process/client and recovery-epoch changes. A rollback before the
+write, after it or at commit leaves no decision and may evaluate again. This is
+exactly-once committed persistence, not exactly-once invocation of a callback.
+Malformed, stale and inconsistent references refuse rather than recomputing.
+Explicit-reset invalidation, mid-span recovery and skip ownership belong to PR4b;
+this service must stay unwired until those controls and the rollout gates ship.
+It currently requires same-round span-entry decisions and a pinned static list.
+
+No migration is needed: 0245 already appended the nullable column. Rollback reverts
+this dormant code and leaves 0245, guard_state and every execution pin intact.
+Once execution is enabled, retain capable workers for all resumable guard-bearing
+tasks; never erase a pin or decision to permit an older worker.
+
 ## Derived overlays (PR4 of 4)
 
 Derived types are admin-authored overlays of the built-in workflow. The API and worker support

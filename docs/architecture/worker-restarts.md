@@ -1016,6 +1016,28 @@ latches, journals, report readers and compatible derived-pin readers for every r
 task. Reverting an executor underneath that state is unsafe. No schema migration needs
 reversal, and spent claims and attempt history are never reset.
 
+## Dormant guard-decision persistence
+
+PR4a's evaluateGuardDecision service has no production caller and cannot skip or
+advance a task. Its pending span-entry decision is committed under the id-ordered
+step batch followed by the task's epoch/owner/live-status/pointer fence. The record
+uses the entry rerun generation, round, immutable contract/list hash and exact
+settled producer row identity; an epoch takeover alone preserves it. Shared
+predicates read their earlier decision and producer identity, never newer task-only
+DAG state. A failed persistence transaction leaves no decision; a lost reply after
+commit replays the stored result without evaluating again. Each transaction sets
+LOCAL statement and lock timeouts before the batch; the predicate has a separate
+deadline and no usable path, progress writer or host capability. Deadline and
+predicate failures roll back and release locks rather than persisting false.
+SQL already in flight remains subject to the server-side statement deadline.
+
+No Retry/reset/boot behavior changes in this PR. A changed entry, dependency or
+producer generation makes an existing record stale and refuses replay. PR4b must
+add dependent-decision invalidation to explicit reset paths and complete all
+mid-span recovery controls before wiring the service into START/advance. Existing
+execution-contract admission and runtime refusals remain authoritative meanwhile.
+Rollback leaves the existing nullable 0245 column and immutable task pins intact.
+
 ## No-change cleanup recovery
 
 `12-no-change-cleanup` records `worktree.no_change_cleanup` in a short owned
