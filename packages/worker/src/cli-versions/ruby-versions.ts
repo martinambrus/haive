@@ -1,6 +1,6 @@
 import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
-import { logger, type RefreshCliVersionsJobResult } from '@haive/shared';
+import { isVersionToken, logger, type RefreshCliVersionsJobResult } from '@haive/shared';
 
 const log = logger.child({ module: 'ruby-version-refresh' });
 
@@ -60,7 +60,7 @@ export function parseRubyBuilderAssets(payload: unknown): { version: string; lab
   for (const asset of assets) {
     const name = typeof asset?.name === 'string' ? asset.name : '';
     const version = pattern.exec(name)?.[1];
-    if (!version || seen.has(version)) continue;
+    if (!isVersionToken(version) || seen.has(version)) continue;
     seen.add(version);
     // `-pNNN` sorts after the same x.y.z without one, which is the real release order.
     const [base, patchLevel] = version.split('-p');

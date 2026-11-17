@@ -9,15 +9,18 @@ export function assertDependencyTokens(deps: {
   browser?: { type?: string; version?: string | null };
   extraPackages?: string[];
   packageManagers?: Partial<Record<string, string | null>>;
-  database?: { kind?: string };
+  database?: { kind?: string; version?: string | null };
 }): void {
-  for (const value of Object.values(deps.versions ?? {})) {
+  for (const [language, value] of Object.entries(deps.versions ?? {})) {
     if (value !== null && value !== '')
-      assertVersionToken(value, 'Runtime version (edit the declared dependencies)');
+      assertVersionToken(
+        value,
+        `Runtime ${language} version (versions.${language}; edit the declared dependencies)`,
+      );
   }
-  for (const value of Object.values(deps.lspServerVersions ?? {})) {
+  for (const [server, value] of Object.entries(deps.lspServerVersions ?? {})) {
     if (value !== null && value !== '')
-      assertVersionToken(value, 'LSP version (edit the repository Tooling settings)');
+      assertVersionToken(value, `LSP ${server} version (edit the repository Tooling settings)`);
   }
   for (const value of [deps.chromeDevtoolsMcpVersion, deps.browser?.version]) {
     if (value !== undefined && value !== null && value !== '')
@@ -34,4 +37,13 @@ export function assertDependencyTokens(deps: {
     assertVersionToken(manager, 'Package manager name');
   }
   if (deps.database?.kind) assertVersionToken(deps.database.kind, 'Database kind');
+  if (
+    deps.database?.version !== undefined &&
+    deps.database.version !== null &&
+    deps.database.version !== ''
+  )
+    assertVersionToken(
+      deps.database.version,
+      'Database version (databaseVersion; edit the declared dependencies)',
+    );
 }

@@ -106,3 +106,21 @@ describe('parseEdgePackages', () => {
     expect(parseEdgePackages('Package: something-else\nVersion: 1.0')).toEqual([]);
   });
 });
+
+it.each(['1.2.3\n', ' 1.2.3 ', '1.2.3$(id)', '1' + '0'.repeat(64)])(
+  'drops unsafe raw catalog token %j before caching',
+  (version) => {
+    expect(
+      parseCftMilestones({
+        milestones: {
+          '1': { version, downloads: { chrome: [{ platform: 'linux64', url: 'u' }] } },
+        },
+      }),
+    ).toEqual([]);
+    // Edge's Version line has its own whitespace delimiter; its captured token is checked too.
+    if (!/\s/.test(version))
+      expect(parseEdgePackages(`Package: microsoft-edge-stable\nVersion: ${version}\n`)).toEqual(
+        [],
+      );
+  },
+);

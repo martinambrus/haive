@@ -45,7 +45,9 @@ export function resolveImageTag(params: {
   if (hasInstall && !hasExtras) {
     const effectiveName = meta.install.kind === 'piggyback' ? meta.install.uses : params.name;
     const versionSegment =
-      meta.versionPinnable && params.cliVersion ? params.cliVersion : 'installer';
+      meta.versionPinnable && params.cliVersion
+        ? params.cliVersion.replaceAll('+', '_')
+        : 'installer';
     // The hash is what makes this tag SAFE TO CACHE. Keyed on name+version alone it carried
     // no content identity, so editing a provider's install lines produced a tag that already
     // existed and docker served the stale image — with NO build error anywhere, because the

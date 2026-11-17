@@ -5,7 +5,7 @@ export const VERSION_TOKEN_REQUIREMENT =
   'use 1–64 ASCII letters, digits, dots, underscores, pluses or dashes, starting with a letter or digit';
 
 export function isVersionToken(value: unknown): value is string {
-  // Avoid `$`, which also matches BEFORE a final newline in JavaScript.
+  // Check every character explicitly, including trailing line terminators (no multiline anchors).
   return (
     typeof value === 'string' &&
     value.length >= 1 &&
@@ -17,6 +17,15 @@ export function isVersionToken(value: unknown): value is string {
 
 /** Refuse stored or typed data; never rewrite an invalid token into another version. */
 export function assertVersionToken(value: unknown, label = 'Version'): asserts value is string {
-  if (!isVersionToken(value))
-    throw new Error(`${label}: invalid version token; ${VERSION_TOKEN_REQUIREMENT}`);
+  if (!isVersionToken(value)) {
+    const preview =
+      typeof value === 'string'
+        ? JSON.stringify(value.length > 80 ? `${value.slice(0, 80)}…` : value)
+        : typeof value === 'object'
+          ? value === null
+            ? 'null'
+            : '[non-string object]'
+          : String(value);
+    throw new Error(`${label}: invalid version token ${preview}; ${VERSION_TOKEN_REQUIREMENT}`);
+  }
 }

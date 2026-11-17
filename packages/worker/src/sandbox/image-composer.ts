@@ -1,6 +1,10 @@
-import { assertVersionToken } from '@haive/shared';
 import { createHash } from 'node:crypto';
-import { DEFAULT_RTK_VERSION, imageRepo, type CliProviderName } from '@haive/shared';
+import {
+  assertVersionToken,
+  DEFAULT_RTK_VERSION,
+  imageRepo,
+  type CliProviderName,
+} from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export const SANDBOX_CORE_IMAGE = `${imageRepo('cli-sandbox')}:latest`;

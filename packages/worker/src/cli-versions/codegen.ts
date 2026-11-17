@@ -1,5 +1,4 @@
-import { assertVersionToken } from '@haive/shared';
-import { CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
+import { assertVersionToken, CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
 
 export interface DockerfileCodegenResult {
   lines: string[];

@@ -1,5 +1,4 @@
-import { assertVersionToken, isVersionToken } from '@haive/shared';
-import { logger, type VersionSource } from '@haive/shared';
+import { assertVersionToken, isVersionToken, logger, type VersionSource } from '@haive/shared';
 
 const log = logger.child({ module: 'cli-version-fetcher' });
 

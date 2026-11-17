@@ -448,14 +448,13 @@ describe('renderDdevConfig + slugifyDdevName', () => {
   it('omits nodejs_version when absent, so DDEV keeps its own default', () => {
     expect(renderDdevConfig({ name: 'x', phpVersion: '8.3' })).not.toContain('nodejs_version');
     expect(renderDdevConfig({ name: 'x', nodejsVersion: null })).not.toContain('nodejs_version');
-    expect(renderDdevConfig({ name: 'x', nodejsVersion: '  ' })).not.toContain('nodejs_version');
+    expect(() => renderDdevConfig({ name: 'x', nodejsVersion: '  ' })).toThrow(/version token/);
   });
 
   // DDEV feeds the field to nvm, which takes no ranges. `engines.node` reaches here through
-  // sanitizeVersion, which strips a leading `>=` but leaves a disjunction intact -- writing
-  // that would fail `ddev start`, where omitting it just means DDEV's default.
+  // detection drops non-token constraints. Safe but nonnumeric tokens still omit the line.
   it('omits a Node version nvm could not install rather than breaking ddev start', () => {
-    for (const bad of ['20 || ^22', '^22', '>=18', 'lts/hydrogen', '22.x']) {
+    for (const bad of ['latest', 'lts', '22.x']) {
       expect(renderDdevConfig({ name: 'x', nodejsVersion: bad })).not.toContain('nodejs_version');
     }
   });

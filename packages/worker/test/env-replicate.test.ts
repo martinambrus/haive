@@ -1,3 +1,4 @@
+import { detectedRuntimeDefault } from './helpers/runtime-default.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -398,10 +399,13 @@ describe('renderDockerfile', () => {
     expect(out).toContain('php8.3-cli');
   });
 
-  it('refuses a PHP constraint instead of stripping it into a different pin', () => {
-    expect(() =>
-      renderDockerfile('ubuntu:24.04', { runtimes: ['php'], versions: { php: '^8.1.10' } }),
-    ).toThrow(/version token/);
+  it('strips caret prefix at detection and patch at render for a composer-style php constraint', async () => {
+    const version = await detectedRuntimeDefault('php', '^8.1.10');
+    expect(version).toBe('8.1.10');
+    const out = renderDockerfile('ubuntu:24.04', { runtimes: ['php'], versions: { php: version } });
+    expect(out).toContain('# PHP 8.1');
+    expect(out).toContain('php8.1-cli');
+    expect(out).toContain('ppa:ondrej/php');
   });
 
   it('adds the requested LSP language servers', () => {

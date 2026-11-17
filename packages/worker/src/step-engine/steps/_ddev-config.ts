@@ -4,6 +4,7 @@
 // the line readers below. Shared by onboarding env detection (01-env-detect), the
 // workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
 // (01-declare-deps) so all interpret the config identically.
+import { assertVersionToken } from '@haive/shared';
 import { isAlias, isMap, isScalar, isSeq, parseAllDocuments, visit } from 'yaml';
 import type { Document, Node, YAMLMap } from 'yaml';
 
@@ -289,6 +290,22 @@ export function slugifyDdevName(name: string): string {
  *  DDEV fills the rest with its own defaults. Used by 01c-ddev-env to create DDEV for a
  *  project that declares it but has no config yet. */
 export function renderDdevConfig(input: DdevConfigInput): string {
+  // Name is slugified below; every other interpolated scalar is checked raw.
+  for (const field of [
+    'type',
+    'phpVersion',
+    'nodejsVersion',
+    'dbType',
+    'dbVersion',
+    'webserverType',
+  ] as const) {
+    const value = input[field];
+    if (value !== undefined && value !== null && value !== '')
+      assertVersionToken(value, `DDEV ${field}`);
+  }
+  // A docroot is a relative path, so check each component with the same token policy.
+  if (input.docroot)
+    for (const part of input.docroot.split('/')) assertVersionToken(part, 'DDEV docroot');
   const lines: string[] = [];
   lines.push(`name: ${slugifyDdevName(input.name)}`);
   lines.push(`type: ${input.type || 'php'}`);
@@ -296,7 +313,7 @@ export function renderDdevConfig(input: DdevConfigInput): string {
   // the regex parser, which can't read an empty-quoted scalar).
   if (input.docroot) lines.push(`docroot: "${input.docroot}"`);
   if (input.phpVersion) lines.push(`php_version: "${input.phpVersion}"`);
-  const nodejsVersion = (input.nodejsVersion ?? '').trim();
+  const nodejsVersion = input.nodejsVersion ?? '';
   if (nodejsVersion && isDdevNodejsVersion(nodejsVersion)) {
     lines.push(`nodejs_version: "${nodejsVersion}"`);
   }

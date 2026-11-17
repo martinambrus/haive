@@ -26,3 +26,15 @@ it('bounds complete ASCII tokens without rewriting them', () => {
     expect(() => assertVersionToken(v, 'Stored pin')).toThrow(/^Stored pin: invalid version token/);
   }
 });
+
+it('names the field and shows a bounded JSON-quoted invalid value', () => {
+  expect(() => assertVersionToken('8.0"\nhooks:', 'Database version')).toThrow(
+    'Database version: invalid version token "8.0\\"\\nhooks:"',
+  );
+  try {
+    assertVersionToken('x'.repeat(1000) + '\n', 'nodeVersion');
+  } catch (err) {
+    expect((err as Error).message).toContain('"' + 'x'.repeat(80) + '…"');
+    expect((err as Error).message).not.toContain('x'.repeat(81));
+  }
+});

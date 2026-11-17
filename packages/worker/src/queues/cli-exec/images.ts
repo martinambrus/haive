@@ -583,13 +583,19 @@ export async function markProvidersReady(
       // One lock order for every build, so two marking overlapping siblings cannot deadlock.
       .orderBy(asc(c.id))
       .for('update');
-    const configTag = (r: (typeof rows)[number]) =>
-      resolveImageTag({
-        name: r.name as CliProviderName,
-        cliVersion: r.cliVersion || null,
-        providerId: r.id,
-        sandboxDockerfileExtra: r.sandboxDockerfileExtra,
-      })?.tag;
+    const configTag = (r: (typeof rows)[number]) => {
+      try {
+        return resolveImageTag({
+          name: r.name as CliProviderName,
+          cliVersion: r.cliVersion || null,
+          providerId: r.id,
+          sandboxDockerfileExtra: r.sandboxDockerfileExtra,
+        })?.tag;
+      } catch (err) {
+        log.warn({ err, providerId: r.id }, 'ignoring provider with invalid image configuration');
+        return undefined;
+      }
+    };
     // Keyed on config, never on the tag a row names: a failed build leaves its row on the image it
     // had, and a row a build of a config it has since left would move is the newer build's to move.
     const moving = rows.filter((r) => configTag(r) === imageTag);
