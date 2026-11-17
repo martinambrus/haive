@@ -7,8 +7,8 @@ export interface LspInstallContract {
   lspInstallContractVersion?: 1 | 2;
 }
 
-/** Refuse newer metadata before reusing a saved Dockerfile or smoke evidence.
- * The cutover must teach generation and verification version 2 together. */
+/** Guard the environment-owned generator before saved-Dockerfile reuse.
+ * Verification dispatches contract 2 separately; the generator still supports only 1. */
 export function assertEnvironmentLspInstallContract(deps: {
   lspInstallContractVersion?: unknown;
 }): void {

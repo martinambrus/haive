@@ -1,4 +1,12 @@
 import {
+  loadComposedLspIdentity,
+  retainComposedImage,
+  type ComposedLspEvidence,
+  type ComposedLspReport,
+} from '../../../lsp/composed-evidence.js';
+import { probeComposedServer } from '../../../lsp/composed-probe.js';
+import { withEnsuredComposedImage } from '../../../sandbox/composed-image-cache.js';
+import {
   assertEnvironmentLspInstallContract,
   type LspInstallContract,
 } from '../../../sandbox/lsp-install-contract.js';
@@ -19,6 +27,8 @@ export interface VerifyEnvironmentDetect {
   envTemplateId: string;
   imageRef: string;
   checks: SmokeCheck[];
+  installContract?: 2;
+  providerId?: string;
 }
 
 export interface VerifyEnvironmentReport {
@@ -38,6 +48,8 @@ export interface VerifyEnvironmentApply {
   passed: number;
   failed: number;
   reports: VerifyEnvironmentReport[];
+  environmentReports?: VerifyEnvironmentReport[];
+  composedLsp?: ComposedLspEvidence;
 }
 
 interface DeclaredDepsShape extends LspInstallContract {
@@ -48,7 +60,7 @@ interface DeclaredDepsShape extends LspInstallContract {
 }
 
 export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
-  assertEnvironmentLspInstallContract(deps);
+  if (deps.lspInstallContractVersion !== 2) assertEnvironmentLspInstallContract(deps);
   const checks: SmokeCheck[] = [];
   const runtimes = deps.runtimes ?? [];
   if (runtimes.includes('node')) {
@@ -80,7 +92,7 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
     checks.push({ id: 'java', label: 'Java', cmd: ['java', '--version'] });
   }
 
-  const lsp = new Set(deps.lspServers ?? []);
+  const lsp = new Set(deps.lspInstallContractVersion === 2 ? [] : (deps.lspServers ?? []));
   const lspChecks: Array<{
     keys: string[];
     id: string;
@@ -183,6 +195,9 @@ export function createVerifyEnvironmentStep(
         envTemplateId: row.id,
         imageRef: row.imageTag,
         checks: buildSmokeChecks(deps),
+        ...(deps.lspInstallContractVersion === 2
+          ? { installContract: 2 as const, providerId: ctx.cliProviderId ?? undefined }
+          : {}),
       };
     },
 
@@ -209,14 +224,36 @@ export function createVerifyEnvironmentStep(
 
     async apply(ctx, args) {
       const raw = args.formValues.selectedChecks;
+      const composed = args.detected.installContract === 2;
+      const step = composed
+        ? await ctx.db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) })
+        : null;
+      const task = composed
+        ? await ctx.db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) })
+        : null;
+      const environmentImage = composed ? await runner.inspect(args.detected.imageRef) : null;
+      if (composed && (!environmentImage?.exists || !environmentImage.imageId))
+        throw new Error('Environment image disappeared; Retry 03');
       const selected = Array.isArray(raw) ? (raw as string[]) : [];
       const selectedSet = new Set(selected);
       const reports: VerifyEnvironmentReport[] = [];
 
       for (const check of args.detected.checks) {
-        if (!selectedSet.has(check.id)) continue;
+        if (!selectedSet.has(check.id)) {
+          if (composed)
+            reports.push({
+              ...check,
+              exitCode: null,
+              stdout: '',
+              stderr: '',
+              durationMs: 0,
+              passed: false,
+              error: 'Check was not selected',
+            });
+          continue;
+        }
         const result = await runner.run({
-          image: args.detected.imageRef,
+          image: composed ? environmentImage!.imageId! : args.detected.imageRef,
           cmd: check.cmd,
           signal: ctx.signal,
         });
@@ -238,6 +275,71 @@ export function createVerifyEnvironmentStep(
         );
       }
 
+      if (composed) {
+        if (!args.detected.providerId || !step || !task)
+          throw new Error('Composed verification needs the current provider and owned step');
+        const provider = await ctx.db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, args.detected.providerId),
+        });
+        if (!provider || provider.id !== ctx.cliProviderId)
+          throw new Error('Composed verification provider changed; Retry 04');
+        const fence = {
+          stepId: ctx.taskStepId,
+          generation: ctx.rerunGeneration ?? step.rerunGeneration,
+          epoch: ctx.epoch ?? task.orchestrationEpoch,
+        };
+        const evidence = await withEnsuredComposedImage(
+          ctx.db,
+          ctx.taskId,
+          provider,
+          async (composition) => {
+            const identity = await loadComposedLspIdentity(ctx.db, ctx.taskId, provider.id, runner);
+            if (
+              !identity ||
+              identity.envTemplateId !== args.detected.envTemplateId ||
+              identity.environmentImageId !== environmentImage?.imageId ||
+              identity.tag !== composition.tag
+            )
+              throw new Error('Composed verification inputs changed; Retry 04');
+            await retainComposedImage(ctx.db, ctx.taskId, identity, false, fence, runner);
+            const lspReports: ComposedLspReport[] = [];
+            for (const selected of identity.selection)
+              lspReports.push(
+                await probeComposedServer(runner, identity.imageId, selected.server, ctx.signal),
+              );
+            const verified =
+              reports.length === args.detected.checks.length &&
+              reports.every((r) => r.passed) &&
+              lspReports.length === identity.selection.length &&
+              lspReports.every((r) => r.passed && !r.skipped);
+            // Build/probe failures never replace effective/prior references. A pending
+            // verification reference also survives a crash or a reset of this output.
+            if (verified)
+              await retainComposedImage(ctx.db, ctx.taskId, identity, true, fence, runner);
+            return {
+              schemaVersion: 1 as const,
+              entries: [
+                {
+                  identity,
+                  outcome: verified ? ('verified' as const) : ('failed' as const),
+                  reports: lspReports,
+                },
+              ],
+            };
+          },
+          runner,
+        );
+        if (!evidence) throw new Error('No composed environment decision for verification');
+        const all = [...reports, ...evidence.entries.flatMap((e) => e.reports)];
+        return {
+          envTemplateId: args.detected.envTemplateId,
+          passed: all.filter((r) => r.passed).length,
+          failed: all.filter((r) => !r.passed).length,
+          reports: [],
+          environmentReports: reports,
+          composedLsp: evidence,
+        };
+      }
       const passed = reports.filter((r) => r.passed).length;
       const failed = reports.length - passed;
       if (failed === 0 && reports.length > 0) {

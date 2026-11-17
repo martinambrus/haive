@@ -1,0 +1,339 @@
+{
+  "ids": {
+    "task": "11111111-1111-4111-8111-111111111111",
+    "env": "22222222-2222-4222-8222-222222222222",
+    "provider": "33333333-3333-4333-8333-333333333333",
+    "plugin": "44444444-4444-4444-8444-444444444444",
+    "verify": "55555555-5555-4555-8555-555555555555",
+    "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  },
+  "tasks": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "repositoryId": null,
+      "cliProviderId": null,
+      "summaryCliProviderId": null,
+      "envTemplateId": "22222222-2222-4222-8222-222222222222",
+      "dbUploadId": null,
+      "parentTaskId": null,
+      "type": null,
+      "title": null,
+      "description": null,
+      "status": null,
+      "currentStepId": null,
+      "currentStepIndex": null,
+      "containerId": null,
+      "worktreePath": null,
+      "worktreeBranch": null,
+      "modelIdentity": null,
+      "commitSha": null,
+      "changedPaths": null,
+      "prProvider": null,
+      "prUrl": null,
+      "prNumber": null,
+      "prState": null,
+      "prMergedAt": null,
+      "prFinalizeMode": null,
+      "prPollError": null,
+      "prCredentialId": null,
+      "memoryLimitMb": null,
+      "cpuLimitMilli": null,
+      "metadata": {
+        "composedLspImageRefs": {
+          "schemaVersion": 1,
+          "entries": [
+            {
+              "providerId": "33333333-3333-4333-8333-333333333333",
+              "effective": {
+                "tag": "haive-sandbox:641434a4c2b2341e",
+                "imageId": "sha256:verified",
+                "identityHash": "ba53a11776fab0c076206f3d19dac4609543f93f79b258352be9fa496e4f04bf"
+              }
+            }
+          ]
+        }
+      },
+      "simplifyCode": null,
+      "adversarialQaLevel": null,
+      "broadAudit": null,
+      "reviewDimensions": null,
+      "debugMode": null,
+      "exposeDbPort": null,
+      "directAccess": null,
+      "awaitingAllowanceProviderId": null,
+      "awaitingProviderReason": null,
+      "awaitingProviderSince": null,
+      "allowanceResetAt": null,
+      "allowanceReplenishedAt": null,
+      "allowanceAutoResumeCount": null,
+      "allowanceAutoResumedAt": null,
+      "estimatedTimeHours": null,
+      "aiEstimatedTimeHours": null,
+      "aiEstimateLowHours": null,
+      "aiEstimateHighHours": null,
+      "executionPath": null,
+      "stepLoopLimits": null,
+      "autoContinue": null,
+      "ignoreSavedStepClis": null,
+      "summaryLlmEnabled": null,
+      "cliChoiceRecorded": null,
+      "summaryCliChoiceRecorded": null,
+      "preAnswers": null,
+      "currentRound": null,
+      "maxFixRounds": null,
+      "orchestrationEpoch": 3,
+      "errorMessage": null,
+      "pausedAt": null,
+      "voteScore": null,
+      "startedAt": null,
+      "completedAt": null,
+      "createdAt": "2026-02-01T00:00:01.000Z",
+      "updatedAt": null,
+      "codexAppServer": null,
+      "summaryCliChoiceAt": null,
+      "runListSnapshot": null,
+      "deadAt": null,
+      "deadReason": null,
+      "customSteps": null,
+      "expectedAttachmentCount": null,
+      "prRemoteUrl": null,
+      "derivedRunPlan": null,
+      "autoActOnInsights": null,
+      "dataEdgePlan": null,
+      "executionContract": null
+    }
+  ],
+  "envTemplates": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "userId": null,
+      "repositoryId": null,
+      "name": null,
+      "baseImage": null,
+      "declaredDeps": {
+        "lspInstallContractVersion": 2,
+        "lspServers": ["gopls"],
+        "lspServerVersions": {
+          "go": "0.18.0"
+        }
+      },
+      "generatedDockerfile": "FROM ubuntu:24.04\n",
+      "dockerfileHash": null,
+      "imageTag": "env:built",
+      "builtImageId": null,
+      "status": "ready",
+      "lastBuiltAt": "1970-01-01T00:00:00.000Z",
+      "createdAt": "2026-02-01T00:00:02.000Z",
+      "updatedAt": null
+    }
+  ],
+  "taskSteps": [
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "taskId": "11111111-1111-4111-8111-111111111111",
+      "stepId": "01b-install-plugins",
+      "stepIndex": null,
+      "runSeq": null,
+      "round": 0,
+      "title": null,
+      "status": "done",
+      "detectOutput": {
+        "providerName": "claude-code",
+        "lspLanguages": ["go"]
+      },
+      "formSchema": null,
+      "formValues": null,
+      "output": {
+        "skipped": false,
+        "composedLspProviderHash": "f29ced90bfe226804c2bd23c85c93a4ef392df4e342710232f1ca27d6d8479d3",
+        "executed": [
+          {
+            "exitCode": 0
+          }
+        ]
+      },
+      "iterations": null,
+      "iterationCount": null,
+      "statusMessage": null,
+      "warningMessage": null,
+      "summary": null,
+      "errorMessage": null,
+      "errorHint": null,
+      "degradedNote": null,
+      "aiFixContext": null,
+      "mergeResolveState": null,
+      "localModelOverride": null,
+      "pauseFormOnRetry": null,
+      "cliTimeoutOverrideMs": null,
+      "cliTimeoutLearnedMs": null,
+      "startedAt": null,
+      "endedAt": null,
+      "idleMs": null,
+      "waitingStartedAt": null,
+      "userActiveMs": null,
+      "carriedWorkMs": null,
+      "carriedIdleMs": null,
+      "carriedUserActiveMs": null,
+      "contextLeftPercent": null,
+      "contextTokens": null,
+      "contextWindowSize": null,
+      "usageFiveHourPct": null,
+      "usageSevenDayPct": null,
+      "usageDailyPct": null,
+      "createdAt": "2026-02-01T00:00:04.000Z",
+      "updatedAt": null,
+      "integrationWait": null,
+      "detectCliProviderId": null,
+      "applyReceipt": null,
+      "rerunGeneration": null,
+      "providerWaitProviderId": null,
+      "guardState": null
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "taskId": "11111111-1111-4111-8111-111111111111",
+      "stepId": "04-verify-environment",
+      "stepIndex": null,
+      "runSeq": null,
+      "round": 0,
+      "title": null,
+      "status": "done",
+      "detectOutput": null,
+      "formSchema": null,
+      "formValues": null,
+      "output": {
+        "envTemplateId": "22222222-2222-4222-8222-222222222222",
+        "reports": [
+          {
+            "id": "lsp-gopls",
+            "passed": true
+          }
+        ],
+        "composedLsp": {
+          "schemaVersion": 1,
+          "entries": [
+            {
+              "identity": {
+                "schemaVersion": 1,
+                "envTemplateId": "22222222-2222-4222-8222-222222222222",
+                "installContract": 2,
+                "templateBodyHash": "850615537c13a095aff9e09d9e9f3e6f1c784716e60764e8f77738ae38fa5a3c",
+                "environmentImageId": "sha256:verified",
+                "selection": [
+                  {
+                    "server": "gopls",
+                    "version": "0.18.0"
+                  }
+                ],
+                "recipeHash": "f138cc0b80f767f108d64f32d8bc8af30cd4d8e9a8444bccef36efd132d902cf",
+                "provider": {
+                  "id": "33333333-3333-4333-8333-333333333333",
+                  "name": "claude-code",
+                  "cliVersion": "1.0.0",
+                  "extrasHash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+                  "configHash": "f29ced90bfe226804c2bd23c85c93a4ef392df4e342710232f1ca27d6d8479d3"
+                },
+                "plugin": {
+                  "hash": "ed384b3f42fde30450c9a036b5d55ad911231e1573990a638c12e9cd3a315ba3",
+                  "ready": true,
+                  "filesHash": null
+                },
+                "compositionHash": "641434a4c2b2341e",
+                "tag": "haive-sandbox:641434a4c2b2341e",
+                "imageId": "sha256:verified"
+              },
+              "outcome": "verified",
+              "reports": [
+                {
+                  "server": "gopls",
+                  "passed": true,
+                  "skipped": false,
+                  "installedVersion": "0.18.0",
+                  "toolchainVersion": "go1.26.7",
+                  "stdout": "",
+                  "stderr": ""
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "iterations": null,
+      "iterationCount": null,
+      "statusMessage": null,
+      "warningMessage": null,
+      "summary": null,
+      "errorMessage": null,
+      "errorHint": null,
+      "degradedNote": null,
+      "aiFixContext": null,
+      "mergeResolveState": null,
+      "localModelOverride": null,
+      "pauseFormOnRetry": null,
+      "cliTimeoutOverrideMs": null,
+      "cliTimeoutLearnedMs": null,
+      "startedAt": null,
+      "endedAt": "1970-01-01T00:00:00.100Z",
+      "idleMs": null,
+      "waitingStartedAt": null,
+      "userActiveMs": null,
+      "carriedWorkMs": null,
+      "carriedIdleMs": null,
+      "carriedUserActiveMs": null,
+      "contextLeftPercent": null,
+      "contextTokens": null,
+      "contextWindowSize": null,
+      "usageFiveHourPct": null,
+      "usageSevenDayPct": null,
+      "usageDailyPct": null,
+      "createdAt": "2026-02-01T00:00:05.000Z",
+      "updatedAt": null,
+      "integrationWait": null,
+      "detectCliProviderId": null,
+      "applyReceipt": null,
+      "rerunGeneration": null,
+      "providerWaitProviderId": null,
+      "guardState": null
+    }
+  ],
+  "cliProviders": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "name": "claude-code",
+      "label": null,
+      "executablePath": null,
+      "wrapperPath": null,
+      "wrapperContent": null,
+      "envVars": null,
+      "cliArgs": null,
+      "supportsSubagents": null,
+      "networkPolicy": null,
+      "egressDomains": null,
+      "authMode": null,
+      "cliVersion": "1.0.0",
+      "effortLevel": null,
+      "model": null,
+      "modelfile": null,
+      "modelProvisionStatus": null,
+      "modelProvisionError": null,
+      "modelLimits": null,
+      "sandboxDockerfileExtra": null,
+      "sandboxImageTag": null,
+      "sandboxImageBuildStatus": null,
+      "sandboxImageBuildError": null,
+      "sandboxImageBuiltAt": null,
+      "enabled": true,
+      "isolateAuth": null,
+      "disableThinking": null,
+      "authStatus": null,
+      "authLastCheckedAt": null,
+      "authMessage": null,
+      "rulesContent": null,
+      "createdAt": "2026-02-01T00:00:03.000Z",
+      "updatedAt": null,
+      "authGeneration": null
+    }
+  ]
+}

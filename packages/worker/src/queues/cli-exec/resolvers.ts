@@ -1,3 +1,4 @@
+import { lspProviderIdentity } from '../../lsp/composed-evidence.js';
 import {
   resolveTaskCommittedSnapshots,
   SNAPSHOT_BASE_TARGET,
@@ -414,6 +415,7 @@ export async function resolveMcpExtraFiles(
   /** The run these files are for; only a prompt step's own run names custom tools, and its invocation row may carry integrations. */
   run?: CustomRun,
   workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
+  selectedProvider?: CliProviderRecord,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -440,7 +442,17 @@ export async function resolveMcpExtraFiles(
     workspaceKind !== 'snapshot' &&
     cliAdapterRegistry.has(providerName) &&
     cliAdapterRegistry.get(providerName).supportsLsp &&
-    (await hasReadyLspBridge(db, taskId));
+    (await hasReadyLspBridge(
+      db,
+      taskId,
+      selectedProvider
+        ? {
+            providerId: selectedProvider.id,
+            providerHash: lspProviderIdentity(selectedProvider),
+            imageId: sandboxImage,
+          }
+        : undefined,
+    ));
 
   // When chrome-devtools is on AND the task's runner has a live headed browser
   // (interactive/mcp testing), connect the agent to THAT visible browser instead

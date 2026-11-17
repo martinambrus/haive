@@ -20,6 +20,9 @@ describe('the callers of resolveMcpExtraFiles', () => {
       calls.push(...callArguments(await readFile(url, 'utf8')));
     }
     expect(calls).toHaveLength(3);
-    for (const args of calls) expect(args.trimEnd()).toMatch(/\n\s*payload,\n\s*workspaceKind,$/);
+    for (const args of calls)
+      expect(args.trimEnd()).toMatch(
+        /\n\s*payload,\n\s*workspaceKind,\n\s*(?:providerRow|provider),$/,
+      );
   });
 });

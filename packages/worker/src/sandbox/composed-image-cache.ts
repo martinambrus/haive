@@ -31,22 +31,38 @@ export async function ensureComposedImage(
   provider: ComposedImageProvider,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
+  return withEnsuredComposedImage(
+    db,
+    taskId,
+    provider,
+    async (composition) => composition.tag,
+    runner,
+  );
+}
+
+/** Keep verification and durable publication in the build's tag turn so the reaper
+ * cannot remove an image between its build and the task taking ownership. */
+export async function withEnsuredComposedImage<T>(
+  db: Database,
+  taskId: string,
+  provider: ComposedImageProvider,
+  use: (composition: SandboxImageComposition) => Promise<T>,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<T | null> {
   const composition = await resolveSandboxImageComposition(db, taskId, provider, runner, true);
   if (!composition) return null;
-
   return withImageTagLock(composition.tag, async () => {
     const inspected = await runner.inspect(composition.tag);
     if (inspected.exists) {
       log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
-      return composition.tag;
+    } else {
+      log.info(
+        { tag: composition.tag, hash: composition.hash },
+        'composed image cache miss, building',
+      );
+      await buildComposedImage(composition, runner);
     }
-
-    log.info(
-      { tag: composition.tag, hash: composition.hash },
-      'composed image cache miss, building',
-    );
-    await buildComposedImage(composition, runner);
-    return composition.tag;
+    return use(composition);
   });
 }
 

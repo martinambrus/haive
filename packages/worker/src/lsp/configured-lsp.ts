@@ -1,3 +1,11 @@
+import {
+  composedEntryMatches,
+  loadComposedLspIdentity,
+  parseImageReferences,
+  evidenceHash,
+  type ComposedLspEvidence,
+} from './composed-evidence.js';
+import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { ONBOARDING_TOOLING_SCHEMA_VERSION, type OnboardingToolingMirror } from '@haive/shared';
@@ -137,7 +145,16 @@ export async function loadConfiguredLspLanguages(
  * bridged server, and the provider plugin that exposes those servers to the
  * CLI. Onboarding mirrors are intentionally not consulted here.
  */
-export async function hasReadyLspBridge(db: Database, taskId: string): Promise<boolean> {
+export async function hasReadyLspBridge(
+  db: Database,
+  taskId: string,
+  composed?: {
+    providerId: string;
+    providerHash?: string;
+    imageId?: string | null;
+    runner?: DockerRunner;
+  },
+): Promise<boolean> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
@@ -155,6 +172,22 @@ export async function hasReadyLspBridge(db: Database, taskId: string): Promise<b
   ) {
     return false;
   }
+  const contract = (envTemplate.declaredDeps as { lspInstallContractVersion?: unknown } | null)
+    ?.lspInstallContractVersion;
+  if (contract === 2) {
+    if (!composed) return false;
+    return (
+      (await readyComposedLspImage(
+        db,
+        taskId,
+        composed.providerId,
+        composed.runner,
+        composed.imageId,
+        composed.providerHash,
+      )) !== null
+    );
+  }
+  if (contract !== undefined && contract !== 1) return false;
   const configuredLanguages =
     parseConfiguredLspLanguages(
       (envTemplate.declaredDeps as { lspServers?: unknown } | null)?.lspServers,
@@ -222,4 +255,57 @@ export async function hasReadyLspBridge(db: Database, taskId: string): Promise<b
     pluginOutput?.skipped === false &&
     !pluginOutput.missingDrupalLsp
   );
+}
+
+/** Read-only at dispatch and again at execution. A reset removes evidence, while the
+ * independent retained reference keeps the previous immutable image protected. */
+export async function readyComposedLspImage(
+  db: Database,
+  taskId: string,
+  providerId: string,
+  runner: DockerRunner = defaultDockerRunner,
+  executionImage?: string | null,
+  providerHash?: string,
+): Promise<string | null> {
+  try {
+    const current = await loadComposedLspIdentity(db, taskId, providerId, runner);
+    if (
+      !current ||
+      (providerHash !== undefined && current.provider.configHash !== providerHash) ||
+      (executionImage !== undefined &&
+        executionImage !== current.imageId &&
+        executionImage !== current.tag)
+    )
+      return null;
+    // Solargraph is standalone, never a callable bridge.
+    if (!parseConfiguredLspLanguages(current.selection.map((s) => s.server))?.length) return null;
+    const step = await db.query.taskSteps.findFirst({
+      where: and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, '04-verify-environment'),
+      ),
+      orderBy: [desc(schema.taskSteps.endedAt), desc(schema.taskSteps.round)],
+    });
+    const evidence = (step?.output as { composedLsp?: ComposedLspEvidence } | null)?.composedLsp;
+    if (
+      step?.status !== 'done' ||
+      !step.endedAt ||
+      evidence?.schemaVersion !== 1 ||
+      !Array.isArray(evidence.entries) ||
+      evidence.entries.length !== 1 ||
+      !evidence.entries.some((e) => composedEntryMatches(e, current))
+    )
+      return null;
+    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+    const effective = parseImageReferences(task?.metadata).entries.find(
+      (e) => e.providerId === providerId,
+    )?.effective;
+    return effective?.identityHash === evidenceHash(current) &&
+      effective.imageId === current.imageId &&
+      effective.tag === current.tag
+      ? current.imageId
+      : null;
+  } catch {
+    return null;
+  }
 }

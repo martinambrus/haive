@@ -33,7 +33,7 @@ const deps = {
 };
 function database(
   declaredDeps: unknown = deps,
-  opts: { linked?: boolean; status?: string; dockerfile?: string | null } = {},
+  opts: { linked?: boolean; status?: string; dockerfile?: string | null; metadata?: unknown } = {},
 ) {
   return {
     query: {
@@ -41,6 +41,7 @@ function database(
         findFirst: async () => ({
           envTemplateId: opts.linked === false ? null : 'env',
           repositoryId: 'repo',
+          metadata: opts.metadata,
         }),
       },
       envTemplates: {
@@ -50,6 +51,7 @@ function database(
           declaredDeps,
         })),
       },
+      cliProviders: { findFirst: async () => provider },
       repositories: { findFirst: async () => ({ rtkVersion: '0.42.4' }) },
       toolPackageVersions: {
         findFirst: async () => {
@@ -81,14 +83,26 @@ it('peek and ensure consume the saved contract/selection/pins and the same base 
   const image = expected();
   const build = vi.fn();
   const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }), build });
-  const db = database();
+  const db = database(deps, {
+    metadata: {
+      composedLspImageRefs: {
+        schemaVersion: 1,
+        entries: [
+          {
+            providerId: provider.id,
+            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+          },
+        ],
+      },
+    },
+  });
   expect(await resolveSandboxImageComposition(db, 't', provider, runner)).toEqual(image);
   expect(image.dockerfileBody).toContain('intelephense@1.18.4');
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toEqual({
     tag: image.tag,
     imageId: ID,
   });
-  expect(await resolveSandboxImageTag(db, 't', provider, runner)).toBe(image.tag);
+  expect(await resolveSandboxImageTag(db, 't', provider, runner)).toBe(ID);
   expect(build).not.toHaveBeenCalled();
 });
 it('a contract-2 miss peeks unknown, then ensure builds the exact requested body without fallback', async () => {
@@ -107,8 +121,26 @@ it('a contract-2 miss peeks unknown, then ensure builds the exact requested body
   const db = database();
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
   expect(build).not.toHaveBeenCalled();
-  expect(await resolveSandboxImageTag(db, 't', provider, runner)).toBe(image.tag);
-  expect(await peekSandboxImageTag(db, 't', provider, runner)).toEqual({
+  await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
+    /has not passed 04/,
+  );
+  expect(await ensureComposedImage(db, 't', provider, runner)).toBe(image.tag);
+  expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
+  const published = database(deps, {
+    metadata: {
+      composedLspImageRefs: {
+        schemaVersion: 1,
+        entries: [
+          {
+            providerId: provider.id,
+            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+          },
+        ],
+      },
+    },
+  });
+  expect(await resolveSandboxImageTag(published, 't', provider, runner)).toBe(ID);
+  expect(await peekSandboxImageTag(published, 't', provider, runner)).toEqual({
     tag: image.tag,
     imageId: ID,
   });
@@ -155,6 +187,9 @@ it('a failed pin replacement preserves the old image and rejects the requested t
     build,
   });
   await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
+    /has not passed 04/,
+  );
+  await expect(ensureComposedImage(db, 't', provider, runner)).rejects.toThrow(
     'controlled failure',
   );
   expect(build).toHaveBeenCalledTimes(1);
@@ -184,4 +219,32 @@ it('serializes simultaneous ensures of one tag and builds it once', async () => 
   release();
   expect(await Promise.all([first, second])).toEqual([image.tag, image.tag]);
   expect(build).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a cached contract-2 image unknown to peek until verification publishes it', async () => {
+  const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
+  expect(await peekSandboxImageTag(database(), 't', provider, runner)).toBeNull();
+});
+
+it('refuses a peek when the provider moved after the caller captured its configuration', async () => {
+  const image = expected();
+  const db = database(deps, {
+    metadata: {
+      composedLspImageRefs: {
+        schemaVersion: 1,
+        entries: [
+          {
+            providerId: provider.id,
+            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+          },
+        ],
+      },
+    },
+  });
+  vi.spyOn(db.query.cliProviders, 'findFirst').mockResolvedValue({
+    ...provider,
+    cliVersion: '2.0.0',
+  } as never);
+  const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
+  expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
 });

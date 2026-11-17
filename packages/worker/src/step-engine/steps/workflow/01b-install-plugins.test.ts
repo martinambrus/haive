@@ -63,6 +63,7 @@ function ctx(): Ctx {
   return {
     db: {
       query: {
+        tasks: { findFirst: async () => ({ envTemplateId: null }) },
         cliProviders: {
           findFirst: async () => ({ name: 'claude-code', wrapperPath: null, executablePath: null }),
         },
@@ -379,5 +380,60 @@ describe('01b-install-plugins apply: the network a CLI run gets', () => {
     const egress = (runInSandbox.mock.calls[local]![1] as { egressDomains?: string[] })
       .egressDomains;
     expect(egress).not.toContain('github.com');
+  });
+});
+
+describe('contract-2 plugin evidence binding', () => {
+  function composedContext() {
+    const c = ctx();
+    const provider = {
+      id: 'provider-1',
+      name: 'claude-code',
+      wrapperPath: null,
+      executablePath: null,
+      envVars: null as Record<string, string> | null,
+    };
+    c.db = {
+      query: {
+        tasks: { findFirst: async () => ({ envTemplateId: 'env', metadata: null }) },
+        envTemplates: {
+          findFirst: async () => ({
+            declaredDeps: { lspInstallContractVersion: 2, lspServers: ['vtsls'] },
+          }),
+        },
+        cliProviders: { findFirst: async () => provider },
+      },
+    } as unknown as Ctx['db'];
+    loadConfiguredLspLanguages.mockResolvedValue(['typescript']);
+    runInSandbox.mockClear();
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+    return { c, provider };
+  }
+  it('binds an installed contract-2 result to the provider configuration', async () => {
+    const { c } = composedContext();
+    const detected = await installPluginsStep.detect(c);
+    const out = await installPluginsStep.apply(c, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.composedLspProviderHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(out.composedLspFilesHash).toBeNull();
+    expect(out.skipped).toBe(false);
+  });
+  it('refuses a provider changed while the plugin form was parked', async () => {
+    const { c, provider } = composedContext();
+    const detected = await installPluginsStep.detect(c);
+    provider.envVars = { OTHER: 'changed' };
+    await expect(
+      installPluginsStep.apply(c, {
+        detected,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).rejects.toThrow(/changed since detection/);
+    expect(runInSandbox).not.toHaveBeenCalled();
   });
 });

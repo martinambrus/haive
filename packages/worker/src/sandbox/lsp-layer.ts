@@ -2,8 +2,8 @@ import { assertVersionToken } from '@haive/shared';
 import { ENSURE_NODE_USER_LINE } from '../cli-versions/codegen.js';
 import { shellQuote } from './shell-quote.js';
 
-/** Optional composed-image recipes. Deliberately not activated by the production cache yet:
- * stored environment templates still own their installers until the verification cutover. */
+/** Optional composed-image recipes, selected only by explicit contract-2 metadata.
+ * No production writer opts in; existing templates keep their environment installers. */
 export type ComposedLspServer =
   'intelephense' | 'vtsls' | 'pyright' | 'gopls' | 'rust-analyzer' | 'solargraph' | 'jdtls';
 export interface SelectedLspServer {
@@ -122,7 +122,13 @@ export function buildLspLayer(servers: unknown, versions?: unknown): string {
       server === 'solargraph' ||
       server === 'jdtls'
     ) {
-      lines.push(`# haive-lsp-recipe: ${server}`, buildNativeRecipe(server, version));
+      // A prerequisite skip must not inherit a stale launcher from the saved base.
+      // Verification opens this recipe-owned path, never another PATH candidate.
+      lines.push(
+        `RUN rm -f /usr/local/bin/${server}`,
+        `# haive-lsp-recipe: ${server}`,
+        buildNativeRecipe(server, version),
+      );
       continue;
     }
     const recipe = RECIPES[server];
