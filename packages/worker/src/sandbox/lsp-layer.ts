@@ -1,3 +1,5 @@
+import { assertVersionToken } from '@haive/shared';
+
 /** Optional composed-image recipes. Deliberately not activated by the production cache yet:
  * stored environment templates still own their installers until the verification cutover. */
 export type ComposedLspServer = 'intelephense' | 'vtsls' | 'pyright';
@@ -16,23 +18,6 @@ const ALIASES = new Map<string, ComposedLspServer>([
   ['python', 'pyright'],
   ['pyright', 'pyright'],
 ]);
-
-/** Exact npm releases or dist-tags only, never ranges, URLs, paths or shell syntax. */
-function versionToken(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value !== 'string')
-    throw new Error('Invalid LSP version: expected an npm version or dist-tag');
-  const token = value.trim();
-  if (!token) return null;
-  const numeric = '(?:0|[1-9][0-9]*)';
-  const release = new RegExp(
-    `^${numeric}\\.${numeric}\\.${numeric}(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
-  );
-  if (token.length > 128 || (!release.test(token) && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(token))) {
-    throw new Error('Invalid LSP version: expected an exact npm version or dist-tag');
-  }
-  return token;
-}
 
 /** One canonical selection for recipes and cache identity. Absent/empty means legacy bytes.
  * Aliases of a selected binary share its pin, including pins recorded under an older key. */
@@ -59,8 +44,9 @@ export function normalizeLspSelection(servers: unknown, versions?: unknown): Sel
   for (const [key, value] of Object.entries(versions ?? {})) {
     const server = ALIASES.get(key);
     if (!server || !selected.has(server)) continue;
-    const pin = versionToken(value);
-    if (!pin) continue;
+    if (value === null || value === undefined || value === '') continue;
+    assertVersionToken(value, `LSP ${server} version (edit the repository Tooling settings)`);
+    const pin = value;
     const previous = pins.get(server);
     if (previous && previous !== pin) throw new Error(`Conflicting LSP versions for ${server}`);
     pins.set(server, pin);
@@ -85,12 +71,16 @@ export function buildLspLayer(servers: unknown, versions?: unknown): string {
     `# haive-lsp-selection: ${JSON.stringify(selection)}`,
     'ENV PATH="/usr/local/bin:${PATH}"',
     'RUN set -eu; \\',
-    '    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then \\',
+    '    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! node -e \'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)\'; then \\',
     '        if command -v apk >/dev/null 2>&1; then \\',
     '            apk add --no-cache nodejs npm; \\',
     '        elif command -v apt-get >/dev/null 2>&1; then \\',
     '            apt-get update; \\',
-    '            apt-get install -y --no-install-recommends nodejs npm; \\',
+    '            apt-get install -y --no-install-recommends curl ca-certificates gnupg bash; \\',
+    '            curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/haive-lsp-nodesource.sh; \\',
+    '            bash /tmp/haive-lsp-nodesource.sh; \\',
+    '            apt-get install -y --no-install-recommends nodejs; \\',
+    '            rm /tmp/haive-lsp-nodesource.sh; \\',
     '            rm -rf /var/lib/apt/lists/*; \\',
     '        else \\',
     '            echo "LSP layer: Node.js and npm are required; no supported package manager" >&2; exit 1; \\',

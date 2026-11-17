@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { composeSandboxImage, type ComposeInput } from '../src/sandbox/image-composer.js';
+import { composeSandboxImage as preLspComposition } from './fixtures/pre-lsp-composer.js';
 import { buildLspMarketplaceCommands } from '../src/cli-adapters/_lsp-marketplace.js';
 
 const base = {
@@ -13,13 +13,20 @@ function compose(lspServers?: unknown, lspServerVersions?: unknown) {
 }
 
 describe('optional composed LSP layer', () => {
-  it('preserves the measured pre-feature bytes and tag when no servers are selected', () => {
+  it('preserves pre-feature assembly structurally for every empty selection', () => {
     for (const selection of [undefined, null, []]) {
-      const result = compose(selection, { vtsls: 'unused; malicious' });
-      expect(result.tag).toBe('haive-sandbox:15f42b4d5e493d3a');
-      expect(createHash('sha256').update(result.dockerfileBody).digest('hex')).toBe(
-        '15f42b4d5e493d3a72629f9a952247da824c85d64b6d0b1c0e2d17f778f6e152',
-      );
+      for (const input of [
+        base,
+        { ...base, envTemplateDockerfile: null, baseImageId: 'sha256:base', rtkVersion: '0.42.4' },
+      ]) {
+        expect(
+          composeSandboxImage({
+            ...input,
+            lspServers: selection,
+            lspServerVersions: { vtsls: 'unused; malicious' },
+          }),
+        ).toEqual(preLspComposition(input));
+      }
     }
   });
 
@@ -105,21 +112,30 @@ describe('optional composed LSP layer', () => {
     "1.2.3'",
     '*',
     '^1.2.3',
+    '1.2.3\n',
+    ' 1.2.3',
+    'v1.2.3 ',
+    '-latest',
+    '１.2.3',
+    'ｌatest',
+    '1.2.3\u2028',
+    '1.2.3\0',
+    'a'.repeat(65),
   ])('refuses version injection or non-exact token %j', (pin) =>
-    expect(() => compose(['vtsls'], { vtsls: pin })).toThrow(/invalid LSP version/i),
+    expect(() => compose(['vtsls'], { vtsls: pin })).toThrow(/LSP.*version/i),
   );
 
   it.each([42, {}, []].map((pin) => ({ pin })))(
     'refuses a non-string selected pin $pin',
     ({ pin }) => {
-      expect(() => compose(['vtsls'], { vtsls: pin })).toThrow(/invalid LSP version/i);
+      expect(() => compose(['vtsls'], { vtsls: pin })).toThrow(/LSP.*version/i);
     },
   );
 
-  it('accepts trimmed exact npm versions, prereleases and dist-tags', () => {
-    for (const pin of [' 1.2.3 ', '1.2.3-rc.1', '1.2.3+build.4', 'latest', 'next']) {
+  it('accepts shared-policy tokens without rewriting them', () => {
+    for (const pin of ['1.2.3', '1.2.3-rc.1', '1.2.3+build.4', 'latest', 'next']) {
       expect(compose(['vtsls'], { vtsls: pin }).dockerfileBody).toContain(
-        `@vtsls/language-server@${pin.trim()}`,
+        `@vtsls/language-server@${pin}`,
       );
     }
   });
@@ -130,15 +146,17 @@ describe('optional composed LSP layer', () => {
     ).toThrow(/conflicting LSP versions/i);
   });
 
-  it('treats blank pins as unpinned and does not hash unselected version entries', () => {
-    expect(compose(['vtsls'], { vtsls: ' ', unrelated: '1;evil' })).toEqual(compose(['vtsls']));
+  it('treats empty pins as unpinned and does not hash unselected version entries', () => {
+    expect(compose(['vtsls'], { vtsls: '', unrelated: '1;evil' })).toEqual(compose(['vtsls']));
     expect(compose(['vtsls'], { vtsls: null })).toEqual(compose(['vtsls']));
   });
 
   it('satisfies or verifies Node/npm without assuming the base supplies it', () => {
     const body = compose(['php']).dockerfileBody;
     expect(body).toContain('apk add --no-cache nodejs npm');
-    expect(body).toContain('apt-get install -y --no-install-recommends nodejs npm');
+    expect(body).toContain('https://deb.nodesource.com/setup_22.x');
+    expect(body).toContain('apt-get install -y --no-install-recommends nodejs');
+    expect(body).not.toContain('apt-get install -y --no-install-recommends nodejs npm');
     expect(body).toContain('LSP layer: Node.js and npm are required');
     expect(body).toContain('node -e');
     expect(body).toContain('npm --version');
