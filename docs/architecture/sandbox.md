@@ -757,3 +757,104 @@ or clear that pin there; re-run dependency declaration before generation, or Ret
 Undo: revert the code change. No schema or data rollback is needed. The output fixture in
 `worker/test/fixtures/version-token-baseline.json` records origin/main's renderer bytes for
 representative valid pins, so unchanged versions keep their Dockerfile bodies and image hashes.
+
+## Optional composed LSP recipes
+
+`ComposeInput.lspServers` and `lspServerVersions` opt into a selected-server layer.
+`lsp-layer.ts` canonicalizes language/server aliases, deduplicates and sorts selection, and
+reconciles pins. For pinnable servers, raw values pass shared `assertVersionToken` without
+trimming; empty/null means unpinned. Unsupported server keys throw explicitly. In the composer
+normalizer, rust-analyzer/jdtls pins are ignored before validation and hashing, matching legacy
+installation and the UI's non-pinnable choices; ignored text is never rendered. Existing API/import
+pin-validation boundaries still apply before values reach the composer.
+
+Go and Solargraph accept legacy's safe-token domain, including partial versions and tags; there
+is no new exact-semver requirement or API restriction. Bare/v-prefixed Go releases canonicalize
+once. Token validity is not proof that a registry publishes it: legacy 02 adds `v` to a nonempty
+Go pin, and passes a gem pin directly. Those install-time resolution failures remain failures.
+Selection metadata and recipe bytes enter the hash with provider, RTK, extras and core-image
+identity. No selection adds no bytes and retains the old tag. The structural fixture freezes
+both pre-feature assembly and `buildHaiveRuntimeToolsLayer`; shared RTK constants and provider
+codegen stay live. Intentional runtime-tools edits must update that fixture too.
+
+Node-based recipes install Intelephense, vtsls and Pyright with npm under `/usr/local` and check
+the plugin executable name. Pyright uses npm's `pyright-langserver` instead of the legacy pip
+wrapper, avoiding a second Node download at first use on this optional path. Missing/old
+Node/npm is supplied through apk or NodeSource on apt, followed by Node >=20 and npm engine
+checks. The composer uses fixed `setup_22.x`, as provider codegen does; environment step 02 uses
+`setup_${nodeMajor}.x` from its resolved Node major. Other package managers fail explicitly.
+
+Native recipes have these runtime contracts:
+
+- **gopls:** compatible base Go >=1.21; `GOTOOLCHAIN=local` prevents implicit build-toolchain
+  replacement and `GOBIN=/usr/local/bin` exposes the binary. The upstream support policy says
+  current gopls runs with the two latest Go lines; that is an upstream-only claim, not measured
+  compatibility of this composed image. Older Go may need an older gopls pin.
+- **rust-analyzer:** isolated stable toolchain, analyzer and rust-src under `/opt/haive-lsp/rust`.
+  The wrapper puts the real toolchain binaries on its own PATH and executes the analyzer directly.
+  It exports none of CARGO_HOME, RUSTUP_HOME or RUSTUP_TOOLCHAIN: no rustup proxy is needed on
+  this path, and Cargo retains its user's writable cache or a caller-supplied CARGO_HOME. Private
+  homes are used only for installation/discovery. Project-wide compiler PATH is unchanged.
+  Real Cargo metadata/dependency fetching and sysroot discovery remain a pre-cutover build gate.
+- **Solargraph:** base Ruby >=3.0, RubyGems, matching development headers, make and a C compiler.
+  The 3.0 floor follows 02's MEASURED Ruby 3.0.7 -> Solargraph 0.58.3 dependency backoff, not
+  the upstream current gemspec's >=3.1 (an upstream-only current-package claim). Below 3.0 skips,
+  as legacy does. Isolated gems under `/opt` and a public wrapper avoid root's gem directory.
+  Safe pin tokens are passed to RubyGems. Solargraph has no supported CLI bridge here.
+- **jdtls:** base Java >=25, Python >=3.9, curl and tar. Java resolution follows JAVA_HOME then
+  PATH. The Java 25 README floor and Python launcher's Java 21 check are upstream-only facts,
+  not successful image startup evidence. The recipe uses the stricter floor and a public wrapper
+  over a readable snapshot under `/opt/haive-lsp/jdtls`. Pins are ignored, as in legacy.
+
+Before native checks, the layer reuses provider codegen's idempotent ENSURE_NODE_USER_LINE;
+02-generated Ubuntu bases need not already contain node. Each native launcher check runs as node
+via su, with the image PATH passed as a positional argument and restored inside the child shell.
+A composed-body stub control executes the RUNs in order and proves `id -u node` succeeds before
+first su; another simulates su resetting PATH. This is shell-control evidence, not a real Ubuntu
+image build. Native runtime checks verify Go/Ruby versions, the direct Rust analyzer, or jdtls
+help; none proves LSP protocol activation.
+
+Missing/incompatible native prerequisites emit `# <server> SKIPPED: <reason>` to the build log
+and finish that recipe RUN without installation. This includes missing su, Go below 1.21, Ruby
+below 3.0/missing headers and incompatible Java/Python. A skip is never installed evidence and
+must fail the future readiness match for that selected server. Once installation starts, registry
+resolution/download/build and post-install launcher failures still fail the image; legacy's
+unguarded go/gem/rustup/curl RUNs also fail in those cases. Node/npm supply still fails when its
+shared provider/runtime requirement cannot be met. Such failures prevent a replacement task
+image from being published; production wiring remains deferred.
+
+Moving inputs include gopls `@latest`, unpinned npm packages (including TypeScript) and gem
+resolution, Rust stable and the jdtls latest snapshot. The NodeSource script, rustup installer
+script and jdtls tarball have no recipe-level checksum verification, as in legacy. RTK separately
+verifies its release's checksums.txt. At one recipe hash, an uncached rebuild can therefore differ;
+immutable version/toolchain resolution remains an activation decision. Unit/stub checks and
+upstream documentation do not establish successful native downloads/builds or protocol behavior.
+
+Primary upstream references (requirements/documentation only):
+[gopls support](https://go.dev/gopls/#supported-go-versions),
+[rust-analyzer installation](https://rust-analyzer.github.io/book/installation.html),
+[Cargo home](https://doc.rust-lang.org/cargo/guide/cargo-home.html),
+[Solargraph gemspec](https://github.com/castwide/solargraph/blob/master/solargraph.gemspec),
+[jdtls README](https://github.com/eclipse-jdtls/eclipse.jdt.ls#requirements) and
+[Python launcher](https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/main/org.eclipse.jdt.ls.product/scripts/jdtls.py).
+
+This API is **not wired into production cache resolution**. Existing templates retain their saved
+installers and pins, and verification still targets the environment image. Optional
+`declaredDeps.lspInstallContractVersion` reserves absent/1 for environment installation and 2 for
+composed installation. No writer emits 2; generation (including saved-body reuse) and environment
+smoke planning refuse 2 and unknown versions. Explicit 1 renders exactly as absent metadata.
+No SQL migration or manifest bump is needed for this existing-JSONB contract key.
+
+The remaining cutover is consumer-first: (a) cache/peek identity consumes the contract, with no
+writer; (b) split 04 runtime and composed LSP checks and store versioned provider/image/plugin
+identity evidence in the existing `task_steps.output.composedLsp` JSONB of completed 04 steps,
+then teach dispatcher and cli-exec readiness to match it; (c) carry an existing row's contract
+through 01's reconstructed declaredDeps like savedWebserver, add the new-template writer, and
+suppress 02's generated installers last. Evidence uses no new columns/migration. That
+evidence is per-run and fail-closed: a Retry at or before 04 nulls step output, so 04 writes
+its complete entry on every run, and the retained image reference and its reaper protection
+live on a row a reset never touches, never in step output. Preserve
+legacy/custom and shared templates and switch image references only after build AND verification;
+a failed replacement retains the old image while reporting the new request failed. A manifest
+bump alone cannot migrate environment installers. Reverting these preparatory recipes needs no
+row or image-reference migration.
