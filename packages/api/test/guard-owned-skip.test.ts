@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
@@ -153,6 +154,30 @@ describe('Retry of a member the guard skipped', () => {
     expect(t.snapshot()).toBe(before);
     expect(t.events()).toEqual([]);
     expect(h.kill).not.toHaveBeenCalled();
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('is refused when the guard skip lands after the unlocked read and before the reset locks', async () => {
+    const t = setup({ member: { status: 'failed', guardState: null } });
+    let landed = false;
+    const land = async () => {
+      if (landed) return;
+      landed = true;
+      await t.fake.db
+        .update(schema.taskSteps)
+        .set({ status: 'skipped', guardState: receipt })
+        .where(eq(schema.taskSteps.id, MEMBER));
+    };
+    t.fake.hooks.beforeLock = land;
+    t.fake.hooks.beforeUpdate = land;
+    const res = await t.act(MEMBER_STEP, 'retry');
+    expect(landed).toBe(true);
+    expect(res.status, await res.clone().text()).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'guard-owned-skip' });
+    expect(t.step(MEMBER)).toMatchObject({ status: 'skipped', guardState: receipt });
+    expect(t.step(TAIL).status).toBe('pending');
+    expect(t.fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+    expect(t.events()).toEqual([]);
     expect(h.add).not.toHaveBeenCalled();
   });
 
