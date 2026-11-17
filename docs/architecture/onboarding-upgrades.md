@@ -70,14 +70,17 @@ Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from L
 ## LSP installation metadata is separate from artifact versions
 
 The optional `env_templates.declared_deps.lspInstallContractVersion` describes who installs servers:
-absent or 1 means the saved environment Dockerfile owns installation; 2 is reserved for future
-composed-image installation. No production writer emits 2 yet. The generator (saved-body reuse
+absent or 1 means the saved environment Dockerfile owns installation; 2 selects composed-image
+installation in cache/peek identity for supported Claude-binary LSP providers. No production writer
+emits 2 yet. The generator (saved-body reuse
 included) and environment smoke planner refuse it and unknown versions until both are supported.
 Explicit 1 leaves the Dockerfile and checks byte identical to unversioned inputs, though adding
 metadata deliberately would change the template hash because that hash includes declaredDeps.
 The field adds no SQL column/migration. Plugin artifacts and their manifest versions are unchanged.
-The later cutover ships cache/peek contract consumers before evidence/readiness and writes new
-contracts last. 01 must carry forward an existing contract, as it carries savedWebserver, before
+Cache/peek contract consumers ship first: absent/1 preserves existing image bodies/tags, while 2
+hashes its installation owner and canonical requested selection/pins with the saved body, recipes,
+provider, RTK and referenced core ID. Unknown contracts/CLIs refuse. This adds no evidence or
+readiness support: the later cutover adds those consumers and writes new contracts last. 01 must carry forward an existing contract, as it carries savedWebserver, before
 comparing rebuilt declaredDeps; 02 suppression comes last. The planned composed evidence lives
 in the existing task_steps.output.composedLsp JSONB of 04 steps, with immutable image/provider/
 plugin identities and per-server reports, so that design also adds no SQL column/migration.

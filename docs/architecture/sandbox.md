@@ -760,8 +760,11 @@ representative valid pins, so unchanged versions keep their Dockerfile bodies an
 
 ## Optional composed LSP recipes
 
-`ComposeInput.lspServers` and `lspServerVersions` opt into a selected-server layer.
-`lsp-layer.ts` canonicalizes language/server aliases, deduplicates and sorts selection, and
+`ComposeInput.lspInstallContractVersion` selects the installation owner. Absent/1 ignores
+`lspServers` and `lspServerVersions` and keeps the exact legacy Dockerfile body and tag. Contract 2
+selects the composed recipes only for a catalogued Claude-binary provider with the existing LSP
+bridge; other CLIs (including grok), unknown names and unknown contracts refuse by name even with
+no selected servers. `lsp-layer.ts` canonicalizes language/server aliases, deduplicates and sorts selection, and
 reconciles pins. For pinnable servers, raw values pass shared `assertVersionToken` without
 trimming; empty/null means unpinned. Unsupported server keys throw explicitly. In the composer
 normalizer, rust-analyzer/jdtls pins are ignored before validation and hashing, matching legacy
@@ -773,7 +776,8 @@ is no new exact-semver requirement or API restriction. Bare/v-prefixed Go releas
 once. Token validity is not proof that a registry publishes it: legacy 02 adds `v` to a nonempty
 Go pin, and passes a gem pin directly. Those install-time resolution failures remain failures.
 Selection metadata and recipe bytes enter the hash with provider, RTK, extras and core-image
-identity. No selection adds no bytes and retains the old tag. The structural fixture freezes
+identity. Contract 2 includes a constant installation-owner marker even for an empty selection;
+legacy absence/1 adds no bytes and retains the old tag. The structural fixture freezes
 both pre-feature assembly and `buildHaiveRuntimeToolsLayer`; shared RTK constants and provider
 codegen stay live. Intentional runtime-tools edits must update that fixture too.
 
@@ -838,23 +842,39 @@ Primary upstream references (requirements/documentation only):
 [jdtls README](https://github.com/eclipse-jdtls/eclipse.jdt.ls#requirements) and
 [Python launcher](https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/main/org.eclipse.jdt.ls.product/scripts/jdtls.py).
 
-This API is **not wired into production cache resolution**. Existing templates retain their saved
-installers and pins, and verification still targets the environment image. Optional
-`declaredDeps.lspInstallContractVersion` reserves absent/1 for environment installation and 2 for
-composed installation. No writer emits 2; generation (including saved-body reuse) and environment
-smoke planning refuse 2 and unknown versions. Explicit 1 renders exactly as absent metadata.
-No SQL migration or manifest bump is needed for this existing-JSONB contract key.
+The shared cache calculation now reads the saved template's `declaredDeps` contract, selection
+and pins. Ensure and read-only peek use that same calculation, saved body, referenced core ID,
+provider/version/extras and repository RTK pin (or the existing RTK cache/default). A missing task,
+link or template, or an ordinary non-ready/empty-body template, explicitly yields no composed
+environment decision and keeps provider/base resolution. A linked row's contract/CLI is validated
+before a non-ready or empty body can fall through. A missing requested composed image makes peek
+answer unknown, never a provider fallback; peek never ensures/builds the core or composed image.
 
-The remaining cutover is consumer-first: (a) cache/peek identity consumes the contract, with no
-writer; (b) split 04 runtime and composed LSP checks and store versioned provider/image/plugin
-identity evidence in the existing `task_steps.output.composedLsp` JSONB of completed 04 steps,
-then teach dispatcher and cli-exec readiness to match it; (c) carry an existing row's contract
-through 01's reconstructed declaredDeps like savedWebserver, add the new-template writer, and
-suppress 02's generated installers last. Evidence uses no new columns/migration. That
-evidence is per-run and fail-closed: a Retry at or before 04 nulls step output, so 04 writes
-its complete entry on every run, and the retained image reference and its reaper protection
-live on a row a reset never touches, never in step output. Preserve
-legacy/custom and shared templates and switch image references only after build AND verification;
-a failed replacement retains the old image while reporting the new request failed. A manifest
-bump alone cannot migrate environment installers. Reverting these preparatory recipes needs no
-row or image-reference migration.
+Composed ensure now holds the same per-tag lock used by provider builds/removals across inspect
+and build; concurrent ensures reuse the first successful build. A failed build is not shared:
+each queued caller then runs its own build in turn, so a failing step costs its duration once
+per waiter (accepted while composed builds are rare; the provider path's in-flight join is the
+model if it matters). The existing provider export and
+lock semantics remain. Composed boot reaping takes that lock, compares the current immutable image
+ID with its age snapshot, lists stopped as well as running containers, and removes without force,
+so Docker refuses an image still used by any container. A failed replacement throws without
+removing the previous cached image or writing any row/reference; an old image is never returned
+as the newly requested pins. The existing age-based boot eviction remains, with no new durable
+image-reference or verification lease in this slice.
+
+No writer emits contract 2; existing templates retain their saved installers and pins, and
+verification/readiness still target the environment image. Generation (including saved-body reuse)
+and environment smoke planning continue refusing 2 and unknown contracts. No SQL migration,
+evidence storage, image-reference publication switch or manifest bump is included.
+
+The remaining cutover is consumer-first: (b) split 04 runtime and composed LSP checks and store
+versioned provider/image/plugin identity evidence in existing `task_steps.output.composedLsp`
+JSONB, then teach dispatcher and cli-exec readiness to match it; (c) carry an existing row's
+contract through 01's reconstructed declaredDeps like savedWebserver, add the new-template writer,
+and suppress 02's generated installers last. That evidence is per-run and fail-closed: Retry at
+or before 04 nulls output, so 04 must write its complete entry every run; the retained image
+reference and reaper protection must live on a row a reset never touches, never in step output.
+Preserve legacy/custom and shared templates and switch image references only after build AND
+verification. A manifest bump alone cannot migrate environment installers. Revert this cache-reader
+slice independently before a later writer activates it; no row or image-reference migration is
+needed for existing rows. Real builds and live LSP acceptance remain deferred as described above.
