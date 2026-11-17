@@ -488,12 +488,15 @@ export const planBuildRequestSchema = z
   });
 export type PlanBuildRequest = z.infer<typeof planBuildRequestSchema>;
 
+/** Task-scoped sequence prompt arms. Omission keeps the shipped parity prompt. */
+export const SEQUENCE_CONTEXT_ARMS = ['parity', 'role-sized'] as const;
+
 /** Put an EXISTING plan into build order. No mode and no brief: the plan is
  *  already there. The context experiment is admin-only and scoped to the new task. */
 export const planSequenceRequestSchema = z.object({
   cliProviderId: z.string().uuid().optional(),
   /** Pilot only: the API admits explicit selections only for administrators. */
-  contextArm: z.enum(['parity', 'role-sized']).optional(),
+  contextArm: z.enum(SEQUENCE_CONTEXT_ARMS).optional(),
   /** Pilot only: end this task's pass after at most one wave (12 agents). */
   singleWave: z.literal(true).optional(),
 });

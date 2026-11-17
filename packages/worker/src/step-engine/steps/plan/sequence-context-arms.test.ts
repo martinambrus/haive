@@ -6,17 +6,20 @@ import {
   loadPlanEdges,
   loadPlanSkeletons,
   planNodePath,
+  sequenceAgentId,
+  type PlanEdgeRecord,
   type PlanNodeSkeleton,
 } from '@haive/shared/plan';
 import {
   buildSequencePrompt,
+  SEQUENCE_ROLE_OUTLINE_MAX_CHARS,
   computeTargets,
   planSequenceStep,
   sequenceForm,
   standalonePlanSequenceStep,
   type PlanSequenceDetect,
 } from './03-plan-sequence.js';
-import { MiningWaveError } from '../../step-definition.js';
+import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import { buildPlanExpansionContext } from './_plan-expansion-context.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 
@@ -50,6 +53,32 @@ function fixture(count = 6): PlanNodeSkeleton[] {
   }
   return nodes;
 }
+// Fourteen undecided runs: the root plus thirteen parents, all in stored order.
+function manyTargets(): PlanNodeSkeleton[] {
+  const root = fixture()[0]!;
+  const nodes = [root];
+  for (let i = 0; i < 13; i++) {
+    const parent = {
+      ...root,
+      id: id(1 + i * 3),
+      parentId: root.id,
+      path: planNodePath(root.path, id(1 + i * 3)),
+      ordinal: i,
+    };
+    nodes.push(parent);
+    for (let j = 0; j < 2; j++) {
+      nodes.push({
+        ...parent,
+        id: id(2 + i * 3 + j),
+        parentId: parent.id,
+        path: planNodePath(parent.path, id(2 + i * 3 + j)),
+        ordinal: j,
+      });
+    }
+  }
+  return nodes;
+}
+
 const target = { parentId: id(1), parentTitle: 'Part 1', childCount: 2 };
 function context(prompt: string): string {
   return prompt.split(`${UNTRUSTED_OPEN}\n`)[1]!.split(`\n${UNTRUSTED_CLOSE}`)[0]!;
@@ -77,6 +106,9 @@ describe('sequence context arms', () => {
     expect(context(parity).length - context(role).length).toBeGreaterThan(4_000);
     expect(role.split('## Your node')[1]).toBe(parity.split('## Your node')[1]);
     expect(context(role)).toMatch(/Showing \d+ evenly sampled title\(s\) from 60 nodes/);
+    expect(role).toContain(
+      `title outline at ${SEQUENCE_ROLE_OUTLINE_MAX_CHARS.toLocaleString('en-US')} characters`,
+    );
     expect(role).toContain('Trade-off: nodes outside the neighborhood have');
     expect(role).toContain('cross-subtree `depends_on` links to them cannot be named directly.');
     for (const prompt of [parity, role]) {
@@ -124,7 +156,7 @@ describe.each([planSequenceStep, standalonePlanSequenceStep])(
       for (const arm of [undefined, 'parity', 'role-sized', 'unknown']) {
         fake.patch(schema.tasks, id(102), { metadata: { sequenceContextArm: arm } });
         const dispatches = await step.agentMining!.selectAgents({
-          ctx: { db: fake.db, taskId: id(102) },
+          ctx: { db: fake.db, taskId: id(102), logger: { warn: vi.fn() } },
           detected,
           formValues: {},
         } as never);
@@ -192,7 +224,188 @@ describe.each([planSequenceStep, standalonePlanSequenceStep])(
         expect(dispatch.prompt).toContain('This role-sized context caps the title outline');
       }
     });
-    it('hydrates the one-wave budget and sends no continuation once twelve agents were used', async () => {
+
+    it.each([undefined, 'parity', 'role-sized'])(
+      'shows the detected context arm %s before budget approval',
+      async (arm) => {
+        const nodes = fixture();
+        vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
+        vi.mocked(loadPlanEdges).mockResolvedValue([]);
+        const empty = async () => [];
+        const ctx = {
+          taskId: id(102),
+          taskStepId: id(103),
+          db: {
+            query: {
+              tasks: {
+                findFirst: async () => ({
+                  repositoryId: id(200),
+                  metadata: { sequenceContextArm: arm, sequenceSingleWave: true },
+                }),
+              },
+            },
+            select: () => ({
+              from: () => ({
+                where: empty,
+                innerJoin: () => ({ innerJoin: () => ({ where: empty }) }),
+              }),
+            }),
+          },
+        } as never;
+        const detected = await step.detect!(ctx);
+        expect(detected.contextArm).toBe(arm ?? 'parity');
+        expect(sequenceForm(detected)?.description).toContain(`Context arm: ${arm ?? 'parity'}.`);
+      },
+    );
+
+    it('warns once per task for an unknown stored arm across detection and repeated dispatch', async () => {
+      const nodes = fixture();
+      vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
+      vi.mocked(loadPlanEdges).mockResolvedValue([]);
+      const fake = createFakeDb({ tasks: schema.tasks });
+      const taskId = step.metadata.workflowType === 'plan_build' ? id(301) : id(302);
+      const metadata = { sequenceContextArm: 'future-arm' };
+      fake.insert(schema.tasks, { id: taskId, metadata });
+      const warn = vi.fn();
+      const empty = async () => [];
+      const ctx = {
+        taskId,
+        taskStepId: id(103),
+        logger: { warn },
+        db: {
+          query: { tasks: { findFirst: async () => ({ repositoryId: id(200), metadata }) } },
+          select(fields: Record<string, unknown>) {
+            if ('metadata' in fields) return fake.db.select(fields as never);
+            return {
+              from: () => ({
+                where: empty,
+                innerJoin: () => ({ innerJoin: () => ({ where: empty }) }),
+              }),
+            };
+          },
+        },
+      } as never;
+      const detected = await step.detect!(ctx);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(detected.contextArm).toBe('parity');
+      expect(sequenceForm(detected)?.description).toContain('Context arm: parity.');
+      for (let i = 0; i < 2; i++) {
+        const dispatches = await step.agentMining!.selectAgents({
+          ctx,
+          detected,
+          formValues: {},
+        } as never);
+        for (const dispatch of dispatches) {
+          expect(dispatch.prompt).not.toContain('This role-sized context');
+        }
+        await step.detect!(ctx);
+      }
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        { taskId, contextArm: 'parity' },
+        'Unknown stored sequence context arm; using parity',
+      );
+    });
+
+    it('dispatches exactly twelve of more than twelve targets for the first single wave', async () => {
+      const nodes = manyTargets();
+      vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
+      vi.mocked(loadPlanEdges).mockResolvedValue([]);
+      const fake = createFakeDb({ tasks: schema.tasks });
+      fake.insert(schema.tasks, { id: id(102), metadata: { sequenceSingleWave: true } });
+      const targets = computeTargets(nodes, [], new Set()).targets;
+      expect(targets.length).toBeGreaterThanOrEqual(13);
+      const dispatches = await step.agentMining!.selectAgents({
+        ctx: { db: fake.db, taskId: id(102) },
+        detected: { repositoryId: id(200), targets, agentsUsed: 0, singleWave: true, wave: 0 },
+        formValues: {},
+      } as never);
+      expect(dispatches).toHaveLength(12);
+      expect(dispatches.map((d) => d.agentId)).toEqual(
+        targets.slice(0, 12).map((t) => sequenceAgentId(t.parentId, 1)),
+      );
+    });
+
+    it.each([false, true])(
+      'ends apply at twelve agents with pending targets (disagreement: %s)',
+      async (disagrees) => {
+        const nodes = manyTargets();
+        const targets = computeTargets(nodes, [], new Set()).targets;
+        const rows = targets.slice(0, 12).map((t) => ({
+          agentId: sequenceAgentId(t.parentId, 1),
+          taskStepId: id(103),
+          status: 'done',
+          rawOutput: null,
+          output: {
+            ops:
+              t.parentId === id(1)
+                ? [
+                    { op: 'upsert', nodeRef: id(2), ordinal: 1 },
+                    { op: 'upsert', nodeRef: id(3), ordinal: 0 },
+                  ]
+                : [],
+            summary: 'independent order',
+          },
+        }));
+        const edges: PlanEdgeRecord[] = disagrees
+          ? [
+              {
+                id: id(500),
+                fromNodeId: id(3),
+                toNodeId: id(2),
+                kind: 'depends_on',
+                note: 'Recorded opposite order',
+              },
+            ]
+          : [];
+        vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
+        vi.mocked(loadPlanEdges).mockResolvedValue(edges);
+        const ctx = {
+          taskId: id(102),
+          taskStepId: id(103),
+          db: {
+            query: {
+              tasks: {
+                findFirst: async () => ({
+                  repositoryId: id(200),
+                  metadata: { sequenceSingleWave: true },
+                }),
+              },
+            },
+            // Named joins are not supported by FakeDb. Both reads use the same
+            // planted mining rows: this step's count and the repository's asked-set.
+            select: () => ({
+              from: () => ({
+                where: async () => rows,
+                innerJoin: () => ({ innerJoin: () => ({ where: async () => rows }) }),
+              }),
+            }),
+          },
+        } as never;
+        const detected = await step.detect!(ctx);
+        expect(detected.agentsUsed).toBe(12);
+        expect(detected.targets.length).toBeGreaterThanOrEqual(1);
+        const applied = step.apply(ctx, {
+          detected: { ...detected, disagreements: [] },
+          formValues: {},
+        } as never);
+        if (disagrees) {
+          await expect(applied).rejects.toBeInstanceOf(ReopenStepFormError);
+          const refreshed = await step.detect!(ctx);
+          expect(refreshed.targets.length).toBeGreaterThanOrEqual(1);
+          expect(refreshed.disagreements).toHaveLength(1);
+          expect(sequenceForm(refreshed)?.title).toBe(
+            'Dependencies a second opinion disagreed with',
+          );
+        } else {
+          // A fulfilled apply also proves it threw neither MiningWaveError nor any other error.
+          const result = await applied;
+          expect(result.dispatched).toBe(0);
+          expect(result.remaining).toBeGreaterThanOrEqual(1);
+          expect(result.decision).toBe('sequenced');
+        }
+      },
+    );
+    it('hydrates the one-wave budget and caps selection and the review form at twelve agents', async () => {
       const nodes = fixture();
       vi.mocked(loadPlanSkeletons).mockResolvedValue(nodes);
       vi.mocked(loadPlanEdges).mockResolvedValue([]);

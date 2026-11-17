@@ -1,7 +1,12 @@
 import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
+import {
+  PLAN_PATCH_MAX_OPS,
+  SEQUENCE_CONTEXT_ARMS,
+  type FormSchema,
+  type FormValues,
+} from '@haive/shared';
 import {
   PlanPatchError,
   retryPlanConflict,
@@ -116,6 +121,8 @@ export interface PlanSequenceDetect {
   agentsUsed: number;
   /** Admin pilot: limit this pass to its first wave, including after recovery. */
   singleWave?: boolean;
+  /** Absent only on detect payloads persisted before the context-arm pilot. */
+  contextArm?: SequenceContextArm;
   wave: number;
   disagreements: SequenceDisagreement[];
 }
@@ -386,6 +393,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
       agentsUsed: 0,
       wave: 0,
       disagreements: [],
+      contextArm: storedContextArm(ctx, task?.metadata),
     };
   }
 
@@ -415,6 +423,7 @@ async function detectSequence(ctx: StepContext): Promise<PlanSequenceDetect> {
     ...((task?.metadata as { sequenceSingleWave?: unknown } | null)?.sequenceSingleWave === true
       ? { singleWave: true }
       : {}),
+    contextArm: storedContextArm(ctx, task?.metadata),
     wave: state.wave,
     disagreements: collectDisagreements(nodes, edges, agentOrdinals(rows)),
   };
@@ -455,7 +464,26 @@ export function sequencePassComplete(
 }
 
 export const SEQUENCE_ROLE_OUTLINE_MAX_CHARS = 4_000;
-export type SequenceContextArm = 'parity' | 'role-sized';
+export type SequenceContextArm = (typeof SEQUENCE_CONTEXT_ARMS)[number];
+
+// Only invalid stored pilot values enter this set. Warn once per task in this
+// worker process, even when detect and continuation waves read it repeatedly.
+const warnedContextArmTasks = new Set<string>();
+function storedContextArm(ctx: StepContext, metadata: unknown): SequenceContextArm {
+  const value = (metadata as { sequenceContextArm?: unknown } | null)?.sequenceContextArm;
+  const arm = SEQUENCE_CONTEXT_ARMS.find((arm) => arm === value);
+  if (arm) return arm;
+  // Missing and unrecognised values keep parity so older tasks and code reverts
+  // remain runnable; an unknown explicit value must not silently select an arm.
+  if (value !== undefined && !warnedContextArmTasks.has(ctx.taskId)) {
+    warnedContextArmTasks.add(ctx.taskId);
+    ctx.logger.warn(
+      { taskId: ctx.taskId, contextArm: 'parity' },
+      'Unknown stored sequence context arm; using parity',
+    );
+  }
+  return 'parity';
+}
 
 export function buildSequencePrompt(
   target: SequenceTarget,
@@ -503,7 +531,7 @@ export function buildSequencePrompt(
     'node that appears only in the outline has no id, so it cannot be named in a `depends_on`.',
     ...(contextArm === 'role-sized'
       ? [
-          'This role-sized context caps the title outline at 4,000 characters while keeping the',
+          `This role-sized context caps the title outline at ${SEQUENCE_ROLE_OUTLINE_MAX_CHARS.toLocaleString('en-US')} characters while keeping the`,
           'same neighborhood and child fields. Trade-off: nodes outside the neighborhood have',
           'no ids here, so cross-subtree `depends_on` links to them cannot be named directly.',
         ]
@@ -571,10 +599,7 @@ async function buildWave(
     .from(schema.tasks)
     .where(eq(schema.tasks.id, ctx.taskId))
     .limit(1);
-  const contextArm: SequenceContextArm =
-    (task?.metadata as { sequenceContextArm?: unknown } | null)?.sequenceContextArm === 'role-sized'
-      ? 'role-sized'
-      : 'parity';
+  const contextArm = storedContextArm(ctx, task?.metadata);
   return slice.map((target) => ({
     agentId: sequenceAgentId(target.parentId, wave),
     agentTitle: `Order: ${target.parentTitle}`,
@@ -855,6 +880,7 @@ export function sequenceForm(detected: PlanSequenceDetect): FormSchema | null {
       `dependencies they declare, and ${detected.targets.length} still need a reader to decide. ` +
       `That is up to ${targetsToAsk} agent runs at ${SEQUENCE_AGENTS_PER_WAVE} at a ` +
       'time — the largest thing this step spends, so it is asked for rather than assumed.' +
+      ` Context arm: ${detected.contextArm ?? 'parity'}.` +
       (detected.singleWave
         ? ' This pilot stops after one wave; other groups remain for a later task.'
         : '') +
