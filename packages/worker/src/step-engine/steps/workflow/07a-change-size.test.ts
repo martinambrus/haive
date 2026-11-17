@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, writeFile, rm, mkdir, symlink, cp } from 'node:fs/promises';
 import { measureImplementationSize, recordChangeSize } from './_change-size.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,11 +68,13 @@ function context() {
 }
 let root: string;
 let repositoryRoot: string;
+let template: string;
 beforeAll(async () => {
-  repositoryRoot = await mkdtemp(join(tmpdir(), 'change-size-'));
-  root = repositoryRoot;
+  template = await mkdtemp(join(tmpdir(), 'change-size-template-'));
+  root = template;
   await mkdir(join(root, 'tests'));
   await writeFile(join(root, 'a.py'), 'x = 0\n');
+  await writeFile(join(root, 'original.py'), 'x = 0\n');
   await writeFile(join(root, 'tests/a.py'), 'x = 0\n');
   await gitExec(['init', '-b', 'main'], { cwd: root });
   await gitExec(['add', '.'], { cwd: root });
@@ -80,11 +82,21 @@ beforeAll(async () => {
     ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'base'],
     { cwd: root },
   );
+});
+afterAll(async () => {
+  await rm(template, { recursive: true, force: true });
+});
+
+beforeEach(async () => {
+  repositoryRoot = await mkdtemp(join(tmpdir(), 'change-size-'));
+  await cp(template, repositoryRoot, { recursive: true });
   root = join(repositoryRoot, '.haive/worktrees/task');
   await gitExec(['worktree', 'add', '-b', 'work', root], { cwd: repositoryRoot });
   state.root = root;
+  expect((await gitExec(['status', '--porcelain'], { cwd: root })).stdout).toBe('');
 });
-afterAll(async () => {
+
+afterEach(async () => {
   await rm(repositoryRoot, { recursive: true, force: true });
 });
 
@@ -249,3 +261,36 @@ it('makes an over-budget capture explicitly unknown at a small injectable host l
     reason: 'Change exceeds the measurement byte budget.',
   });
 });
+
+it.each(['staged', 'unstaged'])(
+  'measures both sides of an unreported %s rename against the frozen base',
+  async (stage) => {
+    const { ctx } = context();
+    const before = await measureImplementationSize(ctx, root);
+    expect(before.state).toBe('measured');
+    if (stage === 'staged') await gitExec(['mv', 'original.py', 'moved.py'], { cwd: root });
+    else {
+      await writeFile(join(root, 'moved.py'), 'x = 0\n');
+      await rm(join(root, 'original.py'));
+    }
+    const measured = await measureImplementationSize(ctx, root, before.baseCommit);
+    expect(measured.state).toBe('measured');
+    expect(measured.result?.files.find((f) => f.path === 'original.py')?.size).toMatchObject({
+      added: 0,
+      deleted: 3,
+      net: -3,
+    });
+    expect(measured.result?.files.find((f) => f.path === 'moved.py')?.size).toMatchObject({
+      added: 3,
+      deleted: 0,
+      net: 3,
+    });
+    expect(measured.result?.total).toMatchObject({
+      added: 3,
+      deleted: 3,
+      net: 0,
+      churn: 6,
+      nullFiles: 0,
+    });
+  },
+);

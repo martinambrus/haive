@@ -14,10 +14,11 @@ import type { ChangeSizeSet, FileTexts, ChangeSizeCounter } from '@haive/shared/
 import { TaskCancelledError, type StepContext } from '../../step-definition.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { collectImplementationFiles, collectChangeSet } from './_impl-changes.js';
+import { collectImplementationFiles } from './_impl-changes.js';
 
 export const CHANGE_SIZE_HOST_LIMITS = {
   totalBytes: 16 * 1024 * 1024,
+  maxFiles: 100,
   gitTimeoutMs: 10_000,
 } as const;
 export type MeasurementOptions = Partial<{ [K in keyof typeof CHANGE_SIZE_HOST_LIMITS]: number }>;
@@ -99,21 +100,10 @@ export async function measureImplementationSize(
       const git = async (args: string[], maxBuffer = CHANGE_SIZE_LIMITS.maxBytes + 1) =>
         (await gitExec(args, { cwd, signal: ctx.signal, timeout: limits.gitTimeoutMs, maxBuffer }))
           .stdout;
-      let set = await collectImplementationFiles(ctx, worktreePath, {
+      const set = await collectImplementationFiles(ctx, worktreePath, {
         signal: ctx.signal,
         gitCwd: cwd,
       });
-      if (baseCommit && !set.scanError && !set.truncated) {
-        set = await collectChangeSet(
-          worktreePath,
-          baseCommit,
-          new Set(set.files),
-          ctx.signal,
-          undefined,
-          false,
-          cwd,
-        );
-      }
       ctx.throwIfCancelled();
       if (set.scanError || set.truncated)
         return unknownSize(
@@ -127,11 +117,15 @@ export async function measureImplementationSize(
         baseCommit = (await git(['merge-base', '--end-of-options', 'HEAD', baseBranch])).trim();
       }
       if (!validOid(baseCommit)) return unknownSize('Task base is unavailable.');
+      // The review collector omits uncommitted deletions hidden by rename detection.
+      // Measure every tracked old/new path directly against the frozen base, with
+      // renames represented as full deletion + addition (zero net for an unchanged move).
+      const changed = await git(['diff', '--name-only', '-z', '--no-renames', baseCommit, '--']);
       const files: FileTexts[] = [];
       const identities: unknown[] = [];
       let bytes = 0;
       const paths = new Map<string, boolean>();
-      for (const path of set.files) {
+      for (const path of [...set.files, ...changed.split('\0').filter(Boolean)]) {
         try {
           paths.set(toSafeRel(path), true);
         } catch (err) {
@@ -140,6 +134,8 @@ export async function measureImplementationSize(
           paths.set(path, false);
         }
       }
+      if (paths.size > limits.maxFiles)
+        return unknownSize('Implementation scope could not be measured completely.');
       const nestedPaths = new Set(Object.keys(set.nestedRepositories ?? {}).map(toSafeRel));
       for (const [path, safe] of paths) {
         ctx.throwIfCancelled();

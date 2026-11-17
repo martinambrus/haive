@@ -67,16 +67,94 @@ const EXTENSIONS: Record<string, LanguageName> = {
 export const changeSizeLanguage = (path: string): LanguageName | undefined =>
   EXTENSIONS[path.split('.').pop()?.toLowerCase() ?? ''];
 
+const EXCLUDED_SEGMENTS = new Set([
+  'test',
+  'tests',
+  '__tests__',
+  'spec',
+  'specs',
+  '__fixtures__',
+  'fixture',
+  'fixtures',
+  '__snapshots__',
+  'e2e',
+  'cypress',
+  'playwright',
+  'doc',
+  'docs',
+  'generated',
+  'vendor',
+  'third_party',
+  'third-party',
+  'node_modules',
+  'dist',
+  'build',
+  'out',
+  'target',
+  'coverage',
+  '.next',
+  '.git',
+  '.haive',
+  '.haive-data',
+  'venv',
+  '.venv',
+  '__pycache__',
+  '.cache',
+  '.turbo',
+  '.nuxt',
+  '.svelte-kit',
+]);
+const PROSE_NAMES = new Set([
+  'readme',
+  'changelog',
+  'license',
+  'notice',
+  'authors',
+  'contributing',
+]);
+const TEST_EXTENSIONS = new Set([
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'mjs',
+  'mjsx',
+  'mts',
+  'mtsx',
+  'cjs',
+  'cjsx',
+  'cts',
+  'ctsx',
+]);
+const PROSE_EXTENSIONS = new Set(['md', 'mdx', 'rst', 'adoc', 'map']);
+
 export function excludedChangeSizePath(path: string): boolean {
+  // Preserve the original non-Unicode /i policy (e.g. Kelvin sign is not ASCII K).
+  const segments = path.replace(/[A-Z]/g, (char) => char.toLowerCase()).split('/');
+  if (segments.some((segment) => EXCLUDED_SEGMENTS.has(segment))) return true;
+  const name = segments[segments.length - 1]!;
+  const firstDot = name.indexOf('.');
+  if (PROSE_NAMES.has(firstDot < 0 ? name : name.slice(0, firstDot))) return true;
+  if (['.d.ts', '.d.cts', '.d.mts'].some((suffix) => name.endsWith(suffix))) return true;
+  if (name.startsWith('test_') && name.endsWith('.py') && name.length > 8) return true;
+  if (name.endsWith('_test.py') && name.length > 8) return true;
+  if (name.endsWith('test.php') && name.length > 8) return true;
+  const dot = name.lastIndexOf('.');
+  const extension = name.slice(dot + 1);
+  if (TEST_EXTENSIONS.has(extension)) {
+    const stem = name.slice(0, dot);
+    if ((stem.endsWith('.test') || stem.endsWith('.spec')) && stem.length > 5) return true;
+  }
+  // A generated/minified suffix may itself contain dots. Each fixed marker is
+  // searched once, with a nonempty prefix and suffix, rather than backtracking.
+  for (const marker of ['.generated.', '.g.', '.min.']) {
+    const at = name.indexOf(marker, 1);
+    if (at >= 1 && at + marker.length < name.length) return true;
+  }
   return (
-    /(^|\/)(tests?|__tests__|specs?|__fixtures__|fixtures?|__snapshots__|e2e|cypress|playwright|docs?|generated|vendor|third_party|third-party|node_modules|dist|build|out|target|coverage|\.next|\.git|\.haive|\.haive-data|venv|\.venv|__pycache__|\.cache|\.turbo|\.nuxt|\.svelte-kit)(\/|$)/i.test(
-      path,
-    ) ||
-    /(^|\/)(readme|changelog|license|notice|authors|contributing)(\.[^/]*)?$/i.test(path) ||
-    /\.d\.[cm]?ts$/i.test(path) ||
-    /(^|\/)(test_[^/]+\.py|[^/]+_test\.py|[^/]+Test\.php|[^/]+\.(test|spec)\.[cm]?[jt]sx?|[^/]+\.(generated|g)\.[^/]+|[^/]+\.min\.[^/]+|[^/]+\.lock|[^/]*lock[^/]*\.(yaml|json)|[^/]+\.(md|mdx|rst|adoc|map))$/i.test(
-      path,
-    )
+    (extension === 'lock' && dot > 0) ||
+    ((extension === 'yaml' || extension === 'json') && name.includes('lock')) ||
+    (PROSE_EXTENSIONS.has(extension) && dot > 0)
   );
 }
 

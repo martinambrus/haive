@@ -295,3 +295,50 @@ it('uses exported metric and dependency versions in the event payload and identi
   await next.recordChangeSize(ctx, '/repo/work', 'before', null, -1);
   expect(events[1].id).not.toBe(firstId);
 });
+
+it('supplements the review list from the exact frozen base without rename detection', async () => {
+  const { measureImplementationSize, CHANGE_SIZE_HOST_LIMITS } = await import('./_change-size.js');
+  const frozen = 'b'.repeat(40);
+  fake.git.mockImplementation(async (args: string[]) => ({
+    stdout: args[0] === 'diff' ? 'old.py\0new.py\0' : '',
+  }));
+  const { ctx } = context();
+  const measured = await measureImplementationSize(ctx, '/repo/work', frozen);
+  expect(measured.result?.touched).toEqual(['a.py', 'b.py', 'old.py', 'new.py']);
+  expect(fake.git).toHaveBeenCalledWith(
+    ['diff', '--name-only', '-z', '--no-renames', frozen, '--'],
+    expect.objectContaining({ cwd: '/proc/self/fd/123', signal: ctx.signal, timeout: 10000 }),
+  );
+  expect(fake.git.mock.calls.some(([args]) => args[0] === 'merge-base')).toBe(false);
+  expect(CHANGE_SIZE_HOST_LIMITS.maxFiles).toBe(100);
+});
+
+it('keeps the measurement path union bounded even when the review list omitted deletions', async () => {
+  const { measureImplementationSize } = await import('./_change-size.js');
+  fake.git.mockImplementation(async (args: string[]) => ({
+    stdout: args[0] === 'diff' ? 'old.py\0new.py\0' : '',
+  }));
+  const { ctx } = context();
+  expect(await measureImplementationSize(ctx, '/repo/work', oid, { maxFiles: 3 })).toMatchObject({
+    state: 'unknown',
+  });
+  expect(fake.read).not.toHaveBeenCalled();
+  expect(metric).not.toHaveBeenCalled();
+});
+
+it('does not freeze a failed frozen-base path scan as a complete measurement', async () => {
+  const { recordChangeSize } = await import('./_change-size.js');
+  const err = Object.assign(new Error('scan timed out'), { code: 'ETIMEDOUT' });
+  fake.git.mockImplementation(async (args: string[]) => {
+    if (args[0] === 'diff') throw err;
+    return { stdout: args[0] === 'merge-base' ? oid : '' };
+  });
+  const { ctx, events } = context();
+  expect(await recordChangeSize(ctx, '/repo/work', 'before', null, -1)).toMatchObject({
+    state: 'unknown',
+    retryable: true,
+  });
+  expect(ctx.logger.warn).toHaveBeenCalledWith({ err }, expect.any(String));
+  expect(events).toHaveLength(0);
+  expect(fake.read).not.toHaveBeenCalled();
+});
