@@ -110,11 +110,77 @@ async function removedBranchHead(ctx: StepContext, dir: string, tailBytes = 4096
   }
 }
 
+/** A moved submodule's core.worktree still names its old location. Check each index
+ *  separately at its relocated path, overriding core.worktree for this command only.
+ *  Superproject diffs ignore submodule working directories; the cached diff still checks
+ *  gitlink changes, and recursion checks each initialized submodule's HEAD, index and files.
+ *  No repository config is rewritten, including on a failed check or crash recovery. */
+async function checkRelocatedTree(ctx: StepContext, dir: string, head: string): Promise<void> {
+  const prefix = [
+    '--no-optional-locks',
+    `--work-tree=${dir}`,
+    '-c',
+    'core.trustctime=true',
+    '-c',
+    'core.checkStat=default',
+    '-c',
+    'core.fileMode=true',
+  ];
+  const flags = await command(
+    dir,
+    [...prefix, 'ls-files', '-v', '-z'],
+    'the worktree index is unreadable',
+  );
+  if (flags.split('\0').some((entry) => /^([a-z]|S) /.test(entry)))
+    refuse('the worktree index is unreadable');
+  for (const args of [
+    ['diff', '--cached', '--quiet', '--ignore-submodules=none', head, '--'],
+    ['diff', '--quiet', '--ignore-submodules=all', head, '--'],
+  ]) {
+    const diff = await gitRun(dir, [...prefix, ...args]);
+    if (diff.code === 1) refuse('the worktree holds uncommitted changes');
+    if (diff.code !== 0) refuse('the worktree is unreadable');
+  }
+  if (
+    await command(
+      dir,
+      [...prefix, 'ls-files', '--others', '--exclude-standard', '-z'],
+      'the worktree is unreadable',
+    )
+  )
+    refuse('the worktree holds uncommitted changes');
+  const entries = await command(
+    dir,
+    [...prefix, 'ls-files', '--stage', '-z'],
+    'the worktree index is unreadable',
+  );
+  for (const entry of entries.split('\0')) {
+    const gitlink = /^160000 ([a-f0-9]{40,64}) 0\t([\s\S]+)$/.exec(entry);
+    if (!gitlink) continue;
+    const child = resolve(dir, gitlink[2]!);
+    const gitfile = await lstatNoFollow(ctx.repoPath, relative(ctx.repoPath, `${child}/.git`), {
+      strict: true,
+    });
+    // Git permits uninitialized submodules. Their absent gitfile owes no nested index check.
+    if (!gitfile) continue;
+    if (gitfile.kind !== 'file' && gitfile.kind !== 'directory')
+      refuse('the submodule gitfile is unreadable');
+    const childHead = await command(
+      child,
+      [`--work-tree=${child}`, 'rev-parse', '--verify', 'HEAD^{commit}'],
+      'the submodule HEAD is unreadable',
+    );
+    if (childHead !== gitlink[1]) refuse('the worktree holds uncommitted changes');
+    await checkRelocatedTree(ctx, child, childHead);
+  }
+}
+
 async function checkTree(
   ctx: StepContext,
   setup: Setup,
   head: string,
   branchAbsent: boolean,
+  relocated = false,
 ): Promise<void> {
   const dir = setup.worktreePath;
   if (
@@ -145,12 +211,14 @@ async function checkTree(
   const liveHead = await gitRun(dir, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
   if (liveHead.code === 0) {
     if (liveHead.stdout.trim() !== head) refuse('the worktree commit changed');
+    if (relocated) return checkRelocatedTree(ctx, dir, head);
     const changes = await readUncommittedChanges(dir, 0);
     if (changes === null) return refuse('the worktree is unreadable');
     if (changes.count !== 0) refuse('the worktree holds uncommitted changes');
     return;
   }
   if (!branchAbsent || liveHead.code !== 1) return refuse('the worktree HEAD is unreadable');
+  if (relocated) return checkRelocatedTree(ctx, dir, head);
   // If the branch was already deleted, status treats its index as an unborn branch.
   // Compare against the worktree's retained HEAD reflog instead, without recreating a ref.
   const flags = await command(
@@ -352,6 +420,7 @@ export const noChangeCleanupStep: StepDefinition<
             { ...setup, worktreePath: resolve(ctx.repoPath, stageRel(journal)) },
             head!,
             branch === null,
+            true,
           );
         } catch (error) {
           try {
@@ -383,6 +452,7 @@ export const noChangeCleanupStep: StepDefinition<
         await removeNoFollow(ctx.repoPath, stageRel(journal), {
           recursive: true,
           repairPermissions: true,
+          expectedDirectory: { dev: BigInt(journal.dev), ino: BigInt(journal.ino) },
         });
       }
       // Git prune has no worktree/path argument. This repo-wide registration sweep

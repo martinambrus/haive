@@ -63,6 +63,7 @@ export async function discardNoChangeCleanupDirectories(
     await removeNoFollow(split.anchor, stageRel(saved), {
       recursive: true,
       repairPermissions: true,
+      expectedDirectory: { dev: BigInt(saved.dev), ino: BigInt(saved.ino) },
     });
   }
 }

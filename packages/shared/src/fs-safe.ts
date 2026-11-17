@@ -1118,7 +1118,23 @@ export async function applyTreeNoFollow(
   return acc;
 }
 
+/** The directory at a removal's leaf no longer has the authorized identity. No contents
+ *  of the replacement are touched. Match by code across workspace module builds. */
+export class DirectoryIdentityError extends Error {
+  readonly code = 'EDIRECTORYIDENTITY' as const;
+
+  constructor(readonly rel: string) {
+    super(`Directory identity changed before removal: ${rel}`);
+    this.name = 'DirectoryIdentityError';
+  }
+}
+
 export interface RemoveOptions {
+  /** Remove only this directory inode. A different inode or a symlink leaf raises
+   *  DirectoryIdentityError before any removal; an absent leaf still returns false.
+   *  Contents are deleted through the verified held descriptor. The final name-based
+   *  rmdir is preceded by another identity check (Node has no identity-bound rmdir). */
+  expectedDirectory?: FileIdentity;
   /** Delete a directory's contents as well. Without it a non-empty directory fails ENOTEMPTY, as
    *  `rmdir` does. */
   recursive?: boolean;
@@ -1250,6 +1266,47 @@ async function removeChild(
   if (removed) opts.onRemoved?.(rel);
 }
 
+/** Identity-bound variant for the top-level directory only. Do not pass the expected
+ *  identity down to its children: those are removed inside the authorized held inode. */
+async function removeExpectedDirectory(
+  dir: HeldDir,
+  leaf: string,
+  anchor: string,
+  rel: string,
+  opts: RemoveOptions,
+): Promise<boolean> {
+  const identity = opts.expectedDirectory!;
+  let held: FileHandle;
+  try {
+    held = await open(at(dir.fh.fd, leaf), O_PATH | O_DIRECTORY | O_NOFOLLOW);
+  } catch (err) {
+    if (errno(err) === 'ENOENT') return false;
+    if (errno(err) === 'ELOOP' || errno(err) === 'ENOTDIR') throw new DirectoryIdentityError(rel);
+    throw err;
+  }
+  try {
+    const st = await held.stat({ bigint: true });
+    if (st.dev !== identity.dev || st.ino !== identity.ino) throw new DirectoryIdentityError(rel);
+    await assertHeldAt(held, below(dir.real, leaf), anchor, rel, rel);
+    if (opts.recursive) await removeDirContents(held, opts, rel);
+    // withRepair may retry rmdir: recheck on every attempt, with no intervening await.
+    return await withRepair(dir.fh, opts, async () => {
+      const current = await lstat(at(dir.fh.fd, leaf), { bigint: true }).catch((err: unknown) => {
+        if (errno(err) === 'ENOENT') return null;
+        throw err;
+      });
+      if (current === null) return false;
+      if (!current.isDirectory() || current.dev !== st.dev || current.ino !== st.ino)
+        throw new DirectoryIdentityError(rel);
+      await rmdir(at(dir.fh.fd, leaf));
+      opts.onRemoved?.(rel);
+      return true;
+    });
+  } finally {
+    await closeQuietly(held);
+  }
+}
+
 /**
  * Delete `<anchor>/<rel>`, following nothing. `false` means it was already absent.
  *
@@ -1281,6 +1338,7 @@ export async function removeNoFollow(
     throw err;
   }
   try {
+    if (opts.expectedDirectory) return await removeExpectedDirectory(dir, leaf, anchor, safe, opts);
     const st = await lstat(at(dir.fh.fd, leaf)).catch((err: unknown) => {
       if (ABSENT.has(errno(err) ?? '')) return null;
       throw err;

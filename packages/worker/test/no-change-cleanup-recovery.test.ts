@@ -7,6 +7,7 @@ import {
   cpSync,
   chmodSync,
   renameSync,
+  symlinkSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,6 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { discardNoChangeCleanupDirectories } from '../src/step-engine/no-change-cleanup.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import * as fsSafe from '@haive/shared/fs-safe';
 
@@ -53,6 +55,7 @@ describe('no-change cleanup race and recovery controls', () => {
   let events: { payload: unknown }[];
   const step = () => noChangeCleanupStep;
   let claimant: boolean;
+  let cancelled: boolean;
   let owned: boolean;
   let taskLive: boolean;
   let onRecord: () => void;
@@ -90,11 +93,19 @@ describe('no-change cleanup race and recovery controls', () => {
     state.setup = { mode: 'worktree', worktreePath: tree, branchName: 'task', baseBranch: 'main' };
     events = [];
     claimant = false;
+    cancelled = false;
     owned = true;
     taskLive = true;
     onRecord = () => {};
     const query = {
-      tasks: { findFirst: async () => (claimant ? { id: 'other', status: 'running' } : null) },
+      tasks: {
+        findFirst: async () =>
+          claimant
+            ? { id: 'other', status: 'running' }
+            : cancelled
+              ? { status: 'cancelled', runListSnapshot: ['12-no-change-cleanup'] }
+              : null,
+      },
       taskEvents: { findMany: async () => [...events].reverse() },
     };
     const select = () => {
@@ -142,6 +153,132 @@ describe('no-change cleanup race and recovery controls', () => {
   const stage = () =>
     join(root, '.haive/no-change-cleanup', (events[0]!.payload as { id: string }).id);
 
+  it.each(['step', 'cancel'] as const)(
+    'refuses a swapped staged directory in %s removal',
+    async (caller) => {
+      const remove = fsSafe.removeNoFollow;
+      if (caller === 'cancel') {
+        vi.spyOn(fsSafe, 'removeNoFollow').mockRejectedValueOnce(new Error('pause'));
+        await expect(run()).rejects.toThrow('pause');
+        vi.restoreAllMocks();
+      }
+      vi.spyOn(fsSafe, 'removeNoFollow').mockImplementationOnce(async (...args) => {
+        const staged = join(args[0], args[1]);
+        renameSync(staged, staged + '-original');
+        mkdirSync(staged);
+        writeFileSync(join(staged, 'keep'), 'replacement');
+        return remove(...args);
+      });
+      if (caller === 'cancel') {
+        cancelled = true;
+        await expect(discardNoChangeCleanupDirectories(ctx.db, ctx.taskId)).rejects.toMatchObject({
+          code: 'EDIRECTORYIDENTITY',
+        });
+      } else await expect(run()).rejects.toMatchObject({ code: 'EDIRECTORYIDENTITY' });
+      expect(readFileSync(join(stage(), 'keep'), 'utf8')).toBe('replacement');
+      expect(readFileSync(join(stage() + '-original', 'a'), 'utf8')).toBe('base\n');
+      expect(git(root, 'branch', '--list', 'task')).toContain('task');
+    },
+  );
+  it.each(['step', 'cancel'] as const)(
+    'refuses a swapped staged symlink in %s removal',
+    async (caller) => {
+      const remove = fsSafe.removeNoFollow;
+      // Pause first for cancel, then inject the same race at its actual removal call.
+      if (caller === 'cancel') {
+        vi.spyOn(fsSafe, 'removeNoFollow').mockRejectedValueOnce(new Error('pause'));
+        await expect(run()).rejects.toThrow('pause');
+        vi.restoreAllMocks();
+        cancelled = true;
+      }
+      vi.spyOn(fsSafe, 'removeNoFollow').mockImplementationOnce(async (...args) => {
+        const staged = join(args[0], args[1]);
+        renameSync(staged, staged + '-original');
+        symlinkSync(staged + '-original', staged);
+        return remove(...args);
+      });
+      const action =
+        caller === 'cancel' ? discardNoChangeCleanupDirectories(ctx.db, ctx.taskId) : run();
+      await expect(action).rejects.toMatchObject({ code: 'EDIRECTORYIDENTITY' });
+      expect(readFileSync(join(stage(), 'a'), 'utf8')).toBe('base\n');
+    },
+  );
+  async function initializeSubmodule(nested = false) {
+    const sub = mkdtempSync(join(tmpdir(), 'no-change-submodule-'));
+    try {
+      cpSync(template, sub, { recursive: true });
+      if (nested) {
+        git(sub, '-c', 'protocol.file.allow=always', 'submodule', 'add', template, 'inner');
+        git(sub, 'commit', '-qam', 'add nested submodule');
+      }
+      git(tree, '-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod');
+      git(tree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive');
+      git(tree, 'commit', '-qam', 'add submodule');
+      git(root, 'merge', '--ff-only', 'task');
+    } finally {
+      rmSync(sub, { recursive: true, force: true });
+    }
+  }
+  it('removes a clean worktree with an initialized submodule', async () => {
+    await initializeSubmodule();
+    expect(await run()).toMatchObject({ removed: true, branchDeleted: true });
+    expect(existsSync(tree)).toBe(false);
+  });
+  it('checks initialized nested submodules at their relocated paths', async () => {
+    await initializeSubmodule(true);
+    const rename = fsSafe.renameNoFollow;
+    vi.spyOn(fsSafe, 'renameNoFollow').mockImplementationOnce(async (...args) => {
+      await rename(...args);
+      writeFileSync(join(root, args[2], 'mod/inner/new'), 'nested work');
+    });
+    await expect(run()).rejects.toThrow('the worktree holds uncommitted changes');
+    expect(readFileSync(join(tree, 'mod/inner/new'), 'utf8')).toBe('nested work');
+    rmSync(join(tree, 'mod/inner/new'));
+    vi.restoreAllMocks();
+    expect(await run()).toMatchObject({ removed: true, branchDeleted: true });
+  });
+  it('refuses dirty submodules before staging', async () => {
+    await initializeSubmodule();
+    writeFileSync(join(tree, 'mod/a'), 'dirty');
+    await preserved(/the worktree holds uncommitted changes/);
+  });
+  it.each(['tracked', 'staged', 'head', 'hidden'] as const)(
+    'restores a submodule with %s changes after relocation without changing config',
+    async (kind) => {
+      await initializeSubmodule();
+      const config = git(join(tree, 'mod'), 'rev-parse', '--absolute-git-dir') + '/config';
+      const before = readFileSync(config, 'utf8');
+      const rename = fsSafe.renameNoFollow;
+      vi.spyOn(fsSafe, 'renameNoFollow').mockImplementationOnce(async (...args) => {
+        await rename(...args);
+        const child = join(root, args[2], 'mod');
+        const at = [`--work-tree=${child}`];
+        writeFileSync(join(child, 'a'), 'dirty after move');
+        if (kind === 'staged') git(child, ...at, 'add', 'a');
+        if (kind === 'head')
+          git(
+            child,
+            ...at,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qam',
+            'local submodule commit',
+          );
+        if (kind === 'hidden') git(child, ...at, 'update-index', '--assume-unchanged', 'a');
+      });
+      await expect(run()).rejects.toThrow(
+        kind === 'hidden'
+          ? 'the worktree index is unreadable'
+          : 'the worktree holds uncommitted changes',
+      );
+      expect(readFileSync(join(tree, 'mod/a'), 'utf8')).toBe('dirty after move');
+      expect(readFileSync(config, 'utf8')).toBe(before);
+      expect(existsSync(stage())).toBe(false);
+    },
+  );
   it('preserves an edit made by the journal write before rename', async () => {
     onRecord = vi.fn(() => writeFileSync(join(tree, 'late'), 'keep'));
     const move = vi.spyOn(fsSafe, 'renameNoFollow');
@@ -151,7 +288,7 @@ describe('no-change cleanup race and recovery controls', () => {
     expect(readFileSync(join(tree, 'late'), 'utf8')).toBe('keep');
     expect(git(root, 'branch', '--list', 'task')).toContain('task');
   });
-  it('checks status through the staged gitfile and restores an edit after rename', async () => {
+  it('checks changes through the staged gitfile and restores an edit after rename', async () => {
     const rename = fsSafe.renameNoFollow;
     vi.spyOn(fsSafe, 'renameNoFollow').mockImplementationOnce(async (...args) => {
       const result = await rename(...args);
@@ -161,9 +298,9 @@ describe('no-change cleanup race and recovery controls', () => {
     const remove = vi.spyOn(fsSafe, 'removeNoFollow');
     const gitSpy = vi.spyOn(gitExec, 'gitRun');
     await expect(run()).rejects.toThrow('the worktree holds uncommitted changes');
-    expect(
-      gitSpy.mock.calls.some(([cwd, args]) => cwd === stage() && args.includes('status')),
-    ).toBe(true);
+    expect(gitSpy.mock.calls.some(([cwd, args]) => cwd === stage() && args.includes('diff'))).toBe(
+      true,
+    );
     expect(remove).not.toHaveBeenCalled();
     expect(readFileSync(join(tree, 'late'), 'utf8')).toBe('keep after move');
     expect(existsSync(stage())).toBe(false);
