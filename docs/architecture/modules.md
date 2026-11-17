@@ -521,7 +521,7 @@ including entries whose exports use a string.
 A module's `./steps` entry imports `StepDefinition`, its phase contracts, form and metadata
 types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
 `satisfies StepDefinition<Detect, Apply>` and default-export a readonly array; the worker
-namespaces their ids and workflow type when it loads them. Import the seven control-error
+namespaces their ids and workflow type when it loads them. Import the eight control-error
 constructors from this same entry so the runner receives the canonical class objects.
 A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
 The contract entry also exports the `ImplementationFileSet`, `ChangedLineNotes`, `FileCoverage`
@@ -671,6 +671,30 @@ A step that repeats agent calls through `llm.completePreForm` bounds its own pas
 fails the step), records each result keyed by the persisted invocation id before returning
 `continueRequested`, and rebuilds the next pass from its own store in `prepare`, since Retry clears
 `detect_output`.
+
+A `llm.prepare` hook may throw `StepPrepareParkError` from `@haive/shared/step`
+when its ledger sees an attempt another advance already owns. The host rechecks
+for a live singleton invocation of the same physical step (`ended_at` and
+`superseded_at` both NULL, excluding `agent_mining` and `dag_parallel`). With one,
+the losing pass returns `superseded`, the existing no-handoff result: it writes
+no checkpoint or output, inserts no invocation and enqueues nothing. The winner's
+row and invocation stay as they are, including a step still `running` before its
+park write. This is distinct from returning `false`, which continues to apply
+with null output. Only the prepare hook handles this signal; other hooks retain
+their existing error behavior. A missing, ended, superseded, other-step or fan-out
+invocation cannot justify the refusal: it follows normal failure handling with
+an explicit missing-live-invocation diagnostic, so the module cannot park forever.
+Modules may subclass the canonical error and must keep the shared peer unbundled.
+Throw it only as the last action of `prepare`, and only for an attempt bound to an
+invocation already inserted (bind in `prepareWorkspace`, which runs after the
+insert): a read is not a lease, so a refusal that races the winner's insert fails
+the step rather than parking it. The missing-live-invocation failure is an
+ordinary error, so a step with `fixLoopOnError` routes it to its fix loop.
+
+Rollback removes consumers of the new signal before reverting its host support;
+otherwise a module that imports the constructor fails to load on a host that
+lacks it, which stops the worker from booting. No schema migration or
+stored-state conversion is required, and paid invocation history is retained.
 
 ### Core-row writes
 

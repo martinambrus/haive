@@ -7,6 +7,7 @@ export {
   MiningWaveError,
   ReopenStepFormError,
   PromptBudgetExceededError,
+  StepPrepareParkError,
 } from '@haive/shared/step';
 export type {
   StepContext,

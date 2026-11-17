@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { StepPrepareParkError } from '@haive/shared/step';
 vi.mock('../src/step-engine/steps/workflow/_fix-test-store.js', () => ({
   beginFixTestCapture: vi.fn(async () => undefined),
   finishFixTestCapture: vi.fn(async () => undefined),
@@ -102,10 +103,26 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
         const allRows = async () =>
           tableName === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
         return {
-          where: (_cond: unknown) => ({
+          where: (_cond: SQL) => ({
             limit: async (_n: number) => {
               if (tableName === 'task_steps') {
                 return state.taskStepRow.id ? [state.taskStepRow] : [];
+              }
+              if (tableName === 'cli_invocations') {
+                const { sql, params } = new PgDialect().sqlToQuery(_cond);
+                // The singleton guard's non-ordered read, separate from latest/history.
+                expect(sql).toContain('"ended_at" is null');
+                expect(sql).toContain('"superseded_at" is null');
+                expect(sql).toContain('"mode" not in');
+                expect(params.slice(1)).toEqual(['agent_mining', 'dag_parallel']);
+                const row = state.cliInvocationRow;
+                return row &&
+                  row.taskStepId === params[0] &&
+                  row.endedAt === null &&
+                  row.supersededAt == null &&
+                  !params.slice(1).includes(row.mode)
+                  ? [row]
+                  : [];
               }
               return [];
             },
@@ -1039,6 +1056,193 @@ describe('repair evidence at the dispatch boundary', () => {
     const { enqueue } = await dispatch(0, '07b-phase-4-validate');
     expect(JSON.stringify(enqueue.mock.calls)).toContain('tests/a.test.ts');
     expect(JSON.stringify(enqueue.mock.calls)).not.toContain('DO-NOT-RELAY');
+  });
+});
+
+describe('prepare park control', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  async function refuse({
+    preForm = false,
+    winnerStatus = 'waiting_cli',
+    winner = {},
+    error = new StepPrepareParkError(),
+    optional = false,
+    stepId = 'module.park-fixture.translate',
+    hook = 'prepare',
+  }: {
+    preForm?: boolean;
+    winnerStatus?: string;
+    winner?: Record<string, unknown> | null;
+    error?: Error;
+    optional?: boolean;
+    stepId?: string;
+    hook?: 'prepare' | 'buildPrompt' | 'prepareWorkspace';
+  } = {}) {
+    const state = freshState();
+    const stepDef: StepDefinition = { ...baseStep(), attachmentContext: 'none' };
+    stepDef.metadata.id = stepId;
+    state.taskStepRow.stepId = stepId;
+    const apply = vi.fn(stepDef.apply);
+    const buildPrompt = vi.fn(stepDef.llm!.buildPrompt);
+    const prepareWorkspace = vi.fn(async () => undefined);
+    let winnerRow: Record<string, unknown> | null = null;
+    let winnerStep: Record<string, unknown>;
+    let writesAtThrow = 0;
+    const decline = () => {
+      // The loser already passed the host's live-run guard. A concurrent
+      // winner inserts/binds before the module's ledger check refuses it.
+      winnerRow =
+        winner === null
+          ? null
+          : {
+              id: 'live-winner',
+              taskId: 'task-1',
+              taskStepId: 'ts-1',
+              mode: 'cli',
+              endedAt: null,
+              supersededAt: null,
+              startedAt: new Date(),
+              ...winner,
+            };
+      state.cliInvocationRow = winnerRow;
+      state.taskStepRow = {
+        ...state.taskStepRow,
+        status: winnerStatus,
+        statusMessage: 'Winner owns the paid run',
+        waitingStartedAt: new Date(),
+      };
+      winnerStep = { ...state.taskStepRow };
+      writesAtThrow = state.updates.length;
+      throw error;
+    };
+    const prepare = vi.fn(async () => {
+      if (hook === 'prepare') decline();
+    });
+    if (hook === 'buildPrompt') buildPrompt.mockImplementation(decline);
+    if (hook === 'prepareWorkspace') prepareWorkspace.mockImplementation(async () => decline());
+    stepDef.apply = apply;
+    stepDef.llm = {
+      ...stepDef.llm!,
+      preForm,
+      optional,
+      prepare,
+      buildPrompt,
+      prepareWorkspace,
+      toolProfile: 'none',
+    };
+    const enqueue = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    });
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(apply).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(state.taskStepRow.output).toBeNull();
+    if (hook === 'prepare') {
+      expect(buildPrompt).not.toHaveBeenCalled();
+      expect(prepareWorkspace).not.toHaveBeenCalled();
+      expect(state.inserts).toEqual([]);
+    }
+    return { result, state, winnerRow, winnerStep: winnerStep!, writesAtThrow };
+  }
+
+  it.each([
+    { preForm: false, winnerStatus: 'running', winner: { startedAt: null } },
+    { preForm: false, winnerStatus: 'waiting_cli', winner: { mode: 'llm' } },
+    { preForm: true, winnerStatus: 'running', winner: { mode: 'ai_fix' } },
+    { preForm: true, winnerStatus: 'waiting_cli', winner: { mode: 'cli' } },
+  ])(
+    'yields without any writes after refusal ($preForm, $winnerStatus, $winner.mode)',
+    async (opts) => {
+      const { result, state, winnerRow, winnerStep, writesAtThrow } = await refuse(opts);
+      // The queue's superseded branch does no handoff/park writes. waiting_cli
+      // would mutate a running winner in handleResult, so it is not a no-op.
+      expect(result.status).toBe('superseded');
+      expect(state.taskStepRow).toEqual(winnerStep);
+      expect(state.cliInvocationRow).toBe(winnerRow);
+      expect(state.cliInvocationRow).toEqual(
+        expect.objectContaining({
+          id: 'live-winner',
+          endedAt: null,
+          supersededAt: null,
+        }),
+      );
+      expect(state.updates).toHaveLength(writesAtThrow);
+    },
+  );
+
+  it.each([
+    { label: 'absent', winner: null },
+    { label: 'ended', winner: { endedAt: new Date() } },
+    { label: 'superseded', winner: { supersededAt: new Date() } },
+    { label: 'mining fan-out', winner: { mode: 'agent_mining' } },
+    { label: 'DAG fan-out', winner: { mode: 'dag_parallel' } },
+    { label: 'another step', winner: { taskStepId: 'ts-other' } },
+  ])('fails clearly with a $label winner, including optional phases', async ({ winner }) => {
+    const { result, state } = await refuse({ winner, optional: true });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toContain(
+      'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
+    );
+  });
+
+  it.each([
+    new Error('ordinary prepare failure'),
+    Object.assign(new Error('lookalike prepare failure'), { name: 'StepPrepareParkError' }),
+  ])('still fails existing prepare throws: $message', async (error) => {
+    const { result, state } = await refuse({ error });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toBe(error.message);
+  });
+
+  it.each(['buildPrompt', 'prepareWorkspace'] as const)(
+    'does not handle this signal outside prepare (%s)',
+    async (hook) => {
+      const { result, state } = await refuse({ hook });
+      expect(result.status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toBe(new StepPrepareParkError().message);
+    },
+  );
+
+  it('keeps ordinary core preparation dispatching', async () => {
+    const state = freshState();
+    const stepDef = baseStep();
+    const prepare = vi.fn(async () => undefined);
+    stepDef.llm = { ...stepDef.llm!, prepare };
+    const enqueue = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toHaveLength(1);
   });
 });
 

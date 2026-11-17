@@ -679,6 +679,19 @@ before constructing the prompt or reserving a run. RAG finalization uses this
 when a parked PR's current history has no classifiable evidence; its initial
 `skipIf` must still allow refresh because reopening can have added queries.
 
+A preparation hook that sees another advance's live bound attempt may throw the
+canonical `StepPrepareParkError` (`@haive/shared/step`). The runner verifies a live
+singleton invocation for that same step with `hasLiveInvocation` and returns the
+existing `superseded` no-handoff outcome. It does not write detection, output,
+status or a park marker after the refusal, and it neither inserts nor enqueues.
+Returning `waiting_cli` here would let the queue handler change a winner still
+`running`, so the refusal uses the no-op path instead. Without a live singleton
+invocation it follows normal failure handling with a clear diagnostic; fan-out,
+ended, superseded and other-step runs cannot justify it. Ordinary prepare throws
+and errors from other hooks retain their existing behavior. This adds no polling
+chain or durable state; the winner's completion and the existing recovery sweep
+own the next advance. Revert module consumers before removing this host support.
+
 ## Task scratch cleanup
 
 `cleanupTaskScratchWorkspace` (`repo/scratch-workspace.ts`) removes only

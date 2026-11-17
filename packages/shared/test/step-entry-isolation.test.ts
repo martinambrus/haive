@@ -72,7 +72,7 @@ function closureOf(entry: string, seen = new Set<string>(), emitted = false): Se
 }
 
 describe('step SDK entry isolation', () => {
-  it('emits no runtime imports or re-exports for the seven control classes', () => {
+  it('emits no runtime imports or re-exports for the control classes', () => {
     expect(specifiersOf(parse(path.resolve(ROOT, manifest.exports['./step']!.import)))).toEqual([]);
   });
 

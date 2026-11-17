@@ -92,6 +92,17 @@ export class AdvisedStepError extends Error {
  * to no proposal, just as they do when no provider can dispatch. */
 export class PromptBudgetExceededError extends Error {}
 
+/** `llm.prepare` found an invocation owned by another advance. The host verifies
+ * a live singleton invocation for this step and leaves the winner untouched.
+ * Without one this is a failure, never an indefinite park. Import this canonical
+ * constructor from @haive/shared/step; other hooks do not handle this signal. */
+export class StepPrepareParkError extends Error {
+  constructor(message = "another advance owns this step's live invocation") {
+    super(message);
+    this.name = 'StepPrepareParkError';
+  }
+}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
@@ -195,6 +206,8 @@ export interface LlmInvocationSpec {
    *  never put a secret there. */
   // Return false when refreshed input makes this invocation unnecessary; apply
   // still runs with null llmOutput. Other preparation hooks return void.
+  // Throw StepPrepareParkError to yield to a live singleton invocation owned by
+  // another advance. The host checks it exists; without one the step fails.
   prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void | false>;
   /** Like `prepare`, but run only once THIS job has WON the dispatch — after the
    *  cli_invocations insert the live-per-step unique index backs, before the job is

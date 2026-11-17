@@ -138,6 +138,7 @@ import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
   AdvisedStepError,
   PromptBudgetExceededError,
+  StepPrepareParkError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -1026,7 +1027,8 @@ async function resolveLlmPhase(
 
   // Optional async setup the invocation depends on (e.g. 08a starting the
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
-  // a throw here fails the step like any dispatch error.
+  // a throw here fails the step like any dispatch error, except the verified
+  // duplicate-advance refusal below.
   //
   // Re-check the dispatch race before running it. This is a CHEAP guard, not a correct
   // one — two advances that reach it before either inserts both pass — so nothing
@@ -1039,7 +1041,27 @@ async function resolveLlmPhase(
     if (await hasLiveInvocation(db, current.id)) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
-    const prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    let prepared: void | false;
+    try {
+      prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    } catch (err) {
+      if (!(err instanceof StepPrepareParkError)) throw err;
+      // A module's ledger can see a winner bound after the cheap guard above.
+      // Verify the same singleton invariant as the insert backstop. No checkpoint,
+      // output, reservation or handoff belongs to this losing pass: waiting_cli
+      // would make the queue handler write a park over the winner's running row.
+      if (await hasLiveInvocation(db, current.id)) {
+        ctx.logger.info(
+          { taskStepId: current.id },
+          'preparation yielded to a concurrent live invocation; nothing to hand off',
+        );
+        return { resolved: false, result: { status: 'superseded', row: current } };
+      }
+      throw new Error(
+        'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
+        { cause: err },
+      );
+    }
     // Preparation may hydrate a saved detection from before versioned plan reads.
     // Checkpoint it through the same owned write as detect, before dispatch: a
     // completed invocation returns above without preparing again, and its form

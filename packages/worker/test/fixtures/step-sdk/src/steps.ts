@@ -8,6 +8,7 @@ import {
   ReopenStepFormError,
   RetryableParseError,
   TaskCancelledError,
+  StepPrepareParkError,
   type ChatPlanRead,
   type StepDefinition,
 } from '@haive/shared/step';
@@ -21,6 +22,7 @@ export const errors = {
   ReopenStepFormError,
   RetryableParseError,
   TaskCancelledError,
+  StepPrepareParkError,
 };
 
 const snapshot: ChatPlanRead = { nodes: [], edges: [] };
