@@ -12,6 +12,7 @@ import {
   summarizeDerivedWarnings,
   validateTaskTypeDefaults,
   type DerivedRunPlan,
+  type ExecutionPredicateDeclaration,
 } from '../modularity/index.js';
 import { catalogWorkflowBaseCandidates, derivedBaseEligibility } from '../step-engine/run-list.js';
 import { readStepCatalog, type StepCatalogRead } from './index.js';
@@ -27,7 +28,7 @@ type Definition = Pick<
   | 'promptSteps'
   | 'preAnswerDefaults'
   | 'stepLoopLimitDefaults'
-> & { updatedAt?: Date };
+> & { updatedAt?: Date; executionContract?: unknown };
 type Base = Pick<Definition, 'slug' | 'source' | 'runListStrategy' | 'requiresRepository'>;
 export type DerivedAdmissionIssue = {
   kind: string;
@@ -42,6 +43,7 @@ export function inspectDerivedDefinition(
   base: Base | undefined,
   catalog: StepCatalogRead,
   integrationCategoryIds?: ReadonlySet<string>,
+  predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>,
 ) {
   const issues: DerivedAdmissionIssue[] = [];
   const eligibility = base
@@ -81,6 +83,8 @@ export function inspectDerivedDefinition(
           catalog: own.composable,
           installedStepIds: own.stepIds,
           requiresRepository: definition.requiresRepository,
+          executionContract: definition.executionContract,
+          predicates,
           promptSteps: {
             typeSlug: definition.slug,
             entries: parsePromptSteps(definition.promptSteps),
@@ -88,6 +92,11 @@ export function inspectDerivedDefinition(
           },
         });
   issues.push(...evaluation.issues);
+  // Preserve the named contract refusal through save and admission diagnostics.
+  for (const candidate of evaluation.candidates)
+    for (const issue of candidate.compositionIssues)
+      if (issue.kind === 'invalid-execution-contract')
+        issues.push({ ...issue, executionPath: candidate.executionPath });
   const stepIds = [...new Set(evaluation.candidates.flatMap((c) => c.stepIds))];
   // A refused active payload never entered a candidate. Keep its module diagnosis,
   // without treating skipped anchors (including propagated producer refusals) as dependencies.
@@ -217,7 +226,11 @@ export async function readDerivedDefinition(
   handle: Pick<Database, 'select' | 'execute'>,
   definition: Definition,
   integrationCategoryIds?: ReadonlySet<string>,
-  opts: { lockTimeoutMs?: number; lock?: boolean } = {},
+  opts: {
+    lockTimeoutMs?: number;
+    lock?: boolean;
+    predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
+  } = {},
 ) {
   const read = handle
     .select()
@@ -227,7 +240,13 @@ export async function readDerivedDefinition(
   if (opts.lock === false) {
     const catalog = await readStepCatalog(handle, { ordered: true });
     return {
-      ...inspectDerivedDefinition(definition, base, catalog, integrationCategoryIds),
+      ...inspectDerivedDefinition(
+        definition,
+        base,
+        catalog,
+        integrationCategoryIds,
+        opts.predicates,
+      ),
       catalog,
       base,
     };
@@ -246,7 +265,7 @@ export async function readDerivedDefinition(
   await handle.execute(sql`SELECT set_config('lock_timeout', ${setting!.timeout}, true)`);
   const catalog = await readStepCatalog(handle, { ordered: true, lock: true });
   return {
-    ...inspectDerivedDefinition(definition, base, catalog, integrationCategoryIds),
+    ...inspectDerivedDefinition(definition, base, catalog, integrationCategoryIds, opts.predicates),
     catalog,
     base,
   };

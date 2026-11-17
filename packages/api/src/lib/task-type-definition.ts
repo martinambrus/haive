@@ -210,7 +210,10 @@ export async function definitionForCreate(
   }
   const derived =
     def.runListStrategy === 'derived'
-      ? await readDerivedDefinition(handle, def, undefined, { lock: opts.locked === true })
+      ? await readDerivedDefinition(handle, def, undefined, {
+          lock: opts.locked === true,
+          predicates: executionPredicates(),
+        })
       : null;
   const membership = derived?.stepIds ?? def.stepIds;
   const modules = await readModuleStates(
@@ -242,6 +245,11 @@ export async function definitionForCreate(
             stepIds: derived.stepIds,
             dependencyStepIds: derived.dependencyStepIds,
             valid: derived.plan !== null,
+            executionIssues: derived.issues.flatMap((issue) =>
+              issue.kind === 'invalid-execution-contract' && typeof issue.reason === 'string'
+                ? [{ kind: 'invalid-execution-contract' as const, reason: issue.reason }]
+                : [],
+            ),
           },
         }
       : {}),

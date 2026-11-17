@@ -134,6 +134,94 @@ afterEach(async () => {
   h.lift = false;
   await mountModules(new Hono<AppEnv>(), [], { db: {} as never });
 });
+it.each(['predicate', 'endpoint'])(
+  'derived save and locked admission name an unavailable guard %s',
+  async (missing) => {
+    const bad =
+      missing === 'predicate'
+        ? executionContract
+        : {
+            ...executionContract,
+            guardedSpans: [
+              { ...executionContract.guardedSpans[0]!, firstStepId: 'module.fx.absent' },
+            ],
+          };
+    const fake = await setup(missing === 'predicate' ? [] : declarations, bad);
+    for (const [stepIndex, stepId] of [
+      '00-model-health-workflow',
+      '00a-sync-base',
+      '00-triage',
+    ].entries())
+      fake.insert(schema.stepCatalog, {
+        stepId,
+        title: stepId,
+        workflowType: 'workflow',
+        stepIndex,
+        composable: true,
+        dispatchesCli: false,
+        entry: {
+          stepId,
+          label: stepId,
+          group: 'test',
+          dispatchesCli: false,
+          requires: [],
+          provides: [],
+        },
+      });
+    fake.insert(schema.taskTypeDefinitions, {
+      slug: 'workflow',
+      source: 'builtin',
+      runListStrategy: 'workflow_paths',
+      requiresRepository: false,
+    });
+    const changes = ids.map((step, index) => ({
+      insertAfter: index ? ids[index - 1]! : '00-triage',
+      step,
+    }));
+    await fake.db
+      .update(schema.taskTypeDefinitions)
+      .set({
+        source: 'admin',
+        runListStrategy: 'derived',
+        baseSlug: 'workflow',
+        stepIds: null,
+        changes,
+      })
+      .where(eq(schema.taskTypeDefinitions.slug, 'fx__scan'));
+    h.lift = true;
+    const app = new Hono<AppEnv>();
+    app.route('/admin/task-types', adminTaskTypeRoutes);
+    app.onError(errorHandler);
+    const response = await app.request('/admin/task-types/fx__scan', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ changes }),
+    });
+    expect(response.status, await response.clone().text()).toBe(400);
+    expect(await response.json()).toMatchObject({
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'invalid-execution-contract',
+          reason: expect.stringContaining(
+            missing === 'predicate' ? 'unknown-predicate' : 'span-endpoints',
+          ),
+        }),
+      ]),
+    });
+    await expect(
+      fake.db.transaction((tx) =>
+        definitionForCreate(tx as never, 'fx__scan', { generic: true, locked: true }),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-execution-contract' });
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    const rename = await app.request('/admin/task-types/fx__scan', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Repair this definition' }),
+    });
+    expect(rename.status, await rename.clone().text()).toBe(200);
+  },
+);
 it('API schemas validate guarded composition and locked pin construction without loading or running a step', async () => {
   const fake = await setup();
   h.lift = true;

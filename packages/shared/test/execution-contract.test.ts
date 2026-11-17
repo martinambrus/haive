@@ -231,6 +231,19 @@ describe('pinned execution contract', () => {
       );
     }
   });
+  it('validates fix target capability without a predicate map', () => {
+    // #1263 already enforces this at the planner boundary. The availability
+    // fallback remains until the separate activation change opens its fence.
+    const fixed = { ...contract(), fixTarget: { stepId: 'fix', capabilityVersion: 1 } };
+    expect(validateComposition(['fix', 'commit'], catalog, { executionContract: fixed })).toEqual(
+      [],
+    );
+    const incapable = new Map(catalog);
+    incapable.set('fix', entry('fix'));
+    expect(validateComposition(['fix', 'commit'], incapable, { executionContract: fixed })).toEqual(
+      [{ kind: 'invalid-execution-contract', reason: expect.stringContaining('not capable') }],
+    );
+  });
   it('checks removal, provider ordering, entailment and closing on feasible paths', () => {
     const cat = new Map(
       [

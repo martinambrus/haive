@@ -1,7 +1,7 @@
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
+import { assertWorkerExecutionContractSupported } from '../step-engine/execution-contract-support.js';
 import {
-  assertExecutionContractSupported,
   ExecutionContractError,
   DerivedRunPlanError,
   parseDerivedRunPlan,
@@ -123,7 +123,7 @@ export function deadTaskResolution(
   registry: StepRegistry = stepRegistry,
 ): DeadTaskResolution {
   try {
-    assertExecutionContractSupported(task.executionContract);
+    assertWorkerExecutionContractSupported(task.executionContract);
     assertDataEdgeSupport(task, registry);
   } catch (error) {
     if (error instanceof ExecutionContractError)

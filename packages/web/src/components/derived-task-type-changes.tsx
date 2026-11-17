@@ -1,6 +1,10 @@
 'use client';
 import { useState } from 'react';
-import type { CompositionIssue, PromptStepIssue, DerivedChange } from '@haive/shared/modularity';
+import type {
+  ExecutionCompositionIssue,
+  PromptStepIssue,
+  DerivedChange,
+} from '@haive/shared/modularity';
 import { MAX_DERIVED_CHANGES } from '@haive/shared/modularity';
 import type { FormSchema } from '@haive/shared';
 import type { DerivedTaskTypeDiagnostics } from '@/lib/api-client';
@@ -84,15 +88,32 @@ export function DerivedTaskTypeChanges({
   }
   const describe = (issue: { kind: string; [key: string]: unknown }) => {
     const stepIds = candidates.find((c) => c.executionPath === issue.executionPath)?.stepIds ?? [];
-    if (issue.kind === 'invalid-composition')
-      return describeIssue(issue.issue as CompositionIssue, {
-        stepIds,
-        catalog: entries,
-        requiresRepository,
-      }).message;
+    if (issue.kind === 'invalid-composition' || issue.kind === 'invalid-execution-contract')
+      return describeIssue(
+        (issue.kind === 'invalid-composition' ? issue.issue : issue) as ExecutionCompositionIssue,
+        {
+          stepIds,
+          catalog: entries,
+          requiresRepository,
+        },
+      ).message;
     if (issue.kind === 'invalid-prompt-step')
       return describePromptStepIssue(issue.issue as PromptStepIssue);
     return describeDerivedProblem(issue);
+  };
+  // Admission needs the named top-level refusal; preview/save also contain its
+  // per-candidate composition wrapper. Show each path/reason only once.
+  const displayIssues = (issues: { kind: string; [key: string]: unknown }[]) => {
+    const seen = new Set<string>();
+    return issues.filter((issue) => {
+      const inner =
+        issue.kind === 'invalid-composition' ? (issue.issue as ExecutionCompositionIssue) : issue;
+      if (inner.kind !== 'invalid-execution-contract') return true;
+      const key = JSON.stringify([issue.executionPath, inner.reason]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   };
   const risky = changes.filter((c) => 'remove' in c && SAFEGUARD_STEP_IDS.has(c.remove));
   return (
@@ -246,14 +267,14 @@ export function DerivedTaskTypeChanges({
       </section>
       <section aria-label="Live validation">
         <h4 className="text-sm font-medium text-neutral-200">Live validation</h4>
-        {[...evaluation.issues, ...evaluation.defaultIssues].map((issue, i) => (
+        {displayIssues([...evaluation.issues, ...evaluation.defaultIssues]).map((issue, i) => (
           <InlineMarkdown key={i} className="text-sm text-red-300" body={describe(issue)} />
         ))}
       </section>
       {serverIssues.length > 0 && (
         <section aria-label="Server save validation">
           <h4 className="text-sm font-medium text-neutral-200">Server save validation</h4>
-          {serverIssues.map((issue, i) => (
+          {displayIssues(serverIssues).map((issue, i) => (
             <InlineMarkdown key={i} className="text-sm text-red-300" body={describe(issue)} />
           ))}
         </section>
@@ -261,7 +282,7 @@ export function DerivedTaskTypeChanges({
       {diagnostics && (
         <section aria-label="Server preview">
           <h4 className="text-sm font-medium text-neutral-200">Server preview</h4>
-          {[...diagnostics.issues, ...diagnostics.defaultIssues].map((issue, i) => (
+          {displayIssues([...diagnostics.issues, ...diagnostics.defaultIssues]).map((issue, i) => (
             <InlineMarkdown key={i} className="text-sm text-red-300" body={describe(issue)} />
           ))}
           {diagnostics.issues.length === 0 && diagnostics.defaultIssues.length === 0 && (

@@ -80,7 +80,9 @@ function availabilityOf(
 ) {
   const own = mergePromptStepCatalog(catalog, row);
   const derived =
-    row.runListStrategy === 'derived' ? inspectDerivedDefinition(row, base, catalog) : null;
+    row.runListStrategy === 'derived'
+      ? inspectDerivedDefinition(row, base, catalog, undefined, executionPredicates())
+      : null;
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
@@ -94,6 +96,11 @@ function availabilityOf(
             stepIds: derived.stepIds,
             dependencyStepIds: derived.dependencyStepIds,
             valid: derived.plan !== null,
+            executionIssues: derived.issues.flatMap((issue) =>
+              issue.kind === 'invalid-execution-contract' && typeof issue.reason === 'string'
+                ? [{ kind: 'invalid-execution-contract' as const, reason: issue.reason }]
+                : [],
+            ),
           },
         }
       : {}),
@@ -196,6 +203,8 @@ adminTaskTypeRoutes.get('/', async (c) => {
               row,
               rows.find((base) => base.slug === row.baseSlug),
               catalog,
+              undefined,
+              executionPredicates(),
             ),
           }
         : {}),
@@ -252,6 +261,8 @@ adminTaskTypeRoutes.get('/catalog', async (c) => {
                 },
                 row,
                 catalog,
+                undefined,
+                executionPredicates(),
               ).candidates.map(({ executionPath, stepIds }) => ({ executionPath, stepIds })),
             }
           : {}),
@@ -279,6 +290,7 @@ adminTaskTypeRoutes.post('/preview', async (c) => {
         stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
       },
       registeredCategoryIds(),
+      { predicates: executionPredicates() },
     );
   });
   const { catalog: _catalog, base: _base, ...preview } = diagnostics;
@@ -358,6 +370,8 @@ adminTaskTypeRoutes.post('/ports', async (c) => {
       },
       base,
       catalog,
+      undefined,
+      executionPredicates(),
     );
     return c.json(projectPortCandidates(diagnostics.candidates, catalog, body.dataRoleBindings));
   }
@@ -390,6 +404,7 @@ adminTaskTypeRoutes.get('/:slug/ports', async (c) => {
       base,
       catalog,
       registeredCategoryIds(),
+      executionPredicates(),
     );
     return c.json(
       projectPortCandidates(
@@ -419,7 +434,11 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   ]);
   const derived =
     row.runListStrategy === 'derived'
-      ? await db.transaction((tx) => readDerivedDefinition(tx, row, registeredCategoryIds()))
+      ? await db.transaction((tx) =>
+          readDerivedDefinition(tx, row, registeredCategoryIds(), {
+            predicates: executionPredicates(),
+          }),
+        )
       : null;
   const compositionIssues =
     row.source === 'admin' && row.runListStrategy !== 'derived' && catalog.synced
@@ -490,7 +509,9 @@ adminTaskTypeRoutes.post('/', async (c) => {
         stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
         promptSteps: body.promptSteps ?? {},
       };
-      const diagnostics = await readDerivedDefinition(tx, values, registeredCategoryIds());
+      const diagnostics = await readDerivedDefinition(tx, values, registeredCategoryIds(), {
+        predicates: executionPredicates(),
+      });
       const portIssues = dataRoleDraftIssues(
         diagnostics.candidates,
         diagnostics.catalog.composable,
@@ -642,17 +663,34 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     }
     if (row.runListStrategy === 'derived') {
       const merged = { ...row, ...body };
-      const diagnostics = await readDerivedDefinition(tx, merged, registeredCategoryIds());
-      const portIssues = dataRoleDraftIssues(
-        diagnostics.candidates,
-        diagnostics.catalog.composable,
-        dataRoleBindingsSchema.parse(merged.dataRoleBindings ?? []),
-        {
-          executionContract: merged.executionContract,
-          catalog: diagnostics.catalog.composable,
-          predicates: executionPredicates(),
-        },
-      );
+      const diagnostics = await readDerivedDefinition(tx, merged, registeredCategoryIds(), {
+        predicates: executionPredicates(),
+      });
+      const structural =
+        body.changes !== undefined ||
+        body.promptSteps !== undefined ||
+        body.dataRoleBindings !== undefined;
+      // A malformed/unavailable guard is a save diagnostic, never an uncaught
+      // data-edge exception. Flat metadata edits retain their repair semantics.
+      if (
+        structural &&
+        diagnostics.issues.some((issue) => issue.kind === 'invalid-execution-contract')
+      )
+        return {
+          invalid: { error: 'Invalid derived task type', issues: diagnostics.issues },
+        } as const;
+      const portIssues = structural
+        ? dataRoleDraftIssues(
+            diagnostics.candidates,
+            diagnostics.catalog.composable,
+            dataRoleBindingsSchema.parse(merged.dataRoleBindings ?? []),
+            {
+              executionContract: merged.executionContract,
+              catalog: diagnostics.catalog.composable,
+              predicates: executionPredicates(),
+            },
+          )
+        : [];
       if (
         (body.changes !== undefined ||
           body.dataRoleBindings !== undefined ||
@@ -660,10 +698,6 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         portIssues.length
       )
         return { invalid: { error: 'Invalid data role bindings', issues: portIssues } } as const;
-      const structural =
-        body.changes !== undefined ||
-        body.promptSteps !== undefined ||
-        body.dataRoleBindings !== undefined;
       const explicitDefaultIssues = diagnostics.defaultIssues.filter((issue) =>
         issue.kind === 'loop-limit-not-editable'
           ? body.stepLoopLimitDefaults !== undefined
@@ -882,7 +916,9 @@ taskTypeRoutes.get('/', async (c) => {
     : undefined;
   const taskTypes = rows.map((row) => {
     const derived =
-      row.runListStrategy === 'derived' ? inspectDerivedDefinition(row, base, catalog) : null;
+      row.runListStrategy === 'derived'
+        ? inspectDerivedDefinition(row, base, catalog, undefined, executionPredicates())
+        : null;
     const availability = availabilityOf(row, switches, catalog, modules, base);
     return publicTaskTypeSchema.parse({
       slug: row.slug,

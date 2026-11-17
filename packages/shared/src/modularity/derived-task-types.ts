@@ -14,7 +14,8 @@ import {
   TRIAGE_STEP_ID,
 } from '../step-engine/execution-paths.js';
 import { legacyComposableStepEntrySchema, type ComposableStepEntry } from './contracts.js';
-import { validateComposition, type CompositionIssue } from './composition.js';
+import { validateComposition, type ExecutionCompositionIssue } from './composition.js';
+import type { ExecutionPredicateDeclaration } from './execution-contract.js';
 import { checkPromptSteps, type PromptStepIssue } from './task-type-draft.js';
 import type { ParsedPromptStepEntry } from './prompt-steps.js';
 
@@ -79,12 +80,12 @@ export type DerivedOverlayIssue =
       expectedContract?: StepOutputContractRef | null;
       actualContract?: StepOutputContractRef | null;
     }
-  | { kind: 'invalid-composition'; executionPath: Path; issue: CompositionIssue }
+  | { kind: 'invalid-composition'; executionPath: Path; issue: ExecutionCompositionIssue }
   | { kind: 'invalid-prompt-step'; executionPath: Path; issue: PromptStepIssue };
 
 export interface DerivedEvaluatedCandidate extends DerivedBaseCandidate {
   outcomes: DerivedChangeOutcome[];
-  compositionIssues: CompositionIssue[];
+  compositionIssues: ExecutionCompositionIssue[];
   roleBindings?: DerivedRoleBindings;
   effectiveEntries?: ComposableStepEntry[];
 }
@@ -134,6 +135,8 @@ interface EvaluationInput {
   /** Include installed prompt IDs after merging their declarations into catalog. */
   installedStepIds: ReadonlySet<string>;
   requiresRepository?: boolean;
+  executionContract?: unknown;
+  predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
   promptSteps?: {
     typeSlug: string;
     entries: Record<string, ParsedPromptStepEntry>;
@@ -371,6 +374,8 @@ export function evaluateDerivedTaskType(input: EvaluationInput): DerivedOverlayE
     });
     const compositionIssues = validateComposition(stepIds, effective, {
       requiresRepository: input.requiresRepository,
+      executionContract: input.executionContract,
+      predicates: input.predicates,
     });
     for (const issue of compositionIssues)
       issues.push({ kind: 'invalid-composition', executionPath, issue });

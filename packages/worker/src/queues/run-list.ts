@@ -1,5 +1,6 @@
 import { pendingInsightApproval } from './insight-gate3-return.js';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
+import { assertWorkerExecutionContractSupported } from '../step-engine/execution-contract-support.js';
 import { isPathAddedInsightStep } from '@haive/shared/execution-paths';
 import { activeInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
 import { eq } from 'drizzle-orm';
@@ -7,7 +8,6 @@ import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import {
   parseStepId,
-  assertExecutionContractSupported,
   parseDerivedRunPlan,
   type PromptStepEntry,
   type DerivedRunPlan,
@@ -272,7 +272,7 @@ export async function buildRunList(
   ctx: ResolvedTaskContext,
   db: Database,
 ): Promise<StepDefinition[]> {
-  assertExecutionContractSupported(ctx.executionContract);
+  assertWorkerExecutionContractSupported(ctx.executionContract);
   assertDataEdgeSupport(ctx, stepRegistry);
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).

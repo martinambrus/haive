@@ -83,7 +83,12 @@ export interface TaskTypeAvailabilityInput {
   generic: boolean;
   /** Trusted schema-only registration from installed module code, never stored JSON. */
   predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
-  derived?: { stepIds: readonly string[]; dependencyStepIds?: readonly string[]; valid: boolean };
+  derived?: {
+    stepIds: readonly string[];
+    dependencyStepIds?: readonly string[];
+    valid: boolean;
+    executionIssues?: ExecutionCompositionIssue[];
+  };
 }
 
 export type TaskTypeAvailability =
@@ -151,6 +156,12 @@ export function resolveTaskTypeAvailability(
       catalog: null,
     });
     if (!moduleAvailability.available) return moduleAvailability;
+    if (input.derived?.executionIssues?.length)
+      return {
+        available: false,
+        reason: 'invalid-composition',
+        issues: input.derived.executionIssues,
+      };
     const execution = executionContractAvailability(definition.executionContract);
     if (!execution.available) return execution;
     return input.derived?.valid ? execution : { available: false, reason: 'invalid-composition' };

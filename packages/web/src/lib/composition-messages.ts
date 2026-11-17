@@ -25,6 +25,7 @@ import {
   validateTaskTypeDefaults,
   type ComposableStepEntry,
   type CompositionIssue,
+  type ExecutionCompositionIssue,
   type PromptStepIssue as CheckedPromptStepIssue,
   type PromptStepIssueKind as CheckedPromptStepIssueKind,
   type TaskTypeAvailability,
@@ -84,10 +85,12 @@ function joinOr(labels: string[]): string {
     : `${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}`;
 }
 
-export function describeIssue(issue: CompositionIssue, ctx: IssueContext): IssueView {
+export function describeIssue(issue: ExecutionCompositionIssue, ctx: IssueContext): IssueView {
   const { catalog } = ctx;
   const label = (id: string) => stepLabel(id, catalog);
   switch (issue.kind) {
+    case 'invalid-execution-contract':
+      return { message: issue.reason, providedBy: [] };
     case 'empty':
       return { message: 'Add at least one step.', providedBy: [] };
     case 'unknown-step':
@@ -146,6 +149,10 @@ export function describeIssue(issue: CompositionIssue, ctx: IssueContext): Issue
         message: `Its fix loop would return past ${label(issue.closingStepId)}, which closes the run; move it before that step.`,
         providedBy: [],
       };
+    default: {
+      const exhaustive: never = issue;
+      throw new Error(`Unknown composition issue: ${exhaustive}`);
+    }
   }
 }
 

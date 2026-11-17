@@ -18,9 +18,20 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   queued: [] as { name: string; payload: unknown }[],
   thrown: undefined as unknown,
+  allowGuarded: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+// Exercise dormant guarded reset/locking below the unchanged production refusal.
+vi.mock('../src/lib/execution-contract-admission.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/lib/execution-contract-admission.js')>();
+  return {
+    assertExecutionContractUsable: (raw: unknown) => {
+      if (!h.allowGuarded) real.assertExecutionContractUsable(raw);
+    },
+  };
+});
+
 vi.mock('../src/queues.js', () => {
   const queue = () => ({
     add: async (name: string, payload: unknown) => {
@@ -84,8 +95,12 @@ import { cancelLiveRuns } from '../src/lib/task-control.js';
 //         wants the step row (`writeLoginHint`). The sweep must refuse at once (55P03, or a 503) instead.
 //   A7c   the same sweep beside a Stop that has ended the live run and then wants the step rows.
 //   A7d   the same sweep reached through the Retry action's route, which must answer 503.
+//   A6g/h guarded done-producer Resume forces the batch with an empty downstream reset set:
+//         runs before agents/batch, batch before the decision writer's task SHARE.
+//   A7g   its retained-row sweep refuses run contention under that forced batch (pass/Stop).
 const STEP = { id: '00000000-0000-4000-8000-0000000000a1', stepId: 'step-a' } as const;
 const LATE = { id: '00000000-0000-4000-8000-0000000000a2', stepId: 'step-b' } as const;
+const ENTRY = { id: '00000000-0000-4000-8000-0000000000a3', stepId: 'guard-entry' } as const;
 const RUN = '00000000-0000-4000-8000-0000000000c1';
 const RUN_LATE = '00000000-0000-4000-8000-0000000000c2';
 const MINING = '00000000-0000-4000-8000-0000000000d1';
@@ -245,6 +260,7 @@ describe.skipIf(!url)(
     beforeEach(async () => {
       h.queued = [];
       h.thrown = undefined;
+      h.allowGuarded = false;
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
     });
 
@@ -652,6 +668,146 @@ describe.skipIf(!url)(
 
           expectRefusedAtOnce(run);
           await expectStopFinished(taskId);
+        },
+        TEST_TIMEOUT,
+      );
+    });
+
+    describe('guarded done-producer Resume with an empty downstream reset selection', () => {
+      const contract = {
+        version: 1,
+        guardedSpans: [
+          {
+            id: 'tail',
+            firstStepId: ENTRY.stepId,
+            lastStepId: ENTRY.stepId,
+            predicateId: 'module.test.check',
+            args: {},
+          },
+        ],
+      };
+      const seedGuardedResume = async (leftActive = false) => {
+        h.allowGuarded = true;
+        const taskId = await seedTask('running', {
+          currentStepId: ENTRY.stepId,
+          currentRound: 0,
+          executionContract: contract,
+          runListSnapshot: [...(leftActive ? [LATE.stepId] : []), STEP.stepId, ENTRY.stepId],
+        });
+        await seedStep(taskId, {
+          status: 'done',
+          runSeq: 1,
+          output: { retained: true },
+          startedAt: new Date(Date.now() - 60_000),
+          endedAt: new Date(),
+        });
+        await seedStep(taskId, { runSeq: 2, stepIndex: 3 }, ENTRY);
+        await seedRun(taskId, 'ended');
+        await seedMining();
+        if (leftActive) {
+          await seedStep(taskId, { status: 'running', runSeq: 0, stepIndex: 0 }, LATE);
+          await seedRun(taskId, 'live', { id: RUN_LATE, taskStepId: LATE.id });
+        }
+        // ENTRY is pristine: nothing downstream qualifies for the route's initial reset set.
+        expect(await rowOf(ENTRY.id)).toMatchObject({ status: 'pending', guardState: null });
+        return taskId;
+      };
+      const expectResumed = async (taskId: string, run: Interleaved) => {
+        expectClean(run);
+        expect(run.deadlocked).toEqual([]);
+        expect(run.result).toMatchObject({ status: 200, body: { retriedAgents: 1 } });
+        expect(await rowOf(STEP.id)).toMatchObject({
+          status: 'running',
+          output: { retained: true },
+          rerunGeneration: 0,
+        });
+        expect((await runOf(RUN)).supersededAt).not.toBeNull();
+        expect((await miningOf(MINING)).userRetryRequestedAt).not.toBeNull();
+        expect((await taskOf(taskId)).orchestrationEpoch).toBe(4);
+      };
+
+      it(
+        'A6g: takes the blocking run before agents and the forced batch beside a Retry-order peer',
+        async () => {
+          const taskId = await seedGuardedResume();
+          const run = await interleave(() => stepAction(taskId, 'resume'), retryOrderPeer, [
+            HELD_MINING,
+            HELD_STEP,
+            { name: 'E', table: schema.taskSteps, id: ENTRY.id },
+            { name: 'T', table: schema.tasks, id: taskId },
+          ]);
+          await expectResumed(taskId, run);
+          expect(await rowOf(ENTRY.id)).toMatchObject({ guardState: null, rerunGeneration: 0 });
+        },
+        TEST_TIMEOUT,
+      );
+
+      it(
+        'A6h: waits for a decision writer at the step batch before taking the task fence, then clears its committed decision',
+        async () => {
+          const taskId = await seedGuardedResume();
+          let published = false;
+          const run = await interleave(
+            () => stepAction(taskId, 'resume'),
+            {
+              first: (tx) => lockStepRows(tx, eq(schema.taskSteps.taskId, taskId)),
+              second: async (tx) => {
+                // The decision service's SQL order: batch, task SHARE, decision UPDATE.
+                await tx
+                  .select({ id: schema.tasks.id })
+                  .from(schema.tasks)
+                  .where(eq(schema.tasks.id, taskId))
+                  .for('share');
+                // Reset selection treats the opaque persisted decision as durable work;
+                // decoding/evaluation belongs to the worker's guard-service controls.
+                await tx
+                  .update(schema.taskSteps)
+                  .set({ guardState: { decision: 'committed-by-peer' } })
+                  .where(eq(schema.taskSteps.id, ENTRY.id));
+                published = true;
+              },
+            },
+            [{ name: 'T', table: schema.tasks, id: taskId }],
+          );
+          expect(published).toBe(true);
+          await expectResumed(taskId, run);
+          expect(await rowOf(ENTRY.id)).toMatchObject({
+            status: 'pending',
+            guardState: null,
+            rerunGeneration: 1,
+          });
+        },
+        TEST_TIMEOUT,
+      );
+
+      it.each(['pass', 'Stop'] as const)(
+        'A7g (%s): retained-row sweep under the forced batch refuses a held run without reversing lock order',
+        async (peerKind) => {
+          const taskId = await seedGuardedResume(true);
+          const run = await interleave(
+            () => stepAction(taskId, 'resume'),
+            peerKind === 'Stop'
+              ? stopPeer(taskId)
+              : {
+                  first: lockRun(RUN_LATE, 'update'),
+                  second: writeLoginHint(LATE.id),
+                },
+            lateProbes(taskId),
+            { mayRefuseAtOnce: true },
+          );
+          expectRefusedAtOnce(run, isServiceUnavailable);
+          expect(await rowOf(STEP.id)).toMatchObject({
+            status: 'done',
+            output: { retained: true },
+            rerunGeneration: 0,
+          });
+          expect((await miningOf(MINING)).userRetryRequestedAt).toBeNull();
+          expect((await runOf(RUN)).supersededAt).toBeNull();
+          expect((await taskOf(taskId)).orchestrationEpoch).toBe(3);
+          expect(await rowOf(ENTRY.id)).toMatchObject({ guardState: null, rerunGeneration: 0 });
+          if (peerKind === 'pass') expect((await rowOf(LATE.id)).errorHint).toEqual(LOGIN_HINT);
+          else expect((await runOf(RUN_LATE)).endedAt).not.toBeNull();
+          expect(h.queued).toEqual([]);
         },
         TEST_TIMEOUT,
       );
