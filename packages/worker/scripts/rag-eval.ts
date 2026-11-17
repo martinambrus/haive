@@ -25,7 +25,9 @@
  *                 One search per page size in {5, 8, 12, 20, 50} reusing one embedding; prints
  *                 recall/MRR per class, language, split and cell, rubric coverage for overview, and
  *                 no-answer false-positive rate. All metrics carry seeded query-bootstrap CIs.
- *   RAG_FIXTURE_ID  SHA-256 of manifest + query bytes, required for pairing fixture runs
+ *   RAG_MANIFEST  manifest JSON path (default: manifest.json next to RAG_QUERY_SET).
+ *                 Fingerprint is computed from manifest + query bytes; any edit invalidates baselines.
+ *   RAG_COMPACT  1 writes minified query records without summaries, hits, ms or dense dumps
  *   RAG_LEXICAL_ONLY  1 skips the embed so the lexical-only branch runs
  *   RAG_IDENTIFIER_SEARCH  0 turns the identifier ranker off (default on)
  *   RAG_PROJECT   project name (internal mode db = haive_rag_<project>); default "default"
@@ -42,6 +44,8 @@
  *   RAG_EXPECTED  optional substring of an expected source_path to report its rank
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fixtureFingerprint } from './rag-eval-fixture.js';
 import { createDatabase } from '@haive/database';
 import {
   embedQueryOrNull,
@@ -71,6 +75,7 @@ import {
 } from './rag-eval-metrics.js';
 
 import {
+  compactRun,
   METRIC_VERSION,
   SET_KS,
   noAnswerScore,
@@ -114,6 +119,15 @@ async function main(): Promise<void> {
   const identifierSearch = process.env.RAG_IDENTIFIER_SEARCH !== '0';
   const runbookBoost = Number(process.env.RAG_RUNBOOK_BOOST || 1);
   const querySet = querySetPath ? loadQuerySet(querySetPath) : null;
+  const fingerprint = querySetPath
+    ? fixtureFingerprint(
+        readFileSync(
+          process.env.RAG_MANIFEST || path.join(path.dirname(querySetPath), 'manifest.json'),
+          'utf8',
+        ),
+        readFileSync(querySetPath, 'utf8'),
+      )
+    : '';
 
   const db = createDatabase(dbUrl);
   let conn: RagConnection | null;
@@ -246,7 +260,7 @@ async function main(): Promise<void> {
         }
         const ranks = golds.map((g) => goldRank(hits, g));
         if (k === SET_KS[SET_KS.length - 1]) {
-          result.golds.forEach((g, i) => {
+          result.golds!.forEach((g, i) => {
             g.rank50 = ranks[i] ?? null;
           });
         }
@@ -257,6 +271,8 @@ async function main(): Promise<void> {
         result.byK[k] = {
           score: scoreQuery(outcomes, k),
           ms,
+          topDenseSim: Math.max(0, ...hits.map((h) => h.denseSim)),
+          topLexical: !!hits[0] && (hits[0].ranks?.fts != null || hits[0].ranks?.ident != null),
           hits: hits.map(({ sourcePath, content, rrf, denseSim }) => ({
             sourcePath,
             content,
@@ -267,8 +283,10 @@ async function main(): Promise<void> {
           noAnswer: q.kind === 'no-answer' ? noAnswerScore(hits) : null,
         };
       }
-      const shown = result.golds
-        .map((g) => (!g.inStore ? 'not in store' : g.rank50 === null ? 'miss' : `rank ${g.rank50}`))
+      const shown = result
+        .golds!.map((g) =>
+          !g.inStore ? 'not in store' : g.rank50 === null ? 'miss' : `rank ${g.rank50}`,
+        )
         .join(', ');
       console.log(`[${q.kind}] ${shown} (page ${SET_KS[SET_KS.length - 1]})  <- ${q.query}`);
       if (denseCheck) {
@@ -291,20 +309,22 @@ async function main(): Promise<void> {
     const summary = summarizeRun(results);
     console.log(JSON.stringify(summary, null, 2));
     if (outPath) {
+      const run = { metricVersion: METRIC_VERSION, fixture: fingerprint, results };
+      const compact = process.env.RAG_COMPACT === '1';
       writeFileSync(
         outPath,
         JSON.stringify(
-          {
-            metricVersion: METRIC_VERSION,
-            fixture: process.env.RAG_FIXTURE_ID || '',
-            project: projectName,
-            settings,
-            results,
-            summary,
-          },
+          compact
+            ? compactRun(run)
+            : {
+                ...run,
+                project: projectName,
+                settings,
+                summary,
+              },
           null,
-          2,
-        ),
+          compact ? undefined : 2,
+        ) + '\n',
       );
     }
   } else if (query) {

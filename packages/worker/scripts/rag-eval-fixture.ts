@@ -20,7 +20,100 @@ export interface FixtureManifest {
   corpus: { files: Record<string, string> };
   chunker: { files: Record<string, string> };
 }
-const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
+export const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
+
+export const fixtureFingerprint = (manifestText: string, queryText: string) =>
+  sha256(manifestText + '\n' + queryText);
+export interface AnchorSnapshot {
+  sourceCommit: string;
+  anchors: { path: string; anchor: string; sha256: string; line: number; context: string }[];
+}
+
+export function makeAnchorSnapshot(
+  manifest: FixtureManifest,
+  queries: SetQuery[],
+  corpus: ReadonlyMap<string, string>,
+): AnchorSnapshot {
+  const pairs = new Map<string, { path: string; anchor: string }>();
+  for (const q of queries)
+    for (const g of [...(q.gold ?? []), ...(q.rubric ?? []).flatMap((r) => r.evidence)]) {
+      if (!g.anchor) throw new Error('snapshot requires body anchors');
+      pairs.set(JSON.stringify([g.path, g.anchor]), { path: g.path, anchor: g.anchor });
+    }
+  return {
+    sourceCommit: manifest.sourceCommit,
+    anchors: [...pairs.values()].map((g) => {
+      const text = corpus.get(g.path)!;
+      const offset = text.indexOf(g.anchor);
+      if (offset < 0) throw new Error('missing snapshot anchor');
+      const lines = text.split('\n');
+      const line = text.slice(0, offset).split('\n').length;
+      const end = line + g.anchor.split('\n').length - 1;
+      return {
+        ...g,
+        sha256: sha256(text),
+        line,
+        context: lines.slice(Math.max(0, line - 3), end + 2).join('\n'),
+      };
+    }),
+  };
+}
+
+export function verifySnapshot(
+  manifest: FixtureManifest,
+  queries: SetQuery[],
+  snapshot: AnchorSnapshot,
+) {
+  if (snapshot.sourceCommit !== manifest.sourceCommit) throw new Error('snapshot commit mismatch');
+  const files = new Map<string, string>();
+  const pairs = new Set<string>();
+  for (const a of snapshot.anchors) {
+    if (manifest.corpus.files[a.path] !== a.sha256 || !a.context.includes(a.anchor) || a.line < 1)
+      throw new Error(`invalid snapshot: ${a.path}`);
+    const key = JSON.stringify([a.path, a.anchor]);
+    if (pairs.has(key)) throw new Error('duplicate snapshot anchor');
+    pairs.add(key);
+    files.set(a.path, (files.get(a.path) ?? '') + '\n' + a.context);
+  }
+  for (const q of queries)
+    for (const g of [...(q.gold ?? []), ...(q.rubric ?? []).flatMap((r) => r.evidence)])
+      if (!pairs.has(JSON.stringify([g.path, g.anchor])))
+        throw new Error(`${q.id}: missing snapshot pair`);
+  return verifyAnchors(queries, files);
+}
+
+export async function hasPinnedCommit(root: string, commit: string): Promise<boolean> {
+  try {
+    return (await gitRun(root, ['cat-file', '-e', `${commit}^{commit}`])).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Warning only: compare committed HEAD blobs, not the immutable source commit. */
+export async function warnChunkerDrift(
+  root: string,
+  manifest: FixtureManifest,
+  warn: (message: string) => void = (message) => {
+    process.stderr.write(message + '\n');
+  },
+  readHead = async (p: string) => {
+    try {
+      const r = await gitRun(root, ['show', `HEAD:${p}`]);
+      return r.code === 0 ? r.stdout : null;
+    } catch {
+      return null;
+    }
+  },
+) {
+  for (const [p, hash] of Object.entries(manifest.chunker.files)) {
+    const text = await readHead(p);
+    if (text === null || sha256(text) !== hash)
+      warn(
+        `WARNING: HEAD chunker drift: ${p}; pinned baseline may be stale. Rebuild and remeasure before ranking comparisons.`,
+      );
+  }
+}
 
 export async function readPinnedFiles(
   root: string,
@@ -86,13 +179,26 @@ export async function verifyFixture(root: string) {
     if (sha256(files.get(p)!) !== hash) throw new Error(`pinned hash mismatch: ${p}`);
   const corpus = new Map(Object.keys(manifest.corpus.files).map((p) => [p, files.get(p)!]));
   const anchors = verifyAnchors(queries, corpus);
-  const fingerprint = sha256(manifestText + '\n' + queryText);
+  const fingerprint = fixtureFingerprint(manifestText, queryText);
   return { manifest, queries, corpus, anchors, fingerprint };
 }
 
 async function main() {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
   const fixture = await verifyFixture(root);
+  if (process.argv[2] === '--snapshot') {
+    await writeFileNoFollow(
+      root,
+      `${FIXTURE_DIR}/anchors.json`,
+      JSON.stringify(
+        makeAnchorSnapshot(fixture.manifest, fixture.queries, fixture.corpus),
+        null,
+        2,
+      ) + '\n',
+      { mode: 'replace-atomic' },
+    );
+    return;
+  }
   const destination = process.argv[2];
   if (destination) {
     const tree = path.resolve(destination);

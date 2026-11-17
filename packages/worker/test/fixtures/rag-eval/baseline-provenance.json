@@ -1,8 +1,8 @@
 {
   "date": "2026-11-17",
   "sourceCommit": "b8a2dde4def9b442d85c426ce771c72ae7c8ffee",
-  "runtimeMainCommit": "d508dd515cbeef62a1cf91f65ce1ea0ea603218c",
-  "runtimeDescription": "Current main rag-build-store.ts and production shared dist/onboarding sources in existing haive-worker; branch rag-eval.ts, metrics, report and dense check copied into /tmp/rge-s-codex-1/runtime/scripts. No app source edited or rebuilt in the container. Production RAG source and dist hashes match the branch parent/build byte-for-byte.",
+  "runtimeMainCommit": "c29624d84fd091a9fb8adf4f03d59e3143c9caf4",
+  "runtimeDescription": "Current main rag-build-store.ts and production shared dist/onboarding sources in existing haive-worker; round-2 branch rag-eval.ts, fixture identity helper, metrics, report and dense check copied into /tmp/rge-s-codex-2/runtime/scripts. No app source edited or rebuilt in the container. Production source/dist hashes match the pinned protocol and round-1 runtime.",
   "hashes": {
     "/app/packages/worker/scripts/rag-build-store.ts": "39b0fd79ea58d9c68ace9d883ff66f2a904960d670804e1cd1e28df415ec5259",
     "/app/packages/worker/src/step-engine/steps/onboarding/_rag-chunkers.ts": "c818f718405d6b3c0c803201526d6a8b86c567e483a603725188764940e6cdca",
@@ -11,12 +11,13 @@
     "/app/packages/shared/dist/rag/search.js": "9c1f477cbe425f0390b015565cad3fab3f54c29599ec65a171227acee2500d76",
     "/app/packages/shared/dist/rag/embed.js": "5b682f709f000dcfa59028330dc95a30b7c4bea13b52aa1902474d0741f04978",
     "/app/packages/shared/dist/rag/connection.js": "316dd03704fe34b965cdb7db6703918edb4e87fecc85610866a417e1eab1d19d",
-    "/tmp/rge-s-codex-1/runtime/scripts/rag-eval-dense.ts": "ad856f89fa47a80a78e51bcf625addeb00a2a024a40a98f25f42edfe63e31dbd",
-    "/tmp/rge-s-codex-1/runtime/scripts/rag-eval-metrics.ts": "20f22b7a17105d8059f0796a6900dbbd4ddc10d39e480eb32b3f32256764d470",
-    "/tmp/rge-s-codex-1/runtime/scripts/rag-eval-report.ts": "d36d782867840f38e2319d0bb52494e0be25f100eefb33f736fd27bc1d06965f",
-    "/tmp/rge-s-codex-1/runtime/scripts/rag-eval.ts": "2532a1df33f03c06b9113fe52ad9eeb537358e5b8f4da8c3bd4db2dbb27f253f"
+    "/tmp/rge-s-codex-2/runtime/scripts/rag-eval.ts": "febaa243188cbf49711318925430019233bdf8386b4c4d05d4407245f97a2f4d",
+    "/tmp/rge-s-codex-2/runtime/scripts/rag-eval-fixture.ts": "538bf4b0c9e085e1147b1af3d7c0f404e3ba5e16d5b4252da957d7bdc069dd7c",
+    "/tmp/rge-s-codex-2/runtime/scripts/rag-eval-report.ts": "abd29a515608f9b951f09b0472384f079f2ec18dee9fe74906ae4e10963b70d5",
+    "/tmp/rge-s-codex-2/runtime/scripts/rag-eval-metrics.ts": "20f22b7a17105d8059f0796a6900dbbd4ddc10d39e480eb32b3f32256764d470",
+    "/tmp/rge-s-codex-2/runtime/scripts/rag-eval-dense.ts": "ad856f89fa47a80a78e51bcf625addeb00a2a024a40a98f25f42edfe63e31dbd"
   },
-  "fixture": "c63bd4d07c253cc9b64c18f4c1d45b166501a176d45d3aa7f55a2dc950e49e51",
+  "fixture": "4d56e5bc11b765f1c6b5539f1fc7de097df7f98d16e54314114c601c1da90068",
   "cost": {
     "paidModelCalls": 0,
     "embedder": "local Ollama qwen3-embedding:4b only"
@@ -30,11 +31,11 @@
     "unaccent": "1.1"
   },
   "scratch": {
-    "database": "haive_rag_rge_s_codex1_20261117",
-    "repositoryId": "4ee18461-522f-43b6-9f0b-051fe5b40a26",
-    "taskId": "f9a09963-087a-491a-924a-ad2e1cb16123",
+    "database": "haive_rag_rge_s_codex2_20261117",
+    "repositoryId": "d68b2294-abea-4bb2-bed5-26fd1edad104",
+    "taskId": "7bfe71e0-c1eb-4de9-8631-ea3c3d9d740c",
     "dryRunFirst": true,
-    "buildSeconds": 157,
+    "buildSeconds": 161,
     "filesMaterialized": 262,
     "filesMasked": ["packages/shared/src/config/secrets.service.ts"],
     "filesIndexed": 252,
@@ -44,7 +45,7 @@
     "droppedByCap": 0,
     "unreadableFiles": 0,
     "oversizeFiles": 0,
-    "lifecycle": "Dry-run first, built, measured hybrid + lexical + verified forced-HNSW-vs-exact, then dropped. pg_database verification returned 0. No live store or service was changed.",
+    "lifecycle": "Dry-run first; fresh store built and measured hybrid + lexical + verified forced-HNSW-vs-exact. Post-measurement metadata SELECT corrected from haive_embeddings to ai_rag_embeddings; then dropped, pg_database verification 0. No live store or service changed.",
     "dropped": true,
     "remainingDatabases": 0
   },
@@ -53,6 +54,57 @@
     "24 answerable topics, translated and rephrased; query-bootstrap CIs are descriptive, not independent-topic population intervals.",
     "Overview measures author-judged source-fact coverage, not generated-answer quality.",
     "The production planner chooses exact search for all 180 queries on this small store; the forced HNSW comparison is verified separately.",
-    "No ranking knobs were tuned in this PR."
-  ]
+    "Ranking knobs stayed fixed. Only the answerability diagnostic threshold uses tuning positives; it is applied unchanged to held-out."
+  ],
+  "measurementRun": "RGE-S/codex-2; both arms and dense comparison from one scratch lifecycle; all committed numbers regenerated from that run.",
+  "denseCheck": {
+    "overlap": {
+      "n": 180,
+      "mean": 0.9993333333333335,
+      "low": 0.9987777777777777,
+      "high": 0.9997777777777779
+    },
+    "indexRows": {
+      "n": 180,
+      "mean": 50,
+      "low": 50,
+      "high": 50
+    },
+    "exactRows": {
+      "n": 180,
+      "mean": 50,
+      "low": 50,
+      "high": 50
+    },
+    "hnswPlan": 0
+  },
+  "answerability": {
+    "tau": 0.4603962254996601,
+    "targetRetention": 0.9,
+    "all": {
+      "answerable": 162,
+      "noAnswer": 18,
+      "auroc": 0.8120713305898491,
+      "retention": 0.9259259259259259,
+      "fpr": 0.5555555555555556
+    },
+    "tuning": {
+      "answerable": 81,
+      "noAnswer": 9,
+      "auroc": 0.7901234567901234,
+      "retention": 0.9012345679012346,
+      "fpr": 0.5555555555555556
+    },
+    "heldOut": {
+      "answerable": 81,
+      "noAnswer": 9,
+      "auroc": 0.8449931412894376,
+      "retention": 0.9506172839506173,
+      "fpr": 0.5555555555555556
+    }
+  },
+  "baselineBytes": {
+    "hybrid": 135800,
+    "lexical": 127907
+  }
 }

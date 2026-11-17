@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { parseQuerySet, scoreQuery } from '../scripts/rag-eval-metrics.js';
 import {
+  answerabilityReport,
+  compactRun,
   bootstrapMean,
   compareRuns,
   METRIC_VERSION,
@@ -183,5 +185,52 @@ describe('paired comparisons', () => {
       run([{ ...row('a', 1), query: 'changed' }]),
     ];
     for (const candidate of bad) expect(() => compareRuns(good, candidate, [8], 10)).toThrow();
+  });
+});
+
+describe('dense answerability', () => {
+  const scored = (id: string, score: number, split: string, kind = 'identifier'): QueryResult => ({
+    ...row(id, 1, kind),
+    split,
+    byK: { 8: { ...page(1), topDenseSim: score, topLexical: false } },
+  });
+  it('fixes tau on tuning positives and grades held-out without threshold leakage', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => scored(`t${i}`, i / 10, 'tuning'));
+    rows.push(scored('p', 0.15, 'held-out'), scored('n', 0.2, 'held-out', 'no-answer'));
+    const r = answerabilityReport(rows, 8);
+    expect(r.tau).toBe(0.1);
+    expect(r.tuning.retention).toBe(0.9);
+    expect(r.heldOut.retention).toBe(1);
+    expect(r.heldOut.fpr).toBe(1);
+    expect(r.heldOut.auroc).toBe(0);
+    rows[11]!.byK[8]!.topDenseSim = 0.15;
+    expect(answerabilityReport(rows, 8).heldOut.auroc).toBe(0.5);
+    rows[11]!.byK[8]!.topDenseSim = 0.05;
+    expect(answerabilityReport(rows, 8).heldOut).toMatchObject({ auroc: 1, fpr: 0 });
+    expect(answerabilityReport([], 8).tau).toBeNull();
+    expect(() => answerabilityReport([row('missing', 1)], 8)).toThrow('dense signal');
+    rows[0]!.byK[8]!.topDenseSim = NaN;
+    expect(() => answerabilityReport(rows, 8)).toThrow('dense signal');
+  });
+  it('keeps ties at tau and includes overview as answerable', () => {
+    const rows = [
+      scored('t', 0, 'tuning', 'overview'),
+      scored('p', 0, 'held-out'),
+      scored('n', 0, 'held-out', 'no-answer'),
+    ];
+    expect(answerabilityReport(rows, 8)).toMatchObject({ tau: 0, heldOut: { auroc: 0.5, fpr: 1 } });
+  });
+  it('compacts without losing scores or signals and recomputes summaries', () => {
+    const r = scored('t', 0.6, 'tuning');
+    r.dense = { indexRows: 50, exactRows: 50, overlap: 1, defaultUsesHnsw: false };
+    const compact = compactRun(run([r]));
+    expect(compact.results[0]!.dense).toBeUndefined();
+    expect(compact.results[0]!.signal).toEqual({ k: 8, topDenseSim: 0.6, topLexical: false });
+    expect(compact.results[0]!.byK[8]).toEqual({
+      score: page(1).score,
+      overview: null,
+      noAnswer: null,
+    });
+    expect(summarizeRun(compact.results, [8]).groups.all![8]!.answerable.recall).toBe(1);
   });
 });

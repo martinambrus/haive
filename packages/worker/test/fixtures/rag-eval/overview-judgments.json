@@ -1,5 +1,5 @@
 {
-  "fixture": "c63bd4d07c253cc9b64c18f4c1d45b166501a176d45d3aa7f55a2dc950e49e51",
+  "fixture": "4d56e5bc11b765f1c6b5539f1fc7de097df7f98d16e54314114c601c1da90068",
   "assessment": "Codex driver evidence judgments, unblinded, using the predeclared multi-fact source rubrics; no model API or generated-answer assessment. Matched supporting source spans are retained for audit.",
   "judgments": [
     {

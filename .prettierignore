@@ -38,3 +38,7 @@ docs/plans
 # that task's own branch mid-run.
 .claude/worktrees
 .haive/worktrees
+
+# Measured RAG query records are deliberately minified and size-checked (<=150 KB).
+packages/worker/test/fixtures/rag-eval/baseline-hybrid.json
+packages/worker/test/fixtures/rag-eval/baseline-lexical.json

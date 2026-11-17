@@ -1,3 +1,7 @@
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { FIXTURE_DIR, sha256, warnChunkerDrift, type FixtureManifest } from './rag-eval-fixture.js';
 import {
   goldRank,
   percentile,
@@ -7,7 +11,7 @@ import {
   type SetQuery,
 } from './rag-eval-metrics.js';
 
-export const METRIC_VERSION = 2;
+export const METRIC_VERSION = 3;
 export const SET_KS = [5, 8, 12, 20, 50];
 export interface EvalHit {
   sourcePath: string;
@@ -17,8 +21,12 @@ export interface EvalHit {
 }
 export interface EvalPage {
   score: QueryScore | null;
-  ms: number;
-  hits: EvalHit[];
+  ms?: number;
+  hits?: EvalHit[];
+  /** Maximum dense similarity on this returned page; zero for an empty/lexical page. */
+  topDenseSim?: number;
+  /** The first returned hit has an FTS or identifier candidate rank. */
+  topLexical?: boolean;
   overview: number | null;
   noAnswer: { falsePositive: boolean; maxRrf: number; maxDense: number } | null;
 }
@@ -29,7 +37,8 @@ export interface QueryResult {
   language: string;
   split: string;
   labels: string;
-  golds: (Gold & { inStore: boolean; rank50: number | null })[];
+  signal?: { k: number; topDenseSim: number; topLexical: boolean };
+  golds?: (Gold & { inStore: boolean; rank50: number | null })[];
   byK: Record<string, EvalPage>;
   dense?: { indexRows: number; exactRows: number; overlap: number; defaultUsesHnsw: boolean };
 }
@@ -111,11 +120,11 @@ export function summarizeGroup(results: QueryResult[], ks = SET_KS) {
           },
           searchMs: {
             p50: percentile(
-              pages.map((p) => p.ms),
+              pages.flatMap((p) => (p.ms === undefined ? [] : [p.ms])),
               50,
             ),
             p95: percentile(
-              pages.map((p) => p.ms),
+              pages.flatMap((p) => (p.ms === undefined ? [] : [p.ms])),
               95,
             ),
           },
@@ -144,13 +153,100 @@ export function summarizeRun(results: QueryResult[], ks = SET_KS) {
     groups: Object.fromEntries(
       Object.entries(resultGroups(results)).map(([name, rows]) => [name, summarizeGroup(rows, ks)]),
     ),
-    missingGolds: results.reduce((n, r) => n + r.golds.filter((g) => !g.inStore).length, 0),
+    answerability: Object.fromEntries(
+      ks.map((k) => [
+        k,
+        results.every((r) => denseSignal(r, k) !== undefined)
+          ? answerabilityReport(results, k)
+          : null,
+      ]),
+    ),
+    missingGolds: results.reduce((n, r) => n + (r.golds ?? []).filter((g) => !g.inStore).length, 0),
     dense: {
       overlap: bootstrapMean(dense.map((d) => d.overlap)),
       indexRows: bootstrapMean(dense.map((d) => d.indexRows)),
       exactRows: bootstrapMean(dense.map((d) => d.exactRows)),
       hnswPlan: dense.filter((d) => d.defaultUsesHnsw).length,
     },
+  };
+}
+
+const denseSignal = (r: QueryResult, k: number) =>
+  r.byK[k]?.topDenseSim ?? (r.signal?.k === k ? r.signal.topDenseSim : undefined);
+const labelIdentity = (s: string) => (/^[a-f0-9]{64}$/.test(s) ? s : sha256(s));
+
+/** Mann–Whitney AUROC, with half credit for ties. Positives include overview. */
+export function answerabilityReport(results: QueryResult[], k: number) {
+  const rows = results.map((r) => {
+    const score = denseSignal(r, k);
+    if (score === undefined || !Number.isFinite(score))
+      throw new Error(`missing/non-finite dense signal: ${r.id} k=${k}`);
+    return { score, positive: r.kind !== 'no-answer', split: r.split };
+  });
+  const tuning = rows
+    .filter((r) => r.split === 'tuning' && r.positive)
+    .map((r) => r.score)
+    .sort((a, b) => b - a);
+  // Highest observed cutoff retaining at least ceil(90% * n) tuning positives.
+  const tau = tuning[Math.ceil(0.9 * tuning.length) - 1] ?? null;
+  const grade = (subset: typeof rows) => {
+    const positives = subset.filter((r) => r.positive);
+    const negatives = subset.filter((r) => !r.positive);
+    const auc = positives.reduce(
+      (sum, p) =>
+        sum +
+        negatives.reduce((n, q) => n + (p.score > q.score ? 1 : p.score === q.score ? 0.5 : 0), 0),
+      0,
+    );
+    return {
+      answerable: positives.length,
+      noAnswer: negatives.length,
+      auroc:
+        positives.length && negatives.length ? auc / (positives.length * negatives.length) : null,
+      retention:
+        tau === null || !positives.length
+          ? null
+          : positives.filter((p) => p.score >= tau).length / positives.length,
+      fpr:
+        tau === null || !negatives.length
+          ? null
+          : negatives.filter((p) => p.score >= tau).length / negatives.length,
+    };
+  };
+  return {
+    tau,
+    targetRetention: 0.9,
+    all: grade(rows),
+    tuning: grade(rows.filter((r) => r.split === 'tuning')),
+    heldOut: grade(rows.filter((r) => r.split === 'held-out')),
+  };
+}
+
+/** Committed baselines keep query records, scores and signals, without runtime dumps. */
+export function compactRun(run: EvalRun): EvalRun {
+  return {
+    metricVersion: run.metricVersion,
+    fixture: run.fixture,
+    results: run.results.map(({ dense: _dense, golds, ...r }) => ({
+      ...r,
+      labels: labelIdentity(r.labels),
+      ...(golds?.some((g) => !g.inStore) ? { golds: golds.filter((g) => !g.inStore) } : {}),
+      signal: r.signal ?? {
+        k: 8,
+        topDenseSim: r.byK[8]!.topDenseSim!,
+        topLexical: r.byK[8]!.topLexical!,
+      },
+      byK: Object.fromEntries(
+        Object.entries(r.byK).map(([k, p]) => [
+          k,
+          {
+            score: p.score,
+            overview: p.overview,
+            noAnswer: p.noAnswer,
+          },
+        ]),
+      ),
+    })),
   };
 }
 
@@ -181,7 +277,11 @@ export function compareRuns(
   const deltas = [...a.values()].map((row) => {
     const next = b.get(row.id)!;
     for (const key of ['query', 'kind', 'language', 'split', 'labels'] as const) {
-      if (row[key] !== next[key]) throw new Error(`query metadata/labels differ: ${row.id}`);
+      if (
+        (key === 'labels' ? labelIdentity(row[key]) : row[key]) !==
+        (key === 'labels' ? labelIdentity(next[key]) : next[key])
+      )
+        throw new Error(`query metadata/labels differ: ${row.id}`);
     }
     const byK = Object.fromEntries(
       ks.map((k) => {
@@ -265,3 +365,20 @@ export function compareRuns(
     groups,
   };
 }
+
+/** Offline summary, recomputed from compact query records. */
+async function main() {
+  const filename = process.argv[2];
+  if (!filename) throw new Error('usage: rag-eval-report.ts run.json');
+  const full = path.resolve(filename);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const manifest = JSON.parse(
+    (await readTextNoFollow(root, `${FIXTURE_DIR}/manifest.json`))!,
+  ) as FixtureManifest;
+  await warnChunkerDrift(root, manifest);
+  const run = JSON.parse(
+    (await readTextNoFollow(path.dirname(full), path.basename(full)))!,
+  ) as EvalRun;
+  process.stdout.write(JSON.stringify(summarizeRun(run.results), null, 2) + '\n');
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

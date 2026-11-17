@@ -330,7 +330,7 @@
     "identifierCandidates": 3,
     "bootstrapSeed": 1729,
     "bootstrapSamples": 2000,
-    "noAnswerDefinition": "A false positive is any returned hit (no abstention threshold). Also record maximum RRF and dense similarity. No-answer queries never enter recall/MRR.",
+    "noAnswerDefinition": "Top denseSim = maximum dense similarity on the returned page, zero if empty/lexical-only; topLexical = first hit has an FTS or identifier rank. AUROC contrasts all answerable (including overview) with no-answer. Tau is the highest observed tuning-positive cutoff retaining at least 90%; accept score >= tau. Apply unchanged to held-out; any-hit FPR is secondary.",
     "overviewDefinition": "Author-judged multi-fact rubric, at least two independent facts. Coverage is the fraction with any supporting evidence anchor in the returned bodies; never single-gold recall.",
     "splitPolicy": "Topic-level split; translations and identifier/paraphrase variants of a topic always share the split. Held-out results are grading only; no tuning in this PR."
   }

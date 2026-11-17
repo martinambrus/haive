@@ -1,0 +1,173 @@
+{
+  "sourceCommit": "b8a2dde4def9b442d85c426ce771c72ae7c8ffee",
+  "anchors": [
+    {
+      "path": "packages/shared/src/rag/identifiers.ts",
+      "anchor": "for (const segment of token.split('.'))",
+      "sha256": "7cae45ed40f3c3a8e7bc2665105ec2ce0f3b27300fde7698eefc7982c9d05bd8",
+      "line": 68,
+      "context": "    if (isIdentifier(token)) out.add(token.toLowerCase());\n    if (!token.includes('.')) continue;\n    for (const segment of token.split('.')) {\n      if (isIdentifier(segment)) out.add(segment.toLowerCase());\n    }"
+    },
+    {
+      "path": "packages/shared/src/rag/identifiers.ts",
+      "anchor": "IDENTIFIER_TSV_SENTINEL = 'haive tsv v3'",
+      "sha256": "7cae45ed40f3c3a8e7bc2665105ec2ce0f3b27300fde7698eefc7982c9d05bd8",
+      "line": 31,
+      "context": "/** Marks a row whose `content_tsv` was built by the identifier-aware trigger. It holds a space, so no\n *  text-search parser emits it as one lexeme and a row's own prose can never stamp it. */\nexport const IDENTIFIER_TSV_SENTINEL = 'haive tsv v3';\n\n/** The single-lexeme tsquery that matches `IDENTIFIER_TSV_SENTINEL` (quoted, so it is not split). */"
+    },
+    {
+      "path": "packages/shared/src/rag/connection.ts",
+      "anchor": "KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning']",
+      "sha256": "5237c6262754397105955269bf40f4953125f6b3496999c8f0b5eb10ad1277b9",
+      "line": 35,
+      "context": " *  They have no counter in `logRagQuery`, so one surfacing in an agent's results\n *  would be an invisible hit. */\nexport const KNOWLEDGE_SOURCE_TYPES = ['kb', 'runbook', 'learning'] as const;\n\n/** The `source_type` of those per-task rows. Declared here rather than in the worker"
+    },
+    {
+      "path": "packages/shared/src/rag/connection.ts",
+      "anchor": "TASK_SOURCE_TYPE = 'task'",
+      "sha256": "5237c6262754397105955269bf40f4953125f6b3496999c8f0b5eb10ad1277b9",
+      "line": 52,
+      "context": " *  invariant is that these rows are not retrievable content, and an allow-list would\n *  silently drop any source type added later. */\nexport const TASK_SOURCE_TYPE = 'task';\n\n/** Resolve the embedding endpoint from a stored tooling object, re-deriving it when the"
+    },
+    {
+      "path": "packages/shared/src/rag/connection.ts",
+      "anchor": ".replace(/[^a-z0-9]/g, '_')",
+      "sha256": "5237c6262754397105955269bf40f4953125f6b3496999c8f0b5eb10ad1277b9",
+      "line": 146,
+      "context": "  return raw\n    .toLowerCase()\n    .replace(/[^a-z0-9]/g, '_')\n    .replace(/_+/g, '_')\n    .replace(/^_|_$/g, '')"
+    },
+    {
+      "path": "packages/shared/src/rag/embed.ts",
+      "anchor": "if (vec.length === opts.dimensions) return vec;",
+      "sha256": "d1a5778fe6f5ccbac601a3df85b5b3e9d2d8e901cdc99c635232548358b121ed",
+      "line": 322,
+      "context": "      });\n      if (vec && vec.length > 0) {\n        if (vec.length === opts.dimensions) return vec;\n        log.warn(\n          { width: vec.length, dimensions: opts.dimensions },"
+    },
+    {
+      "path": "packages/shared/src/rag/embed.ts",
+      "anchor": "OLLAMA_QUERY_TIMEOUT_MS = 20_000",
+      "sha256": "d1a5778fe6f5ccbac601a3df85b5b3e9d2d8e901cdc99c635232548358b121ed",
+      "line": 20,
+      "context": " *  CPU-only 8-core host — so it must never inherit the ingest budget: an agent\n *  waiting on rag_search is waiting on a tool call, not on a background job. */\nexport const OLLAMA_QUERY_TIMEOUT_MS = 20_000;\nexport const EMBED_BATCH_SIZE = 8;\n/** Sent on every embed so Ollama keeps the model resident between batches (and"
+    },
+    {
+      "path": "packages/shared/src/rag/embed.ts",
+      "anchor": "EMBED_BATCH_SIZE = 8",
+      "sha256": "d1a5778fe6f5ccbac601a3df85b5b3e9d2d8e901cdc99c635232548358b121ed",
+      "line": 21,
+      "context": " *  waiting on rag_search is waiting on a tool call, not on a background job. */\nexport const OLLAMA_QUERY_TIMEOUT_MS = 20_000;\nexport const EMBED_BATCH_SIZE = 8;\n/** Sent on every embed so Ollama keeps the model resident between batches (and\n *  after warmup) instead of unloading it (default 5m) and reloading cold. */"
+    },
+    {
+      "path": "packages/shared/src/rag/embed.ts",
+      "anchor": "values.map((v) => v.toFixed(6))",
+      "sha256": "d1a5778fe6f5ccbac601a3df85b5b3e9d2d8e901cdc99c635232548358b121ed",
+      "line": 260,
+      "context": "\nexport function vectorLiteral(values: number[]): string {\n  return `[${values.map((v) => v.toFixed(6)).join(',')}]`;\n}\n"
+    },
+    {
+      "path": "packages/shared/src/rag/embed.ts",
+      "anchor": "if (a.length === 0 || a.length !== b.length) return 0;",
+      "sha256": "d1a5778fe6f5ccbac601a3df85b5b3e9d2d8e901cdc99c635232548358b121ed",
+      "line": 267,
+      "context": " *  treat 0 as \"no signal\" so a degenerate input can never read as a false match. */\nexport function cosineSimilarity(a: number[], b: number[]): number {\n  if (a.length === 0 || a.length !== b.length) return 0;\n  let dot = 0;\n  let na = 0;"
+    },
+    {
+      "path": "packages/shared/src/rag/search.ts",
+      "anchor": "Math.min(knowledgeReserve, Math.floor(topK / 3))",
+      "sha256": "bb70c04002616ba3007a99c24c6159b616a0005d38af2cc8d8fae28df7295dc1",
+      "line": 190,
+      "context": "  // A small page must not be handed over to the reserve: topK reaches this route\n  // as low as 4, where a flat 2 would be half of it.\n  const reserve = Math.min(knowledgeReserve, Math.floor(topK / 3));\n  if (reserve <= 0) return byRrf.slice(0, topK);\n"
+    },
+    {
+      "path": "packages/shared/src/rag/search.ts",
+      "anchor": "Math.max(...codeSims) * knowledgeReserveRatio",
+      "sha256": "bb70c04002616ba3007a99c24c6159b616a0005d38af2cc8d8fae28df7295dc1",
+      "line": 203,
+      "context": "\n  const held = new Set(base.map(hitKey));\n  const floor = Math.max(...codeSims) * knowledgeReserveRatio;\n  const promoted = byRrf\n    .filter((h) => isKnowledgeHit(h) && !held.has(hitKey(h)) && h.denseSim >= floor)"
+    },
+    {
+      "path": "packages/shared/src/rag/search.ts",
+      "anchor": "identifierCandidates: 3",
+      "sha256": "bb70c04002616ba3007a99c24c6159b616a0005d38af2cc8d8fae28df7295dc1",
+      "line": 112,
+      "context": "  knowledgeReserveRatio: 0.75,\n  identifierSearch: true,\n  identifierCandidates: 3,\n};\n"
+    },
+    {
+      "path": "packages/shared/src/rag/search.ts",
+      "anchor": "ORDER BY defines DESC, idf_score DESC, id",
+      "sha256": "bb70c04002616ba3007a99c24c6159b616a0005d38af2cc8d8fae28df7295dc1",
+      "line": 438,
+      "context": "): string {\n  return `ident AS (\n        SELECT id, row_number() OVER (ORDER BY defines DESC, idf_score DESC, id) AS i_rank\n        FROM (\n          SELECT e.id,"
+    },
+    {
+      "path": "packages/shared/src/rag/search.ts",
+      "anchor": "['hnsw.ef_search', '200']",
+      "sha256": "bb70c04002616ba3007a99c24c6159b616a0005d38af2cc8d8fae28df7295dc1",
+      "line": 460,
+      "context": "\nconst REPO_DENSE_SCAN: DenseScanSettings = [\n  ['hnsw.ef_search', '200'],\n  ['cpu_operator_cost', '0.1'],\n  ['hnsw.iterative_scan', 'relaxed_order'],"
+    },
+    {
+      "path": "packages/shared/src/rag/lexical-config.ts",
+      "anchor": "UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501']",
+      "sha256": "c5a4384a3c85210c7b6bc4017ad14c0641fb0517c42b7da839f80f04b789bdd6",
+      "line": 32,
+      "context": "// missing extension files (58P01), or insufficient extension/dictionary privileges (42501).\n// Timeouts, cancellation and catalog races say nothing about unaccent availability.\nconst UNACCENT_UNAVAILABLE_CODES = ['0A000', '58P01', '42501'] as const;\n\nexport type RagSchemaStep = ("
+    },
+    {
+      "path": "packages/shared/src/rag/sync-lock.ts",
+      "anchor": "LOCK_TTL_MS = 120_000",
+      "sha256": "5e2e4ac89ac2012422cfdb1907d1181a1d55f7a47b5cb9dc690018023d89833b",
+      "line": 8,
+      "context": "\n/** Backstop for a holder whose process died: the key frees this long after its last beat. */\nconst LOCK_TTL_MS = 120_000;\nconst HEARTBEAT_MS = 30_000;\nconst POLL_MS = 5_000;"
+    },
+    {
+      "path": "packages/shared/src/rag/sync-lock.ts",
+      "anchor": "lock.assertHeld();",
+      "sha256": "5e2e4ac89ac2012422cfdb1907d1181a1d55f7a47b5cb9dc690018023d89833b",
+      "line": 222,
+      "context": "      // postgres.js's sql and tx are callable: a tagged-template statement goes through apply.\n      apply(obj, thisArg, args) {\n        lock.assertHeld();\n        return Reflect.apply(obj as (...a: unknown[]) => unknown, thisArg, args);\n      },"
+    },
+    {
+      "path": "packages/shared/src/crypto/index.ts",
+      "anchor": "ALGORITHM = 'aes-256-gcm'",
+      "sha256": "efc00f3fc1a4b369c5654ad371e20d412972ca5a846215160c5c4aa004d908b0",
+      "line": 3,
+      "context": "import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';\n\nconst ALGORITHM = 'aes-256-gcm';\nconst IV_LENGTH = 16;\nconst KEY_LENGTH = 32;"
+    },
+    {
+      "path": "packages/shared/src/crypto/index.ts",
+      "anchor": "createHmac('sha256', pepper).update(normalized)",
+      "sha256": "efc00f3fc1a4b369c5654ad371e20d412972ca5a846215160c5c4aa004d908b0",
+      "line": 79,
+      "context": "export function computeEmailBlindIndex(email: string, pepper: string): string {\n  const normalized = email.toLowerCase().trim();\n  return createHmac('sha256', pepper).update(normalized).digest('hex');\n}\n"
+    },
+    {
+      "path": "packages/shared/src/crypto/index.ts",
+      "anchor": "const encryptedDek = encryptDek(dek, kekHex);",
+      "sha256": "efc00f3fc1a4b369c5654ad371e20d412972ca5a846215160c5c4aa004d908b0",
+      "line": 106,
+      "context": "  const dek = generateDek();\n  const encryptedValue = encrypt(plaintext, dek);\n  const encryptedDek = encryptDek(dek, kekHex);\n  return { encryptedValue, encryptedDek };\n}"
+    },
+    {
+      "path": "packages/shared/src/stats/tokens.ts",
+      "anchor": "Math.max(0, input - cacheReadTokens)",
+      "sha256": "3207104627e48137093c08b2f404489bad6dcb69a5dc636d120f3c4e81aecce1",
+      "line": 77,
+      "context": "  // a cross-provider total.\n  const freshInputTokens = inputIncludesCache(raw.provider)\n    ? Math.max(0, input - cacheReadTokens)\n    : input;\n"
+    },
+    {
+      "path": "packages/shared/src/utils/bounded-concurrency.ts",
+      "anchor": "const max = Math.max(1, Math.floor(limit));",
+      "sha256": "cf07a671e48a87d8fc5fb63aca75822d4e8f752f00aae33d7329b43e1244b523",
+      "line": 20,
+      "context": " */\nexport function createBoundedConcurrency(limit: number): BoundedConcurrency {\n  const max = Math.max(1, Math.floor(limit));\n  let active = 0;\n  const queue: Array<() => void> = [];"
+    },
+    {
+      "path": "packages/shared/src/utils/collapse-line.ts",
+      "anchor": "(s ?? '').replace(LINE_WHITESPACE, ' ').trim()",
+      "sha256": "60dd18b88e3c05849567f01181666ebc53d209e78cc448996124974b5b484540",
+      "line": 9,
+      "context": " *  would be the only lossy part — a task title, `varchar(512)`. */\nexport const collapseToLine = (s: string | null | undefined): string =>\n  (s ?? '').replace(LINE_WHITESPACE, ' ').trim();\n"
+    }
+  ]
+}
