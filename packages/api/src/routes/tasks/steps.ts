@@ -1576,10 +1576,14 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         const guarded =
           task.executionContract != null &&
           parseExecutionContract(task.executionContract).guardedSpans.length > 0;
+        // This one decision controls both taking the downstream batch and treating
+        // it as held for the retained-row reset below.
+        const downstreamBatchHeld = downstreamToReset.length > 0 || step.status === 'done';
         const extra = guarded
           ? await resetRowsForRerun(tx, id, downstreamToReset, now, {
               executionContract: task.executionContract,
-              ...(step.status === 'done' ? { invalidateGuardsAfter: step } : {}),
+              // The anchor forces the batch even for an empty reset set.
+              ...(downstreamBatchHeld ? { invalidateGuardsAfter: step } : {}),
             })
           : await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
               preserveGuards: true,
@@ -1591,7 +1595,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           await resetRowsForRerun(tx, id, leftActive, now, {
             preserveGuards: true,
             executionContract: task.executionContract,
-            rowsHeld: downstreamToReset.length > 0 || step.status === 'done',
+            rowsHeld: downstreamBatchHeld,
           });
         }
         const [held] = await tx

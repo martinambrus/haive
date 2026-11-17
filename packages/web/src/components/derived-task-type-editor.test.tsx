@@ -783,3 +783,47 @@ describe('derived editor', () => {
     );
   });
 });
+
+it.each(['preview', 'save'] as const)(
+  'renders a wrapped execution-contract refusal once per path in server %s validation',
+  (source) => {
+    const reason = 'invalid-execution-contract: unknown-predicate: module.missing.check';
+    const issues = fixture.candidates.slice(0, 2).flatMap((candidate) => [
+      {
+        kind: 'invalid-composition',
+        executionPath: candidate.executionPath,
+        issue: { kind: 'invalid-execution-contract', reason },
+      },
+      { kind: 'invalid-execution-contract', executionPath: candidate.executionPath, reason },
+    ]);
+    render(
+      <DerivedTaskTypeChanges
+        changes={[]}
+        evaluation={evaluateDerivedEditor({
+          catalog: fixture.catalog,
+          baseSlug: 'workflow',
+          changes: [],
+          typeSlug: 'mine',
+          requiresRepository: true,
+          promptSteps: {},
+          loopLimits: {},
+          preAnswerDefaults: {},
+        })}
+        diagnostics={source === 'preview' ? { ...preview, issues } : null}
+        serverIssues={source === 'save' ? issues : []}
+        error={null}
+        disabled={false}
+        editable={false}
+        revision={0}
+        entries={new Map(fixture.catalog.steps.map((s) => [s.stepId, s.entry]))}
+        requiresRepository={true}
+        onChange={() => {}}
+      />,
+    );
+    const section = screen.getByRole('region', {
+      name: source === 'preview' ? 'Server preview' : 'Server save validation',
+    });
+    expect(within(section).getAllByText(reason)).toHaveLength(2);
+    expect(section.textContent).not.toContain('This path needs attention');
+  },
+);

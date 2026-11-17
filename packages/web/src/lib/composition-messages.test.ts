@@ -669,3 +669,11 @@ it('keeps ordered-need issues from the server and explains how to repair the ord
     'Needs review after verification: Verify before review.',
   );
 });
+
+it('shows the execution-contract refusal reason without suggesting a token provider', () => {
+  const reason = 'invalid-execution-contract: unknown-predicate: module.missing.check';
+  expect(describeIssue({ kind: 'invalid-execution-contract', reason }, ctx([]))).toEqual({
+    message: reason,
+    providedBy: [],
+  });
+});
