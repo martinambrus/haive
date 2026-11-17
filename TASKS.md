@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T697 · Change-size projection drops escape sequences inside template literals
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1242 · priority: P4
+
+Every JS/TS `template_string` is treated as a composite literal, so its text is discarded, and its named `escape_sequence` children are not counted by the traversal. Changing `` `\n` `` to `` `\t` ``, or an escape inside an interpolated template, records zero exact churn, against the literal-replacement contract in `docs/architecture/review-scope.md`. The measurement is report-only. Fix when touched: emit the escape sequences (or the static template text with interpolations removed) as literal units, with a control per case.
+
 ### T696 · Grok's tool exposure measures 148.83% of its prompt exposure in the read-exposure replay
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: investigate · found: read-exposure tally (#1241) replay · priority: P4
