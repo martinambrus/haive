@@ -1,3 +1,7 @@
+import {
+  assertEnvironmentLspInstallContract,
+  type LspInstallContract,
+} from '../../../sandbox/lsp-install-contract.js';
 import { assertDependencyTokens } from './_dependency-tokens.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -71,6 +75,7 @@ export const generateDockerfileStep: StepDefinition<
     }
     const declaredDeps = (row.declaredDeps ?? {}) as Record<string, unknown>;
     assertDependencyTokens(declaredDeps);
+    assertEnvironmentLspInstallContract(declaredDeps);
     // Reuse a previously-saved Dockerfile, EXCEPT when it still targets a PHP
     // version no apt repo can install (the pre-fix php<5.6 output). Such a
     // Dockerfile can never build, so re-render from declared deps — which now
@@ -211,7 +216,7 @@ type PackageManager =
   | 'gomod'
   | 'cargo';
 
-interface DeclaredDepsShape {
+interface DeclaredDepsShape extends LspInstallContract {
   runtimes?: string[];
   versions?: {
     node?: string | null;
@@ -361,6 +366,7 @@ function normalizeGoVersion(raw: string): string | null {
 export function renderDockerfile(baseImage: string, rawDeps: Record<string, unknown>): string {
   const deps = rawDeps as DeclaredDepsShape;
   assertDependencyTokens(deps);
+  assertEnvironmentLspInstallContract(deps);
   // Docker references need separators a version token cannot contain. Check every
   // name/tag/digest component with the same token policy before writing FROM.
   for (const component of baseImage.split(/[/:@]/))

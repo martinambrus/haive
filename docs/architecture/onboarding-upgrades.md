@@ -67,6 +67,25 @@ the banner offers the newer.
 
 Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from LLM discovery (06_5) without a bundle source, `.haive-data/knowledge_base/`, `.claude/mcp_settings.json`, `.claude/onboarding-review.md`. **Skills and agents installed from custom bundles are tracked and upgradable** (each bundle item lands as an `onboarding_artifacts` row with `templateId = "custom.<bundleId>.<itemId>"`; the `bundle_resync` step before `01-upgrade-plan` refreshes git bundles and the upgrade-plan/apply path treats `custom.*` rows the same as Haive templates). LLM-generated skills and KB content are refreshed by the `/workflow` code-change phase. Project knowledge lives under `.haive-data/` — `knowledge_base/` and `learnings/` — not under a vendor dir, because Haive is model-agnostic; the canonical paths are `KB_DIR`/`LEARNINGS_DIR` in `packages/shared/src/knowledge-paths.ts`, and `stripManagedKnowledgeGlobs` makes them impossible to scope-exclude from the folder pickers (06_7/09_7, the api exclusions endpoint, and the repos-page editor). `mcp_settings.json` is user-owned — created on first onboarding, never rewritten.
 
+## LSP installation metadata is separate from artifact versions
+
+The optional `env_templates.declared_deps.lspInstallContractVersion` describes who installs servers:
+absent or 1 means the saved environment Dockerfile owns installation; 2 is reserved for future
+composed-image installation. No production writer emits 2 yet. The generator (saved-body reuse
+included) and environment smoke planner refuse it and unknown versions until both are supported.
+Explicit 1 leaves the Dockerfile and checks byte identical to unversioned inputs, though adding
+metadata deliberately would change the template hash because that hash includes declaredDeps.
+The field adds no SQL column/migration. Plugin artifacts and their manifest versions are unchanged.
+The later cutover ships cache/peek contract consumers before evidence/readiness and writes new
+contracts last. 01 must carry forward an existing contract, as it carries savedWebserver, before
+comparing rebuilt declaredDeps; 02 suppression comes last. The planned composed evidence lives
+in the existing task_steps.output.composedLsp JSONB of 04 steps, with immutable image/provider/
+plugin identities and per-server reports, so that design also adds no SQL column/migration.
+A Retry nulls that output, so it is readiness evidence only; the retained image reference lives
+elsewhere.
+A manifest bump alone cannot migrate a stored/custom Dockerfile; the later cutover must keep the
+legacy installer until replacement images exist and are verified. See [Sandbox](sandbox.md).
+
 ## Upgrades and rollbacks
 
 **An upgrade also restores the rules delivery 07 set up outside the manifest.** `02-upgrade-apply`

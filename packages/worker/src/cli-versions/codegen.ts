@@ -13,7 +13,7 @@ const ENSURE_NPM_LINE =
   'rm -rf /var/lib/apt/lists/*; ' +
   'fi';
 
-const ENSURE_NODE_USER_LINE =
+export const ENSURE_NODE_USER_LINE =
   'RUN if ! id -u node >/dev/null 2>&1; then ' +
   'if id -u ubuntu >/dev/null 2>&1; then ' +
   'usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; ' +

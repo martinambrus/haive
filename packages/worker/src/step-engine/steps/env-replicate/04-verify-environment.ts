@@ -1,3 +1,7 @@
+import {
+  assertEnvironmentLspInstallContract,
+  type LspInstallContract,
+} from '../../../sandbox/lsp-install-contract.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
@@ -36,7 +40,7 @@ export interface VerifyEnvironmentApply {
   reports: VerifyEnvironmentReport[];
 }
 
-interface DeclaredDepsShape {
+interface DeclaredDepsShape extends LspInstallContract {
   runtimes?: string[];
   lspServers?: string[];
   database?: { kind?: string };
@@ -44,6 +48,7 @@ interface DeclaredDepsShape {
 }
 
 export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
+  assertEnvironmentLspInstallContract(deps);
   const checks: SmokeCheck[] = [];
   const runtimes = deps.runtimes ?? [];
   if (runtimes.includes('node')) {
