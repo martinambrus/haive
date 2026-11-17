@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T698 · Change-size measurement edge cases: a git spawn ENOENT read as a deleted file, an invalid nested-repo key freezing the measurement, untested real abort path
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1242 · priority: P4
+
+Three narrow items in `packages/worker/src/step-engine/steps/workflow/_change-size.ts`, none reachable in normal runs: (1) the per-file catch treats any `ENOENT` as an absent head file, but the same try also runs `ls-tree`/`cat-file`, so a git spawn ENOENT would count the file as null instead of making the measurement unknown (take the ENOENT branch only for `readFileNoFollow`); (2) `Object.keys(set.nestedRepositories).map(toSafeRel)` sits outside the per-item guard, so one invalid nested key freezes the whole measurement as a non-retryable unknown (normalise it with the files or skip it); (3) no test covers `gitExec` rejecting with a plain error while the signal is aborted (the code handles it through `ctx.throwIfCancelled()`).
+
 ### T697 · Change-size projection drops escape sequences inside template literals
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1242 · priority: P4
