@@ -822,8 +822,8 @@ metadata, label SHA-256 and k=8 signals remain; duplicate golds, hit bodies, sum
 and per-query dense-pool dumps are omitted (lost golds alone are retained to preserve missing counts).
 Structured `settings` also survives compaction: the embedding model and dimensions used by the
 run, page sizes (`ks`), whether the search is repository-scoped, and effective search defaults,
-arm (`search.lexicalOnly`) and ranking knobs. Lexical-only runs record the configured embedder
-but make no query embedding call. Both committed compact baselines had this metadata restored
+arm (`search.lexicalOnly`) and ranking knobs. Forced lexical-only runs (`RAG_LEXICAL_ONLY=1`) record the
+configured embedder but make no query embedding call. Both committed compact baselines had this metadata restored
 from their original full-run settings, page keys and recorded model/store/runtime provenance;
 query records, scores and fingerprint did not change and no new measurement was made.
 Dense-pool aggregate results remain in provenance; full run output stays in external evidence.
