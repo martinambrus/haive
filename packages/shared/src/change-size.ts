@@ -298,7 +298,8 @@ const INTERPOLATIONS = new Set([
   'member_access_expression',
   'subscript_expression',
 ]);
-const OPERATORS = /^(?:[-+*/%=<>!&|^~?]+|and|or|not|in|is|not in|is not|instanceof)$/;
+const OPERATORS =
+  /^(?:[-+*/%=<>!&|^~?]+|and|or|not|in|is|not in|is not|instanceof|typeof|void|delete)$/;
 function project(tree: Tree, maxUnits: number, language: LanguageName): Unit[] | null {
   if (tree.rootNode.hasError) return null;
   const units: Unit[] = [];

@@ -106,6 +106,12 @@ describe('syntax change size', () => {
       file('a.py', 'if x:\n    f()\ng()\n', 'if x:\n    f()\n    g()\n').total.churn,
     ).toBeGreaterThan(0);
     expect(file('a.py', 'x = a < b\n', 'x = a > b\n').total.structuralChurn).toBe(2);
+    for (const [from, to] of [
+      ['typeof', 'void'],
+      ['void', 'delete'],
+      ['delete', 'typeof'],
+    ])
+      expect(file('a.ts', `x = ${from} v.k;`, `x = ${to} v.k;`).total.structuralChurn).toBe(2);
   });
   it('uses minimum edits, including repeated units, and flags an over-budget approximation', () => {
     expect(file('a.py', 'a()\nb()\na()\n', 'a()\na()\n').total).toMatchObject({
