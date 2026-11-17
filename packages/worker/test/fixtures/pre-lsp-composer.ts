@@ -1,4 +1,6 @@
-// Frozen pre-LSP assembly from 7164a86ca; shared RTK and provider codegen stay live.
+// Frozen pre-LSP assembly AND buildHaiveRuntimeToolsLayer from 7164a86ca.
+// Shared RTK constants and provider codegen stay live; intentional runtime-tools edits
+// require updating this fixture too, or the no-selection identity control will fail.
 import { createHash } from 'node:crypto';
 import {
   assertVersionToken,

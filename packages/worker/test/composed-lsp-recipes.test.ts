@@ -48,7 +48,9 @@ describe('additional composed LSP recipes', () => {
     expect(compose('gopls', '0.21.1').tag).not.toBe(compose('gopls', '0.21.0').tag);
     expect(body).toContain('GOTOOLCHAIN=local GOBIN=/usr/local/bin go install');
     expect(body).toContain('Go >=1.21');
-    expect(body).toContain("su -s /bin/sh node -c 'go version && gopls version'");
+    expect(body).toContain(
+      'su -s /bin/sh node -c \'PATH="$1"; export PATH; go version && gopls version\' haive-lsp "$PATH"',
+    );
   });
 
   it('installs rust-analyzer and rust-src with a private stable toolchain and a public wrapper', () => {
@@ -56,22 +58,26 @@ describe('additional composed LSP recipes', () => {
     expect(body).toContain('RUSTUP_HOME=/opt/haive-lsp/rust/rustup');
     expect(body).toContain('CARGO_HOME=/opt/haive-lsp/rust/cargo');
     expect(body).toContain('--component rust-analyzer,rust-src');
-    expect(body).toContain('RUSTUP_TOOLCHAIN=stable');
+    expect(body).not.toContain('export RUSTUP_HOME');
     expect(body).toContain('chmod -R a+rX /opt/haive-lsp/rust');
-    expect(body).toContain("su -s /bin/sh node -c 'rust-analyzer --version'");
+    expect(body).toContain(
+      'su -s /bin/sh node -c \'PATH="$1"; export PATH; rust-analyzer --version\' haive-lsp "$PATH"',
+    );
     expect(body).not.toContain('/root/.cargo');
   });
 
   it('installs Solargraph with isolated gems, a sandbox-user launcher, and strict Ruby prerequisites', () => {
     const body = compose('solargraph', '0.57.0').dockerfileBody;
-    expect(body).toContain('Ruby >=3.1');
+    expect(body).toContain('Ruby >=3.0');
     expect(body).toContain('rubyhdrdir');
     expect(body).toContain('command -v make');
     expect(body).toContain('command -v cc');
     expect(body).toContain('gem install solargraph --version 0.57.0');
     expect(body).toContain('--install-dir /opt/haive-lsp/solargraph');
     expect(body).toContain('GEM_PATH=/opt/haive-lsp/solargraph');
-    expect(body).toContain("su -s /bin/sh node -c 'solargraph --version'");
+    expect(body).toContain(
+      'su -s /bin/sh node -c \'PATH="$1"; export PATH; solargraph --version\' haive-lsp "$PATH"',
+    );
     expect(compose('solargraph', '0.57.1').tag).not.toBe(compose('solargraph', '0.57.0').tag);
   });
 
@@ -82,24 +88,14 @@ describe('additional composed LSP recipes', () => {
     expect(body).toContain('jdt-language-server-latest.tar.gz');
     expect(body).toContain('exec python3 /opt/haive-lsp/jdtls/bin/jdtls');
     expect(body).toContain('chmod -R a+rX /opt/haive-lsp/jdtls');
-    expect(body).toContain("su -s /bin/sh node -c 'jdtls --help'");
+    expect(body).toContain(
+      'su -s /bin/sh node -c \'PATH="$1"; export PATH; jdtls --help\' haive-lsp "$PATH"',
+    );
     expect(body).not.toContain('jdtls --version');
   });
 
-  it.each(['rust-analyzer', 'jdtls'])('refuses a pin it cannot honor for %s', (server) => {
-    expect(() => compose(server, '1.2.3')).toThrow(/version pins are not supported/i);
-    expect(() => compose(server, '1.2.3\nRUN id')).toThrow(/version token/i);
-  });
-
-  it.each(['gopls', 'solargraph'])(
-    'refuses registry-inappropriate but shell-safe pins for %s',
-    (server) => {
-      expect(() => compose(server, 'next')).toThrow(/exact.*version/i);
-    },
-  );
-
   it.each(['gopls', 'rust-analyzer', 'solargraph', 'jdtls'])(
-    'fails explicitly before installation when %s prerequisites are missing',
+    'skips visibly before installation when %s prerequisites are missing',
     (server) => {
       const body = compose(server).dockerfileBody;
       const result = spawnSync('/bin/sh', ['-c', recipeRun(body, `haive-lsp-recipe: ${server}`)], {
@@ -107,9 +103,9 @@ describe('additional composed LSP recipes', () => {
         encoding: 'utf8',
         timeout: 1000,
       });
-      expect(result.status).not.toBe(0);
+      expect(result.status).toBe(0);
       expect(result.error).toBeUndefined();
-      expect(result.stderr).toContain(`${server}:`);
+      expect(result.stderr).toContain(`# ${server} SKIPPED:`);
       expect(result.stderr).toContain('required');
     },
   );
@@ -134,7 +130,9 @@ describe('rendered shell and launcher behavior', () => {
       const home = join(dir, 'jdk');
       mkdirSync(join(home, 'bin'), { recursive: true });
       symlinkSync('/usr/bin/python3', join(dir, 'python3'));
-      writeFileSync(join(dir, 'su'), '#!/bin/sh\nexec /bin/sh -c "$5"\n', { mode: 0o755 });
+      writeFileSync(join(dir, 'su'), '#!/bin/sh\nexec /bin/sh -c "$5" "$6" "$7"\n', {
+        mode: 0o755,
+      });
       writeFileSync(
         join(home, 'bin', 'java'),
         `#!/bin/sh\necho 'openjdk version "${major}.0.1"' >&2\n`,
@@ -149,7 +147,7 @@ describe('rendered shell and launcher behavior', () => {
           timeout: 1000,
         },
       );
-      expect(result.status).not.toBe(0);
+      expect(result.status).toBe(0);
       expect(result.error).toBeUndefined();
       // A compatible Java reaches the next missing prerequisite; no download or host write runs.
       expect(result.stderr).toContain(major < 25 ? 'Java >=25 is required' : 'curl is required');

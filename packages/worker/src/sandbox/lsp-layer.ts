@@ -1,4 +1,5 @@
 import { assertVersionToken } from '@haive/shared';
+import { ENSURE_NODE_USER_LINE } from '../cli-versions/codegen.js';
 import { shellQuote } from './shell-quote.js';
 
 /** Optional composed-image recipes. Deliberately not activated by the production cache yet:
@@ -54,18 +55,14 @@ export function normalizeLspSelection(servers: unknown, versions?: unknown): Sel
   for (const [key, value] of Object.entries(versions ?? {})) {
     const server = ALIASES.get(key);
     if (!server || !selected.has(server)) continue;
+    // Legacy and the Tooling UI do not pin these distributions. Ignore even stale
+    // unsafe values: they enter neither shell text nor cache identity.
+    if (server === 'rust-analyzer' || server === 'jdtls') continue;
     if (value === null || value === undefined || value === '') continue;
     assertVersionToken(value, `LSP ${server} version (edit the repository Tooling settings)`);
-    if (server === 'rust-analyzer' || server === 'jdtls') {
-      throw new Error(`${server}: version pins are not supported; clear the pin in Tooling`);
-    }
+    // Match legacy's safe-token domain; registry availability is an install-time
+    // concern. Canonicalize the optional Go release prefix only.
     const pin = server === 'gopls' ? value.replace(/^v/, '') : value;
-    if (
-      (server === 'gopls' || server === 'solargraph') &&
-      !/^[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9.-]+)?$/.test(pin)
-    ) {
-      throw new Error(`${server}: an exact release version is required`);
-    }
     const previous = pins.get(server);
     if (previous && previous !== pin) throw new Error(`Conflicting LSP versions for ${server}`);
     pins.set(server, pin);
@@ -84,8 +81,8 @@ const RECIPES: Record<
   pyright: { package: 'pyright', binary: 'pyright-langserver', extras: '' },
 };
 
-/** Validate once before rendering; all package/binary names are Haive-owned. Runtime
- * checks fail the build explicitly instead of claiming an unusable server installed. */
+/** Validate once before rendering; all package/binary names are Haive-owned. Missing
+ * native prerequisites skip visibly; a skipped server is not installation evidence. */
 export function buildLspLayer(servers: unknown, versions?: unknown): string {
   const selection = normalizeLspSelection(servers, versions);
   if (selection.length === 0) return '';
@@ -111,6 +108,11 @@ export function buildLspLayer(servers: unknown, versions?: unknown): string {
     '    node -e \'if (Number(process.versions.node.split(".")[0]) < 20) { console.error("LSP layer: Node.js >=20 is required"); process.exit(1); }\'; \\',
     '    npm --version',
   ];
+  // Step 02 bases are Ubuntu images without node. Provider codegen also ensures
+  // the account later; reuse its idempotent line before any native launcher check.
+  if (selection.some(({ server }) => !Object.hasOwn(RECIPES, server))) {
+    lines.push(ENSURE_NODE_USER_LINE);
+  }
   for (const { server, version } of selection) {
     if (
       server === 'gopls' ||
@@ -136,7 +138,11 @@ function run(commands: string[]): string {
 }
 
 function requireTool(binary: string, message: string): string {
-  return `command -v ${binary} >/dev/null 2>&1 || { echo ${shellQuote(message)} >&2; exit 1; };`;
+  return `command -v ${binary} >/dev/null 2>&1 || ${skip(message)}`;
+}
+
+function skip(message: string): string {
+  return `{ echo ${shellQuote(`# ${message.replace(':', ' SKIPPED:')}`)} >&2; exit 0; };`;
 }
 
 function launcher(binary: string, script: string[]): string {
@@ -151,7 +157,10 @@ function buildNativeRecipe(
   server: 'gopls' | 'rust-analyzer' | 'solargraph' | 'jdtls',
   version: string | null,
 ): string {
-  const asNode = (command: string) => `su -s /bin/sh node -c ${shellQuote(command)};`;
+  // su may reset PATH. Pass the image PATH as an argument, never interpolate its
+  // contents into shell source; keep su's sandbox-user HOME/default environment.
+  const asNode = (command: string) =>
+    `su -s /bin/sh node -c ${shellQuote(`PATH="$1"; export PATH; ${command}`)} haive-lsp "$PATH"`;
   const requireSu = requireTool(
     'su',
     `${server}: su and the sandbox node user are required for launcher verification`,
@@ -163,12 +172,12 @@ function buildNativeRecipe(
         'go_version="$(GOTOOLCHAIN=local go env GOVERSION)";',
         'go_major="$(printf \'%s\' "$go_version" | sed -n \'s/^go\\([0-9]*\\)\\..*/\\1/p\')";',
         'go_minor="$(printf \'%s\' "$go_version" | sed -n \'s/^go[0-9]*\\.\\([0-9]*\\).*/\\1/p\')";',
-        '[ "${go_major:-0}" -gt 1 ] || { [ "${go_major:-0}" -eq 1 ] && [ "${go_minor:-0}" -ge 21 ]; } || { echo "gopls: Go >=1.21 is required in the base image" >&2; exit 1; };',
+        `[ "\${go_major:-0}" -gt 1 ] || { [ "\${go_major:-0}" -eq 1 ] && [ "\${go_minor:-0}" -ge 21 ]; } || ${skip('gopls: Go >=1.21 is required in the base image')}`,
         requireSu,
-        asNode('GOTOOLCHAIN=local go version'),
+        `${asNode('GOTOOLCHAIN=local go version')} || ${skip('gopls: the sandbox user needs Go on the image PATH')}`,
         `GOTOOLCHAIN=local GOBIN=/usr/local/bin go install golang.org/x/tools/gopls@${version ? `v${version}` : 'latest'} || { echo 'gopls: selected release requires a compatible Go toolchain in the base image; update Go or pin an older gopls in Tooling' >&2; exit 1; };`,
         'chmod 0755 /usr/local/bin/gopls;',
-        asNode('go version && gopls version'),
+        `${asNode('go version && gopls version')};`,
       ]);
     case 'rust-analyzer':
       return run([
@@ -184,27 +193,32 @@ function buildNativeRecipe(
         'lsp_rust_bin="$(RUSTUP_HOME=/opt/haive-lsp/rust/rustup /opt/haive-lsp/rust/cargo/bin/rustup which --toolchain stable rust-analyzer)";',
         'lsp_rust_bin="${lsp_rust_bin%/*}";',
         // Direct toolchain binaries avoid an unprivileged rustup proxy trying to update a root-owned toolchain.
-        `printf '%s\\n' '#!/bin/sh' 'export RUSTUP_HOME=/opt/haive-lsp/rust/rustup CARGO_HOME=/opt/haive-lsp/rust/cargo RUSTUP_TOOLCHAIN=stable' "export PATH=\\\"$lsp_rust_bin:\\$PATH\\\"" "exec \\\"$lsp_rust_bin/rust-analyzer\\\" \\\"\\$@\\\"" > /usr/local/bin/rust-analyzer;`,
+        // Direct rustc/cargo infer their sysroot from their own toolchain location.
+        // No rustup proxies run, so no rustup context is needed; Cargo keeps its
+        // writable user cache (or caller-supplied CARGO_HOME).
+        `printf '%s\\n' '#!/bin/sh' "export PATH=\\\"$lsp_rust_bin:\\$PATH\\\"" "exec \\\"$lsp_rust_bin/rust-analyzer\\\" \\\"\\$@\\\"" > /usr/local/bin/rust-analyzer;`,
         'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/rust; chmod 0755 /usr/local/bin/rust-analyzer;',
-        asNode('rust-analyzer --version'),
+        `${asNode('rust-analyzer --version')};`,
       ]);
     case 'solargraph':
       return run([
-        requireTool('ruby', 'solargraph: Ruby >=3.1 is required in the base image'),
-        `ruby -e ${shellQuote('abort "solargraph: Ruby >=3.1 is required in the base image" if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("3.1")')};`,
+        // Match step 02's measured floor; RubyGems may resolve older compatible
+        // dependencies on 3.0 even when the current gemspec requires newer Ruby.
+        requireTool('ruby', 'solargraph: Ruby >=3.0 is required in the base image'),
+        `ruby -e ${shellQuote('exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.0") ? 0 : 1)')} || ${skip('solargraph: Ruby >=3.0 is required in the base image')}`,
         requireTool('gem', 'solargraph: RubyGems is required in the base image'),
         requireTool('make', 'solargraph: make is required for native gems in the base image'),
         requireTool('cc', 'solargraph: a C compiler is required for native gems in the base image'),
-        `ruby -rrbconfig -e ${shellQuote('abort "solargraph: Ruby development headers are required in the base image" unless File.file?(File.join(RbConfig::CONFIG.fetch("rubyhdrdir"), "ruby.h"))')};`,
+        `ruby -rrbconfig -e ${shellQuote('exit(File.file?(File.join(RbConfig::CONFIG.fetch("rubyhdrdir"), "ruby.h")) ? 0 : 1)')} || ${skip('solargraph: Ruby development headers are required in the base image')}`,
         requireSu,
-        asNode('ruby --version'),
+        `${asNode('ruby --version')} || ${skip('solargraph: the sandbox user needs Ruby on the image PATH')}`,
         `gem install solargraph${version ? ` --version ${version}` : ''} --no-document --install-dir /opt/haive-lsp/solargraph --bindir /opt/haive-lsp/solargraph/bin;`,
         launcher('solargraph', [
           'export GEM_HOME=/opt/haive-lsp/solargraph GEM_PATH=/opt/haive-lsp/solargraph',
           'exec ruby /opt/haive-lsp/solargraph/bin/solargraph "$@"',
         ]),
         'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/solargraph;',
-        asNode('solargraph --version'),
+        `${asNode('solargraph --version')};`,
       ]);
     case 'jdtls': {
       // Upstream README requires Java 25; its Python launcher still checks only 21.
@@ -214,7 +228,7 @@ function buildNativeRecipe(
       return run([
         requireTool('python3', 'jdtls: Python >=3.9 and Java >=25 are required in the base image'),
         requireSu,
-        asNode(`python3 -c ${shellQuote(checkJava)}`),
+        `${asNode(`python3 -c ${shellQuote(checkJava)}`)} || ${skip('jdtls: compatible Python >=3.9 and Java >=25 are required for the sandbox user')}`,
         requireTool('curl', 'jdtls: curl is required in the base image'),
         requireTool('tar', 'jdtls: tar is required in the base image'),
         'curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/haive-lsp-jdtls.tar.gz;',
@@ -222,7 +236,7 @@ function buildNativeRecipe(
         'tar -xzf /tmp/haive-lsp-jdtls.tar.gz -C /opt/haive-lsp/jdtls; rm /tmp/haive-lsp-jdtls.tar.gz;',
         launcher('jdtls', ['exec python3 /opt/haive-lsp/jdtls/bin/jdtls "$@"']),
         'chmod a+rx /opt/haive-lsp; chmod -R a+rX /opt/haive-lsp/jdtls;',
-        asNode('jdtls --help'),
+        `${asNode('jdtls --help')};`,
       ]);
     }
   }
