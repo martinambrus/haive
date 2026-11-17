@@ -699,3 +699,57 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
 
 Undo: revert the change; the column is ignored by the older release
 (`ALTER TABLE cli_providers DROP COLUMN IF EXISTS auth_generation` removes it).
+
+## Version and package tokens in generated Dockerfiles
+
+`isVersionToken` / `assertVersionToken` (`@haive/shared`, `tooling/version-token.ts`) own the
+policy for pins and simple names interpolated into generated shell or Dockerfile text: 1–64
+ASCII characters, a leading letter or digit, then letters, digits, `.`, `_`, `+` or `-`.
+This permits dist-tags, prereleases and semver build metadata while excluding shell syntax,
+Dockerfile line breaks, option prefixes, whitespace, NUL and Unicode. It checks the whole raw
+value, including a final newline; it never trims or sanitizes one into another version.
+This is token validation, not a promise that a registry publishes the version.
+
+The environment dependency writer checks repository LSP/chrome-devtools pins before copying,
+and typed runtime/browser pins before resolution. The generator checks both stored dependencies
+and fresh render inputs, including runtime versions (Python's comment too), browser/DevTools
+pins, extra package names, dependency language/manager names and the database-kind comment. FROM references keep their Docker
+separators (`/`, `:`, `@`); each name/tag/digest component passes the token check. Safe runtime
+version resolution (Go filename shaping, PHP's floor, numeric majors) remains after that check.
+Package constraints or multiarch selectors are not simple package names; use the editable
+Dockerfile for those. Empty/null pins retain their unpinned behavior.
+Detected non-token runtime and database versions (from manifests, DDEV/Compose or the onboarding
+mirror) are dropped before form defaults are built, so those fields offer their established
+fallbacks; language/database detection is retained. Node constraints whose first dotted component
+is numeric retain that major (`>=18.17.0 <21` and `^18.12.0 || ^20.0.0` become `18`), as the
+previous Dockerfile renderer did; a generated DDEV config is then pinned to that major too. Simple manifest constraints that previously normalized to a token, such
+as PHP `^8.1.10`, keep that behavior. Onboarding values are trimmed before token checking, and
+blank values do not detect a language. Reused non-token runtime/database answers are blanked
+before form validation so current defaults apply; valid prior choices remain. Apply checks database
+versions, and the DDEV renderer checks them only when emitting a supported database service; the
+Dockerfile guard does not check database versions because it never interpolates them. Other
+unsafe submitted or stored operands still refuse. Refusals name the field and show a JSON-quoted
+value truncated to 80 input characters. After JSON quoting, DEL/C1 controls and invisible/bidi
+characters in U+007F–U+009F, U+200B–U+200F, U+2028–U+202E, U+2060–U+2069 and U+FEFF are escaped
+as `\uXXXX`, keeping the preview safe to display.
+
+The composed runtime-tools layer checks its RTK pin before building its URL or echo text. CLI
+install codegen checks pins for npm, piggyback and curl installers; provider writes, clones and
+cached-latest selection check them too. Registry, browser and Ruby catalogs drop unsafe version entries before caching, and an unsafe npm
+or PyPI latest fails that source's refresh through its existing diagnostic path. Image callers
+pass raw stored pins to codegen rather than trimming them first. The readable CLI tag segment
+maps `+` to `_` because Docker tags cannot contain `+`; its content hash and install text keep
+the original pin, so `1.0.0+build.5` and `1.0.0_build.5` remain distinct images. Shared-image
+readiness logs and skips a provider whose stored configuration cannot resolve, without blocking
+other matching providers in the transaction. Chrome DevTools checks the pin
+at the shared MCP surface (before cache warming) and at config rendering. Ollama provisioning
+uses JSON fields and argv, not generated Dockerfile/shell interpolation of the model name.
+Owner-authored Dockerfile extras and saved editable Dockerfile bodies remain free Dockerfile text.
+
+A refused import keeps this install's setting and the old base and reports the setting through
+the existing rejected-setting warning. A refused saved pin stops generation/image resolution
+with a message pointing to Tooling, the CLI provider settings, or declared dependencies; correct
+or clear that pin there; re-run dependency declaration before generation, or Retry the image build. No stored data is rewritten.
+Undo: revert the code change. No schema or data rollback is needed. The output fixture in
+`worker/test/fixtures/version-token-baseline.json` records origin/main's renderer bytes for
+representative valid pins, so unchanged versions keep their Dockerfile bodies and image hashes.
