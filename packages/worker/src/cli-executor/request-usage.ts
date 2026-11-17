@@ -1,6 +1,11 @@
 /** In-process evidence only; collection never stores or prices it. Input stays provider-native:
  * exclusive for Claude, inclusive for Codex/Gemini. Only the pricer splits inclusive input. */
-import type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from '@haive/shared';
+import type {
+  PricedTokens,
+  RequestUsage,
+  RequestUsageCapture,
+  UnobservedSameModelUsage,
+} from '@haive/shared';
 export type { RequestUsage, RequestUsageCapture, UnobservedSameModelUsage } from '@haive/shared';
 
 export type UnobservedSameModelPricingBlocker =
@@ -38,7 +43,7 @@ export function unknownRequestUsage(reason = 'no-request-channel'): RequestUsage
 /** Process-local sub-step evidence. Namespace identities because each CLI process can reuse ids.
  * Any missing channel, convention or model prevents a complete aggregate. */
 export function aggregateRequestUsage(
-  parts: { id: string; usage?: RequestUsageCapture }[],
+  parts: { id: string; usage?: RequestUsageCapture; tokenUsage?: PricedTokens | null }[],
 ): RequestUsageCapture {
   if (!parts.length) return unknownRequestUsage('no-substeps');
   const captures = parts.map((p) => p.usage ?? unknownRequestUsage());
@@ -53,33 +58,19 @@ export function aggregateRequestUsage(
   );
   const conventions = new Set(captures.map((c) => c.inputConvention));
   const inputConvention = conventions.size === 1 ? captures[0]!.inputConvention : 'unknown';
-  let modelCoverage = captures.some((c) => c.modelCoverage === 'mixed')
-    ? 'mixed'
-    : requestModelCoverage(requests);
-  const wholes = captures.map((c) => c.wholeRun);
-  let wholeRun: RequestUsageCapture['wholeRun'];
-  if (
-    wholes.every((w) => w !== undefined) &&
-    inputConvention !== 'unknown' &&
-    new Set(wholes.map((w) => w!.usage.model)).size === 1 &&
-    wholes[0]!.usage.model !== null
-  ) {
-    const total = { ...wholes[0]!.usage };
-    for (const w of wholes.slice(1)) {
-      for (const key of ['inputTokens', 'cacheReadTokens', 'cacheCreationTokens'] as const)
-        total[key] += w!.usage[key];
-      for (const key of ['outputTokens', 'cacheCreation5mTokens', 'cacheCreation1hTokens'] as const)
-        total[key] =
-          total[key] === null || w!.usage[key] === null ? null : total[key]! + w!.usage[key]!;
-    }
-    wholeRun = {
-      usage: total,
-      requestCount: wholes.every((w) => w!.requestCount !== null)
-        ? wholes.reduce((n, w) => n + w!.requestCount!, 0)
-        : null,
-    };
-    modelCoverage = 'single';
-  }
+  const models = new Set(
+    captures.flatMap(
+      (c) => c.wholeRun?.usage.model ?? c.aggregateModel ?? c.requests?.map((r) => r.model) ?? [],
+    ),
+  );
+  const modelCoverage =
+    captures.some((c) => c.modelCoverage === 'mixed') || models.size > 1
+      ? 'mixed'
+      : models.size === 1 &&
+          !models.has(null) &&
+          captures.every((c) => c.modelCoverage === 'single')
+        ? 'single'
+        : requestModelCoverage(requests);
   const complete =
     captures.every((c) => c.coverage === 'complete') &&
     inputConvention !== 'unknown' &&
@@ -88,7 +79,11 @@ export function aggregateRequestUsage(
     ? captures.reduce((n, c) => n + c.requestCount!, 0)
     : null;
   return {
-    ...(wholeRun ? { wholeRun } : {}),
+    parts: parts.map((p, i) => ({
+      id: p.id,
+      tokenUsage: p.tokenUsage ?? null,
+      usage: captures[i]!,
+    })),
     requests: captures.some((c) => c.requests !== null) ? requests : null,
     ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
     coverage: complete ? 'complete' : requests.length ? 'incomplete' : 'unknown',

@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
@@ -78,6 +79,7 @@ interface PricingResponse {
   prices: PriceRow[];
   unknownTierInvocations?: {
     id: string;
+    taskId: string;
     modelKey: string | null;
     tier: { lowUsd?: number; highUsd?: number };
   }[];
@@ -368,6 +370,13 @@ export default function PricingPage() {
           <InlineMarkdown body="Up to 50 recent invocations. Each range describes one run and is excluded from cost totals. Missing coverage or rates leave a run unpriced. Saved snapshots keep their original prices." />
           {data!.unknownTierInvocations!.map((run) => (
             <div key={run.id} className="flex gap-3 text-xs">
+              <Link
+                href={`/tasks/${run.taskId}`}
+                aria-label={`View task for invocation ${run.id}`}
+                className="font-mono text-indigo-300 hover:underline"
+              >
+                {run.id.slice(0, 8)}
+              </Link>
               <span className="font-mono text-neutral-300">{run.modelKey ?? 'Unknown model'}</span>
               <PromptTierUnknown tier={run.tier} />
             </div>

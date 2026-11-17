@@ -116,8 +116,8 @@ describe.skipIf(!url)('tier inventories and spend queries on migrated PostgreSQL
       expect(stats).not.toHaveProperty('unknownTierCount');
       expect(UNKNOWN_TIER_INVOCATION_LIMIT).toBe(50);
       expect(await loadUnknownTierInvocations(scoped)).toEqual([
-        { id: ids[2], modelKey: 'model', tier: costs[2]!.tier },
-        { id: ids[3], modelKey: 'model', tier: costs[3]!.tier },
+        { id: ids[2], taskId: task!.id, modelKey: 'model', tier: costs[2]!.tier },
+        { id: ids[3], taskId: task!.id, modelKey: 'model', tier: costs[3]!.tier },
       ]);
       expect((await loadUnknownTierInvocations(scoped, 1)).map((r) => r.id)).toEqual([ids[2]]);
       await tx

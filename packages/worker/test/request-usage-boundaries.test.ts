@@ -214,7 +214,10 @@ describe('sequential request aggregation', () => {
       requests: null,
       coverage: 'complete',
       requestCount: 2,
-      wholeRun: { requestCount: 2 },
+      parts: [
+        { usage: { wholeRun: { requestCount: 1 } } },
+        { usage: { wholeRun: { requestCount: 1 } } },
+      ],
       inputConvention: 'inclusive',
     });
   });
@@ -321,6 +324,23 @@ it('preserves independent whole-run proofs across zero-assistant-usage sequentia
   );
   expect(result.requestUsage).toMatchObject({
     coverage: 'incomplete',
-    wholeRun: { requestCount: 2, usage: { model: 'model-a', inputTokens: 20, outputTokens: 4 } },
+    parts: [
+      {
+        usage: {
+          wholeRun: {
+            requestCount: 1,
+            usage: { model: 'model-a', inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+      {
+        usage: {
+          wholeRun: {
+            requestCount: 1,
+            usage: { model: 'model-a', inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    ],
   });
 });

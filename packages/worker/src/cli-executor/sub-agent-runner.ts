@@ -77,7 +77,11 @@ export async function runSequentialSubAgent(
   const collected: Record<string, unknown> = {};
   const trace: SubAgentStepTrace[] = [];
   // Separate from trace: trace is serialized into raw_output, request evidence is not.
-  const requestParts: { id: string; usage: RequestUsageCapture }[] = [];
+  const requestParts: {
+    id: string;
+    usage: RequestUsageCapture;
+    tokenUsage: CliTokenUsage | null;
+  }[] = [];
   let tokenUsage: CliTokenUsage | null = null;
 
   for (const step of invocation.steps) {
@@ -88,7 +92,11 @@ export async function runSequentialSubAgent(
       opts,
       extractClaudeStream,
     );
-    requestParts.push({ id: step.id, usage: requestUsage });
+    requestParts.push({
+      id: step.id,
+      usage: requestUsage,
+      tokenUsage: traceEntry.tokenUsage ?? null,
+    });
     trace.push(traceEntry);
     tokenUsage = sumTokenUsage(tokenUsage, traceEntry.tokenUsage ?? null);
     if (traceEntry.exitCode !== 0 || traceEntry.error) {
@@ -115,7 +123,11 @@ export async function runSequentialSubAgent(
     opts,
     extractClaudeStream,
   );
-  requestParts.push({ id: invocation.synthesis.id, usage: requestUsage });
+  requestParts.push({
+    id: invocation.synthesis.id,
+    usage: requestUsage,
+    tokenUsage: synthesisTrace.tokenUsage ?? null,
+  });
   trace.push(synthesisTrace);
   tokenUsage = sumTokenUsage(tokenUsage, synthesisTrace.tokenUsage ?? null);
 

@@ -47,6 +47,67 @@ export function computeTieredCost(
     ![raw.inputTokens, raw.outputTokens, raw.cacheReadTokens, raw.cacheCreationTokens].every(count)
   )
     return result();
+  if (capture?.parts !== undefined) {
+    // Process totals are reconciliation data, never a new whole-run proof. Price
+    // every leaf through the same rules, including its own refusal conditions.
+    const parts = capture.parts;
+    if (
+      !parts.length ||
+      parts.some((p) => p.tokenUsage === null) ||
+      !(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'] as const).every(
+        (key) => {
+          const values = parts.map((p) => p.tokenUsage![key] ?? 0);
+          const total = values.reduce((n, value) => n + value, 0);
+          return values.every(count) && count(total) && total === raw[key];
+        },
+      )
+    )
+      return result();
+    const total = zero();
+    let exact = true;
+    let bounded = true;
+    let low = 0;
+    let high = 0;
+    for (const part of parts) {
+      const cost = computeTieredCost(part.tokenUsage!, rates, {
+        ...opts,
+        requestUsage: part.usage,
+      });
+      const partExact = cost.tier?.state === 'exact' && !cost.unpricedBuckets.length;
+      exact &&= partExact;
+      for (const bucket of cost.unpricedBuckets) unpriced.add(bucket);
+      for (const key of Object.keys(total) as CostBucket[]) total[key] += cost.perBucket[key];
+      const partLow = partExact ? cost.costUsd : cost.tier?.lowUsd;
+      const partHigh = partExact ? cost.costUsd : cost.tier?.highUsd;
+      if (partLow === undefined || partHigh === undefined) bounded = false;
+      else {
+        low += partLow;
+        high += partHigh;
+      }
+      for (const split of cost.tier?.split ?? []) {
+        const existing = tier.split.find((s) => s.aboveTokens === split.aboveTokens);
+        if (!existing) tier.split.push({ ...split });
+        else {
+          for (const key of [
+            'requests',
+            'inputTokens',
+            'outputTokens',
+            'cacheReadTokens',
+            'cacheCreationTokens',
+            'costUsd',
+          ] as const)
+            existing[key] += split[key];
+        }
+      }
+    }
+    tier.split.sort((a, b) => (a.aboveTokens ?? -1) - (b.aboveTokens ?? -1));
+    if (exact) tier.state = 'exact';
+    else if (bounded && !unpriced.size) {
+      tier.lowUsd = low;
+      tier.highUsd = high;
+    }
+    return result(total);
+  }
   if (
     !capture ||
     ((capture.coverage !== 'complete' || capture.reasons.length > 0) && !capture.wholeRun) ||

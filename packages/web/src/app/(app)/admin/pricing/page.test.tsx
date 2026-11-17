@@ -18,6 +18,9 @@ vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
+vi.mock('next/link', () => ({
+  default: (props: Record<string, unknown>) => createElement('a', props),
+}));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => body,
@@ -505,4 +508,38 @@ it('prefills small rates without floating point tails and warns that tier-only o
   expect(textOf(view.tree())).toContain(
     'This manual rate overrides the feed, so requests below the first tier will be unpriced.',
   );
+});
+
+it('links each visible short invocation id to its task with an accessible full-id label', async () => {
+  const id = '12345678-abcd-4321-9876-123456789abc';
+  const other = '87654321-abcd-4321-9876-123456789abc';
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [],
+          unknownTierInvocations: [
+            { id, taskId: 'task-a', modelKey: 'same-model', tier: { lowUsd: 1, highUsd: 5 } },
+            { id: other, taskId: 'task-b', modelKey: 'same-model', tier: {} },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  for (const [invocation, task] of [
+    [id, 'task-a'],
+    [other, 'task-b'],
+  ]) {
+    const links = findAll(
+      view.tree(),
+      (host) => host.tag === 'a' && host.props.href === `/tasks/${task}`,
+    );
+    expect(links).toHaveLength(1);
+    expect(textOf(links[0]!)).toBe(invocation!.slice(0, 8));
+    expect(links[0]!.props['aria-label']).toBe(`View task for invocation ${invocation}`);
+  }
 });

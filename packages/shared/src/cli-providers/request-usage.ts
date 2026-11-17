@@ -1,3 +1,5 @@
+import type { PricedTokens } from './model-pricing.js';
+
 /** Process-local request evidence. Input uses the provider-native convention. */
 export interface RequestUsage {
   requestId: string;
@@ -14,6 +16,13 @@ export interface RequestUsage {
 export type UnobservedSameModelUsage = Omit<RequestUsage, 'requestId' | 'turnId'>;
 
 export interface RequestUsageCapture {
+  /** Independent processes retain their own totals and evidence. Never infer a
+   * request or whole-run proof from the combined totals. Not persisted. */
+  parts?: {
+    id: string;
+    tokenUsage: PricedTokens | null;
+    usage: RequestUsageCapture;
+  }[];
   requests: RequestUsage[] | null;
   /** Only on complete captures: ledger excess for an observed model, outside the request inventory. These are
    * aggregate buckets, not inferred requests; unknown output and cache-write TTL stay null. */

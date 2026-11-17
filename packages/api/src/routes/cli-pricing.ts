@@ -135,6 +135,7 @@ export function loadUnknownTierInvocations(
   return db
     .select({
       id: schema.cliInvocations.id,
+      taskId: schema.cliInvocations.taskId,
       modelKey: sql<string>`${schema.cliInvocations.cost} ->> 'modelKey'`,
       tier: sql<{ lowUsd?: number; highUsd?: number }>`${schema.cliInvocations.cost} -> 'tier'`,
     })
