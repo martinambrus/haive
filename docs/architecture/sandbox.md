@@ -741,7 +741,11 @@ pass raw stored pins to codegen rather than trimming them first. The readable CL
 maps `+` to `_` because Docker tags cannot contain `+`; its content hash and install text keep
 the original pin, so `1.0.0+build.5` and `1.0.0_build.5` remain distinct images. Shared-image
 readiness logs and skips a provider whose stored configuration cannot resolve, without blocking
-other matching providers in the transaction. Chrome DevTools checks the pin
+other matching providers in the transaction. A queued build of a refused pin records `failed` and
+the escaped refusal under the provider row lock, only while name, CLI version and Dockerfile
+extras still equal the refused configuration. Provider edits win. A locked refused configuration
+wants no buildable tag; it is distinct from `null`, which means no image, so an older build
+cannot write status or clear the previous image on behalf of a newly refused configuration. Chrome DevTools checks the pin
 at the shared MCP surface (before cache warming) and at config rendering. Ollama provisioning
 uses JSON fields and argv, not generated Dockerfile/shell interpolation of the model name.
 Owner-authored Dockerfile extras and saved editable Dockerfile bodies remain free Dockerfile text.
