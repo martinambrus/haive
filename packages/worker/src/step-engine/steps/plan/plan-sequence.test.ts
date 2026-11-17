@@ -904,7 +904,7 @@ describe('a sequencing wave', () => {
       disagreements: [],
     };
     return planSequenceStep.agentMining!.selectAgents({
-      ctx: { db: {} },
+      ctx: { db: createFakeDb({ tasks: schema.tasks }).db },
       detected,
       formValues: {},
     } as never);

@@ -123,6 +123,36 @@ from 148,443 to 106,629 characters on a 7,983-node plan (870 agents) and from 11
 the budget. Of the 9,312 `depends_on` ops sequence agents ever wrote, 9,288 joined two nodes of the
 agent's own section and 24 were malformed, so the bounded view cuts no link an agent made.
 
+**Sequence context pilot (opt-in per task).** Parity remains the default, with byte-identical
+prompts. An administrator can select `contextArm: 'parity' | 'role-sized'` on `POST
+/repositories/:id/plan/sequence`; an explicit selection from a non-admin is refused. The
+selection is stored as `tasks.metadata.sequenceContextArm` only on the new task, and both
+initial and continuation waves read it. Admins can also request `singleWave: true`, stored as
+`sequenceSingleWave`, to end this pass after at most 12 agents. Detection persists that limit
+and the resolved `contextArm` for recovery. The budget form names the chosen arm before
+approval, and the end-of-pass disagreement review uses the same limit as dispatch. Both
+registered step ids are tested through `apply`: 12 used agents with pending targets finish
+without another wave, while a recorded edge contradicting an agent ordinal reopens the
+disagreement form after fresh detection. More than 12 initial targets dispatch exactly 12. It
+never writes a user preference or global configuration. `SEQUENCE_CONTEXT_ARMS` in shared
+supplies both the request enum and the worker type. A missing or unknown stored value uses
+parity; an unknown explicit value warns once per task per worker process (among its 256 most recent) across detection and
+repeated dispatch, logging task identity and the parity fallback without the stored value. The
+role-sized arm keeps the same exact-ref neighborhood, child list and build-order fields, and
+caps only the title outline at `SEQUENCE_ROLE_OUTLINE_MAX_CHARS` (4,000), interpolated into the
+prompt copy. Both arms omit dependency information; the role-sized prompt states that
+cross-subtree dependencies outside the named neighborhood cannot be named directly. The context
+plus child list still shares `SEQUENCE_CONTEXT_BUDGET`. The 4,000-character cap need not save
+anything when ancestors and children consume that budget: zero-token synthetic checks with 250
+capped-title children measured 109,172 → 86,175 prompt characters, while the same run under a
+200-deep chain measured 109,371 → 109,622 (the new trade-off statement adds 251 characters). A
+502-child group is still named and never dispatched. One live wave per arm requires separate
+repository/plan copies: `loadAskedParents` spans tasks. The 12-agent ceiling is per pass: do not
+Retry a completed experimental wave, since Retry deletes its mining rows and permits another
+first wave while keeping the task metadata. No live wave or model call has been run for this
+pilot; D1 remains open. Rollback is to omit the request option for new tasks or revert the code;
+no schema migration is involved.
+
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
 (`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet
 `depends_on` of its own, **no ANCESTOR with one**, no open task on it, and a unit of work

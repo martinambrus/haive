@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, role: 'user' }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: vi.fn() }));
 vi.mock('../src/lib/plan-mirror.js', () => ({
@@ -14,6 +14,7 @@ vi.mock('../src/lib/task-start.js', () => ({ enqueueStart: vi.fn() }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
+    c.set('userRole', h.role);
     await next();
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
@@ -96,6 +97,7 @@ const planner = async () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.role = 'user';
   vi.spyOn(configService, 'get').mockResolvedValue('true');
   vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
@@ -226,5 +228,69 @@ describe.each(OPTIONAL_ACTIONS)('optional plan body: $path', ({ path, field, val
     expect(spawnPlanTask).not.toHaveBeenCalled();
     expect(enqueueStart).not.toHaveBeenCalled();
     expect(tables.map((table) => fake.rows(table))).toEqual(before);
+  });
+});
+
+describe('task-local sequence context experiment', () => {
+  function fixture() {
+    const fake = setup();
+    fake.insert(schema.planNodes, {
+      id: NODE,
+      repositoryId: REPO,
+      parentId: null,
+      path: `/${NODE}/`,
+      title: 'Root',
+      kind: 'component',
+      status: 'todo',
+      version: 1,
+    });
+  }
+  const send = (body: unknown) =>
+    app.request(`/${REPO}/plan/sequence`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  it.each(['parity', 'role-sized'])(
+    'refuses explicit %s from a non-admin before task creation',
+    async (contextArm) => {
+      fixture();
+      expect((await send({ contextArm })).status).toBe(403);
+      expect(spawnPlanTask).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['parity', 'role-sized'])(
+    'persists admin selection %s only on the created task',
+    async (contextArm) => {
+      fixture();
+      h.role = 'admin';
+      expect((await send({ contextArm })).status).toBe(201);
+      expect(spawnPlanTask).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: { sequenceContextArm: contextArm } }),
+      );
+    },
+  );
+  it('keeps ordinary task metadata empty', async () => {
+    fixture();
+    expect((await send({})).status).toBe(201);
+    expect(spawnPlanTask).toHaveBeenCalledWith(expect.objectContaining({ metadata: {} }));
+  });
+  it('rejects an unknown arm before task creation', async () => {
+    fixture();
+    h.role = 'admin';
+    expect((await send({ contextArm: 'unknown' })).status).toBe(400);
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+  });
+  it('restricts the one-wave budget to admins and persists it only on this task', async () => {
+    fixture();
+    expect((await send({ singleWave: true })).status).toBe(403);
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+    h.role = 'admin';
+    expect((await send({ contextArm: 'parity', singleWave: true })).status).toBe(201);
+    expect(spawnPlanTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: { sequenceContextArm: 'parity', sequenceSingleWave: true },
+      }),
+    );
   });
 });

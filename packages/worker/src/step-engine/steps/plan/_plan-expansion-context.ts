@@ -99,7 +99,13 @@ export function buildPlanExpansionContext(
   {
     buildOrder,
     omitChildren = false,
-  }: { buildOrder?: ReadonlyMap<string, number>; omitChildren?: boolean } = {},
+    outlineMaxChars,
+  }: {
+    buildOrder?: ReadonlyMap<string, number>;
+    omitChildren?: boolean;
+    /** Optional outline-only cap; leaves the exact-ref neighborhood budget unchanged. */
+    outlineMaxChars?: number;
+  } = {},
 ): string {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const byParent = indexChildren(nodes);
@@ -160,7 +166,10 @@ export function buildPlanExpansionContext(
   const withOutline = (local: string): string => {
     let sampled = evenlySample(
       allOutlineLines,
-      Math.max(0, maxChars - local.length - outlineHeader.length - 160),
+      Math.max(
+        0,
+        Math.min(maxChars - local.length, outlineMaxChars ?? maxChars) - outlineHeader.length - 160,
+      ),
     );
     // The note contains the selected count, so calculate the exact fixed size
     // after the first estimate and trim complete lines until the hard cap holds.
