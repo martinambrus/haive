@@ -684,6 +684,7 @@ status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; 
 2. `describeIssue` (`api/src/lib/task-type-definition.ts`) prints only kind and step id, dropping a data-edge issue's `message`. Unreachable until the api supplies predicates; print the message then.
 3. No data-level control puts a pinned producer and consumer on opposite `when` branches of one predicate, and the scan fixture has no cross-span pinned data edge (only a synthetic control covers `requiresSpan` for data). Add both.
 4. A span skipped on every feasible path (`when: false` plus `requiresSpan` on the true branch of the same predicate) validates. Consider refusing it.
+5. Guard decision bounds (review of #1249): `limits` accepts any positive safe integer; above 2147483647 ms Node clamps the predicate deadline to 1 ms and Postgres rejects the `statement_timeout` with a raw error. Both fail closed. Bound it to 2147483647 and fail as `invalid-deadline`. When the guard runtime is wired, treat raw 55P03/57014 timeouts from the lock batch as retryable like `GuardDecisionError`, and add a control that a predicate writing through its handle after the deadline is refused.
 
 ### T701 · Admin unpriced-run inventory links to tasks the admin may not own
 
