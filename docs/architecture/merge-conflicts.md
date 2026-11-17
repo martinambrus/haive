@@ -484,7 +484,34 @@ step doing any merge. Composition only makes the step available; no guarded-span
 runtime or built-in run-list change is enabled.
 
 The clean-tree check runs after journaling and again through the staged gitfile;
-a failed staged check restores the tree and refuses. Inode-bound staging, durable
+a failed staged check restores the tree and refuses. Staged verification checks
+each initialized submodule (nested ones included) at its relocated path using
+command-local `--work-tree`, because its administrative `core.worktree` still names
+the original location. Cached diffs check gitlinks; working-tree diffs ignore their
+contents only while separate recursive checks verify each submodule's HEAD, index,
+tracked and untracked files and hidden index flags. Persistent config is never
+rewritten. Their relative gitfiles continue to resolve because the staging layout
+`.haive/no-change-cleanup/<uuid>` and `.haive/worktrees/<name>` have equal depth;
+worktree names must remain one segment.
+
+Before staging, again after journaling, and during staged verification, every
+initialized submodule (recursively) must retain all commits reachable from its
+local refs, the top stash entry and HEAD in its remote-tracking refs. Without a
+configured remote, the corresponding gitlink in the base of the enclosing repository
+(the superproject, or the parent submodule for a nested one) is the retention
+boundary instead; with neither, the cleanup refuses. A submodule pinned to a commit
+that only a remote tag reaches is refused too, since tags are not remote-tracking
+refs; the refusal is permanent but loses nothing. Reflog-only commits (older stash
+entries, dropped stashes) are not covered, and a deinitialized submodule, whose
+administrative directory survives under the worktree's, is not checked at all.
+Unreadable history or an unretained commit refuses before removal (and restores an
+already staged tree). This matters because pruning
+removes the worktree's entire administrative directory, including submodule refs,
+stashes and objects. The check uses local remote-tracking evidence and performs no
+fetch or push; it does not prove the remote still retains those commits. As with
+the clean-tree check, a writer can change refs after the last check.
+
+Inode-bound staging, durable
 removal authorization and owned recovery cuts are described in
 [Worker restarts](worker-restarts.md#no-change-cleanup-recovery). Git's prune command
 cannot select a worktree: the registration sweep has the same repository-wide scope

@@ -1008,14 +1008,21 @@ reversal, and spent claims and attempt history are never reset.
 `12-no-change-cleanup` records `worktree.no_change_cleanup` in a short owned
 step/task-fenced transaction before an atomic fs-safe move into a fresh host UUID
 under `.haive/no-change-cleanup/`. The event binds setup identity, the proven commit
-and the source directory device/inode. Every pass, including a resumed journal,
+and the source directory device/inode as decimal strings from bigint stats;
+all identity probes and comparisons preserve the exact values, including inode
+numbers above 2^53. Non-digit device/inode journal fields refuse parsing. Every pass, including a resumed journal,
 takes the owned step row before the task epoch/status fence. Fenced sections hold
 those rows across their filesystem and Git writes and use only their transaction
 for database writes; Retry/Stop/Cancel wait for a section already in flight.
 
 The clean-tree check runs again after the intent transaction, immediately before
-the identity probe and rename. Git status is then checked through the staged tree's
-gitfile. A refused staged check restores the tree without overwriting a replacement
+the identity probe and rename. Changes are then checked through the staged tree's
+gitfile, with initialized submodules verified recursively using command-local
+`--work-tree` paths rather than their now-stale persistent `core.worktree` values.
+The equal-depth staging/worktree layouts keep relative submodule gitfiles valid.
+Recursive submodule history retention is checked before staging, after journaling
+and during staged verification too (see [No-change cleanup](merge-conflicts.md#no-change-cleanup)).
+A refused staged check restores the tree without overwriting a replacement
 at its original name and rethrows; failed restoration keeps both trees and refuses
 recovery while the replacement remains. New journals carry `phase: staging`, and a
 successful staged check commits `phase: removing` before the first unlink in a
@@ -1025,7 +1032,18 @@ misreading missing tracked files as new edits. A journal without a phase is unre
 and refuses. Explicit Retry retains events
 even though it clears apply receipts. A changed staging identity or a new source
 directory beside the staged one refuses recovery. Removal repairs directory
-permissions through fs-safe, as `removeWorktreeDir` does.
+permissions through fs-safe, as `removeWorktreeDir` does. Both the step and Cancel
+pass the journal's expected device/inode to `removeNoFollow`: it opens the leaf
+directory without following links through the held parent, compares its held
+identity before deleting contents, then removes contents through that descriptor.
+A replaced directory or symlink raises `DirectoryIdentityError`
+(`EDIRECTORYIDENTITY`) without deleting the replacement. Before every final
+name-based `rmdir` attempt, including a permission-repair retry, it checks the leaf
+identity again through the held parent. An already absent directory remains a
+successful recovery cut. Node exposes no atomic identity-bound `rmdir`, so the
+last identity check and that syscall still have a small name-replacement window.
+Its worst case is removing one EMPTY directory of the wrong identity: `rmdir`
+fails with `ENOTEMPTY` on a non-empty directory and `ENOTDIR` on a symlink.
 
 An old setup's journal no longer blocks once neither its staging directory nor a
 same-device/inode source at its recorded path remains. Before staging, a branch tip
