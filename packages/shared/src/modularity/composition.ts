@@ -1,5 +1,6 @@
 import {
   ExecutionContractError,
+  FIX_LOOP_TARGET_STEP_ID,
   executionContractPaths,
   parseExecutionContract,
   type ExecutionPredicateDeclaration,
@@ -67,7 +68,7 @@ export function validateComposition(
         ? new Map(
             [...catalog].map(([id, entry]) => [
               id,
-              entry.loopTargetStepId === '07-phase-2-implement'
+              entry.loopTargetStepId === FIX_LOOP_TARGET_STEP_ID
                 ? { ...entry, loopTargetStepId: contract.fixTarget!.stepId }
                 : entry,
             ]),

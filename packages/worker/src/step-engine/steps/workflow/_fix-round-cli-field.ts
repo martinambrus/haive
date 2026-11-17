@@ -1,13 +1,11 @@
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 
+export { FIX_LOOP_TARGET_STEP_ID } from '@haive/shared/modularity';
+
 // The gate's form field and its constants live apart from the dispatch checks in
 // _fix-round-cli.ts: _fix-loop.ts needs only these, and importing the dispatcher from
 // there closes an import cycle back through the step modules that read _fix-loop.ts at load.
-
-/** The implementation step every fix round re-enters. Kept here so the form builder
- * and dispatch lookup share it without importing the gate/diagnosis module. */
-export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
 
 export const FIX_ROUND_CLI_FIELD = 'fixRoundCliProviderId';
 

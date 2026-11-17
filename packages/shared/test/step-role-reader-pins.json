@@ -2360,14 +2360,6 @@
     "reason": "Physical admission, retry or projection identity; summary roles do not redirect control."
   },
   {
-    "file": "packages/shared/src/modularity/composition.ts",
-    "symbol": "validateComposition.effective",
-    "context": "EqualsEqualsEqualsToken",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical implementation identity in execution metadata, policy or provenance; never a summary data read."
-  },
-  {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
     "symbol": "SPEC_INPUTS",
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
@@ -2894,22 +2886,6 @@
     "value": "@roles",
     "count": 1,
     "reason": "Implementation summary producer/learning input declaration; physical execution identity remains host-owned."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_fix-round-cli-field.ts",
-    "symbol": "FIX_LOOP_TARGET_STEP_ID",
-    "context": "VariableDeclaration",
-    "value": "@role-alias:FIX_LOOP_TARGET_STEP_ID",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_fix-round-cli-field.ts",
-    "symbol": "FIX_LOOP_TARGET_STEP_ID",
-    "context": "VariableDeclaration",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/_impl-changes.ts",
@@ -4726,5 +4702,21 @@
     "value": "@roles",
     "count": 2,
     "reason": "QA findings are read through the pinned input; module fingerprint claims must belong to physical rows of the same task, producer row and current round before human waiver."
+  },
+  {
+    "file": "packages/shared/src/modularity/execution-contract.ts",
+    "symbol": "FIX_LOOP_TARGET_STEP_ID",
+    "context": "VariableDeclaration",
+    "value": "@role-alias:FIX_LOOP_TARGET_STEP_ID",
+    "count": 1,
+    "reason": "Shared physical fix-loop routing identity used by both guarded composition and the worker; never a data-role producer selection."
+  },
+  {
+    "file": "packages/shared/src/modularity/execution-contract.ts",
+    "symbol": "FIX_LOOP_TARGET_STEP_ID",
+    "context": "VariableDeclaration",
+    "value": "07-phase-2-implement",
+    "count": 1,
+    "reason": "Shared physical fix-loop routing identity used by both guarded composition and the worker; never a data-role producer selection."
   }
 ]

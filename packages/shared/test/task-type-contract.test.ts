@@ -130,7 +130,7 @@ describe('resolveTaskTypeAvailability', () => {
         });
       },
     );
-    it('checks derived module state and composition before the contract', () => {
+    it('checks derived module state first and preserves the named execution refusal even for an invalid overlay', () => {
       const derivedInput = {
         ...input,
         definition: { ...input.definition, runListStrategy: 'derived' as const, stepIds: null },
@@ -141,6 +141,7 @@ describe('resolveTaskTypeAvailability', () => {
       expect(resolveTaskTypeAvailability(installed)).toEqual({
         available: false,
         reason: 'invalid-composition',
+        issues: [{ kind: 'invalid-execution-contract', reason: expect.any(String) }],
       });
       expect(
         resolveTaskTypeAvailability({

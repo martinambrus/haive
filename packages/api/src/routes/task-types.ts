@@ -423,6 +423,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
     row.source === 'admin' && row.runListStrategy !== 'derived' && catalog.synced
       ? validateComposition(row.stepIds ?? [], mergePromptStepCatalog(catalog, row).composable, {
           requiresRepository: row.requiresRepository,
+          executionContract: row.executionContract,
         })
       : [];
   const promptStepIssues =
@@ -639,6 +640,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         diagnostics.candidates,
         diagnostics.catalog.composable,
         dataRoleBindingsSchema.parse(merged.dataRoleBindings ?? []),
+        { executionContract: merged.executionContract, catalog: diagnostics.catalog.composable },
       );
       if (
         (body.changes !== undefined ||
@@ -732,7 +734,10 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         body.requiresRepository !== undefined ||
         body.promptSteps !== undefined
       ) {
-        const issues = validateComposition(stepIds, composable, { requiresRepository });
+        const issues = validateComposition(stepIds, composable, {
+          requiresRepository,
+          executionContract: row.executionContract,
+        });
         if (issues.length > 0) {
           return { invalid: { error: 'Invalid step composition', issues } } as const;
         }
@@ -741,6 +746,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         [{ executionPath: null, stepIds }],
         composable,
         dataRoleBindingsSchema.parse(body.dataRoleBindings ?? row.dataRoleBindings ?? []),
+        { executionContract: row.executionContract, catalog: composable },
       );
       if (
         portIssues.length &&

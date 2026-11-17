@@ -1,4 +1,3 @@
-import { assertExecutionContractUsable } from './execution-contract-admission.js';
 import {
   buildDataEdgePlan,
   DataEdgePlanError,
@@ -26,7 +25,7 @@ import {
   parsePromptStepEntry,
   promptStepId,
   resolveTaskTypeAvailability,
-  type ExecutionCompositionIssue,
+  type TaskTypeAvailability,
   parseExecutionContract,
   type ExecutionContract,
   type DerivedRunPlan,
@@ -107,7 +106,9 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   restoresDatabase: false,
 });
 
-function describeIssue(issue: ExecutionCompositionIssue): string {
+function describeIssue(
+  issue: NonNullable<Extract<TaskTypeAvailability, { available: false }>['issues']>[number],
+): string {
   return (
     insightRequirementMessage(issue) ??
     ('stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind)
@@ -278,8 +279,9 @@ export async function definitionForCreate(
           availability.reason,
         );
       case 'invalid-composition':
-        if (availability.issues?.some((issue) => issue.kind === 'invalid-execution-contract'))
-          assertExecutionContractUsable(def.executionContract);
+        for (const issue of availability.issues ?? [])
+          if (issue.kind === 'invalid-execution-contract')
+            throw new HttpError(409, issue.reason, issue.kind);
         if (derived) throw new DerivedTaskAdmissionError(derived.issues);
         throw new HttpError(
           409,
@@ -393,6 +395,11 @@ export async function definitionForCreate(
             throw new DataEdgePlanError('invalid author binding or role declarations');
           }
         }),
+        MAX_DATA_EDGE_STEPS,
+        {
+          executionContract: def.executionContract,
+          catalog: catalog?.composable ?? storedCatalog.composable,
+        },
       );
     };
     if (opts.locked && derived?.plan) {

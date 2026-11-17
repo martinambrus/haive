@@ -1,4 +1,10 @@
-import { assertExecutionContractSupported, ExecutionContractError } from './execution-contract.js';
+import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  executionContractSchema,
+  type ExecutionPredicateDeclaration,
+} from './execution-contract.js';
+import { dataRoleDraftIssues, type DataRoleDraftIssue } from '../step-engine/step-ports.js';
 import { dataRoleBindingsSchema } from '../step-engine/role-port-declarations.js';
 import { z } from 'zod';
 import { type RunListStrategy } from '../step-engine/run-list.js';
@@ -65,6 +71,7 @@ export interface TaskTypeAvailabilityInput {
     stepIds: readonly string[] | null;
     requiresRepository: boolean;
     executionContract?: unknown;
+    dataRoleBindings?: unknown;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
   // Null when no rows were read, which turns the module reasons off; a module with no row is missing.
@@ -74,6 +81,8 @@ export interface TaskTypeAvailabilityInput {
     composable: ReadonlyMap<string, ComposableStepEntry>;
   } | null;
   generic: boolean;
+  /** Trusted registration only. API storage readers deliberately have no executable map. */
+  predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
   derived?: { stepIds: readonly string[]; dependencyStepIds?: readonly string[]; valid: boolean };
 }
 
@@ -83,7 +92,7 @@ export type TaskTypeAvailability =
       available: false;
       reason: TaskTypeUnavailableReason;
       missingStepIds?: string[];
-      issues?: ExecutionCompositionIssue[];
+      issues?: (ExecutionCompositionIssue | DataRoleDraftIssue)[];
       modules?: TaskTypeModuleRef[];
     };
 
@@ -142,9 +151,9 @@ export function resolveTaskTypeAvailability(
       catalog: null,
     });
     if (!moduleAvailability.available) return moduleAvailability;
-    return input.derived?.valid
-      ? executionContractAvailability(definition.executionContract)
-      : { available: false, reason: 'invalid-composition' };
+    const execution = executionContractAvailability(definition.executionContract);
+    if (!execution.available) return execution;
+    return input.derived?.valid ? execution : { available: false, reason: 'invalid-composition' };
   }
   if (modules !== null) {
     const used = moduleIdsOfTaskType(definition);
@@ -177,11 +186,48 @@ export function resolveTaskTypeAvailability(
     definition.source === 'admin' ||
     (definition.source.startsWith('module:') &&
       definition.stepIds.every((id) => catalog.composable.has(id)));
-  if (checked) {
+  const parsed = executionContractSchema.safeParse(definition.executionContract);
+  const guarded = parsed.success && parsed.data.guardedSpans.length > 0;
+  const planned =
+    parsed.success &&
+    input.predicates !== undefined &&
+    (guarded || parsed.data.fixTarget !== undefined);
+  // API catalog references cannot stand in for executable predicate schemas. In
+  // this process guards remain unavailable, rather than checking an unconditional
+  // projection (which would reject the two mutually exclusive cleanup paths).
+  if (guarded && !input.predicates)
+    return executionContractAvailability(definition.executionContract);
+  if (checked || planned) {
     const issues = validateComposition(definition.stepIds, catalog.composable, {
       requiresRepository: definition.requiresRepository,
+      ...(planned
+        ? { executionContract: definition.executionContract, predicates: input.predicates }
+        : {}),
     });
     if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
+  }
+  if (planned) {
+    const bindings = dataRoleBindingsSchema.safeParse(definition.dataRoleBindings ?? []);
+    const issues: DataRoleDraftIssue[] = bindings.success
+      ? dataRoleDraftIssues(
+          [{ executionPath: null, stepIds: definition.stepIds }],
+          catalog.composable,
+          bindings.data,
+          {
+            executionContract: definition.executionContract,
+            catalog: catalog.composable,
+            predicates: input.predicates,
+          },
+        )
+      : [
+          {
+            kind: 'invalid-data-role-binding',
+            stepId: '',
+            input: '',
+            message: 'invalid author bindings',
+          },
+        ];
+    if (issues.length) return { available: false, reason: 'invalid-composition', issues };
   }
   return executionContractAvailability(definition.executionContract);
 }

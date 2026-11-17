@@ -113,6 +113,9 @@ async function seedModuleTaskTypes(
   const invalid = declared
     .map((row) => {
       const stepIds = row.stepIds ?? [];
+      const activeContract =
+        row.executionContract != null &&
+        (row.executionContract.guardedSpans.length > 0 || row.executionContract.fixTarget != null);
       return {
         slug: row.slug,
         issues: [
@@ -120,6 +123,7 @@ async function seedModuleTaskTypes(
             [{ executionPath: null, stepIds }],
             composables,
             row.dataRoleBindings ?? [],
+            { executionContract: row.executionContract, catalog: composables, predicates },
           ),
           ...validateTaskTypeDefaults(
             {
@@ -130,14 +134,10 @@ async function seedModuleTaskTypes(
             composables,
           ),
           // A step with no composable entry is internal: what it requires and provides is unknown.
-          ...((row.executionContract != null &&
-            (row.executionContract.guardedSpans.length > 0 ||
-              row.executionContract.fixTarget != null)) ||
-          stepIds.every((id) => composables.has(id))
+          ...(activeContract || stepIds.every((id) => composables.has(id))
             ? validateComposition(stepIds, composables, {
                 requiresRepository: row.requiresRepository,
-                executionContract: row.executionContract,
-                predicates,
+                ...(activeContract ? { executionContract: row.executionContract, predicates } : {}),
               })
             : []),
         ],

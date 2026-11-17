@@ -63,6 +63,7 @@ import { enqueueStart, markQueuedForStart } from '../src/lib/task-start.js';
 import { NewWorkRefused } from '../src/middleware/maintenance.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError } from '../src/context.js';
+import { assertExecutionContractUsable } from '../src/lib/execution-contract-admission.js';
 import type { AppEnv } from '../src/context.js';
 
 const PROVIDER = '00000000-0000-4000-8000-0000000000c1';
@@ -82,6 +83,8 @@ beforeEach(() => {
   h.gdb = fake.db;
   h.definition.mockClear();
   h.beforeAdmit = undefined;
+  vi.mocked(enqueueStart).mockClear();
+  vi.mocked(markQueuedForStart).mockClear();
 });
 
 const enrich = () =>
@@ -92,6 +95,27 @@ const enrich = () =>
   });
 
 describe('POST /enrich pins the kb_author step list', () => {
+  it.each([false, true])(
+    'execution refusal leaves no KB entry, task or job (locked=%s)',
+    async (locked) => {
+      if (locked)
+        h.definition.mockResolvedValueOnce({ runListSnapshot: ['01-enrich'], customSteps: null });
+      h.definition.mockImplementationOnce(async () =>
+        assertExecutionContractUsable({
+          version: 1,
+          guardedSpans: [],
+          fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+        }),
+      );
+      const res = await enrich();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'invalid-execution-contract' });
+      expect(fake.rows(schema.tasks)).toEqual([]);
+      expect(fake.rows(globalKbEntries)).toEqual([]);
+      expect(markQueuedForStart).not.toHaveBeenCalled();
+      expect(enqueueStart).not.toHaveBeenCalled();
+    },
+  );
   it('writes the helper snapshot into the task row', async () => {
     expect((await enrich()).status).toBe(201);
     expect(h.definition).toHaveBeenNthCalledWith(1, fake.db, 'kb_author', {
