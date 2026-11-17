@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'"
+    />
+    <title>Haive</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Haive</h1>
+      <p>
+        Run Haive locally, then open the app to create your first administrator and connect your AI
+        providers.
+      </p>
+      <section aria-labelledby="permission-heading">
+        <h2 id="permission-heading">Before you start</h2>
+        <p>
+          The Haive worker mounts the Docker socket. It can create and destroy containers and has
+          access equivalent to root on the host. The stack also mounts your home folder read-write.
+          Only run Haive on a machine where you accept this access.
+        </p>
+        <p>
+          Docker Desktop is required. Windows uses Linux containers; macOS uses CPU Ollama,
+          including Apple Silicon. The published installer selects supported GPU settings on Linux.
+          A GPU is optional.
+        </p>
+        <label><input id="consent" type="checkbox" /> I understand and accept this access.</label>
+      </section>
+      <section aria-labelledby="install-heading">
+        <h2 id="install-heading">Install a public release</h2>
+        <label for="version">Release</label>
+        <input
+          id="version"
+          value="latest"
+          placeholder="latest, next, or 0.2.0"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <p>
+          Install writes a separate Haive Desktop directory in your home folder. Start downloads and
+          runs the release's images. Your existing Haive installs stay separate.
+        </p>
+        <div class="actions">
+          <button id="install" disabled>Install</button>
+          <button id="start" disabled>Start</button>
+          <button id="stop" disabled>Stop</button>
+          <button id="status">Refresh status</button>
+          <button id="open" disabled>Open app</button>
+        </div>
+        <p id="message" role="status" aria-live="polite"></p>
+        <p id="status-summary" role="status" aria-live="polite"></p>
+        <p id="directory"></p>
+        <p id="release"></p>
+        <p id="operation-log"></p>
+        <table>
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>Status</th>
+              <th>Health</th>
+              <th>Exit code</th>
+              <th>Published ports</th>
+            </tr>
+          </thead>
+          <tbody id="services"></tbody>
+        </table>
+        <div class="actions">
+          <button id="logs">API logs</button><button id="worker-logs">Worker logs</button>
+        </div>
+      </section>
+      <section aria-labelledby="data-heading">
+        <h2 id="data-heading">Your data stays local</h2>
+        <p>
+          Stop keeps every data volume. Removing or updating this extension leaves the Haive stack,
+          data volumes, install directory and private operation log in place. Stop Haive before
+          removing the extension if you want it to stop running.
+        </p>
+        <p>
+          Upgrade Haive from the app's admin console. To remove Haive itself, use the uninstall
+          script in its install directory. Keep that directory and its .env file while keeping data:
+          the encryption key is needed to read stored credentials.
+        </p>
+        <p>
+          This extension installs public releases. Private channel credentials and module
+          entitlements use the existing installer.
+        </p>
+        <p>
+          <a data-external href="https://github.com/martinambrus/haive"
+            >Installation help and rootless Docker</a
+          >
+          · <a data-external href="https://github.com/martinambrus/haive/releases">Releases</a>
+        </p>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

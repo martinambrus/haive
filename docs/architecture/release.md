@@ -442,3 +442,366 @@ rebuilds configured own modules during preflight, before draining, and journals 
 references for rollback and recovery. See [Modules](modules.md#own-modules-on-a-published-install)
 for the prepared-source and per-customer builder contract. Channel selection and customer builder
 publication remain the vendor pipeline's responsibility; a public builder contains public core only.
+
+## Docker Desktop extension
+
+The local prototype lives in `docker/desktop-extension/`. It reuses the RUN-IT
+installers and release compose bundle. The owner began native live acceptance on
+Windows with Docker Desktop 4.98; a port clash exposed a frozen failure panel. The
+startup and port selection behavior below has unit/build evidence; native acceptance
+of these changes is still pending. The extension has not been published.
+
+### SDK contract verified 2026-11-17
+
+Measured: Extensions CLI v0.2.32, server API 0.4.2, Docker client/server 29.9.2.
+The JavaScript client and its lockfile-resolved types are 0.4.2; the image declares
+`>= 0.4.2, < 0.5.0`. These are measured versions; Docker's web manuals are unversioned.
+
+The [metadata contract](https://docs.docker.com/extensions/extensions-sdk/architecture/metadata/)
+requires `/metadata.json`, and permits optional UI, VM and host sections. A VM
+backend can use `vm.image` (generated Compose) or `vm.composefile` (supplied Compose).
+This extension uses a host executable backend, without a VM section: installation
+needs a real host path for the existing updater, and extension uninstall must not
+silently destroy an independently managed Haive install.
+
+[Host executables](https://docs.docker.com/extensions/extensions-sdk/guides/invoke-host-binaries/)
+are copied from the image, invoked with `ddClient.extension.host.cli.exec`, and removed
+with the extension. They run as the Desktop user. The extension uses buffered exec;
+installer and Compose output stays in a local operation log, while the UI receives
+structured status and errors. The request is one unpadded base64url argument: Desktop's
+Windows host-exec command line strips quotes from raw JSON. The helper decodes that
+argument without introducing a shell or changing the installer.
+`ddClient.host.openExternal` opens the existing app;
+`desktopUI.navigate.viewContainerLogs` opens the selected API or worker container.
+See [Dashboard](https://docs.docker.com/extensions/extensions-sdk/dev/api/dashboard/)
+and [NavigationIntents](https://docs.docker.com/reference/api/extensions-sdk/NavigationIntents/).
+
+The [architecture contract](https://docs.docker.com/extensions/extensions-sdk/extensions/multi-arch/)
+uses Linux extension images even on Windows. The local image contains amd64 and arm64
+variants; each carries a native Linux, Darwin and Windows helper for that architecture.
+No shell runtime beyond the existing installer prerequisites is added to the host.
+Windows uses its native PowerShell; macOS and Linux use `sh`. The Windows process uses
+execution-policy bypass for that invocation only; it changes no machine policy.
+
+### Installation and lifecycle
+
+`Install` invokes an embedded, byte-for-byte copy of `install/install.sh` or
+`install/install.ps1`, with an install id and `--no-start`/`-NoStart`. The installer
+resolves latest/next once, pins an exact release, validates the release manifest and
+bundle hashes when declared, probes ports, generates secrets and writes its normal
+helpers. There is no second version resolver, secret generator, compose definition,
+registration route or module entitlement resolver.
+
+The id and Compose project are `haive_desktop`; the host directory is
+`~/haive_desktop` (`%USERPROFILE%\haive_desktop` on Windows). Existing directory and
+resource collision refusals remain the installer's. The helper refuses other ids,
+unpinned settings, linked bundle files and a host Docker CLI pointed at a different
+engine from Desktop's SDK. The resolved Compose model must use this install's
+resource names and published images before install completes or Start runs. Older
+shared-name bundles and source-build services are refused. During Install, a bundle refusal or generic
+installer failure names the install folder and says to remove that folder, then install
+again; the UI renders this advice in its status message. Start never gives that advice: its
+folder holds an established install's `.env` secrets, which its data volumes depend on. The helper deletes no install
+files. A failed installer can leave a non-empty partial directory, such as snapshots,
+that must be removed before retrying. An unsupported release written with no start
+also requires clearing that fresh directory before choosing a newer release. Preserve
+an established install's .env and data before any manual cleanup.
+
+`Start` runs the installed base/run bundle and its already selected GPU overlay,
+NVIDIA first, then Vulkan, matching the updater. It calls `up -d --no-build --wait`
+with a six-minute service wait, without resolving or repinning a release. Initial
+missing images are pulled by Compose. The bundle's db-migrate dependency remains the
+only migration path. On every Start the helper checks all three configured TCP ports:
+`HAIVE_WEB_PORT`, `HAIVE_API_PORT` and `HAIVE_MAILPIT_PORT`. It lists running Docker
+containers and reads their structured `NetworkSettings.Ports` bindings in one inspect
+call, including IPv4 and IPv6; exposed-only container ports and UDP bindings do not
+conflict. It
+also probes host availability with IPv4/IPv6 wildcard TCP binds, so native listeners
+and Docker-published ports both count. After IPv4 passes, only an IPv6 address-in-use
+or access-denied error counts as a conflict; other IPv6 errors mean the family is
+unavailable. The platform-specific checks unwrap errors and use native Winsock codes
+on Windows. A port published by this Compose project is exempt from the host bind probe, while a foreign binding on that same number still
+conflicts. This checks availability rather than reserving ports through Compose start.
+
+A conflict selects the next available port, bounded to 50 candidates including the
+configured port and never past 65535, matching the installer's bounded search. Other
+configured service ports and ports selected earlier in the pass are reserved so web
+cannot take the API's port. All three selections finish before any file write. An
+exhausted search refuses Start with `.env` and containers unchanged. Failed or malformed
+Docker reads also refuse safely; Stop skips port selection. Status and Stop do not
+require `HAIVE_MAILPIT_PORT`; only Start validates it, defaulting to Compose's 8025
+when absent or empty. A move still requires a unique existing assignment to rewrite.
+
+For a changed port the helper replaces only the digits in its single `.env` assignment;
+it preserves LF/CRLF, comments, whitespace, unrelated bytes and POSIX file mode. It
+requires a regular file and a unique assignment, writes a temporary file in the install
+directory, syncs and renames it; a changed file observed before rename refuses. On
+Windows, a failed rename retries up to four total attempts with 50 ms sleeps between
+attempts. Every attempt rechecks the original bytes; an observed edit refuses without
+overwriting it. The temporary file is removed on success or refusal. Windows sharing
+and antivirus behavior still require native live acceptance. It never prints `.env`. The operation returns messages such as `web moved to 3002 because 3000
+is in use`, and the UI retains them alongside status through subsequent polls in that
+tab. The new app URL comes from the updated settings. Selection does not rewrite the
+release bundle, version pins, generated helpers or secrets. A late listener race can
+still fail Compose; refresh and Start repeats selection.
+
+After `up` fails, the helper reads this project's Compose status. A web/API/Mailpit
+service still `created` is inspected privately for `State.Status` and `State.Error`.
+Docker has no allocation code there, so the named `portAllocationError` constant
+recognizes its allocation wording. A match names the port, `.env` keys and operation
+log; unknown errors or failed diagnostics retain the generic Compose failure/log
+pointer. No raw daemon error is sent to the UI. Start never advises removing an
+established install folder. The existing installer selects CPU on macOS and Windows;
+Linux keeps its existing GPU detection. The disclosure names both the host-root-equivalent
+Docker socket access and the stack's read-write mount of the home folder. Install and
+Start require consent in the UI and the literal consent marker in the helper. For
+an installed instance, the tick persists in that viewer's localStorage, keyed by
+engine identity and install directory, and the checkbox restores it after tab reload.
+Reading and writing storage are guarded; missing or denied storage restores unticked.
+Unchecking clears the stored tick. A status showing no installed instance clears its
+stored tick and requires an explicit new tick before Install. The successful fresh
+Install carries that explicit tick into the installed view. No consent is stored in
+`.env` or shared across viewers. This is
+a guard against a UI regression; a same-user caller able to run the helper can supply
+the constant marker and already has the same host authority.
+
+`Stop` calls Compose stop for this project and retains containers, networks and every
+volume. It requires valid settings and regular compose files, but does not run the
+resolved-model/isolation check. The upgrade guard below still applies to Stop.
+Start retains the check. Stop still depends on Compose itself accepting its stop
+command. It stops Compose services; worker-created resources follow the existing worker
+shutdown behavior. Status is read-only. The UI re-reads it after every Install, Start
+or Stop, whether the operation succeeds or fails. Operation errors and service snapshots stay separate;
+a failed status read retains the last rows and marks them as last known. Controls
+are recomputed after every operation and every poll: Stop requires at least one
+`running`, `restarting` or `paused` service; Start requires an installed instance,
+consent and at least one service not ready; Open app requires the web service running and reachable. Busy or
+unavailable status disables mutations and app opening. Ready means running with
+healthy health (or no healthcheck); API and web use the extension probes below. The
+exit-0, exited `db-migrate` one-shot counts as ready. Status privately reads the
+installed Compose model and adds `missing` rows for active services with no container,
+so removed services cannot make a partial stack look ready; inactive profile services
+are not required. Stop's own returned snapshot skips model resolution to preserve the
+escape hatch, then the UI's normal status refresh resolves it again.
+
+While visible, the tab polls status after five seconds during an operation or when
+Compose reports a created/restarting service, a starting health check, or a running
+API/web service whose extension probe is negative. Each fast window lasts at most
+five minutes; starting Install or Start resets it, and completion resets it again so
+Node startup after Compose returns gets fast progress. Continued starting states do
+not extend the deadline. Three consecutive status-read errors also switch to thirty
+seconds; a successful read resets that error count. Outside the fast window or when
+steady, it polls after thirty seconds. Each periodic read finishes before the next
+is scheduled. Hiding the tab cancels its poll timer; showing it reads
+status immediately. Page teardown disposes the controller, removes the listener and
+ignores late replies. An in-flight read is not cancelled. Operation completion
+invalidates older polls and reads a fresh snapshot even if a poll is still in flight.
+The helper returns only each service's name, state, health, exit code and published
+ports (interface, target/host port and protocol); Compose labels, mounts, container
+IDs and host paths never cross to the UI. Container IDs needed for late failure
+inspection remain private. The table shows those fields, with a `Starting…` summary
+and ready/total progress during the fast window while any service is starting,
+including negative running API/web probes. After the window expires, the summary
+reads `Still not ready (N/M)` and retains the ready count with thirty-second polling.
+Idle status and port notices appear only in the summary live region;
+the operation region contains distinct progress or error text. The count includes
+a successful exit-0 `db-migrate` one-shot. Errors remain visible alongside the
+current status until the next manual action. API health is `healthy`/`unhealthy` from a bounded `/health` request
+requiring HTTP 200. Web health is `reachable`/`unreachable` from the app URL, accepting
+2xx or 3xx without following redirects. Both table values are labelled `extension
+probe`; Docker's own missing healthchecks do not leave these rows blank. Each probe
+runs only while this project's corresponding service is running; stopped services
+cannot borrow another app's response. App opening depends on web reachability and
+can remain available while the API or another service is down. The app opens at the actual selected port on `/setup`, whose
+existing first-admin/login guards remain authoritative. The extension collects no
+administrator passwords, API keys or registry credentials. Its UI installs public
+releases only; channel installs retain the existing installer and private credentials.
+
+Data volumes live in Docker Desktop's engine/VM, not in the extension image. Runtime
+volumes include `haive_desktop_{postgres,redis,mailpit,ollama}_data`; repositories,
+bundles, wrappers, caches, DDEV CA and per-task auth/IDE volumes use the existing
+`haive_desktop_` namespace. The host directory holds `.env`, the bundle, bundle record,
+normal control/uninstall helpers and snapshots. Keep `.env` while retaining data.
+The sibling `haive_desktop.extension.log` records the latest mutation (0600 on POSIX;
+Windows uses the profile's inherited ACL). No log is sent to the web UI.
+
+Updating or removing the extension replaces/removes its SDK-owned UI and executables
+only. Haive's stack, directory, log and volumes remain; a running stack keeps running.
+Upgrade Haive through the existing admin updater, with its drain, backup and rollback
+contract. Extension replacement never upgrades Haive. To stop before removing the
+extension, use Stop. To remove Haive itself, use its generated uninstaller separately:
+the default deletes runtime volumes including PostgreSQL, and purge also deletes work
+volumes and owned built images. The directory and pulled release images remain. No
+extension removal path calls down -v or prunes volumes.
+
+Before Install, Start or Stop, the host helper checks for a running updater for
+`haive_desktop`. This first check precedes the installer, port rewriting and any
+Compose command; Start and Stop make a final check immediately before the Compose
+call that changes services. An active updater refuses the action with guidance to
+wait for completion and refresh. If the updater is hung, stop that updater container
+in Docker Desktop, then check the upgrade state in the existing updater journal
+before retrying. A failed or malformed Docker listing/inspection retries the whole
+list-and-inspect check once with fresh container IDs; a second error refuses the
+action. This also covers a container removed between listing and inspection.
+Status remains read-only. Install continues to use `--no-start`/`-NoStart`; only
+Start invokes Compose up.
+
+The API's in-app upgrade and the generated POSIX/PowerShell `haive` helpers launch
+the updater outside Compose, without updater or Compose project labels. The helper
+therefore identifies the released image's exact `node packages/updater/dist/cli.js`
+entrypoint together with an exact `HAIVE_INSTALL_ID=haive_desktop` or
+`COMPOSE_PROJECT_NAME=haive_desktop` environment entry and `State.Running`. It lists
+running container IDs and inspects them in one batch. The Docker template projects
+these fields to booleans: no environment values, credentials or full inspect output
+are returned to the helper or UI. This works while PostgreSQL is stopped for its
+volume archive and the API/journal cannot be queried. Other installs and stopped
+updaters do not block these actions. This is a check of the released container launch
+contract, not an atomic mutex with the updater: a new upgrade can still begin after
+the final check, a crashed updater's unfinished journal is not read, and a custom
+entrypoint or host-run updater is outside this detection contract. A shared host lock
+would need participation by the updater and its launchers; released updaters do not
+honor the extension's lock. Changing the updater entrypoint or its install
+environment requires updating the extension in the same release. A script test pins
+the Dockerfile entrypoint to the extension guard and both install identity environment
+arguments in the API and generated POSIX/PowerShell upgrade launchers. The updater
+and its launch protocol are unchanged.
+
+A cross-process directory lock serializes extension mutations. If a hard termination leaves
+`~/haive_desktop.extension-lock`, inspect this install's containers and ensure no
+operation remains before removing that lock directory. Normal completion and handled
+signals release it. Keep the tab open during long operations. Processes have a
+30-minute deadline; a timeout or close can leave a completed install or partially
+started stack, so refresh status and inspect logs before retrying. Cancellation kills
+the direct child only; installer grandchildren can outlive it even after lock release. No automatic
+reinstall or deletion is attempted.
+
+### Build and validation
+
+Run `bash scripts/build-desktop-extension.sh`. It creates a scratch context with an
+explicit file allowlist, embeds the unchanged installers, runs the Go tests, bundles
+the pinned JavaScript SDK, and loads a dual-architecture image as
+`haive-desktop-extension:dev` and `haive-desktop-extension:0.0.0-dev`. Local multiarch
+load requires Docker's containerd image store; the script never changes Desktop
+settings. It never starts Haive, installs the extension or pushes any image.
+
+Both builder stages retain their tags and pin the multi-platform index digest resolved
+on 2026-11-17 by `docker buildx imagetools inspect node:26-alpine` and
+`docker buildx imagetools inspect golang:1.25-alpine`:
+
+- Node: `sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5`.
+- Go: `sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59`.
+
+Dependabot covers the Dockerfile and the UI's independent npm lockfile in separate
+Docker/npm update entries, with the existing minor/patch grouping policy.
+
+`docker extension validate docker/desktop-extension/metadata.json` passes. The full
+image validator in CLI v0.2.32 additionally applies Marketplace semver and remote
+multiplatform checks. The literal dev tag fails semver. The identical 0.0.0-dev alias
+passes labels, metadata, semver and SDK compatibility but reports its DockerHub
+multiplatform failure even though both local platforms are present. No full-image
+validation pass is claimed. `--sdk-compatibility` adds a check and does not disable
+publication checks; the CLI has no skip-marketplace flag. See the current
+[validation manual](https://docs.docker.com/extensions/extensions-sdk/extensions/validate/).
+This gate remains unresolved under the no-push constraint. Do not install a different
+CLI, falsify its result or publish to work around it during local development.
+
+Unit controls live in `scripts/test/desktop-extension.test.mjs` (UI, part of
+`pnpm test:scripts`) and `docker/desktop-extension/bridge/main_test.go` (installer
+byte preservation/delegation, version syntax/pins, bundle/overlay resolution, identity,
+consent, concurrency, recovery advice, stop without resolution and legacy-resource refusal).
+The delegation test proves bytes are preserved from the embed; the build script's
+allowlisted copy supplies the checkout-to-embed identity. A real child-process test
+checks that ambient Haive, Compose and secret variables are filtered case-insensitively,
+while PATH, Docker context and ordinary variables survive. Health-gating tests pin
+literal probe and readiness expectations, including API-only and web-only cases.
+Polling and failure regressions cover failed-operation status recovery, recomputed controls,
+5s/30s polling with fake timers, reads during Start, hidden/disposed tabs, overlapping
+read prevention and stale reply fencing. Go cases cover web/API published-port
+clashes, own-project exclusion, unlabelled apps, IPv4/IPv6, exposed-only and UDP
+ports, failed/malformed listings, Stop bypass and late allocation/generic mapping.
+Port and service controls cover port re-picking from both host and Docker conflicts, sibling
+port reservation, own-project exemptions, late-service exhaustion without writes,
+65535 and 50-try bounds, byte-preserving LF/CRLF updates and file modes, final
+port assignments without a newline, bounded rename success/exhaustion, concurrent
+edits and temp cleanup, batched container inspections, IPv6 family failures, and refused
+linked/duplicate/missing assignments, status field filtering and missing-service rows.
+A real local listener and local HTTP redirect fixture exercise the actual bind/probe
+seams; the remaining cases mock I/O. UI tests cover the service control matrix,
+consent reload/uncheck/viewer separation/storage failures/fresh install, labelled
+probes, restarting/paused Stop controls, move notices surviving polls, bounded fast
+polling after Start/Install, expired readiness wording for either negative running
+probe, and error-cadence backoff. Upgrade controls cover refusal of all three
+mutations for this install's updater, unchanged behavior for other installs/stopped
+updaters, failed/malformed Docker reads, one complete retry with fresh IDs, safe
+one-element entrypoints even with eager template evaluation, batched boolean
+projection without secrets, hung-updater recovery advice, and a new updater observed
+on the final pre-mutation check. Go tests run in a throwaway
+golang container with copied install/ files, and again inside the extension build
+with two scheduler threads and one package worker; no host Go dependency is needed. Native macOS/Windows execution and live stack behavior
+have not been measured by the local mocked-UI and unit checks.
+
+Measured 2026-11-17 on Docker Desktop 4.98.0 (245422), with its WSL-integrated Compose
+v5.6.1:
+a separate two-service fixture using `restart: 'no'` and
+`depends_on: { db-migrate: { condition: service_completed_successfully } }` returned
+exit 0 from `up -d --no-build --wait --wait-timeout 20`. The one-shot was exited with
+code 0 and the dependent service healthy. The fixture had no mounts, volumes or
+published ports, and both self-named containers were removed with `docker rm -fv`.
+This checks Compose's one-shot treatment, not Haive's actual first boot; repeat the
+live first-start check below on the owner's native Desktop version.
+
+### Owner-session acceptance and rollback
+
+1. Confirm this id, its host directory and its volumes are unused. Keep every other
+   stack running unchanged. Build the image; record the validation limitation above.
+2. From the Desktop host, run `docker extension install haive-desktop-extension:dev`.
+   Do not use the validator's install/uninstall flag. If Desktop policy disallows
+   unpublished extensions, stop and let the owner decide; do not change settings.
+3. In Haive's tab, verify install/start are disabled until the socket/home-mount disclosure is
+   accepted. Select a current public release and Install. Confirm an exact pinned
+   version and an isolated install directory without copying secret values.
+4. With another project publishing a configured web/API/Mailpit port, Start must
+   choose the next free port and display the move, leaving the other project alone.
+   Repeat with a native host listener. Compare `.env` privately: only conflicted port
+   values may change. Own-project running ports must not move. If all 50 candidates
+   are occupied, Start must refuse without changing `.env` or running Compose up.
+   Watch five-second service progress, including running API/web with negative probes,
+   and thirty-second polling after five minutes or three consecutive read failures.
+   After the fast window expires, a continued negative API/web probe must read
+   `Still not ready (N/M)`, with the ready count preserved.
+   Confirm the summary is announced once. Hide/show the tab and confirm polling
+   suspends/resumes. A late allocation race retains its reason
+   and a Created service's status. Stop stays enabled for running, restarting and paused
+   services, and is disabled when none are live; Start is disabled only once all
+   services are ready; Open app follows the web probe. Reload
+   an installed tab and verify consent stays ticked; uncheck and reload to verify it
+   stays unticked. A fresh install must require a new tick. API/web health rows must
+   identify the extension probes, with web redirects shown as reachable. On Windows,
+   check rename retries under concurrent status reads and antivirus scanning; a refused
+   rename must preserve the original file and leave no temporary .env copy. With the
+   Mailpit port line absent, status and Stop must still work; Start uses default 8025.
+5. Start. Check db-migrate succeeded and the services are running; watch for a false
+   "Compose failed" after its exit-0 one-shot on the owner's Desktop/Compose version. Open app; create
+   the first administrator through the existing setup page, then verify a later
+   visit uses login. Exercise API and worker log links.
+6. During an in-app upgrade for this install, try Start and Stop: both must refuse
+   with the upgrade message and leave services alone, including while the updater
+   archives PostgreSQL. A direct Install request must also refuse before delegation.
+   A Docker inspection failure that persists after one retry must refuse these
+   actions, while another install's updater must not block this one. After the updater finishes, Stop; verify this
+   project's services stop and its volumes survive. Start again and verify the
+   account/data persist. Check other installs remain unchanged.
+7. Stop, then `docker extension rm haive-desktop-extension:dev`. Verify the extension
+   disappears while the directory and volumes remain. Reinstalling the extension
+   must reattach to this same install rather than reinstall it.
+
+Rollback of this code is a git revert, with no database migration. Port values
+selected by Start remain in the install's `.env` after rollback; retain those valid
+values, or privately restore only the three port lines while stopped after checking
+availability. Never replace the file with newly generated secrets. Viewer consent
+storage may be cleared independently; no application data depends on it. For a live trial,
+stop and remove the extension first; preserve its data and `.env`. Remove the Haive
+trial only through its generated uninstall script after separately deciding which
+data to discard. Local extension image tags may be removed afterward; do not remove
+Haive service images or unrelated Docker resources. Roll back a Haive upgrade through
+the existing updater rather than changing version pins by hand.
