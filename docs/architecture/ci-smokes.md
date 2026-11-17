@@ -40,9 +40,9 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1700 s at 158 rows. MEASURED 2026-11-12 on
+- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1710 s at 159 rows. MEASURED 2026-11-12 on
   ubuntu-latest: the gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the
-  older 7.5 s figure undercounted. Its 42-minute limit (2520 s) leaves 820 s over modelled green and covers the
+  older 7.5 s figure undercounted. Its 42-minute limit (2520 s) leaves 810 s over modelled green and covers the
   40-minute gated step limit plus setup (2520 s). The 120 s allowance rounds up the historical 62 s setup maximum to
   include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
