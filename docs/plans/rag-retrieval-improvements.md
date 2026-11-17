@@ -808,14 +808,24 @@ approximation recall. Each diagnostic setting stays in its read-only transaction
 production plan is reported independently; a small store can correctly choose exact search.
 
 `rag-eval.ts` computes its fingerprint from the exact manifest and query bytes; `RAG_MANIFEST`
-defaults to `manifest.json` beside `RAG_QUERY_SET`. Any manifest edit, including whitespace or
-provenance, invalidates both baselines and requires remeasurement. There is no operator-supplied id.
+defaults to `manifest.json` beside `RAG_QUERY_SET`. Standalone query sets still run when that
+default file is absent; their output has no fixture identity and comparison refuses them with
+`not comparable: no fixture manifest`. An explicitly supplied missing `RAG_MANIFEST` fails.
+Query/manifest reads and result writes use descriptor-held `@haive/shared/fs-safe` operations;
+a symlink in an input or its parent directories is refused. Any manifest edit, including whitespace
+or provenance, invalidates both fixture baselines and requires remeasurement. There is no operator-supplied id.
 
 `RAG_OUT` includes all pages (5, 8, 12, 20, 50), source bodies for rubric inspection, per-query
 scores and summary cells. Set `RAG_COMPACT=1` to write only minified query records, or use exported
 `compactRun` on saved output. Committed baselines are below 150 KB each: all page scores, query
 metadata, label SHA-256 and k=8 signals remain; duplicate golds, hit bodies, summaries, milliseconds
 and per-query dense-pool dumps are omitted (lost golds alone are retained to preserve missing counts).
+Structured `settings` also survives compaction: the embedding model and dimensions used by the
+run, page sizes (`ks`), whether the search is repository-scoped, and effective search defaults,
+arm (`search.lexicalOnly`) and ranking knobs. Lexical-only runs record the configured embedder
+but make no query embedding call. Both committed compact baselines had this metadata restored
+from their original full-run settings, page keys and recorded model/store/runtime provenance;
+query records, scores and fingerprint did not change and no new measurement was made.
 Dense-pool aggregate results remain in provenance; full run output stays in external evidence.
 The report recomputes class/language/split/cell summaries, CIs, AUROC and the fixed-threshold FPR.
 `--cells` emits the exact Markdown cell table above from the same summary code:
@@ -834,7 +844,12 @@ The report also hashes HEAD's committed chunker/collector/builder blobs against
 for drift. This warning is tested; it does not silently update or bless a stale baseline.
 
 The comparison refuses mismatched fingerprints, ids, labels, metadata, metric versions and
-missing pages/scores. Deltas are candidate minus baseline; wins/losses/ties use higher recall,
+missing pages/scores. It also requires observed structured settings and refuses different fixed
+`embeddingModel`, `embeddingDimensions`, `ks` or `repositoryScoped`, naming the field. A selected
+comparison k must belong to the recorded page protocol. The arm and search ranking knobs are
+experiment variables: they may differ deliberately, and the comparison retains both runs' settings
+as `settings.before/after` so the change is visible. The lexical/hybrid baseline pair still loads.
+Deltas are candidate minus baseline; wins/losses/ties use higher recall,
 MRR and coverage, and lower negative dense-threshold `fpr`. Each arm fixes its own global tau
 using only its tuning positives; that tau is held fixed across all held-out and cell comparisons.
 `answerability[k].before/after` reports each arm’s tau, AUROC, FPR and retention by split and group.
