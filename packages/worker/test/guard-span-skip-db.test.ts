@@ -14,12 +14,16 @@ import { handleResult, reconcileOrphanedSteps } from '../src/queues/task-queue.j
 import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { reviveDeadTask } from '../src/queues/dead-task-boot.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import { holdReopenedForm } from '../src/step-engine/step-runner.js';
 
 // Only the existing API/worker capability refusal is bypassed in this file to
 // exercise generic recovery/reset below the still-closed production fence.
 vi.mock('@haive/shared/modularity', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/modularity')>()),
   assertExecutionContractSupported: () => {},
+}));
+vi.mock('../src/step-engine/execution-contract-support.js', () => ({
+  assertWorkerExecutionContractSupported: () => {},
 }));
 vi.mock('../../api/src/lib/execution-contract-admission.js', () => ({
   assertExecutionContractUsable: () => {},
@@ -379,6 +383,80 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
     expect(response.status).toBe(200);
     expect((await read()).every((r) => r.guardState === null && r.status === 'pending')).toBe(true);
   });
+  it.each([true, false])(
+    'Resume rescans from its retained producer when a run:%s decision commits after the empty cascade read',
+    async (run) => {
+      await db
+        .update(schema.taskSteps)
+        .set({ output: { retained: true } })
+        .where(eq(schema.taskSteps.id, rows.plan!.id));
+      await db.insert(schema.taskStepAgentMinings).values({
+        taskStepId: rows.plan!.id,
+        agentId: 'retry-me',
+        agentTitle: 'Retry me',
+        status: 'failed',
+      });
+      let published = false;
+      state.db = new Proxy(db, {
+        get(target, key, receiver) {
+          if (key !== 'transaction') return Reflect.get(target, key, receiver);
+          return async (fn: (tx: DbTx) => Promise<unknown>) => {
+            // The route already read only pristine pending downstream rows.
+            // Publish the competing decision before Resume takes its ordered batch.
+            if (!published) {
+              published = true;
+              evaluate.mockResolvedValue(run);
+              await decide();
+              if (!run) await skip();
+            }
+            return db.transaction(fn);
+          };
+        },
+      });
+      const app = new Hono();
+      app.use(
+        '*',
+        async (c: { set: (key: string, value: string) => void }, next: () => Promise<void>) => {
+          c.set('userId', userId);
+          await next();
+        },
+      );
+      app.route('/', stepRoutes);
+      app.onError(errorHandler);
+      try {
+        const response = await app.request(`/${taskId}/steps/plan/action`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'resume', round: 0 }),
+        });
+        expect(response.status).toBe(200);
+        expect(published).toBe(true);
+        const after = await read();
+        expect(after[0]).toMatchObject({
+          status: 'running',
+          output: { retained: true },
+          rerunGeneration: 0,
+        });
+        expect(after[1]).toMatchObject({ status: 'pending', guardState: null, rerunGeneration: 1 });
+        expect(after[2]).toMatchObject({
+          status: 'pending',
+          guardState: null,
+          rerunGeneration: run ? 0 : 1,
+        });
+        expect(after[3]!.rerunGeneration).toBe(0);
+        expect((await task())!.orchestrationEpoch).toBe(1);
+        expect(evaluate).toHaveBeenCalledOnce();
+        expect(
+          await db
+            .select()
+            .from(schema.taskStepAgentMinings)
+            .where(eq(schema.taskStepAgentMinings.taskStepId, rows.plan!.id)),
+        ).toMatchObject([{ status: 'failed', userRetryRequestedAt: expect.any(Date) }]);
+      } finally {
+        state.db = db;
+      }
+    },
+  );
   it('Stop and provider Resume preserve committed skip identity byte-for-byte', async () => {
     const before = await saved();
     await db
@@ -465,5 +543,120 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
     expect(handoff).not.toHaveBeenCalled();
     expect(evaluate).not.toHaveBeenCalled();
     expect({ task: await task(), steps: await read() }).toEqual(before);
+  });
+  it('reconciles a held form generation with dependent/shared skips atomically across crash and replay', async () => {
+    const expanded = {
+      ...contract,
+      guardedSpans: [
+        ...contract.guardedSpans,
+        {
+          id: 'closed',
+          firstStepId: 'report',
+          lastStepId: 'report',
+          predicateId,
+          args: {},
+          requiresSpan: 'work',
+          when: false,
+        },
+      ],
+    };
+    await db
+      .update(schema.tasks)
+      .set({ executionContract: expanded })
+      .where(eq(schema.tasks.id, taskId));
+    evaluate.mockResolvedValue(true);
+    await decide();
+    for (const id of ['a', 'b'])
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done' })
+        .where(eq(schema.taskSteps.id, rows[id]!.id));
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: 'report' })
+      .where(eq(schema.tasks.id, taskId));
+    const later = { ...ctx, taskStepId: rows.report!.id };
+    await evaluateGuardDecision(later, 'closed', predicates);
+    await skipGuardSpan(later, 'closed', predicates);
+    await db.update(schema.tasks).set({ currentStepId: 'a' }).where(eq(schema.tasks.id, taskId));
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'running', formValues: { old: true } })
+      .where(eq(schema.taskSteps.id, rows.a!.id));
+    const [agent] = await db
+      .insert(schema.taskStepAgentMinings)
+      .values({
+        taskStepId: rows.a!.id,
+        agentId: 'folded',
+        agentTitle: 'Folded',
+        status: 'done',
+      })
+      .returning();
+    const folded = [{ agentId: 'folded', invocationId: null }] as unknown as Parameters<
+      typeof holdReopenedForm
+    >[2];
+    const before = await read();
+    const at = new Date();
+    // Fail the generation write after the guard references have been updated.
+    await db.execute(
+      sql`CREATE FUNCTION guard_reopen_cut() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.step_id = 'a' AND NEW.rerun_generation > OLD.rerun_generation THEN RAISE EXCEPTION 'reopen cut'; END IF; RETURN NEW; END $$`,
+    );
+    await db.execute(
+      sql`CREATE TRIGGER guard_reopen_cut BEFORE UPDATE ON task_steps FOR EACH ROW EXECUTE FUNCTION guard_reopen_cut()`,
+    );
+    try {
+      await expect(holdReopenedForm(db, rows.a!.id, folded, at, 1, ctx)).rejects.toSatisfy((e) =>
+        hasPgCode(e, 'P0001'),
+      );
+      expect(await read()).toEqual(before);
+      expect(
+        (await db.query.taskStepAgentMinings.findFirst({
+          where: eq(schema.taskStepAgentMinings.id, agent!.id),
+        }))!.consumedAt,
+      ).toBeNull();
+    } finally {
+      await db.execute(sql`DROP TRIGGER guard_reopen_cut ON task_steps`);
+      await db.execute(sql`DROP FUNCTION guard_reopen_cut()`);
+    }
+    await holdReopenedForm(db, rows.a!.id, folded, at, 1, ctx);
+    const after = await read();
+    expect(after[1]).toMatchObject({
+      rerunGeneration: 1,
+      pauseFormOnRetry: true,
+      formValues: null,
+      guardState: { generation: 1, run: true, predicate: { source: { generation: 1 } } },
+    });
+    expect(after[3]).toMatchObject({
+      status: 'skipped',
+      rerunGeneration: 0,
+      guardState: {
+        generation: 0,
+        required: { generation: 1 },
+        predicate: { source: { generation: 1 } },
+      },
+    });
+    expect(after[3]!.endedAt).toEqual(before[3]!.endedAt);
+    await expect(skipGuardSpan({ ...ctx, rerunGeneration: 1 }, 'work', predicates)).rejects.toThrow(
+      'entry-fence-lost',
+    );
+    expect(await read()).toEqual(after);
+    // A lost acknowledgement cannot consume/bump this old pass a second time.
+    await expect(holdReopenedForm(db, rows.a!.id, folded, at, 1, ctx)).rejects.toThrow(
+      'reset, skipped or stopped',
+    );
+    expect(await read()).toEqual(after);
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: 'report' })
+      .where(eq(schema.tasks.id, taskId));
+    expect(await skipGuardSpan(later, 'closed', predicates)).toEqual({ nextStepId: null });
+    expect(evaluate).toHaveBeenCalledOnce();
+    await resetStepAndDownstream(db, taskId, 'plan', 0, 0);
+    expect((await read())[1]).toMatchObject({
+      status: 'pending',
+      guardState: null,
+      rerunGeneration: 2,
+      formSchema: null,
+    });
   });
 });

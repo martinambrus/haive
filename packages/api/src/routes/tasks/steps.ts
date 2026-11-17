@@ -239,9 +239,15 @@ export async function resetRowsForRerun(
   taskId: string,
   rows: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { rowsHeld?: boolean; preserveGuards?: boolean; executionContract?: unknown } = {},
+  opts: {
+    rowsHeld?: boolean;
+    preserveGuards?: boolean;
+    executionContract?: unknown;
+    /** Rescan after a retained producer even when the initial reset set is empty. */
+    invalidateGuardsAfter?: typeof schema.taskSteps.$inferSelect;
+  } = {},
 ): Promise<(typeof schema.taskSteps.$inferSelect)[]> {
-  if (rows.length === 0) return [];
+  if (rows.length === 0 && !opts.invalidateGuardsAfter) return [];
   let executionContract = opts.executionContract;
   // Production callers pass their loaded pin. Direct callers may omit it.
   if (executionContract === undefined) {
@@ -254,6 +260,8 @@ export async function resetRowsForRerun(
   }
   const guarded =
     executionContract != null && parseExecutionContract(executionContract).guardedSpans.length > 0;
+  const anchor = guarded && !opts.preserveGuards ? opts.invalidateGuardsAfter : undefined;
+  if (rows.length === 0 && !anchor) return [];
   const ids = rows.map((r) => r.id);
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
   // their runs are swept without waiting, and a held one refuses the action as a held row does.
@@ -269,7 +277,7 @@ export async function resetRowsForRerun(
   // this read is current; `rows` is the caller's read from before the transaction began.
   const forward = guarded
     ? or(
-        ...rows.map((row) =>
+        ...[...rows, ...(anchor ? [anchor] : [])].map((row) =>
           and(
             eq(schema.taskSteps.round, row.round),
             row.runSeq != null
@@ -295,9 +303,9 @@ export async function resetRowsForRerun(
     );
   const held = guardResetRows(
     loaded,
-    loaded.filter((r) => ids.includes(r.id)),
+    [...loaded.filter((r) => ids.includes(r.id)), ...(anchor ? [anchor] : [])],
     opts.preserveGuards === true,
-  );
+  ).filter((r) => r.id !== anchor?.id || ids.includes(r.id));
   // A guard decision (and even its first run) can land after the caller's read.
   // These extra rows were not in the first run sweep. We hold steps now, so
   // refuse a busy run rather than wait in the reverse lock order.
@@ -1571,18 +1579,19 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         const extra = guarded
           ? await resetRowsForRerun(tx, id, downstreamToReset, now, {
               executionContract: task.executionContract,
+              ...(step.status === 'done' ? { invalidateGuardsAfter: step } : {}),
             })
           : await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
               preserveGuards: true,
               executionContract: task.executionContract,
             });
         if (guarded) {
-          // A nonempty downstream reset holds the task's entire step batch.
+          // The forward rescan also holds the batch when no initial row needed resetting.
           // Never wait on another run while holding that batch: refuse contention.
           await resetRowsForRerun(tx, id, leftActive, now, {
             preserveGuards: true,
             executionContract: task.executionContract,
-            rowsHeld: downstreamToReset.length > 0,
+            rowsHeld: downstreamToReset.length > 0 || step.status === 'done',
           });
         }
         const [held] = await tx

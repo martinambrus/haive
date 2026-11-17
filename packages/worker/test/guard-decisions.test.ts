@@ -58,10 +58,20 @@ it('keeps the execution fence closed and the decision service has no skip or han
           (name) =>
             file.pathname === new URL(`../src/step-engine/${name}`, import.meta.url).pathname,
         )
-      )
-        expect(readFileSync(file, 'utf8'), file.pathname).not.toMatch(
+      ) {
+        const source = readFileSync(file, 'utf8');
+        // Reopen may decode/hash records; evaluation and span skipping stay unwired.
+        const checked =
+          file.pathname === new URL('../src/step-engine/guard-reopen.ts', import.meta.url).pathname
+            ? source.replace(
+                "import { GuardDecisionError, guardContractHash, parseGuardDecision } from './guard-decisions.js';",
+                '',
+              )
+            : source;
+        expect(checked, file.pathname).not.toMatch(
           /evaluateGuardDecision|guard-decisions|skipGuardSpan|advanceGuardSpan|guard-span-skip/,
         );
+      }
     }
   }
   for (const root of [

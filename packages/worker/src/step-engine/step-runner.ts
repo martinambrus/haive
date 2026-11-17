@@ -1,4 +1,6 @@
 import { finalizeCanonicalCheckResult } from './check-result-output.js';
+import { parseExecutionContract } from '@haive/shared/modularity';
+import { reconcileReopenedGuardGeneration } from './guard-reopen.js';
 import {
   recordGate3Check,
   pendingInsightApproval,
@@ -2263,9 +2265,32 @@ export async function holdReopenedForm(
   folded: readonly AgentMiningResult[] | undefined,
   at: Date,
   nextGeneration?: number,
+  ctx?: StepContext,
 ): Promise<void> {
+  const pin =
+    nextGeneration == null
+      ? undefined
+      : ctx
+        ? await db.query.tasks.findFirst({
+            where: eq(schema.tasks.id, ctx.taskId),
+            columns: { executionContract: true },
+          })
+        : (
+            await db
+              .select({ executionContract: schema.tasks.executionContract })
+              .from(schema.taskSteps)
+              .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+              .where(eq(schema.taskSteps.id, taskStepId))
+          )[0];
+  const guarded =
+    pin?.executionContract != null &&
+    parseExecutionContract(pin.executionContract).guardedSpans.length > 0;
   await db.transaction(async (tx) => {
     await consumeFoldedMiningRows(tx, taskStepId, folded, at);
+    if (guarded) {
+      if (!ctx || ctx.taskStepId !== taskStepId) throw new StepSupersededError(taskStepId);
+      await reconcileReopenedGuardGeneration(tx, ctx, nextGeneration!);
+    }
     await updateOwnedStep(
       tx,
       taskStepId,
@@ -3986,6 +4011,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             applyArgs.agentMiningResults,
             new Date(),
             nextGeneration,
+            ctx,
           );
           if (nextGeneration != null) {
             current = { ...current, rerunGeneration: nextGeneration };
