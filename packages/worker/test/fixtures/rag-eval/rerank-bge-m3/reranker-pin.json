@@ -1,0 +1,15 @@
+{
+  "image": "ghcr.io/ggml-org/llama.cpp@sha256:d68ec493c0ff9105ddfe2e909fff304117bc6e1fffbbd8d94182bd455983c264",
+  "build": "12429",
+  "commit": "9fba51d2c9a1b5cb5f0c47986c031334e2d7663a",
+  "repo": "gpustack/bge-reranker-v2-m3-GGUF",
+  "revision": "3093af03b1a635e67b084b1d8c03c5f5e020fd05",
+  "file": "bge-reranker-v2-m3-Q8_0.gguf",
+  "sha256": "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3",
+  "scoreScale": "raw relevance_score logit, uncalibrated; observed probe 5.0296 and -11.0000",
+  "context": 2048,
+  "ubatch": 2048,
+  "gpuLayers": 99,
+  "parallel": 1,
+  "verbosity": 4
+}
