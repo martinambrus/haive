@@ -194,6 +194,8 @@ describe('guard decisions from loaded rows', () => {
       boundary: { stepRowId: rows.plan!.id, stepId: 'plan', round: 0, generation: 0 },
       predicate: { id: predicateId, result: true },
       required: null,
+      // Ties the decision path to the hash pinned by the fixed vector below.
+      contractHash: guardContractHash(ids, currentContract()),
     });
     expect(evaluate).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
@@ -427,7 +429,16 @@ describe('guard decisions from loaded rows', () => {
       if (change === 'boundary') saved.boundary!.stepRowId = randomUUID();
       rows.work!.guardState = saved;
     }
-    await expect(decide()).rejects.toThrow('guard-decision');
+    const reason: Record<string, string> = {
+      state: 'malformed-state',
+      'producer-generation': 'stale-producer',
+      boundary: 'stale-producer',
+      result: 'invalid-predicate-decision',
+      source: 'stale-predicate-source',
+    };
+    await expect(decide()).rejects.toThrow(
+      `guard-decision-invalid: ${reason[change] ?? 'stale-decision'}`,
+    );
     expect(evaluate).toHaveBeenCalledOnce();
   });
 
