@@ -125,6 +125,7 @@ export function createStreamJsonCollector(
   let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
   let resultCount = 0;
+  let strictWholeRun: RequestUsage | null = null;
   let resultOutputKnown = false;
   let initialized = false;
   const requestIssues = new Set<string>();
@@ -171,7 +172,10 @@ export function createStreamJsonCollector(
       malformedLineCount++;
       return;
     }
-    if (typeof event.type !== 'string') return;
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
+      malformedLineCount++;
+      return;
+    }
     eventCount++;
     toolUsage.claudeEvent(event);
 
@@ -256,6 +260,7 @@ export function createStreamJsonCollector(
     if (type === 'result') {
       resultCount++;
       const strictResult = claudeRequestUsage(event.usage, 'result', null);
+      strictWholeRun = strictResult;
       if (!strictResult) requestIssues.add('invalid-result-usage');
       resultOutputKnown = strictResult?.outputTokens != null;
       if (!resultFired) {
@@ -676,9 +681,40 @@ export function createStreamJsonCollector(
         }
         if (!matches) reasons.add('model-usage-mismatch');
       }
+      // Result buckets are authoritative even on endpoints whose assistant usage is
+      // zero. Prove the whole stream separately from prompt reconciliation.
+      const mainModel = requests[0]?.model ?? null;
+      const wholeRunIntact =
+        initialized &&
+        resultCount === 1 &&
+        malformedLineCount === 0 &&
+        requestIssues.size === 0 &&
+        modelCoverage === 'single' &&
+        strictWholeRun?.outputTokens != null;
+      const wholeMatches = (billed: RequestUsage | null) =>
+        billed != null &&
+        ['inputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'outputTokens'].every(
+          (key) =>
+            billed[key as keyof RequestUsage] === strictWholeRun?.[key as keyof RequestUsage],
+        );
+      // A same-name ledger must cover exactly the priced total: hidden calls must
+      // not be silently folded into a one-request or under-threshold proof.
+      const wholeLedgerMatches =
+        billedUsageByModel.size === 0 ||
+        (mainModel !== null && billedUsageByModel.has(mainModel)
+          ? wholeMatches(billedUsageByModel.get(mainModel)!)
+          : [...billedUsageByModel.values()].some(wholeMatches));
+      const wholeRun =
+        wholeRunIntact && wholeLedgerMatches
+          ? {
+              usage: { ...strictWholeRun!, model: mainModel },
+              requestCount: requests.length,
+            }
+          : undefined;
       const complete = reasons.size === 0;
       return {
         requests,
+        ...(wholeRun ? { wholeRun } : {}),
         ...(complete && unobservedSameModel.length ? { unobservedSameModel } : {}),
         coverage: complete ? 'complete' : 'incomplete',
         inputConvention: 'exclusive',

@@ -108,14 +108,19 @@ function basePriceRates(rates: ModelPriceRates): BasePriceRates {
   return Object.fromEntries(PRICE_RATE_KEYS.map((key) => [key, rates[key]])) as BasePriceRates;
 }
 
-/** Pure boundary helper reserved for per-request pricing in PR 3. Returns a copy. */
-export function tierRatesFor(rates: ModelPriceRates, promptTokens: number): BasePriceRates {
-  let selected: BasePriceRates = rates;
+/** One boundary rule for both tier metadata and rates. */
+export function selectedPriceTier(rates: ModelPriceRates, promptTokens: number): PriceTier | null {
+  let selected: PriceTier | null = null;
   for (const tier of rates.tiers ?? []) {
     if (tier.inclusive ? promptTokens >= tier.aboveTokens : promptTokens > tier.aboveTokens)
       selected = tier;
   }
-  return basePriceRates(selected);
+  return selected;
+}
+
+/** Complete rates for a request's prompt, copied by value. */
+export function tierRatesFor(rates: ModelPriceRates, promptTokens: number): BasePriceRates {
+  return basePriceRates(selectedPriceTier(rates, promptTokens) ?? rates);
 }
 
 /** Where a stored rate came from. `manual` is admin-entered (a negotiated or

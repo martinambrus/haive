@@ -1,6 +1,6 @@
 'use client';
 
-import { PromptTierUnknown } from '@/components/prompt-tier-unknown';
+import { PromptTierUnknownList } from '@/components/prompt-tier-unknown';
 
 import { DerivedTaskWarnings } from '@/components/derived-task-warnings';
 import { PostLoginRetryDialog } from '@/components/post-login-retry-dialog';
@@ -594,7 +594,7 @@ interface TaskProviderUsage {
   /** Invocations with tokens but no usable rate — excluded from costUsd, shown so a low
    *  total is explained rather than silently understated. */
   unpricedInvocations: number;
-  unknownTierCosts?: { lowUsd?: number; highUsd?: number }[];
+  unknownTierCosts?: { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[];
 }
 
 interface LinkedTask {
@@ -3564,9 +3564,7 @@ function TaskTotalTime({
                     )}
                   </span>
                   <span className="flex flex-wrap items-center gap-x-3 font-mono text-neutral-400">
-                    {(p.unknownTierCosts ?? []).map((tier, index) => (
-                      <PromptTierUnknown key={index} tier={tier} display={costDisplay} />
-                    ))}
+                    <PromptTierUnknownList tiers={p.unknownTierCosts ?? []} display={costDisplay} />
                     <span>in {formatTokens(p.inputTokens)}</span>
                     <span>out {formatTokens(p.outputTokens)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>

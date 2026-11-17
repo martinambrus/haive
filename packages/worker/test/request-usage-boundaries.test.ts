@@ -212,9 +212,115 @@ describe('sequential request aggregation', () => {
     );
     expect(result.requestUsage).toMatchObject({
       requests: null,
-      coverage: 'unknown',
+      coverage: 'complete',
       requestCount: 2,
+      wholeRun: { requestCount: 2 },
       inputConvention: 'inclusive',
     });
+  });
+});
+
+it('carries a codex exec whole-run proof through executeCliSpec into pricing', async () => {
+  const { resolveInvocationCost } = await import('../src/queues/cli-exec/invocation-cost.js');
+  const { createCodexJsonlCollector } = await import('../src/cli-executor/codex-jsonl.js');
+  const data = fixture('codex-exec');
+  const stdout = jsonl(data);
+  sandbox.mockImplementationOnce(async (opts) => {
+    opts.onStdoutChunk?.(stdout);
+    return spawned(stdout);
+  });
+  const result = await executeCliSpec(
+    { command: 'codex', args: ['--model', 'model'], env: {}, outputFormat: 'codex-jsonl' },
+    defaultDeps,
+  );
+  expect(result.requestUsage).toMatchObject({
+    requests: null,
+    coverage: 'unknown',
+    wholeRun: { requestCount: null, usage: { model: 'model', inputTokens: 100 } },
+  });
+  const base = {
+    inputRate: 1e-7,
+    outputRate: 5e-7,
+    cacheReadRate: 1e-8,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const store = (tiers: boolean) =>
+    ({
+      query: {
+        cliProviders: { findFirst: async () => ({ authMode: 'api_key', model: 'model' }) },
+        cliPricingSync: { findFirst: async () => undefined },
+      },
+      select: () => ({
+        from: () => ({
+          where: async () => [
+            {
+              id: 'price',
+              provider: 'codex',
+              modelKey: 'model',
+              source: 'litellm',
+              rates: {
+                ...base,
+                ...(tiers
+                  ? { tiers: [{ ...base, aboveTokens: 100000, inclusive: false, inputRate: 9e-7 }] }
+                  : {}),
+              },
+              effectiveFrom: new Date(),
+            },
+          ],
+        }),
+      }),
+    }) as unknown as import('@haive/database').Database;
+  const input = {
+    cliProviderId: 'provider',
+    providerName: 'codex',
+    tokenUsage: result.tokenUsage ?? null,
+    modelIdentity: result.modelIdentity ?? null,
+    requestUsage: result.requestUsage,
+  };
+  const cost = await resolveInvocationCost(store(true), input);
+  const flat = await resolveInvocationCost(store(false), input);
+  expect(cost).toMatchObject({
+    source: flat!.source,
+    billable: flat!.billable,
+    costUsd: flat!.costUsd,
+    tier: { state: 'exact' },
+  });
+  for (const broken of [
+    stdout + '{broken\n',
+    stdout + 'null\n',
+    stdout + stdout,
+    jsonl(data.slice(0, -1)),
+    jsonl(data.slice(1)),
+  ]) {
+    const collector = createCodexJsonlCollector();
+    collector.onChunk(broken);
+    expect(collector.getRequestUsage('model')).not.toHaveProperty('wholeRun');
+  }
+});
+
+it('preserves independent whole-run proofs across zero-assistant-usage sequential sub-steps', async () => {
+  const events = [
+    { type: 'system', subtype: 'init', model: 'model-a' },
+    {
+      type: 'assistant',
+      message: { id: 'one', model: 'model-a', usage: { input_tokens: 0, output_tokens: 0 } },
+    },
+    { type: 'result', usage: { input_tokens: 10, output_tokens: 2 } },
+  ];
+  const result = await runSequentialSubAgent(
+    {
+      mode: 'sequential',
+      steps: [{ id: 'scan', prompt: 'scan', expectJsonOutput: false }],
+      synthesis: { id: 'finish', prompt: 'finish', expectJsonOutput: false },
+    },
+    () => ({ command: 'cli', args: [], env: {}, outputFormat: 'claude-stream-json' }),
+    async () => spawned(jsonl(events)),
+    {},
+    extractClaudeStreamSubStep,
+  );
+  expect(result.requestUsage).toMatchObject({
+    coverage: 'incomplete',
+    wholeRun: { requestCount: 2, usage: { model: 'model-a', inputTokens: 20, outputTokens: 4 } },
   });
 });

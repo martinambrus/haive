@@ -270,3 +270,124 @@ it('refuses whole-run tier proof when Gemini includes an unnamed model or an arr
     expect(cost!.tier).not.toHaveProperty('lowUsd');
   }
 });
+
+function zeroAssistantRun(totalInput: number, count = 2, suffix = '') {
+  const collector = createStreamJsonCollector();
+  collector.onChunk(
+    [
+      { type: 'system', subtype: 'init', model: 'model' },
+      ...Array.from({ length: count }, (_, i) => ({
+        type: 'assistant',
+        message: {
+          id: `r${i}`,
+          model: 'model',
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      })),
+      { type: 'result', usage: { input_tokens: totalInput, output_tokens: 5 } },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join('\n') +
+      '\n' +
+      suffix,
+  );
+  return { tokenUsage: collector.getTokenUsage(), requestUsage: collector.getRequestUsage() };
+}
+
+it.each(['openrouter', 'muse'])(
+  'retains the pre-tier base cost, source and billable flag for tiny %s runs',
+  async (provider) => {
+    const evidence = zeroAssistantRun(1000);
+    expect(evidence.requestUsage).toMatchObject({
+      coverage: 'incomplete',
+      reasons: ['prompt-mismatch'],
+      wholeRun: { requestCount: 2 },
+    });
+    const cost = await resolve(provider, evidence);
+    const flat = await resolve(provider, evidence, db('litellm', base));
+    expect(cost).toMatchObject({
+      source: flat!.source,
+      billable: flat!.billable,
+      costUsd: flat!.costUsd,
+      tier: { state: 'exact' },
+    });
+    const large = await resolve(provider, zeroAssistantRun(100001));
+    expect(large).toMatchObject({
+      source: 'none',
+      billable: false,
+      costUsd: 0,
+      tier: { state: 'unknown', lowUsd: expect.any(Number), highUsd: expect.any(Number) },
+    });
+    expect(large!.tier!.lowUsd).toBeCloseTo(100001e-7 + 5 * 5e-7);
+    expect(large!.tier!.highUsd).toBeCloseTo(100001 * 5e-7 + 5 * 2.5e-6);
+  },
+);
+
+it('keeps a tiny manual tiered row priced identically to its base row', async () => {
+  const evidence = zeroAssistantRun(1);
+  const cost = await resolve('openrouter', evidence, db('manual'));
+  const flat = await resolve('openrouter', evidence, db('manual', base));
+  expect(cost).toMatchObject({
+    source: 'manual',
+    billable: true,
+    costUsd: flat!.costUsd,
+    tier: { state: 'exact' },
+  });
+});
+
+it('proves a single zero-usage assistant request above the threshold but refuses malformed evidence', async () => {
+  expect(await resolve('muse', zeroAssistantRun(100001, 1))).toMatchObject({
+    source: 'computed',
+    tier: { state: 'exact', split: [{ requests: 1, aboveTokens: 100000 }] },
+  });
+  for (const suffix of ['{broken\n', 'null\n', '[]\n', '{}\n']) {
+    const broken = await resolve('muse', zeroAssistantRun(10, 1, suffix));
+    expect(broken).toMatchObject({ source: 'none', tier: { state: 'unknown' } });
+    expect(broken!.tier).not.toHaveProperty('lowUsd');
+  }
+});
+
+it('prices the actual codex app-server request collector mixed-tier output through the resolver', async () => {
+  const { createCodexRequestUsageCollector } =
+    await import('../src/cli-executor/codex-request-usage.js');
+  const collector = createCodexRequestUsageCollector();
+  const a = { inputTokens: 100000, cachedInputTokens: 90000, outputTokens: 11 };
+  const b = { inputTokens: 100001, cachedInputTokens: 80000, outputTokens: 29 };
+  collector.onUsage({ total: a, last: a }, 'model', 'thread', 'turn', 'turn');
+  collector.onUsage(
+    { total: { inputTokens: 200001, cachedInputTokens: 170000, outputTokens: 40 }, last: b },
+    'model',
+    'thread',
+    'turn',
+    'turn',
+  );
+  const tokenUsage = {
+    inputTokens: 200001,
+    cacheReadTokens: 170000,
+    outputTokens: 40,
+    totalTokens: 200041,
+  };
+  const requestUsage = collector.get(true, 0, tokenUsage);
+  expect(requestUsage.coverage).toBe('complete');
+  const cost = await resolveInvocationCost(db(), {
+    cliProviderId: 'provider',
+    providerName: 'codex',
+    modelIdentity: null,
+    tokenUsage,
+    requestUsage,
+  });
+  expect(cost).toMatchObject({
+    source: 'computed',
+    billable: true,
+    tier: {
+      state: 'exact',
+      split: [
+        { aboveTokens: null, outputTokens: 11 },
+        { aboveTokens: 100000, outputTokens: 29 },
+      ],
+    },
+  });
+  expect(cost!.costUsd).toBeCloseTo(
+    10000e-7 + 90000e-8 + 11 * 5e-7 + 20001 * 5e-7 + 80000e-8 + 29 * 2.5e-6,
+  );
+});

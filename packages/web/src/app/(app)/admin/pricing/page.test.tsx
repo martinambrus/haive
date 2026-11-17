@@ -440,3 +440,59 @@ it('shows individual unknown-tier ranges and unpriced missing bounds on the admi
   expect(textOf(view.tree())).toContain('prompt tier unknown · $1.00–$5.00');
   expect(textOf(view.tree())).toContain('prompt tier unknown · unpriced');
 });
+
+it('prefills small rates without floating point tails and warns that tier-only overrides shadow base prices', async () => {
+  const rates = {
+    inputRate: 1e-7,
+    outputRate: 2e-7,
+    cacheReadRate: 5e-8,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-pricing'
+      ? Promise.resolve({
+          currencies: [],
+          feeds: [],
+          providers: [],
+          prices: [
+            {
+              id: 'x',
+              provider: null,
+              modelKey: 'tiered',
+              source: 'manual',
+              rates: { ...rates, tiers: [{ ...rates, aboveTokens: 100000, inclusive: false }] },
+              currency: 'USD',
+              note: null,
+              effectiveFrom: '2026-11-01T00:00:00Z',
+            },
+          ],
+        })
+      : original(path),
+  );
+  const view = createRenderer(() => createElement(PricingPage));
+  await settle(view);
+  fire.click(buttons(view.tree(), /^edit$/i)[0]!);
+  view.draw();
+  for (const [label, expected] of [
+    ['input /m', '0.1'],
+    ['output /m', '0.2'],
+    ['cache read /m', '0.05'],
+  ])
+    expect(controls(view.tree(), label!)[0]!.props.value).toBe(expected);
+  expect(textOf(view.tree())).not.toContain('All base rates are empty.');
+  for (const label of [
+    'input /m',
+    'output /m',
+    'cache read /m',
+    'cache write /m',
+    'cache write 1h /m',
+  ]) {
+    fire.type(controls(view.tree(), label)[0]!, '');
+    view.draw();
+  }
+  expect(textOf(view.tree())).toContain(
+    'This manual rate overrides the feed, so requests below the first tier will be unpriced.',
+  );
+});

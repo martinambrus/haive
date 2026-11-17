@@ -1178,7 +1178,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage,
-        requestUsage: unknownRequestUsage(),
+        requestUsage: codexCollector?.getRequestUsage(specRequestedModel) ?? unknownRequestUsage(),
         // codex names no model on any typed event (verified against a complete
         // successful run), so it carries the argv value only, served null.
         // antigravity's init event names none either; its --log-file is the one
@@ -1204,7 +1204,7 @@ export async function executeCliSpec(
         jsonlCollector.getNoResultReason() ??
         `${jsonlCliName} emitted no agent message`,
       tokenUsage,
-      requestUsage: unknownRequestUsage(),
+      requestUsage: codexCollector?.getRequestUsage(specRequestedModel) ?? unknownRequestUsage(),
       modelIdentity: modelIdentityFrom({ antigravityLog: result.capturedLog ?? null }),
       toolUsage: jsonlCollector.getToolUsage(),
       ...persisted,

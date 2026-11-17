@@ -383,8 +383,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 157 rows × the measured 10 s model + 120 s setup = 1690 s green.
-    # 40 minutes covers 1.5 × row time (2355 s); 42 includes setup and 830 s over green.
+    # 158 rows × the measured 10 s model + 120 s setup = 1700 s green.
+    # 40 minutes covers 1.5 × row time (2370 s); 42 includes setup and 820 s over green.
     timeout-minutes: 42
     services:
       postgres:
@@ -526,6 +526,7 @@ jobs:
             ' || failed=1
             echo "::endgroup::"
           done <<'GATED'
+          api test/tiered-pricing-sql-db.test.ts TIERED_PRICING_SQL_TEST_URL tiered_pricing_sql_test pg
           database test/mining-snapshot.test.ts MINING_SNAPSHOT_TEST_URL mining_snapshot_test pg
           database test/pg-transaction-fence.test.ts PG_TX_FENCE_TEST_URL pg_tx_fence_test pg
           database test/plan-active-time.test.ts PLAN_ACTIVE_TIME_TEST_URL plan_active_time_test pg

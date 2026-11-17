@@ -1,5 +1,7 @@
 import {
   canonicalModelKey,
+  tierRatesFor,
+  selectedPriceTier,
   type BasePriceRates,
   type CostBucket,
   type CostComputation,
@@ -47,8 +49,10 @@ export function computeTieredCost(
     return result();
   if (
     !capture ||
-    capture.coverage !== 'complete' ||
-    capture.reasons.length ||
+    ((capture.coverage !== 'complete' || capture.reasons.length > 0) && !capture.wholeRun) ||
+    capture.reasons.some((r) =>
+      ['result-count', 'recovered-completion', 'malformed-stream'].includes(r),
+    ) ||
     capture.inputConvention !== convention ||
     capture.modelCoverage !== 'single' ||
     !model
@@ -63,17 +67,10 @@ export function computeTieredCost(
   const prompt = (
     r: Pick<RequestUsage, 'inputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>,
   ) => r.inputTokens + (opts.inputIncludesCache ? 0 : r.cacheReadTokens + r.cacheCreationTokens);
-  const selected = (tokens: number) => {
-    let aboveTokens: number | null = null;
-    let price: BasePriceRates = rates;
-    for (const t of rates.tiers ?? []) {
-      if (t.inclusive ? tokens >= t.aboveTokens : tokens > t.aboveTokens) {
-        aboveTokens = t.aboveTokens;
-        price = t;
-      }
-    }
-    return { aboveTokens, price };
-  };
+  const selected = (tokens: number) => ({
+    aboveTokens: selectedPriceTier(rates, tokens)?.aboveTokens ?? null,
+    price: tierRatesFor(rates, tokens),
+  });
   const nativeBuckets = (
     r: Pick<
       RequestUsage,
@@ -134,7 +131,8 @@ export function computeTieredCost(
     )
   )
     return result();
-  const requests = capture.requests;
+  const detailed = capture.coverage === 'complete' && capture.reasons.length === 0;
+  const requests = detailed ? capture.requests : null;
   if (requests !== null) {
     if (
       !requests.length ||
@@ -189,12 +187,14 @@ export function computeTieredCost(
     const remaining = raw.outputTokens - knownOutput;
     const outputRates = unknownOutput.map((r) => selected(prompt(r)).price.outputRate);
     if (remaining > 0 && outputRates.some((r) => r === null)) unpriced.add('output');
-    const oneTier = tier.split.length === 1;
-    if (!excess.length && (!unknownOutput.length || oneTier)) {
+    const outputTiers = new Set(unknownOutput.map((r) => selected(prompt(r)).aboveTokens));
+    const fixedOutput = remaining === 0 || new Set(outputRates).size === 1;
+    if (!excess.length && fixedOutput) {
       if (remaining > 0 && !unpriced.has('output')) total.output += remaining * outputRates[0]!;
-      if (oneTier) {
-        tier.split[0]!.outputTokens = raw.outputTokens;
-        tier.split[0]!.costUsd = sum(total);
+      if (remaining > 0 && outputTiers.size === 1) {
+        const split = tier.split.find((s) => s.aboveTokens === [...outputTiers][0])!;
+        split.outputTokens += remaining;
+        split.costUsd += remaining * (outputRates[0] ?? 0);
       }
       tier.state = 'exact';
       return result(total);
@@ -234,14 +234,26 @@ export function computeTieredCost(
     }
     return result(total);
   }
-  // Aggregate-only proof must come from a reconciled, complete channel, with its
-  // model explicitly identified. One observed message in a partial stream is insufficient.
+  // A structural whole-run proof can survive an unavailable per-request channel.
+  // It cannot rescue a malformed, steered or recovered stream, nor ledger excess.
+  const whole = capture.wholeRun;
+  const aggregateModel = whole?.usage.model ?? capture.aggregateModel;
+  const requestCount = whole ? whole.requestCount : capture.requestCount;
+  const aggregateUsage: UnobservedSameModelUsage = whole?.usage ?? {
+    ...raw,
+    model: aggregateModel ?? null,
+    cacheCreation5mTokens: raw.cacheCreationTokens === 0 ? 0 : null,
+    cacheCreation1hTokens: raw.cacheCreationTokens === 0 ? 0 : null,
+  };
   if (
     excess.length ||
-    canonicalModelKey(capture.aggregateModel) !== model ||
-    !count(capture.requestCount) ||
-    capture.requestCount < 1 ||
-    raw.cacheCreationTokens > 0
+    canonicalModelKey(aggregateModel) !== model ||
+    (!whole && (!count(requestCount) || requestCount < 1)) ||
+    (requestCount !== null && (!count(requestCount) || requestCount < 1)) ||
+    !ttlKnown(aggregateUsage) ||
+    !['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'].every(
+      (k) => aggregateUsage[k as keyof typeof raw] === raw[k as keyof typeof raw],
+    )
   )
     return result();
   const totalPrompt = prompt(raw);
@@ -251,33 +263,48 @@ export function computeTieredCost(
       t.inclusive ? totalPrompt >= t.aboveTokens : totalPrompt > t.aboveTokens,
     ),
   ];
-  if (capture.requestCount === 1 || possible.length === 1) {
+  if (requestCount === 1 || possible.length === 1) {
     const { aboveTokens, price } = selected(totalPrompt);
-    const cost = priced(nativeBuckets(raw), rateBuckets(price));
+    const cost = priceRequest(aggregateUsage, price);
     tier.state = 'exact';
-    tier.split = [
-      {
-        aboveTokens,
-        requests: capture.requestCount,
-        inputTokens: raw.inputTokens,
-        outputTokens: raw.outputTokens,
-        cacheReadTokens: raw.cacheReadTokens,
-        cacheCreationTokens: raw.cacheCreationTokens,
-        costUsd: sum(cost),
-      },
-    ];
+    tier.split =
+      requestCount === null
+        ? []
+        : [
+            {
+              aboveTokens,
+              requests: requestCount,
+              inputTokens: raw.inputTokens,
+              outputTokens: raw.outputTokens,
+              cacheReadTokens: raw.cacheReadTokens,
+              cacheCreationTokens: raw.cacheCreationTokens,
+              costUsd: sum(cost),
+            },
+          ];
     return result(cost);
   }
   const tokens = nativeBuckets(raw);
   const low = zero(),
     high = zero();
   for (const k of Object.keys(tokens) as CostBucket[]) {
-    if (!tokens[k]) continue;
+    if (!tokens[k] || k === 'cacheWrite') continue;
     const values = possible.map((p) => rateBuckets(p)[k]);
     if (values.some((r) => r === null || !Number.isFinite(r) || r < 0)) unpriced.add(k);
     else {
       low[k] = tokens[k] * Math.min(...(values as number[]));
       high[k] = tokens[k] * Math.max(...(values as number[]));
+    }
+  }
+  for (const [tokens, key] of [
+    [aggregateUsage.cacheCreation5mTokens!, 'cacheWriteRate'],
+    [aggregateUsage.cacheCreation1hTokens!, 'cacheWrite1hRate'],
+  ] as const) {
+    if (!tokens) continue;
+    const values = possible.map((p) => p[key]);
+    if (values.some((r) => r === null || !Number.isFinite(r) || r < 0)) unpriced.add('cacheWrite');
+    else {
+      low.cacheWrite += tokens * Math.min(...(values as number[]));
+      high.cacheWrite += tokens * Math.max(...(values as number[]));
     }
   }
   if (!unpriced.size) {

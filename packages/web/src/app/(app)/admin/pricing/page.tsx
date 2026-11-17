@@ -35,7 +35,10 @@ const RATE_LABELS: [keyof ModelRates, string][] = [
 ];
 const rateDraft = (rates: ModelRates) =>
   Object.fromEntries(
-    RATE_LABELS.map(([key]) => [key, rates[key] === null ? '' : String(rates[key]! * 1_000_000)]),
+    RATE_LABELS.map(([key]) => [
+      key,
+      rates[key] === null ? '' : String(Number((rates[key]! * 1_000_000).toPrecision(12))),
+    ]),
   ) as Record<keyof ModelRates, string>;
 const tierDraft = (tier: ModelRates & { aboveTokens: number; inclusive: boolean }): TierDraft => ({
   aboveTokens: String(tier.aboveTokens),
@@ -414,6 +417,13 @@ export default function PricingPage() {
               />
             </label>
           ))}
+          {draftTiers.length > 0 &&
+            RATE_LABELS.every(([key]) => draft.rates[key].trim() === '') && (
+              <InlineMarkdown
+                className="w-full text-xs text-amber-300"
+                body="All base rates are empty. This manual rate overrides the feed, so requests below the first tier will be unpriced."
+              />
+            )}
           <div className="w-full space-y-3">
             {draftTiers.map((tier, index) => (
               <div

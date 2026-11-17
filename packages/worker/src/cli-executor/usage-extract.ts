@@ -183,7 +183,23 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
     requestUsage: {
       ...unknownRequestUsage('aggregate-only'),
       ...(aggregateComplete
-        ? { coverage: 'complete' as const, reasons: [], aggregateModel: modelNames[0]! }
+        ? {
+            coverage: 'complete' as const,
+            reasons: [],
+            aggregateModel: modelNames[0]!,
+            wholeRun: {
+              requestCount,
+              usage: {
+                model: modelNames[0]!,
+                inputTokens: tokenUsage!.inputTokens,
+                outputTokens: tokenUsage!.outputTokens,
+                cacheReadTokens: tokenUsage!.cacheReadTokens ?? 0,
+                cacheCreationTokens: 0,
+                cacheCreation5mTokens: 0,
+                cacheCreation1hTokens: 0,
+              },
+            },
+          }
         : {}),
       inputConvention: 'inclusive',
       requestCount: modelNames.length > 0 ? requestCount : null,

@@ -14,3 +14,25 @@ it('shows one invocation range in the task currency without converting missing b
     );
   }
 });
+
+it('labels and caps the task inventory, disclosing omitted invocations', async () => {
+  const { PromptTierUnknownList, UNKNOWN_TIER_DISPLAY_LIMIT } =
+    await import('./prompt-tier-unknown');
+  expect(UNKNOWN_TIER_DISPLAY_LIMIT).toBe(50);
+  const text = renderToStaticMarkup(
+    <PromptTierUnknownList
+      tiers={[
+        { id: 'abcdefgh-first', modelKey: 'first-model', lowUsd: 1, highUsd: 3 },
+        { id: 'ijklmnop-second' },
+        { id: 'hidden-third' },
+      ]}
+      limit={2}
+    />,
+  );
+  expect(text).toContain('Invocation abcdefgh');
+  expect(text).toContain('(first-model)');
+  expect(text).toContain('Invocation ijklmnop');
+  expect(text).not.toContain('hidden-third');
+  expect(text).toContain('1 more invocations with prompt tier unknown');
+  expect(text.match(/Excluded from cost totals/g)).toHaveLength(2);
+});

@@ -24,6 +24,13 @@ export interface RequestUsageCapture {
   requestCount: number | null;
   modelCoverage: 'single' | 'mixed' | 'unknown';
   reasons: string[];
-  /** Reconciled aggregate-only channel (currently Gemini). */
+  /** Structural whole-run evidence, independent of request prompt reconciliation.
+   * A single intact completion covers these buckets; requestCount stays null unless
+   * the transcript and billing ledger also prove the inventory has no hidden calls. */
+  wholeRun?: {
+    usage: UnobservedSameModelUsage;
+    requestCount: number | null;
+  };
+  /** Reconciled aggregate-only channel (Gemini). */
   aggregateModel?: string;
 }

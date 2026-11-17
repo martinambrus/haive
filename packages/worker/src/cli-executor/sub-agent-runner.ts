@@ -1,3 +1,4 @@
+import { requestedFromSpec } from '../queues/cli-exec/model-identity.js';
 import type { CliTokenUsage } from '@haive/shared';
 import type {
   CliCommandSpec,
@@ -148,7 +149,8 @@ async function runOneStep(
   let apiDurationMs: number | null = null;
   let outputLimit: string | undefined;
   if (spec.outputFormat === 'codex-jsonl') {
-    const extracted = extractCodexJsonlOutput(result.stdout);
+    const extracted = extractCodexJsonlOutput(result.stdout, requestedFromSpec(spec));
+    requestUsage = extracted.requestUsage;
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
     tokenUsage = extracted.tokenUsage;
     if (

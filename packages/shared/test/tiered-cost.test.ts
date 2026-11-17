@@ -164,6 +164,7 @@ describe('tier-aware per-request arithmetic', () => {
           ...capture([request('a', 10, 1)]),
           coverage: 'incomplete',
           reasons: [reason],
+          wholeRun: { usage: request('proof', 10, 1), requestCount: 1 },
         },
       });
       expect(cost.tier).toEqual({ state: 'unknown', split: [] });
@@ -194,94 +195,161 @@ describe('tier-aware per-request arithmetic', () => {
   });
 });
 
-it('contains every feasible small allocation across multiple non-monotone thresholds and null rates', () => {
-  const scalar = (n: number) => ({
-    inputRate: n,
-    outputRate: 7 - n,
-    cacheReadRate: n / 2,
-    cacheWriteRate: n / 3,
-    cacheWrite1hRate: n * 2,
-  });
-  for (const missing of [false, true]) {
-    const p: ModelPriceRates = {
-      ...scalar(2),
-      tiers: [
-        { ...scalar(5), aboveTokens: 2, inclusive: true },
-        {
-          ...scalar(1),
-          aboveTokens: 4,
-          inclusive: false,
-          ...(missing ? { outputRate: null, cacheWrite1hRate: null } : {}),
-        },
+// Independent oracle: no call to the pricer or its tier selector. Enumerated
+// requests are fully allocated; a required null rate means that allocation is unpriced.
+function reference(rs: RequestUsage[], p: ModelPriceRates, inclusive = false): number | null {
+  let total = 0;
+  for (const r of rs) {
+    const prompt = r.inputTokens + (inclusive ? 0 : r.cacheReadTokens + r.cacheCreationTokens);
+    let chosen = p;
+    for (const t of p.tiers ?? [])
+      if (prompt > t.aboveTokens || (t.inclusive && prompt === t.aboveTokens)) chosen = t;
+    const pairs = [
+      [
+        r.inputTokens - (inclusive ? r.cacheReadTokens + r.cacheCreationTokens : 0),
+        chosen.inputRate,
       ],
-    };
-    // Enumerate every prompt and output split, with all input buckets and both TTLs present.
-    for (let input = 0; input <= 8; input++)
-      for (let output = 0; output <= 5; output++) {
-        const rs = [0, 1, 2].map((n) => ({
-          ...request(String(n), n === 0 ? input : n, null),
-          cacheReadTokens: n,
-          cacheCreationTokens: 2,
-          cacheCreation5mTokens: 1,
-          cacheCreation1hTokens: 1,
-        }));
-        const bound = compute(rs, output, p);
-        expect(bound.tier?.state).toBe('unknown');
-        if (!missing) {
-          expect(bound.tier?.lowUsd).toEqual(expect.any(Number));
-          expect(bound.tier?.highUsd).toEqual(expect.any(Number));
-        }
-        for (let a = 0; a <= output; a++)
-          for (let b = 0; b <= output - a; b++) {
-            const exact = compute(
-              rs.map((r, i) => ({ ...r, outputTokens: [a, b, output - a - b][i]! })),
-              output,
-              p,
-            );
-            if (exact.unpricedBuckets.length) expect(bound.tier).not.toHaveProperty('lowUsd');
-            else if (bound.tier?.lowUsd !== undefined) {
-              expect(exact.costUsd).toBeGreaterThanOrEqual(bound.tier.lowUsd - 1e-10);
-              expect(exact.costUsd).toBeLessThanOrEqual(bound.tier.highUsd! + 1e-10);
-            }
-          }
-      }
-  }
-});
-
-it('bounds every aggregate-only input/output/cache allocation without choosing a tier from totals', () => {
-  const p: ModelPriceRates = {
-    ...base,
-    tiers: [
-      { ...base, aboveTokens: 2, inclusive: true, inputRate: 9e-7, outputRate: 1e-7 },
-      { ...base, aboveTokens: 4, inclusive: false, inputRate: 2e-7, outputRate: 8e-7 },
-    ],
-  };
-  for (let a = 0; a <= 6; a++)
-    for (let out = 0; out <= 4; out++) {
-      const rs = [
-        { ...request('a', a, out), cacheReadTokens: Math.min(a, 1) },
-        { ...request('b', 6 - a, 4 - out), cacheReadTokens: Math.min(6 - a, 1) },
-      ];
-      const usage = {
-        inputTokens: 6,
-        outputTokens: 4,
-        cacheReadTokens: rs[0]!.cacheReadTokens + rs[1]!.cacheReadTokens,
-      };
-      const bound = computeInvocationCost(usage, p, {
-        modelKey: 'model',
-        inputIncludesCache: true,
-        requestUsage: {
-          ...capture([], true),
-          requests: null,
-          requestCount: 2,
-          aggregateModel: 'model',
-        },
-      });
-      const exact = compute(rs, 4, p, true);
-      expect(bound.tier?.state).toBe('unknown');
-      expect(exact.costUsd).toBeGreaterThanOrEqual(bound.tier!.lowUsd! - 1e-10);
-      expect(exact.costUsd).toBeLessThanOrEqual(bound.tier!.highUsd! + 1e-10);
+      [r.outputTokens!, chosen.outputRate],
+      [r.cacheReadTokens, chosen.cacheReadRate],
+      [r.cacheCreation5mTokens!, chosen.cacheWriteRate],
+      [r.cacheCreation1hTokens!, chosen.cacheWrite1hRate],
+    ];
+    for (const [tokens, rate] of pairs) {
+      if (!tokens) continue;
+      if (rate === null) return null;
+      total += tokens! * rate!;
     }
+  }
+  return total;
+}
+const smallRates = (missing: boolean): ModelPriceRates => ({
+  inputRate: 2,
+  outputRate: 5,
+  cacheReadRate: 1,
+  cacheWriteRate: 3,
+  cacheWrite1hRate: 4,
+  tiers: [
+    {
+      aboveTokens: 2,
+      inclusive: true,
+      inputRate: 5,
+      outputRate: 2,
+      cacheReadRate: 3,
+      cacheWriteRate: 1,
+      cacheWrite1hRate: 8,
+    },
+    {
+      aboveTokens: 4,
+      inclusive: false,
+      inputRate: 1,
+      outputRate: missing ? null : 6,
+      cacheReadRate: 2,
+      cacheWriteRate: 7,
+      cacheWrite1hRate: missing ? null : 2,
+    },
+  ],
+});
+function assertEnvelope(bound: ReturnType<typeof compute>, feasible: (number | null)[]) {
+  if (feasible.includes(null)) {
+    expect(bound.tier).not.toHaveProperty('lowUsd');
+    expect(bound.costUsd).toBe(0);
+    expect(bound.unpricedBuckets.length > 0 || bound.tier?.state === 'unknown').toBe(true);
+  } else if (bound.tier?.state === 'exact') {
+    for (const cost of feasible) expect(bound.costUsd).toBeCloseTo(cost!);
+  } else {
+    expect(bound.tier?.lowUsd).toEqual(expect.any(Number));
+    expect(bound.tier?.highUsd).toEqual(expect.any(Number));
+    for (const cost of feasible) {
+      expect(cost!).toBeGreaterThanOrEqual(bound.tier!.lowUsd! - 1e-10);
+      expect(cost!).toBeLessThanOrEqual(bound.tier!.highUsd! + 1e-10);
+    }
+  }
+}
+it('contains every output allocation with base tiers, both TTLs and conditionally reached null rates', () => {
+  const seen = new Set<number | null>();
+  let nullUnreached = 0,
+    partiallyPriced = 0;
+  for (const missing of [false, true])
+    for (let input = 0; input <= 7; input++)
+      for (let caches = 0; caches <= 2; caches++)
+        for (let output = 0; output <= 4; output++) {
+          const p = smallRates(missing);
+          const rs = [
+            request('a', input, null),
+            { ...request('b', 0, null), cacheReadTokens: caches },
+            {
+              ...request('c', 1, null),
+              cacheCreationTokens: caches,
+              cacheCreation5mTokens: caches > 0 ? 1 : 0,
+              cacheCreation1hTokens: Math.max(0, caches - 1),
+            },
+          ];
+          for (const r of rs) {
+            const prompt = r.inputTokens + r.cacheReadTokens + r.cacheCreationTokens;
+            seen.add(prompt > 4 ? 4 : prompt >= 2 ? 2 : null);
+          }
+          const feasible: (number | null)[] = [];
+          for (let a = 0; a <= output; a++)
+            for (let b = 0; b <= output - a; b++)
+              feasible.push(
+                reference(
+                  rs.map((r, i) => ({ ...r, outputTokens: [a, b, output - a - b][i]! })),
+                  p,
+                ),
+              );
+          const bound = compute(rs, output, p);
+          assertEnvelope(bound, feasible);
+          if (missing && !feasible.includes(null)) nullUnreached++;
+          if (feasible.includes(null) && feasible.some((n) => n !== null)) partiallyPriced++;
+        }
+  expect(seen).toEqual(new Set([null, 2, 4]));
+  expect(nullUnreached).toBeGreaterThan(0);
+  expect(partiallyPriced).toBeGreaterThan(0);
+});
+it('bounds all aggregate input/cache/output allocations using an independent oracle, including reachable null tiers', () => {
+  let pricedWithNullTier = 0,
+    partiallyPriced = 0;
+  for (const missing of [false, true])
+    for (let input = 0; input <= 6; input++)
+      for (let output = 0; output <= 3; output++)
+        for (let cached = 0; cached <= Math.min(input, 2); cached++) {
+          const p = smallRates(missing);
+          const feasible: (number | null)[] = [];
+          for (let a = 0; a <= input; a++)
+            for (let read = 0; read <= cached; read++) {
+              if (read > a || cached - read > input - a) continue;
+              for (let out = 0; out <= output; out++)
+                feasible.push(
+                  reference(
+                    [
+                      { ...request('a', a, out), cacheReadTokens: read },
+                      { ...request('b', input - a, output - out), cacheReadTokens: cached - read },
+                    ],
+                    p,
+                    true,
+                  ),
+                );
+            }
+          const bound = computeInvocationCost(
+            { inputTokens: input, cacheReadTokens: cached, outputTokens: output },
+            p,
+            {
+              modelKey: 'model',
+              inputIncludesCache: true,
+              requestUsage: {
+                ...capture([], true),
+                requests: null,
+                requestCount: 2,
+                aggregateModel: 'model',
+              },
+            },
+          );
+          assertEnvelope(bound, feasible);
+          if (missing && !feasible.includes(null)) pricedWithNullTier++;
+          if (feasible.includes(null) && feasible.some((n) => n !== null)) partiallyPriced++;
+        }
+  expect(pricedWithNullTier).toBeGreaterThan(0);
+  expect(partiallyPriced).toBeGreaterThan(0);
 });
 
 // Frozen arithmetic output captured before introducing the tier branch. Extra capture
@@ -357,4 +425,65 @@ it('bounds ledger excess with 5m and 1h writes allocated to different tiers', ()
         expect(exact.costUsd).toBeGreaterThanOrEqual(bound.tier!.lowUsd!);
         expect(exact.costUsd).toBeLessThanOrEqual(bound.tier!.highUsd!);
       }
+});
+
+it.each([
+  [[request('a', 50000, 5), request('b', 100001, null)], 5],
+  [[request('a', 50000, null), request('b', 100001, null)], 0],
+  [[request('a', 50000, 5), request('b', 100001, null), request('c', 100002, null)], 12],
+] as const)('takes the exact path when output allocation cannot change the cost', (rs, output) => {
+  const cost = compute([...rs], output);
+  const fixed = rs.reduce(
+    (n, r) =>
+      n +
+      r.inputTokens * (r.inputTokens > 100000 ? 5e-7 : 1e-7) +
+      (r.outputTokens ?? 0) * (r.inputTokens > 100000 ? 2.5e-6 : 5e-7),
+    0,
+  );
+  const remaining = output - rs.reduce((n, r) => n + (r.outputTokens ?? 0), 0);
+  expect(cost.tier?.state).toBe('exact');
+  expect(cost.costUsd).toBeCloseTo(fixed + remaining * 2.5e-6);
+  expect(cost.tier).not.toHaveProperty('lowUsd');
+  expect(cost.tier!.split.reduce((n, s) => n + s.outputTokens, 0)).toBe(output);
+});
+
+it('prices fixed output rates across different tiers exactly without inventing an output allocation', () => {
+  const p = { ...rates, tiers: [{ ...rates.tiers![0]!, outputRate: base.outputRate }] };
+  const cost = compute([request('a', 50000, null), request('b', 100001, null)], 7, p);
+  expect(cost.tier?.state).toBe('exact');
+  expect(cost.costUsd).toBeCloseTo(50000e-7 + 100001 * 5e-7 + 7 * base.outputRate);
+  expect(cost.tier!.split.map((s) => s.outputTokens)).toEqual([0, 0]);
+});
+
+it('prices whole-run cache writes by observed TTL and withholds bounds when a reachable TTL rate is null', () => {
+  const whole = {
+    ...request('proof', 1, 2),
+    cacheReadTokens: 1,
+    cacheCreationTokens: 2,
+    cacheCreation5mTokens: 1,
+    cacheCreation1hTokens: 1,
+  };
+  const run = (p: ModelPriceRates) =>
+    computeInvocationCost(
+      { inputTokens: 1, outputTokens: 2, cacheReadTokens: 1, cacheCreationTokens: 2 },
+      p,
+      {
+        modelKey: 'model',
+        requestUsage: {
+          ...capture([], false),
+          requests: null,
+          coverage: 'incomplete',
+          requestCount: null,
+          reasons: ['prompt-mismatch'],
+          wholeRun: { usage: whole, requestCount: null },
+        },
+      },
+    );
+  expect(run(rates).tier?.state).toBe('exact');
+  expect(run(rates).costUsd).toBeCloseTo(1e-7 + 2 * 5e-7 + 1e-8 + 1.25e-7 + 2e-7, 14);
+  const p = { ...rates, tiers: [{ ...rates.tiers![0]!, aboveTokens: 2, cacheWrite1hRate: null }] };
+  const cost = run(p);
+  expect(cost.tier?.state).toBe('unknown');
+  expect(cost.unpricedBuckets).toContain('cacheWrite');
+  expect(cost.tier).not.toHaveProperty('lowUsd');
 });

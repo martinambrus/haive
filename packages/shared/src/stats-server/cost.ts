@@ -126,7 +126,7 @@ export interface TaskProviderUsage {
    *  this rather than silently understating the total. */
   unpricedInvocations: number;
   /** Per-invocation uncertainty; ranges are never summed into either spend total. */
-  unknownTierCosts?: { lowUsd?: number; highUsd?: number }[];
+  unknownTierCosts?: { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[];
 }
 
 export interface CostDisplay {
@@ -253,12 +253,17 @@ export async function providerBreakdownWhere(
         string[]
       >`coalesce(array_agg(distinct ${schema.cliInvocations.cost} ->> 'source') filter (where ${schema.cliInvocations.cost} is not null), '{}')`,
       unknownTierCosts: includeUnknownTiers
-        ? sql<{ lowUsd?: number; highUsd?: number }[]>`coalesce(jsonb_agg(
-        jsonb_strip_nulls(jsonb_build_object('lowUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'lowUsd',
+        ? sql<
+            { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[]
+          >`coalesce(jsonb_agg(
+        jsonb_strip_nulls(jsonb_build_object('id', ${schema.cliInvocations.id},
+          'modelKey', ${schema.cliInvocations.cost} ->> 'modelKey', 'lowUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'lowUsd',
           'highUsd', ${schema.cliInvocations.cost} -> 'tier' -> 'highUsd'))
         order by ${schema.cliInvocations.id}) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none'
           and ${schema.cliInvocations.cost} -> 'tier' ->> 'state' = 'unknown'), '[]'::jsonb)`
-        : sql<{ lowUsd?: number; highUsd?: number }[]>`'[]'::jsonb`,
+        : sql<
+            { id: string; modelKey: string | null; lowUsd?: number; highUsd?: number }[]
+          >`'[]'::jsonb`,
       unpricedInvocations: sql<number>`count(*) filter (where ${schema.cliInvocations.cost} ->> 'source' = 'none')::int`,
     })
     .from(schema.cliInvocations)
