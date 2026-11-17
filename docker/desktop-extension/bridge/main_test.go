@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -60,6 +62,9 @@ func TestConsentAndVersionInputs(t *testing.T) {
 	}
 }
 
+// Proves the bridge writes the embedded bytes unchanged and selects the right argv.
+// It does not compare the embed with checkout install/: build-desktop-extension.sh
+// supplies that identity by copying those files into the allowlisted build context.
 func TestInstallerDelegation(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin", "windows"} {
 		t.Run(platform, func(t *testing.T) {
@@ -179,23 +184,36 @@ func TestIdentityAndPinnedSettings(t *testing.T) {
 }
 
 func TestStatusFormatsAndHealthGating(t *testing.T) {
-	for _, output := range []string{`[{"Service":"api","State":"running"},{"Service":"web","State":"running"}]`, "{\"Service\":\"api\",\"State\":\"running\"}\n{\"Service\":\"web\",\"State\":\"running\"}\n", "", `[]`, `{"Service":"api","State":"exited"}`, `{"Service":"api","State":"running"}`} {
+	for _, tc := range []struct {
+		name, output                     string
+		probeOK, wantProbed, wantHealthy bool
+	}{
+		{"array", `[{"Service":"api","State":"running"},{"Service":"web","State":"running"}]`, true, true, true},
+		{"ndjson", "{\"Service\":\"api\",\"State\":\"running\"}\n{\"Service\":\"web\",\"State\":\"running\"}\n", true, true, true},
+		{"empty", "", true, false, false},
+		{"empty array", `[]`, true, false, false},
+		{"exited api", `{"Service":"api","State":"exited"}`, true, false, false},
+		{"api only", `{"Service":"api","State":"running"}`, true, true, false},
+		{"web only", `{"Service":"web","State":"running"}`, true, false, false},
+		{"exited web", `[{"Service":"api","State":"running"},{"Service":"web","State":"exited"}]`, true, true, false},
+		{"failed health", `[{"Service":"api","State":"running"},{"Service":"web","State":"running"}]`, false, true, false},
+	} {
 		b := fixture(t)
-		b.run = func(context.Context, string, []string, string, io.Writer) (string, error) { return output, nil }
+		b.run = func(context.Context, string, []string, string, io.Writer) (string, error) { return tc.output, nil }
 		probed := false
 		b.health = func(url string) bool {
 			probed = true
 			if url != "http://localhost:3011/health" {
 				t.Fatal(url)
 			}
-			return true
+			return tc.probeOK
 		}
 		s, err := b.inspect(context.Background())
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal(tc.name, err)
 		}
-		if s.Healthy != (strings.Contains(output, "running") && strings.Contains(output, "web")) || probed != strings.Contains(output, "running") {
-			t.Fatal("health not gated by project container", s)
+		if s.Healthy != tc.wantHealthy || probed != tc.wantProbed {
+			t.Fatalf("%s: healthy=%v probed=%v; want healthy=%v probed=%v", tc.name, s.Healthy, probed, tc.wantHealthy, tc.wantProbed)
 		}
 		if s.AppURL != "http://localhost:3010" || s.Version != "1.2.3" {
 			t.Fatal(s)
@@ -276,6 +294,138 @@ func TestResolvedBundleRejectsLegacySharedResourcesAndSourceBuilds(t *testing.T)
 	} {
 		if isolatedBundle([]byte(bad)) == nil {
 			t.Fatal("unsafe legacy bundle accepted")
+		}
+	}
+}
+
+func TestInstallFailuresExplainRecovery(t *testing.T) {
+	for _, kind := range []string{"installer", "legacy names", "source build", "compose version"} {
+		t.Run(kind, func(t *testing.T) {
+			b := fixture(t)
+			envPath := filepath.Join(b.dir, ".env")
+			env, err := os.ReadFile(envPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(envPath); err != nil {
+				t.Fatal(err)
+			}
+			base := b.run
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if exe == "sh" {
+					if err := os.Mkdir(filepath.Join(b.dir, "snapshots"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if kind == "installer" {
+						return "", errors.New("private installer details")
+					}
+					return "", os.WriteFile(envPath, env, 0600)
+				}
+				if strings.HasSuffix(strings.Join(args, " "), "config --format json") {
+					switch kind {
+					case "compose version":
+						return "", errors.New("private compose details")
+					case "legacy names":
+						return `{"services":{"api":{"container_name":"haive-api","image":"api:1.2.3"}}}`, nil
+					case "source build":
+						return `{"services":{"api":{"container_name":"haive_desktop-api","image":"api:1.2.3","build":{"context":"."}}}}`, nil
+					}
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			s, err := b.handle(context.Background(), request{Action: "install", Version: "latest", Consent: consent, Engine: "desktop-engine"})
+			if err == nil {
+				t.Fatal("failed install accepted")
+			}
+			want := fmt.Sprintf("Remove the folder %q, then install again.", b.dir)
+			if s.Directory != b.dir || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "private installer details") || strings.Contains(err.Error(), "private compose details") {
+				t.Fatalf("missing recovery advice or leaked details: %v, %v", s, err)
+			}
+			if _, err := os.Stat(filepath.Join(b.dir, "snapshots")); err != nil {
+				t.Fatal("partial files were removed", err)
+			}
+		})
+	}
+}
+
+func TestStopSkipsBundleValidationButStartRequiresIt(t *testing.T) {
+	for _, kind := range []string{"unresolvable", "legacy"} {
+		t.Run(kind, func(t *testing.T) {
+			b := fixture(t)
+			base := b.run
+			configs, stops, starts := 0, 0, 0
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if strings.HasSuffix(strings.Join(args, " "), "config --format json") {
+					configs++
+					if kind == "unresolvable" {
+						return "", errors.New("cannot resolve model")
+					}
+					return `{"services":{}}`, nil
+				}
+				if log != nil {
+					if args[len(args)-1] == "stop" {
+						stops++
+					} else {
+						starts++
+					}
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			if _, err := b.handle(context.Background(), request{Action: "stop", Engine: "desktop-engine"}); err != nil {
+				t.Fatal(err)
+			}
+			if configs != 0 || stops != 1 {
+				t.Fatalf("stop checked bundle: configs=%d stops=%d", configs, stops)
+			}
+			if _, err := b.handle(context.Background(), request{Action: "start", Consent: consent, Engine: "desktop-engine"}); err == nil {
+				t.Fatal("start skipped bundle check")
+			}
+			if configs != 1 || starts != 0 {
+				t.Fatalf("start mutated invalid bundle: configs=%d starts=%d", configs, starts)
+			}
+		})
+	}
+}
+
+// Re-exec the test binary so runCommand's actual child environment is observed.
+// The helper returns presence booleans only, never ambient environment values.
+func TestRunCommandFiltersEnvironment(t *testing.T) {
+	keys := []string{"HAIVE_REPO", "Haive_Repo", "Compose_File", "POSTGRES_PASSWORD", "Postgres_User", "Config_Encryption_Key", "Jwt_Secret", "Host_Repo_Root", "Mailpit_Ui_Password", "PATH", "DOCKER_HOST", "DOCKER_CONTEXT", "LANG", "HDE_TEST_KEEP"}
+	if os.Getenv("HDE_ENV_HELPER") == "1" {
+		present := map[string]bool{}
+		for _, key := range keys {
+			_, present[key] = os.LookupEnv(key)
+		}
+		json.NewEncoder(os.Stdout).Encode(present)
+		os.Exit(0)
+	}
+	t.Setenv("HDE_ENV_HELPER", "1")
+	for _, key := range keys {
+		if key == "PATH" {
+			continue
+		}
+		value := make([]byte, 16)
+		if _, err := rand.Read(value); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(key, fmt.Sprintf("%x", value))
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCommand(context.Background(), exe, []string{"-test.run=^TestRunCommandFiltersEnvironment$"}, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var present map[string]bool
+	if err := json.Unmarshal([]byte(out), &present); err != nil {
+		t.Fatal(err)
+	}
+	for i, key := range keys {
+		want := i >= 9
+		if present[key] != want {
+			t.Errorf("%s present=%v; want %v", key, present[key], want)
 		}
 	}
 }

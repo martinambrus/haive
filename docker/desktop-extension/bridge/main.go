@@ -157,9 +157,12 @@ func (b bridge) checkBundle(ctx context.Context) error {
 	}
 	out, err := b.run(ctx, "docker", args, b.dir, nil)
 	if err != nil {
-		return errors.New("Cannot resolve the installed bundle. Docker Compose 2.24 or later is required.")
+		return b.installRecovery("Cannot resolve the installed bundle. Docker Compose 2.24 or later is required.")
 	}
-	return isolatedBundle([]byte(out))
+	if err := isolatedBundle([]byte(out)); err != nil {
+		return b.installRecovery(err.Error())
+	}
+	return nil
 }
 
 func isolatedBundle(data []byte) error {
@@ -256,6 +259,10 @@ func (b bridge) inspect(ctx context.Context) (state, error) {
 	return s, nil
 }
 
+func (b bridge) installRecovery(reason string) error {
+	return fmt.Errorf("%s Remove the folder %q, then install again.", reason, b.dir)
+}
+
 func (b bridge) install(ctx context.Context, version string, log io.Writer) error {
 	if _, err := os.Lstat(filepath.Join(b.dir, ".env")); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("An install already exists. Use Start or the app's Upgrade page; installation never upgrades.")
@@ -287,7 +294,7 @@ func (b bridge) install(ctx context.Context, version string, log io.Writer) erro
 	}
 	_, err = b.run(ctx, exe, args, "", log)
 	if err != nil {
-		return errors.New("The installer failed. See the private operation log; fix the reported prerequisite or release error, then refresh status.")
+		return b.installRecovery("The installer failed. See the private operation log and fix the reported prerequisite or release error.")
 	}
 	return nil
 }
@@ -335,11 +342,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if _, err = b.settings(); err != nil {
 		return s, errors.New("No complete Haive Desktop install was found. Refresh status before continuing.")
 	}
-	if err = b.checkBundle(ctx); err != nil {
-		return s, err
-	}
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
+		if err = b.checkBundle(ctx); err != nil {
+			return s, err
+		}
 		action = []string{"up", "-d", "--no-build", "--wait", "--wait-timeout", "360"}
 	}
 	args, err := b.composeArgs(action...)
@@ -359,6 +366,7 @@ func runCommand(ctx context.Context, exe string, args []string, dir string, log 
 	// registry token must never reach an unrelated child. Keep Docker context/PATH.
 	for _, e := range os.Environ() {
 		key, _, _ := strings.Cut(e, "=")
+		key = strings.ToUpper(key) // Windows environment names are case-insensitive.
 		if !strings.HasPrefix(key, "HAIVE_") && !strings.HasPrefix(key, "COMPOSE_") && key != "CONFIG_ENCRYPTION_KEY" && key != "JWT_SECRET" && !strings.HasPrefix(key, "POSTGRES_") && key != "HOST_REPO_ROOT" && key != "MAILPIT_UI_PASSWORD" {
 			cmd.Env = append(cmd.Env, e)
 		}

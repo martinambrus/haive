@@ -164,3 +164,30 @@ test('extension lifecycle owns no VM stack or data volumes', () => {
   assert.equal(metadata.vm, undefined);
   assert.ok(metadata.host.binaries[0].windows[0].path.endsWith('.exe'));
 });
+
+test('install failures render folder recovery advice from resolved and rejected host results', async () => {
+  const directory = '/home/test/haive_desktop';
+  for (const reason of [
+    'This release bundle does not support isolated published installs. Choose a newer release; no containers were changed.',
+    'Cannot resolve the installed bundle. Docker Compose 2.24 or later is required.',
+    'The installer failed. See the private operation log and fix the reported prerequisite or release error.',
+  ]) {
+    for (const rejected of [false, true]) {
+      const f = fixture();
+      await f.c.run('status');
+      f.c.accept(true);
+      const error = `${reason} Remove the folder "${directory}", then install again.`;
+      const result = { stdout: JSON.stringify({ directory, error }), stderr: 'private details' };
+      f.dd.extension.host.cli.exec = async () => {
+        if (rejected) throw result;
+        return result;
+      };
+      await f.c.run('install');
+      const view = f.views.at(-1);
+      assert.equal(view.message, error);
+      assert.equal(view.state.directory, directory);
+      assert.equal(view.busy, false);
+      assert.ok(!JSON.stringify(view).includes('private details'));
+    }
+  }
+});

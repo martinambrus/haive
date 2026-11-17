@@ -41,6 +41,23 @@ updates:
       - dependency-name: "drizzle-orm"
       - dependency-name: "drizzle-kit"
 
+  # The Desktop extension UI has its own npm lockfile outside the workspace.
+  - package-ecosystem: npm
+    directory: "/docker/desktop-extension/ui"
+    schedule:
+      interval: weekly
+    groups:
+      production:
+        patterns:
+          - "*"
+        dependency-type: production
+        update-types: ["minor", "patch"]
+      development:
+        patterns:
+          - "*"
+        dependency-type: development
+        update-types: ["minor", "patch"]
+
   # GitHub Actions pinned in the CI workflow.
   - package-ecosystem: github-actions
     directory: "/"
@@ -64,6 +81,7 @@ updates:
       - "/packages/api"
       - "/packages/worker"
       - "/packages/web"
+      - "/docker/desktop-extension"
       - "/docker/ollama-thinking-proxy"
       - "/docker/openrouter-compat-proxy"
       - "/docker/ollama-gate"
