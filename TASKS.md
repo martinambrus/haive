@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T701 · Admin unpriced-run inventory links to tasks the admin may not own
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1245 · priority: P4
+
+The admin pricing page lists every invocation whose prompt tier is unknown, across all users, and links each to `/tasks/:id`. That route is owner-only, so on a multi-user install an admin who does not own the task gets "Task not found". Single-owner installs are unaffected. Fix when touched: show the owner, or link to an admin-readable invocation view. An invocation with no proof stays unknown without bounds by design: a finite envelope would trust token totals nothing proves complete.
+
 ### T700 · No-change cleanup trusts a remote-tracking ref whose remote is inside the worktree
 
 status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1243 · priority: P4
