@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T704 · Installer port probe matches only the first port of a published range
+
+status: open · kind: bug · found: review of #1260 · priority: P4
+
+`port_in_use` (install.sh) and `Test-PortInUse` (install.ps1) match docker's published ports with `(^|[^0-9])N->`, so a range such as `0.0.0.0:8025-8026->8025-8026/tcp` reports only its first port as taken; 8026 reads free. Pre-existing, unchanged by #1260. Fix: parse `A-B->` ranges and test membership, with a test next to `scripts/test/install-ports.test.mjs`.
+
 ### T703 · Check claude-code and grok reported totals on tiered prompts
 
 status: open (owner approved 2026-11-17: one small throwaway task on a scratch repository through normal dispatch on the owner's CLI login, cap ~$5, task removed after) · kind: research · found: tiered pricing plan PR 4 (#1245) · priority: P3
