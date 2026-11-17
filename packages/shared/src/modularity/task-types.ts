@@ -189,16 +189,33 @@ export function resolveTaskTypeAvailability(
   const parsed = executionContractSchema.safeParse(definition.executionContract);
   const guarded = parsed.success && parsed.data.guardedSpans.length > 0;
   // Guards must validate even without a map: an undeclared predicate fails closed.
-  const planned =
-    parsed.success &&
-    (guarded || (input.predicates !== undefined && parsed.data.fixTarget !== undefined));
+  let planned = parsed.success && (guarded || parsed.data.fixTarget !== undefined);
   if (checked || planned) {
-    const issues = validateComposition(definition.stepIds, catalog.composable, {
-      requiresRepository: definition.requiresRepository,
-      ...(planned
-        ? { executionContract: definition.executionContract, predicates: input.predicates }
-        : {}),
-    });
+    let issues: ExecutionCompositionIssue[] = validateComposition(
+      definition.stepIds,
+      catalog.composable,
+      {
+        requiresRepository: definition.requiresRepository,
+        ...(planned
+          ? { executionContract: definition.executionContract, predicates: input.predicates }
+          : {}),
+      },
+    );
+    // A capable target still redirects loop emitters during validation. An invalid
+    // fix-target-only declaration keeps ordinary composition priority, then the
+    // runtime support refusal; predicate registration must not change that order.
+    if (
+      planned &&
+      !guarded &&
+      issues.some((issue) => issue.kind === 'invalid-execution-contract')
+    ) {
+      planned = false;
+      issues = checked
+        ? validateComposition(definition.stepIds, catalog.composable, {
+            requiresRepository: definition.requiresRepository,
+          })
+        : [];
+    }
     if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
   }
   if (planned) {
