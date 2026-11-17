@@ -59,7 +59,12 @@ export function readerCommandPaths(command: unknown): Paths {
     const inner = wrapper[2]!;
     // A quoted shell argument, not a general shell parser. Nested wrappers and escaped
     // quote concatenation remain unknown instead of evaluating arbitrary shell syntax.
-    if (inner.includes(wrapper[1]!) || /^(?:\/bin\/)?(?:bash|sh)\s/.test(inner))
+    // An outer double-quoted argument can expand even text in inner single quotes.
+    if (
+      (wrapper[1] === '"' && /[$`\\]/.test(inner)) ||
+      inner.includes(wrapper[1]!) ||
+      /^(?:\/bin\/)?(?:bash|sh)\s/.test(inner)
+    )
       return 'unattributed';
     return readerCommandPaths(inner);
   }

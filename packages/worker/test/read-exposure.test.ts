@@ -142,7 +142,12 @@ describe('read exposure', () => {
         ['/tmp', 'cat package.json', 'outside', null],
         [root + '-other', 'cat package.json', 'outside', null],
         [root, 'cat ../private', 'outside', null],
-        [undefined, 'cat package.json', 'unattributed', null],
+        [
+          undefined,
+          'cat package.json',
+          transport === 'exec' ? 'files' : 'unattributed',
+          transport === 'exec' ? 'package.json' : null,
+        ],
         [null, 'cat package.json', 'unattributed', null],
         ['', 'cat package.json', 'unattributed', null],
         ['packages/worker', 'cat package.json', 'unattributed', null],
@@ -172,6 +177,81 @@ describe('read exposure', () => {
           [bucket === 'files' ? 'fileReads' : bucket]: { chars: 4 },
         });
         if (!path) expect(stored.fileReads.chars).toBe(0);
+      }
+    },
+  );
+
+  it('attributes real Codex exec items without cwd to the launch root, live and replayed', () => {
+    // Production exec items omit cwd entirely, unlike app-server commandExecution items.
+    const item = {
+      id: 'exec-no-cwd',
+      type: 'command_execution',
+      command: "sed -n '1,20p' src/a.ts",
+      aggregated_output: 'abcd',
+    };
+    for (const command of [item.command, `/bin/bash -lc "${item.command}"`]) {
+      const event = { type: 'item.completed', item: { ...item, command } };
+      const stored = toolUsageFromStreamLog('codex', log([event]), root).reads!;
+      const live = createCodexJsonlCollector(undefined, createToolUsageTally({ workdir: root }));
+      live.onChunk(log([event]));
+      expect(live.getToolUsage().reads).toEqual(stored);
+      expect(stored).toMatchObject({
+        files: [{ path: 'src/a.ts', chars: 4, weightedChars: null }],
+        fileReads: { chars: 4 },
+        unattributed: { chars: 0 },
+      });
+    }
+    for (const command of ["cd src && sed -n '1,20p' a.ts", "pushd src; sed -n '1,20p' a.ts"]) {
+      expect(
+        toolUsageFromStreamLog(
+          'codex',
+          log([{ type: 'item.completed', item: { ...item, command } }]),
+          root,
+        ).reads,
+      ).toMatchObject({ files: [], fileReads: { chars: 0 }, unattributed: { chars: 4 } });
+    }
+    expect(
+      read([
+        assistant('a', [use('t', 'Bash', { command: item.command })]),
+        result('t', 'abcd'),
+        assistant('b'),
+      ]),
+    ).toMatchObject({ files: [], fileReads: { chars: 0 }, unattributed: { chars: 4 } });
+    const unknownRoot = createToolUsageTally({ workdir: null });
+    unknownRoot.codexExecItem(item);
+    expect(unknownRoot.finalize('stream').reads).toMatchObject({
+      files: [],
+      unattributed: { chars: 4 },
+    });
+  });
+
+  it.each(['bash -lc', 'sh -c'])(
+    'rejects expansion and escape characters anywhere inside outer double quotes: %s',
+    (shell) => {
+      for (const inner of [
+        "cat '$HOME/x'",
+        "cat '`pwd`/x'",
+        "cat 'src/a\\b.ts'",
+        "sed -n '$p' src/a.ts",
+      ]) {
+        const command = `${shell} "${inner}"`;
+        expect(read(one('Bash', { command })), command).toMatchObject({
+          files: [],
+          fileReads: { chars: 0 },
+          unattributed: { chars: 4 },
+        });
+        const tally = createToolUsageTally({ workdir: root });
+        tally.codexExecItem({
+          id: 'wrapper',
+          type: 'command_execution',
+          command,
+          aggregated_output: 'abcd',
+        });
+        expect(tally.finalize('stream').reads, command).toMatchObject({
+          files: [],
+          fileReads: { chars: 0 },
+          unattributed: { chars: 4 },
+        });
       }
     },
   );
