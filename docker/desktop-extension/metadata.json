@@ -1,0 +1,19 @@
+{
+  "icon": "icon.svg",
+  "ui": {
+    "dashboard-tab": {
+      "title": "Haive",
+      "root": "/ui",
+      "src": "index.html"
+    }
+  },
+  "host": {
+    "binaries": [
+      {
+        "linux": [{ "path": "/linux/haive-desktop" }],
+        "darwin": [{ "path": "/darwin/haive-desktop" }],
+        "windows": [{ "path": "/windows/haive-desktop.exe" }]
+      }
+    ]
+  }
+}

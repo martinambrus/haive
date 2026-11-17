@@ -1,0 +1,14 @@
+{
+  "name": "haive-desktop-extension-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild app.js --bundle --format=esm --outfile=dist/app.js && cp index.html style.css dist/"
+  },
+  "dependencies": {
+    "@docker/extension-api-client": "0.4.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}
