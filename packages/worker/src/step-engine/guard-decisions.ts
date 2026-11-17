@@ -41,10 +41,13 @@ type TaskRow = typeof schema.tasks.$inferSelect;
 type StepRow = typeof schema.taskSteps.$inferSelect;
 type Span = ExecutionContract['guardedSpans'][number];
 
-/** A retryable protocol fault. Never expose a predicate's error text or substitute false. */
+/** A protocol refusal; only explicitly transient reasons may retry. Never expose a predicate's error text or substitute false. */
 export class GuardDecisionError extends Error {
   readonly code = 'guard-decision-invalid';
-  constructor(reason: string, options?: ErrorOptions) {
+  constructor(
+    readonly reason: string,
+    options?: ErrorOptions,
+  ) {
     super(`guard-decision-invalid: ${reason}`, options);
     this.name = 'GuardDecisionError';
   }

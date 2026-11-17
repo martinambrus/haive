@@ -1,7 +1,6 @@
 /** Loaded-row reset selection. Call only under the ordered step batch, before
  * taking the task fence. Explicit reruns invalidate every forward decision in
- * the same round, including decisions on still-pending entries. Recovery and
- * Resume keep decisions and never reopen a guard-owned skipped row. */
+ * the same round, including decisions on still-pending entries. Recovery and Resume of retained work keep decisions and never reopen a guard-owned skipped row. */
 export function guardResetRows<
   T extends {
     id: string;

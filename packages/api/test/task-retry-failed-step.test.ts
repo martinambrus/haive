@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
   kill: vi.fn(async (_taskId: string) => 0),
+  allowGuardPin: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -17,6 +18,16 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
+
+vi.mock('../src/lib/execution-contract-admission.js', async (original) => {
+  const actual = await original<typeof import('../src/lib/execution-contract-admission.js')>();
+  return {
+    ...actual,
+    assertExecutionContractUsable: (pin: unknown) => {
+      if (!h.allowGuardPin) actual.assertExecutionContractUsable(pin);
+    },
+  };
+});
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
@@ -39,6 +50,7 @@ app.onError(errorHandler);
 vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
+  h.allowGuardPin = false;
   h.add.mockClear();
   h.kill.mockClear();
 });
@@ -71,6 +83,20 @@ function setup(target: Record<string, unknown>) {
     repositoryId: USER,
     status: 'failed',
     errorMessage: 'boom',
+    executionContract: h.allowGuardPin
+      ? {
+          version: 1,
+          guardedSpans: [
+            {
+              id: 'work',
+              firstStepId: 'step-c',
+              lastStepId: 'step-d',
+              predicateId: 'module.fx.guard',
+              args: {},
+            },
+          ],
+        }
+      : null,
     orchestrationEpoch: 3,
     currentStepId: 'step-b',
     currentRound: 0,
@@ -497,6 +523,9 @@ describe('a task Retry re-runs the step the task stopped on', () => {
 // Storage-level reset controls under an ordinary pin: the execution-contract
 // admission refusals remain covered separately and are never enabled here.
 describe('guard storage on task Retry', () => {
+  beforeEach(() => {
+    h.allowGuardPin = true;
+  });
   it.each(['retry_ai', 'resume'] as const)(
     '%s distinguishes a new rerun from recovery of stored decisions',
     async (action) => {
@@ -563,3 +592,193 @@ describe('guard storage on task Retry', () => {
     expect(queued()).toEqual([{ name: TASK_JOB_NAMES.START, data: expect.any(Object) }]);
   });
 });
+
+describe('guard reset review controls', () => {
+  it.each(['skipped', 'done'] as const)(
+    'F1 Resume regenerates the producer and invalidates a %s entry and owned skips',
+    async (status) => {
+      h.allowGuardPin = true;
+      const t = setup({ status: 'done', degradedNote: 'partial agents' });
+      t.fake.patch(schema.taskSteps, LATER_ROW, { status: 'done', rerunGeneration: 2 });
+      const entry = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-d',
+        stepIndex: 4,
+        runSeq: 4,
+        round: 0,
+        status,
+        guardState: { run: false },
+        rerunGeneration: 3,
+      });
+      const member = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'step-e',
+        stepIndex: 5,
+        runSeq: 5,
+        round: 0,
+        status: 'skipped',
+        guardState: { kind: 'guard-skip' },
+        rerunGeneration: 4,
+      });
+      const retained = t.fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: 'retained',
+        stepIndex: 1,
+        runSeq: 1,
+        round: 1,
+        status: 'running',
+        guardState: { run: true },
+        rerunGeneration: 8,
+      });
+      t.fake.insert(schema.taskStepAgentMinings, {
+        taskStepId: TARGET_ROW,
+        agentId: 'reviewer',
+        agentTitle: 'Reviewer',
+        status: 'failed',
+      });
+      const response = await app.request(`/${TASK}/steps/step-b/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'resume' }),
+      });
+      expect(response.status).toBe(200);
+      expect(t.step(retained.id as string)).toMatchObject({
+        status: 'pending',
+        guardState: { run: true },
+        rerunGeneration: 8,
+      });
+      expect(t.step(LATER_ROW)).toMatchObject({ status: 'pending', rerunGeneration: 3 });
+      expect(t.step(entry.id as string)).toMatchObject({
+        status: 'pending',
+        guardState: null,
+        rerunGeneration: 4,
+      });
+      expect(t.step(member.id as string)).toMatchObject({
+        status: 'pending',
+        guardState: null,
+        rerunGeneration: 5,
+      });
+    },
+  );
+  it.each(['task retry', 'step retry', 'pending provider switch'] as const)(
+    'F4 %s kills the sandbox of an extra guard row activated after selection',
+    async (action) => {
+      h.allowGuardPin = true;
+      const switching = action === 'pending provider switch';
+      const t = setup({ status: switching ? 'pending' : 'failed', iterationCount: 0 });
+      if (switching)
+        t.fake.patch(schema.taskSteps, LATER_ROW, {
+          applyReceipt: { kind: 'custom-migration', id: 'old' },
+        });
+      const extra = switching
+        ? t.fake.insert(schema.taskSteps, {
+            taskId: TASK,
+            stepId: 'step-d',
+            rerunGeneration: 0,
+            stepIndex: 4,
+            runSeq: 4,
+            round: 0,
+            status: 'pending',
+          })
+        : t.step(LATER_ROW);
+      let claimed = false;
+      t.fake.hooks.beforeUpdate = (table) => {
+        if (table !== schema.cliInvocations || claimed) return;
+        claimed = true;
+        t.fake.patch(schema.taskSteps, extra.id as string, {
+          status: 'running',
+          guardState: { run: true },
+        });
+      };
+      const response =
+        action === 'task retry'
+          ? await t.retry()
+          : await app.request(`/${TASK}/steps/step-b/${switching ? 'cli-provider' : 'action'}`, {
+              method: switching ? 'PATCH' : 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(
+                switching ? { cliProviderId: null, remember: false } : { action: 'retry' },
+              ),
+            });
+      expect(response.status).toBe(200);
+      expect(t.step(extra.id as string)).toMatchObject({
+        status: 'pending',
+        guardState: null,
+        rerunGeneration: 1,
+      });
+      expect(h.kill).toHaveBeenCalledWith(TASK);
+      const eventType =
+        action === 'task retry'
+          ? 'task.retried'
+          : switching
+            ? 'step.cli_provider_preference_changed'
+            : 'step.retry';
+      const selected = expect.arrayContaining([{ stepId: extra.stepId, round: 0 }]);
+      expect(
+        t.fake.rows(schema.taskEvents).find((r) => r.eventType === eventType)?.payload,
+      ).toEqual(
+        expect.objectContaining(
+          action === 'task retry' ? { reset: selected } : { leftActive: selected },
+        ),
+      );
+      if (switching) expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['reoffer', 'settle'] as const)(
+    'F5 %s clears a guard state when it advances its generation',
+    async (action) => {
+      h.allowGuardPin = true;
+      const t = setup({ status: 'waiting_form', guardState: { run: true }, rerunGeneration: 4 });
+      await t.fake.db.transaction((tx) =>
+        action === 'reoffer'
+          ? reofferParkedSteps(tx as never, TASK, new Date(), [])
+          : settleActiveStepsIn(tx as never, TASK),
+      );
+      expect(t.step(TARGET_ROW)).toMatchObject({
+        status: 'pending',
+        guardState: null,
+        rerunGeneration: 5,
+      });
+    },
+  );
+});
+
+it.each([null, { version: 1, guardedSpans: [] }])(
+  'F2 ordinary START Retry adds no full step-row SELECT: %j',
+  async (executionContract) => {
+    const t = setup({ status: 'pending' });
+    t.fake.patch(schema.tasks, TASK, { currentStepId: null, executionContract });
+    const reads: unknown[] = [];
+    const writes: object[] = [];
+    const transaction = t.fake.db.transaction.bind(t.fake.db);
+    vi.spyOn(t.fake.db, 'transaction').mockImplementation((fn) =>
+      transaction((tx) => {
+        const select = tx.select.bind(tx);
+        const handle = {
+          ...tx,
+          update: (table: never) => ({
+            set: (values: never) => {
+              if (table === schema.taskSteps) writes.push(values);
+              return tx.update(table).set(values);
+            },
+          }),
+          select: (fields?: never) => ({
+            from: (table: never) => {
+              if (
+                (table === schema.taskSteps && fields == null) ||
+                (table === schema.tasks && Object.keys(fields ?? {}).includes('executionContract'))
+              )
+                reads.push(table);
+              return select(fields).from(table);
+            },
+          }),
+        };
+        return fn(handle as never);
+      }),
+    );
+    expect((await t.retry()).status).toBe(200);
+    expect(reads).toEqual([]);
+    expect(writes.length).toBeGreaterThan(0);
+    for (const values of writes) expect(values).not.toHaveProperty('guardState');
+  },
+);

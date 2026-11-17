@@ -1,4 +1,4 @@
-import { guardResetRows } from '@haive/shared/modularity';
+import { guardResetRows, parseExecutionContract } from '@haive/shared/modularity';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
 import {
@@ -230,6 +230,9 @@ async function sweepRunsOf(
  *  row waits for the task row, so a batch that waited there would deadlock with it. The carried_*
  *  fold reads each row again once it is held: `rows` was read before the transaction, and a fold or
  *  idle write that landed since would otherwise be overwritten.
+ *  Guarded pins widen the held-row read only to same-round forward rows. The
+ *  returned rows are additions beyond the caller's set, with pre-reset liveness,
+ *  so callers can include them in audit and post-commit sandbox cleanup.
  *  Exported for the unit test. */
 export async function resetRowsForRerun(
   tx: DbHandle,
@@ -237,8 +240,16 @@ export async function resetRowsForRerun(
   rows: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
   opts: { rowsHeld?: boolean; preserveGuards?: boolean } = {},
-): Promise<void> {
-  if (rows.length === 0) return;
+): Promise<(typeof schema.taskSteps.$inferSelect)[]> {
+  if (rows.length === 0) return [];
+  const [taskPin] = await tx
+    .select({ executionContract: schema.tasks.executionContract })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  const guarded =
+    taskPin?.executionContract != null &&
+    parseExecutionContract(taskPin.executionContract).guardedSpans.length > 0;
   const ids = rows.map((r) => r.id);
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
   // their runs are swept without waiting, and a held one refuses the action as a held row does.
@@ -252,14 +263,31 @@ export async function resetRowsForRerun(
   const locked = opts.rowsHeld ? rows : await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   // This transaction holds the rows now (the batch above, or the caller's lock under rowsHeld), so
   // this read is current; `rows` is the caller's read from before the transaction began.
+  const forward = guarded
+    ? or(
+        ...rows.map((row) =>
+          and(
+            eq(schema.taskSteps.round, row.round),
+            row.runSeq != null
+              ? gte(schema.taskSteps.runSeq, row.runSeq)
+              : gte(schema.taskSteps.stepIndex, row.stepIndex),
+          ),
+        ),
+      )
+    : undefined;
   const loaded = await tx
     .select()
     .from(schema.taskSteps)
     .where(
-      inArray(
-        schema.taskSteps.id,
-        locked.map((r) => r.id),
-      ),
+      guarded
+        ? and(
+            inArray(
+              schema.taskSteps.id,
+              locked.map((r) => r.id),
+            ),
+            or(inArray(schema.taskSteps.id, ids), forward),
+          )
+        : inArray(schema.taskSteps.id, ids),
     );
   const held = guardResetRows(
     loaded,
@@ -285,7 +313,7 @@ export async function resetRowsForRerun(
         formValues: null,
         output: null,
         applyReceipt: null,
-        ...(opts.preserveGuards ? {} : { guardState: null }),
+        ...(guarded && !opts.preserveGuards ? { guardState: null } : {}),
         ...(opts.preserveGuards && r.guardState != null
           ? {}
           : {
@@ -328,6 +356,7 @@ export async function resetRowsForRerun(
   // A pass records a run only under its row's lock, so each write above waited for one it was
   // recording and every later one is refused: this finds whatever the first sweep missed.
   await sweepRunsOf(tx, ids, now);
+  return held.filter((row) => extraIds.includes(row.id));
 }
 
 const ACTIVE_STEP_STATUSES = ['running', 'waiting_cli', 'waiting_form'] as const;
@@ -457,7 +486,9 @@ async function moveTaskToStep(
 ) {
   // The task leaves `failed` here for every caller, so the revival checks sit here too.
   await refuseReviveBesideLive(tx, taskId);
-  await resetRowsForRerun(tx, taskId, leftActive, now, { preserveGuards: opts.preserveGuards });
+  const extra = await resetRowsForRerun(tx, taskId, leftActive, now, {
+    preserveGuards: opts.preserveGuards,
+  });
   const [bumped] = await tx
     .update(schema.tasks)
     .set({
@@ -492,11 +523,15 @@ async function moveTaskToStep(
       )
     : null;
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
-  await resetRowsForRerun(tx, taskId, late, now, {
+  const lateExtra = await resetRowsForRerun(tx, taskId, late, now, {
     rowsHeld: true,
     preserveGuards: opts.preserveGuards,
   });
-  return { epoch: bumped.epoch, leftActive: [...leftActive, ...late], resumeAudit };
+  return {
+    epoch: bumped.epoch,
+    leftActive: [...leftActive, ...extra, ...late, ...lateExtra],
+    resumeAudit,
+  };
 }
 
 /** A cancelled or completed task is not moved back to a step, as the task page offers no step
@@ -549,7 +584,8 @@ export async function retryTaskAtStep(
     await refuseReviveBesideLive(tx, taskId);
     // Runs first and step rows after, the order a pass takes them in.
     const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
-    await resetRowsForRerun(tx, taskId, reset, now);
+    const extra = await resetRowsForRerun(tx, taskId, reset, now);
+    reset.push(...extra);
     // An empty `reset` takes no batch above; the statements below write rows outside it.
     await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
     await reofferParkedSteps(
@@ -557,6 +593,7 @@ export async function retryTaskAtStep(
       taskId,
       now,
       reset.map((r) => r.id),
+      task.executionContract,
     );
     // A wait note on a row that is not waiting describes a park that has ended.
     await tx
@@ -1262,7 +1299,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
       // reset blanks and why. Mirrors resetStepAndDownstream in the worker. A row still active
       // outside that set is reset with it: the retry moves the task away from it.
-      await resetRowsForRerun(tx, id, [step, ...downstreamToReset, ...leftActive], now);
+      const extra = await resetRowsForRerun(
+        tx,
+        id,
+        [step, ...downstreamToReset, ...leftActive],
+        now,
+      );
+      leftActive.push(...extra);
       // Per-step "Override and run": only the clicked step bypasses the
       // unsafe-for-local-models guard on re-run. A plain retry sets this false
       // (re-arming the guard); the override button sets it true. Scoped to
@@ -1319,7 +1362,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
       newEpoch = bumped[0].epoch;
       const late = await rowsActivatedMeanwhile(tx, id, []);
-      await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
+      const lateExtra = await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
+      late.push(...lateExtra);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -1505,9 +1549,24 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
         // set is reset too, as Retry resets one: the resume moves the task away from it.
-        await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
-          preserveGuards: true,
-        });
+        // The cascade regenerates producers, so invalidate their dependent decisions.
+        // Rows merely left active are recovery and keep their stored branch.
+        const guarded =
+          task.executionContract != null &&
+          parseExecutionContract(task.executionContract).guardedSpans.length > 0;
+        const extra = guarded
+          ? await resetRowsForRerun(tx, id, downstreamToReset, now)
+          : await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now, {
+              preserveGuards: true,
+            });
+        if (guarded) {
+          // A nonempty downstream reset holds the task's entire step batch.
+          // Never wait on another run while holding that batch: refuse contention.
+          await resetRowsForRerun(tx, id, leftActive, now, {
+            preserveGuards: true,
+            rowsHeld: downstreamToReset.length > 0,
+          });
+        }
         const [held] = await tx
           .select()
           .from(schema.taskSteps)
@@ -1578,11 +1637,14 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             round: step.round,
             retriedAgents,
             cascadedSteps: downstreamToReset.length,
-            leftActive: [...leftActive, ...late].map((r) => ({ stepId: r.stepId, round: r.round })),
+            leftActive: [...leftActive, ...extra, ...late].map((r) => ({
+              stepId: r.stepId,
+              round: r.round,
+            })),
             note: body.note ?? null,
           },
         });
-        return late;
+        return [...extra, ...late];
       });
       // Same rule as Retry: if anything in the set reset is in flight, its sandbox has to go, or
       // the reset row's CLI keeps running against a step that no longer owns it, and it goes only
@@ -2285,6 +2347,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   let redrive: { epoch: number; leftActive: (typeof schema.taskSteps.$inferSelect)[] } | null =
     null;
+  let pendingResetExtras: (typeof schema.taskSteps.$inferSelect)[] = [];
   if (reruns) {
     // A failed or parked step is re-run on the new CLI, which takes the task back to it as a
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
@@ -2326,7 +2389,11 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       // The clicked row joins the rows it resets in one id-ordered batch. Even a
       // pending-row switch invalidates downstream pending durable work.
       await lockRowsForMove(tx, id, leftActive, now);
-      if (!movesTask) await resetRowsForRerun(tx, id, leftActive, now);
+      if (!movesTask) {
+        const extra = await resetRowsForRerun(tx, id, leftActive, now);
+        leftActive.push(...extra);
+        pendingResetExtras = extra;
+      }
       // Read under the row lock, so a fold or idle write that landed after the handler read `step`
       // is in it and none can land before this transaction ends.
       const [held] = await tx
@@ -2345,7 +2412,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           status: 'pending',
           detectOutput: null,
           applyReceipt: null,
-          guardState: null,
+          ...(task.executionContract != null &&
+          parseExecutionContract(task.executionContract).guardedSpans.length > 0
+            ? { guardState: null }
+            : {}),
           rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
           formSchema: null,
           formValues: withoutGateAnswer,
@@ -2371,7 +2441,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       await saveChoice(tx);
       return moved;
     });
-    if (redrive?.leftActive.some(isLive)) {
+    if ((redrive?.leftActive ?? pendingResetExtras).some(isLive)) {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for a CLI switch');
     }
@@ -2382,8 +2452,13 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     cliProviderId: body.cliProviderId,
     remembered: choice.remember,
     by: userId,
-    ...(redrive && redrive.leftActive.length > 0
-      ? { leftActive: redrive.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })) }
+    ...((redrive?.leftActive ?? pendingResetExtras).length > 0
+      ? {
+          leftActive: (redrive?.leftActive ?? pendingResetExtras).map((r) => ({
+            stepId: r.stepId,
+            round: r.round,
+          })),
+        }
       : {}),
   });
 

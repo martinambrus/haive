@@ -95,7 +95,9 @@ describe('owned guard skip plan', () => {
       Object.assign(member, {
         [change]: change === 'iterations' ? [{}] : change === 'iterationCount' ? 1 : {},
       });
-    expect(() => planGuardSkip(f, f.rows)).toThrow('member-not-pristine');
+    expect(() => planGuardSkip(f, f.rows)).toThrow(
+      change === 'missing' ? 'missing-member' : 'member-not-pristine',
+    );
   });
   it('rejects run:true and never mutates input rows', () => {
     const f = fixture();
@@ -146,12 +148,18 @@ it('accepts the largest common Node/Postgres bound', () => {
     2_147_483_647,
   );
 });
-it.each([new GuardDecisionError('x'), { code: '55P03' }, { code: '57014' }])(
-  'the dormant caller retries protocol/SQL timeouts',
-  (err) => {
-    expect(isRetryableGuardError(err)).toBe(true);
-  },
-);
+it.each([
+  new GuardDecisionError('producer-not-settled'),
+  new GuardDecisionError('decision-write-lost'),
+  new GuardDecisionError('skip-write-lost'),
+  new GuardDecisionError('predicate-evaluation-failed', { cause: { code: '57014' } }),
+  { code: '55P03' },
+  { code: '57014' },
+  { code: '40P01' },
+  { cause: { code: '40001' } },
+])('the dormant caller retries protocol/SQL timeouts', (err) => {
+  expect(isRetryableGuardError(err)).toBe(true);
+});
 it.each([null, {}, new Error('55P03'), { code: '23505' }])(
   'does not classify other errors as retryable',
   (err) => {
@@ -245,3 +253,48 @@ it.each(['statementTimeoutMs', 'lockTimeoutMs', 'predicateTimeoutMs'] as const)(
     expect(transaction).not.toHaveBeenCalled();
   },
 );
+
+it('F3 owned skip replay ignores terminal timestamps and retains the receipt as identity', () => {
+  const f = fixture();
+  const plan = planGuardSkip(f, f.rows);
+  for (const row of plan.pending)
+    Object.assign(row, {
+      status: 'skipped',
+      guardState: plan.receipt(row),
+      endedAt: new Date(),
+      updatedAt: new Date(),
+    });
+  expect(planGuardSkip(f, f.rows).pending).toEqual([]);
+  f.rows[2]!.output = { forbidden: true };
+  expect(() => planGuardSkip(f, f.rows)).toThrow('member-not-pristine');
+});
+it.each([
+  'member-not-pristine',
+  'predicate-evaluation-failed',
+  'predicate-non-boolean',
+  'stale-producer',
+  'stale-decision',
+  'malformed-state',
+  'invalid-span',
+  'missing-member',
+  'missing-fence',
+  'entry-fence-lost',
+  'task-fence-lost',
+])('F6 permanent refusal %s never retries or hands off', async (reason) => {
+  const error = new GuardDecisionError(reason);
+  expect(isRetryableGuardError(error)).toBe(false);
+  const handoff = vi.fn();
+  const db = {
+    query: {
+      tasks: {
+        findFirst: async () => {
+          throw error;
+        },
+      },
+    },
+  };
+  expect(
+    await advanceGuardSpan({ db } as unknown as StepContext, 'work', new Map(), handoff),
+  ).toEqual({ kind: 'refused', reason });
+  expect(handoff).not.toHaveBeenCalled();
+});

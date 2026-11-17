@@ -9,7 +9,8 @@ import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
 import { advanceGuardSpan, skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
 import { resetStepAndDownstream, autoResumeFailedStep } from '../src/queues/_step-reset.js';
-import { reconcileOrphanedSteps } from '../src/queues/task-queue.js';
+import type { ResolvedTaskContext } from '../src/queues/run-list.js';
+import { handleResult, reconcileOrphanedSteps } from '../src/queues/task-queue.js';
 import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { reviveDeadTask } from '../src/queues/dead-task-boot.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
@@ -46,6 +47,17 @@ vi.mock('../../api/src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
     c.set('userId', state.userId);
     await next();
+  },
+}));
+
+vi.mock('../src/redis.js', async (original) => ({
+  ...(await original<typeof import('../src/redis.js')>()),
+  getBullRedis: () => ({}),
+}));
+vi.mock('bullmq', async (original) => ({
+  ...(await original<typeof import('bullmq')>()),
+  Queue: class {
+    async add() {}
   },
 }));
 
@@ -185,6 +197,35 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
     );
     expect(await read()).toEqual(steps);
     expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('F3 two finished-row redeliveries append one step.skipped event', async () => {
+    const skipped = (await saved()).find((r) => r.stepId === 'a')!;
+    const loaded = await task();
+    const pickup = {
+      ...loaded,
+      taskId,
+      userId,
+      orchestrationEpoch: 0,
+      runListStrategy: 'static',
+    } as unknown as ResolvedTaskContext;
+    for (let i = 0; i < 2; i++)
+      await handleResult(db, pickup, 'a', { status: 'skipped', row: skipped }, { redrive: true });
+    const events = await db
+      .select()
+      .from(schema.taskEvents)
+      .where(eq(schema.taskEvents.taskStepId, skipped.id));
+    expect(events.filter((e) => e.eventType === 'step.skipped')).toHaveLength(1);
+    expect(skipped.endedAt).toBeInstanceOf(Date);
+    expect(skipped.updatedAt).toEqual(skipped.endedAt);
+  });
+  it('F6 unmaterialized members produce a refusal, not an endless retry', async () => {
+    await db.delete(schema.taskSteps).where(eq(schema.taskSteps.id, rows.b!.id));
+    const handoff = vi.fn();
+    expect(await advanceGuardSpan(ctx, 'work', predicates, handoff)).toEqual({
+      kind: 'refused',
+      reason: 'missing-member',
+    });
+    expect(handoff).not.toHaveBeenCalled();
   });
   it('rolls back a partial-skip crash and replays the already committed decision', async () => {
     await decide();

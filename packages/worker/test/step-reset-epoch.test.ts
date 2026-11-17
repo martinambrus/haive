@@ -115,3 +115,84 @@ describe('resetStepAndDownstream at an expected epoch', () => {
     expect(epochWrites).toEqual([[]]);
   });
 });
+
+it.each([null, { version: 1, guardedSpans: [] }])(
+  'F2 ordinary reset keeps main lock/read predicates and SET columns: %j',
+  async (executionContract) => {
+    const { createFakeDb } = await import('@haive/database/testing');
+    const { schema } = await import('@haive/database');
+    const { PgDialect } = await import('drizzle-orm/pg-core');
+    const { and, eq, inArray } = await import('drizzle-orm');
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+      taskStepAgentMinings: schema.taskStepAgentMinings,
+    });
+    const task = fake.insert(schema.tasks, { executionContract, orchestrationEpoch: 3 });
+    const target = fake.insert(schema.taskSteps, {
+      taskId: task.id,
+      stepId: 'target',
+      status: 'failed',
+      round: 0,
+      runSeq: 2,
+      stepIndex: 2,
+    });
+    const held = fake.insert(schema.taskSteps, {
+      taskId: task.id,
+      stepId: 'handoff',
+      status: 'done',
+      round: 0,
+      runSeq: 1,
+      stepIndex: 1,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: task.id,
+      stepId: 'other-round',
+      status: 'running',
+      round: 1,
+      runSeq: 3,
+      stepIndex: 3,
+    });
+    const queries: { fields: unknown; where: unknown }[] = [];
+    const sets: object[] = [];
+    const handle = {
+      ...fake.db,
+      select: (fields?: never) => ({
+        from: (table: never) => ({
+          where: (where: never) => {
+            if (table === schema.taskSteps) queries.push({ fields, where });
+            return fake.db.select(fields).from(table).where(where);
+          },
+        }),
+      }),
+      update: (table: never) => ({
+        set: (values: never) => {
+          if (table === schema.taskSteps) sets.push(values);
+          return fake.db.update(table).set(values);
+        },
+      }),
+    };
+    const db = {
+      ...handle,
+      transaction: async (fn: (tx: unknown) => unknown) => fn(handle),
+    } as unknown as Database;
+    await resetStepAndDownstream(db, task.id as string, 'target', 0, 3, false, [held.id as string]);
+    const dialect = new PgDialect();
+    const query = (where: unknown) => dialect.sqlToQuery(where as never);
+    const lock = queries.find((q) => q.fields != null)!;
+    expect(query(lock.where)).toEqual(
+      query(inArray(schema.taskSteps.id, [target.id as string, held.id as string])),
+    );
+    expect(query(queries.at(-1)!.where)).toEqual(
+      query(
+        and(
+          eq(schema.taskSteps.taskId, task.id as string),
+          inArray(schema.taskSteps.id, [target.id as string]),
+        ),
+      ),
+    );
+    expect(sets).toHaveLength(1);
+    expect(sets[0]).not.toHaveProperty('guardState');
+  },
+);

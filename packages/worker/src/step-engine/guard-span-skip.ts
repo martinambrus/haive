@@ -19,7 +19,7 @@ type SkipInput = {
   span: { firstStepId: string; lastStepId: string };
   decision: GuardDecision;
 };
-const pristine = (row: StepRow): boolean =>
+const pristine = (row: StepRow, ownedSkip = false): boolean =>
   [
     'detectOutput',
     'formSchema',
@@ -36,7 +36,7 @@ const pristine = (row: StepRow): boolean =>
     'errorMessage',
     'errorHint',
     'degradedNote',
-  ].every((k) => row[k as keyof StepRow] == null) &&
+  ].every((k) => (ownedSkip && k === 'endedAt') || row[k as keyof StepRow] == null) &&
   (row.iterations?.length ?? 0) === 0 &&
   (row.iterationCount ?? 0) === 0;
 
@@ -49,7 +49,7 @@ export function planGuardSkip(input: SkipInput, rows: readonly StepRow[]) {
   const last = ids.indexOf(span.lastStepId);
   if (first < 0 || last < first) throw new GuardDecisionError('invalid-span');
   const entry = rows.find((r) => r.stepId === span.firstStepId && r.round === decision.round);
-  if (!entry) throw new GuardDecisionError('member-not-pristine');
+  if (!entry) throw new GuardDecisionError('missing-member');
   const receipt = (r: StepRow) =>
     r.id === entry.id
       ? decision
@@ -67,9 +67,13 @@ export function planGuardSkip(input: SkipInput, rows: readonly StepRow[]) {
   const pending: StepRow[] = [];
   for (const id of ids.slice(first, last + 1)) {
     const row = rows.find((r) => r.stepId === id && r.round === decision.round);
-    if (!row || row.taskId !== decision.taskId || !pristine(row))
+    if (!row) throw new GuardDecisionError('missing-member');
+    const ownedSkip = row.status === 'skipped' && same(row.guardState, receipt(row));
+    // Terminal timestamps name the skip event, not its ownership. Empty work
+    // fields and the exact generation-bound receipt still have to match.
+    if (row.taskId !== decision.taskId || !pristine(row, ownedSkip))
       throw new GuardDecisionError('member-not-pristine');
-    if (row.status === 'skipped' && same(row.guardState, receipt(row))) continue;
+    if (ownedSkip) continue;
     if (
       row.status !== 'pending' ||
       (row.id === entry.id ? !same(row.guardState, decision) : row.guardState != null)
@@ -166,10 +170,17 @@ export async function skipGuardSpan(
       if (run || agent) throw new GuardDecisionError('member-not-pristine');
     }
     ctx.throwIfCancelled();
+    const now = new Date();
     for (const row of plan.pending) {
       const written = await tx
         .update(schema.taskSteps)
-        .set({ status: 'skipped', guardState: plan.receipt(row), ...CLEAR_STEP_USAGE_STAMP })
+        .set({
+          status: 'skipped',
+          guardState: plan.receipt(row),
+          endedAt: now,
+          updatedAt: now,
+          ...CLEAR_STEP_USAGE_STAMP,
+        })
         .where(
           and(
             eq(schema.taskSteps.id, row.id),
@@ -184,8 +195,15 @@ export async function skipGuardSpan(
   });
 }
 
+const TRANSIENT_GUARD_REASONS = new Set([
+  'producer-not-settled',
+  'decision-write-lost',
+  'skip-write-lost',
+]);
+
 export const isRetryableGuardError = (err: unknown): boolean =>
-  err instanceof GuardDecisionError || hasPgCode(err, '55P03') || hasPgCode(err, '57014');
+  (err instanceof GuardDecisionError && TRANSIENT_GUARD_REASONS.has(err.reason)) ||
+  ['55P03', '57014', '40P01', '40001'].some((code) => hasPgCode(err, code));
 
 /** Unwired caller seam. A failed handoff propagates so the owner retries; a crash
  * before/after enqueue replays committed skips without predicate or step work.
@@ -195,7 +213,9 @@ export async function advanceGuardSpan(
   spanId: string,
   predicates: ReadonlyMap<string, Predicate>,
   handoff: (nextStepId: string | null) => Promise<void>,
-): Promise<{ kind: 'ordinary' | 'run' | 'skipped' | 'retry' }> {
+): Promise<
+  { kind: 'ordinary' | 'run' | 'skipped' | 'retry' } | { kind: 'refused'; reason: string }
+> {
   let skipped: Awaited<ReturnType<typeof skipGuardSpan>>;
   try {
     const decision = await evaluateGuardDecision(ctx, spanId, predicates);
@@ -204,6 +224,7 @@ export async function advanceGuardSpan(
     skipped = await skipGuardSpan(ctx, spanId, predicates);
   } catch (err) {
     if (isRetryableGuardError(err)) return { kind: 'retry' };
+    if (err instanceof GuardDecisionError) return { kind: 'refused', reason: err.reason };
     throw err;
   }
   if (!skipped) return { kind: 'ordinary' };

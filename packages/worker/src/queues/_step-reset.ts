@@ -1,5 +1,5 @@
-import { guardResetRows } from '@haive/shared/modularity';
-import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
+import { guardResetRows, parseExecutionContract } from '@haive/shared/modularity';
+import { and, desc, eq, gt, gte, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import {
   isUniqueViolationOf,
   lockStepRows,
@@ -34,7 +34,9 @@ class ReviveBlocked extends Error {
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
- *  Scoped to `round` so a concurrent fix-loop round's rows are never disturbed. Bumps the
+ *  Reset and guard-expansion locks stay in `round`; an owned handoff may also
+ *  supply explicit heldStepIds to lock without resetting. Other fix-loop rounds
+ *  are never disturbed. Ordinary pins keep main's exact lock/read sets. Bumps the
  *  task's orchestration epoch (like the API retry) so stale advance-step jobs no-op.
  *  With `expectedEpoch` it resets only while the task is still at that epoch, and answers
  *  `superseded`, having changed nothing, once a Retry or another reset moved it on.
@@ -91,6 +93,17 @@ export async function resetStepAndDownstream(
     .map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 
+  // The immutable pin alone opts into wider guard invalidation. Ordinary tasks
+  // retain the original lock footprint and held-row read.
+  const [taskPin] = await db
+    .select({ executionContract: schema.tasks.executionContract })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  const guarded =
+    taskPin?.executionContract != null &&
+    parseExecutionContract(taskPin.executionContract).guardedSpans.length > 0;
+
   let newEpoch = 0;
   let extraReset = 0;
   try {
@@ -126,25 +139,33 @@ export async function resetStepAndDownstream(
       // The rows the loop writes, in id order: the loop takes them in the order of an unordered read,
       // while the api's writers (a Stop, a repository delete) take theirs by id. After the sweeps,
       // since a pass holds a run and then wants its step row.
-      // The whole task batch also covers heldStepIds supplied by an owned handoff.
+      // Guarded tasks additionally hold same-round forward rows, where a decision
+      // could have landed after the pre-read. Never lock another round/upstream
+      // row unless the owned handoff explicitly supplied it in heldStepIds.
+      const resetScope = guarded
+        ? and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.round, round),
+            targetSeq != null
+              ? gte(schema.taskSteps.runSeq, targetSeq)
+              : gte(schema.taskSteps.stepIndex, target.stepIndex),
+          )
+        : inArray(schema.taskSteps.id, [...allStepIds, ...heldStepIds]);
       const locked = await lockStepRows(
         tx,
-        heldStepIds.length
-          ? or(eq(schema.taskSteps.taskId, taskId), inArray(schema.taskSteps.id, [...heldStepIds]))
-          : eq(schema.taskSteps.taskId, taskId),
+        guarded && heldStepIds.length
+          ? or(resetScope, inArray(schema.taskSteps.id, [...heldStepIds]))
+          : resetScope,
       );
-      // Held by this tx now, so this read is current. The reads above predate the lock: a fold from
-      // them would overwrite what a peer added to carried_* or idle_ms before the lock was granted.
+      // Read only held rows. For ordinary tasks the read is exactly the reset ids,
+      // as on main; heldStepIds are locked for the handoff but are not reset.
       const loaded = await tx
         .select()
         .from(schema.taskSteps)
         .where(
           and(
             eq(schema.taskSteps.taskId, taskId),
-            inArray(
-              schema.taskSteps.id,
-              locked.map((r) => r.id),
-            ),
+            inArray(schema.taskSteps.id, guarded ? locked.map((r) => r.id) : allStepIds),
           ),
         );
       const held = guardResetRows(
@@ -201,7 +222,7 @@ export async function resetStepAndDownstream(
               ? {}
               : {
                   applyReceipt: null,
-                  guardState: null,
+                  ...(guarded ? { guardState: null } : {}),
                   rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1`,
                 }),
             // The recap describes the run being discarded; left behind it reads as the new
