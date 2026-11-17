@@ -5,6 +5,8 @@ import type { ComposableStepEntry } from './contracts.js';
 const id = z.string().min(1).max(128);
 /** Bounds the exponential path walk. Repeated predicate ids consume only one decision. */
 export const MAX_EXECUTION_PREDICATES = 8;
+/** Canonical legacy fix consumer; planner and worker routing must agree. */
+export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
 export const fixConsumerSchema = z.strictObject({ version: z.literal(1) });
 export type FixConsumer = z.infer<typeof fixConsumerSchema>;
 const json = z.json();
@@ -21,6 +23,8 @@ export const executionContractSchema = z.strictObject({
           .max(128)
           .regex(new RegExp(`^module\\.${MODULE_ID_PATTERN_SOURCE}\\.[a-z0-9_-]+$`)),
         args: z.record(z.string(), json),
+        /** Select the false branch of the same durable predicate decision. Omitted means true. */
+        when: z.boolean().optional(),
         requiresSpan: id.optional(),
       }),
     )
@@ -124,7 +128,7 @@ export function executionContractPaths(
     const skipped = new Set<number>();
     for (const span of spans) {
       const active =
-        enabled.get(span.predicateId) === true &&
+        enabled.get(span.predicateId) === (span.when ?? true) &&
         (span.requiresSpan === undefined || ran.get(span.requiresSpan) === true);
       ran.set(span.id, active);
       if (!active) for (let index = span.first; index <= span.last; index++) skipped.add(index);

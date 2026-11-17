@@ -160,9 +160,9 @@ test('module CI workflow checks caller source without persisted credentials and 
 });
 
 test('shell module-id rule equals the shared contract', () => {
-  const contracts = readFileSync(join(root, 'packages/shared/src/modularity/module-id.ts'), 'utf8');
-  const max = Number(/MODULE_ID_MAX_LENGTH = (\d+);/.exec(contracts)?.[1]);
-  const source = /MODULE_ID_PATTERN_SOURCE = `([^`]+)`/.exec(contracts)?.[1];
+  const moduleIds = readFileSync(join(root, 'packages/shared/src/modularity/module-id.ts'), 'utf8');
+  const max = Number(/MODULE_ID_MAX_LENGTH = (\d+);/.exec(moduleIds)?.[1]);
+  const source = /MODULE_ID_PATTERN_SOURCE = `([^`]+)`/.exec(moduleIds)?.[1];
   const pattern = source.replace('${MODULE_ID_MAX_LENGTH - 1}', String(max - 1));
   const shell = readFileSync(join(root, 'scripts/module-ci.sh'), 'utf8');
   assert.equal(/\[\[ \$module_id =~ (\S+) \]\]/.exec(shell)?.[1], `^${pattern}$`);

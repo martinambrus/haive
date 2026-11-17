@@ -38,6 +38,7 @@ import { upgradeRoutes } from '../src/routes/upgrades.js';
 import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError } from '../src/context.js';
+import { assertExecutionContractUsable } from '../src/lib/execution-contract-admission.js';
 import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
@@ -170,6 +171,23 @@ describe('POST /tasks pins the run list', () => {
 });
 
 describe('the rollback pins the run list', () => {
+  it('propagates the execution fence before rollback writes or jobs', async () => {
+    const { fake } = world();
+    const before = structuredClone(fake.rows(schema.tasks));
+    h.definition.mockImplementationOnce(async () =>
+      assertExecutionContractUsable({
+        version: 1,
+        guardedSpans: [],
+        fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+      }),
+    );
+    const res = await post(`/repositories/${REPO}/rollback-upgrade`);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'invalid-execution-contract' });
+    expect(fake.rows(schema.tasks)).toEqual(before);
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
   it('writes the helper snapshot into the rollback row, looked up non-generically', async () => {
     const { created } = world();
     const res = await post(`/repositories/${REPO}/rollback-upgrade`);
@@ -187,6 +205,37 @@ describe('the rollback pins the run list', () => {
 });
 
 describe('spawnPlanTask pins the run list', () => {
+  it.each(['plan_build', 'plan_chat', 'advisory', 'plan_sequence', 'plan_merge'] as const)(
+    'propagates the %s execution fence without inserting, seeding or queuing',
+    async (type) => {
+      const fake = createFakeDb({ tasks: schema.tasks });
+      const seed = vi.fn();
+      h.definition.mockImplementationOnce(async () =>
+        assertExecutionContractUsable({
+          version: 1,
+          guardedSpans: [],
+          fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+        }),
+      );
+      await expect(
+        fake.db.transaction((tx) =>
+          spawnPlanTask({
+            db: tx as never,
+            userId: USER,
+            repositoryId: REPO,
+            type,
+            title: 'x',
+            metadata: {},
+            cliProviderId: null,
+            seed,
+          }),
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'invalid-execution-contract' });
+      expect(fake.rows(schema.tasks)).toEqual([]);
+      expect(seed).not.toHaveBeenCalled();
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
   it.each(['plan_build', 'plan_chat', 'advisory', 'plan_sequence', 'plan_merge'] as const)(
     'writes the helper snapshot into a %s row',
     async (type) => {
@@ -247,6 +296,23 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
     h.db = fake.db;
     return fake;
   };
+  it('propagates the execution fence before conversation, audit or START writes', async () => {
+    const fake = draftWorld();
+    h.definition.mockImplementationOnce(async () =>
+      assertExecutionContractUsable({
+        version: 1,
+        guardedSpans: [],
+        fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+      }),
+    );
+    const res = await post('/admin/task-type-drafts', { message: 'draft' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'invalid-execution-contract' });
+    expect(fake.rows(schema.tasks)).toEqual([]);
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
 
   it('writes the helper snapshot into the row, looked up non-generically', async () => {
     const fake = draftWorld();

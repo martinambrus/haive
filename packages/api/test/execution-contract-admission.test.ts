@@ -107,6 +107,50 @@ beforeEach(() => {
   h.add.mockClear();
   h.kill.mockClear();
 });
+it('an invalid derived definition carrying a live pin still returns the named execution refusal', async () => {
+  const fake = setup(guarded);
+  await fake.db
+    .update(schema.taskTypeDefinitions)
+    .set({ runListStrategy: 'derived', stepIds: null, baseSlug: 'missing', changes: [] })
+    .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+  await expect(
+    definitionForCreate(fake.db as never, 'test', { generic: true, locked: false }),
+  ).rejects.toMatchObject({ status: 409, code: 'invalid-execution-contract' });
+  expect(fake.rows(schema.tasks)).toEqual([]);
+  expect(fake.rows(schema.taskEvents)).toEqual([]);
+  expect(h.add).not.toHaveBeenCalled();
+});
+it.each([
+  'test',
+  'onboarding_upgrade',
+  'kb_author',
+  'plan_build',
+  'plan_chat',
+  'advisory',
+  'plan_sequence',
+  'plan_merge',
+  'type_draft',
+])(
+  'the common locked admission for %s refuses both active contract forms before pinning',
+  async (slug) => {
+    for (const contract of [guarded, fixed]) {
+      const fake = setup(contract);
+      await fake.db
+        .update(schema.taskTypeDefinitions)
+        .set({ slug, source: slug === 'test' ? 'admin' : 'builtin' })
+        .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+      await expect(
+        fake.db.transaction((tx) =>
+          definitionForCreate(tx as never, slug, { generic: slug === 'test', locked: true }),
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'invalid-execution-contract' });
+      expect(fake.rows(schema.tasks)).toEqual([]);
+      expect(fake.rows(schema.taskEvents)).toEqual([]);
+      expect(h.add).not.toHaveBeenCalled();
+      expect(h.kill).not.toHaveBeenCalled();
+    }
+  },
+);
 it.each([guarded, fixed])(
   'create refuses unsupported contracts before task, event or queue writes',
   async (contract) => {

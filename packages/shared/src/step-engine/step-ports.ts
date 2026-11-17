@@ -1,5 +1,12 @@
 export * from './core-data-ports.js';
 import {
+  executionContractPaths,
+  ExecutionContractError,
+  parseExecutionContract,
+  type ExecutionPredicateDeclaration,
+} from '../modularity/execution-contract.js';
+import type { ComposableStepEntry } from '../modularity/contracts.js';
+import {
   CORE_DATA_INPUTS,
   CHECK_RESULT_INPUTS,
   implementationSummaryProducer,
@@ -56,6 +63,51 @@ export interface StepPortGraph {
     targetIndex: number;
     targetPort: string;
   }[];
+}
+
+export interface GuardedDataEdgeOptions {
+  executionContract?: unknown;
+  catalog: ReadonlyMap<string, ComposableStepEntry>;
+  /** Only trusted executable registration may supply these; catalog JSON grants no trust. */
+  predicates?: ReadonlyMap<string, ExecutionPredicateDeclaration>;
+  maxPredicates?: number;
+  maxSteps?: number;
+}
+export type DataRoleDraftIssue = {
+  kind: 'invalid-data-role-binding';
+  stepId: string;
+  input: string;
+  message: string;
+};
+
+/** Check the already selected edges, never re-run selection on a filtered list.
+ * Even an optional bound producer must not skip independently of its consumer.
+ * A null optional binding has no edge and stays absent on every path. */
+export function guardedDataEdgeIssues(
+  nodes: readonly PortNode[],
+  graph: StepPortGraph,
+  opts?: GuardedDataEdgeOptions,
+): DataRoleDraftIssue[] {
+  if (opts?.executionContract == null) return [];
+  const contract = parseExecutionContract(opts.executionContract);
+  if (contract.guardedSpans.length === 0 && !contract.fixTarget) return [];
+  const paths = executionContractPaths(
+    nodes.map((n) => n.id),
+    opts.catalog,
+    contract,
+    opts.predicates ?? new Map(),
+    opts.maxPredicates,
+  ).map((path) => new Set(path));
+  if (paths.some((path) => path.size === 0))
+    throw new ExecutionContractError('empty execution path');
+  return graph.edges
+    .filter((edge) => paths.some((path) => path.has(edge.target) && !path.has(edge.source)))
+    .map((edge) => ({
+      kind: 'invalid-data-role-binding',
+      stepId: edge.target,
+      input: edge.targetPort,
+      message: `${edge.target}.${edge.targetPort}: pinned producer ${edge.source} can skip independently of its consumer`,
+    }));
 }
 
 /** One pure edge validator for projections and future admission. Each call is ONE candidate path.
@@ -292,8 +344,13 @@ export function dataRoleDraftIssues(
   }[],
   entries: ReadonlyMap<string, RolePortDeclarations>,
   bindings: DataRoleBindingsDraft = [],
-  maxSteps = MAX_DATA_PORT_STEPS,
-): { kind: 'invalid-data-role-binding'; stepId: string; input: string; message: string }[] {
+  limitsOrExecution: number | GuardedDataEdgeOptions = MAX_DATA_PORT_STEPS,
+): DataRoleDraftIssue[] {
+  const maxSteps =
+    typeof limitsOrExecution === 'number'
+      ? limitsOrExecution
+      : (limitsOrExecution.maxSteps ?? MAX_DATA_PORT_STEPS);
+  const execution = typeof limitsOrExecution === 'number' ? undefined : limitsOrExecution;
   const issues: ReturnType<typeof dataRoleDraftIssues> = [];
   const paths = new Set(candidates.map((c) => c.executionPath));
   for (const b of bindings)
@@ -317,6 +374,7 @@ export function dataRoleDraftIssues(
     try {
       const nodes = dataPortNodes(c.stepIds, c.roleBindings, entries);
       const graph = validatePortEdges(nodes, portBindingIndexes(nodes, bindings, c.executionPath));
+      issues.push(...guardedDataEdgeIssues(nodes, graph, execution));
       for (const n of graph.nodes)
         for (const i of n.inputs)
           if (i.state === 'ambiguous' || i.state === 'dangling')
@@ -326,12 +384,15 @@ export function dataRoleDraftIssues(
               input: i.id,
               message: `${c.executionPath ?? 'default'}: ${n.id}.${i.id}: ${i.state}`,
             });
-    } catch {
+    } catch (error) {
       issues.push({
         kind: 'invalid-data-role-binding',
         stepId: '',
         input: '',
-        message: 'invalid declarations or producer choice',
+        message:
+          error instanceof ExecutionContractError
+            ? error.message
+            : 'invalid declarations or producer choice',
       });
     }
   }

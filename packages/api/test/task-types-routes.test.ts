@@ -132,6 +132,111 @@ describe('/admin/task-types for a regular user', () => {
 });
 
 describe('GET /task-types', () => {
+  it('a structural static PATCH validates the stored contract and leaves definition/audit state intact', async () => {
+    h.role = 'admin';
+    const fake = createFakeDb({
+      taskTypeDefinitions: schema.taskTypeDefinitions,
+      stepCatalog: schema.stepCatalog,
+      auditEvents: schema.auditEvents,
+    });
+    h.db = fake.db;
+    fake.insert(schema.stepCatalog, {
+      stepId: 'report',
+      source: 'core',
+      composable: true,
+      dispatchesCli: false,
+      entry: {
+        stepId: 'report',
+        label: 'Report',
+        group: 'test',
+        dispatchesCli: false,
+        requires: [],
+        provides: [],
+      },
+    });
+    fake.insert(schema.taskTypeDefinitions, {
+      slug: 'guarded',
+      displayName: 'Guarded',
+      source: 'admin',
+      enabled: true,
+      selectable: true,
+      runListStrategy: 'static',
+      stepIds: ['report'],
+      requiresRepository: false,
+      promptSteps: {},
+      preAnswerDefaults: {},
+      stepLoopLimitDefaults: {},
+      executionContract: {
+        version: 1,
+        guardedSpans: [
+          {
+            id: 'a',
+            firstStepId: 'report',
+            lastStepId: 'report',
+            predicateId: 'module.scan.planned',
+            args: {},
+          },
+        ],
+      },
+    });
+    const before = structuredClone(fake.rows(schema.taskTypeDefinitions));
+    const response = await send('PATCH', '/admin/task-types/guarded', { stepIds: ['report'] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      issues: [expect.objectContaining({ kind: 'invalid-execution-contract' })],
+    });
+    expect(fake.rows(schema.taskTypeDefinitions)).toEqual(before);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+  it('detail composition diagnostics refuse a stored guard without inventing trusted predicates', async () => {
+    h.role = 'admin';
+    h.catalog = [
+      {
+        stepId: 'report',
+        source: 'core',
+        composable: true,
+        dispatchesCli: false,
+        entry: {
+          stepId: 'report',
+          label: 'Report',
+          group: 'test',
+          dispatchesCli: false,
+          requires: [],
+          provides: [],
+        },
+      },
+    ];
+    h.defs = [
+      {
+        slug: 'guarded',
+        source: 'admin',
+        enabled: true,
+        selectable: true,
+        runListStrategy: 'static',
+        stepIds: ['report'],
+        requiresRepository: false,
+        promptSteps: {},
+        executionContract: {
+          version: 1,
+          guardedSpans: [
+            {
+              id: 'a',
+              firstStepId: 'report',
+              lastStepId: 'report',
+              predicateId: 'module.scan.planned',
+              args: {},
+            },
+          ],
+        },
+      },
+    ];
+    const res = await send('GET', '/admin/task-types/guarded');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      compositionIssues: [expect.objectContaining({ kind: 'invalid-execution-contract' })],
+    });
+    expect(h.write).not.toHaveBeenCalled();
+  });
   it('names only absent steps in missingStepIds, leaving the stored run list intact', async () => {
     h.catalog = [{ stepId: 'installed', composable: false, dispatchesCli: false }];
     h.defs = [

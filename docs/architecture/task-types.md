@@ -213,7 +213,7 @@ edit or remove an applied migration.
 
 **Availability** (`resolveTaskTypeAvailability`, pure, shared by create and every list), first match
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →
-`module-missing` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes
+`module-missing` → `module-draining` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes
 before `missing-step` so a removed module is named instead of "a step is not installed". Without a
 synced catalog the step and composition checks are skipped for existing strategies, except prompt
 steps using role declarations/tokens or structured mode: these refuse admission with 409
@@ -221,6 +221,19 @@ steps using role declarations/tokens or structured mode: these refuse admission 
 requires a coherent synced catalog. Over HTTP: disabled, not selectable and the
 switches are 403; the module reasons, a missing step and a bad composition are 409 naming what is wrong.
 The switch over reasons ends in an exhaustive `never`, so a new reason cannot fall through to a create.
+
+The execution-contract support refusal remains the final `invalid-composition` check
+and also runs without a synced catalog. For a derived definition it retains its named
+`invalid-execution-contract` issue even if the overlay is invalid, after module policy.
+`definitionForCreate` reports that issue directly rather than evaluating the contract again.
+When executable predicate schemas are available from trusted code, availability checks
+composition and pinned data edges on feasible paths first. API catalog JSON carries no
+predicate schema or executable authority: guarded definitions remain unavailable there
+with the named runtime-support refusal. Admin static detail and structural edits carry
+the stored contract into validation; strict create/editor/draft schemas still expose no
+execution-contract authoring. Availability and the seeder keep inert declarations on the ordinary composition walk; the admin
+detail and static PATCH routes still pass a stored inert contract to the contract walk, which
+returns the same verdict with different issue indexes.
 
 **Traits returned with the definition:** the run list snapshot (a non-built-in static list that
 dispatches a CLI and has no canary gets `00-model-health-workflow` prepended; a prompt step counts as a
@@ -763,12 +776,15 @@ runtime ships in P6.
 
 A static module seed may declare `executionContract: {version: 1, guardedSpans,
 fixTarget?}`. A span is `{id, firstStepId, lastStepId, predicateId, args,
-requiresSpan?}`. Endpoints must be real, ordered run-list members; spans cannot
+requiresSpan?, when?}`. Endpoints must be real, ordered run-list members; spans cannot
 overlap or nest. `requiresSpan` names a strictly earlier span by run-list order,
 so unknown, later, self and cyclic references are refused. Its runtime promise
 for P7 is that the dependent span skips whenever the required span skipped,
 regardless of the dependent predicate. Disjoint spans sharing a predicate id
-share one task decision and must carry identical JSON args.
+share one task decision and must carry identical JSON args. `when` is an optional
+boolean selecting the expected result, defaulting to true; `when: false` consumes the
+false branch of that same decision, not a separate predicate. `requiresSpan` still
+requires the earlier span to run, including on a false predicate branch.
 
 Trusted executable predicates come from the module's step code, with an args
 schema; stored ids or source strings grant no executable authority. Composition
@@ -777,9 +793,25 @@ ordering, entailment, loop-target and closing checks. A skipped producer cannot
 supply a later mandatory requirement. The walk permits at most eight independent
 predicate decisions (injectable in tests), with at most 32 spans in the DTO.
 Empty execution paths remain invalid. `requiresSpan` excludes merged-without-
-planned; it does not excuse the feasible planned-without-merged cleanup's missing
-`commit`. The scan seed and P7 scenario controls still need the owner's cleanup
-contract decision. P6 adds no waiver, conditional requirement or cleanup step.
+planned; it does not waive any token requirement. The scan validation fixture puts
+normal `12-worktree-cleanup` inside the merged span and `12-no-change-cleanup`
+in a separate `merged`-predicate span with `when: false, requiresSpan: planned`.
+Its three feasible paths reach the unguarded report: no planned issues, planned with
+no merges (no-change cleanup), and merged (normal cleanup). No scan seed is installed.
+Normal cleanup still requires `commit`; no conditional requirement is introduced.
+
+Draft/seed checks and the v3 admission writer select data edges once from the full
+immutable run list and verify those same edges on every feasible guarded path.
+A pinned producer may not skip independently of its consumer, even for an optional
+bound input. Shared predicate results and `requiresSpan` can prove that a producer
+always runs whenever its consumer does; being in different spans is not itself an
+error. Explicit author choices must remain earlier and exactly compatible; the
+validator never chooses a different producer on a filtered path. Optional null
+bindings stay absent. No task pin, fingerprint, retry reader or recovery path is
+rewritten by these planner checks. Predicate schemas are supplied by executable
+module registration, never reconstructed from stored JSON; validation never calls
+predicate evaluation. Guard decisions, skipping and custom-fix execution remain
+fenced off until their runtime PRs.
 
 An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
 capable run-list target on every path where an emitter runs. For validation,

@@ -1,7 +1,14 @@
 // Server-only pin codec. The browser-safe port declarations live in core-data-ports.
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { MAX_DATA_PORT_STEPS, validatePortEdges, type PortNode } from './step-ports.js';
+import {
+  MAX_DATA_PORT_STEPS,
+  validatePortEdges,
+  guardedDataEdgeIssues,
+  type GuardedDataEdgeOptions,
+  type PortNode,
+} from './step-ports.js';
+import { ExecutionContractError } from '../modularity/execution-contract.js';
 import { executionPathSchema } from '../schemas/tasks.js';
 
 export const MAX_DATA_EDGE_STEPS = MAX_DATA_PORT_STEPS;
@@ -73,11 +80,19 @@ export function buildDataEdgePlan(
     bindings?: Readonly<Record<string, number>>;
   }[],
   maxSteps = MAX_DATA_EDGE_STEPS,
+  execution?: GuardedDataEdgeOptions,
 ): DataEdgePlan {
   const pinned = candidates.map((c) => {
     if (c.nodes.length > maxSteps)
       throw new DataEdgePlanError('step-count exceeds admission limit');
     const graph = validatePortEdges(c.nodes, c.bindings);
+    try {
+      const issues = guardedDataEdgeIssues(c.nodes, graph, execution);
+      if (issues.length) throw new DataEdgePlanError(issues[0]!.message);
+    } catch (error) {
+      if (error instanceof ExecutionContractError) throw new DataEdgePlanError(error.message);
+      throw error;
+    }
     const bindings: DataEdgeCandidate['bindings'] = {};
     graph.nodes.forEach((n, index) =>
       n.inputs.forEach((i) => {

@@ -29,7 +29,8 @@ export async function syncStepCatalog(
       if (entry) assertMatchingOutputDeclaration(def, entry, parsed?.kind === 'module');
       const composableRow = {
         composable: composables.has(meta.id),
-        // Data declarations are references only; module executable parity was checked above.
+        // Data contracts and fixConsumer are versioned references; executable parity
+        // was checked above. Predicate code and schemas are never stored here.
         entry: entry ? composableStepEntrySchema.parse(entry) : null,
       };
       const row = {
