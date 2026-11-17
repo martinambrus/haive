@@ -104,7 +104,7 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 
 1. register every core step, then the static-list asserts (provider-sensitive, CLI-dispatch,
    skippable, closed path sets);
-2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 58 entries);
+2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 59 entries);
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
@@ -287,7 +287,8 @@ composition-checked at boot. A guard test (`worker/test/composable-core.test.ts`
 unset pre-triage path, including the environment prelude. Every shipped step must have a composable
 entry, and every complete path must validate with **no issues**, including `unmet-need`; no step or
 issue is filtered out. The environment and registered workflow ordering guard stays too. The core
-catalog has 58 entries: all 54 registered workflow steps plus the four environment steps.
+catalog has 59 entries: all 54 registered workflow steps, the four environment steps,
+and the explicit-composition no-change cleanup step.
 
 A requirement may declare `after: <token>`: both tokens must be available, and the current provider
 of `needs` must strictly follow the current provider of `after`. A shared producer does not satisfy
@@ -1396,3 +1397,20 @@ ordered verify/review/08e/gate-3 destinations before dispatch or reset. It also 
 gate 2 before gate 3, so a pick cannot edit and later park on a missing approval step.
 Incomplete pick paths fail visibly with Retry guidance. This conditional gate-3 branch
 does not weaken 08e's own admission requirements or rewrite existing task pins.
+
+## No-change worktree cleanup
+
+`12-no-change-cleanup` is a deterministic core step available for explicit composition
+only (`workflowType: core`); registering it does not add it to a built-in run list. It
+requires `worktree` and `clean-tree`, provides `cleaned`, removes `worktree` and closes
+the run. It neither provides nor requires `commit` or `pr`. Ordinary
+`12-worktree-cleanup` still requires `commit`. No guarded-span runtime or seed wiring
+is enabled by this addition.
+
+The step reads the recorded `01-worktree-setup` output again in apply. It refuses a
+dirty or unreadable tree, an open merge/rebase/cherry-pick/revert (including sequencer
+state), a locked, different or shared checkout, or branch history not contained in the local
+base. An advanced base is allowed when it contains every branch commit. It never
+merges, commits or pushes. Ignored files follow the existing cleanup policy and are
+not uncommitted changes and are removed too. Completion defers to this step as it
+does to ordinary cleanup.

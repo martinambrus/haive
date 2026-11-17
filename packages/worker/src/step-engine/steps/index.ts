@@ -15,6 +15,7 @@ import { registerKbAuthorSteps } from './kb-author/index.js';
 import { registerRunAppSteps } from './run-app/index.js';
 import { registerPlanSteps } from './plan/index.js';
 import { registerTypeDraftSteps } from './type-draft/index.js';
+import { noChangeCleanupStep } from './core/12-no-change-cleanup.js';
 
 export {
   registerOnboardingSteps,
@@ -49,6 +50,7 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerRunAppSteps(registry);
   registerPlanSteps(registry);
   registerTypeDraftSteps(registry);
+  registry.register(noChangeCleanupStep);
   assertProviderSensitiveListInSync(registry);
   assertCliDispatchListInSync(registry);
   assertSkippableListInSync(registry);

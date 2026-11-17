@@ -1002,3 +1002,81 @@ workers until active continuations and pending new gate forms are settled. Retai
 latches, journals, report readers and compatible derived-pin readers for every resumable
 task. Reverting an executor underneath that state is unsafe. No schema migration needs
 reversal, and spent claims and attempt history are never reset.
+
+## No-change cleanup recovery
+
+`12-no-change-cleanup` records `worktree.no_change_cleanup` in a short owned
+step/task-fenced transaction before an atomic fs-safe move into a fresh host UUID
+under `.haive/no-change-cleanup/`. The event binds setup identity, the proven commit
+and the source directory device/inode as decimal strings from bigint stats;
+all identity probes and comparisons preserve the exact values, including inode
+numbers above 2^53. Non-digit device/inode journal fields refuse parsing. Every pass, including a resumed journal,
+takes the owned step row before the task epoch/status fence. Fenced sections hold
+those rows across their filesystem and Git writes and use only their transaction
+for database writes; Retry/Stop/Cancel wait for a section already in flight.
+
+The clean-tree check runs again after the intent transaction, immediately before
+the identity probe and rename. Changes are then checked through the staged tree's
+gitfile, with initialized submodules verified recursively using command-local
+`--work-tree` paths rather than their now-stale persistent `core.worktree` values.
+The equal-depth staging/worktree layouts keep relative submodule gitfiles valid.
+Recursive submodule history retention is checked before staging, after journaling
+and during staged verification too (see [No-change cleanup](merge-conflicts.md#no-change-cleanup)).
+A refused staged check restores the tree without overwriting a replacement
+at its original name and rethrows; failed restoration keeps both trees and refuses
+recovery while the replacement remains. New journals carry `phase: staging`, and a
+successful staged check commits `phase: removing` before the first unlink in a
+separate owned section. A crash after rename but before that authorization rechecks
+the staged tree, while a partly deleted authorized tree resumes removal without
+misreading missing tracked files as new edits. A journal without a phase is unreadable
+and refuses. Explicit Retry retains events
+even though it clears apply receipts. A changed staging identity or a new source
+directory beside the staged one refuses recovery. Removal repairs directory
+permissions through fs-safe, as `removeWorktreeDir` does. Both the step and Cancel
+pass the journal's expected device/inode to `removeNoFollow`: it opens the leaf
+directory without following links through the held parent, compares its held
+identity before deleting contents, then removes contents through that descriptor.
+A replaced directory or symlink raises `DirectoryIdentityError`
+(`EDIRECTORYIDENTITY`) without deleting the replacement. Before every final
+name-based `rmdir` attempt, including a permission-repair retry, it checks the leaf
+identity again through the held parent. An already absent directory remains a
+successful recovery cut. Node exposes no atomic identity-bound `rmdir`, so the
+last identity check and that syscall still have a small name-replacement window.
+Its worst case is removing one EMPTY directory of the wrong identity: `rmdir`
+fails with `ENOTEMPTY` on a non-empty directory and `ENOTDIR` on a symlink.
+
+An old setup's journal no longer blocks once neither its staging directory nor a
+same-device/inode source at its recorded path remains. Before staging, a branch tip
+that moved is rechecked against the live base and a fresh intent records the current
+tip; a moved branch with staging still present refuses. Worktree absence and branch
+absence are successful recovery cuts, and an already-complete replay skips ancestry.
+With a remaining tree but no branch, the last complete worktree HEAD log entry
+supplies the commit; a bounded unreadable/partial log refuses. Index, worktree and
+untracked changes are checked against that commit without recreating the branch.
+The final branch deletion compares its proven tip and verifies the base in one Git
+ref transaction. A changed ref fails retryably. `git worktree prune --expire now`
+has no path selector: it clears stale registrations repo-wide, as setup's prune and
+`removeWorktreeDir` already do, and removes no other worktree directory.
+Another task's prune that lands while the staged tree is being checked can drop this
+worktree's registration, since its recorded path no longer exists. The staged check then fails,
+the tree is restored with every file and commit intact, and each Retry refuses until the
+worktree is registered again by hand. This fails closed; locking the worktree around the move
+would add a mutation that interacts with the same prune, so it is not done.
+
+After sandbox teardown is proven, Cancel discards inode-bound staging directories
+last in its directory-cleanup block. A refused discard is caught so model unloads
+and KB cleanup still run; it is rethrown before `task.cancel_finished`, retaining
+the existing redrive. With no cleanup journal this helper adds no task-row read.
+
+The tree checks bound concurrent-edit windows; they do not freeze a writer holding
+an open cwd or descriptor. Such a writer can still edit after the final staged
+check or during an authorized partial removal. The step does not quiesce live
+terminal, IDE or CLI writers. Ignored files are intentionally removed without being
+counted as uncommitted work, matching the ordinary cleanup policy.
+
+Rollback first removes the step from definitions admitting new tasks, and retains
+a capable worker until every task pin naming it and every interrupted staging
+removal is settled. Older workers do not understand staged verification phases and
+must not resume an unchecked staged move. Keep the event records. Reverting code cannot restore removed
+worktrees; retained Git commits can be checked out again from the base. No migration
+is added or reversed.

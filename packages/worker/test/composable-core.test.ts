@@ -53,8 +53,8 @@ describe('core composable catalog', () => {
     ).not.toThrow();
   });
 
-  it('holds the 58 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(58);
+  it('holds the 59 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(59);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -189,10 +189,16 @@ describe('core composable catalog', () => {
     );
   });
 
-  it('marks the four finish steps as closing', () => {
+  it('marks the five finish steps as closing', () => {
     const closing = CORE_COMPOSABLE_STEPS.filter((e) => e.closes).map((e) => e.stepId);
     expect(closing.sort()).toEqual(
-      ['10-gate-3-commit', '11a-gate-4-push', '12-worktree-cleanup', '13-pr-wait'].sort(),
+      [
+        '10-gate-3-commit',
+        '11a-gate-4-push',
+        '12-worktree-cleanup',
+        '12-no-change-cleanup',
+        '13-pr-wait',
+      ].sort(),
     );
   });
 

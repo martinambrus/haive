@@ -209,6 +209,7 @@ import {
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
+import { discardNoChangeCleanupDirectories } from '../step-engine/no-change-cleanup.js';
 import { undoLeftMerge, recordUndoFailure } from '../step-engine/undo-left-merge.js';
 import {
   StepSupersededError,
@@ -1271,7 +1272,8 @@ export async function releaseTaskWorktree(
     completed.type !== 'run_app' &&
     completed.type !== 'workflow' &&
     runList.includes('01-worktree-setup') &&
-    !runList.includes('12-worktree-cleanup');
+    !runList.includes('12-worktree-cleanup') &&
+    !runList.includes('12-no-change-cleanup');
   let removeWorktree = reason === 'cancelled' || completed?.type === 'run_app';
   if (customWithoutCleanup) {
     removeWorktree = !(await worktreeMayHoldWork(completed?.worktreePath ?? null, taskId));
@@ -4789,6 +4791,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
+  let discardFailed = false;
+  let discardFailure: unknown;
   if (sandboxesGone) {
     await recordLeftOpenMerges(db, payload.taskId);
     await releaseTaskMergeClaims(db, payload.taskId);
@@ -4798,6 +4802,12 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       await cleanupTaskScratchWorkspace(db, payload.taskId);
     } catch (err) {
       logger.warn({ err, taskId: payload.taskId }, 'cleanup-scratch-workspace failed');
+    }
+    try {
+      await discardNoChangeCleanupDirectories(db, payload.taskId);
+    } catch (err) {
+      discardFailed = true;
+      discardFailure = err;
     }
   }
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
@@ -4810,6 +4820,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       'the cancelled task still has a sandbox container or docker could not list them; its merge dir claims are kept and the stalled re-drive repeats the cancel',
     );
   }
+  if (discardFailed) throw discardFailure;
   // The teardown above reads this task's rows, so whoever deletes them waits for this record.
   await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });
 }
