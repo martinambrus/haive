@@ -3,7 +3,7 @@
 > **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
 > eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
 > lexical configuration have since shipped. P2(b)/(c) remain parked (T144/T147), as does index-space
-> work (T149); P3 has a negative local GPU measurement below, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
+> work (T149); P3 has two local GPU measurements below, neither recommended to ship, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
 > changes still require held-out comparisons, including negative and overview results. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
 > 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
@@ -746,6 +746,134 @@ containers removed and verified absent. This PR adds only the offline evaluator 
 controls. Rollback: revert the experiment commit; no product key, schema, live data or reindex
 needs undoing. P3 remains unshipped; a different local model/configuration requires a fresh,
 separately declared paired experiment rather than tuning against these held-out results.
+
+**SECOND LOCAL MODEL (2026-11-17): Qwen3 improves held-out early ordering, tuning split flat; do not ship this configuration yet.**
+The owner authorized one additional model, fixed before grading: Qwen3-Reranker-0.6B Q8_0.
+Held-out remains the decision split. The existing `rag-eval-rerank.ts` is **byte-unchanged**,
+as are the BGE runs. A new isolated scratch server held 2,141 code chunks from 252 files,
+zero null vectors/hashes, all 144 positive golds and the same fixture fingerprint
+`4d56e5bc11b765f1c6b5539f1fc7de097df7f98d16e54314114c601c1da90068`.
+All 262 pinned files and 204 anchors verified before the dry run and 173-second build.
+The measured hybrid arm's metrics match the committed baseline at all five page sizes.
+
+The local Ollama 0.40.16 probe still returned HTTP 404 for POST `/api/rerank`
+(`text/plain`, 18 bytes, `404 page not found`). Native Qwen3 support exists in the **same**
+llama.cpp image as the BGE experiment; no newer build or adapter was needed:
+
+- Image `ghcr.io/ggml-org/llama.cpp@sha256:d68ec493c0ff9105ddfe2e909fff304117bc6e1fffbbd8d94182bd455983c264`,
+  build 12429, source `9fba51d2c9a1b5cb5f0c47986c031334e2d7663a`.
+- GGUF repo `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`, revision
+  `a02f48bb4f057028298c21fa033da2b30d7742d5`, file `qwen3-reranker-0.6b-q8_0.gguf`,
+  639,153,184 bytes; SHA-256
+  `22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48`, verified against
+  the pinned LFS oid. The 0.6B model fits beside the embedder; no 4B run was made.
+- Its embedded `tokenizer.chat_template.rerank` exactly matches the
+  [original model card](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)'s system prefix,
+  default English instruction, query/document format and non-thinking assistant suffix.
+  The [pinned converter](https://github.com/ggml-org/llama.cpp/blob/9fba51d2c9a1b5cb5f0c47986c031334e2d7663a/conversion/qwen.py)
+  extracts LM-head rows for `yes` (9693), then `no` (2152); the graph applies softmax and
+  the server returns the first element. Thus `relevance_score` is
+  `sigmoid(yes_logit - no_logit)`, in [0,1], **not BGE's raw logit and not a calibrated
+  answerability probability**. The exact template and all pins survive in the committed pin file.
+- Flags remain `--reranking -ngl 99 -c 2048 -b 2048 -ub 2048 -np 1 -lv 4`.
+  All 29/29 layers offloaded. Tokenizing all 2,141 full header-plus-body chunks with the
+  complete prompt template and all 180 queries gives a conservative bound of 1,051 tokens,
+  including 16 extra boundary tokens, below both 2,048 limits. Runtime logs confirm a maximum
+  actual pair length of 1,030 tokens and zero truncated releases across 9,000 pairs plus the
+  two warmup pairs. No chunk was shortened.
+- Total GPU memory during measurement was 4,562–4,564 MiB of 8,188 MiB, leaving at least
+  3,624 MiB headroom. All 24 Ollama residency samples retained the pinned
+  `qwen3-embedding:4b` digest and its 3,434,537,287 bytes of VRAM.
+
+One fixed configuration scored all 50 merged candidates for all 180 queries (9,000 pairs),
+with zero fallbacks, changed candidate sets, changed original hit fields or missing golds.
+The evaluator keeps RRF distinct, stable ties and the same post-ordering knowledge quota.
+Baseline k=8 pages differ from the prefix of the baseline k=50 pool for 5/180 queries;
+the paired baseline remains the shipped page-size call. This code-only fixture has no
+KB/global rows, so it does not measure real knowledge quotas, entry expansion, global merge
+quality, other code languages, private traffic, large HNSW stores or generated answers.
+
+Recall values are hybrid → Qwen3; overview and no-answer remain outside recall/MRR.
+
+| group | n | recall@5 | recall@8 | recall@12 | recall@20 | MRR@8 |
+|---|---:|---|---|---|---|---|
+| all | 144 | 0.819 → 0.882 | 0.861 → 0.917 | 0.896 → 0.938 | 0.951 → 0.944 | 0.640 → 0.696 |
+| kind:identifier | 72 | 0.972 → 0.986 | 0.972 → 0.986 | 0.986 → 0.986 | 1.000 → 1.000 | 0.811 → 0.826 |
+| kind:paraphrase | 72 | 0.667 → 0.778 | 0.750 → 0.847 | 0.806 → 0.889 | 0.903 → 0.889 | 0.469 → 0.566 |
+| language:en | 48 | 0.833 → 0.917 | 0.875 → 0.958 | 0.917 → 0.958 | 1.000 → 0.979 | 0.658 → 0.733 |
+| language:fr | 48 | 0.833 → 0.875 | 0.875 → 0.896 | 0.896 → 0.938 | 0.958 → 0.938 | 0.642 → 0.715 |
+| language:sk | 48 | 0.792 → 0.854 | 0.833 → 0.896 | 0.875 → 0.917 | 0.896 → 0.917 | 0.619 → 0.640 |
+| split:tuning | 72 | 0.819 → 0.889 | 0.861 → 0.931 | 0.889 → 0.944 | 0.931 → 0.944 | 0.679 → 0.655 |
+| split:held-out | 72 | 0.819 → 0.875 | 0.861 → 0.903 | 0.903 → 0.931 | 0.972 → 0.944 | 0.600 → 0.737 |
+
+| k | hybrid recall / MRR | reranked recall / MRR | held-out recall delta [95% CI] | held-out MRR delta [95% CI] |
+|---|---|---|---|---|
+| 5 | 0.819 / 0.633 | 0.882 / 0.690 | 0.056 [-0.014, 0.125] | 0.139 [0.050, 0.228] |
+| 8 | 0.861 / 0.640 | 0.917 / 0.696 | 0.042 [-0.028, 0.111] | 0.136 [0.047, 0.224] |
+| 12 | 0.896 / 0.643 | 0.938 / 0.698 | 0.028 [0.000, 0.069] | 0.135 [0.048, 0.221] |
+| 20 | 0.951 / 0.647 | 0.944 / 0.698 | -0.028 [-0.069, 0.000] | 0.131 [0.045, 0.218] |
+| 50 | 0.965 / 0.647 | 0.965 / 0.699 | 0.000 [0.000, 0.000] | 0.132 [0.047, 0.218] |
+
+At k=8, held-out recall improves by **+0.042 [−0.028, +0.111]** (5 wins / 2 losses /
+65 ties), while MRR improves by **+0.136 [+0.047, +0.224]** (25 / 9 / 38).
+The early-ordering gain is promising, but the primary recall interval includes no gain and
+held-out recall@20 falls by 0.028 (two paraphrases about fencing a writer after lock loss
+move from ranks 19/17 to 36/23; both are translations of one topic, so the loss is one topic). Candidate recall@50 remains 0.965. CIs use the unchanged
+2,000 paired query-bootstrap samples, xorshift32 seed 1729, percentile 95%; translations share
+topics, so these describe this fixture rather than independent-topic population uncertainty.
+No setting, instruction, threshold, mixing weight or truncation policy was selected after grading.
+
+The MRR gain is a single-split result. On the tuning split MRR@8 is flat to slightly worse,
+−0.024 [−0.096, +0.050] (16 / 16), while tuning recall@8 rises +0.069: the reranker pulls more
+golds into the top 8 there but orders them worse than the hybrid did. Over all 144 queries MRR@8
+is +0.056 [−0.004, +0.117], an interval that includes zero. Bootstrapping by topic (48 topics,
+3 translations each) gives held-out +0.136 [+0.027, +0.263] and pooled +0.056 [−0.025, +0.134];
+the held-out minus tuning difference, +0.160 [+0.007, +0.321], barely excludes zero. Hybrid MRR@8
+was already higher on tuning (0.679 vs 0.600), so the split gap is most likely noise plus
+regression to the mean; the per-query label hashes and the fixture fingerprint are unchanged.
+Only the model card's default web-search instruction was used; no code-specific instruction was
+tried, and no other model size.
+
+Overview coverage@8 is 0.310 → 0.444 overall and 0.278 → 0.370 held-out (9 queries;
+delta +0.093 [+0.028, +0.185]). Any-hit no-answer FPR stays 1.000 in both arms.
+The existing dense-on-returned-page diagnostic's held-out FPR is 5/9 → 6/9, with retention
+0.951 → 0.963. Separately, the maximum **Qwen3 relevance score**, using the same tuning-only
+90% retention protocol, yields tau 0.657756, held-out FPR 2/9 (Wilson 95% [0.063, 0.547]),
+retention 0.926 and AUROC 0.956. This small, correlated negative set cannot establish an
+abstention policy; no threshold was applied to retrieval.
+
+Warmed serial latency with the embedder resident: rerank-only p50/p95 **1,045/1,208 ms/query**;
+amortized **20.91/24.17 ms/chunk** (50-document requests divided by 50).
+Embedding + retrieval + rerank p50/p95 is **1,133/1,304 ms**, versus **90/108 ms** for embedding
++ shipped k=8 retrieval. These stage sums exclude offline gold/report work and are not
+production HTTP timings. The 180-query evaluator took 252 seconds. Timing finished before
+any test suite ran. API charges were $0; inference was local only; electricity was unmeasured.
+
+**P2(d), descriptive only.** The largest adjacent relevance-score drop in the first 20
+averages 0.355, with position p50/p95 4/14. Maximum positive/overview scores have
+p5/p50/p95 0.451/0.997/1.000, versus 0.010/0.049/0.927 for no-answer; their ranges overlap.
+A post-measurement illustration cutting at that gap, minimum three, keeps 6.14/20 hits on
+held-out on average but loses a further 0.069 recall [−0.139, −0.014] relative to the full
+reranked page. No cliff policy was selected or used in the paired run.
+
+**Recommendation: do not ship this configuration yet.** The held-out MRR and overview gains
+are encouraging, and the model fits comfortably in VRAM, but the primary recall@8 improvement
+is uncertain, recall@20 regresses and each query gains about a second of GPU work. That tradeoff
+does not yet justify a product reranker key in this experiment. This is a recommendation about
+this measured configuration, not a claim that Qwen3 lacks ranking value. No further model run
+or tuning is part of the owner's one-additional-model authorization.
+
+Compact paired runs and the exact runtime/model/template pin are committed under
+`packages/worker/test/fixtures/rag-eval/rerank-qwen3/`. The existing compare/report CLIs
+recompute all marginal, cell and held-out scores from those records, with k=8 dense signals.
+Latency, VRAM and residency figures come from the local run; their raw samples are not committed.
+Reproduction follows the baseline and BGE protocol above, using this directory's pin and
+unchanged `rag-eval-rerank.ts`. The `rrk-qwen-*` self-named runtime satisfies its existing
+local-origin allowlist. No paid/hosted inference, dev-database write, live-source edit, or
+haive service restart/rebuild was used. The scratch database was explicitly dropped and verified
+absent before both throwaway containers were removed with `docker rm -fv` and verified absent.
+Rollback is reverting the single experiment commit; there is no product setting, schema, live
+data or reindex to undo. P3 remains unshipped.
 
 ### P4. LLM-written chunk context (last)
 
