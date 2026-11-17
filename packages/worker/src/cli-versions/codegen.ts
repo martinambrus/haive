@@ -1,4 +1,4 @@
-import { CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
+import { assertVersionToken, CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
 
 export interface DockerfileCodegenResult {
   lines: string[];
@@ -27,6 +27,8 @@ export function buildProviderInstallLines(
   name: CliProviderName,
   version: string | null,
 ): DockerfileCodegenResult {
+  if (version !== null && version !== '')
+    assertVersionToken(version, 'CLI version (edit the CLI provider settings)');
   const meta = CLI_INSTALL_METADATA[name];
   const install = meta.install;
   const lines: string[] = [];

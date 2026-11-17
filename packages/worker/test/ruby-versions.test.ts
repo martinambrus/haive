@@ -113,3 +113,9 @@ describe('resolveRubyVersion', () => {
     expect(resolveRubyVersion('ruby-3.4.6', catalog)).toBe('3.4.6');
   });
 });
+
+it('drops an oversized otherwise-numeric Ruby catalog version', () => {
+  expect(
+    parseRubyBuilderAssets(assets([`ruby-${'1'.repeat(65)}.0.0-ubuntu-24.04.tar.gz`])),
+  ).toEqual([]);
+});

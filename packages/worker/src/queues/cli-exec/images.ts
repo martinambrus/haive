@@ -1,7 +1,11 @@
 import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getCliProviderMetadata, splitSecretLikeEnv, type CliProviderName } from '@haive/shared';
-import type { CliProbePathResult } from '@haive/shared';
+import {
+  getCliProviderMetadata,
+  splitSecretLikeEnv,
+  type CliProviderName,
+  type CliProbePathResult,
+} from '@haive/shared';
 import { guardedProbeFetch } from '@haive/shared/egress';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
@@ -99,7 +103,7 @@ async function ensureProviderSandboxImage(
 ): Promise<string | null> {
   const resolution = resolveImageTag({
     name: provider.name as CliProviderName,
-    cliVersion: provider.cliVersion?.trim() || null,
+    cliVersion: provider.cliVersion || null,
     providerId: provider.id,
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   });
@@ -169,7 +173,7 @@ export async function resolveSandboxImageTag(
       taskId,
       {
         name: provider.name as CliProviderName,
-        cliVersion: provider.cliVersion?.trim() || null,
+        cliVersion: provider.cliVersion || null,
         sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
       },
       runner,
@@ -199,7 +203,7 @@ export async function peekSandboxImageTag(
 ): Promise<{ tag: string; imageId: string } | null> {
   const config = {
     name: provider.name as CliProviderName,
-    cliVersion: provider.cliVersion?.trim() || null,
+    cliVersion: provider.cliVersion || null,
     sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
   };
   const composition = taskId
@@ -583,13 +587,19 @@ export async function markProvidersReady(
       // One lock order for every build, so two marking overlapping siblings cannot deadlock.
       .orderBy(asc(c.id))
       .for('update');
-    const configTag = (r: (typeof rows)[number]) =>
-      resolveImageTag({
-        name: r.name as CliProviderName,
-        cliVersion: r.cliVersion?.trim() || null,
-        providerId: r.id,
-        sandboxDockerfileExtra: r.sandboxDockerfileExtra,
-      })?.tag;
+    const configTag = (r: (typeof rows)[number]) => {
+      try {
+        return resolveImageTag({
+          name: r.name as CliProviderName,
+          cliVersion: r.cliVersion || null,
+          providerId: r.id,
+          sandboxDockerfileExtra: r.sandboxDockerfileExtra,
+        })?.tag;
+      } catch (err) {
+        log.warn({ err, providerId: r.id }, 'ignoring provider with invalid image configuration');
+        return undefined;
+      }
+    };
     // Keyed on config, never on the tag a row names: a failed build leaves its row on the image it
     // had, and a row a build of a config it has since left would move is the newer build's to move.
     const moving = rows.filter((r) => configTag(r) === imageTag);

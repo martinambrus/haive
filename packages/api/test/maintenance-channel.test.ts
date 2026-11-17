@@ -308,3 +308,16 @@ it('preserves the Docker error when compensating deletion fails', async () => {
   expect(h.rows).toHaveLength(1);
   expect(h.auditLog).not.toHaveBeenCalled();
 });
+
+it.each(['a'.repeat(64), 'v1.0.0+build.5', ' 1.2.3 ', 'vA9.z+build-5'])(
+  'keeps previously accepted version %j',
+  async (version) => {
+    const result = await app.request('/maintenance/upgrade', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version }),
+    });
+    expect(result.status).toBe(202);
+    expect(h.spawn).toHaveBeenCalledOnce();
+  },
+);

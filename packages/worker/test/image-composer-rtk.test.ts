@@ -23,10 +23,11 @@ describe('composeSandboxImage RTK version pin', () => {
     expect(pinned.hash).not.toBe(def.hash);
   });
 
-  it('treats null/empty/whitespace rtkVersion as the default (same hash)', () => {
+  it('treats null/empty rtkVersion as the default and refuses whitespace', () => {
     const a = composeSandboxImage({ ...baseInput, rtkVersion: null });
     const b = composeSandboxImage({ ...baseInput });
-    const c = composeSandboxImage({ ...baseInput, rtkVersion: '   ' });
+    const c = composeSandboxImage({ ...baseInput, rtkVersion: '' });
+    expect(() => composeSandboxImage({ ...baseInput, rtkVersion: '   ' })).toThrow(/version token/);
     expect(a.hash).toBe(b.hash);
     expect(c.hash).toBe(b.hash);
   });

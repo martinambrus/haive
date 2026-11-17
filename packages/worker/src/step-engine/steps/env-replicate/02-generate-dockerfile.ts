@@ -1,6 +1,7 @@
+import { assertDependencyTokens } from './_dependency-tokens.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { assertVersionToken, type FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {
@@ -69,6 +70,7 @@ export const generateDockerfileStep: StepDefinition<
       );
     }
     const declaredDeps = (row.declaredDeps ?? {}) as Record<string, unknown>;
+    assertDependencyTokens(declaredDeps);
     // Reuse a previously-saved Dockerfile, EXCEPT when it still targets a PHP
     // version no apt repo can install (the pre-fix php<5.6 output). Such a
     // Dockerfile can never build, so re-render from declared deps — which now
@@ -287,10 +289,9 @@ function isUbuntuBase(baseImage: string): boolean {
  *  Not cosmetic. These values default to a REPO-DERIVED capture — `rust-version = "..."`
  *  from Cargo.toml, `ruby '...'` from a Gemfile — and a JS negated character class matches
  *  a newline, so a crafted `Gemfile` can close the quote on a later line and carry its own
- *  `RUN` into the generated Dockerfile. Anything that is not a plain version falls back to
- *  the recorded default (Rust) or to the undeclared wording (Ruby), so a hostile repo gets
- *  a working image rather than a shell. normalizeGoVersion filters the same way by
- *  construction — it rebuilds the string from numeric parts. */
+ *  `RUN` into the generated Dockerfile. assertDependencyTokens now refuses unsafe raw
+ *  tokens first. Safe but unresolvable versions still use the recorded runtime fallback.
+ *  normalizeGoVersion rebuilds the release filename from numeric parts. */
 function isPlainVersion(raw: string): boolean {
   return /^\d+(\.\d+){0,2}$/.test(raw);
 }
@@ -359,6 +360,11 @@ function normalizeGoVersion(raw: string): string | null {
 
 export function renderDockerfile(baseImage: string, rawDeps: Record<string, unknown>): string {
   const deps = rawDeps as DeclaredDepsShape;
+  assertDependencyTokens(deps);
+  // Docker references need separators a version token cannot contain. Check every
+  // name/tag/digest component with the same token policy before writing FROM.
+  for (const component of baseImage.split(/[/:@]/))
+    assertVersionToken(component, 'Base image name');
   const lines: string[] = [];
   lines.push(`FROM ${baseImage}`);
   lines.push('');
@@ -623,7 +629,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('# Language servers');
     for (const lsp of lspServers) {
       // Bare version pin for this server; empty/absent = latest/unpinned.
-      const v = (lspVersions[lsp] ?? '').trim();
+      const v = lspVersions[lsp] ?? '';
       switch (lsp) {
         case 'intelephense':
           lines.push(`RUN npm install -g intelephense${v ? `@${v}` : ''}`);
@@ -683,7 +689,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     const ubuntu = isUbuntuBase(baseImage);
     // Chromium-family only: the agent path is chrome-devtools-mcp, which speaks CDP.
     const browserType = (deps.browser?.type ?? 'chrome').trim().toLowerCase();
-    const pinnedVersion = (deps.browser?.version ?? '').trim();
+    const pinnedVersion = deps.browser?.version ?? '';
     // A FULL Chrome for Testing version (e.g. 140.0.7339.207); empty = system default.
     const pinnedChrome = browserType === 'chrome' ? pinnedVersion : '';
     const xStack = 'xvfb x11vnc socat procps fonts-dejavu';
@@ -797,7 +803,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
       lines.push('    apt-get update \\');
       lines.push(`    && apt-get install -y --no-install-recommends chromium ${xStack}`);
     }
-    const cdmVersion = (deps.chromeDevtoolsMcpVersion ?? '').trim();
+    const cdmVersion = deps.chromeDevtoolsMcpVersion ?? '';
     lines.push(`RUN npm install -g chrome-devtools-mcp${cdmVersion ? `@${cdmVersion}` : ''}`);
     lines.push(
       'RUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1',

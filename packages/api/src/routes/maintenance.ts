@@ -17,6 +17,7 @@ import {
   getHaiveVersion,
   installId,
   isDevVersion,
+  isVersionToken,
   lockNewWorkFenceExclusive,
   logger,
   maintenanceStateSchema,
@@ -495,7 +496,7 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   const body = startUpgradeSchema.parse(await c.req.json());
   const version = stripV(body.version.trim());
   // The version reaches a command line. Constrain it rather than trust it.
-  if (!/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(version)) throw new HttpError(400, 'invalid version');
+  if (!isVersionToken(version)) throw new HttpError(400, 'invalid version');
 
   const channel = process.env.HAIVE_CHANNEL || 'public';
   const channelRegistry = process.env.HAIVE_CHANNEL_REGISTRY || '';

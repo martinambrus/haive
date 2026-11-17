@@ -1,15 +1,16 @@
+import { assertDependencyTokens } from './_dependency-tokens.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  assertVersionToken,
+  isVersionToken,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
-} from '@haive/shared';
-import type {
-  FormSchema,
-  FormValues,
-  OnboardingEnvironmentMirror,
-  OnboardingToolingMirror,
+  type FormSchema,
+  type FormValues,
+  type OnboardingEnvironmentMirror,
+  type OnboardingToolingMirror,
 } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -209,14 +210,14 @@ export async function loadOnboardingDetection(
   for (const { field, language } of ONBOARDING_VERSION_KEYS) {
     const v = str(field);
     if (v) {
-      runtimeVersions[language] = v;
+      if (isVersionToken(v)) runtimeVersions[language] = v;
       languages.add(language);
     }
   }
 
   return {
     databaseType: str('databaseType'),
-    databaseVersion: str('databaseVersion'),
+    databaseVersion: isVersionToken(str('databaseVersion')) ? str('databaseVersion') : null,
     webserver: str('webserver'),
     languages: Array.from(languages),
     runtimeVersions,
@@ -758,6 +759,31 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       repoLspServers = repoRow[0]?.lspServers ?? null;
     }
 
+    if (values.databaseVersion)
+      assertVersionToken(
+        values.databaseVersion,
+        'Database version (databaseVersion; edit the declared dependencies)',
+      );
+    assertDependencyTokens({
+      lspServerVersions: repoLspVersions ?? undefined,
+      chromeDevtoolsMcpVersion: repoChromeMcpVersion,
+      versions: {
+        node: values.nodeVersion || null,
+        php: values.phpVersion || null,
+        python: values.pythonVersion || null,
+        java: values.javaVersion || null,
+        go: values.goVersion || null,
+        rust: values.rustVersion || null,
+        ruby: values.rubyVersion || null,
+      },
+      database: { kind: values.databaseKind, version: values.databaseVersion },
+    });
+
+    for (const field of ['browserVersion_chrome', 'browserVersion_edge'] as const) {
+      const value = values[field];
+      if (value !== undefined && value !== null && value !== '') assertVersionToken(value, field);
+    }
+
     const packageManagers: Partial<Record<LanguageKey, PackageManager | null>> = {};
     for (const detected of args.detected.runtimes) {
       if (values.runtimes.includes(detected.language)) {
@@ -840,13 +866,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         if (type !== 'chrome' && type !== 'edge') return {};
         const version =
           (type === 'chrome' ? values.browserVersion_chrome : values.browserVersion_edge) ?? '';
-        const pinned = version.trim();
+        const pinned = version;
         if (type === 'chrome' && !pinned) return {};
         return { browser: { type, version: pinned || null } };
       })(),
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
+
+    assertDependencyTokens(declaredDeps);
 
     // A changed base image or declared-deps set makes the previously saved
     // Dockerfile (and any image built from it) stale — it was rendered from
@@ -930,8 +958,9 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
  *  never fires, so the DDEV stack the repo now carries is never brought up.
  *
  *  Only a reused 'none' — the "nothing found" sentinel of either select — is
- *  refreshed from this task's detection. A tool or database the user picked is
- *  never overwritten, including when it has since disappeared from the repo.
+ *  refreshed from this task's detection. A tool or database kind the user picked
+ *  is never overwritten, including when it has since disappeared from the repo.
+ *  Non-token versions from older answers are blanked to take safe form defaults.
  *  Manual mode never reaches here (reuse is auto-continue-gated) and already shows
  *  the freshly detected values as its form defaults. */
 export function reconcileStaleDeps(
@@ -939,6 +968,12 @@ export function reconcileStaleDeps(
   reused: DeclareDepsFormValues,
 ): DeclareDepsFormValues {
   const patch: Partial<DeclareDepsFormValues> = {};
+  // Old answers can carry manifest constraints or Compose substitutions. Blanking
+  // them lets form validation supply this detection's safe defaults before apply.
+  for (const { id } of VERSION_FIELDS) {
+    if (reused[id] && !isVersionToken(reused[id])) patch[id] = '';
+  }
+  if (reused.databaseVersion && !isVersionToken(reused.databaseVersion)) patch.databaseVersion = '';
 
   if (reused.containerTool === 'none' && detected.containerTool !== 'none') {
     patch.containerTool = detected.containerTool;
@@ -950,7 +985,7 @@ export function reconcileStaleDeps(
 
   if (reused.databaseKind === 'none' && detected.database.kind !== 'none') {
     patch.databaseKind = detected.database.kind;
-    if (!reused.databaseVersion && detected.database.version) {
+    if (!(patch.databaseVersion ?? reused.databaseVersion) && detected.database.version) {
       patch.databaseVersion = detected.database.version;
     }
   }
@@ -1242,11 +1277,19 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   const webserver = await detectWebserver(repoPath);
 
   return {
-    runtimes,
+    // Manifests describe constraints as well as pins. Non-tokens carry no usable pin;
+    // leave the language detected so the form offers its established fallback.
+    runtimes: runtimes.map((r) => {
+      // The renderer historically used the first dotted component when numeric,
+      // e.g. engines ">=18.17.0 <21" (already stripped to "18.17.0 <21") chose 18.
+      const major = r.language === 'node' ? r.version?.split('.')[0] : null;
+      if (isVersionToken(r.version)) return r;
+      return { ...r, version: isVersionToken(major) && !/\D/.test(major) ? major : null };
+    }),
     containerTool,
     webserver,
     ddevProjectName: ddev.projectName,
-    database,
+    database: { ...database, version: isVersionToken(database.version) ? database.version : null },
     suggestedLsp: Array.from(suggestedLsp),
     // scanRepoForDeps is also exported for callers without a task/CLI context;
     // the step's detect() fills the authoritative value from the selected CLI.

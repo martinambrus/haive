@@ -1,6 +1,6 @@
 import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
-import { logger, type RefreshCliVersionsJobResult } from '@haive/shared';
+import { isVersionToken, logger, type RefreshCliVersionsJobResult } from '@haive/shared';
 
 const log = logger.child({ module: 'browser-version-refresh' });
 
@@ -34,8 +34,8 @@ export function parseCftMilestones(payload: unknown): { version: string; label: 
   if (!milestones || typeof milestones !== 'object') return [];
   const out: { version: string; label: string; sort: number }[] = [];
   for (const [key, m] of Object.entries(milestones)) {
-    const version = typeof m?.version === 'string' ? m.version.trim() : '';
-    if (!version) continue;
+    const version = m?.version;
+    if (!isVersionToken(version)) continue;
     const hasLinux = (m?.downloads?.chrome ?? []).some((d) => d?.platform === 'linux64' && d?.url);
     if (!hasLinux) continue;
     const milestone = (m?.milestone ?? key).trim();
@@ -64,7 +64,7 @@ export function parseEdgePackages(text: string): { version: string; label: strin
     const m = /^Version: (\S+)/m.exec(block);
     if (!m) continue;
     const version = m[1] ?? '';
-    if (!version) continue;
+    if (!isVersionToken(version)) continue;
     const parts = version.split(/[.-]/).map((n) => Number(n) || 0);
     const major = parts[0] ?? 0;
     if (!major) continue;

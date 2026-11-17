@@ -1764,7 +1764,7 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
     await s.putRecord(
       withSettings({
         'lsp-servers': ['vtsls', 'made-up', 'vtsls'],
-        'lsp-server-versions': { vtsls: ' 1.0.0 ', 'made-up': '2', pyright: '' },
+        'lsp-server-versions': { vtsls: '1.0.0', 'made-up': '2', pyright: '' },
         'review-dimensions': ['security', 'nope'],
         'scope-exclude-globs': ['/vendor/', 'b', '', 'a'],
       }),

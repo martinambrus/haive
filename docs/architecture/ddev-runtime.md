@@ -213,3 +213,27 @@ even in automatic mode. An uploaded dump overrides it; without either source the
 Checkpoints are discovered at restoration time, including those saved after task creation. The final `11g-save-database` form always requires the user to choose save,
 finish without saving, or save and overwrite when another task advanced the project snapshot.
 See [Project database persistence](database-persistence.md) for revision fencing and cleanup.
+
+## Scalars in generated DDEV configuration
+
+`renderDdevConfig` checks only scalars it interpolates. Raw PHP versions, project type and
+webserver type use the shared version-token policy; docroot paths check each slash-separated
+component, and project names still use the DNS slug. Node versions are trimmed, then checked
+by `isDdevNodejsVersion` before token validation and interpolation. Padded numeric versions
+such as `22` render as `"22"`; constraints, blank values and names nvm cannot install
+(`20 || ^22`, `^22`, `>=18`, `lts/hydrogen`) omit `nodejs_version` as before. Database types
+outside `DDEV_DB_TYPES` omit the entire database block, and database versions are token-checked
+only inside an emitted database block. A quote/newline database-version payload for a supported
+database is refused before any config is returned for review or writing. Valid version inputs
+render the same bytes. Already-authored editable config text remains the owner's configuration;
+this guard applies to generated scalar interpolation.
+
+Repository scans drop non-token runtime/database versions before form defaults while retaining
+the language and database kind, except that Node constraints with a numeric leading dotted
+component retain that major, which a generated DDEV config now writes as `nodejs_version`. The onboarding merge trims first and ignores blank values,
+then applies token checks. Reused runtime/database answers containing non-tokens are blanked so
+form validation uses the current detected defaults. Declaration still checks submitted database
+and browser pins, including both raw browser picker fields, before any template write. Stored
+unsafe interpolated scalars stop DDEV rendering with the field and a bounded JSON-quoted preview;
+Unicode controls and invisible/bidi characters are escaped as `\uXXXX`. Correct the declared
+dependencies and retry. Undo is a code revert, with no schema or data rollback.

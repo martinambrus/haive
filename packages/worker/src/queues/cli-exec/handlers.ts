@@ -785,13 +785,29 @@ export async function handleBuildSandboxImageJob(
     return { ok: false, providerId: payload.providerId, error: 'provider not found' };
   }
 
-  const cliVersion = provider.cliVersion?.trim() || null;
-  const resolution = resolveImageTag({
-    name: provider.name as CliProviderName,
-    cliVersion,
-    providerId: provider.id,
-    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
-  });
+  const cliVersion = provider.cliVersion || null;
+  let resolution: ImageTagResolution | null;
+  try {
+    resolution = resolveImageTag({
+      name: provider.name as CliProviderName,
+      cliVersion,
+      providerId: provider.id,
+      sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+    });
+  } catch (err) {
+    const error = safeErrorMessage(err);
+    const wrote = await writeWhileWanted(
+      db,
+      provider.id,
+      { refused: provider },
+      {
+        sandboxImageBuildStatus: 'failed',
+        sandboxImageBuildError: error,
+      },
+    );
+    log.warn({ err, providerId: provider.id }, 'sandbox image configuration refused');
+    return { ok: false, providerId: provider.id, error: wrote ? error : SUPERSEDED_BUILD };
+  }
 
   if (!resolution) {
     const wrote = await writeWhileWanted(db, provider.id, null, {
@@ -966,12 +982,17 @@ async function removeOnceBuilt(
 const SUPERSEDED_BUILD =
   'the provider changed, and now asks for another image than this build makes';
 
-/** Write `set` to the provider's row only while its config still asks for `imageTag` (null: for no
- *  image): once it asks for another, the build of that one owns the row. */
+type ImageConfig = Pick<
+  typeof schema.cliProviders.$inferSelect,
+  'name' | 'cliVersion' | 'sandboxDockerfileExtra'
+>;
+
+/** Write only while the locked config still asks for this tag (null: no image), or still
+ *  equals the refused config. A refusal wants no buildable tag, distinct from no image. */
 async function writeWhileWanted(
   db: Database,
   providerId: string,
-  imageTag: string | null,
+  wanted: string | null | { refused: ImageConfig },
   set: Partial<typeof schema.cliProviders.$inferInsert>,
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
@@ -985,14 +1006,29 @@ async function writeWhileWanted(
       .where(eq(schema.cliProviders.id, providerId))
       .for('update');
     if (!row) return false;
-    const wants =
-      resolveImageTag({
-        name: row.name as CliProviderName,
-        cliVersion: row.cliVersion?.trim() || null,
-        providerId,
-        sandboxDockerfileExtra: row.sandboxDockerfileExtra,
-      })?.tag ?? null;
-    if (wants !== imageTag) return false;
+    if (wanted !== null && typeof wanted === 'object') {
+      const { refused } = wanted;
+      if (
+        row.name !== refused.name ||
+        row.cliVersion !== refused.cliVersion ||
+        row.sandboxDockerfileExtra !== refused.sandboxDockerfileExtra
+      )
+        return false;
+    } else {
+      let wants: string | null;
+      try {
+        wants =
+          resolveImageTag({
+            name: row.name as CliProviderName,
+            cliVersion: row.cliVersion || null,
+            providerId,
+            sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+          })?.tag ?? null;
+      } catch {
+        return false;
+      }
+      if (wants !== wanted) return false;
+    }
     await tx
       .update(schema.cliProviders)
       .set({ ...set, updatedAt: new Date() })

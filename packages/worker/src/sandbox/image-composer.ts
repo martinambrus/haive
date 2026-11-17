@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { DEFAULT_RTK_VERSION, imageRepo, type CliProviderName } from '@haive/shared';
+import {
+  assertVersionToken,
+  DEFAULT_RTK_VERSION,
+  imageRepo,
+  type CliProviderName,
+} from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export const SANDBOX_CORE_IMAGE = `${imageRepo('cli-sandbox')}:latest`;
@@ -60,7 +65,7 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   // sandbox-core base (haive-cli-sandbox) installs `uv` from apk but only
   // applies when there is no env-template. Inject the install here so
   // composed images built on top of env-templates get it too.
-  const rtkVersion = (input.rtkVersion ?? '').trim() || DEFAULT_RTK_VERSION;
+  const rtkVersion = input.rtkVersion || DEFAULT_RTK_VERSION;
   parts.push(buildHaiveRuntimeToolsLayer(rtkVersion));
   if (installLines.length > 0) parts.push(installLines.join('\n'));
   if (extra.length > 0) parts.push(extra);
@@ -125,6 +130,7 @@ function resolveBase(envTemplateDockerfile: string | null): string {
  *  present for the early exit. Idempotent on its own line so a change
  *  here forces a clean cache miss across all composed images. */
 function buildHaiveRuntimeToolsLayer(rtkVersion: string): string {
+  assertVersionToken(rtkVersion, 'RTK version (edit the repository Tooling settings)');
   const asset = 'rtk-x86_64-unknown-linux-musl.tar.gz';
   const releaseBase = `https://github.com/rtk-ai/rtk/releases/download/v${rtkVersion}`;
   return [

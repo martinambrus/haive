@@ -145,12 +145,10 @@ describe('normalizeSetting', () => {
       ok: true,
       value: ['vtsls'],
     });
-    expect(ok('lsp-server-versions', { vtsls: ' 1.0 ', pyright: '', x: '1', gopls: null })).toEqual(
-      {
-        ok: true,
-        value: { vtsls: '1.0' },
-      },
-    );
+    expect(ok('lsp-server-versions', { vtsls: '1.0', pyright: '', x: '1', gopls: null })).toEqual({
+      ok: true,
+      value: { vtsls: '1.0' },
+    });
     expect(ok('lsp-server-versions', [])).toEqual({ ok: false });
   });
 
@@ -163,13 +161,13 @@ describe('normalizeSetting', () => {
     expect(ok('review-dimensions', [])).toEqual({ ok: false });
   });
 
-  it('takes a boolean for RTK and a non-empty string for a version, and no other name', () => {
+  it('takes a boolean for RTK and a valid token for a version, and no other name', () => {
     expect(ok('rtk-enabled', false)).toEqual({ ok: true, value: false });
     expect(ok('rtk-enabled', 'false')).toEqual({ ok: false });
-    expect(ok('rtk-version', ' 0.42.4 ')).toEqual({ ok: true, value: '0.42.4' });
+    expect(ok('rtk-version', '0.42.4')).toEqual({ ok: true, value: '0.42.4' });
     expect(ok('chrome-devtools-mcp-version', '')).toEqual({
       ok: false,
-      reason: 'is not non-empty text',
+      reason: expect.stringMatching(/plain version/),
     });
     expect(ok('app-auth', {})).toEqual({ ok: false });
   });
@@ -189,7 +187,7 @@ describe('normalizeSetting', () => {
     ]) {
       expect(ok('chrome-devtools-mcp-version', bad).ok, JSON.stringify(bad)).toBe(false);
     }
-    expect(ok('chrome-devtools-mcp-version', ' 1.12.0 ')).toEqual({ ok: true, value: '1.12.0' });
+    expect(ok('chrome-devtools-mcp-version', '1.12.0')).toEqual({ ok: true, value: '1.12.0' });
     expect(ok('chrome-devtools-mcp-version', 'latest')).toEqual({ ok: true, value: 'latest' });
   });
 
