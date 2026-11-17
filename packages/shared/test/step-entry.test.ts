@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as step from '@haive/shared/step';
 
 describe('public step entry', () => {
-  it('exports only the seven runtime constructors', () => {
+  it('exports only the eight runtime constructors', () => {
     expect(Object.keys(step).sort()).toEqual([
       'AdvisedStepError',
       'MiningRetryError',
@@ -10,11 +10,19 @@ describe('public step entry', () => {
       'PromptBudgetExceededError',
       'ReopenStepFormError',
       'RetryableParseError',
+      'StepPrepareParkError',
       'TaskCancelledError',
     ]);
   });
 
   it('preserves the control signals and their payloads', () => {
+    expect(new step.StepPrepareParkError()).toMatchObject({
+      name: 'StepPrepareParkError',
+      message: "another advance owns this step's live invocation",
+    });
+    expect(new step.StepPrepareParkError('live ledger attempt').message).toBe(
+      'live ledger attempt',
+    );
     expect(new step.TaskCancelledError()).toMatchObject({
       name: 'TaskCancelledError',
       message: 'task cancelled',

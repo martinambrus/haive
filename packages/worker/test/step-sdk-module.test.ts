@@ -30,7 +30,7 @@ beforeAll(async () => {
     new URL('./fixtures/step-sdk/package.json', import.meta.url),
     join(fixtureRoot, 'package.json'),
   );
-  // Resolve the host's existing peer installation, preserving the six constructors' identity.
+  // Resolve the host's existing peer installation, preserving the constructors' identity.
   symlinkSync(
     fileURLToPath(new URL('../node_modules', import.meta.url)),
     join(fixtureRoot, 'node_modules'),
@@ -94,7 +94,7 @@ describe('compiled module step SDK consumer', () => {
     });
   });
 
-  it('resolves all seven constructors to the worker objects through the compiled module', () => {
+  it('resolves all eight constructors to the worker objects through the compiled module', () => {
     for (const name of Object.keys(errors) as (keyof typeof errors)[]) {
       expect(errors[name]).toBe(worker[name]);
     }

@@ -10,6 +10,7 @@ const constructors = [
   'MiningWaveError',
   'ReopenStepFormError',
   'PromptBudgetExceededError',
+  'StepPrepareParkError',
 ] as const;
 
 describe('step SDK compatibility', () => {
