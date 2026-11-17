@@ -88,11 +88,20 @@ in context. Per repository: the files that cost the most, and which steps pay fo
   `tool_result` blocks of claude-family `user` events (size, keyed by `tool_use_id`), assistant
   message ids (turns, deduplicated by id), `compact_boundary` (a result's life ends), and codex
   `command_execution` items, which carry the command and its output in one item.
-- **Paths.** The read tool's input keys (`CLI_TOOL_NAMES.readTools`), and `commandPathTokens` on
-  reader commands only (`cat`, `sed -n`, `head`, `tail`, `nl`), with redirect targets such as
+- **Paths.** The read tool's input keys (`CLI_TOOL_NAMES.readTools`), and `readerCommandPaths` on
+  reader commands only (`cat`, print-only `sed`, `head`, `tail`, `nl`), with redirect targets such as
   `2>/dev/null` excluded. Normalised as `classifyReadPath` already does: the sandbox mount root and
   `.haive/worktrees/<name>` stripped. A path outside the repository (a CLI's own temp file) goes to
-  one `outside` bucket, never dropped silently.
+  one `outside` bucket, never dropped silently. Resolve shell paths against per-call absolute
+  `cwd` before normalization. Codex exec commands start as fresh processes: if the item omits
+  cwd, use the sandbox launch root (`SANDBOX_WORKDIR`, Docker `-w`). App-server uses its reported
+  cwd. Persistent Claude-family/Grok shells need a reported cwd; without it, relative paths stay
+  unattributed. Invalid cwd also leaves relative paths unattributed. Absolute paths can still
+  classify. Cwd-changing chains, here-strings, here-documents and unsupported redirects stay
+  unattributed. Any dollar sign, backtick or backslash inside a shell wrapper's outer double
+  quotes makes the call unattributed, even inside nested single quotes. Every sed expression
+  must be a known print/range form; file reads/writes, execution and unknown script commands
+  stay unattributed.
 - **Record.** A new `reads` key in `tool_usage`: per file `{ path, reads, chars, weightedChars }`,
   totals for all results and for file reads, `turns`, `compactions`, and `resultSeen` (whether the
   transcript held the CLI's `result` event). `weightedChars` is chars × later turns before the next
@@ -224,8 +233,11 @@ The owner's decision (D4): the file is the user's client code.
 
 - Whether claude-code clears old tool results without logging a compaction. If it does, the
   weighted figures overstate.
-- Paths parsed from shell commands are a heuristic, so per-file figures are floors. Codex reads
-  were counted in totals but not attributed to files.
+- Paths parsed from shell commands are a heuristic. Unknown syntax and missing persistent-shell
+  cwd lose attribution. Conversely, Codex exec can override its per-call workdir without echoing
+  it in JSONL; the launch-root fallback can then attribute a relative path to the wrong repository
+  file or miss that it is outside. Per-file attribution is therefore not a guaranteed floor.
+  Codex raw reads are attributed, but its weighted exposure remains unknown without request turns.
 - Why 9 grok runs show results above their recorded prompt tokens (M5).
 - The article was read through a summarising fetch of its page, not verbatim. Its per-step numbers
   are as reported there.
@@ -250,31 +262,89 @@ The owner's decision (D4): the file is the user's client code.
 
 - The original `.claude/tmp/read-cost/` scripts and `read-cost.out` are absent from this checkout
   and the host paths searched. The original row selection cannot be reconstructed from the plan.
-  A SELECT-only replay of retained Claude-family logs started before 2026-10-18 examined 4,034
-  runs and admitted 3,820 with complete weighted exposure, a result event and prompt usage:
-  known repository file exposure was 13.74% and all tool exposure 26.38%, against the historical 13.8% and 19.4%.
-  Current top-20 file concentration is 70.88%; shell-reader output is 15.33% of all tool
-  exposure and native `Read` output is 39.68%. The populations differ (the original had 2,722 runs), and no retained transcript contains
-  `d_inspection.inc`, the original leading hotspot. This does not establish reproduction.
-  Truncated logs, missing message ids and runs without a result are explicitly excluded from
-  the weighted-share denominator. Shell attribution is conservative and combined outputs remain
-  in buckets rather than being charged in full to each path.
+  The historical M1–M6 figures above remain historical, not a claimed reproduction. A fresh
+  SELECT-only replay of retained logs started before 2026-10-18 examined 5,819 runs, including
+  1,785 Codex runs. Of the 4,034 Claude-family/Grok runs, 3,820 had complete weighted exposure,
+  a result event and positive prompt usage. Their known repository-file exposure is 13.33% of
+  prompt tokens and all tool exposure 26.38%, against the historical 13.8% and 19.4%.
+  Current top-20 path concentration is 71.29%. Reader-like shell output is 15.33% of all tool
+  exposure: this parser category includes unsupported or unattributed reader commands and is
+  not a file-attribution share. Shell output actually attributed to repository files is 0.57%
+  of all tool exposure; native `Read` output is 39.68%. All three shares were recomputed.
+  The original population had 2,722 runs, and the replay's retained attributed path lists contain
+  no `d_inspection.inc`, its leading hotspot. Truncated logs, missing message ids and runs without a result stay out
+  of the weighted denominator. Codex has zero eligible weighted runs and enters none of those
+  prompt-share percentages; its raw exposure is reported separately below.
 
-- **Reader grammar remains conservative.** A second SELECT-only replay on the same retained
-  population reconciled every outside and unattributed weighted character after the path fixes.
-  Outside holds 365.85M weighted characters: `/home/…` contributes 363.27M (99.29%), `/tmp/…`
-  2.57M (0.70%); `/haive/…` and `/var/…` together contribute 9,215. Unattributed holds 348.45M:
-  commands containing pipeline/OR syntax contribute 252.24M (72.39% of the bucket, 9.55% of all
-  result exposure), other unsupported or mixed syntax 83.04M (23.83%), and expansions 8.18M
-  (2.35%). These categories describe command syntax, not proof that all returned text is file
-  content. The leading individual redacted shape is `cd /haive/… && sed -n <arg> <arg>` at
-  11.25M (3.23% of unattributed). Pipelines and cwd-changing chains remain unattributed; widening
-  that grammar needs a separate measured change, since combined search/listing/file output
-  cannot safely be apportioned. Descriptor redirects are supported now; remaining commands
-  containing `>&` alongside other unsupported syntax hold 2.90M (0.83%). Home expansion alone
-  is only 12,040 (0.0035%). Only first path segments and redacted command shapes were saved in
-  `bucket-breakdown.json`; no file content or complete argument values were retained. This
-  explains the large buckets but still does not reproduce the missing historical reference.
+  The same historical window, split by provider (percentages are estimated weighted characters
+  / 4 divided by exact prompt usage over that row's eligible runs):
+
+  | Provider | Examined runs | Weighted-eligible runs | File / prompt | All tool / prompt |
+  | --- | ---: | ---: | ---: | ---: |
+  | claude-code | 3,151 | 2,981 | 9.62% | 16.55% |
+  | ollama | 385 | 360 | 22.48% | 27.80% |
+  | muse | 257 | 257 | 23.22% | 31.47% |
+  | openrouter | 18 | 14 | 29.57% | 34.28% |
+  | grok | 223 | 208 | 41.98% | 148.83% |
+  | Claude-family, excluding Grok | 3,811 | 3,612 | 11.42% | 18.21% |
+  | Codex | 1,785 | 0 | unknown | unknown |
+
+  No retained zai, amp, gemini or antigravity logs occur in this window. Grok's exposure above
+  100% remains a diagnostic discrepancy (M5), not a trustworthy prompt decomposition. The replay
+  also reports the all-retained population and separates every provider family and Codex transport.
+  Across all retained logs, 5,901 runs were examined: 4,074 Claude-family/Grok runs and 1,827
+  Codex runs. The 3,858 weighted-eligible runs are all Claude-family/Grok; their file/prompt
+  share is 13.31% and all-tool/prompt share 26.33%. Codex comprises 1,615 observed exec runs,
+  41 observed app-server runs and 171 without an observable tool-bearing event. Six Codex logs
+  are elided; all 1,827 have unknown turn counts. No retained logs from other provider families
+  occur in this population.
+
+- **Codex exec launch-root fallback.** A SELECT-only inventory of all 1,827 retained Codex runs
+  found no cwd/workdir on 52,498 completed exec command items and no structured function-call
+  arguments or other per-call cwd that could be paired with them; all 164 app-server command
+  items reported cwd. Before/after is the same retained stream replayed with the previous
+  conservative rule and the exec launch-root fallback plus the wrapper guard:
+
+  | Raw file exposure | Before, characters | After, characters | Share of that row's tool output, before → after |
+  | --- | ---: | ---: | ---: |
+  | Exec command items only | 21,463,938 | 131,474,972 | 4.53% → 27.74% |
+  | Exec, commands and MCP | 100,007,129 | 210,018,163 | 16.27% → 34.17% |
+  | App-server, commands and MCP | 371,514 | 371,514 | 28.16% → 28.16% |
+
+  Exec command output totals 474.00M raw characters; all exec tool output totals 614.70M.
+  The command-only file-read count rises from 2,056 to 13,921. All exec raw totals include
+  observed floors from elided logs; excluding elided logs, file exposure moves from 91.85M
+  to 201.86M characters out of 603.80M. All command-item output happens to be in non-elided logs.
+  These are raw character counts, not weighted exposure or billable tokens. Codex does not
+  supply per-request turn counts, so weights remain null. An unreported per-call workdir
+  override remains a risk of attributing a relative path to the wrong repository file or
+  missing an outside read. A `cd`/`pushd` command stays unattributed. App-server keeps its
+  reported cwd and has no launch-root fallback.
+
+- **Persistent-shell cwd remains conservative.** None of 22,021 shell-call events in the
+  historical window's weighted-eligible Claude-family/Grok runs reported cwd. A separate
+  comparison with the current reader grammar unchanged isolates this rule: it leaves 41.08M
+  weighted characters unattributed, 2.99% of otherwise attributable repository-file exposure
+  across Claude-family plus Grok, 3.69% for Claude-family alone and 5.00% for claude-code.
+  Init and launch directories cannot establish a persistent shell's later cwd. Absolute reads
+  still classify. This loss is deliberate; it is not silently extended to fresh Codex exec
+  processes.
+
+- **Reader grammar remains conservative.** In the historical weighted-eligible population,
+  outside holds 365.85M weighted characters: `/home/…` contributes 363.27M (99.29%), `/tmp/…`
+  2.57M (0.70%); `/haive/…` and `/var/…` together contribute 9,215. Unattributed holds 389.53M:
+  pipeline/OR syntax contributes 252.24M (64.75% of the bucket, 9.55% of all result exposure),
+  other unsupported or mixed syntax 123.52M (31.71%), and expansions 8.18M (2.10%).
+  The leading redacted shape is `sed -n <arg> <arg>` at 15.30M (3.93%); the cwd-changing shape
+  `cd /haive/… && sed -n <arg> <arg>` holds 11.25M (2.89%). These shapes are not proof of file
+  content. Remaining commands containing `>&` hold 3.51M (0.90%); that is a first-match syntax
+  label, not a causal diagnosis. Home expansion alone holds 12,040 (0.0031%). Pipelines and
+  cwd-changing chains stay unattributed. Widening attribution needs separate evidence because
+  combined search/listing/file outputs cannot safely be apportioned. The replay reconciles
+  every outside and unattributed character, with Codex raw buckets separate from the weighted
+  buckets. Only first path segments, redacted command shapes, field names and aggregate counts
+  were saved; no file content or complete argument values were retained. These conservative
+  buckets do not prove that file reads dominate prompt cost.
 
 - **Historical killed runs recorded wrong token usage** (M5). Fixed in the current
   `assistantUsageByMessage` fallback; the original defect was in `queues/cli-exec/stream.ts`

@@ -36,9 +36,37 @@ characters times later observed model turns, not billed tokens or dollars. Unkno
 and elided transcripts have null weights; raw counts from an elided transcript remain floors.
 Repository paths are lexically normalized from the sandbox mount root, with the task worktree
 prefix removed using `WORKTREE_SUBDIR`. Outside paths, including home-relative Read/MCP
-paths, have their own bucket. Reader commands with any home-relative token stay unattributed.
+paths, have their own bucket. Shell paths resolve against a reported absolute per-call `cwd`
+before the same mount-root and worktree normalization. An outside cwd keeps its relative reads
+outside; invalid cwd leaves relative reads unattributed. Codex exec is the one missing-cwd
+fallback: each command starts as a fresh process in the sandbox launch workdir
+(`SANDBOX_WORKDIR`, passed to Docker with `-w`), so an exec item without cwd resolves relative
+paths there. App-server keeps using its reported cwd and has no launch-root fallback. Persistent
+Claude-family/Grok shell tools also have no fallback: without per-call cwd, relative reads stay
+unattributed, even when init metadata names a directory. Absolute paths can still classify.
+A `cd` or `pushd` command stays unattributed.
+
+A SELECT-only inventory of 1,827 retained Codex runs found no cwd/workdir on any of 52,498
+completed exec command items and no structured function-call arguments or other per-call cwd
+that could be paired with them. All 164 app-server command items reported cwd. Residual risk:
+an exec per-call workdir override that the JSONL does not echo can make the launch-root fallback
+attribute a relative path to the wrong repository file, or miss that it is outside. The tally
+cannot recover an unreported override from display text. Codex weighted exposure stays unknown;
+raw file exposure is measured separately from Claude-family prompt shares. A separate
+current-grammar comparison on the historical retained population isolates the persistent-shell
+cwd rule: it leaves 41.08M weighted characters unattributed, 2.99% of otherwise attributable
+file exposure across Claude-family plus Grok (3.69% for Claude-family alone).
+
+Reader commands with any home-relative token stay unattributed.
 Paths containing U+0000, lone surrogates or more than 1,024 UTF-16 code units stay unattributed.
-Output redirects, including descriptor duplication/close (`2>&1`, `>&-`), are excluded from paths. Only recognized reader commands are
+Only output-file redirects (`>`, `>>`) and output descriptor duplication/close (`2>&1`, `>&-`)
+are supported and excluded from paths. Here-strings, here-documents and every other redirect
+leave the call unattributed. In a `bash -lc "..."` or `sh -c "..."` wrapper, any dollar sign,
+backtick or backslash inside the outer double quotes makes the call unattributed, including
+characters inside nested single quotes. Sed attribution requires every expression to be a known `p` command,
+optionally addressed by line, range, regex or end-of-file, with or without `-n`. Every other
+command, including file reads/writes and command execution, stays unattributed. The reader table
+contains no awk or other script reader. Only recognized reader commands are
 attributed; unsupported shell syntax and mixed repository/outside output are unattributed
 and excluded from repository-file totals. A call reading several repository files has one
 combined bucket; a call reading only outside files stays in the outside bucket. The top 50 files are kept by weighted characters, then raw characters and path; the
