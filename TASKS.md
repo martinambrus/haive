@@ -670,6 +670,12 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 3. Gate 3: the insight list becomes a multi-select. Ticked items go through the 08e apply path, then 08 verify and 08c review, then back to gate 3 (gate 2 is not asked again unless verify fails).
 4. The end summary shows every insight with its class and outcome (applied, left as minor, cap reached).
 
+### T695 · Toolchain advisory position mismatch surfaces as developer jargon in the step's failure text
+
+status: parked: diminishing returns (2026-11-17, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: review of #1240 · priority: P4
+
+When exec cannot find the sandbox toolchain advisory at its stamped prompt position, it fails closed with "Sandbox toolchain advisory does not match its stamped prompt position", which becomes the step's `cli invocation failed: ...` text. A Retry restamps and recovers (sandbox.md says so), but the step copy does not. Fix when touched: map that error to user copy that says the prompt changed before the run started and Retry will rebuild it, keeping the technical text in the log.
+
 ### T693 · Live notional cost of a running claude-code invocation is unpriced when the provider row's model is set only by `--model`
 
 status: parked: diminishing returns (2026-11-16, owner rule: trivial lows park; resume on a user report, a measured failure or a related change) · kind: fix · found: capped real workflow run 2026-11-16 · priority: P4
