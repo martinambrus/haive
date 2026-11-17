@@ -562,8 +562,9 @@ parse_release_manifest() {
 port_in_use() {
   if command -v ss >/dev/null 2>&1; then
     ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0
-    return 1
   fi
+  # Always also ask docker: under Docker Desktop (WSL, macOS) a published port lives in the
+  # engine's VM, and the host's listener table does not show it.
   if command -v docker >/dev/null 2>&1; then
     docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE "(^|[^0-9])$1->" && return 0
   fi
