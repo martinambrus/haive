@@ -83,7 +83,14 @@ function fakeDb(): Database {
             : () => chain(keys),
       },
     );
-  return { select: (fields?: object) => chain(Object.keys(fields ?? {})) } as unknown as Database;
+  // The provider rollup ranks unknown-tier rows in a CTE; `with` hands back this fake.
+  return {
+    select: (fields?: object) => chain(Object.keys(fields ?? {})),
+    $with: () => ({ as: () => ({}) }),
+    with() {
+      return this;
+    },
+  } as unknown as Database;
 }
 
 function buildApp(): Hono<AppEnv> {
