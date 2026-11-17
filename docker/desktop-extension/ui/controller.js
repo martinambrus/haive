@@ -40,14 +40,16 @@ export function serviceHealth(service) {
   return ['api', 'web'].includes(service.Service) ? `${value} (extension probe)` : value;
 }
 
-export function statusMessage(state) {
+export function statusMessage(state, expired = false) {
   if (state?.error)
     return `Status unavailable: ${state.error} Last known service states are shown below.`;
   if (!state) return 'Reading status…';
   if (!state.installed) return 'Haive Desktop is not installed.';
   if (isStarting(state)) {
     const ready = state.services.filter(serviceReady).length;
-    return `Starting… ${ready}/${state.services.length} services ready. See service progress below.`;
+    return expired
+      ? `Still not ready (${ready}/${state.services.length}). See service progress below.`
+      : `Starting… ${ready}/${state.services.length} services ready. See service progress below.`;
   }
   return allReady(state) ? 'Haive is ready.' : 'Haive is not ready. Check service status below.';
 }
@@ -136,16 +138,17 @@ export function createController(ddClient, render, options = {}) {
   let fastUntil;
   let readErrors = 0;
   const update = () => {
-    if (!disposed)
+    if (!disposed) {
+      const summary = statusMessage(state, fastUntil !== undefined && now() >= fastUntil);
       render({
         state,
         busy,
         accepted,
-        message:
-          (operationError || message) === statusMessage(state) ? '' : operationError || message,
-        statusMessage: [statusMessage(state), portNotice].filter(Boolean).join(' '),
+        message: (operationError || message) === summary ? '' : operationError || message,
+        statusMessage: [summary, portNotice].filter(Boolean).join(' '),
         controls: controls(state, busy, accepted),
       });
+    }
   };
   const host = async (action, version = 'latest') => {
     const engineResult = await ddClient.docker.cli.exec('info', ['--format', '{{.ID}}']);

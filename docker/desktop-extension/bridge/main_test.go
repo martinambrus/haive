@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -36,7 +37,7 @@ func fixture(t *testing.T) bridge {
 		}
 	}
 	return bridge{dir: dir, os: "linux", portInUse: func(int) bool { return false }, health: func(string) bool { return true }, run: func(_ context.Context, _ string, args []string, _ string, _ io.Writer) (string, error) {
-		if args[0] == "ps" {
+		if args[0] == "ps" || (args[0] == "container" && args[1] == "ls") {
 			return "", nil
 		}
 		if reflect.DeepEqual(args, []string{"info", "--format", "{{.ID}}"}) {
@@ -486,7 +487,7 @@ func TestStartPortPrecheck(t *testing.T) {
 				if args[0] == "ps" {
 					return fmt.Sprintf(`{"ID":%q,"Project":%q}`, strings.Repeat("a", 64), tc.project), nil
 				}
-				if args[0] == "container" {
+				if args[0] == "container" && args[1] == "inspect" {
 					inspections++
 					if !strings.Contains(strings.Join(args, " "), ".NetworkSettings.Ports") {
 						t.Fatal(args)
@@ -541,7 +542,7 @@ func TestPortPrecheckFailsClosedAndStopSkipsIt(t *testing.T) {
 					}
 					return fmt.Sprintf(`{"ID":%q,"Project":"other"}`, strings.Repeat("a", 64)), nil
 				}
-				if args[0] == "container" {
+				if args[0] == "container" && args[1] == "inspect" {
 					if kind == "inspect failed" {
 						return "", errors.New("private inspect error")
 					}
@@ -587,7 +588,7 @@ func TestStartFailureReasonMapping(t *testing.T) {
 				if strings.HasSuffix(strings.Join(args, " "), "ps --all --format json") {
 					return fmt.Sprintf(`[{"ID":%q,"Service":%q,"State":%q,"Health":"","ExitCode":0}]`, strings.Repeat("b", 64), tc.service, tc.status), nil
 				}
-				if args[0] == "container" {
+				if args[0] == "container" && args[1] == "inspect" {
 					if !strings.Contains(strings.Join(args, " "), ".State") {
 						t.Fatal(args)
 					}
@@ -620,7 +621,7 @@ func TestRepickPreservesEnvironmentBytes(t *testing.T) {
 				if args[0] == "ps" {
 					return fmt.Sprintf(`{"ID":%q,"Project":"other"}`, strings.Repeat("a", 64)), nil
 				}
-				if args[0] == "container" {
+				if args[0] == "container" && args[1] == "inspect" {
 					return `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3012"},{"HostPort":"8025"}]}`, nil
 				}
 				return base(ctx, exe, args, dir, log)
@@ -711,7 +712,7 @@ func TestPortRepickOwnBindingsIgnoreHostListenerButForeignWins(t *testing.T) {
 				}
 				return out, nil
 			}
-			if args[0] == "container" {
+			if args[0] == "container" && args[1] == "inspect" {
 				ports := `{"80/tcp":[{"HostPort":"3010"},{"HostPort":"3011"},{"HostPort":"8025"}]}`
 				if foreign {
 					ports += "\n" + ports
@@ -1050,5 +1051,163 @@ func TestStatusAndStopDoNotRequireMailpitPort(t *testing.T) {
 	}
 	if _, err = b.repickPorts(context.Background(), settings, portTries); err != nil || settings["HAIVE_MAILPIT_PORT"] != "8025" {
 		t.Fatalf("missing Mailpit port did not default for Start: %v", err)
+	}
+}
+
+// Exercise the Docker template against the same structural Config/State fields
+// shipped by the updater image and both the API and generated host launchers.
+func TestUpgradeFence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		entrypoint []string
+		env        []string
+		running    bool
+		failure    string
+		refuse     bool
+	}{
+		{name: "API updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"COMPOSE_PROJECT_NAME=" + installID, "HAIVE_INSTALL_ID=" + installID}, running: true, refuse: true},
+		{name: "host helper updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true, refuse: true},
+		{name: "project identity", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"COMPOSE_PROJECT_NAME=" + installID}, running: true, refuse: true},
+		{name: "other install", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=other", "COMPOSE_PROJECT_NAME=other"}, running: true},
+		{name: "prefix is another install", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID + "_other"}, running: true},
+		{name: "own API", entrypoint: []string{"node", "packages/api/dist/index.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
+		{name: "stopped updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: false},
+		{name: "no entrypoint in own container", env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
+		{name: "different updater command", entrypoint: []string{"node", "packages/updater/dist/recover-admin-cli.js"}, env: []string{"HAIVE_INSTALL_ID=" + installID}, running: true},
+		{name: "unscoped updater", entrypoint: []string{"node", "packages/updater/dist/cli.js"}, running: true},
+		{name: "no containers"},
+		{name: "listing error", failure: "list", refuse: true},
+		{name: "invalid ID", failure: "id", refuse: true},
+		{name: "inspection error", failure: "inspect", refuse: true},
+		{name: "malformed inspection", failure: "json", refuse: true},
+		{name: "missing inspection", failure: "missing", refuse: true},
+		{name: "extra inspection", failure: "extra", refuse: true},
+	} {
+		for _, action := range []string{"start", "stop", "install"} {
+			t.Run(tc.name+"/"+action, func(t *testing.T) {
+				b := fixture(t)
+				envPath := filepath.Join(b.dir, ".env")
+				original, _ := os.ReadFile(envPath)
+				if action == "install" {
+					os.Remove(envPath)
+				}
+				base := b.run
+				checks, mutations, compose := 0, 0, 0
+				b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+					if exe == "docker" && reflect.DeepEqual(args, []string{"container", "ls", "--no-trunc", "--format", "{{.ID}}"}) {
+						checks++
+						if tc.failure == "list" {
+							return "", errors.New("private failure")
+						}
+						if tc.failure == "id" {
+							return "invalid ID", nil
+						}
+						if tc.name == "no containers" {
+							return "", nil
+						}
+						return strings.Repeat("a", 64) + "\n" + strings.Repeat("b", 64) + "\n", nil
+					}
+					if exe == "docker" && len(args) > 1 && args[0] == "container" && args[1] == "inspect" {
+						if len(args) != 6 || args[2] != "--format" || args[4] != strings.Repeat("a", 64) || args[5] != strings.Repeat("b", 64) {
+							t.Fatalf("not one batched inspection: %q", args)
+						}
+						if tc.failure == "inspect" {
+							return "", errors.New("private inspection failure")
+						}
+						if tc.failure == "json" {
+							return "garbage", nil
+						}
+						if tc.failure == "missing" {
+							return "false\n", nil
+						}
+						if tc.failure == "extra" {
+							return "false\nfalse\nfalse\n", nil
+						}
+						tmpl, err := template.New("inspect").Parse(args[3])
+						if err != nil {
+							t.Fatal(err)
+						}
+						data := map[string]any{
+							"State":  map[string]any{"Running": tc.running},
+							"Config": map[string]any{"Entrypoint": tc.entrypoint, "Env": append(tc.env, "CONFIG_ENCRYPTION_KEY=private-value")},
+						}
+						var out strings.Builder
+						if err := tmpl.Execute(&out, data); err != nil {
+							t.Fatal(err)
+						}
+						if strings.Contains(out.String(), "private-value") {
+							t.Fatal("inspection leaked env")
+						}
+						return "false\n" + out.String() + "\n", nil
+					}
+					if exe == "docker" && args[0] == "compose" {
+						compose++
+					}
+					if log != nil {
+						mutations++
+						if exe == "sh" {
+							return "", os.WriteFile(envPath, original, 0600)
+						}
+					}
+					return base(ctx, exe, args, dir, log)
+				}
+				_, err := b.handle(context.Background(), request{Action: action, Version: "latest", Consent: consent, Engine: "desktop-engine"})
+				if tc.refuse {
+					want := "Cannot check whether an upgrade is running"
+					if tc.failure == "" {
+						want = "An upgrade is running for this Haive Desktop install"
+					}
+					if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "private") {
+						t.Fatalf("wanted safe upgrade refusal, got %v", err)
+					}
+					if compose != 0 || mutations != 0 {
+						t.Fatalf("refusal reached compose=%d mutations=%d", compose, mutations)
+					}
+					after, readErr := os.ReadFile(envPath)
+					if action == "install" {
+						if !errors.Is(readErr, os.ErrNotExist) {
+							t.Fatal("refused install wrote .env")
+						}
+					} else if string(after) != string(original) {
+						t.Fatal("refusal changed .env")
+					}
+				} else if err != nil || mutations != 1 {
+					t.Fatalf("absent updater changed behavior: mutations=%d err=%v", mutations, err)
+				}
+				if checks == 0 {
+					t.Fatal("upgrade check was skipped")
+				}
+			})
+		}
+	}
+}
+
+func TestUpgradeRecheckedBeforeServiceMutation(t *testing.T) {
+	for _, action := range []string{"start", "stop"} {
+		t.Run(action, func(t *testing.T) {
+			b := fixture(t)
+			base := b.run
+			checks, mutations := 0, 0
+			b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+				if reflect.DeepEqual(args, []string{"container", "ls", "--no-trunc", "--format", "{{.ID}}"}) {
+					checks++
+					if checks == 1 {
+						return "", nil
+					}
+					return strings.Repeat("a", 64), nil
+				}
+				if args[0] == "container" && args[1] == "inspect" {
+					return "true", nil
+				}
+				if log != nil {
+					mutations++
+				}
+				return base(ctx, exe, args, dir, log)
+			}
+			_, err := b.handle(context.Background(), request{Action: action, Consent: consent, Engine: "desktop-engine"})
+			if checks != 2 || mutations != 0 || err == nil || !strings.Contains(err.Error(), "An upgrade is running") {
+				t.Fatalf("late updater was not fenced: checks=%d mutations=%d err=%v", checks, mutations, err)
+			}
+		})
 	}
 }

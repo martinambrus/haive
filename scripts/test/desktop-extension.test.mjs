@@ -701,14 +701,19 @@ test('stored consent is scoped to engine and directory and carries through a fre
 
 test('Start and Install completion poll negative running probes quickly for a bounded window', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  for (const action of ['start', 'install']) {
+  for (const [action, probe] of [
+    ['start', 'api'],
+    ['start', 'web'],
+    ['install', 'api'],
+    ['install', 'web'],
+  ]) {
     const f = fixture();
     const pending = {
       ...installed,
       healthy: false,
       services: [
-        { Service: 'api', State: 'running', Health: 'unhealthy' },
-        { Service: 'web', State: 'running', Health: 'reachable' },
+        { Service: 'api', State: 'running', Health: probe === 'api' ? 'unhealthy' : 'healthy' },
+        { Service: 'web', State: 'running', Health: probe === 'web' ? 'unreachable' : 'reachable' },
       ],
     };
     f.respond(action === 'start' ? pending : { installed: false });
@@ -727,6 +732,8 @@ test('Start and Install completion poll negative running probes quickly for a bo
     // The production five-minute bound expires despite repeated successful reads.
     t.mock.timers.tick(295000);
     await flush();
+    assert.match(f.views.at(-1).statusMessage, /Still not ready \(1\/2\)/);
+    assert.doesNotMatch(f.views.at(-1).statusMessage, /Starting/);
     const bounded = hostActions(f).length;
     t.mock.timers.tick(29999);
     await flush();

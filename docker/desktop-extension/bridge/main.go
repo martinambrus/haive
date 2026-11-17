@@ -636,6 +636,54 @@ func (b bridge) install(ctx context.Context, version string, log io.Writer) erro
 	return nil
 }
 
+// Released API and host-helper launches have no updater/Compose labels: the
+// updater lives outside Compose so it survives replacing the stack. Its image
+// entrypoint and exact install/project environment identify it even while the
+// database is stopped for a snapshot. Project the environment to a boolean in
+// Docker's template: never return credentials or the whole Config to the helper.
+const upgradeIdentity = `{{$install := false}}{{range .Config.Env}}{{if or (eq . "HAIVE_INSTALL_ID=` + installID + `") (eq . "COMPOSE_PROJECT_NAME=` + installID + `")}}{{$install = true}}{{end}}{{end}}{{$updater := false}}{{with .Config.Entrypoint}}{{$updater = and (eq (len .) 2) (eq (index . 0) "node") (eq (index . 1) "packages/updater/dist/cli.js")}}{{end}}{{and .State.Running $install $updater}}`
+
+func (b bridge) checkUpgrade(ctx context.Context) error {
+	refusal := errors.New("Cannot check whether an upgrade is running. Install, Start and Stop are refused. Check Docker Desktop, then retry.")
+	out, err := b.run(ctx, "docker", []string{"container", "ls", "--no-trunc", "--format", "{{.ID}}"}, "", nil)
+	if err != nil {
+		return refusal
+	}
+	ids := strings.Fields(out)
+	if len(ids) == 0 {
+		return nil
+	}
+	args := []string{"container", "inspect", "--format", upgradeIdentity}
+	for _, id := range ids {
+		if !containerIDPattern.MatchString(id) {
+			return refusal
+		}
+		args = append(args, id)
+	}
+	out, err = b.run(ctx, "docker", args, "", nil)
+	if err != nil {
+		return refusal
+	}
+	values := strings.Fields(out)
+	if len(values) != len(ids) {
+		return refusal
+	}
+	active := false
+	for _, value := range values {
+		switch value {
+		case "true":
+			active = true
+		case "false":
+		default:
+			return refusal
+		}
+	}
+	if active {
+		return errors.New("An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status.")
+	}
+	return nil
+}
+
 func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	s.Directory = b.dir
 	if err = validateRequest(r); err != nil {
@@ -654,6 +702,10 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, errors.New("Another operation is active. If Desktop closed during an operation, check its containers before removing " + lock)
 	}
 	defer os.Remove(lock)
+	// Refuse before any installer, Compose call or .env port rewrite.
+	if err := b.checkUpgrade(ctx); err != nil {
+		return s, err
+	}
 	logPath := b.dir + ".extension.log"
 	if info, e := os.Lstat(logPath); e == nil && !info.Mode().IsRegular() {
 		return s, errors.New("The operation log must be a regular file.")
@@ -695,6 +747,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	}
 	args, err := b.composeArgs(action...)
 	if err != nil {
+		return s, err
+	}
+	// Bundle checks and port probes can take time. Recheck immediately before
+	// changing services as well; released updaters cannot share our host lock.
+	if err = b.checkUpgrade(ctx); err != nil {
 		return s, err
 	}
 	if _, err = b.run(ctx, "docker", args, b.dir, log); err != nil {
