@@ -49,7 +49,7 @@ describe('additional composed LSP recipes', () => {
     expect(body).toContain('GOTOOLCHAIN=local GOBIN=/usr/local/bin go install');
     expect(body).toContain('Go >=1.21');
     expect(body).toContain(
-      'su -s /bin/sh node -c \'PATH="$1"; export PATH; go version && gopls version\' haive-lsp "$PATH"',
+      'su -s /bin/sh node -c \'PATH="${1#PATH=}"; export PATH; go version && gopls version\' haive-lsp "PATH=$PATH"',
     );
   });
 
@@ -61,7 +61,7 @@ describe('additional composed LSP recipes', () => {
     expect(body).not.toContain('export RUSTUP_HOME');
     expect(body).toContain('chmod -R a+rX /opt/haive-lsp/rust');
     expect(body).toContain(
-      'su -s /bin/sh node -c \'PATH="$1"; export PATH; rust-analyzer --version\' haive-lsp "$PATH"',
+      'su -s /bin/sh node -c \'PATH="${1#PATH=}"; export PATH; rust-analyzer --version\' haive-lsp "PATH=$PATH"',
     );
     expect(body).not.toContain('/root/.cargo');
   });
@@ -76,7 +76,7 @@ describe('additional composed LSP recipes', () => {
     expect(body).toContain('--install-dir /opt/haive-lsp/solargraph');
     expect(body).toContain('GEM_PATH=/opt/haive-lsp/solargraph');
     expect(body).toContain(
-      'su -s /bin/sh node -c \'PATH="$1"; export PATH; solargraph --version\' haive-lsp "$PATH"',
+      'su -s /bin/sh node -c \'PATH="${1#PATH=}"; export PATH; solargraph --version\' haive-lsp "PATH=$PATH"',
     );
     expect(compose('solargraph', '0.57.1').tag).not.toBe(compose('solargraph', '0.57.0').tag);
   });
@@ -89,7 +89,7 @@ describe('additional composed LSP recipes', () => {
     expect(body).toContain('exec python3 /opt/haive-lsp/jdtls/bin/jdtls');
     expect(body).toContain('chmod -R a+rX /opt/haive-lsp/jdtls');
     expect(body).toContain(
-      'su -s /bin/sh node -c \'PATH="$1"; export PATH; jdtls --help\' haive-lsp "$PATH"',
+      'su -s /bin/sh node -c \'PATH="${1#PATH=}"; export PATH; jdtls --help\' haive-lsp "PATH=$PATH"',
     );
     expect(body).not.toContain('jdtls --version');
   });

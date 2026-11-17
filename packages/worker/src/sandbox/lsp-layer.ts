@@ -63,6 +63,8 @@ export function normalizeLspSelection(servers: unknown, versions?: unknown): Sel
     // Match legacy's safe-token domain; registry availability is an install-time
     // concern. Canonicalize the optional Go release prefix only.
     const pin = server === 'gopls' ? value.replace(/^v/, '') : value;
+    // A bare `v` canonicalizes to nothing: treat it as unpinned, like an empty value.
+    if (!pin) continue;
     const previous = pins.get(server);
     if (previous && previous !== pin) throw new Error(`Conflicting LSP versions for ${server}`);
     pins.set(server, pin);
@@ -159,8 +161,10 @@ function buildNativeRecipe(
 ): string {
   // su may reset PATH. Pass the image PATH as an argument, never interpolate its
   // contents into shell source; keep su's sandbox-user HOME/default environment.
+  // The `PATH=` prefix keeps an argument that su would otherwise parse as an option
+  // (a PATH starting with `-`) from ever starting with `-`.
   const asNode = (command: string) =>
-    `su -s /bin/sh node -c ${shellQuote(`PATH="$1"; export PATH; ${command}`)} haive-lsp "$PATH"`;
+    `su -s /bin/sh node -c ${shellQuote(`PATH="\${1#PATH=}"; export PATH; ${command}`)} haive-lsp "PATH=$PATH"`;
   const requireSu = requireTool(
     'su',
     `${server}: su and the sandbox node user are required for launcher verification`,

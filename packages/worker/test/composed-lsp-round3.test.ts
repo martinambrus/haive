@@ -82,6 +82,24 @@ describe('round 3 composed LSP regressions', () => {
     });
   });
 
+  it('never hands su an argument it could parse as an option, even for a PATH starting with -', () => {
+    withPath((dir, stub) => {
+      symlinkSync('/usr/bin/sed', join(dir, 'sed'));
+      stub('go', 'echo go1.23.0');
+      // util-linux su permutes options, so any argument starting with - after the user is read as one.
+      stub(
+        'su',
+        'for a in "$5" "$6" "$7"; do case "$a" in -*) echo "option-like: $a" >&2; exit 64;; esac; done\n' +
+          'PATH=/nonexistent; export PATH\nexec /bin/sh -c "$5" "$6" "$7"',
+      );
+      const recipe = native('gopls').split('GOTOOLCHAIN=local GOBIN=')[0]!;
+      const result = execute(`PATH="-z:$PATH"; export PATH; ${recipe}`, dir);
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('go1.23.0');
+    });
+  });
+
   it('keeps Cargo caches user-owned and leaves rustup context unset in the direct-binary wrapper', () => {
     withPath((dir, stub) => {
       const creation = native('rust-analyzer')
@@ -194,5 +212,16 @@ describe('round 3 composed LSP regressions', () => {
       expect(calls).toContain('nodejs');
       expect(calls).not.toContain('npm\n--version');
     });
+  });
+});
+
+describe('gopls pin canonicalization', () => {
+  it('treats a bare v pin as unpinned, whatever the key order', async () => {
+    const { normalizeLspSelection } = await import('../src/sandbox/lsp-layer.js');
+    const unpinned = normalizeLspSelection(['gopls'], {});
+    expect(normalizeLspSelection(['gopls'], { gopls: 'v' })).toEqual(unpinned);
+    expect(normalizeLspSelection(['gopls'], { go: 'v', gopls: '1.2.3' })).toEqual(
+      normalizeLspSelection(['gopls'], { gopls: '1.2.3', go: 'v' }),
+    );
   });
 });
