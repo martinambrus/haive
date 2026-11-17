@@ -41,8 +41,9 @@ A deficit in any checked bucket still withholds coverage, even if another entry 
 Only otherwise complete captures expose same-name excess in `unobservedSameModel`, with per-bucket totals
 and model but no invented request count, size or identity. Unobservable output and cache-write
 TTL stay null; zero cache-write excess has zero TTL buckets. Exact entries need no excess
-block. Sequential sub-step aggregation preserves these blocks only when the aggregate is complete;
-incomplete sub-steps and aggregates expose no excess. Request sizes and legacy
+block. The flattened sequential aggregate exposes these excess blocks only when the
+aggregate is complete. Independent part captures retain their own excess for pricing,
+including complete siblings of an incomplete part; incomplete leaf captures expose none. Request sizes and legacy
 `tokenUsage` remain unchanged. With no same-name entry, a differently named entry must carry exactly
 the observed vector, corroborating it without renaming the served model (Grok's build suffix,
 GLM's context variant). Ledger-only tokens outside the priced totals, such as Claude's Haiku
@@ -308,10 +309,29 @@ The channels provide these proofs:
   channels stay unknown for tiered computed pricing, as does recovery without retained
   process-local evidence.
 
-Sequential sub-steps preserve each whole-run proof and sum its buckets only when every
-part supplies one with the same model and input convention. A missing request count stays
-unknown; it is never replaced with sub-step count. A steered, malformed or recovered part
-cannot acquire proof through aggregation. Observable cache-write TTLs are kept separately.
+Sequential sub-steps retain independent process boundaries in the in-memory capture's
+`parts`: each part carries its own token totals, request inventory and whole-run proof.
+The pricer first reconciles the sum of the parts' four token buckets with the invocation,
+then prices each part independently under the rules above. It never selects a tier from
+combined process totals or manufactures an aggregate whole-run proof. Two Codex exec
+processes of 150,000 prompt tokens each both stay exact at base under a 272,000 threshold.
+A missing request count stays unknown; it is never replaced with sub-step count.
+
+The invocation is exact only when every part is exact and fully priced. Otherwise it stays
+unknown: when every part has an exact cost or finite bounds, its low/high bounds are the
+sums of those part costs/bounds. Equal aggregate bounds never promote an unknown part to
+exact. Missing proof, token measurement or a required rate in any part omits the aggregate
+bounds. A steered, malformed or recovered part cannot acquire proof from a sibling. Per-request
+output allocation and observable cache-write TTLs remain local to their process. Nested
+aggregates follow the same rules; mixed models never use another model's rates.
+
+The sequential runner uses these boundaries for Codex, Gemini and Amp, including synthesis
+and early-failure returns. Codex app-server fallback returns the exec process's evidence
+because the abandoned transport accepted no turn. Mining fan-out creates separate invocation
+rows, each priced in its own completion handler, so it does not combine request proofs.
+Only the existing cost snapshot shape (summed tier splits and optional bounds) is persisted;
+`parts` stays outside token_usage, raw trace and cost JSON. Old snapshots and leaf captures
+remain readable without migration, backfill or repricing.
 
 Threshold semantics follow the rate source: Anthropic's prompt includes input, cache reads
 and cache writes and crosses strictly above 100,000; OpenRouter is strict for every vendor,
@@ -338,7 +358,9 @@ rollup caps the SQL aggregate at 50 invocations per provider group before buildi
 array, carrying each id, model and individual bounds plus the uncapped unknown-tier count.
 The task card labels that inventory and discloses any omitted count. Statistics rollups skip that
 inventory and keep their existing payload and totals. Admin pricing lists at most 50 recent
-unknown runs. The manual editor trims decimal rate prefills and parsed per-token rates
+unknown runs. Each row shows the invocation id's first eight characters as a link to its
+task; the accessible link label includes the full invocation id, so same-model runs remain
+distinguishable. The manual editor trims decimal rate prefills and parsed per-token rates
 to 12 significant digits so ordinary decimal rates round-trip, and warns when tier-only manual
 rates shadow the feed while leaving every base rate unknown.
 `resolveCostDecision`, real-spend and notional SQL precedence remain unchanged.
