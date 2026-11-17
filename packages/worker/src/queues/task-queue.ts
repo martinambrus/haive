@@ -101,6 +101,7 @@ import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { getBullRedis, getRedis } from '../redis.js';
 import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
+import { checkGuardMembership, decideGuardEntry, GuardRetry } from '../step-engine/guard-entry.js';
 import {
   advanceStep,
   computeGlobalStepIndex,
@@ -264,6 +265,8 @@ interface HeldTask {
   readEpoch?: number;
   /** A START's claim landed, so the task is one this job started. */
   claimed?: boolean;
+  /** The queue gives this job no further attempt after this one. */
+  lastAttempt?: boolean;
 }
 
 async function resolveTaskContext(
@@ -3671,6 +3674,50 @@ async function handleAdvanceStep(
   // Stamp the step's position in the run list as run_seq (the run-order display key).
   const runList = await buildRunList(ctx, db);
   const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
+  const entryGuard = await decideGuardEntry(db, ctx, payload.stepId, round, existing, runList);
+  if (entryGuard.kind === 'skipped') {
+    await handleResult(
+      db,
+      ctx,
+      payload.stepId,
+      { status: 'skipped', row: entryGuard.entry },
+      { redrive: true },
+    );
+    return;
+  }
+  if (entryGuard.kind === 'retry') {
+    if (held?.lastAttempt) {
+      await failStepTransition(
+        db,
+        ctx,
+        entryGuard.row,
+        'guard-decision-invalid: retries-exhausted',
+      );
+      return;
+    }
+    throw new GuardRetry();
+  }
+  if (entryGuard.kind === 'refused') {
+    await failStepTransition(
+      db,
+      ctx,
+      entryGuard.row,
+      `guard-decision-invalid: ${entryGuard.reason}`,
+    );
+    return;
+  }
+  if (entryGuard.kind === 'stale') {
+    logger.info({ taskId: ctx.taskId, stepId: payload.stepId }, 'guard entry superseded');
+    return;
+  }
+  const memberRefusal = await checkGuardMembership(db, ctx, payload.stepId, round);
+  if (memberRefusal) {
+    const row =
+      existing ??
+      (await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined));
+    await failStepTransition(db, ctx, row, `guard-member-refused: ${memberRefusal.reason}`);
+    return;
+  }
   // Refuse an old/custom pin before allowing its human selection to dispatch an editor.
   if (
     (payload.stepId === '08e-insights-triage' || payload.stepId === '10-gate-3-commit') &&
@@ -5103,6 +5150,7 @@ export async function processTaskJob(job: Job<TaskWorkerPayload>, token?: string
 async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
   const db = getDb();
   const held: HeldTask = {};
+  held.lastAttempt = (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1);
   try {
     if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
       await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
@@ -5157,7 +5205,8 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     if (
       err instanceof RagCleanupDeferredError ||
       err instanceof RevivalBusy ||
-      err instanceof MaintenanceStateUnreadable
+      err instanceof MaintenanceStateUnreadable ||
+      err instanceof GuardRetry
     )
       throw err;
     const message = safeErrorMessage(err);

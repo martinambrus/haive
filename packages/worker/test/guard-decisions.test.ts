@@ -9,7 +9,11 @@ import {
   evaluateGuardDecision,
   parseGuardDecision,
 } from '../src/step-engine/guard-decisions.js';
-import { assertExecutionContractSupported, type ExecutionContract } from '@haive/shared/modularity';
+import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  type ExecutionContract,
+} from '@haive/shared/modularity';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { schema } from '@haive/database';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
@@ -35,47 +39,50 @@ it('refuses malformed durable decisions instead of treating them as false', () =
     expect(() => parseGuardDecision(value)).toThrow('guard-decision-invalid');
 });
 
-it('keeps the execution fence closed and the decision service has no skip or handoff writer', () => {
+it('the decision service has no skip or handoff writer and the shared fence refuses a guarded pin outside a static pinned list', () => {
   const executionContract = {
     version: 1,
     guardedSpans: [
       { id: 'x', firstStepId: 'x', lastStepId: 'x', predicateId: 'module.fx.planned', args: {} },
     ],
   };
-  expect(() => assertExecutionContractSupported(executionContract)).toThrow('not yet supported');
+  let caught: unknown;
+  try {
+    assertExecutionContractSupported(executionContract, { staticPinnedList: false });
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ExecutionContractError);
   const source = readFileSync(
     new URL('../src/step-engine/guard-decisions.ts', import.meta.url),
     'utf8',
   );
   expect(source).not.toMatch(/status\s*:\s*['"]skipped['"]|\.insert\(|\.delete\(|\.add\(/);
-  const packages = new URL('../../', import.meta.url);
+});
+
+const GUARD_SERVICE_CALLERS = [
+  'packages/worker/src/step-engine/guard-decisions.ts',
+  'packages/worker/src/step-engine/guard-entry.ts',
+  'packages/worker/src/step-engine/guard-reopen.ts',
+  'packages/worker/src/step-engine/guard-span-skip.ts',
+];
+const repoRoot = new URL('../../../', import.meta.url);
+function guardServiceReferences(): string[] {
+  const found: string[] = [];
   function check(dir: URL): void {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const file = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
       if (entry.isDirectory()) check(file);
       else if (
-        !['guard-decisions.ts', 'guard-span-skip.ts'].some(
-          (name) =>
-            file.pathname === new URL(`../src/step-engine/${name}`, import.meta.url).pathname,
+        /evaluateGuardDecision|guard-decisions|skipGuardSpan|advanceGuardSpan|guard-span-skip/.test(
+          readFileSync(file, 'utf8'),
         )
-      ) {
-        const source = readFileSync(file, 'utf8');
-        // Reopen may decode/hash records; evaluation and span skipping stay unwired.
-        const checked =
-          file.pathname === new URL('../src/step-engine/guard-reopen.ts', import.meta.url).pathname
-            ? source.replace(
-                "import { GuardDecisionError, guardContractHash, parseGuardDecision } from './guard-decisions.js';",
-                '',
-              )
-            : source;
-        expect(checked, file.pathname).not.toMatch(
-          /evaluateGuardDecision|guard-decisions|skipGuardSpan|advanceGuardSpan|guard-span-skip/,
-        );
-      }
+      )
+        found.push(file.pathname.slice(repoRoot.pathname.length));
     }
   }
   for (const root of [
-    packages,
+    new URL('../../', import.meta.url),
     new URL('../../../modules/', import.meta.url),
     new URL('../../../external-modules/', import.meta.url),
   ])
@@ -83,6 +90,25 @@ it('keeps the execution fence closed and the decision service has no skip or han
       const source = new URL(`${entry.name}/src/`, root);
       if (entry.isDirectory() && existsSync(source)) check(source);
     }
+  return found.sort();
+}
+
+it('only the allowlisted production files reference the guard services', () => {
+  const unexpected = guardServiceReferences().filter((f) => !GUARD_SERVICE_CALLERS.includes(f));
+  expect(unexpected).toEqual([]);
+});
+
+it('the worker guard entry exists and is the one caller of advanceGuardSpan', () => {
+  const entry = new URL('../src/step-engine/guard-entry.ts', import.meta.url);
+  expect(existsSync(entry)).toBe(true);
+  expect(readFileSync(entry, 'utf8')).toMatch(/advanceGuardSpan/);
+  const callers = guardServiceReferences().filter((f) =>
+    readFileSync(new URL(f, repoRoot), 'utf8').includes('advanceGuardSpan'),
+  );
+  expect(callers).toEqual([
+    'packages/worker/src/step-engine/guard-entry.ts',
+    'packages/worker/src/step-engine/guard-span-skip.ts',
+  ]);
 });
 
 it('pins the production SQL, lock and predicate bounds', () => {

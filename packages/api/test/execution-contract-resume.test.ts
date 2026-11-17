@@ -62,7 +62,7 @@ const guarded = {
   ],
 };
 const fixed = { ...empty, fixTarget: { stepId: 'report', capabilityVersion: 1 } };
-const unsupported = [guarded, fixed, { version: 99 }];
+const unsupported = [fixed, { version: 99 }];
 const app = new Hono<AppEnv>();
 app.route('/admin/maintenance', maintenanceRoutes);
 app.route('/admin', adminRoutes);
@@ -116,7 +116,7 @@ it.each(unsupported)(
     expect(h.kill).not.toHaveBeenCalled();
   },
 );
-it.each([null, empty])('admin Resume retains supported pin behavior', async (contract) => {
+it.each([null, empty, guarded])('admin Resume retains supported pin behavior', async (contract) => {
   const fake = setup(contract);
   const res = await request(`/admin/maintenance/tasks/${TASK}/action`, { action: 'resume' });
   expect(res.status, await res.clone().text()).toBe(200);
@@ -221,8 +221,34 @@ it.each(unsupported)(
     expect(h.kill).not.toHaveBeenCalled();
   },
 );
-it('an already-off global lift leaves unsupported tasks and their pause evidence untouched', async () => {
-  const fake = setup(guarded, null);
+it.each([empty, guarded])(
+  'global lift holds nothing and reports nothing for a supported pin',
+  async (contract) => {
+    const fake = setup(contract, null);
+    const queued = '00000000-0000-4000-8000-000000000004';
+    fake.insert(schema.tasks, {
+      id: queued,
+      userId: OWNER,
+      type: 'test',
+      status: 'queued',
+      executionContract: contract,
+    });
+    const res = await request('/admin/config/global-pause', { paused: false }, 'PUT');
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(h.paused).toBe(false);
+    const body = (await res.json()) as { skippedTasks?: { taskId: string }[] };
+    expect(body.skippedTasks ?? []).toEqual([]);
+    for (const row of fake.rows(schema.tasks)) {
+      expect(row.pausedAt).toBeNull();
+      expect(row.executionContract).toEqual(contract);
+    }
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+    expect(fake.rows(schema.auditEvents).map((row) => row.action)).toEqual(['config.global_pause']);
+    expect(h.kill).not.toHaveBeenCalled();
+  },
+);
+it('an already-off global lift leaves fix-target tasks and their pause evidence untouched', async () => {
+  const fake = setup(fixed, null);
   h.paused = false;
   const before = structuredClone(fake.rows(schema.tasks));
 
@@ -239,7 +265,7 @@ it('an already-off global lift leaves unsupported tasks and their pause evidence
   expect(h.paused).toBe(false);
 });
 it('a task hold lock timeout answers 503 before the config save and leaves the switch on', async () => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   const before = state(fake);
   const statements: string[][] = [];
   const transaction = fake.db.transaction;
@@ -280,7 +306,7 @@ it('a task hold lock timeout answers 503 before the config save and leaves the s
 it.each([schema.taskEvents, schema.auditEvents])(
   'a refused hold evidence insert rolls back the task hold and keeps the global switch on',
   async (refusedTable) => {
-    const fake = setup(guarded, null);
+    const fake = setup(fixed, null);
     const before = state(fake);
     fake.hooks.beforeInsert = (table) => {
       if (table === refusedTable && fake.rows(schema.tasks)[0]?.pausedAt)
@@ -297,7 +323,7 @@ it.each([schema.taskEvents, schema.auditEvents])(
   },
 );
 it('global pause engagement leaves tasks untouched', async () => {
-  const fake = setup(guarded);
+  const fake = setup(fixed);
   const before = structuredClone(fake.rows(schema.tasks));
   const res = await request('/admin/config/global-pause', { paused: true }, 'PUT');
   expect(res.status).toBe(200);
@@ -308,7 +334,7 @@ it('global pause engagement leaves tasks untouched', async () => {
 // A savepoint borrows no connection; a root transaction does. Fail a nested borrow by
 // the config-lock owner as if the pool/lock timeout fired, so regressions cannot hang.
 it.each([1, 2, 3])('completes N+1 global lifts with an injected pool of %i', async (size) => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   const context = new AsyncLocalStorage<{ configLockHeld: boolean }>();
   const firstWave = Promise.withResolvers<void>();
   const waiting: Array<() => void> = [];
@@ -372,7 +398,7 @@ it.each([1, 2, 3])('completes N+1 global lifts with an injected pool of %i', asy
 });
 
 it('keeps the committed task hold and evidence when the later config write fails', async () => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   h.beforeLift = () => {
     throw new Error('redis write failed');
   };
@@ -393,7 +419,7 @@ it('keeps the committed task hold and evidence when the later config write fails
 });
 
 it('allows an extra unsupported-task hold when another lift turns the switch off after the read', async () => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
     h.paused = false;
     return 'true';
@@ -413,7 +439,7 @@ it('allows an extra unsupported-task hold when another lift turns the switch off
 });
 
 it('holds unsupported tasks after saving when the switch turns on after the pre-read', async () => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   h.paused = false;
   vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
     h.paused = true;
@@ -447,7 +473,7 @@ it('holds unsupported tasks after saving when the switch turns on after the pre-
 });
 
 it('reports recovery when a raced post-save hold times out after the switch is lifted', async () => {
-  const fake = setup(guarded, null);
+  const fake = setup(fixed, null);
   h.paused = false;
   vi.spyOn(configService, 'getFresh').mockImplementationOnce(async () => {
     h.paused = true;

@@ -7,7 +7,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { SPEC_ROLES, STEP_ROLE_REGISTRY } from '@haive/shared/step-outputs';
 import type { AppEnv } from '../src/context.js';
-const h = vi.hoisted(() => ({ db: undefined as unknown, lift: false }));
+const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: vi.fn() }) }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -18,28 +18,6 @@ vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { getBoolean: async () => true },
 }));
-// Isolate only the final runtime fence to prove the complete locked API pin path.
-// The ordinary production refusal suite has no such seam.
-vi.mock('@haive/shared/modularity', async (original) => {
-  const actual = await original<typeof import('@haive/shared/modularity')>();
-  return {
-    ...actual,
-    resolveTaskTypeAvailability: (
-      input: Parameters<typeof actual.resolveTaskTypeAvailability>[0],
-    ) => {
-      const result = actual.resolveTaskTypeAvailability(input);
-      if (
-        h.lift &&
-        !result.available &&
-        result.issues?.length === 1 &&
-        result.issues[0]?.kind === 'invalid-execution-contract' &&
-        result.issues[0].reason.includes('not yet supported')
-      )
-        return { available: true };
-      return result;
-    },
-  };
-});
 import { mountModules, type ApiModuleEntry } from '../src/modules/loader.js';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { adminTaskTypeRoutes, taskTypeRoutes } from '../src/routes/task-types.js';
@@ -52,16 +30,16 @@ const moduleEntry = (executionPredicates?: unknown) =>
     ...(executionPredicates === undefined ? {} : { executionPredicates }),
   }) as ApiModuleEntry;
 const declarations = [{ id: 'planned', argsSchema }];
-const ids = ['module.fx.producer', 'module.fx.consumer', 'module.fx.report'];
+const ids = ['module.fx.prelude', 'module.fx.producer', 'module.fx.consumer', 'module.fx.report'];
 const executionContract = {
   version: 1,
   guardedSpans: [
     {
       id: 'work',
-      firstStepId: ids[0],
-      lastStepId: ids[1],
+      firstStepId: ids[1],
+      lastStepId: ids[2],
       predicateId: 'module.fx.planned',
-      args: { producer: ids[0] },
+      args: { producer: ids[1] },
     },
   ],
 };
@@ -113,8 +91,8 @@ async function setup(exported: unknown = declarations, rawContract: unknown = ex
         requires: [],
         provides: [],
         dispatchesCli: false,
-        ...(index === 0 ? { providesRoles: [{ role, contract }] } : {}),
-        ...(index === 1
+        ...(index === 1 ? { providesRoles: [{ role, contract }] } : {}),
+        ...(index === 2
           ? { consumesRoles: [{ input: 'spec', role, contract, optional: false }] }
           : {}),
       },
@@ -131,7 +109,6 @@ async function availability() {
   return ((await response.json()) as { taskTypes: { available: boolean }[] }).taskTypes[0]!;
 }
 afterEach(async () => {
-  h.lift = false;
   await mountModules(new Hono<AppEnv>(), [], { db: {} as never });
 });
 it.each(['predicate', 'endpoint'])(
@@ -188,7 +165,6 @@ it.each(['predicate', 'endpoint'])(
         changes,
       })
       .where(eq(schema.taskTypeDefinitions.slug, 'fx__scan'));
-    h.lift = true;
     const app = new Hono<AppEnv>();
     app.route('/admin/task-types', adminTaskTypeRoutes);
     app.onError(errorHandler);
@@ -224,22 +200,20 @@ it.each(['predicate', 'endpoint'])(
 );
 it('API schemas validate guarded composition and locked pin construction without loading or running a step', async () => {
   const fake = await setup();
-  h.lift = true;
   expect(await availability()).toMatchObject({ available: true });
   const def = await fake.db.transaction((tx) =>
     definitionForCreate(tx as never, 'fx__scan', { generic: true, locked: true }),
   );
   expect(def.dataEdgePlan).toMatchObject({
     version: 3,
-    candidates: [{ bindings: { '1:spec': { producerStepId: ids[0] } } }],
+    candidates: [{ bindings: { '2:spec': { producerStepId: ids[1] } } }],
   });
   expect(def.executionContract).toEqual(executionContract);
   expect(JSON.stringify(def)).not.toContain('argsSchema');
 });
-it('a module without the export stays unknown even when the runtime fence is isolated', async () => {
+it('a module without the export stays unknown', async () => {
   const fake = await setup([]);
   await mountModules(new Hono<AppEnv>(), [moduleEntry()], { db: fake.db as never });
-  h.lift = true;
   expect(await availability()).toMatchObject({ available: false });
   await expect(
     fake.db.transaction((tx) =>
@@ -247,18 +221,16 @@ it('a module without the export stays unknown even when the runtime fence is iso
     ),
   ).rejects.toThrow('unknown-predicate');
 });
-it('the real runtime fence remains closed even with matching trusted schemas', async () => {
+it('matching trusted schemas admit the guarded pin through availability and locked creation', async () => {
   const fake = await setup();
-  expect(await availability()).toMatchObject({ available: false });
-  await expect(
-    fake.db.transaction((tx) =>
-      definitionForCreate(tx as never, 'fx__scan', { generic: true, locked: true }),
-    ),
-  ).rejects.toThrow('not yet supported');
+  expect(await availability()).toMatchObject({ available: true });
+  const def = await fake.db.transaction((tx) =>
+    definitionForCreate(tx as never, 'fx__scan', { generic: true, locked: true }),
+  );
+  expect(def.executionContract).toEqual(executionContract);
 });
 it('API admission validates args and independently skipped data producers', async () => {
   const fake = await setup();
-  h.lift = true;
   for (const [bad, reason] of [
     [
       {
@@ -270,7 +242,7 @@ it('API admission validates args and independently skipped data producers', asyn
     [
       {
         ...executionContract,
-        guardedSpans: [{ ...executionContract.guardedSpans[0]!, lastStepId: ids[0] }],
+        guardedSpans: [{ ...executionContract.guardedSpans[0]!, lastStepId: ids[1] }],
       },
       'invalid-data-role-binding',
     ],
@@ -332,7 +304,7 @@ it('stored admin detail and structural PATCH use the same schema map for composi
   expect(detail.status, await detail.clone().text()).toBe(200);
   expect(await detail.json()).toMatchObject({
     compositionIssues: [],
-    availability: { available: false },
+    availability: { available: true },
   });
   const patch = () =>
     app.request('/admin/task-types/fx__scan', {

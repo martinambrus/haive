@@ -312,7 +312,7 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
   });
 
   describe('config switches', () => {
-    it('commits unsupported task holds and evidence before lifting the global pause', async () => {
+    it('commits fix-target task holds and evidence before lifting the global pause and leaves a guarded task unheld', async () => {
       await control.insert(schema.users).values({
         id: actor,
         emailEncrypted: 'global-pause-test',
@@ -322,6 +322,11 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       });
       try {
         const contract = {
+          version: 1 as const,
+          guardedSpans: [],
+          fixTarget: { stepId: 'report', capabilityVersion: 1 as const },
+        };
+        const guardedContract = {
           version: 1 as const,
           guardedSpans: [
             {
@@ -342,6 +347,7 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
               { executionContract: contract, pausedAt: stamp },
               { executionContract: null },
               { executionContract: { version: 1 as const, guardedSpans: [] } },
+              { executionContract: guardedContract, status: 'queued' as const },
               { executionContract: contract, status: 'completed' as const },
               { executionContract: contract, status: 'cancelled' as const },
               { executionContract: contract, deadAt: stamp },
@@ -425,7 +431,7 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       }
     });
 
-    it('completes N+1 global lifts while unsupported tasks need holds on the same pool', async () => {
+    it('completes N+1 global lifts while fix-target tasks need holds on the same pool', async () => {
       await control.insert(schema.users).values({
         id: actor,
         emailEncrypted: 'global-pause-pool-test',
@@ -443,15 +449,8 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
             status: 'queued',
             executionContract: {
               version: 1,
-              guardedSpans: [
-                {
-                  id: 'guard',
-                  firstStepId: 'report',
-                  lastStepId: 'report',
-                  predicateId: 'module.fx.planned',
-                  args: {},
-                },
-              ],
+              guardedSpans: [],
+              fixTarget: { stepId: 'report', capabilityVersion: 1 },
             },
           })
           .returning();

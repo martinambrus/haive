@@ -132,7 +132,7 @@ describe('/admin/task-types for a regular user', () => {
 });
 
 describe('GET /task-types', () => {
-  it('a structural static PATCH validates the stored contract and leaves definition/audit state intact', async () => {
+  it('a structural static PATCH refuses a stored guard with an unregistered predicate and leaves definition/audit state intact', async () => {
     h.role = 'admin';
     const fake = createFakeDb({
       taskTypeDefinitions: schema.taskTypeDefinitions,
@@ -188,7 +188,7 @@ describe('GET /task-types', () => {
     expect(fake.rows(schema.taskTypeDefinitions)).toEqual(before);
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   });
-  it('detail composition diagnostics refuse a stored guard without inventing trusted predicates', async () => {
+  it('detail composition diagnostics refuse a stored guard with an unregistered predicate without inventing trusted predicates', async () => {
     h.role = 'admin';
     h.catalog = [
       {

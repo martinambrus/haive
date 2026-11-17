@@ -191,7 +191,7 @@ describe('guarded immutable data edges', () => {
 });
 
 describe('contract-aware availability', () => {
-  it('validates a selected capable target with trusted registration but still refuses runtime admission', () => {
+  it('validates a selected capable target with trusted registration but still refuses a custom fix target', () => {
     const f = fixture(true);
     f.catalog.set(producer, entry(producer, { fixConsumer: { version: 1 } }));
     f.catalog.set(consumer, entry(consumer, { loopTargetStepId: '07-phase-2-implement' }));
@@ -221,15 +221,16 @@ describe('contract-aware availability', () => {
       issues: [
         expect.objectContaining({
           kind: 'invalid-execution-contract',
-          reason: expect.stringContaining('not yet supported'),
         }),
       ],
     });
   });
   it.each([true, false])(
-    'keeps a structurally valid guarded contract fenced (trusted schemas=%s)',
+    'admits a structurally valid guarded contract only with trusted schemas (trusted schemas=%s)',
     (trusted) => {
       const f = fixture();
+      const ids = ['module.scan.lead', ...f.ids];
+      const catalog = new Map(f.catalog).set('module.scan.lead', entry('module.scan.lead'));
       const c = guarded([span('p', producer), span('c', consumer)]);
       expect(
         resolveTaskTypeAvailability({
@@ -238,26 +239,30 @@ describe('contract-aware availability', () => {
             enabled: true,
             selectable: true,
             runListStrategy: 'static',
-            stepIds: f.ids,
+            stepIds: ids,
             requiresRepository: false,
             executionContract: c,
           },
           switches: { customEnabled: true, moduleEnabled: true },
           modules: null,
-          catalog: { stepIds: new Set(f.ids), composable: f.catalog },
+          catalog: { stepIds: new Set(ids), composable: catalog },
           generic: true,
           ...(trusted ? { predicates } : {}),
         }),
-      ).toMatchObject({
-        available: false,
-        reason: 'invalid-composition',
-        issues: [
-          expect.objectContaining({
-            kind: 'invalid-execution-contract',
-            reason: expect.stringContaining(trusted ? 'not yet supported' : 'unknown-predicate'),
-          }),
-        ],
-      });
+      ).toMatchObject(
+        trusted
+          ? { available: true }
+          : {
+              available: false,
+              reason: 'invalid-composition',
+              issues: [
+                expect.objectContaining({
+                  kind: 'invalid-execution-contract',
+                  reason: expect.stringContaining('unknown-predicate'),
+                }),
+              ],
+            },
+      );
     },
   );
   it('checks pinned data on guarded paths when trusted schemas are supplied', () => {

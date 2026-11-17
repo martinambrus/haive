@@ -79,7 +79,7 @@ function setup(contract: unknown = null) {
     displayName: 'Test',
     source: 'admin',
     runListStrategy: 'static',
-    stepIds: ['report', 'tail'],
+    stepIds: ['lead', 'report', 'tail'],
     enabled: true,
     selectable: true,
     requiresRepository: false,
@@ -89,10 +89,26 @@ function setup(contract: unknown = null) {
     executionContract: contract,
   });
   fake.insert(schema.stepCatalog, {
-    stepId: 'report',
+    stepId: 'lead',
     source: 'core',
     workflowType: 'test',
     stepIndex: 1,
+    composable: true,
+    dispatchesCli: false,
+    entry: {
+      stepId: 'lead',
+      label: 'Lead',
+      group: 'test',
+      requires: [],
+      provides: [],
+      dispatchesCli: false,
+    },
+  });
+  fake.insert(schema.stepCatalog, {
+    stepId: 'report',
+    source: 'core',
+    workflowType: 'test',
+    stepIndex: 2,
     composable: true,
     dispatchesCli: false,
     entry: {
@@ -109,7 +125,7 @@ function setup(contract: unknown = null) {
     stepId: 'tail',
     source: 'core',
     workflowType: 'test',
-    stepIndex: 2,
+    stepIndex: 3,
     composable: true,
     dispatchesCli: false,
     entry: {
@@ -166,9 +182,9 @@ it.each([
   'plan_merge',
   'type_draft',
 ])(
-  'the common locked admission for %s refuses both active contract forms before pinning',
+  'the common locked admission for %s refuses a custom fix target before pinning',
   async (slug) => {
-    for (const contract of [guarded, fixed]) {
+    for (const contract of [fixed, { version: 99 }]) {
       const fake = setup(contract);
       await fake.db
         .update(schema.taskTypeDefinitions)
@@ -186,7 +202,31 @@ it.each([
     }
   },
 );
-it.each([guarded, fixed])(
+it.each([
+  'test',
+  'onboarding_upgrade',
+  'kb_author',
+  'plan_build',
+  'plan_chat',
+  'advisory',
+  'plan_sequence',
+  'plan_merge',
+  'type_draft',
+])('the common locked admission for %s admits an empty and a guarded pin', async (slug) => {
+  for (const contract of [empty, guarded]) {
+    const fake = setup(contract);
+    await fake.db
+      .update(schema.taskTypeDefinitions)
+      .set({ slug, source: slug === 'test' ? 'admin' : 'builtin' })
+      .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+    const definition = await fake.db.transaction((tx) =>
+      definitionForCreate(tx as never, slug, { generic: slug === 'test', locked: true }),
+    );
+    expect(definition.executionContract).toEqual(contract);
+    expect(definition.runListSnapshot).toEqual(['lead', 'report', 'tail']);
+  }
+});
+it.each([fixed, { version: 99 }])(
   'create refuses unsupported contracts before task, event or queue writes',
   async (contract) => {
     const fake = setup(contract);
@@ -199,17 +239,39 @@ it.each([guarded, fixed])(
       body: JSON.stringify({ type: 'test', title: 'Test', description: 'test' }),
     });
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({
-      code: 'invalid-execution-contract',
-      error: expect.stringContaining('not yet supported by this worker'),
-    });
+    expect(await res.json()).toMatchObject({ code: 'invalid-execution-contract' });
     expect(fake.rows(schema.tasks)).toEqual([]);
     expect(fake.rows(schema.taskEvents)).toEqual([]);
     expect(h.add).not.toHaveBeenCalled();
   },
 );
-it.each([guarded, fixed])(
-  'START refuses a pinned active contract without changing a row, event or job',
+it.each([empty, guarded])(
+  'create pins a supported contract byte-equal on the inserted task',
+  async (contract) => {
+    const fake = setup(contract);
+    const app = new Hono<AppEnv>();
+    app.route('/tasks', taskRoutes);
+    app.onError(errorHandler);
+    const res = await app.request('/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'test',
+        title: 'Pinned',
+        description: 'pinned',
+        repositoryId: USER,
+        deferStart: true,
+      }),
+    });
+    expect(res.status, await res.clone().text()).toBe(201);
+    const tasks = fake.rows(schema.tasks);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.executionContract).toEqual(contract);
+    expect(tasks[0]!.runListSnapshot).toEqual(['lead', 'report', 'tail']);
+  },
+);
+it.each([fixed, { version: 99 }])(
+  'START refuses a pinned unsupported contract without changing a row, event or job',
   async (contract) => {
     const fake = setup();
     const task = fake.insert(schema.tasks, {
@@ -219,12 +281,32 @@ it.each([guarded, fixed])(
       status: 'created',
       executionContract: contract,
     });
-    await expect(markQueuedForStart(fake.db as never, TASK)).rejects.toThrow(
-      'not yet supported by this worker',
-    );
+    await expect(markQueuedForStart(fake.db as never, TASK)).rejects.toMatchObject({
+      status: 409,
+      code: 'invalid-execution-contract',
+    });
     expect(fake.rows(schema.tasks)).toEqual([task]);
     expect(fake.rows(schema.taskEvents)).toEqual([]);
     expect(h.add).not.toHaveBeenCalled();
+  },
+);
+it.each([empty, guarded])(
+  'START queues a task pinned with a supported contract',
+  async (contract) => {
+    const fake = setup();
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      type: 'test',
+      status: 'created',
+      executionContract: contract,
+    });
+    const queued = await markQueuedForStart(fake.db as never, TASK);
+    expect(queued).toMatchObject({ id: TASK, status: 'queued', executionContract: contract });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({
+      status: 'queued',
+      executionContract: contract,
+    });
   },
 );
 it('pins an inert valid contract with data edges on the locked INSERT and keeps it across definition edits', async () => {
@@ -254,6 +336,22 @@ it('pins an inert valid contract with data edges on the locked INSERT and keeps 
   expect(fake.rows(schema.tasks)[0]!.executionContract).toEqual(empty);
   expect(result).toBeDefined();
 });
+it.each(['workflow_paths', 'run_app_modes'] as const)(
+  'a %s type with a guarded pin refuses with the named code and writes nothing',
+  async (strategy) => {
+    const fake = setup(guarded);
+    await fake.db
+      .update(schema.taskTypeDefinitions)
+      .set({ runListStrategy: strategy, stepIds: null })
+      .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+    await expect(
+      definitionForCreate(fake.db as never, 'test', { generic: true, locked: false }),
+    ).rejects.toMatchObject({ status: 409, code: 'invalid-execution-contract' });
+    expect(fake.rows(schema.tasks)).toEqual([]);
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  },
+);
 it('plain static and unseeded builtins keep NULL contract semantics', async () => {
   const fake = setup();
   expect(
@@ -376,7 +474,7 @@ const requestCases: {
   },
   { label: 'pause Resume', path: '/action', body: { action: 'resume' } },
 ];
-for (const contract of [guarded, fixed, { version: 99 }]) {
+for (const contract of [fixed, { version: 99 }]) {
   it.each(requestCases)(
     'refuses $label for an unsupported pin without side effects',
     async (test) => {
@@ -403,8 +501,47 @@ for (const contract of [guarded, fixed, { version: 99 }]) {
     },
   );
 }
+const effects: Record<string, { event: string; job: boolean; kill: boolean }> = {
+  'task Retry at a step': { event: 'task.retried', job: true, kill: true },
+  'step retry': { event: 'step.retry', job: true, kill: true },
+  'step resume': { event: 'step.resume', job: true, kill: true },
+  'step retry_ai': { event: 'step.retry_ai', job: true, kill: true },
+  'step skip': { event: 'step.skip', job: true, kill: true },
+  'form answer': { event: 'step.form_submitted', job: true, kill: false },
+  clarification: { event: 'step.clarified', job: true, kill: false },
+  'provider switch': { event: 'step.cli_provider_preference_changed', job: false, kill: false },
+  'auto-continue wakeup': { event: 'task.auto_continue_changed', job: true, kill: false },
+  'pause Resume': { event: 'task.resumed', job: false, kill: false },
+};
+for (const contract of [empty, guarded]) {
+  it.each(requestCases)('admits $label for a supported pin with its effects', async (test) => {
+    const fake = stopped(contract, test.status);
+    if (test.taskStatus)
+      await fake.db
+        .update(schema.tasks)
+        .set({ status: test.taskStatus })
+        .where(eq(schema.tasks.id, TASK));
+    const app = new Hono<AppEnv>();
+    app.route('/tasks', taskRoutes);
+    app.onError(errorHandler);
+    const res = await app.request(`/tasks/${TASK}${test.path}`, {
+      method: test.method ?? 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(test.body),
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const effect = effects[test.label]!;
+    expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain(effect.event);
+    if (effect.job)
+      expect(h.add).toHaveBeenCalledWith('advance-step', expect.anything(), expect.anything());
+    else expect(h.add).not.toHaveBeenCalled();
+    if (effect.kill) expect(h.kill).toHaveBeenCalled();
+    else expect(h.kill).not.toHaveBeenCalled();
+    expect(fake.rows(schema.tasks)[0]!.executionContract).toEqual(contract);
+  });
+}
 it('direct task-at-step Retry refuses before resetting or killing in-flight work', async () => {
-  const fake = stopped(guarded);
+  const fake = stopped(fixed);
   const before = state(fake);
   const target = fake.rows(schema.taskSteps)[0]!;
   await expect(
@@ -418,50 +555,69 @@ it('direct task-at-step Retry refuses before resetting or killing in-flight work
   expect(h.add).not.toHaveBeenCalled();
 });
 
-it.each([null, empty])('retains task-at-step Retry for a supported pin', async (contract) => {
-  const fake = stopped(contract);
-  await expect(
-    retryTaskAtStep(fake.db as never, TASK, USER, fake.rows(schema.taskSteps)[0]! as never),
-  ).resolves.toEqual({ epoch: 4 });
-  expect(fake.rows(schema.tasks)[0]).toMatchObject({
-    status: 'running',
-    executionContract: contract,
-  });
-  expect(h.kill).toHaveBeenCalledTimes(1);
-  expect(h.add).toHaveBeenCalledTimes(1);
-});
+it.each([null, empty, guarded])(
+  'retains task-at-step Retry for a supported pin',
+  async (contract) => {
+    const fake = stopped(contract);
+    await expect(
+      retryTaskAtStep(fake.db as never, TASK, USER, fake.rows(schema.taskSteps)[0]! as never),
+    ).resolves.toEqual({ epoch: 4 });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({
+      status: 'running',
+      executionContract: contract,
+    });
+    expect(h.kill).toHaveBeenCalledTimes(1);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  },
+);
 
-it('allows Stop on an unsupported mid-span task but refuses the following Resume', async () => {
-  const midSpan = {
-    ...guarded,
-    guardedSpans: [{ ...guarded.guardedSpans[0]!, firstStepId: STEP }],
-  };
-  const fake = stopped(midSpan, 'running');
-  await fake.db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, TASK));
-  const app = new Hono<AppEnv>();
-  app.route('/tasks', taskRoutes);
-  app.onError(errorHandler);
-  const stop = await app.request(`/tasks/${TASK}/cancel-active-cli`, { method: 'POST' });
-  expect(stop.status, await stop.clone().text()).toBe(200);
-  expect(fake.rows(schema.tasks)[0]).toMatchObject({
-    status: 'failed',
-    executionContract: midSpan,
-  });
-  expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
-  const before = state(fake);
-  h.kill.mockClear();
-  h.add.mockClear();
-  const resume = await app.request(`/tasks/${TASK}/steps/${STEP}/action`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action: 'resume', round: 0 }),
-  });
-  expect(resume.status).toBe(409);
-  expect(await resume.json()).toMatchObject({ code: 'invalid-execution-contract' });
-  expect(state(fake)).toEqual(before);
-  expect(h.kill).not.toHaveBeenCalled();
-  expect(h.add).not.toHaveBeenCalled();
-});
+it.each([
+  {
+    label: 'a custom fix target',
+    pin: fixed,
+    admitted: false,
+  },
+  {
+    label: 'a guarded mid-span pin',
+    pin: {
+      ...guarded,
+      guardedSpans: [{ ...guarded.guardedSpans[0]!, firstStepId: STEP }],
+    },
+    admitted: true,
+  },
+])(
+  'allows Stop on $label; the following Resume is admitted only when supported',
+  async ({ pin, admitted }) => {
+    const fake = stopped(pin, 'running');
+    await fake.db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, TASK));
+    const app = new Hono<AppEnv>();
+    app.route('/tasks', taskRoutes);
+    app.onError(errorHandler);
+    const stop = await app.request(`/tasks/${TASK}/cancel-active-cli`, { method: 'POST' });
+    expect(stop.status, await stop.clone().text()).toBe(200);
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed', executionContract: pin });
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
+    const before = admitted ? null : state(fake);
+    h.kill.mockClear();
+    h.add.mockClear();
+    const resume = await app.request(`/tasks/${TASK}/steps/${STEP}/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'resume', round: 0 }),
+    });
+    if (admitted) {
+      expect(resume.status, await resume.clone().text()).toBe(200);
+      expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain('step.resume');
+      expect(h.add).toHaveBeenCalledWith('advance-step', expect.anything(), expect.anything());
+      return;
+    }
+    expect(resume.status).toBe(409);
+    expect(await resume.json()).toMatchObject({ code: 'invalid-execution-contract' });
+    expect(state(fake)).toEqual(before);
+    expect(h.kill).not.toHaveBeenCalled();
+    expect(h.add).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   { label: 'task Cancel', path: '/action', action: 'cancel' },

@@ -149,7 +149,6 @@ it('accepts the largest common Node/Postgres bound', () => {
   );
 });
 it.each([
-  new GuardDecisionError('producer-not-settled'),
   new GuardDecisionError('decision-write-lost'),
   new GuardDecisionError('skip-write-lost'),
   new GuardDecisionError('predicate-evaluation-failed', { cause: { code: '57014' } }),
@@ -269,6 +268,7 @@ it('F3 owned skip replay ignores terminal timestamps and retains the receipt as 
   expect(() => planGuardSkip(f, f.rows)).toThrow('member-not-pristine');
 });
 it.each([
+  'producer-not-settled',
   'member-not-pristine',
   'predicate-evaluation-failed',
   'predicate-non-boolean',

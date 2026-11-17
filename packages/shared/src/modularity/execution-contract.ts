@@ -48,15 +48,28 @@ export function parseExecutionContract(raw: unknown): ExecutionContract {
   if (!parsed.success) throw new ExecutionContractError('malformed contract');
   return parsed.data;
 }
-/** P6 admission fence. Empty declarations are inert; malformed pins never fall back. */
-export function assertExecutionContractSupported(raw: unknown): void {
+export interface ContractAdmissionScope {
+  staticPinnedList: boolean;
+  stepIds?: readonly string[];
+}
+/** Admission fence. Empty declarations are inert; malformed pins never fall back. */
+export function assertExecutionContractSupported(
+  raw: unknown,
+  scope: ContractAdmissionScope,
+): void {
   if (raw == null) return;
   const contract = parseExecutionContract(raw);
-  if (contract.guardedSpans.length || contract.fixTarget) {
-    throw new ExecutionContractError(
-      'guarded spans or custom fix target not yet supported by this worker',
-    );
-  }
+  if (contract.fixTarget)
+    throw new ExecutionContractError('custom fix target not yet supported by this worker');
+  if (contract.guardedSpans.length > 0 && !scope.staticPinnedList)
+    throw new ExecutionContractError('guarded spans need a static pinned run list');
+  const { stepIds } = scope;
+  if (stepIds)
+    for (const span of contract.guardedSpans)
+      if (stepIds.indexOf(span.firstStepId) < 1)
+        throw new ExecutionContractError(
+          `span-entry ${span.id}: first step must not lead the list`,
+        );
 }
 const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, item) =>

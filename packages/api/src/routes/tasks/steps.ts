@@ -88,6 +88,7 @@ import {
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
+  isGuardOwnedSkip,
   isStepSkippable,
   liftReadPause,
   propagateModelHealthCliToTaskDefault,
@@ -234,6 +235,14 @@ async function sweepRunsOf(
  *  returned rows are additions beyond the caller's set, with pre-reset liveness,
  *  so callers can include them in audit and post-commit sandbox cleanup.
  *  Exported for the unit test. */
+function throwGuardOwnedSkip(): never {
+  throw new HttpError(
+    409,
+    'Step was skipped by a guard; retry the span entry instead',
+    'guard-owned-skip',
+  );
+}
+
 export async function resetRowsForRerun(
   tx: DbHandle,
   taskId: string,
@@ -245,6 +254,8 @@ export async function resetRowsForRerun(
     executionContract?: unknown;
     /** Rescan after a retained producer even when the initial reset set is empty. */
     invalidateGuardsAfter?: typeof schema.taskSteps.$inferSelect;
+    /** A Retry's clicked row: re-read under the step locks, refused when a guard now owns its skip. */
+    refuseGuardOwnedSkipId?: string;
   } = {},
 ): Promise<(typeof schema.taskSteps.$inferSelect)[]> {
   if (rows.length === 0 && !opts.invalidateGuardsAfter) return [];
@@ -273,6 +284,15 @@ export async function resetRowsForRerun(
   // the task has no DAG / no stuck issue.
   await resetDagCurrentLevelForRetry(tx, taskId);
   const locked = opts.rowsHeld ? rows : await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
+  // The caller's unlocked read can predate a span entry's guard skip; this read is current.
+  if (opts.refuseGuardOwnedSkipId) {
+    const [current] = await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, opts.refuseGuardOwnedSkipId))
+      .limit(1);
+    if (current && isGuardOwnedSkip(current, executionContract)) throwGuardOwnedSkip();
+  }
   // This transaction holds the rows now (the batch above, or the caller's lock under rowsHeld), so
   // this read is current; `rows` is the caller's read from before the transaction began.
   const forward = guarded
@@ -1261,6 +1281,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   const step = stepRows[0];
   if (!step) throw new HttpError(404, 'Step not found');
 
+  if (body.action === 'retry' && isGuardOwnedSkip(step, task.executionContract))
+    throwGuardOwnedSkip();
+
   if (body.action === 'retry') {
     // Retry resets a step (and its downstream) back to pending so the worker
     // can re-run it. Any status is retryable — including `running` and
@@ -1322,7 +1345,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         id,
         [step, ...downstreamToReset, ...leftActive],
         now,
-        { executionContract: task.executionContract },
+        { executionContract: task.executionContract, refuseGuardOwnedSkipId: step.id },
       );
       leftActive.push(...extra);
       // Per-step "Override and run": only the clicked step bypasses the

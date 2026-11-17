@@ -231,16 +231,18 @@ over ordinary and execution-contract issues. Over HTTP: disabled, not selectable
 switches are 403; the module reasons, a missing step and a bad composition are 409 naming what is wrong.
 The switch over reasons ends in an exhaustive `never`, so a new reason cannot fall through to a create.
 
-The execution-contract support refusal remains the final `invalid-composition` check
-and also runs without a synced catalog. For a derived definition it retains its named
+The execution-contract support check remains the final `invalid-composition` check
+and also runs without a synced catalog; there a guarded pin is refused, since nothing
+validated its composition. For a derived definition it retains its named
 `invalid-execution-contract` issue even if the overlay is invalid, after module policy.
 `definitionForCreate` reports that issue directly rather than evaluating the contract again.
 Trusted predicate schemas come from installed modules’ schema-only
 `./execution-predicates` exports, loaded at API boot without importing `./steps`.
 Availability checks composition and pinned data edges on feasible paths before the
-unchanged runtime-support refusal. A missing map/export does not skip conditional
+runtime-support check. A missing map/export does not skip conditional
 validation: referenced predicates are unknown and fail closed. API catalog JSON
-carries no schema or executable authority; guarded definitions remain unavailable. Admin static detail and structural edits carry
+carries no schema or executable authority; a guarded definition is available only when its
+predicate schemas are registered. Admin static detail and structural edits carry
 the stored contract into validation; strict create/editor/draft schemas still expose no
 execution-contract authoring. Availability and the seeder keep inert declarations on the ordinary composition walk; the admin
 detail and static PATCH routes still pass a stored inert contract to the contract walk, which
@@ -777,20 +779,20 @@ fallbacks without a pin. Preflights remain available. The switch never touches e
 tasks: their readers, Retry, Resume and boot recovery never consult it. Keep capable readers
 and the nullable authoring column while any affected task can resume.
 
-## Pinned execution declarations (P6; admission only)
+## Pinned execution declarations
 
 Migration 0245 appends nullable `execution_contract jsonb` LAST on
 `task_type_definitions` and `tasks`, and nullable `guard_state jsonb` LAST on
 `task_steps`. Database types are `unknown`; the shared strict version-1 decoder
-owns their interpretation. No default, backfill, guard-state writer or guard
-runtime ships in P6.
+owns their interpretation. No default or backfill exists; the worker writes
+`guard_state` at a guarded span's first step (see Guard decisions).
 
 A static module seed may declare `executionContract: {version: 1, guardedSpans,
 fixTarget?}`. A span is `{id, firstStepId, lastStepId, predicateId, args,
 requiresSpan?, when?}`. Endpoints must be real, ordered run-list members; spans cannot
 overlap or nest. `requiresSpan` names a strictly earlier span by run-list order,
 so unknown, later, self and cyclic references are refused. Its runtime promise
-for P7 is that the dependent span skips whenever the required span skipped,
+is that the dependent span skips whenever the required span skipped,
 regardless of the dependent predicate. Disjoint spans sharing a predicate id
 share one task decision and must carry identical JSON args. `when` is an optional
 boolean selecting the expected result, defaulting to true; `when: false` consumes the
@@ -801,7 +803,7 @@ Trusted predicate schemas come from the module’s optional schema-only
 `./execution-predicates` export. Worker boot binds each declaration to the matching
 `guardPredicates` callback in step code and requires the exact same args-schema
 object in both exports; missing declarations/evaluators, duplicate or non-local ids
-and schema mismatch refuse boot. See [Modules](modules.md#schema-only-predicate-registration-fence-closed)
+and schema mismatch refuse boot. See [Modules](modules.md#schema-only-predicate-registration)
 for the SDK shape and comparison rationale. Stored ids or source strings grant no
 executable authority. API never loads step code or evaluates predicates. Composition
 projects every feasible predicate combination through the existing token,
@@ -830,8 +832,8 @@ predicate evaluation. The API passes its boot map to public/admin availability,
 stored static detail and structural edits, guarded author-binding checks and the
 final locked `buildDataEdgePlan` call inside `definitionForCreate`. All INSERT
 callers share that writer. Schema registration changes no pin bytes or recovery
-protocol and leaves the execution fence closed. Guard decisions, skipping and custom-fix execution remain
-fenced off until their runtime PRs.
+protocol. Guard decisions and span skipping run in the worker (see Guard decisions);
+custom-fix execution does not exist.
 
 An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
 capable run-list target on every path where an emitter runs. For validation,
@@ -839,7 +841,7 @@ core emitters aimed at 07 resolve through that selected target. A prompt step,
 off-list id, non-capable executable or wrong capability version is refused.
 This declares no output replacement role or host policy. The existing live
 `fix_loop` runtime, target-specific CLI readers and diagnosis services remain
-unchanged until P8.
+unchanged. No gate admits a pin that selects a fix target.
 
 The seeder owns execution declarations with its existing source-guarded upsert,
 no-op test and hash; absent contracts preserve the previous hash bytes. All five
@@ -848,11 +850,20 @@ task creators copy the locked definition's execution contract beside
 by definition edits, Retry, Resume, boot or revival. Existing definitions and
 tasks retain NULL semantics. An explicit empty contract is inert and pinnable.
 
-P6 refuses any guarded span or selected fix target at create, API START and
-worker START/advance with `invalid-execution-contract` and “not yet supported by
-this worker”. A rejected create or API START writes no task state, event or job.
-A worker START or ADVANCE refusal instead marks the existing task dead under
-its held epoch, keeps its status and immutable pin, and records one `task.dead`
+A pin is supported when it selects no fix target and, if it declares guarded
+spans, belongs to a static type with a pinned run list. Every gate refuses the rest
+with `invalid-execution-contract`: a pin that selects a fix target, a malformed pin,
+and a guarded pin on a derived, dynamic, workflow-path or run-app-mode type.
+Availability and create additionally validate a guarded static type's composition,
+data roles and registered predicate schemas, so an unknown predicate, a bad
+endpoint or a span whose first step leads the run list (START runs that step itself,
+and a decision needs a predecessor) keeps the type unavailable. The worker checks the pin against its own state
+at START, advance, boot and revival: static strategy, a unique non-null run-list
+snapshot and no derived plan, every span predicate provided by a registered module
+step with valid args, a feasible path set, and no span entry at the first step.
+The worker is authoritative. A rejected create or API START writes no task state,
+event or job. A worker START or ADVANCE refusal instead marks the existing task dead
+under its held epoch, keeps its status and immutable pin, and records one `task.dead`
 event with the named reason. Duplicate delivery and the stalled sweep leave
 that dead task alone. Boot marks unsupported snapshot-task pins dead; revival
 refuses while support is still missing (see [Worker restarts](worker-restarts.md#dead-tasks)).
@@ -864,8 +875,13 @@ The API also checks the immutable execution pin before task Retry at a step
 or clarification submission, and step CLI changes. Turning on auto-continue
 while a task awaits an answer uses the same refusal. Owner and administrator
 pause Resume refuse unsupported pins before clearing a standing hold.
-An unsupported or malformed pin returns 409 `invalid-execution-contract`
-before any row reset, answer/event write, sandbox kill or job enqueue.
+A pin that selects a fix target, or a malformed one, returns 409 `invalid-execution-contract`
+before any row reset, answer/event write, sandbox kill or job enqueue. At these gates
+only the stored pin is known; the registered-predicate and run-list checks belong to
+availability and to the worker. A task with a supported guarded pin passes every gate.
+A step a guard skipped (a skipped span member holding a guard receipt) answers Retry with
+409 `guard-owned-skip` before any write: retry the span's first step to decide again.
+A span's first step cannot be skipped by the user.
 Lifting the global pause succeeds for ordinary work while leaving unsupported
 tasks held: an existing per-task pause keeps its timestamp; normally a task held
 only by the global switch receives an audited administrator pause before the
@@ -891,36 +907,42 @@ were held back.
 The worker's existing boot and duplicate-advance fence remains authoritative
 for already queued work. Stop, Cancel and step Abort
 remain available; NULL and explicit empty execution contracts retain their
-existing behavior. This adds no guard evaluation, skip writer or custom fix execution.
+existing behavior.
 
-Deployment is worker first: deploy workers carrying the independent
-`worker/src/step-engine/execution-contract-support.ts` refusal before deploying an API
-that can admit active contracts. START/advance run-list construction and boot/revival
-check this worker-local capability even if shared/API admission has become permissive.
-An unsupported admitted task is marked dead with its immutable pin and resumable state
-retained; it never executes an unguarded list. Both admission and worker
-fences stay closed. A future activation must wire the worker runtime before lifting the
-local refusal, then enable API admission. Workers predating the execution contract fence (#1222)
-cannot safely receive admitted guarded tasks; upgrade them first.
+Deployment is worker first: deploy every worker replica, confirm that no older worker
+still consumes `task-queue`, then deploy the API; do not create guarded task types before
+the API step finishes. The independent `worker/src/step-engine/execution-contract-support.ts`
+check runs at START/advance run-list construction and at boot/revival even if shared/API
+admission is permissive, so a permissive shared never widens the worker. An unsupported
+admitted task is marked dead with its immutable pin and resumable state retained; it
+never executes an unguarded list.
 
-Rollback stops creation of contract-bearing types and retains nullable columns,
-the applied migration and every immutable pin. Never erase or remap a pin to
-make rollback appear safe; once P7/P8 admit active pins, retain capable workers
-for every resumable task.
+Skew fails closed. An API that admits guarded pins in front of an older worker gets the
+task marked dead at START or advance (pin and rows retained, one `task.dead` event, revived
+by the next capable worker's boot). A new worker behind an older API sees guarded create,
+START, Retry, Resume, Skip, AI Retry, submit, clarify, CLI change and pause Resume refused
+with 409 `invalid-execution-contract` and the pins held in a global-pause lift; tasks
+already running keep running. Workers that predate the execution-contract refusal have no
+check at all and must never receive guarded tasks. Custom fix targets stay refused by every
+gate.
 
-## Guard decisions (PR4a; dormant)
+Rollback stops creation of guarded types (disable them) and retains nullable columns,
+the applied migration, every immutable pin and every guard decision. Keep a capable
+worker for each resumable guarded task. Never erase or remap a pin to make rollback
+appear safe; a rolled-back API leaves guarded tasks held until a capable API returns.
 
-`worker/src/step-engine/guard-decisions.ts` adds an unwired decision service.
-The API admission, worker START/advance, boot and revival fences remain closed.
-No production caller invokes it or the dormant span skip/advance service described
-below. The decision service itself writes no skip, task pointer, recap, output,
+## Guard decisions
+
+`worker/src/step-engine/guard-decisions.ts` decides a guarded span at its entry. The
+span-entry hook ([Span entry](#span-entry)) reaches it through the skip service
+described below. The decision service itself writes no skip, task pointer, recap, output,
 event or enqueue. Ordinary NULL and explicit empty
 contracts return without opening a transaction. No scan seed is installed.
 
-A future caller supplies the owned pending span-entry row, round, rerun generation
+The caller supplies the owned pending span-entry row, round, rerun generation
 and epoch. The service reads the immutable task contract and run-list snapshot,
 locks extant task steps in id order, reads the task FOR SHARE, then validates
-the PR3 span/predicate rules under those locks. It refuses foreign owners, off-pointer
+the pinned span and predicate rules under those locks. It refuses foreign owners, off-pointer
 work, stopped, failed, dead or completed tasks and stale epochs/generations. It never creates a
 missing entry row. It considers only held rows and never waits for another step
 row after taking the task fence.
@@ -929,7 +951,7 @@ A fresh predicate receives a narrowed transaction-bound context identifying the 
 settled predecessor row at or below the decision round: exact taskStepId, producer
 round and producer generation. It must query structural rows using that identity,
 including task_dag_plans.task_step_id, rather than task-only plan selection.
-Missing, skipped, failed or unfinished producers refuse; trusted predicates must
+Missing, skipped, failed or unfinished producers refuse (`producer-not-settled`); trusted predicates must
 throw for absent/unreadable structural data. Only a literal boolean is accepted;
 exceptions and non-booleans roll back rather than becoming false. Failures keep their
 original cause and log through the sanitising logger with task/span identity; public
@@ -975,23 +997,22 @@ It currently requires same-round span-entry decisions and a pinned static list.
 A stored decision also replays on its skipped entry; no predicate runs again.
 
 No migration is needed: 0245 already appended the nullable column. Rollback reverts
-this dormant code and leaves 0245, guard_state and every execution pin intact.
-Once execution is enabled, retain capable workers for all resumable guard-bearing
+this code and leaves 0245, guard_state and every execution pin intact.
+Retain capable workers for all resumable guard-bearing
 tasks; never erase a pin or decision to permit an older worker.
 
-## Owned span skips (dormant)
+## Owned span skips
 
-`worker/src/step-engine/guard-span-skip.ts` provides the unwired skip writer and
-advance caller seam. Admission, START/advance, boot and revival still refuse
-nonempty execution contracts; a source-tree control refuses production callers
-of either guard service. No scan seed or runtime activation ships here.
+`worker/src/step-engine/guard-span-skip.ts` provides the skip writer and
+advance caller seam. A source-tree control pins `guard-entry.ts` as the only
+production caller of either guard service. No scan seed ships.
 
 The skip writer takes the same bounded id-ordered task-step batch, then the task
 FOR SHARE fence, validates owner, live status, epoch, round, pointer and entry
 generation, and revalidates the stored decision and its producer/dependency
 references. It requires run:false and never evaluates a missing decision. Every
-member must already exist in the same round among the held rows. The activation must
-materialize every member row before the decision/skip lock batch, never after
+member must already exist in the same round among the held rows. The span-entry hook
+materializes every member row before the decision/skip lock batch, never after
 taking step locks or the task fence; missing members return a non-retry refusal. A pending member
 must have no detect/form/output, apply receipt, recap, iterations, active wait or
 started/ended timing, and no unsuperseded invocation (including recap invocations)
@@ -1009,19 +1030,16 @@ adopt a newer generation's skip. No output, recap, event, task pointer or queue
 write occurs in this transaction. The unchanged entry pointer remains a durable
 handoff recovery anchor. The advance seam calls a supplied, epoch/pointer-fenced
 finished-row handoff only after commit. Failure before enqueue or loss of its
-acknowledgement can retry from the same decisions/skips without step work. A
-future runtime integration must use that fenced handoff and retain duplicate
-advance checks. Only producer-not-settled, decision-write-lost and skip-write-lost protocol reasons, plus SQLSTATE
+acknowledgement can retry from the same decisions/skips without step work. Only
+decision-write-lost and skip-write-lost protocol reasons, plus SQLSTATE
 55P03/57014/40P01/40001 (including raw lock batch errors), return retry.
 Predicate errors without a transient SQLSTATE, including deadline expiry and
 non-boolean results, refuse. Other GuardDecisionError reasons also return
 {kind: refused, reason} without handoff:
-member-not-pristine, missing-member, stale producer/decision/dependency identities,
+producer-not-settled, member-not-pristine, missing-member, stale producer/decision/dependency identities,
 malformed-state, invalid-span and lost owner/epoch/pointer fences cannot heal by
-redelivering the same job. Unknown errors propagate. The activation must handle refusal
-explicitly rather than scheduling another retry indefinitely. In particular,
-`refused` from a predicate deadline means this pass stops and an existing redrive
-path decides what happens next; it is not an instruction to immediately retry.
+redelivering the same job. Unknown errors propagate. The span-entry hook handles every
+refusal by failing the entry step, never by scheduling another retry.
 
 The runner's `holdReopenedForm` and its `nextGeneration` branch are one generation
 write, not two independent bumps. A guarded in-place new attempt consumes folded mining
@@ -1034,8 +1052,7 @@ it never evaluates a predicate or reopens a suppressed span. Missing ownership,
 stale references and suppressed entries refuse and roll consumption back. A crash
 before commit rolls everything back; a lost acknowledgement cannot bump the old pass
 again. Recovery sees the held new generation. Explicit upstream reset still clears
-that generation's decision and form through the normal reset helper. Production
-execution remains fenced; this reconciliation does not activate guarded execution.
+that generation's decision and form through the normal reset helper.
 
 Explicit upstream Retry/rerun clears forward guard decisions and skip receipts
 in the same round, including pending decisions observed after the ordered lock
@@ -1072,7 +1089,7 @@ ordinary full-step SELECT. Only
 guarded tasks widen to same-round rows at or after the target (run_seq, else
 step_index), with explicit owned handoff ids still held as before. The API's
 existing task-wide lock remains necessary for its later bulk writes. No reset
-lock_timeout is added, preserving ordinary behavior; the dormant guard services'
+lock_timeout is added, preserving ordinary behavior; the guard services'
 bounded timeouts remain unchanged.
 
 The API helper returns extra rows with their pre-reset liveness. Retry, task moves,
@@ -1088,12 +1105,54 @@ resets retain ownership of their forward cascades.
 
 Real-Postgres controls cover duplicate/stale requests, a crash after the first
 member UPDATE, enqueue cuts, both API Retry paths, worker rerun, Stop/provider
-Resume, orphan boot reset, stalled handoff and dead revival. Capability refusals
-are isolated at the test seam for these dormant recovery controls; production
-refusal controls remain unchanged. Unit variants exercise pristine-state and
-receipt checks. No DDL is added. Rollback reverts the dormant services/reset
+Resume, orphan boot reset, stalled handoff and dead revival, through the real
+capability fences. Unit variants exercise pristine-state and
+receipt checks. No DDL is added. Rollback reverts the services/reset
 support and retains migration 0245, nullable guard_state and all immutable pins;
-once execution is enabled, retain capable workers for every resumable pin.
+retain capable workers for every resumable pin.
+
+## Span entry
+
+`worker/src/step-engine/guard-entry.ts` is where a guarded span is decided. `handleAdvanceStep`
+calls `decideGuardEntry` right after it builds the run list and before any pause, provider, schema
+or admission hold, so a skipped span takes no capacity and starts no CLI. A pin with no span
+entered at this step returns without a query. A pending entry row that already holds its run:true
+decision for this span, round and generation (a redelivered job) returns without a transaction. An
+entry row past its decision (running or parked) must still hold that decision, bound to the task,
+the span, its round and generation and the pin's contract hash; one reopened without it, as Retry
+with AI or Resume do on a refused entry, fails with `guard-decision-invalid`.
+
+At a span's first step the hook materializes the entry row and every member row (`run_seq` is the
+run-list index; a duplicate insert on the step/round index re-reads the winner), then calls
+`advanceGuardSpan` with the registered predicates. The outcome decides the job:
+
+- run: the step goes on through admission and apply as any step does.
+- skipped: all members are committed skipped in one transaction and the entry goes through
+  `handleResult` with `skipped` and `redrive`. Each member is then handed off one hop at a time by
+  the existing skipped-row branch, one queue job per member; the first step after the span is the
+  next real step.
+- retry (a lost decision or skip write, lock or statement timeout, deadlock, serialization
+  failure): the hook throws `GuardRetry`. `runTaskJob` rethrows it, so the queue retries the job
+  (3 attempts, exponential backoff from 5 s). When the last attempt meets it too, the entry fails
+  with `guard-decision-invalid: retries-exhausted` and Retry on it decides again.
+- refused: the entry step fails with `guard-decision-invalid: <reason>`, `<reason>` being the
+  `GuardDecisionError` code. Retry on the entry decides again.
+- stale (the task, the entry row or the epoch changed since the job was queued, or the task was
+  cancelled): the job logs and returns; whatever superseded it owns the next step.
+
+A step inside a span, whatever its status when its job runs (absent, pending, running or parked),
+is admitted only when the latest entry row at or below its round holds a run:true decision bound
+to this task, that span, the entry's round and rerun generation, and the pin's contract hash.
+Otherwise it fails with `guard-member-refused: <reason>` (`no-decision`, `malformed-state` or
+`decision-mismatch`). A member already skipped or finished never reaches the check.
+
+A task with no pin, or a pin with no spans, is untouched. Limits: a dependent span
+(`requiresSpan`) re-entered in a later fix round has no same-round shared decision and fails
+closed (`shared-decision-unavailable`); an independent span whose predecessor is not done fails
+its entry (`producer-not-settled`) instead of waiting; a predicate that throws, times out or
+answers a non-boolean, such as one from a deactivated module, fails the entry the same way; the
+predicate also runs while the task is paused, because the hook sits before the pause hold, and
+it only reads.
 
 ## Derived overlays (PR4 of 4)
 

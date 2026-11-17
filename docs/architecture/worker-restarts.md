@@ -762,8 +762,10 @@ A task is **dead** when its current step requires an uninstalled integration pro
 names a step this install no longer registers: a module was removed, or a step its run list names
 went away (`UnresolvedStepError`). A third cause is a registered producer that cannot execute its
 pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or
-malformed execution-contract pin is another cause (`invalid-execution-contract`); guards and custom
-fix targets remain unavailable in P6. Dead is neither failed nor completed. `markTaskDead`
+malformed execution-contract pin is another cause (`invalid-execution-contract`): a custom fix
+target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
+registered step provides, or a span whose first step leads the list. Dead is neither failed nor
+completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends
 `task.dead` (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and
 otherwise tears nothing down, so a revive finds the task as it was. The api refuses every advancing
@@ -786,8 +788,9 @@ at run time.
 `provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check
 inside its transaction, including for direct callers. `reviveDeadTask` also rechecks pinned producer
 contract, host role policy and execution-contract support inside that transaction; any unsupported
-pin keeps the task dead, with no remap. Execution-contract death uses the same boot revival once a
-capable worker supports the pin. A provider restored but deactivated can revive into the integration
+pin keeps the task dead, with no remap. Execution-contract death uses the same boot revival: a task
+whose span predicate was unregistered revives on the first boot that registers it again, and every
+boot that does not leaves it dead. A provider restored but deactivated can revive into the integration
 park. This uses only resolver state, never dead-reason copy or token refresh (see
 [Integrations](integrations.md#dispatch)). The same boot pass revives a dead task once what it was
 missing resolves again: a snapshot task when its whole run list does, a snapshot-less one when the
@@ -1016,10 +1019,11 @@ latches, journals, report readers and compatible derived-pin readers for every r
 task. Reverting an executor underneath that state is unsafe. No schema migration needs
 reversal, and spent claims and attempt history are never reset.
 
-## Dormant guard-decision persistence
+## Guard decision persistence
 
-PR4a's evaluateGuardDecision service has no production caller and cannot skip or
-advance a task. Its pending span-entry decision is committed under the id-ordered
+`evaluateGuardDecision` decides a guarded span at its entry; the span-entry hook in the
+step machine calls it (see [Span entry](task-types.md#span-entry)). It writes only
+`guard_state`. Its pending span-entry decision is committed under the id-ordered
 step batch followed by the task's epoch/owner/live-status/pointer fence. The record
 uses the entry rerun generation, round, immutable contract/list hash and exact
 settled producer row identity; an epoch takeover alone preserves it. Shared
@@ -1031,7 +1035,7 @@ deadline and no usable path, progress writer or host capability. Deadline and
 predicate failures roll back and release locks rather than persisting false.
 SQL already in flight remains subject to the server-side statement deadline.
 
-A still-unwired span skip writer exists: all pristine members commit skipped
+The span skip writer commits all pristine members skipped
 under the same ordered batch then task fence, with no output or recap. Non-entry
 members carry generation-bound guard-skip receipts; duplicate and partial replay
 must match the stored entry decision. The writer moves no task pointer and queues
@@ -1040,22 +1044,21 @@ finished-row handoff. Failure before enqueue or acknowledgement loss retries the
 same decision without step execution. Skips stamp ended_at and updated_at;
 redelivery keeps that pass identity and appends one step.skipped event. Replay
 checks exact receipts and empty work fields, excluding terminal timestamps.
-The dormant advance caller retries only transient producer/write races
-and SQLSTATE 55P03/57014/40P01/40001. Permanent guard errors return a separate
-refused outcome with the reason and no handoff. The activation must materialize all span
-member rows before the decision/skip lock batch; a missing member refuses rather
-than retrying forever. Limits are capped at
+The advance caller retries only lost decision and skip writes
+and SQLSTATE 55P03/57014/40P01/40001; the hook rethrows them so the queue retries the job.
+Permanent guard errors return a separate refused outcome with the reason and no handoff: the
+entry step fails with that reason code and Retry decides again. A producer that is not done,
+a predicate error, a predicate deadline and a non-boolean answer are all permanent. The hook
+materializes all span member rows before the decision/skip lock batch; a missing member refuses
+rather than retrying forever. Limits are capped at
 2147483647 ms; late predicate writes through an ended handle are refused.
-A predicate-deadline `refused` stops this pass; an existing redrive path decides
-what happens next, rather than an immediate retry loop. Before the activation opens the
-execution fence, retain the runner's in-place generation reconciliation:
+The runner keeps its in-place generation reconciliation:
 08e can be a span entry. `holdReopenedForm` consumes mining rows before taking the
 ordered step batch and the task owner/epoch/pointer fence, then atomically rebinds
 its retained decision and dependent/shared/producer references with the generation
 bump and durable form hold. Committed skips and branch results remain unchanged.
 Crash rollback and stale-pass refusal prevent duplicate bumps or lost held forms.
-No predicate is reevaluated. The admission and worker-local capability fences stay
-closed (see Task types for worker-first deployment and rollback).
+No predicate is reevaluated. See Task types for worker-first deployment and rollback.
 
 Explicit upstream reruns (API task/step Retry and worker revise/recheck/fix reset)
 clear forward decisions and their skips, including pending entries read after the
@@ -1077,11 +1080,10 @@ leaves guard-owned skipped members closed. Park re-offer and START settlement
 clear guard_state whenever they advance rerun_generation, preventing stale replay. Stop, BullMQ boot requeue, orphan reconcile, stalled
 redrive and dead revival preserve the stored branch; an epoch takeover alone
 cannot re-evaluate it. Changed entry, dependency or producer generations still
-refuse stale replay. These services remain unwired; execution-contract admission,
-START/advance, boot and revival refusals remain authoritative. Tests isolate the
-capability check to exercise generic recovery beneath that closed fence.
-Rollback leaves nullable 0245 guard_state and immutable task pins intact. After
-activation retain capable workers while any guarded task can resume.
+refuse stale replay. The worker's capability check at START, advance, boot and revival
+stays authoritative: a pin it cannot run marks the task dead.
+Rollback leaves nullable 0245 guard_state and immutable task pins intact. Retain
+capable workers while any guarded task can resume.
 
 Ordinary worker reset locks and reads retain main's exact id sets, including
 owned handoff locks without resetting those held-only rows. Guarded pins alone

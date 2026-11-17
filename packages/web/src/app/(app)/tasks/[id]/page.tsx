@@ -3737,7 +3737,7 @@ function StepCardImpl({
     !taskCancelled &&
     !taskDead &&
     taskStatus !== 'completed' &&
-    !isAutoSkipped &&
+    (!isAutoSkipped || step.guardEntryRetryable) &&
     RETRYABLE_STEP_STATUSES.has(step.status);
   // No per-step action is possible once the task is terminally cancelled or
   // completed — there is nothing left to do on it, so every action button is

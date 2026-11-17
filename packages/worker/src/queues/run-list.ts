@@ -272,7 +272,7 @@ export async function buildRunList(
   ctx: ResolvedTaskContext,
   db: Database,
 ): Promise<StepDefinition[]> {
-  assertWorkerExecutionContractSupported(ctx.executionContract);
+  assertWorkerExecutionContractSupported(ctx.executionContract, ctx);
   assertDataEdgeSupport(ctx, stepRegistry);
   // run_app assembles its own mode-aware list from steps reused BY ID (there is no
   // full registered list for the type — only the 99-run-app-ready gate is native).

@@ -383,9 +383,9 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 160 rows × the measured 10 s model + 120 s setup = 1720 s green.
-    # 40 minutes covers 1.5 × row time (2400 s); 42 includes setup and 800 s over green.
-    timeout-minutes: 42
+    # 165 rows × the measured 10 s model + 120 s setup = 1770 s green.
+    # 42 minutes covers 1.5 × row time (2475 s); 44 includes setup and 870 s over green.
+    timeout-minutes: 44
     services:
       postgres:
         image: postgres:18-alpine
@@ -487,7 +487,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 40
+        timeout-minutes: 42
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -540,6 +540,11 @@ jobs:
           worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
           worker test/guard-decisions-db.test.ts GUARD_DECISIONS_TEST_URL guard_decisions_test pg
           worker test/guard-span-skip-db.test.ts GUARD_SPAN_SKIP_TEST_URL guard_span_skip_test pg
+          worker test/guard-span-e2e-db.test.ts GUARD_SPAN_E2E_TEST_URL guard_span_e2e_test pg
+          worker test/guard-entry-db.test.ts GUARD_ENTRY_TEST_URL guard_entry_test pg
+          worker test/guard-api-e2e-db.test.ts GUARD_API_E2E_TEST_URL guard_api_e2e_test pg
+          worker test/guard-gate-agreement-db.test.ts GUARD_GATES_TEST_URL guard_gates_test pg
+          worker test/execution-contract-old-worker-skew-db.test.ts GUARD_OLD_WORKER_TEST_URL guard_old_worker_test pg
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
           worker test/module-task-type-seed.test.ts MODULE_TASK_TYPE_SEED_TEST_URL module_task_type_seed_test pg
           worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test pg

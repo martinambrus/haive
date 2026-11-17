@@ -3,7 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, hasPgCode, schema, type Database, type DbTx } from '@haive/database';
-import { configService, logger } from '@haive/shared';
+import { configService, logger, type WorkflowType } from '@haive/shared';
+import { moduleManifestSchema } from '@haive/shared/modularity';
 import type { StepContext, StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
@@ -16,23 +17,12 @@ import { reviveDeadTask } from '../src/queues/dead-task-boot.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import { holdReopenedForm } from '../src/step-engine/step-runner.js';
 
-// Only the existing API/worker capability refusal is bypassed in this file to
-// exercise generic recovery/reset below the still-closed production fence.
-vi.mock('@haive/shared/modularity', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/shared/modularity')>()),
-  assertExecutionContractSupported: () => {},
-}));
-vi.mock('../src/step-engine/execution-contract-support.js', () => ({
-  assertWorkerExecutionContractSupported: () => {},
-}));
-vi.mock('../../api/src/lib/execution-contract-admission.js', () => ({
-  assertExecutionContractUsable: () => {},
-}));
 vi.mock('../../api/src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => {} }) }));
 vi.mock('../../api/src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
 // Runtime cross-package test seam; keep the API source out of the worker's tsc root.
 const apiRequire = createRequire(new URL('../../api/package.json', import.meta.url));
 const { Hono } = apiRequire('hono');
+const apiSource = (rel: string) => new URL(`../../api/src/${rel}`, import.meta.url).pathname;
 const apiStepsPath = new URL('../../api/src/routes/tasks/steps.ts', import.meta.url).pathname;
 const apiControlPath = new URL('../../api/src/lib/task-control.ts', import.meta.url).pathname;
 const apiErrorPath = new URL('../../api/src/middleware/error-handler.ts', import.meta.url).pathname;
@@ -97,11 +87,27 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
       .returning();
     userId = u!.id;
     state.userId = userId;
+    const { registerModuleExecutionPredicates } = await import(
+      apiSource('modules/execution-predicates.ts')
+    );
+    registerModuleExecutionPredicates(
+      [{ executionPredicates: [{ id: 'guard', argsSchema: z.strictObject({}) }] }],
+      [
+        {
+          manifest: moduleManifestSchema.parse({
+            id: 'fx',
+            name: 'Fx',
+            version: '1',
+            schemaVersion: 1,
+          }),
+        },
+      ],
+    );
     for (const id of ids)
       stepRegistry.register({
         metadata: {
           id,
-          workflowType: 'workflow',
+          workflowType: id === 'plan' ? ('module.fx' as WorkflowType) : 'workflow',
           index: ids.indexOf(id),
           title: id,
           description: '',
@@ -109,6 +115,13 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
         },
         detect: async () => ({}),
         apply: async () => ({}),
+        ...(id === 'plan'
+          ? {
+              guardPredicates: {
+                guard: { argsSchema: z.strictObject({}), evaluate: async () => false },
+              },
+            }
+          : {}),
       } as StepDefinition);
   });
   afterAll(async () => {
@@ -230,6 +243,19 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
       reason: 'missing-member',
     });
     expect(handoff).not.toHaveBeenCalled();
+  });
+  it('F6 an unsettled predecessor is a refusal, never a retry', async () => {
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'pending' })
+      .where(eq(schema.taskSteps.id, rows.plan!.id));
+    const handoff = vi.fn();
+    expect(await advanceGuardSpan(ctx, 'work', predicates, handoff)).toEqual({
+      kind: 'refused',
+      reason: 'producer-not-settled',
+    });
+    expect(handoff).not.toHaveBeenCalled();
+    expect(evaluate).not.toHaveBeenCalled();
   });
   it('rolls back a partial-skip crash and replays the already committed decision', async () => {
     await decide();
