@@ -3,8 +3,8 @@
 > **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
 > eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
 > lexical configuration have since shipped. P2(b)/(c) remain parked (T144/T147), as does index-space
-> work (T149); P3/P4 are conditional proposals. A reproducible current eval still gates ranking
-> changes; historical scratch results alone do not satisfy that gate. The original status was stale. Seven external
+> work (T149); P3/P4 are conditional proposals. The committed shared-source eval below supplies a reproducible baseline; ranking
+> changes still require held-out comparisons, including negative and overview results. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
 > 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
 > change belongs to: a new source goes into Sources reviewed, a re-measured number replaces the old
@@ -377,12 +377,12 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
 
 ### P0. Retrieval eval (gates everything)
 
-A golden set in the cookbook's shape, each query labelled with the chunk or chunks that answer it,
-built on the dev repository: synthetic questions per sampled chunk plus hand-judged real agent
-queries. Synthetic questions share vocabulary with their chunk, which flatters lexical matching, so
-they never stand alone. Overview questions, the few F12 finds, can be generated as S4 does, from
-invented users and tasks and a description of the repository rather than its text; they have no
-single gold chunk, so they are judged in pairs instead of scored by recall. A script reports
+The committed public fixture uses authored identifier questions, paraphrases without identifiers,
+judged overview questions and no-answer questions over the pinned Haive shared-source tree.
+Identifier questions share vocabulary with their source, which flatters lexical matching, so they
+never stand alone. Overview questions have multi-fact source rubrics and pair judgments, not a
+single gold chunk; their evidence coverage is reported separately from recall. Private logged
+queries remain outside the committed set. A script reports
 recall@k and MRR for k in {5, 8, 12, 20} against a store built from the current chunker, and its
 numbers are recorded here as the baseline. It also reports the dense pool's recall against an exact
 search on the same queries (S7's flat baseline), since the HNSW path keeps 40 candidates by
@@ -390,7 +390,113 @@ approximation (F14). The existing nullable `result_hits` column on `rag_query_lo
 ranker's rank) records final hit identity/order; it does not by itself freeze the historical corpus or
 reproduce search. Keep it; do not add a second `hits` column or replay migration 0180.
 
-**Baseline (2026-10-12).** A scratch store `haive_rag_p0_eval` built by `rag-build-store.ts` from
+**Reproducible baseline (2026-11-17).** The committed, non-private Haive fixture is
+[`packages/worker/test/fixtures/rag-eval/`](../../packages/worker/test/fixtures/rag-eval/).
+`manifest.json` pins the corpus/config; `queries.json` fixes labels, languages and splits;
+`baseline-{hybrid,lexical}.json` retains compact per-query scores; report summaries are recomputed;
+`baseline-provenance.json` records precisely which code and runtime produced them.
+The old private 2026-10-12 table below is history, not a grading set.
+
+The store held 2,141 code chunks, zero hash-fallback rows, from the scoped Haive shared source
+at `b8a2dde4def9b442d85c426ce771c72ae7c8ffee`. The dry run preceded the 161-second local
+Ollama build. The scratch database `haive_rag_rge_s_codex2_20261117` was dropped after measurement;
+`pg_database` verification returned 0. Neither the old P0 database nor any live store was used.
+There were no paid model calls, service restarts, app source edits or container artifact rebuilds.
+All 180 queries remain present; all 204 source/rubric anchors validate at the pinned commit,
+and all 144 positive golds are in the store. Each arm uses production retrieval unchanged.
+
+| group | n | hybrid recall@8 [95% CI] | hybrid MRR@8 | lexical recall@8 [95% CI] | lexical MRR@8 |
+|---|---:|---|---:|---|---:|
+| all answerable | 144 | 0.861 [0.799, 0.917] | 0.640 | 0.403 [0.319, 0.486] | 0.389 |
+| identifier | 72 | 0.972 [0.931, 1.000] | 0.811 | 0.792 [0.694, 0.889] | 0.764 |
+| paraphrase | 72 | 0.750 [0.639, 0.847] | 0.469 | 0.014 [0.000, 0.042] | 0.014 |
+| English | 48 | 0.875 [0.771, 0.958] | 0.658 | 0.417 [0.271, 0.562] | 0.403 |
+| French | 48 | 0.875 [0.771, 0.958] | 0.642 | 0.396 [0.250, 0.542] | 0.382 |
+| Slovak | 48 | 0.833 [0.729, 0.938] | 0.619 | 0.396 [0.250, 0.542] | 0.382 |
+| tuning | 72 | 0.861 [0.778, 0.931] | 0.679 | 0.431 [0.319, 0.542] | 0.403 |
+| held-out | 72 | 0.861 [0.778, 0.931] | 0.600 | 0.375 [0.264, 0.486] | 0.375 |
+
+Every class/language/split cell at k=8 (positive cells: recall / MRR, with recall CI;
+overview: judged fact coverage; no-answer: dense-threshold FPR using the globally fixed tuning tau). This exact cell table is emitted by the committed report CLI with `--cells`; all page sizes are recomputed from the compact JSONs.
+
+| class | language | split | n | hybrid metric [95% CI] | lexical metric [95% CI] |
+|---|---|---|---:|---|---|
+| identifier | en | tuning | 12 | 1.000 [1.000, 1.000] / 0.878 | 0.833 [0.583, 1.000] / 0.778 |
+| identifier | fr | tuning | 12 | 1.000 [1.000, 1.000] / 0.836 | 0.833 [0.583, 1.000] / 0.778 |
+| identifier | sk | tuning | 12 | 1.000 [1.000, 1.000] / 0.878 | 0.833 [0.583, 1.000] / 0.778 |
+| paraphrase | en | tuning | 12 | 0.833 [0.583, 1.000] / 0.590 | 0.083 [0.000, 0.250] / 0.083 |
+| paraphrase | fr | tuning | 12 | 0.667 [0.417, 0.917] / 0.441 | 0.000 [0.000, 0.000] / 0.000 |
+| paraphrase | sk | tuning | 12 | 0.667 [0.417, 0.917] / 0.451 | 0.000 [0.000, 0.000] / 0.000 |
+| identifier | en | held-out | 12 | 0.917 [0.750, 1.000] / 0.757 | 0.750 [0.500, 1.000] / 0.750 |
+| identifier | fr | held-out | 12 | 1.000 [1.000, 1.000] / 0.763 | 0.750 [0.500, 1.000] / 0.750 |
+| identifier | sk | held-out | 12 | 0.917 [0.750, 1.000] / 0.753 | 0.750 [0.500, 1.000] / 0.750 |
+| paraphrase | en | held-out | 12 | 0.750 [0.500, 1.000] / 0.406 | 0.000 [0.000, 0.000] / 0.000 |
+| paraphrase | fr | held-out | 12 | 0.833 [0.583, 1.000] / 0.529 | 0.000 [0.000, 0.000] / 0.000 |
+| paraphrase | sk | held-out | 12 | 0.750 [0.500, 1.000] / 0.396 | 0.000 [0.000, 0.000] / 0.000 |
+| overview | en | tuning | 3 | 0.528 [0.333, 0.750] | 0.000 [0.000, 0.000] |
+| overview | fr | tuning | 3 | 0.250 [0.000, 0.500] | 0.000 [0.000, 0.000] |
+| overview | sk | tuning | 3 | 0.250 [0.000, 0.500] | 0.000 [0.000, 0.000] |
+| overview | en | held-out | 3 | 0.333 [0.000, 1.000] | 0.000 [0.000, 0.000] |
+| overview | fr | held-out | 3 | 0.250 [0.000, 0.750] | 0.000 [0.000, 0.000] |
+| overview | sk | held-out | 3 | 0.250 [0.000, 0.750] | 0.000 [0.000, 0.000] |
+| no-answer | en | tuning | 3 | 1.000 [1.000, 1.000] | 1.000 [1.000, 1.000] |
+| no-answer | fr | tuning | 3 | 0.667 [0.000, 1.000] | 1.000 [1.000, 1.000] |
+| no-answer | sk | tuning | 3 | 0.000 [0.000, 0.000] | 1.000 [1.000, 1.000] |
+| no-answer | en | held-out | 3 | 1.000 [1.000, 1.000] | 1.000 [1.000, 1.000] |
+| no-answer | fr | held-out | 3 | 0.000 [0.000, 0.000] | 1.000 [1.000, 1.000] |
+| no-answer | sk | held-out | 3 | 0.667 [0.000, 1.000] | 1.000 [1.000, 1.000] |
+
+| k (144 answerable queries) | hybrid recall / MRR | lexical recall / MRR |
+|---|---|---|
+| 5 | 0.819 / 0.633 | 0.403 / 0.389 |
+| 8 | 0.861 / 0.640 | 0.403 / 0.389 |
+| 12 | 0.896 / 0.643 | 0.403 / 0.389 |
+| 20 | 0.951 / 0.647 | 0.403 / 0.389 |
+| 50 | 0.965 / 0.647 | 0.403 / 0.389 |
+
+Overview coverage@8 (18 queries) is 0.310 [0.167, 0.463] hybrid versus 0.000 [0.000, 0.000] lexical.
+The unblinded, source-evidence pair judgments in `overview-judgments.json` give hybrid 10 wins,
+8 ties where neither page covers a complete rubric fact, and zero lexical wins; this does not
+measure generated-answer quality. Secondary any-hit FPR@8 (18 queries) is 1.000 [1.000, 1.000] hybrid versus
+0.000 [0.000, 0.000] lexical. Hybrid's mean maximum RRF is 0.016,
+mean maximum dense similarity 0.491; these are diagnostics, not
+calibrated answerability probabilities. Negative/overview queries never enter recall/MRR.
+
+The paired lexical→hybrid recall@8 delta is 0.458 [0.375, 0.542], 66 wins / 0 losses /
+78 ties over 144 positive queries; held-out delta is 0.486 [0.375, 0.597],
+35 / 0 / 37 over 72. On the primary dense-threshold FPR at k=8, lexical→hybrid has 8 negative-query wins / 0 losses / 10 ties; any-hit alone has 18 losses.
+CIs use 2,000 paired query-bootstrap samples, xorshift32 seed 1729, percentile 95%; translations
+are correlated, so these describe this fixture rather than independent topic/population uncertainty.
+Ranking knobs stayed fixed; only the answerability threshold below uses tuning positives.
+
+The verified forced-HNSW dense overlap@50 is 0.999 [0.999, 1.000], with 50 index and 50 exact
+rows for all 180 queries. The production/default planner chose exact search for 180/180 at this
+small size; forced HNSW is a separate diagnostic, not its production plan. Scope limits remain:
+this shared-source fixture has no KB/global rows, other programming languages or private traffic,
+so it does not establish knowledge-reserve/global-merge or cross-repository quality.
+
+
+
+Dense answerability at k=8 (162 answerable, including 18 overview; 18 no-answer).
+Tau is fixed using 81 tuning positives, then applied unchanged to 81 held-out positives
+and 9 held-out no-answer queries. It is a diagnostic, not a production search threshold.
+
+| arm | tau | AUROC all / tuning / held-out | tuning retention | held-out retention | held-out FPR |
+|---|---:|---|---:|---:|---:|
+| hybrid | 0.460396 | 0.812 / 0.790 / 0.845 | 0.901 | 0.951 | 0.556 |
+| lexical | 0.000000 | 0.500 / 0.500 / 0.500 | 1.000 | 1.000 | 1.000 |
+
+The held-out hybrid no-answer result is **weak**: 5 of 9 negatives accepted
+(FPR 0.556; Wilson 95% interval [0.267, 0.811]).
+The interval is descriptive; translated queries share topics and are correlated.
+
+Lexical-only scores are all zero: AUROC 0.5, tau 0 accepts everything. Its lack of returned
+negative hits therefore does not imply useful dense answerability. The primary no-answer result
+is held-out dense-threshold FPR; any-hit FPR is secondary. All queries retain k=8 top-dense
+similarity and top-lexical flags. Every manifest byte edit invalidates the fixture fingerprint
+and requires fresh baselines.
+
+**Historical baseline (2026-10-12; private, untracked, not reproducible).** A scratch store `haive_rag_p0_eval` built by `rag-build-store.ts` from
 the current chunker over the scoped tree plus the repository KB (20,839 chunks, 0 hash vectors).
 The golden set (kept untracked, outside git) holds 296 queries and 438 golds, each gold a source
 path plus a string from the chunk body: 100 synthetic questions that reuse the chunk's identifiers,
@@ -420,8 +526,9 @@ all original questions in the denominator: a gold span lost by chunking is a mis
 delete. Report by query class and language, include no-answer queries, and separate tuning from
 held-out grading. Compare the same corpus/config, with paired per-query changes and uncertainty;
 20 valid spot checks do not establish every gold's correctness. Public fixtures must not contain
-client code or logged private queries. Main `TASKS.md` explicitly parks T144/T147 until such an
-eval exists, despite the historical P0 table here.
+client code or logged private queries. Main `TASKS.md` parked T144/T147 pending such an
+eval. The committed shared-source baseline supplies that scoped prerequisite; each ranking PR
+still needs the same corpus/config, held-out comparisons, and explicit negative/overview results.
 
 ### P1. Chunker corrections, shipped as one reindex
 
@@ -584,7 +691,171 @@ file's chunks at the next sync.
   `hnsw.iterative_scan` set. Bind the query vector as a parameter or a scalar subquery: one taken
   from a join cannot use the index.
 - **F15.** Compare `pg_relation_size('idx_rag_vector_hnsw')` with the table's live row count.
-- **P0 baseline.** Build a scratch store with `rag-build-store.ts` (`RAG_DRY_RUN=1` first; it
-  refuses the eval and live stores by name and resumes by `chunk_hash`), then run `rag-eval.ts` in
-  `haive-worker` with `RAG_PROJECT`, `RAG_QUERY_SET`, `RAG_REPOSITORY_ID`, `RAG_DENSE_CHECK=1` and
-  `RAG_OUT`, once as is and once with `RAG_LEXICAL_ONLY=1`.
+- **P0 baseline.** Use the committed fixture and rerun protocol below. Keep the source tree,
+  query/label set, model/digest, dimensions and index protocol fixed for a paired experiment.
+
+### Reproduce or compare the committed fixture
+
+The public baseline is `packages/worker/test/fixtures/rag-eval/`: `manifest.json` pins the
+Haive source tree (`b8a2dde4def9b442d85c426ce771c72ae7c8ffee`), all 262 allowlisted source
+hashes, collector/chunker hashes, the local model digest, dimensions, and index/search settings.
+`queries.json` holds 180 authored questions, not logged queries: 72 identifier, 72 paraphrase,
+18 overview and 18 no-answer; English, French and Slovak are equally represented. Only query
+language changes. The corpus is production TypeScript under `packages/shared/src`; tests,
+other packages, docs, dependencies, generated files and managed knowledge are excluded.
+The materialized tree has no Git index, so the default secret policy also excludes
+`config/secrets.service.ts`. Nine collected files yield no chunks; 252 files yield 2,141 chunks.
+There are no KB/global rows: this baseline cannot establish knowledge-reserve or global-merge
+quality. It tests Haive's shared-source scope, not the historical client-code corpus.
+
+Every positive label is a source path and body anchor. `anchors.json` is a script-generated
+snapshot of the 24 distinct path/anchor pairs, with each pinned file hash and context lines.
+Unit tests validate all 204 references against this snapshot without Git history. A separate
+`skipIf` test checks all corpus hashes and regenerates the snapshot when `git cat-file -e` can
+read the pinned commit; otherwise its test name explains the skip and other tests still run.
+Regenerate deliberately with `tsx scripts/rag-eval-fixture.ts --snapshot` after fixture edits. A lost indexed span remains a miss. Topic variants, translations and overview
+supporting evidence share one split; neither labels nor queries cross from tuning into grading.
+Overview uses author-judged multi-fact rubrics, reported as evidence coverage (a fact needs any
+supporting anchor in returned bodies), never single-gold recall or generated-answer quality.
+For answerability, each query records `signal` at k=8: maximum returned dense similarity
+(zero for an empty/lexical-only page), plus whether the first hit has an FTS or identifier rank.
+AUROC distinguishes all answerable queries (including overview) from no-answer, with half
+credit for ties. Set tau to the highest observed tuning-positive score retaining at least
+90% of tuning positives (ceil(0.9*n), score >= tau), then apply it unchanged to held-out.
+Report held-out FPR and retention, plus AUROC by split. `answerability[k].groups` grades every
+class/language/split/cell using this one globally fixed tau; cells never fit their own cutoff.
+Each negative group includes accepted/total counts, bootstrap `fprCI` and `fprWilson95`.
+Any-hit FPR in `groups.*[k].noAnswer` remains secondary.
+Lexical-only has zero dense scores; its AUROC is 0.5 and tau=0 accepts everything, demonstrating
+that it has no dense answerability signal. This is an offline diagnostic, not a production gate. Overview and no-answer never
+enter recall/MRR. No paid provider or generation call is needed.
+
+Run from a checkout containing the fixture and its pinned Git history, with dependencies and
+libraries built. First validate/materialize, into a newly created empty directory:
+
+```bash
+RGE_TREE=$(mktemp -d /tmp/haive-rge-tree.XXXXXX)
+pnpm --filter @haive/worker exec tsx scripts/rag-eval-fixture.ts "$RGE_TREE" > /tmp/rge-verified.json
+```
+
+Before using the dev embedder, run the idle check below and wait while its count is nonzero.
+Never restart services for this eval. `docker exec` runs diagnostics in the existing worker;
+it does not install dependencies or rebuild any runtime artifact.
+
+```bash
+docker exec haive-postgres psql -U haive -d haive -tAc \
+  'select count(*) from cli_invocations where ended_at is null and started_at is not null'
+docker exec haive-worker mkdir -p /tmp/rge-eval/tree /tmp/rge-eval/runtime/scripts
+docker cp "$RGE_TREE/." haive-worker:/tmp/rge-eval/tree/
+docker cp packages/worker/test/fixtures/rag-eval/queries.json haive-worker:/tmp/rge-eval/queries.json
+docker cp packages/worker/test/fixtures/rag-eval/manifest.json haive-worker:/tmp/rge-eval/manifest.json
+```
+
+If the container cannot see this checkout, copy the five eval scripts into the isolated temporary
+runtime and link its dependencies/source to the existing container checkout. The module marker
+is necessary for ESM. Check and record the container's actual Git commit, builder/chunker/collector
+and shared source **and dist** hashes: a baseline/candidate must use the intended production code.
+The measured baseline used main at `c29624d84fd091a9fb8adf4f03d59e3143c9caf4` for builder/production
+code (matching the pinned parent in all measured code paths), plus the five eval scripts at
+measurement time. `baseline-provenance.json` retains their measured SHA-256 values and separately
+records the committed fixture-helper hash: snapshot/drift helpers were added after measurement;
+the fingerprint expression is unchanged, now the named export `fixtureFingerprint`. The report was later extended offline for cell FPR,
+Wilson intervals and paired threshold diagnostics; the compact measurement records are unchanged.
+No live application source was edited.
+
+```bash
+docker exec haive-worker ln -s /app/packages/worker/node_modules /tmp/rge-eval/runtime/node_modules
+docker exec haive-worker ln -s /app/packages/worker/src /tmp/rge-eval/runtime/src
+docker exec haive-worker sh -c 'printf "{\"type\":\"module\"}\n" > /tmp/rge-eval/runtime/package.json'
+docker exec haive-worker cp /app/packages/worker/scripts/rag-build-store.ts /tmp/rge-eval/runtime/scripts/
+for RGE_SCRIPT in rag-eval.ts rag-eval-fixture.ts rag-eval-metrics.ts rag-eval-report.ts rag-eval-dense.ts; do
+  docker cp "packages/worker/scripts/$RGE_SCRIPT" "haive-worker:/tmp/rge-eval/runtime/scripts/$RGE_SCRIPT"
+done
+```
+
+Check the local Ollama `/api/tags` model digest against the manifest before building; use only
+`qwen3-embedding:4b` (2560 dimensions), never a cloud alias. The measured versions were Ollama
+0.40.16, PostgreSQL 18.7, pgvector 0.8.7, unaccent 1.1. HNSW uses `halfvec(2560)` cosine,
+default construction `m=16, ef_construction=64`; per-repository reads use `ef_search=200`,
+`cpu_operator_cost=0.1`, iterative `relaxed_order`. First run the no-write dry run:
+
+```bash
+docker exec -e RAG_TREE=/tmp/rge-eval/tree -e RAG_DRY_RUN=1 \
+  -e RAG_EXTENSION_SET='[".ts"]' -e RAG_OWN_PATHS='["packages/shared/src"]' \
+  -w /app/packages/worker haive-worker ../../node_modules/.bin/tsx scripts/rag-build-store.ts
+RGE_STORE="rge_eval_$(date -u +%Y%m%d_%H%M%S)"
+RGE_REPO=$(node -p 'require("crypto").randomUUID()')
+docker exec -e RAG_TREE=/tmp/rge-eval/tree -e RAG_STORE="$RGE_STORE" \
+  -e RAG_REPOSITORY_ID="$RGE_REPO" -e RAG_EXTENSION_SET='[".ts"]' \
+  -e RAG_OWN_PATHS='["packages/shared/src"]' -w /app/packages/worker \
+  haive-worker ../../node_modules/.bin/tsx scripts/rag-build-store.ts
+for RGE_MODE in hybrid lexical; do
+  RGE_LEXICAL=0
+  if [ "$RGE_MODE" = lexical ]; then RGE_LEXICAL=1; fi
+  docker exec -e RAG_QUERY_SET=/tmp/rge-eval/queries.json \
+    -e RAG_PROJECT="$RGE_STORE" -e RAG_REPOSITORY_ID="$RGE_REPO" \
+    -e RAG_LEXICAL_ONLY="$RGE_LEXICAL" -e RAG_DENSE_CHECK="$((1-RGE_LEXICAL))" \
+    -e RAG_OUT="/tmp/rge-eval/$RGE_MODE.json" -w /app/packages/worker \
+    haive-worker ../../node_modules/.bin/tsx /tmp/rge-eval/runtime/scripts/rag-eval.ts
+  docker cp "haive-worker:/tmp/rge-eval/$RGE_MODE.json" "/tmp/rge-$RGE_MODE.json"
+done
+```
+
+Dense checking excludes task rows, verifies the forced HNSW plan (disabling the sort as well
+as sequential/bitmap scans), and compares its top 50 to an exact halfvec scan. Disabling only
+sequential scans can still select the repository btree plus a sort and falsely report perfect
+approximation recall. Each diagnostic setting stays in its read-only transaction. The default
+production plan is reported independently; a small store can correctly choose exact search.
+
+`rag-eval.ts` computes its fingerprint from the exact manifest and query bytes; `RAG_MANIFEST`
+defaults to `manifest.json` beside `RAG_QUERY_SET`. Any manifest edit, including whitespace or
+provenance, invalidates both baselines and requires remeasurement. There is no operator-supplied id.
+
+`RAG_OUT` includes all pages (5, 8, 12, 20, 50), source bodies for rubric inspection, per-query
+scores and summary cells. Set `RAG_COMPACT=1` to write only minified query records, or use exported
+`compactRun` on saved output. Committed baselines are below 150 KB each: all page scores, query
+metadata, label SHA-256 and k=8 signals remain; duplicate golds, hit bodies, summaries, milliseconds
+and per-query dense-pool dumps are omitted (lost golds alone are retained to preserve missing counts).
+Dense-pool aggregate results remain in provenance; full run output stays in external evidence.
+The report recomputes class/language/split/cell summaries, CIs, AUROC and the fixed-threshold FPR.
+`--cells` emits the exact Markdown cell table above from the same summary code:
+
+```bash
+pnpm --filter @haive/worker exec tsx scripts/rag-eval-report.ts \
+  test/fixtures/rag-eval/baseline-hybrid.json
+pnpm --filter @haive/worker exec tsx scripts/rag-eval-report.ts --cells \
+  test/fixtures/rag-eval/baseline-hybrid.json test/fixtures/rag-eval/baseline-lexical.json
+pnpm --filter @haive/worker exec tsx scripts/rag-eval-compare.ts \
+  test/fixtures/rag-eval/baseline-lexical.json test/fixtures/rag-eval/baseline-hybrid.json /tmp/rge-comparison.json
+```
+
+The report also hashes HEAD's committed chunker/collector/builder blobs against
+`manifest.chunker.files` and prints a warning on drift or unreadable files. It never fails solely
+for drift. This warning is tested; it does not silently update or bless a stale baseline.
+
+The comparison refuses mismatched fingerprints, ids, labels, metadata, metric versions and
+missing pages/scores. Deltas are candidate minus baseline; wins/losses/ties use higher recall,
+MRR and coverage, and lower negative dense-threshold `fpr`. Each arm fixes its own global tau
+using only its tuning positives; that tau is held fixed across all held-out and cell comparisons.
+`answerability[k].before/after` reports each arm’s tau, AUROC, FPR and retention by split and group.
+Secondary `anyHit` and `maxRrf` deltas also prefer lower values. The compact baselines retain dense
+signals only at k=8: other k values have null answerability and per-query `fpr`, with no grouped
+`fpr` metric; any-hit never substitutes for it. It reports every query and every marginal/cell,
+with a paired query bootstrap (2,000 samples, xorshift32 seed 1729, percentile 95% CI). Do not use
+a new fixture id to hide an indexer's misses. Only change an experiment knob deliberately,
+record it, and use the same frozen corpus/labels/model/index protocol. Translations are correlated:
+these CIs describe this query set, not independent topics or unseen repositories. Cell-table CIs use the seeded bootstrap;
+the primary held-out no-answer result also gives a Wilson 95% interval because n=9 is small.
+Small-group CIs and constant-outcome bootstrap intervals are descriptive, not guarantees. Grade held-out separately;
+no ranking setting was tuned on either split in this baseline PR.
+
+After saving evidence, close connections and drop **only** the freshly named scratch database:
+
+```bash
+docker exec haive-postgres dropdb -U haive "haive_rag_$RGE_STORE"
+docker exec haive-postgres psql -U haive -d haive -tAc \
+  "select count(*) from pg_database where datname='haive_rag_$RGE_STORE'"
+```
+
+The second command must return 0. Never reuse or drop `haive_rag_p0_eval` or any live store.
+Rollback is reverting the eval commit; it changes no production search, schema or live data.

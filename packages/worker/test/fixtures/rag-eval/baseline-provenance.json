@@ -111,7 +111,7 @@
     "committedAt": "a987f7e58",
     "committedFileSha256": "3b9a59e2a60513774cfc6f490f310cd1c93f21c22597dbad94312f3edf31b192",
     "fixtureFingerprintSourceSha256": "da9ea2f65b0b771e01302dc28c9665a7b815a66c303c049f75ff646a5b337f47",
-    "note": "rag-eval-fixture.ts was extended after measurement with the history-free anchor snapshot and warn-only HEAD drift helpers. fixtureFingerprint and sha256 are unchanged. The hashes map above records the measured runtime bytes; this committed-file hash records the extended helper, not the measured file."
+    "note": "rag-eval-fixture.ts was extended after measurement with the history-free anchor snapshot and warn-only HEAD drift helpers. The fingerprint expression sha256(manifest + newline + queries) is unchanged, now a named export (fixtureFingerprint); the committed baselines still match it. The hashes map above records the measured runtime bytes; this committed-file hash records the extended helper, not the measured file."
   },
   "postMeasurementReportNote": "Round 3 extends offline reports with per-cell tau FPR, Wilson intervals and paired threshold FPR/AUROC; the measured runtime report hash above is preserved. Both compact baseline files and the manifest/query fingerprint are unchanged; no new retrieval measurement."
 }
