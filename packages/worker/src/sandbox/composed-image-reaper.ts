@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process';
 import { logger } from '@haive/shared';
 import { COMPOSED_IMAGE_REPO } from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
+import { withImageTagLock } from './image-tag-lock.js';
 
 const log = logger.child({ module: 'composed-image-reaper' });
 
 // Composed sandbox images (`haive-sandbox:<hash>`) are hash-cached for cross-task
 // reuse and nothing ever removed them, so they accumulate one image per unique
 // (env-template, provider, rtk) build forever. Evict tags older than this that no
-// running container uses. Removal is safe: a live task that still needs an evicted
+// container uses. Removal is safe: a live task that still needs an evicted
 // tag simply rebuilds it on next use (a cache miss — self-healing, never broken).
 // Override with HAIVE_COMPOSED_IMAGE_MAX_AGE_DAYS.
 const DEFAULT_MAX_AGE_DAYS = 14;
@@ -22,7 +23,7 @@ export function composedImageMaxAgeMs(): number {
 export interface ComposedImageInfo {
   /** `haive-sandbox:<hash>` tag used to remove the image. */
   ref: string;
-  /** `sha256:...` image id, matched against running-container images. */
+  /** `sha256:...` image id, matched against container images. */
   id: string;
   createdAtMs: number;
 }
@@ -58,18 +59,24 @@ export async function reapStaleComposedImages(
     if (refs.length === 0) return 0;
     const [images, running] = await Promise.all([
       inspectComposedImages(refs),
-      listRunningImageRefs(),
+      listContainerImageRefs(),
     ]);
     const stale = selectStaleComposedImages(images, running, nowMs, maxAgeMs);
     if (stale.length === 0) return 0;
 
     let reaped = 0;
     for (const ref of stale) {
-      // `docker image rm -f` still refuses an image backing a running container
-      // (fails cleanly), so a container we didn't catch above is never nuked.
-      const rm = await runner.remove(ref);
-      if (rm.ok) reaped += 1;
-      else log.warn({ ref, stderr: rm.stderr }, 'stale composed image removal failed (kept)');
+      await withImageTagLock(ref, async () => {
+        const candidate = images.find((image) => image.ref === ref)!;
+        const current = await runner.inspect(ref);
+        // The listing may predate a build that held this turn. Never remove its
+        // replacement using the old image's age. No force: Docker is the final
+        // authority for containers created after our snapshot, stopped included.
+        if (!current.exists || current.imageId !== candidate.id) return;
+        const rm = await runner.remove(ref, { force: false });
+        if (rm.ok) reaped += 1;
+        else log.warn({ ref, stderr: rm.stderr }, 'stale composed image removal failed (kept)');
+      });
     }
     if (reaped > 0) {
       log.info({ reaped, candidates: images.length }, 'stale composed sandbox images reaped');
@@ -145,7 +152,7 @@ async function inspectComposedImages(refs: string[]): Promise<ComposedImageInfo[
   return out;
 }
 
-async function listRunningImageRefs(): Promise<Set<string>> {
-  const lines = await dockerLines(['ps', '--no-trunc', '--format', '{{.Image}}']);
+async function listContainerImageRefs(): Promise<Set<string>> {
+  const lines = await dockerLines(['ps', '--all', '--no-trunc', '--format', '{{.Image}}']);
   return new Set(lines);
 }

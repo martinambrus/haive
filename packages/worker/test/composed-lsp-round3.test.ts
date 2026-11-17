@@ -8,6 +8,7 @@ import { shellQuote } from '../src/sandbox/shell-quote.js';
 
 function body(server: string, pin?: string) {
   return composeSandboxImage({
+    lspInstallContractVersion: 2,
     envTemplateDockerfile: 'FROM ubuntu:24.04\n',
     provider: { name: 'claude-code', cliVersion: null, sandboxDockerfileExtra: null },
     lspServers: [server],

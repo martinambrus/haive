@@ -179,7 +179,7 @@ export interface DockerRunner {
   build(opts: DockerBuildOpts): Promise<DockerBuildResult>;
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
   inspect(tag: string): Promise<DockerInspectResult>;
-  remove(ref: string): Promise<DockerRemoveResult>;
+  remove(ref: string, opts?: { force?: boolean }): Promise<DockerRemoveResult>;
   volumeCreate(name: string): Promise<DockerVolumeOpResult>;
   volumeExists(name: string): Promise<boolean>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
@@ -437,8 +437,9 @@ export const defaultDockerRunner: DockerRunner = {
     return { exists: false, imageId: null };
   },
 
-  async remove(ref) {
-    const result = await spawnAndCollect('docker', ['image', 'rm', '--force', ref], {
+  async remove(ref, opts) {
+    const args = ['image', 'rm', ...(opts?.force === false ? [] : ['--force']), ref];
+    const result = await spawnAndCollect('docker', args, {
       timeoutMs: 30_000,
     });
     return {

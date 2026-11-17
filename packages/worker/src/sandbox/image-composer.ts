@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 import {
   assertVersionToken,
   DEFAULT_RTK_VERSION,
-  getCliProviderMetadata,
   imageRepo,
   type CliProviderName,
 } from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 import { buildLspLayer } from './lsp-layer.js';
+import { resolveComposedLspInstallContract } from './lsp-install-contract.js';
 
 export const SANDBOX_CORE_IMAGE = `${imageRepo('cli-sandbox')}:latest`;
 
@@ -50,18 +50,22 @@ export interface ComposeInput {
    * which forces a fresh composed-image build when the repo's rtk pin changes.
    */
   rtkVersion?: string | null;
-  /** Opt-in composed LSP installer. Production cache callers retain the environment
-   * template installer until verification and template versioning switch together.
+  /** Saved declaredDeps contract. Absent/1 keeps environment-owned installation
+   * and ignores composed selection/pins. Unknown persisted versions fail closed. */
+  lspInstallContractVersion?: unknown;
+  /** Opt-in composed LSP installer. Only contract 2 selects recipes; legacy
+   * templates retain their environment installer until the later writer cutover.
    * Accepts persisted language or server keys; unsupported selections fail explicitly. */
   lspServers?: readonly string[] | null;
   lspServerVersions?: Readonly<Record<string, string | null>> | null;
 }
 
 export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
-  const lspLayer = buildLspLayer(input.lspServers, input.lspServerVersions);
-  if (lspLayer && !getCliProviderMetadata(input.provider.name).supportsLsp) {
-    throw new Error(`${input.provider.name} does not expose Haive LSP plugin support`);
-  }
+  const contract = resolveComposedLspInstallContract(
+    input.lspInstallContractVersion,
+    input.provider.name,
+  );
+  const lspLayer = contract === 2 ? buildLspLayer(input.lspServers, input.lspServerVersions) : '';
   const extra = (input.provider.sandboxDockerfileExtra ?? '').trim();
   const codegen = buildProviderInstallLines(input.provider.name, input.provider.cliVersion);
   const installLines = codegen.supported ? codegen.lines : [];
@@ -79,6 +83,9 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   const rtkVersion = input.rtkVersion || DEFAULT_RTK_VERSION;
   parts.push(buildHaiveRuntimeToolsLayer(rtkVersion));
   // Selected servers supply Node/npm before a provider's npm installer needs them.
+  // Even an empty selection has a distinct install owner. Recipe/selection bytes
+  // below supply the rest of this identity without changing any legacy body.
+  if (contract === 2) parts.push('# haive-lsp-install-contract: 2');
   if (lspLayer) parts.push(lspLayer);
   if (installLines.length > 0) parts.push(installLines.join('\n'));
   if (extra.length > 0) parts.push(extra);

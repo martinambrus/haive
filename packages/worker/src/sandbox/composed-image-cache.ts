@@ -12,6 +12,8 @@ import {
 } from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
+import { withImageTagLock } from './image-tag-lock.js';
+import { resolveComposedLspInstallContract } from './lsp-install-contract.js';
 
 const log = logger.child({ module: 'composed-image-cache' });
 
@@ -32,15 +34,20 @@ export async function ensureComposedImage(
   const composition = await resolveSandboxImageComposition(db, taskId, provider, runner, true);
   if (!composition) return null;
 
-  const inspected = await runner.inspect(composition.tag);
-  if (inspected.exists) {
-    log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
-    return composition.tag;
-  }
+  return withImageTagLock(composition.tag, async () => {
+    const inspected = await runner.inspect(composition.tag);
+    if (inspected.exists) {
+      log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
+      return composition.tag;
+    }
 
-  log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache miss, building');
-  await buildComposedImage(composition, runner);
-  return composition.tag;
+    log.info(
+      { tag: composition.tag, hash: composition.hash },
+      'composed image cache miss, building',
+    );
+    await buildComposedImage(composition, runner);
+    return composition.tag;
+  });
 }
 
 /** Shared composition calculation. A peek uses inspect only; only the ensure path may
@@ -62,7 +69,16 @@ export async function resolveSandboxImageComposition(
   const envTemplate = await db.query.envTemplates.findFirst({
     where: eq(schema.envTemplates.id, task.envTemplateId),
   });
-  if (!envTemplate?.generatedDockerfile || envTemplate.status !== 'ready') return null;
+  if (!envTemplate) return null;
+  const deps = (envTemplate.declaredDeps ?? {}) as {
+    lspInstallContractVersion?: unknown;
+    lspServers?: readonly string[] | null;
+    lspServerVersions?: Record<string, string | null> | null;
+  };
+  // A linked row with refused metadata cannot quietly fall back to a provider
+  // image, even while its saved environment body is unavailable.
+  const contract = resolveComposedLspInstallContract(deps.lspInstallContractVersion, provider.name);
+  if (!envTemplate.generatedDockerfile || envTemplate.status !== 'ready') return null;
 
   // Per-repo RTK version. An explicit pin is honored; an unpinned repo (null)
   // tracks the latest known rtk from the version cache rather than the baked
@@ -96,6 +112,9 @@ export async function resolveSandboxImageComposition(
     provider,
     baseImageId,
     rtkVersion,
+    lspInstallContractVersion: contract,
+    lspServers: deps.lspServers,
+    lspServerVersions: deps.lspServerVersions,
   });
 }
 

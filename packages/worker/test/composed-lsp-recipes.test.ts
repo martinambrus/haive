@@ -14,6 +14,7 @@ import { buildSmokeChecks } from '../src/step-engine/steps/env-replicate/04-veri
 
 function compose(server: string, pin?: string) {
   return composeSandboxImage({
+    lspInstallContractVersion: 2,
     envTemplateDockerfile: 'FROM ubuntu:24.04\n',
     provider: { name: 'claude-code', cliVersion: null, sandboxDockerfileExtra: null },
     lspServers: [server],
