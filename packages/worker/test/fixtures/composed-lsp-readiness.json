@@ -48,7 +48,13 @@
               "effective": {
                 "tag": "haive-sandbox:641434a4c2b2341e",
                 "imageId": "sha256:verified",
-                "identityHash": "ba53a11776fab0c076206f3d19dac4609543f93f79b258352be9fa496e4f04bf"
+                "identityHash": "53f73515fad0f8751c17c3fa81d8975f49ad6d26b9ab9ec3614ea5c1e6c44896",
+                "inputs": {
+                  "rtkVersion": "1.0.1",
+                  "baseImageId": "sha256:verified",
+                  "rtkPin": null,
+                  "requestedHash": "6303290d75d5e13a5900cb42648d05604be123c562241b3d6fd2c6336263b3ce"
+                }
               }
             }
           ]
@@ -146,7 +152,7 @@
       "formValues": null,
       "output": {
         "skipped": false,
-        "composedLspProviderHash": "f29ced90bfe226804c2bd23c85c93a4ef392df4e342710232f1ca27d6d8479d3",
+        "composedLspProviderHash": "b0a30a3d21f2fd4c308cc19b8f2085a2448c58cd2f696d773606357343a98976",
         "executed": [
           {
             "exitCode": 0
@@ -232,16 +238,22 @@
                   "name": "claude-code",
                   "cliVersion": "1.0.0",
                   "extrasHash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
-                  "configHash": "f29ced90bfe226804c2bd23c85c93a4ef392df4e342710232f1ca27d6d8479d3"
+                  "configHash": "b0a30a3d21f2fd4c308cc19b8f2085a2448c58cd2f696d773606357343a98976"
                 },
                 "plugin": {
-                  "hash": "ed384b3f42fde30450c9a036b5d55ad911231e1573990a638c12e9cd3a315ba3",
+                  "hash": "af73cdd2c1fea0d2b4568cd1836824c53da842c6b9ac6d332f4b7df56cd18178",
                   "ready": true,
                   "filesHash": null
                 },
                 "compositionHash": "641434a4c2b2341e",
                 "tag": "haive-sandbox:641434a4c2b2341e",
-                "imageId": "sha256:verified"
+                "imageId": "sha256:verified",
+                "inputs": {
+                  "rtkVersion": "1.0.1",
+                  "baseImageId": "sha256:verified",
+                  "rtkPin": null,
+                  "requestedHash": "6303290d75d5e13a5900cb42648d05604be123c562241b3d6fd2c6336263b3ce"
+                }
               },
               "outcome": "verified",
               "reports": [

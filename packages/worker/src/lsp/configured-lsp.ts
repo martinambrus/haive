@@ -145,26 +145,70 @@ export async function loadConfiguredLspLanguages(
  * bridged server, and the provider plugin that exposes those servers to the
  * CLI. Onboarding mirrors are intentionally not consulted here.
  */
-export async function hasReadyLspBridge(
-  db: Database,
-  taskId: string,
-  composed?: {
-    providerId: string;
-    providerHash?: string;
-    imageId?: string | null;
-    runner?: DockerRunner;
-  },
-): Promise<boolean> {
+type ComposedReadiness = {
+  providerId: string;
+  providerHash?: string;
+  imageId?: string | null;
+  runner?: DockerRunner;
+};
+
+async function loadLspReadinessContext(db: Database, taskId: string) {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
   });
-  if (!task?.envTemplateId) return false;
+  if (!task?.envTemplateId) return null;
 
   const envTemplate = await db.query.envTemplates.findFirst({
     where: eq(schema.envTemplates.id, task.envTemplateId),
     columns: { declaredDeps: true, generatedDockerfile: true, lastBuiltAt: true, status: true },
   });
+  return { task, envTemplate };
+}
+
+export async function hasReadyLspBridge(
+  db: Database,
+  taskId: string,
+  composed?: ComposedReadiness,
+): Promise<boolean> {
+  return readyLspBridgeForContext(db, taskId, await loadLspReadinessContext(db, taskId), composed);
+}
+
+/** Legacy readiness is provider independent. Read its context and evidence once;
+ * only contract 2 fans out to compare each provider's composed/plugin identity. */
+export async function readyLspBridgesByProvider(
+  db: Database,
+  taskId: string,
+  providers: readonly { id: string; hash: string }[],
+): Promise<Record<string, boolean>> {
+  const context = await loadLspReadinessContext(db, taskId);
+  if (context?.envTemplate?.declaredDeps?.lspInstallContractVersion === 2)
+    return Object.fromEntries(
+      await Promise.all(
+        providers.map(
+          async (p) =>
+            [
+              p.id,
+              await readyLspBridgeForContext(db, taskId, context, {
+                providerId: p.id,
+                providerHash: p.hash,
+              }),
+            ] as const,
+        ),
+      ),
+    );
+  const ready = await readyLspBridgeForContext(db, taskId, context);
+  return Object.fromEntries(providers.map((p) => [p.id, ready]));
+}
+
+async function readyLspBridgeForContext(
+  db: Database,
+  taskId: string,
+  context: Awaited<ReturnType<typeof loadLspReadinessContext>>,
+  composed?: ComposedReadiness,
+): Promise<boolean> {
+  if (!context) return false;
+  const { task, envTemplate } = context;
   if (
     envTemplate?.status !== 'ready' ||
     !envTemplate.generatedDockerfile?.trim() ||
@@ -268,7 +312,12 @@ export async function readyComposedLspImage(
   providerHash?: string,
 ): Promise<string | null> {
   try {
-    const current = await loadComposedLspIdentity(db, taskId, providerId, runner);
+    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+    const effective = parseImageReferences(task?.metadata).entries.find(
+      (e) => e.providerId === providerId,
+    )?.effective;
+    if (!effective) return null;
+    const current = await loadComposedLspIdentity(db, taskId, providerId, runner, effective.inputs);
     if (
       !current ||
       (providerHash !== undefined && current.provider.configHash !== providerHash) ||
@@ -296,10 +345,6 @@ export async function readyComposedLspImage(
       !evidence.entries.some((e) => composedEntryMatches(e, current))
     )
       return null;
-    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
-    const effective = parseImageReferences(task?.metadata).entries.find(
-      (e) => e.providerId === providerId,
-    )?.effective;
     return effective?.identityHash === evidenceHash(current) &&
       effective.imageId === current.imageId &&
       effective.tag === current.tag

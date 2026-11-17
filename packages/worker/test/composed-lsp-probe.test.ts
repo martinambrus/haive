@@ -33,7 +33,7 @@ function initialize(response: unknown, mode: 'response' | 'exit' | 'timeout' = '
       stdout.emit('data', frame.subarray(25));
     },
   });
-  const spawn = vi.fn(() => child);
+  const spawn = vi.fn((_command: string) => child);
   runInNewContext(COMPOSED_LSP_PROBE, {
     require: (name: string) =>
       name === 'node:child_process'

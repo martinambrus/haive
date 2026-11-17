@@ -1,3 +1,6 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import { retainedComposedImageRefs } from '../src/lsp/composed-evidence.js';
 import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
@@ -25,7 +28,12 @@ vi.mock('node:child_process', async (original) => ({
   }),
 }));
 const tag = `${COMPOSED_IMAGE_REPO}:old`;
-const ref = { tag, imageId: 'sha256:old', identityHash: 'hash' };
+const ref = {
+  tag,
+  imageId: 'sha256:old',
+  identityHash: 'hash',
+  inputs: { rtkVersion: '0.42.4', baseImageId: null, rtkPin: null, requestedHash: 'h' },
+};
 function taskDb(read: () => unknown): Database {
   return {
     select: () => ({ from: () => ({ where: async () => [{ metadata: read() }] }) }),
@@ -39,7 +47,7 @@ function metadata(kind: 'effective' | 'prior' | 'verifying') {
 beforeEach(() => vi.clearAllMocks());
 describe('composed reaper durable ownership', () => {
   it.each(['effective', 'prior', 'verifying'] as const)(
-    'protects %s after step-output reset without a container',
+    "protects a live task's %s without a container",
     async (kind) => {
       const remove = vi.fn(async () => ({ ok: true, stderr: '' }));
       const runner = fakeDockerRunner({
@@ -117,4 +125,21 @@ describe('composed reaper durable ownership', () => {
     ).toBe(0);
     expect(remove).not.toHaveBeenCalled();
   });
+});
+
+it('uses a bound jsonb_exists key test for retained references', async () => {
+  let query: { sql: string; params: unknown[] } | undefined;
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: async (where: SQL) => {
+          query = new PgDialect().sqlToQuery(where);
+          return [];
+        },
+      }),
+    }),
+  } as unknown as Database;
+  await retainedComposedImageRefs(db);
+  expect(query?.sql).toContain('jsonb_exists(');
+  expect(query?.params).toContain('composedLspImageRefs');
 });

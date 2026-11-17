@@ -1,7 +1,13 @@
+import * as lspLayer from '../src/sandbox/lsp-layer.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { eq } from 'drizzle-orm';
+import { eq, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { retainedComposedImageRefs } from '../src/lsp/composed-evidence.js';
+import { peekSandboxImageTag } from '../src/queues/cli-exec/images.js';
+import { SANDBOX_CORE_IMAGE } from '../src/sandbox/image-composer.js';
 import { logger } from '@haive/shared';
 import { fakeDockerRunner } from './fake-docker-runner.js';
 import { hasReadyLspBridge, readyComposedLspImage } from '../src/lsp/configured-lsp.js';
@@ -62,12 +68,17 @@ function fixture() {
     cliProviders: schema.cliProviders,
     toolPackageVersions: schema.toolPackageVersions,
     repositories: schema.repositories,
+    cliInvocations: schema.cliInvocations,
+    taskStepAgentMinings: schema.taskStepAgentMinings,
+    taskDagIssues: schema.taskDagIssues,
+    taskDagPlans: schema.taskDagPlans,
   });
   f.insert(schema.tasks, {
     id: ids.task,
     userId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     envTemplateId: ids.env,
     metadata: { feature: 'retain-me' },
+    status: 'running',
     orchestrationEpoch: 3,
   });
   f.insert(schema.envTemplates, {
@@ -91,11 +102,13 @@ function fixture() {
     sandboxDockerfileExtra: null,
     envVars: null,
   });
-  const provider = f.rows(schema.cliProviders)[0];
+  const provider = f.rows(schema.cliProviders)[0]!;
   f.insert(schema.taskSteps, {
     id: ids.plugin,
     taskId: ids.task,
     stepId: '01b-install-plugins',
+    stepIndex: 10,
+    runSeq: 10,
     round: 0,
     status: 'done',
     detectOutput: { providerName: 'claude-code', lspLanguages: ['go'] },
@@ -109,6 +122,8 @@ function fixture() {
     id: ids.verify,
     taskId: ids.task,
     stepId: '04-verify-environment',
+    stepIndex: 4,
+    runSeq: 4,
     round: 0,
     status: 'running',
     rerunGeneration: 0,
@@ -167,7 +182,12 @@ function fixture() {
     const refs = updateImageReferences(
       parseImageReferences(null),
       ids.provider,
-      { tag: current.tag, imageId: current.imageId, identityHash: evidenceHash(current) },
+      {
+        tag: current.tag,
+        imageId: current.imageId,
+        identityHash: evidenceHash(current),
+        inputs: current.inputs,
+      },
       true,
     );
     await write(schema.tasks, ids.task, {
@@ -400,11 +420,7 @@ describe('composed LSP identity and readiness', () => {
     if (kind === 'no row')
       await f.db.delete(schema.taskSteps).where(eq(schema.taskSteps.id, ids.verify));
     if (kind === 'retry')
-      await f.write(schema.taskSteps, ids.verify, {
-        status: 'pending',
-        output: null,
-        endedAt: null,
-      });
+      await resetStepAndDownstream(f.db, ids.task, '04-verify-environment', 0, 3);
     if (kind === 'no template') await f.write(schema.tasks, ids.task, { envTemplateId: null });
     if (kind === 'ruby')
       await f.write(schema.envTemplates, ids.env, {
@@ -422,7 +438,7 @@ describe('per-run 04 checks and retained ownership', () => {
   it('checks the exact composed ID as node without overriding the image PATH and rewrites the full current entry', async () => {
     const f = fixture();
     const step = createVerifyEnvironmentStep(f.runner);
-    const detected = await step.detect(f.ctx);
+    const detected = await step.detect!(f.ctx);
     const result = await step.apply(f.ctx, {
       detected,
       formValues: { selectedChecks: ['bash'] },
@@ -461,7 +477,7 @@ describe('per-run 04 checks and retained ownership', () => {
     });
     f.run.mockImplementation(async () => ({ ...probeResult(), exitCode: 1 }));
     const step = createVerifyEnvironmentStep(f.runner);
-    const detected = await step.detect(f.ctx);
+    const detected = await step.detect!(f.ctx);
     const result = await step.apply(f.ctx, {
       detected,
       formValues: { selectedChecks: ['bash'] },
@@ -474,7 +490,7 @@ describe('per-run 04 checks and retained ownership', () => {
     );
     await expect(
       resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner),
-    ).rejects.toThrow(/has not passed 04/);
+    ).rejects.toThrow(/Requested composed image inputs changed/);
   });
   it('a Retry clears readiness but preserves effective/prior/verifying ownership', async () => {
     const f = fixture();
@@ -482,11 +498,16 @@ describe('per-run 04 checks and retained ownership', () => {
     const refs = updateImageReferences(
       parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata),
       ids.provider,
-      { tag: 'candidate:new', imageId: 'sha256:new', identityHash: 'new' },
+      {
+        tag: 'candidate:new',
+        imageId: 'sha256:new',
+        identityHash: 'new',
+        inputs: entry.identity.inputs,
+      },
       false,
     );
     await f.write(schema.tasks, ids.task, { metadata: { composedLspImageRefs: refs } });
-    await f.write(schema.taskSteps, ids.verify, { status: 'pending', output: null, endedAt: null });
+    await resetStepAndDownstream(f.db, ids.task, '04-verify-environment', 0, 3);
     expect(
       await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
     ).toBe(false);
@@ -520,7 +541,12 @@ describe('per-run 04 checks and retained ownership', () => {
   it('bounds retained providers at an injectable small limit and pins production bounds', () => {
     expect(MAX_COMPOSED_LSP_PROVIDERS).toBe(16);
     expect(MAX_COMPOSED_LSP_REPORTS).toBe(7);
-    const ref = { tag: 't', imageId: 'sha256:i', identityHash: 'h' };
+    const ref = {
+      tag: 't',
+      imageId: 'sha256:i',
+      identityHash: 'h',
+      inputs: { rtkVersion: '0.42.4', baseImageId: null, rtkPin: null, requestedHash: 'h' },
+    };
     const refs = updateImageReferences(parseImageReferences(null), 'p', ref, true, 1);
     expect(() => updateImageReferences(refs, 'p2', ref, false, 1)).toThrow(/limit/);
     const replacement = updateImageReferences(
@@ -567,7 +593,7 @@ describe('bounded protocol reports', () => {
     ).toMatchObject({ passed: false, stdout: 'x'.repeat(2000), stderr: 'y'.repeat(2000) });
   });
   it('uses the immutable image and a sandbox-user protocol check', async () => {
-    const run = vi.fn(async () => probeResult());
+    const run = vi.fn(async (_opts: unknown) => probeResult());
     expect(
       (await probeComposedServer(fakeDockerRunner({ run }), 'sha256:test', 'gopls')).passed,
     ).toBe(true);
@@ -628,6 +654,7 @@ it('rejects a verifier that claimed a plugin installed for another language cove
       tag: entry.identity.tag,
       imageId: entry.identity.imageId,
       identityHash: evidenceHash(entry.identity),
+      inputs: entry.identity.inputs,
     },
     true,
   );
@@ -652,7 +679,246 @@ it('a Retry of an older 04 row cannot reuse a completed higher-round row', async
     endedAt: new Date(200),
     output: { composedLsp: { schemaVersion: 1, entries: [entry] } },
   });
-  await f.write(schema.taskSteps, ids.verify, { status: 'pending', output: null, endedAt: null });
+  await resetStepAndDownstream(f.db, ids.task, '04-verify-environment', 0, 3);
+  expect(
+    await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
+  ).toBe(false);
+});
+
+describe('verified inputs stay pinned until requested inputs move', () => {
+  it.each(['rtk cache', 'core image'] as const)(
+    'launch, peek and readiness survive only a changed %s',
+    async (kind) => {
+      const f = fixture();
+      const repo = '66666666-6666-4666-8666-666666666666';
+      f.f.insert(schema.repositories, { id: repo, rtkVersion: null });
+      await f.write(schema.tasks, ids.task, { repositoryId: repo });
+      await f.write(schema.envTemplates, ids.env, {
+        generatedDockerfile: `FROM ${SANDBOX_CORE_IMAGE}\n`,
+      });
+      f.f.insert(schema.toolPackageVersions, {
+        name: 'rtk',
+        versions: ['0.42.4'],
+        latestVersion: '0.42.4',
+      });
+      const entry = await f.installEvidence();
+      if (kind === 'rtk cache')
+        await f.db
+          .update(schema.toolPackageVersions)
+          .set({ versions: ['0.43.0'], latestVersion: '0.43.0' })
+          .where(eq(schema.toolPackageVersions.name, 'rtk'));
+      else
+        f.runner.inspect = async (tag) => ({
+          exists: true,
+          imageId: tag === SANDBOX_CORE_IMAGE ? 'sha256:new-core' : 'sha256:verified',
+        });
+      const provider = f.f.rows(schema.cliProviders)[0] as never;
+      expect(await resolveSandboxImageTag(f.db, ids.task, provider, f.runner)).toBe(
+        entry.identity.imageId,
+      );
+      expect(await peekSandboxImageTag(f.db, ids.task, provider, f.runner)).toEqual({
+        tag: entry.identity.tag,
+        imageId: entry.identity.imageId,
+      });
+      expect(
+        await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
+      ).toBe(true);
+      expect(
+        parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata).entries[0]!.effective,
+      ).toMatchObject({
+        inputs: { rtkVersion: '0.42.4', baseImageId: 'sha256:verified', rtkPin: null },
+      });
+    },
+  );
+  it('rejects a newly requested repository RTK pin', async () => {
+    const f = fixture();
+    const repo = '66666666-6666-4666-8666-666666666666';
+    f.f.insert(schema.repositories, { id: repo, rtkVersion: null });
+    await f.write(schema.tasks, ids.task, { repositoryId: repo });
+    await f.installEvidence();
+    await f.db
+      .update(schema.repositories)
+      .set({ rtkVersion: '0.43.0' })
+      .where(eq(schema.repositories.id, repo));
+    await expect(
+      resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner),
+    ).rejects.toThrow(/requested.*RTK pin changed/i);
+    expect(await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner)).toBeNull();
+  });
+  it('does not prescribe Retry 04 when the verified image is missing', async () => {
+    const f = fixture();
+    await f.installEvidence();
+    f.runner.inspect = async () => ({ exists: false, imageId: null });
+    await expect(
+      resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner),
+    ).rejects.toThrow(/verification after the plugin result/);
+  });
+});
+
+describe('provider identity allow-list', () => {
+  it.each([
+    'modelLimits',
+    'modelProvisionStatus',
+    'modelProvisionError',
+    'rulesContent',
+    'authGeneration',
+    'newOperationalColumn',
+  ])('ignores %s and preserves plugin/effective identity', async (field) => {
+    const f = fixture();
+    const before = await f.installEvidence();
+    const provider = f.f.rows(schema.cliProviders)[0]!;
+    expect(lspProviderIdentity({ ...provider, [field]: 'changed' })).toBe(
+      lspProviderIdentity(provider),
+    );
+    if (field !== 'newOperationalColumn')
+      await f.write(schema.cliProviders, ids.provider, {
+        [field]: field === 'modelLimits' ? { model: 'x', vision: false } : 'changed',
+      });
+    expect((await f.identity())?.plugin.ready).toBe(true);
+    expect(await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner)).toBe(
+      before.identity.imageId,
+    );
+  });
+  it.each([
+    'name',
+    'cliVersion',
+    'sandboxDockerfileExtra',
+    'wrapperContent',
+    'envVars',
+    'cliArgs',
+    'executablePath',
+    'wrapperPath',
+    'authMode',
+    'isolateAuth',
+  ])('binds %s', (field) => {
+    expect(lspProviderIdentity({ [field]: 'before' })).not.toBe(
+      lspProviderIdentity({ [field]: 'after' }),
+    );
+  });
+});
+
+it.each(['completed', 'failed', 'cancelled'] as const)(
+  'releases retained images for a %s task',
+  async (status) => {
+    const f = fixture();
+    const entry = await f.installEvidence();
+    expect(await retainedComposedImageRefs(retentionDb(f))).toContain(entry.identity.imageId);
+    await f.write(schema.tasks, ids.task, { status });
+    expect(await retainedComposedImageRefs(retentionDb(f))).toEqual(new Set());
+  },
+);
+
+it.each(['04-verify-environment', '03-build-image'])(
+  'real Retry of %s clears 04 and downstream plugin evidence while retaining all image roles',
+  async (target) => {
+    const f = fixture();
+    const entry = await f.installEvidence();
+    const ref = {
+      tag: entry.identity.tag,
+      imageId: entry.identity.imageId,
+      identityHash: evidenceHash(entry.identity),
+      inputs: entry.identity.inputs,
+    };
+    let refs = updateImageReferences(
+      parseImageReferences(f.f.rows(schema.tasks)[0]!.metadata),
+      ids.provider,
+      { ...ref, imageId: 'sha256:next' },
+      true,
+    );
+    refs = updateImageReferences(
+      refs,
+      ids.provider,
+      { ...ref, imageId: 'sha256:candidate' },
+      false,
+    );
+    await f.write(schema.tasks, ids.task, {
+      metadata: { feature: 'retain-me', composedLspImageRefs: refs },
+    });
+    f.f.insert(schema.taskSteps, {
+      id: '88888888-8888-4888-8888-888888888888',
+      taskId: ids.task,
+      stepId: '03-build-image',
+      status: 'done',
+      round: 0,
+      stepIndex: 3,
+      runSeq: 3,
+    });
+    expect(await resetStepAndDownstream(f.db, ids.task, target, 0, 3)).toMatchObject({
+      newEpoch: 4,
+    });
+    expect(f.f.rows(schema.taskSteps).find((s) => s.id === ids.verify)).toMatchObject({
+      status: 'pending',
+      output: null,
+      endedAt: null,
+    });
+    expect(f.f.rows(schema.taskSteps).find((s) => s.id === ids.plugin)).toMatchObject({
+      status: 'pending',
+      output: null,
+    });
+    expect(f.f.rows(schema.tasks)[0]!.metadata).toEqual({
+      feature: 'retain-me',
+      composedLspImageRefs: refs,
+    });
+    expect(await retainedComposedImageRefs(retentionDb(f))).toEqual(
+      new Set([ref.tag, ref.imageId, 'sha256:next', 'sha256:candidate']),
+    );
+    expect(await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner)).toBeNull();
+  },
+);
+
+function retentionDb(f: ReturnType<typeof fixture>): Database {
+  return {
+    select: () => ({
+      from: () => ({
+        where: async (where: SQL) => {
+          const q = new PgDialect().sqlToQuery(where);
+          const excluded = q.sql.includes('not in')
+            ? q.params.filter((x) => ['completed', 'failed', 'cancelled'].includes(String(x)))
+            : [];
+          return f.f
+            .rows(schema.tasks)
+            .filter((t) => !excluded.includes(t.status))
+            .map((t) => ({ metadata: t.metadata }));
+        },
+      }),
+    }),
+  } as unknown as Database;
+}
+
+it('keeps launch pinned across a worker recipe update while readiness requires fresh evidence', async () => {
+  const f = fixture();
+  const entry = await f.installEvidence();
+  const original = lspLayer.buildLspLayer;
+  const changed = vi
+    .spyOn(lspLayer, 'buildLspLayer')
+    .mockImplementation((...args) => original(...args) + '\n# worker recipe changed');
+  try {
+    expect(
+      await resolveSandboxImageTag(
+        f.db,
+        ids.task,
+        f.f.rows(schema.cliProviders)[0] as never,
+        f.runner,
+      ),
+    ).toBe(entry.identity.imageId);
+    expect(await readyComposedLspImage(f.db, ids.task, ids.provider, f.runner)).toBeNull();
+  } finally {
+    changed.mockRestore();
+  }
+});
+
+it('launch stays pinned while the unchanged environment template is rebuilding', async () => {
+  const f = fixture();
+  const entry = await f.installEvidence();
+  await f.write(schema.envTemplates, ids.env, { status: 'building' });
+  const provider = f.f.rows(schema.cliProviders)[0] as never;
+  expect(await resolveSandboxImageTag(f.db, ids.task, provider, f.runner)).toBe(
+    entry.identity.imageId,
+  );
+  expect(await peekSandboxImageTag(f.db, ids.task, provider, f.runner)).toEqual({
+    tag: entry.identity.tag,
+    imageId: entry.identity.imageId,
+  });
   expect(
     await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
   ).toBe(false);

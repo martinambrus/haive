@@ -1,3 +1,4 @@
+import { composedRequestedInputsHash } from '../src/lsp/composed-image-refs.js';
 import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
@@ -90,13 +91,23 @@ it('peek and ensure consume the saved contract/selection/pins and the same base 
         entries: [
           {
             providerId: provider.id,
-            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+            effective: {
+              tag: image.tag,
+              imageId: ID,
+              identityHash: 'verified',
+              inputs: {
+                rtkVersion: '0.42.4',
+                rtkPin: '0.42.4',
+                baseImageId: ID,
+                requestedHash: composedRequestedInputsHash(body, provider, deps),
+              },
+            },
           },
         ],
       },
     },
   });
-  expect(await resolveSandboxImageComposition(db, 't', provider, runner)).toEqual(image);
+  expect(await resolveSandboxImageComposition(db, 't', provider, runner)).toMatchObject(image);
   expect(image.dockerfileBody).toContain('intelephense@1.18.4');
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toEqual({
     tag: image.tag,
@@ -122,7 +133,7 @@ it('a contract-2 miss peeks unknown, then ensure builds the exact requested body
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
   expect(build).not.toHaveBeenCalled();
   await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
-    /has not passed 04/,
+    /verification after the plugin result/,
   );
   expect(await ensureComposedImage(db, 't', provider, runner)).toBe(image.tag);
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
@@ -133,7 +144,17 @@ it('a contract-2 miss peeks unknown, then ensure builds the exact requested body
         entries: [
           {
             providerId: provider.id,
-            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+            effective: {
+              tag: image.tag,
+              imageId: ID,
+              identityHash: 'verified',
+              inputs: {
+                rtkVersion: '0.42.4',
+                rtkPin: '0.42.4',
+                baseImageId: ID,
+                requestedHash: composedRequestedInputsHash(body, provider, deps),
+              },
+            },
           },
         ],
       },
@@ -187,7 +208,7 @@ it('a failed pin replacement preserves the old image and rejects the requested t
     build,
   });
   await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
-    /has not passed 04/,
+    /verification after the plugin result/,
   );
   await expect(ensureComposedImage(db, 't', provider, runner)).rejects.toThrow(
     'controlled failure',
@@ -235,7 +256,17 @@ it('refuses a peek when the provider moved after the caller captured its configu
         entries: [
           {
             providerId: provider.id,
-            effective: { tag: image.tag, imageId: ID, identityHash: 'verified' },
+            effective: {
+              tag: image.tag,
+              imageId: ID,
+              identityHash: 'verified',
+              inputs: {
+                rtkVersion: '0.42.4',
+                rtkPin: '0.42.4',
+                baseImageId: ID,
+                requestedHash: composedRequestedInputsHash(body, provider, deps),
+              },
+            },
           },
         ],
       },

@@ -49,7 +49,7 @@ import {
 } from '../step-engine/steps/_retrieval-guidance.js';
 import { withGlobalKbDigest, type GlobalKbDigest } from '../step-engine/steps/_global-kb-digest.js';
 import type { HouseRulesStamp } from '@haive/shared/global-kb';
-import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
+import { readyLspBridgesByProvider } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import {
@@ -402,20 +402,13 @@ async function resolveTaskDispatchOnTree(
     agentRulesInjection,
     sandboxToolchain,
   ] = await Promise.all([
-    Promise.all(
-      req.providers.map(
-        async (provider) =>
-          [
-            provider.id,
-            snapshotWorkspace
-              ? false
-              : await hasReadyLspBridge(db, taskId, {
-                  providerId: provider.id,
-                  providerHash: lspProviderIdentity(provider),
-                }),
-          ] as const,
-      ),
-    ).then(Object.fromEntries),
+    snapshotWorkspace
+      ? Object.fromEntries(req.providers.map((p) => [p.id, false]))
+      : readyLspBridgesByProvider(
+          db,
+          taskId,
+          req.providers.map((p) => ({ id: p.id, hash: lspProviderIdentity(p) })),
+        ),
     snapshotWorkspace
       ? false
       : resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),

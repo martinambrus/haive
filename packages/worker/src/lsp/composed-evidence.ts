@@ -1,6 +1,13 @@
+import {
+  COMPOSED_IMAGE_REFS_KEY,
+  parseImageReferences,
+  updateImageReferences,
+  type ComposedImageInputs,
+} from './composed-image-refs.js';
+export * from './composed-image-refs.js';
 import { toolchainEnvironmentMatches } from '../sandbox/toolchain-prompt.js';
 import { createHash } from 'node:crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import {
@@ -16,9 +23,7 @@ import {
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 
-export const MAX_COMPOSED_LSP_PROVIDERS = 16;
 export const MAX_COMPOSED_LSP_REPORTS = 7;
-export const COMPOSED_IMAGE_REFS_KEY = 'composedLspImageRefs';
 
 /** Stable hashes never persist provider settings or plugin bodies in evidence. */
 export function evidenceHash(value: unknown): string {
@@ -38,21 +43,23 @@ export function evidenceHash(value: unknown): string {
 }
 
 export function lspProviderIdentity(provider: Record<string, unknown>): string {
-  // Operational health/build timestamps do not configure a CLI. Every execution-affecting
-  // setting does; additions fail closed until consciously excluded here.
-  const {
-    createdAt: _c,
-    updatedAt: _u,
-    sandboxImageBuildStatus: _s,
-    sandboxImageBuildError: _e,
-    sandboxImageTag: _t,
-    sandboxImageBuiltAt: _b,
-    authLastCheckedAt: _a,
-    authStatus: _as,
-    authMessage: _am,
-    ...config
-  } = provider;
-  return evidenceHash(config);
+  // Composition: installer family/version and owner-authored Dockerfile additions.
+  // Plugin execution: wrapper body, environment/arguments and executable routing.
+  // Plugin storage: auth mode and isolation choose its task auth-volume namespace.
+  // IDs/ownership/enabled are checked separately; model, rules, learned limits,
+  // provisioning/auth health and timestamps affect neither image nor plugin bytes.
+  return evidenceHash({
+    name: provider.name,
+    cliVersion: provider.cliVersion,
+    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+    wrapperContent: provider.wrapperContent,
+    envVars: provider.envVars,
+    cliArgs: provider.cliArgs,
+    executablePath: provider.executablePath,
+    wrapperPath: provider.wrapperPath,
+    authMode: provider.authMode,
+    isolateAuth: provider.isolateAuth,
+  });
 }
 
 export interface ComposedLspIdentity {
@@ -74,6 +81,7 @@ export interface ComposedLspIdentity {
   compositionHash: string;
   tag: string;
   imageId: string;
+  inputs: ComposedImageInputs;
 }
 export interface ComposedLspReport {
   server: string;
@@ -93,22 +101,6 @@ export interface ComposedLspEvidence {
   schemaVersion: 1;
   entries: ComposedLspEntry[];
 }
-export interface ComposedImageReference {
-  tag: string;
-  imageId: string;
-  identityHash: string;
-}
-interface ProviderReferences {
-  providerId: string;
-  effective?: ComposedImageReference;
-  prior?: ComposedImageReference;
-  verifying?: ComposedImageReference;
-}
-export interface ComposedImageReferences {
-  schemaVersion: 1;
-  entries: ProviderReferences[];
-}
-
 export function composedEntryMatches(
   entry: unknown,
   current: ComposedLspIdentity,
@@ -196,6 +188,7 @@ export async function loadComposedLspIdentity(
   taskId: string,
   providerId: string,
   runner: DockerRunner = defaultDockerRunner,
+  inputs?: ComposedImageInputs,
 ): Promise<ComposedLspIdentity | null> {
   const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
   if (!task?.envTemplateId) return null;
@@ -221,6 +214,9 @@ export async function loadComposedLspIdentity(
     taskId,
     provider as ComposedImageProvider,
     runner,
+    false,
+    undefined,
+    { inputs },
   );
   if (!composition) return null;
   const environment = env.imageTag ? await runner.inspect(env.imageTag) : null;
@@ -297,54 +293,8 @@ export async function loadComposedLspIdentity(
     compositionHash: composition.hash,
     tag: composition.tag,
     imageId: inspected.imageId,
+    inputs: composition.inputs,
   };
-}
-
-export function parseImageReferences(metadata: unknown): ComposedImageReferences {
-  const raw = (metadata as Record<string, unknown> | null)?.[COMPOSED_IMAGE_REFS_KEY] as
-    ComposedImageReferences | undefined;
-  if (!raw) return { schemaVersion: 1, entries: [] };
-  if (
-    raw.schemaVersion !== 1 ||
-    !Array.isArray(raw.entries) ||
-    raw.entries.length > MAX_COMPOSED_LSP_PROVIDERS
-  )
-    throw new Error('Invalid retained composed image references');
-  for (const e of raw.entries) {
-    if (typeof e.providerId !== 'string')
-      throw new Error('Invalid composed image provider reference');
-    for (const ref of [e.effective, e.prior, e.verifying])
-      if (
-        ref &&
-        (typeof ref.tag !== 'string' ||
-          typeof ref.imageId !== 'string' ||
-          typeof ref.identityHash !== 'string')
-      )
-        throw new Error('Invalid retained composed image reference');
-  }
-  return raw;
-}
-
-export function updateImageReferences(
-  refs: ComposedImageReferences,
-  providerId: string,
-  ref: ComposedImageReference,
-  publish: boolean,
-  limit = MAX_COMPOSED_LSP_PROVIDERS,
-): ComposedImageReferences {
-  const entries = refs.entries.map((e) => ({ ...e }));
-  let e = entries.find((e) => e.providerId === providerId);
-  if (!e) {
-    if (entries.length >= limit) throw new Error('Retained composed image provider limit reached');
-    e = { providerId };
-    entries.push(e);
-  }
-  if (publish) {
-    if (e.effective?.imageId !== ref.imageId) e.prior = e.effective;
-    e.effective = ref;
-    delete e.verifying;
-  } else e.verifying = ref;
-  return { schemaVersion: 1, entries };
 }
 
 /** A reset clears 04 output, not this task-owned key. Task-row serialization and a fresh locked read
@@ -390,13 +340,19 @@ export async function retainComposedImage(
       taskId,
       identity.provider.id,
       runner,
+      identity.inputs,
     );
     if (!current || evidenceHash(current) !== evidenceHash(identity))
       throw new Error('Composed image inputs changed during verification');
     const refs = updateImageReferences(
       parseImageReferences(task.metadata),
       identity.provider.id,
-      { tag: identity.tag, imageId: identity.imageId, identityHash: evidenceHash(identity) },
+      {
+        tag: identity.tag,
+        imageId: identity.imageId,
+        identityHash: evidenceHash(identity),
+        inputs: identity.inputs,
+      },
       publish,
     );
     await tx
@@ -413,7 +369,12 @@ export async function retainedComposedImageRefs(db: Database): Promise<Set<strin
   const tasks = await db
     .select({ metadata: schema.tasks.metadata })
     .from(schema.tasks)
-    .where(sql`${schema.tasks.metadata} ? ${COMPOSED_IMAGE_REFS_KEY}`);
+    .where(
+      and(
+        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+        sql`jsonb_exists(${schema.tasks.metadata}, ${COMPOSED_IMAGE_REFS_KEY})`,
+      ),
+    );
   const held = new Set<string>();
   for (const task of tasks)
     for (const e of parseImageReferences(task.metadata).entries)

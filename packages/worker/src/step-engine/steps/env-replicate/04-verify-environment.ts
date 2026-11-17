@@ -293,7 +293,13 @@ export function createVerifyEnvironmentStep(
           ctx.taskId,
           provider,
           async (composition) => {
-            const identity = await loadComposedLspIdentity(ctx.db, ctx.taskId, provider.id, runner);
+            const identity = await loadComposedLspIdentity(
+              ctx.db,
+              ctx.taskId,
+              provider.id,
+              runner,
+              composition.inputs,
+            );
             if (
               !identity ||
               identity.envTemplateId !== args.detected.envTemplateId ||

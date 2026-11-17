@@ -411,7 +411,7 @@ describe('contract-2 plugin evidence binding', () => {
   }
   it('binds an installed contract-2 result to the provider configuration', async () => {
     const { c } = composedContext();
-    const detected = await installPluginsStep.detect(c);
+    const detected = await installPluginsStep.detect!(c);
     const out = await installPluginsStep.apply(c, {
       detected,
       formValues: {},
@@ -424,7 +424,7 @@ describe('contract-2 plugin evidence binding', () => {
   });
   it('refuses a provider changed while the plugin form was parked', async () => {
     const { c, provider } = composedContext();
-    const detected = await installPluginsStep.detect(c);
+    const detected = await installPluginsStep.detect!(c);
     provider.envVars = { OTHER: 'changed' };
     await expect(
       installPluginsStep.apply(c, {

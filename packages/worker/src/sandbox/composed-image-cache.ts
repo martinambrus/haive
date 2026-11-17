@@ -1,10 +1,17 @@
+import {
+  parseImageReferences,
+  composedRequestedInputsHash,
+  ComposedImageNotVerifiedError,
+  type ComposedImageInputs,
+  type ComposedImageReference,
+} from '../lsp/composed-image-refs.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, type CliProviderName } from '@haive/shared';
+import { logger, DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared';
 import {
   composeSandboxImage,
   SANDBOX_CORE_IMAGE,
@@ -46,11 +53,19 @@ export async function withEnsuredComposedImage<T>(
   db: Database,
   taskId: string,
   provider: ComposedImageProvider,
-  use: (composition: SandboxImageComposition) => Promise<T>,
+  use: (composition: ResolvedSandboxImageComposition) => Promise<T>,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<T | null> {
   const composition = await resolveSandboxImageComposition(db, taskId, provider, runner, true);
   if (!composition) return null;
+  return withResolvedComposedImage(composition, use, runner);
+}
+
+export async function withResolvedComposedImage<T>(
+  composition: ResolvedSandboxImageComposition,
+  use: (composition: ResolvedSandboxImageComposition) => Promise<T>,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<T> {
   return withImageTagLock(composition.tag, async () => {
     const inspected = await runner.inspect(composition.tag);
     if (inspected.exists) {
@@ -66,6 +81,12 @@ export async function withEnsuredComposedImage<T>(
   });
 }
 
+export interface ResolvedSandboxImageComposition extends SandboxImageComposition {
+  installContract: 1 | 2;
+  inputs: ComposedImageInputs;
+  effective?: ComposedImageReference;
+}
+
 /** Shared composition calculation. A peek uses inspect only; only the ensure path may
  * heal/build the base. A missing composed image must not fall through to another image. */
 export async function resolveSandboxImageComposition(
@@ -75,10 +96,11 @@ export async function resolveSandboxImageComposition(
   runner: DockerRunner = defaultDockerRunner,
   buildBase = false,
   peekBaseImageId?: () => Promise<string | null>,
-): Promise<SandboxImageComposition | null> {
+  options: { inputs?: ComposedImageInputs; verifiedProviderId?: string } = {},
+): Promise<ResolvedSandboxImageComposition | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { envTemplateId: true, repositoryId: true },
+    columns: { envTemplateId: true, repositoryId: true, metadata: true },
   });
   if (!task?.envTemplateId) return null;
 
@@ -94,7 +116,34 @@ export async function resolveSandboxImageComposition(
   // A linked row with refused metadata cannot quietly fall back to a provider
   // image, even while its saved environment body is unavailable.
   const contract = resolveComposedLspInstallContract(deps.lspInstallContractVersion, provider.name);
-  if (!envTemplate.generatedDockerfile || envTemplate.status !== 'ready') return null;
+  const effective =
+    contract === 2 && options.verifiedProviderId
+      ? parseImageReferences(task.metadata).entries.find(
+          (e) => e.providerId === options.verifiedProviderId,
+        )?.effective
+      : undefined;
+  // Build status controls verification, not an unchanged pinned launch. A user
+  // can rebuild the environment without invalidating the image already verified.
+  if (!envTemplate.generatedDockerfile || (envTemplate.status !== 'ready' && !effective)) {
+    if (contract === 2 && options.verifiedProviderId)
+      throw new ComposedImageNotVerifiedError(
+        'Requested composed template is not ready; verification after the plugin result is required',
+      );
+    return null;
+  }
+  if (contract === 2 && options.verifiedProviderId && !effective)
+    throw new ComposedImageNotVerifiedError(
+      'Requested composed image has no verified reference; verification after the plugin result is required',
+    );
+  const pinned = options.inputs ?? effective?.inputs;
+  const requestedHash =
+    contract === 2
+      ? composedRequestedInputsHash(envTemplate.generatedDockerfile, provider, deps)
+      : ''; // Legacy selection/pins are deliberately ignored, including malformed values.
+  if (pinned && pinned.requestedHash !== requestedHash)
+    throw new ComposedImageNotVerifiedError(
+      'Requested composed image inputs changed (template body, selection/pins or provider image settings); verification after the plugin result is required; retained prior image was kept',
+    );
 
   // Per-repo RTK version. An explicit pin is honored; an unpinned repo (null)
   // tracks the latest known rtk from the version cache rather than the baked
@@ -110,7 +159,13 @@ export async function resolveSandboxImageComposition(
     });
     rtkVersion = repo?.rtkVersion ?? null;
   }
-  if (!rtkVersion) {
+  const rtkPin = rtkVersion || null;
+  if (pinned && pinned.rtkPin !== rtkPin)
+    throw new ComposedImageNotVerifiedError(
+      'Requested repository RTK pin changed; verification after the plugin result is required',
+    );
+  if (pinned) rtkVersion = pinned.rtkVersion;
+  else if (!rtkVersion) {
     const rtkCache = await db.query.toolPackageVersions.findFirst({
       where: eq(schema.toolPackageVersions.name, 'rtk'),
       columns: { versions: true, latestVersion: true },
@@ -118,12 +173,14 @@ export async function resolveSandboxImageComposition(
     rtkVersion = rtkCache?.versions?.[0] ?? rtkCache?.latestVersion ?? null;
   }
 
-  const baseImageId = buildBase
-    ? await resolveBaseImageId(runner)
-    : peekBaseImageId
-      ? await peekBaseImageId()
-      : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
-  return composeSandboxImage({
+  const baseImageId = pinned
+    ? pinned.baseImageId
+    : buildBase
+      ? await resolveBaseImageId(runner)
+      : peekBaseImageId
+        ? await peekBaseImageId()
+        : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
+  const composition = composeSandboxImage({
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,
     baseImageId,
@@ -132,6 +189,13 @@ export async function resolveSandboxImageComposition(
     lspServers: deps.lspServers,
     lspServerVersions: deps.lspServerVersions,
   });
+  return {
+    ...composition,
+    tag: effective?.tag ?? composition.tag,
+    installContract: contract,
+    inputs: { rtkVersion: rtkVersion || DEFAULT_RTK_VERSION, baseImageId, rtkPin, requestedHash },
+    effective,
+  };
 }
 
 /**
