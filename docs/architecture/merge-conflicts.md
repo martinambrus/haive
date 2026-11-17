@@ -496,10 +496,10 @@ worktree names must remain one segment.
 
 Before staging, again after journaling, and during staged verification, every
 initialized submodule (recursively) must retain all commits reachable from its
-local refs, the top stash entry and HEAD in its remote-tracking refs. Without a
-configured remote, the corresponding gitlink in the base of the enclosing repository
-(the superproject, or the parent submodule for a nested one) is the retention
-boundary instead; with neither, the cleanup refuses. A submodule pinned to a commit
+local refs, the top stash entry and HEAD in its remote-tracking refs. A submodule
+without a configured remote refuses: a base gitlink records a commit id, not its
+objects, and the only copy of that commit can be the worktree's own submodule object
+store, which pruning deletes. A submodule pinned to a commit
 that only a remote tag reaches is refused too, since tags are not remote-tracking
 refs; the refusal is permanent but loses nothing. Reflog-only commits (older stash
 entries, dropped stashes) are not covered, and a deinitialized submodule, whose

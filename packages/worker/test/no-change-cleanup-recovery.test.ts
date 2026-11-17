@@ -376,14 +376,20 @@ describe('no-change cleanup race and recovery controls', () => {
       expect(existsSync(stage())).toBe(false);
     },
   );
-  it('uses the base gitlink when a submodule has no remote, including detached HEAD', async () => {
+  it('keeps a no-remote submodule even when the base gitlink names its HEAD', async () => {
     await initializeSubmodule();
     const child = join(tree, 'mod');
     git(child, 'remote', 'remove', 'origin');
-    // The base gitlink is sufficient even though the object has never been pushed.
-    expect(await run()).toMatchObject({ removed: true });
+    // A gitlink records a commit id, not its objects: the only copy may be the worktree's
+    // own submodule object store, which pruning deletes.
+    await preserved(/submodule has no remote to retain its commits/);
   });
-  it('keeps a no-remote submodule HEAD not reachable from the base gitlink', async () => {
+  it('keeps a nested no-remote submodule', async () => {
+    await initializeSubmodule(true);
+    git(join(tree, 'mod/inner'), 'remote', 'remove', 'origin');
+    await preserved(/submodule has no remote to retain its commits/);
+  });
+  it('keeps a no-remote submodule with an unpushed HEAD', async () => {
     await initializeSubmodule();
     const child = join(tree, 'mod');
     git(child, 'remote', 'remove', 'origin');
@@ -393,11 +399,8 @@ describe('no-change cleanup race and recovery controls', () => {
     git(child, 'commit', '-qam', 'private HEAD');
     git(tree, 'add', 'mod');
     git(tree, 'commit', '-qm', 'new gitlink');
-    // Merge the superproject commit without changing the older base gitlink.
-    git(root, 'merge', '--no-ff', '--no-commit', 'task');
-    git(root, 'restore', '--source=HEAD', '--staged', 'mod');
-    git(root, 'commit', '-qm', 'contain branch, retain base gitlink');
-    await preserved(/submodule holds commits not reachable from the base gitlink/);
+    git(root, 'merge', '--no-ff', '-q', 'task');
+    await preserved(/submodule has no remote to retain its commits/);
   });
   it('removes a clean worktree with an initialized submodule', async () => {
     await initializeSubmodule();

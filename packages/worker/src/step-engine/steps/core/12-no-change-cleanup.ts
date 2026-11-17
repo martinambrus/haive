@@ -273,14 +273,12 @@ async function checkTreeChanges(
     refuse('the worktree holds uncommitted changes');
 }
 
-/** Pruning a worktree also drops its submodule admin dirs, including every ref and
- *  stash. Prove those commits survive outside those dirs before authorizing deletion.
- *  Remote-tracking refs are the local evidence; no network or persistent config writes. */
-async function checkSubmoduleHistory(
-  ctx: StepContext,
-  dir: string,
-  base: string | null,
-): Promise<void> {
+/** Pruning a worktree also drops its submodule admin dirs, including every ref, stash
+ *  and object. Prove those commits survive outside those dirs before authorizing deletion.
+ *  Remote-tracking refs are the local evidence; no network or persistent config writes.
+ *  A base gitlink is no evidence: it records a commit id, not the objects, and the only
+ *  copy of that commit can be the object store this prune deletes. */
+async function checkSubmoduleHistory(ctx: StepContext, dir: string): Promise<void> {
   const prefix = ['--no-optional-locks', `--work-tree=${dir}`];
   const entries = await command(
     dir,
@@ -288,20 +286,6 @@ async function checkSubmoduleHistory(
     'the submodule index is unreadable',
   );
   if (!entries.split('\0').some((entry) => entry.startsWith('160000 '))) return;
-  // Read all base gitlinks once, with full unquoted paths, including nested tree paths.
-  const baseEntries =
-    base === null
-      ? ''
-      : await command(
-          dir,
-          [...prefix, 'ls-tree', '-r', '-z', base],
-          'the base gitlinks are unreadable',
-        );
-  const baseLinks = new Map<string, string>();
-  for (const entry of baseEntries.split('\0')) {
-    const link = /^160000 commit ([a-f0-9]{40,64})\t([\s\S]+)$/.exec(entry);
-    if (link) baseLinks.set(link[2]!, link[1]!);
-  }
   for (const entry of entries.split('\0')) {
     const link = /^160000 ([a-f0-9]{40,64}) 0\t([\s\S]+)$/.exec(entry);
     if (!link) continue;
@@ -318,29 +302,15 @@ async function checkSubmoduleHistory(
       [...childPrefix, 'remote'],
       'the submodule remotes are unreadable',
     );
-    const childBase = baseLinks.get(link[2]!) ?? null;
-    if (!remotes && childBase === null)
-      refuse('the submodule has no remote or base gitlink to retain its commits');
+    if (!remotes) refuse('the submodule has no remote to retain its commits');
     const unretained = await command(
       child,
-      [
-        ...childPrefix,
-        'rev-list',
-        '--max-count=1',
-        '--all',
-        'HEAD',
-        '--not',
-        ...(remotes ? ['--remotes'] : [childBase!]),
-      ],
+      [...childPrefix, 'rev-list', '--max-count=1', '--all', 'HEAD', '--not', '--remotes'],
       'the submodule history is unreadable',
     );
     if (unretained)
-      refuse(
-        remotes
-          ? 'the submodule holds commits not reachable from its remote-tracking refs'
-          : 'the submodule holds commits not reachable from the base gitlink',
-      );
-    await checkSubmoduleHistory(ctx, child, childBase);
+      refuse('the submodule holds commits not reachable from its remote-tracking refs');
+    await checkSubmoduleHistory(ctx, child);
   }
 }
 
@@ -349,11 +319,10 @@ async function checkTree(
   setup: Setup,
   head: string,
   branchAbsent: boolean,
-  base: string,
   relocated = false,
 ): Promise<void> {
   await checkTreeChanges(ctx, setup, head, branchAbsent, relocated);
-  await checkSubmoduleHistory(ctx, setup.worktreePath, base);
+  await checkSubmoduleHistory(ctx, setup.worktreePath);
 }
 
 /** Explicit-composition only: the built-in workflow still finishes through step 12. */
@@ -466,7 +435,7 @@ export const noChangeCleanupStep: StepDefinition<
       if (contained.code !== 0) return refuse('could not read branch ancestry');
     }
     if (source) {
-      await checkTree(ctx, setup, head!, branch === null, base);
+      await checkTree(ctx, setup, head!, branch === null);
       if (!journal || journal.head !== head || journal.phase !== 'staging') {
         journal = {
           ...setup,
@@ -484,7 +453,7 @@ export const noChangeCleanupStep: StepDefinition<
       if (source && journal) {
         // The journal transaction can wait on locks. Check again after it, immediately
         // before the identity probe and move, rather than relying on the earlier read.
-        await checkTree(ctx, setup, head!, branch === null, base);
+        await checkTree(ctx, setup, head!, branch === null);
         // An atomic move precedes recursive deletion. The durable inode-bound record survives
         // explicit Retry (which clears apply receipts) and boot recovery. A partially deleted
         // staged tree is never misread as new uncommitted work or adopted by pathname alone.
@@ -513,7 +482,6 @@ export const noChangeCleanupStep: StepDefinition<
             { ...setup, worktreePath: resolve(ctx.repoPath, stageRel(journal)) },
             head!,
             branch === null,
-            base,
             true,
           );
         } catch (error) {
