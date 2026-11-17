@@ -9,7 +9,7 @@ import {
 import { probeComposedServer } from '../../../lsp/composed-probe.js';
 import { withEnsuredComposedImage } from '../../../sandbox/composed-image-cache.js';
 import {
-  assertEnvironmentLspInstallContract,
+  assertKnownLspInstallContract,
   type LspInstallContract,
 } from '../../../sandbox/lsp-install-contract.js';
 import { eq } from 'drizzle-orm';
@@ -65,7 +65,7 @@ interface DeclaredDepsShape extends LspInstallContract {
 }
 
 export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
-  if (deps.lspInstallContractVersion !== 2) assertEnvironmentLspInstallContract(deps);
+  assertKnownLspInstallContract(deps);
   const checks: SmokeCheck[] = [];
   const runtimes = deps.runtimes ?? [];
   if (runtimes.includes('node')) {
