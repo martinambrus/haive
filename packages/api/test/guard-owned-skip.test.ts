@@ -252,3 +252,50 @@ describe('a span entry is not user-skippable', () => {
     expect(enriched.find((r) => r.stepId === ENTRY_STEP)?.canSkip).toBe(true);
   });
 });
+
+describe('guardEntryRetryable', () => {
+  it('is true only for a guard-skipped span entry', async () => {
+    const t = setup();
+    const task = t.fake.rows(schema.tasks)[0]!;
+    const flags = await loadTaskStepFlags(t.fake.db as never, task as never);
+    const enriched = await enrichStepsWithSkipFlag(
+      t.fake.db as never,
+      flags,
+      TASK,
+      t.fake.rows(schema.taskSteps).map((r) => ({
+        id: r.id as string,
+        status: r.status as string,
+        stepId: r.stepId as string,
+        guardState: r.guardState,
+      })),
+    );
+    const flag = (stepId: string) =>
+      (enriched.find((r) => r.stepId === stepId) as { guardEntryRetryable?: boolean })
+        .guardEntryRetryable;
+    expect(flag(ENTRY_STEP)).toBe(true);
+    expect(flag(MEMBER_STEP)).toBe(false);
+    expect(flag('pre-step')).toBe(false);
+    expect(flag('tail-step')).toBe(false);
+  });
+
+  it('is false for an ordinary auto-skipped step without guard state', async () => {
+    const t = setup({ entry: { guardState: null } });
+    const task = t.fake.rows(schema.tasks)[0]!;
+    const flags = await loadTaskStepFlags(t.fake.db as never, task as never);
+    const enriched = await enrichStepsWithSkipFlag(
+      t.fake.db as never,
+      flags,
+      TASK,
+      t.fake.rows(schema.taskSteps).map((r) => ({
+        id: r.id as string,
+        status: r.status as string,
+        stepId: r.stepId as string,
+        guardState: r.guardState,
+      })),
+    );
+    expect(
+      (enriched.find((r) => r.stepId === ENTRY_STEP) as { guardEntryRetryable?: boolean })
+        .guardEntryRetryable,
+    ).toBe(false);
+  });
+});

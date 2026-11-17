@@ -1109,6 +1109,9 @@ export interface TaskStep {
   /** True when the step opts into the user-facing Skip action (server-enforced
    *  from step_catalog). Drives whether the Skip button is shown. */
   canSkip: boolean;
+  /** True for a skipped step that is the entry of a guarded span the guard skipped. It reads as
+   *  auto-skipped, but Retry on it re-runs the span, so the card keeps Retry for it. */
+  guardEntryRetryable: boolean;
   /** True when this step ever dispatches a CLI (llm | agentMining | dagExecute),
    *  from step_catalog. Deterministic steps (false) never consume a
    *  per-step provider, so the step card hides the CLI picker for them and shows

@@ -989,13 +989,13 @@ export function isStepSkippable(
 }
 
 export async function enrichStepsWithSkipFlag<
-  T extends { id: string; status: string; stepId: string },
+  T extends { id: string; status: string; stepId: string; guardState?: unknown },
 >(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
   taskId: string,
   steps: T[],
-): Promise<(T & { manuallySkipped: boolean; canSkip: boolean })[]> {
+): Promise<(T & { manuallySkipped: boolean; canSkip: boolean; guardEntryRetryable: boolean })[]> {
   // canSkip: the step opts into the user-facing Skip action (the skip handler
   // enforces the same rule). Task-aware so the worktree can be skipped where the run list allows.
   const task = await db.query.tasks.findFirst({
@@ -1012,6 +1012,12 @@ export async function enrichStepsWithSkipFlag<
     ...s,
     manuallySkipped,
     canSkip: isStepSkippable(flags, s.stepId, task ?? {}),
+    // A guard-skipped span ENTRY looks auto-skipped, yet Retry on it is the one way to
+    // re-run the span (members are refused by isGuardOwnedSkip).
+    guardEntryRetryable:
+      s.status === 'skipped' &&
+      s.guardState != null &&
+      spanEntryIds(task?.executionContract).has(s.stepId),
   });
   const skippedIds = steps.filter((s) => s.status === 'skipped').map((s) => s.id);
   if (skippedIds.length === 0) return steps.map((s) => withFlags(s, false));
