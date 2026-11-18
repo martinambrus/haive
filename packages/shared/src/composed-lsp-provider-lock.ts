@@ -1,0 +1,105 @@
+import { and, eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import { resolveTaskCliProviderId } from './cli-providers/default-provider.js';
+
+/** Provider names verified to launch the composed language-server image. */
+export const COMPOSED_LSP_VERIFIED_PROVIDER_NAMES: readonly string[] = ['claude-code'];
+
+/** The API error code of a refused switch. */
+export const COMPOSED_LSP_PROVIDER_LOCKED = 'composed_lsp_provider_locked';
+
+/** The provider facts the lock decision reads. */
+export interface ComposedLspLockProvider {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+/** Why a set of effective providers cannot run a composed-LSP task. */
+export type ComposedLspLockViolation =
+  | { code: 'no_provider' }
+  | { code: 'multiple_providers'; providerIds: string[] }
+  | { code: 'unverified_provider'; providerId: string; providerName: string | null }
+  | { code: 'disabled_provider'; providerId: string };
+
+/** The lock verdict; `message` is display copy, callers key on `violation.code`. */
+export type ComposedLspLockDecision =
+  | { ok: true; providerId: string }
+  | { ok: false; violation: ComposedLspLockViolation; message: string };
+
+const REMEDY =
+  'Start a new task and tick the opt-out for installing language servers in the environment image to use another CLI.';
+
+function refuse(violation: ComposedLspLockViolation, reason: string): ComposedLspLockDecision {
+  return { ok: false, violation, message: `${reason} ${REMEDY}` };
+}
+
+/** Decide whether the providers a composed-LSP task would run on are the one verified provider. */
+export function decideComposedLspProviderLock(args: {
+  effectiveProviderIds: readonly (string | null | undefined)[];
+  providers: readonly ComposedLspLockProvider[];
+}): ComposedLspLockDecision {
+  const ids = [
+    ...new Set(args.effectiveProviderIds.filter((id): id is string => typeof id === 'string')),
+  ];
+  if (ids.length === 0) {
+    return refuse(
+      { code: 'no_provider' },
+      'This task has no CLI provider to run language servers.',
+    );
+  }
+  for (const id of ids) {
+    const provider = args.providers.find((p) => p.id === id);
+    if (!provider) {
+      return refuse(
+        { code: 'unverified_provider', providerId: id, providerName: null },
+        'This task installs its language servers in a composed image, and that CLI provider is not available to you.',
+      );
+    }
+    if (!provider.enabled) {
+      return refuse(
+        { code: 'disabled_provider', providerId: id },
+        `This task installs its language servers in a composed image, and the CLI provider "${provider.name}" is disabled.`,
+      );
+    }
+    if (!COMPOSED_LSP_VERIFIED_PROVIDER_NAMES.includes(provider.name)) {
+      return refuse(
+        { code: 'unverified_provider', providerId: id, providerName: provider.name },
+        `This task installs its language servers in a composed image that only Claude Code can launch, so "${provider.name}" cannot run it.`,
+      );
+    }
+  }
+  if (ids.length > 1) {
+    return refuse(
+      { code: 'multiple_providers', providerIds: ids },
+      'This task installs its language servers in a composed image that one Claude Code provider row runs, and a second row was chosen.',
+    );
+  }
+  return { ok: true, providerId: ids[0]! };
+}
+
+/** The lock verdict for putting `providerId` on a task, or null when the task has no composed-LSP contract. */
+export async function checkTaskComposedLspProvider(
+  db: Pick<Database, 'query'>,
+  params: { userId: string; taskId: string; providerId: string },
+): Promise<ComposedLspLockDecision | null> {
+  const { userId, taskId, providerId } = params;
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
+    columns: { cliProviderId: true, envTemplateId: true },
+  });
+  if (!task?.envTemplateId) return null;
+  const template = await db.query.envTemplates.findFirst({
+    where: eq(schema.envTemplates.id, task.envTemplateId),
+    columns: { declaredDeps: true },
+  });
+  if (template?.declaredDeps?.lspInstallContractVersion !== 2) return null;
+  const providers = await db.query.cliProviders.findMany({
+    where: eq(schema.cliProviders.userId, userId),
+    columns: { id: true, name: true, enabled: true, createdAt: true },
+  });
+  return decideComposedLspProviderLock({
+    effectiveProviderIds: [resolveTaskCliProviderId(task.cliProviderId, providers), providerId],
+    providers,
+  });
+}

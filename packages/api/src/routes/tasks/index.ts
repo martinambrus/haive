@@ -100,7 +100,7 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
-import { loadUsableProvider } from '../../lib/step-cli-choice.js';
+import { assertComposedLspProviderAllowed, loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import {
   cancelTaskIfOpen,
@@ -1962,6 +1962,7 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
 
   if (body.summaryCliProviderId) {
     await loadUsableProvider(db, userId, body.summaryCliProviderId);
+    await assertComposedLspProviderAllowed(db, userId, id, body.summaryCliProviderId);
   }
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = { updatedAt: new Date() };
