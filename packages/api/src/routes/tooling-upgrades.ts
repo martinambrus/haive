@@ -278,9 +278,10 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   }
 
   // Only the repo pins change here. The repo's next workflow task re-runs
-  // 01-declare-deps, which injects the new pins into declaredDeps → the
-  // staleDockerfile check re-renders + rebuilds the env image (and the composed
-  // image rebuilds on its hash change). No eager build is triggered.
+  // 01-declare-deps, which injects the new pins into declaredDeps. For a legacy
+  // environment the staleDockerfile check re-renders + rebuilds the env image; for a
+  // contract 2 environment the pins reach the composed image only. The composed
+  // image rebuilds on its hash change. No eager build is triggered.
   if (applied.length > 0) {
     assertToolingVersionPins({
       rtkVersion: nextRtk,
