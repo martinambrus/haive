@@ -291,6 +291,18 @@ override refuses dispatch visibly, with the implementation card named as a recov
 there is no fallback. The refusal first writes the round's bare `pending` row, so Retry
 re-runs the step at that round rather than replaying the task from START. A reoffered gate can replace the slot, or clear it with The same CLI.
 
+The implementation step of this section is the task's fix target: 07, or the module step a
+pinned execution contract names (see Task types). Every rule above holds for that step id.
+Dispatch honors a round slot only on that step, because the step-card route writes any role on
+any step of the task: a round row that wins is checked against `fixLoopTargetStepId` of
+`tasks.execution_contract`, a read made only then. Round 0 and a step that is neither 07 nor a
+module step never query. A module step that declares `fixConsumer` passes the provider
+eligibility check in place of the core dispatch list; a core step never does. Both gate
+previews list providers for the target `fixRoundTargetDef` names, before the router runs. A pin
+that resolves to no capable step lists none, and Continue then fails the task with
+`fix_loop.unroutable`. The api shows the round provider on the same step: it reads the contract
+only for a task whose choices hold a round slot, and a malformed contract displays as no pin.
+
 A choice that becomes unusable before the gate answer is applied refuses that answer
 instead of failing the task. The same transaction restores the gate's `waiting_form` status,
 clears its submitted values, stamps `waiting_started_at`, refreshes the eligible options and

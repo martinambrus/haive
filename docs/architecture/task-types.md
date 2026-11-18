@@ -842,7 +842,8 @@ off-list id, non-capable executable or wrong capability version is refused.
 This declares no output replacement role or host policy. At the fix router a pinned
 target replaces the live `fix_loop` target; one that is not a registered module step with
 the pinned capability, or is not in the run list, fails the task with
-`fix_loop.unroutable` before any reset. Target-specific CLI readers remain unchanged. No
+`fix_loop.unroutable` before any reset. The next-round CLI choice, the gates' provider options
+and the api's round-slot display follow the pinned target's own step id (see Fix loop). No
 gate admits a pin that selects a fix target.
 
 The seeder owns execution declarations with its existing source-guarded upsert,
