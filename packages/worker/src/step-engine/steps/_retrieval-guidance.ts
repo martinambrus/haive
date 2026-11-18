@@ -292,15 +292,23 @@ export function buildRetrievalGuidance(axes: RetrievalAxes): string[] {
   return retrievalVariants()[variantIndex(axes)];
 }
 
+/** The canonical block as it was before the cold-start lines. A mining retry can reuse a
+ *  `dispatchPrompt` saved before they shipped, and the rewrite must still find it, else a
+ *  provider without LSP keeps the LSP instructions. Kept as long as such prompts can be
+ *  replayed. */
+const PRE_COLD_START_CANONICAL = RETRIEVAL_GUIDANCE_WITH_LSP.filter(
+  (line) => !(LSP_COLD_START_GUIDANCE as readonly string[]).includes(line),
+).join('\n');
+
 /** Rewrite every Haive-owned retrieval fragment for the resolved provider and surface.
  * Everything else remains byte-for-byte unchanged. */
 export function adaptRetrievalProtocol(prompt: string, axes: RetrievalAxes): string {
   const index = variantIndex(axes);
   if (index === 0) return prompt;
-  let adapted = prompt.replaceAll(
-    retrievalVariants()[0].join('\n'),
-    retrievalVariants()[index].join('\n'),
-  );
+  const target = retrievalVariants()[index].join('\n');
+  let adapted = prompt
+    .replaceAll(retrievalVariants()[0].join('\n'), target)
+    .replaceAll(PRE_COLD_START_CANONICAL, target);
   for (const [source, variants] of PROMPT_VARIANT_TABLE) {
     adapted = adapted.replaceAll(source, variants[index]);
   }

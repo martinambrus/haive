@@ -175,6 +175,23 @@ describe('buildRetrievalGuidance', () => {
 });
 
 describe('adaptRetrievalProtocol', () => {
+  it('rewrites a canonical block saved before the cold-start lines', () => {
+    const current = buildRetrievalGuidance({ supportsLsp: true, ragWired: true });
+    const saved = current
+      .filter((line) => !/LSP starts on first use|server is starting/.test(line))
+      .join('\n');
+    expect(saved).not.toBe(current.join('\n'));
+    for (const axes of [
+      { supportsLsp: false, ragWired: true },
+      { supportsLsp: true, ragWired: false },
+      { supportsLsp: false, ragWired: false },
+    ]) {
+      expect(adaptRetrievalProtocol(`before\n${saved}\nafter`, axes)).toBe(
+        `before\n${buildRetrievalGuidance(axes).join('\n')}\nafter`,
+      );
+    }
+  });
+
   const canonical = retrievalGuidanceLines().join('\n');
 
   it('leaves the canonical arm untouched', () => {
