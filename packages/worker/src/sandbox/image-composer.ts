@@ -26,6 +26,21 @@ export interface SandboxImageComposition {
   hasExtras: boolean;
 }
 
+export interface EnvironmentImageRef {
+  ref: string;
+  imageId: string;
+}
+
+const ENV_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/;
+const ENV_IMAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
+
+function assertEnvironmentImageField(field: string, value: unknown, pattern: RegExp): void {
+  if (typeof value !== 'string' || !pattern.test(value))
+    throw new Error(
+      `Invalid environment image ${field}: ${JSON.stringify(String(value).slice(0, 80))}`,
+    );
+}
+
 export interface ComposeInput {
   envTemplateDockerfile: string | null;
   provider: {
@@ -58,6 +73,9 @@ export interface ComposeInput {
    * Accepts persisted language or server keys; unsupported selections fail explicitly. */
   lspServers?: readonly string[] | null;
   lspServerVersions?: Readonly<Record<string, string | null>> | null;
+  /** Contract 2 only: build FROM this already-built environment image instead of pasting
+   * the template body. The id is part of the Dockerfile text, hence of the tag. */
+  environmentImage?: EnvironmentImageRef | null;
 }
 
 export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
@@ -70,7 +88,14 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   const codegen = buildProviderInstallLines(input.provider.name, input.provider.cliVersion);
   const installLines = codegen.supported ? codegen.lines : [];
 
-  const base = resolveBase(input.envTemplateDockerfile);
+  const environmentImage = contract === 2 ? input.environmentImage : null;
+  if (environmentImage) {
+    assertEnvironmentImageField('ref', environmentImage.ref, ENV_REF_PATTERN);
+    assertEnvironmentImageField('imageId', environmentImage.imageId, ENV_IMAGE_ID_PATTERN);
+  }
+  const base = environmentImage
+    ? `FROM ${environmentImage.ref}\n# haive-environment-image: ${environmentImage.imageId}`
+    : resolveBase(input.envTemplateDockerfile);
   const parts: string[] = [base];
   // Haive-required runtime tools that the user CLI session relies on,
   // independent of the env-template's project deps. Currently: `uv`/`uvx`

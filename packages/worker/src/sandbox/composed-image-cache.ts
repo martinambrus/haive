@@ -15,6 +15,7 @@ import { logger, DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared
 import {
   composeSandboxImage,
   SANDBOX_CORE_IMAGE,
+  type EnvironmentImageRef,
   type SandboxImageComposition,
 } from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
@@ -71,11 +72,34 @@ export async function withResolvedComposedImage<T>(
     if (inspected.exists) {
       log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
     } else {
+      // Contract 2 builds only FROM the environment image; its pasted body needs a context.
+      if (composition.installContract === 2) {
+        const environment = composition.environmentImage;
+        if (!environment)
+          throw new Error(
+            'Contract-2 composed image cannot be built without its environment image',
+          );
+        // Re-inspected inside the tag turn: the id resolved earlier may have moved since.
+        const current = await runner.inspect(environment.ref);
+        if (!current.exists || current.imageId !== environment.imageId)
+          throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+      }
       log.info(
         { tag: composition.tag, hash: composition.hash },
         'composed image cache miss, building',
       );
       await buildComposedImage(composition, runner);
+      // The tag lock does not cover the environment tag, and docker resolves FROM by name
+      // during the build: an environment that moved meanwhile may be the parent, so the
+      // composed tag (named after the old id) is removed rather than served.
+      const environment = composition.installContract === 2 ? composition.environmentImage : null;
+      if (environment) {
+        const after = await runner.inspect(environment.ref);
+        if (!after.exists || after.imageId !== environment.imageId) {
+          await runner.remove(composition.tag, { force: true });
+          throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+        }
+      }
     }
     return use(composition);
   });
@@ -85,6 +109,26 @@ export interface ResolvedSandboxImageComposition extends SandboxImageComposition
   installContract: 1 | 2;
   inputs: ComposedImageInputs;
   effective?: ComposedImageReference;
+  environmentImage?: EnvironmentImageRef;
+}
+
+const ENV_IMAGE_CHANGED = 'Environment image is missing or changed; Retry 03, then verify again';
+
+/** The retained environment image a contract-2 composition builds FROM; null when it is
+ * absent, has no id, or is not the image the environment build recorded. */
+export async function resolveEnvironmentImage(
+  envTemplate: { imageTag?: string | null; builtImageId?: string | null },
+  runner: DockerRunner,
+): Promise<EnvironmentImageRef | null> {
+  if (!envTemplate.imageTag) return null;
+  const environment = await runner.inspect(envTemplate.imageTag);
+  if (
+    !environment.exists ||
+    !environment.imageId ||
+    (envTemplate.builtImageId && envTemplate.builtImageId !== environment.imageId)
+  )
+    return null;
+  return { ref: envTemplate.imageTag, imageId: environment.imageId };
 }
 
 /** Shared composition calculation. A peek uses inspect only; only the ensure path may
@@ -96,7 +140,11 @@ export async function resolveSandboxImageComposition(
   runner: DockerRunner = defaultDockerRunner,
   buildBase = false,
   peekBaseImageId?: () => Promise<string | null>,
-  options: { inputs?: ComposedImageInputs; verifiedProviderId?: string } = {},
+  options: {
+    inputs?: ComposedImageInputs;
+    verifiedProviderId?: string;
+    environmentImage?: EnvironmentImageRef;
+  } = {},
 ): Promise<ResolvedSandboxImageComposition | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -178,6 +226,15 @@ export async function resolveSandboxImageComposition(
     rtkVersion = rtkCache?.versions?.[0] ?? rtkCache?.latestVersion ?? null;
   }
 
+  // A pinned launch/peek skips the environment image: it keeps the retained image id and
+  // must not depend on the environment still being there.
+  let environmentImage: EnvironmentImageRef | undefined;
+  if (contract === 2 && !options.verifiedProviderId) {
+    environmentImage =
+      options.environmentImage ?? (await resolveEnvironmentImage(envTemplate, runner)) ?? undefined;
+    if (!environmentImage) throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+  }
+
   const baseImageId = pinned
     ? pinned.baseImageId
     : buildBase
@@ -193,6 +250,7 @@ export async function resolveSandboxImageComposition(
     lspInstallContractVersion: contract,
     lspServers: deps.lspServers,
     lspServerVersions: deps.lspServerVersions,
+    environmentImage,
   });
   return {
     ...composition,
@@ -200,6 +258,7 @@ export async function resolveSandboxImageComposition(
     installContract: contract,
     inputs: { rtkVersion: rtkVersion || DEFAULT_RTK_VERSION, baseImageId, rtkPin, requestedHash },
     effective,
+    environmentImage,
   };
 }
 

@@ -873,6 +873,32 @@ contract that is not absent, 1 or 2, saved-body reuse included. 02 apply re-read
 contract and refuses a body generated under a different owner, so a stale parked form cannot save
 one. No manifest bump or SQL migration is included.
 
+**A contract-2 composed image is built on the environment image, never on the pasted body.** The
+composed build's context holds only its Dockerfile, so an environment body that copies project
+files (the generated `COPY composer.json composer.lock ./` when dependencies are preinstalled)
+cannot run there and failed with "not found" (MEASURED on a live PHP environment). Contract 2
+therefore starts the composed Dockerfile with `FROM <environment image tag>` and a comment line
+holding that image's id, then layers the runtime tools, the selected servers, the provider CLI
+install and the provider extras on top; the saved body is not run again. The id is part of the
+Dockerfile text, so the composed tag changes whenever the environment image does. MEASURED on
+Docker 29.9.2 with the containerd image store: `FROM sha256:<id>` and a bare hex id are refused,
+`FROM <repo>@sha256:<id>` works only on that store, and `FROM <local tag>` works with an empty
+context. The tag form is therefore used and the id is checked instead of pinned in `FROM`.
+`resolveEnvironmentImage` accepts a template whose tag names an existing image with an id equal
+to the stored built image id (when one is stored); a missing image, a tag that names another
+image or a template without a tag refuses with `ComposedImageNotVerifiedError` before the core
+image could be built; the identity read reports no identity for the same cases. The tag turn
+inspects the environment image again right before `docker build`, and a composition of contract
+2 without an environment image is never built. A retained reference names its image itself, so
+launch and peek never resolve the environment image: a verified launch keeps working while the
+environment is rebuilt or removed, and readiness (the identity holds `environmentImageId`) is
+what withdraws. MEASURED with the containerd image store: forcibly removing a parent image by id
+succeeds and leaves the image built on it in place, so step 03 removing a superseded environment
+image does not break a composed image. A daemon that records parent links between images may
+refuse that removal (not measured); step 03 only logs a failed removal. Legacy (absent/1) text,
+tags and builds are unchanged and still paste the body: a legacy body that copies project files
+from the build context still fails at composed build.
+
 Verification separates runtime/client checks (the inspected environment image) from selected LSP
 servers (the exact inspected composed image ID). Bootstrap 04 and the final step below run the
 same checks. The LSP runs use node, the image PATH without provider
@@ -989,6 +1015,12 @@ metadata or image rollback is needed. The writer is stopped first (see Composed 
 restore retained legacy template links and images before removing readers, and never downgrade
 metadata on a body without its legacy installers.
 
+Deploying the environment-image build changes no schema, metadata or reference. A task verified
+before it keeps its pinned launch image, but its readiness is withdrawn until the final
+verification runs again, because the composed tag now derives from the environment image and
+readiness compares it with the retained reference's tag. Reverting returns contract-2 builds to
+the pasted body and withdraws readiness of tasks verified under it the same way.
+
 ## Composed LSP adoption
 
 Step `01-declare-deps` writes `declaredDeps.lspInstallContractVersion = 2` only for a new
@@ -1001,8 +1033,9 @@ The switch is OFF for now. The composed build runs the environment's Dockerfile 
 context that holds only that Dockerfile, so an environment body that copies project files
 (the generated `COPY composer.json composer.lock ./` when dependencies are preinstalled) fails
 there with "not found". MEASURED on a live PHP environment: `03-build-image` built, then
-`04-verify-environment` failed its first composed build. Adoption returns once the composed build
-no longer needs the repository's files.
+`04-verify-environment` failed its first composed build. Contract 2 now builds on the environment
+image instead (see the composed image section), and the switch stays off until a live run of steps
+03, 04 and 01b1 passes on that build.
 
 A new environment gets 2 when every condition holds. They are checked cheapest first, and a failed
 one reads nothing further:
