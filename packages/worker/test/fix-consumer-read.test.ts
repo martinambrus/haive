@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
+import { ExecutionContractError } from '@haive/shared/modularity';
 import { TaskCancelledError, type FixLoopRead, type StepContext } from '@haive/shared/step';
 import {
   DIAGNOSIS_BUDGET,
@@ -152,7 +153,7 @@ const coreOf = async (events: Ev[], round: number) => {
   return core;
 };
 
-describe('loadFixLoopRead returns the core values raw', () => {
+describe("loadFixLoopRead returns the core readers' own values", () => {
   it('passes a machine diagnosis through unfenced, equal to the core reader, with guidance verbatim', async () => {
     const events = [ev('08c-code-review', 2, `AssertionError in a.ts. ${HOSTILE}`, GUIDANCE)];
     const read = present(await readOf(events, 2));
@@ -568,6 +569,26 @@ describe('createStepHostServices(...).loadFixLoopDiagnosis', () => {
       );
     },
   );
+
+  it('rejects a malformed pin with the contract error, not a binding error', async () => {
+    const w = world({
+      task: {
+        id: 'task',
+        userId: 'user',
+        type: 'workflow',
+        currentRound: 3,
+        executionContract: { version: 99 },
+      },
+    });
+    const outcome = await serve(w)
+      .loadFixLoopDiagnosis()
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(outcome).toBeInstanceOf(ExecutionContractError);
+    expect(outcome).not.toBeInstanceOf(StepHostBindingError);
+  });
 
   it('surfaces a cancelled task as the runner control error', async () => {
     const controller = new AbortController();

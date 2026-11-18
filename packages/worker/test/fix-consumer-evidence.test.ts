@@ -433,6 +433,10 @@ describe('repair evidence for a pinned fix target', () => {
     ['a pin that names another step', { ...capable, executionContract: pin('module.fx.other') }],
     ['a capability version that differs from the pin', { ...capable, fixConsumer: { version: 2 } }],
     ['a pin whose target is not capable', { ...capable, fixConsumer: undefined }],
+    [
+      'a pin naming a core step that declares the capability',
+      { ...capable, id: '08-phase-5-verify', executionContract: pin('08-phase-5-verify') },
+    ],
     ['a task with no pin', { ...capable, executionContract: null }],
     ['a pin without a target', { ...capable, executionContract: { version: 1, guardedSpans: [] } }],
   ];

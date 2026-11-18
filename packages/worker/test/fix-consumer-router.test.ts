@@ -533,6 +533,25 @@ describe('a fix round whose pinned custom target cannot be routed', () => {
     expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
     expect(h.state.add).not.toHaveBeenCalled();
   });
+
+  it('fails a malformed pin by name at the round-limit Continue', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockClear();
+    await resolveFixLoopGate(
+      db as never,
+      ctx(['epoch-job-target', '07-phase-2-implement', 'epoch-job-step'], { version: 99 }) as never,
+      GATE as never,
+      'continue',
+      1,
+      '',
+    );
+    expect(failure()?.errorMessage).toBe(
+      'fix loop target of task type custom cannot be read from its pinned execution contract',
+    );
+    expect(h.state.events).not.toContain('fix_loop.continued');
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
 });
 
 describe('a fix round whose pinned custom target is valid', () => {

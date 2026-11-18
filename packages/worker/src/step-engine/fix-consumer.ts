@@ -22,11 +22,16 @@ export function resolvePinnedFixConsumer(
   target: PinnedFixTarget,
   registry: Pick<StepRegistry, 'get'>,
 ): { ok: true; def: StepDefinition } | { ok: false } {
-  if (parseStepId(target.stepId)?.kind !== 'module') return { ok: false };
   const def = registry.get(target.stepId);
-  if (!def?.fixConsumer || def.fixConsumer.version !== target.capabilityVersion)
-    return { ok: false };
+  if (!def || !isCapableModuleStep(target, def)) return { ok: false };
   return { ok: true, def };
+}
+
+function isCapableModuleStep(target: PinnedFixTarget, def: StepDefinition | undefined): boolean {
+  return (
+    parseStepId(target.stepId)?.kind === 'module' &&
+    def?.fixConsumer?.version === target.capabilityVersion
+  );
 }
 
 export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): Promise<boolean> {
@@ -36,7 +41,7 @@ export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): 
     columns: { executionContract: true },
   });
   const target = pinnedFixTarget(row?.executionContract);
-  if (target?.stepId !== def.metadata.id || target.capabilityVersion !== def.fixConsumer.version)
+  if (!target || target.stepId !== def.metadata.id || !isCapableModuleStep(target, def))
     return false;
   return isFixRound(ctx);
 }

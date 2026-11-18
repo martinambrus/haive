@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import {
+  ExecutionContractError,
   parseStepId,
   parseDerivedRunPlan,
   type PromptStepEntry,
@@ -337,7 +338,8 @@ export function resolveFixLoopTarget(args: {
   let pinned: PinnedFixTarget | null;
   try {
     pinned = pinnedFixTarget(args.executionContract);
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ExecutionContractError)) throw error;
     return {
       ok: false,
       reason: `fix loop target of task type ${args.taskType} cannot be read from its pinned execution contract`,
