@@ -555,6 +555,12 @@ describe.each<Gate>(['cap', 'oscillation'])('the %s gate, pinned custom target',
     await raiseGate(gate, pin(CUSTOM));
     expect(parkedOptions()).toEqual(['same']);
   });
+
+  it('lists only the same CLI when the pin names an unregistered step, never the implementation step', async () => {
+    withSteps(true, true);
+    await raiseGate(gate, pin('module.fix-demo.absent'));
+    expect(parkedOptions()).toEqual(['same']);
+  });
 });
 
 describe('Continue with a CLI pick, legacy parity', () => {

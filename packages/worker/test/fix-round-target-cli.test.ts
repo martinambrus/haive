@@ -221,6 +221,40 @@ describe('resolveFixRoundCli matrix, pinned custom target', () => {
   });
 });
 
+describe('resolveFixRoundCli reads the task pin only when a round row wins', () => {
+  const callsFor = async (stepId: string, rows: Row[], contract: unknown) => {
+    const { db, calls } = callLoggingDb({ rows, contract });
+    await resolveFixRoundCli(db, USER, TASK, stepId, 'default', 2);
+    return calls;
+  };
+
+  it.each([
+    ['legacy 07', LEGACY, null],
+    ['the pinned custom step', CUSTOM, pin(CUSTOM)],
+  ])(
+    '%s: a winning round row reads the choices, the task, then the provider',
+    async (_n, id, c) => {
+      expect(await callsFor(id, [roundRow(id)], c)).toEqual([
+        'taskStepCliChoices',
+        'tasks',
+        'cliProviders',
+      ]);
+    },
+  );
+
+  it.each([
+    ['legacy 07', LEGACY, null],
+    ['the pinned custom step', CUSTOM, pin(CUSTOM)],
+  ])('%s: a newer ordinary row reads no task', async (_n, id, c) => {
+    const rows = [roundRow(id, picked.id, 1), ordinaryRow(id, original.id, 2)];
+    expect(await callsFor(id, rows, c)).toEqual(['taskStepCliChoices']);
+  });
+
+  it('a module step of an unpinned task at a fix round reads only the choices', async () => {
+    expect(await callsFor(CUSTOM, [], null)).toEqual(['taskStepCliChoices']);
+  });
+});
+
 const TARGETS: [string, string, unknown][] = [
   ['legacy 07', LEGACY, null],
   ['pinned custom', CUSTOM, pin(CUSTOM)],
