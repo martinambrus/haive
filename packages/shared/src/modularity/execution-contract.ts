@@ -48,6 +48,11 @@ export function parseExecutionContract(raw: unknown): ExecutionContract {
   if (!parsed.success) throw new ExecutionContractError('malformed contract');
   return parsed.data;
 }
+/** The step that repairs a fix round: the pinned custom target, else 07; a malformed pin throws. */
+export function fixLoopTargetStepId(contract: unknown): string {
+  if (contract === null || contract === undefined) return FIX_LOOP_TARGET_STEP_ID;
+  return parseExecutionContract(contract).fixTarget?.stepId ?? FIX_LOOP_TARGET_STEP_ID;
+}
 export interface ContractAdmissionScope {
   staticPinnedList: boolean;
   stepIds?: readonly string[];
