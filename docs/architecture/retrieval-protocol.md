@@ -32,3 +32,18 @@ silence there was exactly the dispatch whose body still named the tool.
 Grep-first is CORRECT below onboarding step index 14 (`10-rag-populate`): `08-knowledge-
 acquisition` (9), `09_5-skill-generation` (11) and `09_5b-skill-repair` (11.5) run before any
 index exists. The boundary is that index, not a list of step ids.
+
+Both LSP arms, the canonical (LSP, rag) one and the LSP branch of the rag-off one, end their
+LSP-bearing item with the same two cold-start lines from one constant
+(`LSP_COLD_START_GUIDANCE`), so they cannot drift; the no-LSP arms carry none of it. A language
+server starts on first use and indexes the repository before it can answer. MEASURED on a composed
+PHP image: three parallel first calls all returned "server is starting" or nothing within 0.64 s,
+one with its cursor on leading whitespace, and a model-free repro resolved the same definition about
+0.6 s after `initialized` at full CPU and about 6.7 s at 0.2 CPU. Haive cannot wait on that server,
+since each CLI session spawns its own, so the lines tell the agent to send LSP calls one at a time
+with the cursor on the symbol and to retry an empty first answer. They name no CLI and no tool.
+The block also renders into on-disk agent files for LSP-capable targets, so this is a body-only
+template change ([Onboarding template versioning](onboarding-upgrades.md)): a built-in agent's
+`contentHash` follows the render on worker boot and no `schemaVersion` moves. A custom-bundle
+agent's hash covers its parsed spec and the renderer version, not the rendered body, so an
+installed one keeps the previous block until one of those changes.
