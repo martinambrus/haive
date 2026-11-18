@@ -7,9 +7,7 @@ import {
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
-// Adoption is switched off in the product until a composed build gets the repository build
-// context; most controls pin the writer as it behaves when the switch is on, and the rollback
-// controls below turn it off again.
+// Most controls pin the writer with the switch on; the rollback controls below turn it off.
 const adoption = vi.hoisted(() => ({ on: true }));
 vi.mock('../src/lsp/composed-adoption.js', async (original) => ({
   ...(await original<object>()),
@@ -410,11 +408,11 @@ describe('contract-2 writer: existing linked row', () => {
 });
 
 describe('contract-2 writer: rollback switch', () => {
-  it('ships switched off', async () => {
+  it('ships switched on', async () => {
     const actual = await vi.importActual<typeof import('../src/lsp/composed-adoption.js')>(
       '../src/lsp/composed-adoption.js',
     );
-    expect(actual.COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION).toBe(false);
+    expect(actual.COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION).toBe(true);
   });
 
   it('switched off, an eligible new environment writes no contract key', async () => {
