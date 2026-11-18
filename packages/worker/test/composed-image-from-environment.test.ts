@@ -240,7 +240,11 @@ function dockerLike(envInspect: () => { exists: boolean; imageId: string | null 
     if (ref === SANDBOX_CORE_IMAGE) return { exists: true, imageId: CORE_ID };
     return { exists: images.has(ref), imageId: images.has(ref) ? 'sha256:x' : null };
   });
-  return { runner: fakeDockerRunner({ build, inspect }), build, inspect, seen };
+  const remove = vi.fn(async (ref: string) => {
+    images.delete(ref);
+    return { ok: true, stderr: '' };
+  });
+  return { runner: fakeDockerRunner({ build, inspect, remove }), build, inspect, remove, seen };
 }
 const envOk =
   (id = ENV_ID) =>
@@ -309,6 +313,24 @@ describe('D environment image identity', () => {
       ComposedImageNotVerifiedError,
     );
     expect(build).not.toHaveBeenCalled();
+  });
+  it('an env id that moves during the build removes the built tag and rejects', async () => {
+    let built = false;
+    const docker = dockerLike(() => ({ exists: true, imageId: built ? 'sha256:envid2' : ENV_ID }));
+    docker.build.mockImplementationOnce(async (opts: DockerBuildOpts) => {
+      built = true;
+      return result(opts);
+    });
+    await expect(
+      ensureComposedImage(database(), 't', provider, docker.runner),
+    ).rejects.toBeInstanceOf(ComposedImageNotVerifiedError);
+    expect(docker.build).toHaveBeenCalledTimes(1);
+    expect(docker.remove).toHaveBeenCalledWith(
+      expect.stringMatching(/^haive-sandbox:[0-9a-f]{16}$/),
+      {
+        force: true,
+      },
+    );
   });
 });
 

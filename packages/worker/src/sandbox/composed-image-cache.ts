@@ -89,6 +89,17 @@ export async function withResolvedComposedImage<T>(
         'composed image cache miss, building',
       );
       await buildComposedImage(composition, runner);
+      // The tag lock does not cover the environment tag, and docker resolves FROM by name
+      // during the build: an environment that moved meanwhile may be the parent, so the
+      // composed tag (named after the old id) is removed rather than served.
+      const environment = composition.installContract === 2 ? composition.environmentImage : null;
+      if (environment) {
+        const after = await runner.inspect(environment.ref);
+        if (!after.exists || after.imageId !== environment.imageId) {
+          await runner.remove(composition.tag, { force: true });
+          throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+        }
+      }
     }
     return use(composition);
   });
