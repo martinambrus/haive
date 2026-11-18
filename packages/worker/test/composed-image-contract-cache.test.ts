@@ -29,6 +29,7 @@ const provider = {
 };
 const body = `FROM ${SANDBOX_CORE_IMAGE}\nRUN echo saved-body\n`;
 const ID = 'sha256:core';
+const ENV_TAG = 'haive-env:retained';
 const deps = {
   lspInstallContractVersion: 2,
   lspServers: ['php-extended'],
@@ -51,6 +52,8 @@ function database(
         findFirst: vi.fn(async () => ({
           status: opts.status ?? 'ready',
           generatedDockerfile: opts.dockerfile === undefined ? body : opts.dockerfile,
+          imageTag: ENV_TAG,
+          builtImageId: ID,
           declaredDeps,
         })),
       },
@@ -93,6 +96,7 @@ const expected = () =>
     provider,
     baseImageId: ID,
     rtkVersion: '0.42.4',
+    environmentImage: { ref: ENV_TAG, imageId: ID },
     ...deps,
   } as ComposeInput);
 const buildResult = (imageTag: string, exitCode = 0) => ({
@@ -143,7 +147,7 @@ it('peek and ensure consume the saved contract/selection/pins and the same base 
 });
 it('a contract-2 miss peeks unknown, then ensure builds the exact requested body without fallback', async () => {
   const image = expected();
-  const images = new Set([SANDBOX_CORE_IMAGE]);
+  const images = new Set([SANDBOX_CORE_IMAGE, ENV_TAG]);
   const build = vi.fn(async (opts: DockerBuildOpts) => {
     expect(opts.tag).toBe(image.tag);
     expect(await readFile(opts.dockerfilePath!, 'utf8')).toBe(image.dockerfileBody);
@@ -229,7 +233,7 @@ it('a failed pin replacement preserves the old image and rejects the requested t
     { ...deps, lspServerVersions: { php: '1.18.5' } },
     { metadata: { composedLspImageRefs: effectiveRef(old.tag) } },
   );
-  const images = new Set([SANDBOX_CORE_IMAGE, old.tag]);
+  const images = new Set([SANDBOX_CORE_IMAGE, ENV_TAG, old.tag]);
   const build = vi.fn(async (opts: DockerBuildOpts) => {
     expect(opts.tag).not.toBe(old.tag);
     expect(await readFile(opts.dockerfilePath!, 'utf8')).toContain('intelephense@1.18.5');
@@ -252,7 +256,7 @@ it('a failed pin replacement preserves the old image and rejects the requested t
 });
 it('serializes simultaneous ensures of one tag and builds it once', async () => {
   const image = expected();
-  const images = new Set([SANDBOX_CORE_IMAGE]);
+  const images = new Set([SANDBOX_CORE_IMAGE, ENV_TAG]);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;

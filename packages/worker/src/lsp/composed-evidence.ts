@@ -11,6 +11,7 @@ import { and, desc, eq, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import {
+  resolveEnvironmentImage,
   resolveSandboxImageComposition,
   type ComposedImageProvider,
 } from '../sandbox/composed-image-cache.js';
@@ -244,6 +245,8 @@ export async function loadComposedLspIdentity(
     env.declaredDeps.lspServers,
     env.declaredDeps.lspServerVersions,
   );
+  const environmentImage = await resolveEnvironmentImage(env, runner);
+  if (!environmentImage) return null;
   const composition = await resolveSandboxImageComposition(
     db,
     taskId,
@@ -251,16 +254,9 @@ export async function loadComposedLspIdentity(
     runner,
     false,
     undefined,
-    { inputs },
+    { inputs, environmentImage },
   );
   if (!composition) return null;
-  const environment = env.imageTag ? await runner.inspect(env.imageTag) : null;
-  if (
-    !environment?.exists ||
-    !environment.imageId ||
-    (env.builtImageId && env.builtImageId !== environment.imageId)
-  )
-    return null;
   const inspected = await runner.inspect(composition.tag);
   if (!inspected.exists || !inspected.imageId) return null;
   const plugin = await db.query.taskSteps.findFirst({
@@ -298,7 +294,7 @@ export async function loadComposedLspIdentity(
     envTemplateId: env.id,
     installContract: 2,
     templateBodyHash: evidenceHash(env.generatedDockerfile),
-    environmentImageId: environment.imageId,
+    environmentImageId: environmentImage.imageId,
     selection,
     recipeHash: evidenceHash(
       buildLspLayer(env.declaredDeps.lspServers, env.declaredDeps.lspServerVersions),
