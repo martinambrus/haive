@@ -1,4 +1,9 @@
-import { parseExecutionContract, parseStepId } from '@haive/shared/modularity';
+import {
+  ExecutionContractError,
+  FIX_LOOP_TARGET_STEP_ID,
+  parseExecutionContract,
+  parseStepId,
+} from '@haive/shared/modularity';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '@haive/shared/step';
@@ -25,6 +30,23 @@ export function resolvePinnedFixConsumer(
   const def = registry.get(target.stepId);
   if (!def || !isCapableModuleStep(target, def)) return { ok: false };
   return { ok: true, def };
+}
+
+/** Advisory option list for a gate; the router still fails the task by name at Continue. */
+export function fixRoundTargetDef(
+  contract: unknown,
+  registry: Pick<StepRegistry, 'get'>,
+): StepDefinition | undefined {
+  let pin: PinnedFixTarget | null;
+  try {
+    pin = pinnedFixTarget(contract);
+  } catch (err) {
+    if (err instanceof ExecutionContractError) return undefined;
+    throw err;
+  }
+  if (!pin) return registry.get(FIX_LOOP_TARGET_STEP_ID);
+  const resolved = resolvePinnedFixConsumer(pin, registry);
+  return resolved.ok ? resolved.def : undefined;
 }
 
 /** A fan-out step (`agentMining`) is never capable: repair evidence is captured only on

@@ -5,6 +5,7 @@ import { checkTaskComposedLspProvider } from '@haive/shared/composed-lsp-provide
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
 import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
+import { fixLoopTargetStepId, parseStepId } from '@haive/shared/modularity';
 import type { StepDefinition } from '../../step-definition.js';
 import {
   FIX_LOOP_TARGET_STEP_ID,
@@ -43,7 +44,14 @@ export function eligibleFixRoundProviders(
   providers: CliProviderRecord[],
   target: StepDefinition | undefined,
 ): CliProviderRecord[] {
-  if (!target?.llm || !CLI_DISPATCH_STEP_IDS.includes(target.metadata.id)) return [];
+  if (
+    !target?.llm ||
+    !(
+      CLI_DISPATCH_STEP_IDS.includes(target.metadata.id) ||
+      (target.fixConsumer !== undefined && parseStepId(target.metadata.id)?.kind === 'module')
+    )
+  )
+    return [];
   return providers.filter((provider) => {
     if (provider.userId !== userId || !provider.enabled) return false;
     try {
@@ -120,7 +128,8 @@ export async function resolveFixRoundCli(
   role: string,
   round: number | undefined,
 ): Promise<CliProviderRecord | undefined> {
-  if (!taskId || stepId !== FIX_LOOP_TARGET_STEP_ID || role !== 'default' || !round) return;
+  if (!taskId || role !== 'default' || !round) return;
+  if (stepId !== FIX_LOOP_TARGET_STEP_ID && parseStepId(stepId)?.kind !== 'module') return;
   const choice = await db.query.taskStepCliChoices.findFirst({
     where: and(
       eq(schema.taskStepCliChoices.taskId, taskId),
@@ -131,9 +140,14 @@ export async function resolveFixRoundCli(
     // A later card pick (including clearing it) replaces the round override.
     orderBy: [desc(schema.taskStepCliChoices.updatedAt), asc(schema.taskStepCliChoices.role)],
   });
-  return choice?.role === fixRoundCliRole(round)
-    ? loadRoundProvider(db, userId, choice.cliProviderId)
-    : undefined;
+  if (choice?.role !== fixRoundCliRole(round)) return;
+  // A round slot is honored only by the task's fix target; the step-card route writes any role on any step.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { executionContract: true },
+  });
+  if (fixLoopTargetStepId(task?.executionContract) !== stepId) return;
+  return loadRoundProvider(db, userId, choice.cliProviderId);
 }
 
 /** Called only inside the gate's existing fenced close/round-transition transaction. */

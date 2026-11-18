@@ -174,6 +174,7 @@ import {
   type ResolvedTaskContext,
 } from './run-list.js';
 import { PinnedStepSupportError, UnresolvedStepError } from '../step-engine/registry.js';
+import { fixRoundTargetDef } from '../step-engine/fix-consumer.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
@@ -196,7 +197,6 @@ import {
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
   FIX_LOOP_GATE_SOURCE,
-  FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
@@ -2614,7 +2614,7 @@ export async function handleResult(
               ctx.userId,
               ctx.taskId,
               await loadProviders(db, ctx.userId),
-              stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
+              fixRoundTargetDef(ctx.executionContract, stepRegistry),
             ),
           };
           const parked = await writeOwnedRow(db, result.row.id, {
@@ -2696,7 +2696,7 @@ export async function handleResult(
             ctx.userId,
             ctx.taskId,
             await loadProviders(db, ctx.userId),
-            stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
+            fixRoundTargetDef(ctx.executionContract, stepRegistry),
           ),
         };
         const parked = await writeOwnedRow(db, result.row.id, {
