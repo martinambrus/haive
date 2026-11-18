@@ -31,6 +31,11 @@ import {
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
+import {
+  pinnedFixTarget,
+  resolvePinnedFixConsumer,
+  type PinnedFixTarget,
+} from '../step-engine/fix-consumer.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 import { builtinTaskTypeRows } from '../step-engine/task-type-seed.js';
 
@@ -327,7 +332,33 @@ export function resolveFixLoopTarget(args: {
   fixLoop: FixLoopDef | null | undefined;
   runList: readonly StepDefinition[];
   registry: Pick<StepRegistry, 'get'>;
+  executionContract?: unknown;
 }): { ok: true; def: StepDefinition } | { ok: false; reason: string } {
+  let pinned: PinnedFixTarget | null;
+  try {
+    pinned = pinnedFixTarget(args.executionContract);
+  } catch {
+    return {
+      ok: false,
+      reason: `fix loop target of task type ${args.taskType} cannot be read from its pinned execution contract`,
+    };
+  }
+  if (pinned) {
+    const consumer = resolvePinnedFixConsumer(pinned, args.registry);
+    if (!consumer.ok) {
+      return {
+        ok: false,
+        reason: `fix loop target ${pinned.stepId} of task type ${args.taskType} is not a registered module step with fix consumer version ${pinned.capabilityVersion}`,
+      };
+    }
+    if (args.runList.some((s) => s.metadata.id === pinned.stepId)) {
+      return { ok: true, def: consumer.def };
+    }
+    return {
+      ok: false,
+      reason: `fix loop target ${pinned.stepId} is not in the run list of task type ${args.taskType}`,
+    };
+  }
   const targetId = args.fixLoop?.targetStepId ?? FIX_LOOP_TARGET_STEP_ID;
   // Only 07 reads the recorded fix_loop.requested diagnosis; another target would re-run blind.
   if (targetId !== FIX_LOOP_TARGET_STEP_ID) {
