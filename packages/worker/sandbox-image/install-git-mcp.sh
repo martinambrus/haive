@@ -33,11 +33,33 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
+# uv's own release tarball, checked against the sha256 astral publishes beside it, rather than its
+# installer script, which nothing would check. uv in turn checks the CPython it downloads against
+# the hashes built into it, and the lock carries a hash for every wheel.
+arch="$(uname -m)"
+libc=gnu
+if [ -e "/lib/ld-musl-$arch.so.1" ]; then libc=musl; fi
+case "$arch-$libc" in
+  x86_64-gnu) uv_sha256=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2 ;;
+  aarch64-gnu) uv_sha256=9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31 ;;
+  x86_64-musl) uv_sha256=a4742988791c9aeae68c78150d6cba762062ad2a47e53738c2779d2b596bfcdb ;;
+  aarch64-musl) uv_sha256=8767a0e77f2cd45436401b1b42bf7e9ed5a4a91a74a5305d6fe93249d0f6dbc5 ;;
+  *)
+    echo "haive: no pinned uv build for $arch-$libc" >&2
+    exit 1
+    ;;
+esac
+uv_target="uv-$arch-unknown-linux-$libc"
+
 tools="$(mktemp -d)"
 trap 'rm -rf "$tools"' EXIT
-curl -fsSL -o "$tools/install.sh" "https://astral.sh/uv/$uv_version/install.sh"
-env UV_UNMANAGED_INSTALL="$tools" sh "$tools/install.sh"
-uv="$tools/uv"
+curl -fsSL -o "$tools/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$uv_version/$uv_target.tar.gz"
+if [ "$(sha256sum "$tools/uv.tar.gz" | cut -d' ' -f1)" != "$uv_sha256" ]; then
+  echo "haive: $uv_target.tar.gz does not match its pinned sha256" >&2
+  exit 1
+fi
+tar -xzf "$tools/uv.tar.gz" -C "$tools"
+uv="$tools/$uv_target/uv"
 
 rm -rf "$root"
 mkdir -p "$root"
