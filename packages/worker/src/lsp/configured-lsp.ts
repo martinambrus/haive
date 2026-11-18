@@ -156,7 +156,7 @@ type ComposedReadiness = {
 async function loadLspReadinessContext(db: Database, taskId: string) {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { envTemplateId: true },
+    columns: { envTemplateId: true, metadata: true },
   });
   if (!task?.envTemplateId) return null;
 
@@ -175,31 +175,45 @@ export async function hasReadyLspBridge(
   return readyLspBridgeForContext(db, taskId, await loadLspReadinessContext(db, taskId), composed);
 }
 
-/** Legacy readiness is provider independent. Read its context and evidence once;
- * only contract 2 fans out to compare each provider's composed/plugin identity. */
-export async function readyLspBridgesByProvider(
+/** One context read for a dispatch. `ready` is per provider (all false without evidence queries
+ * when `withReadiness` is false). Legacy readiness is provider independent; only contract 2 fans
+ * out to compare each provider's composed/plugin identity. `composedProviderIds` is null unless
+ * the template is contract 2, then the providers holding an effective retained composed image. */
+export async function lspDispatchState(
   db: Database,
   taskId: string,
   providers: readonly { id: string; hash: string }[],
-): Promise<Record<string, boolean>> {
+  withReadiness: boolean,
+): Promise<{ ready: Record<string, boolean>; composedProviderIds: string[] | null }> {
   const context = await loadLspReadinessContext(db, taskId);
-  if (context?.envTemplate?.declaredDeps?.lspInstallContractVersion === 2)
-    return Object.fromEntries(
-      await Promise.all(
-        providers.map(
-          async (p) =>
-            [
-              p.id,
-              await readyLspBridgeForContext(db, taskId, context, {
-                providerId: p.id,
-                providerHash: p.hash,
-              }),
-            ] as const,
+  const composedProviderIds =
+    context?.envTemplate?.declaredDeps?.lspInstallContractVersion === 2
+      ? parseImageReferences(context.task.metadata)
+          .entries.filter((e) => e.effective)
+          .map((e) => e.providerId)
+      : null;
+  if (!withReadiness)
+    return { ready: Object.fromEntries(providers.map((p) => [p.id, false])), composedProviderIds };
+  if (composedProviderIds)
+    return {
+      ready: Object.fromEntries(
+        await Promise.all(
+          providers.map(
+            async (p) =>
+              [
+                p.id,
+                await readyLspBridgeForContext(db, taskId, context, {
+                  providerId: p.id,
+                  providerHash: p.hash,
+                }),
+              ] as const,
+          ),
         ),
       ),
-    );
+      composedProviderIds,
+    };
   const ready = await readyLspBridgeForContext(db, taskId, context);
-  return Object.fromEntries(providers.map((p) => [p.id, ready]));
+  return { ready: Object.fromEntries(providers.map((p) => [p.id, ready])), composedProviderIds };
 }
 
 async function readyLspBridgeForContext(
