@@ -83,7 +83,11 @@ const card = async (s: Setup, stepId: string) => {
     [{ stepId, round: 2 }],
     TASK,
   );
-  return step as { preferredCliProviderId: string | null; roundCliUnavailable?: true };
+  return step as {
+    preferredCliProviderId: string | null;
+    preferredEffortLevel: string | null;
+    roundCliUnavailable?: true;
+  };
 };
 
 const listing = async (s: Setup, stepId: string) =>
@@ -106,6 +110,7 @@ describe('step card of a pinned custom fix target', () => {
     s.choose(CUSTOM, PICKED_CLI, ROUND);
     const step = await card(s, CUSTOM);
     expect(step.preferredCliProviderId).toBe(PICKED_CLI);
+    expect(step.preferredEffortLevel).toBe('high');
     expect(step).not.toHaveProperty('roundCliUnavailable');
   });
 
@@ -134,6 +139,7 @@ describe('step card of a pinned custom fix target', () => {
     s.choose(LEGACY, PICKED_CLI, ROUND);
     const step = await card(s, LEGACY);
     expect(step.preferredCliProviderId).toBe(SAVED_CLI);
+    expect(step.preferredEffortLevel).toBe('low');
     expect(step).not.toHaveProperty('roundCliUnavailable');
   });
 });
