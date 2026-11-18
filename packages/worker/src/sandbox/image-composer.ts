@@ -54,7 +54,7 @@ export interface ComposeInput {
    * and ignores composed selection/pins. Unknown persisted versions fail closed. */
   lspInstallContractVersion?: unknown;
   /** Opt-in composed LSP installer. Only contract 2 selects recipes; legacy
-   * templates retain their environment installer until the later writer cutover.
+   * templates retain their environment installer.
    * Accepts persisted language or server keys; unsupported selections fail explicitly. */
   lspServers?: readonly string[] | null;
   lspServerVersions?: Readonly<Record<string, string | null>> | null;

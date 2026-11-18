@@ -1,4 +1,5 @@
 import { lspProviderIdentity } from '../lsp/composed-evidence.js';
+import { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from '@haive/shared/composed-lsp-provider-lock';
 import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
@@ -49,7 +50,7 @@ import {
 } from '../step-engine/steps/_retrieval-guidance.js';
 import { withGlobalKbDigest, type GlobalKbDigest } from '../step-engine/steps/_global-kb-digest.js';
 import type { HouseRulesStamp } from '@haive/shared/global-kb';
-import { readyLspBridgesByProvider } from '../lsp/configured-lsp.js';
+import { lspDispatchState } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import {
@@ -185,6 +186,8 @@ export interface DispatchRequest {
    *  coarse capability alone never advertises tools that are not configured. */
   lspConfigured?: boolean;
   lspByProvider?: Record<string, boolean>;
+  /** Set for a contract 2 task: only these providers hold a retained effective composed image and can launch it. */
+  composedLspProviderIds?: readonly string[] | null;
   /** Invocation-specific worktree override. Must match the worktreeRel later
    *  placed on CliExecJobPayload so prompt and mount use the same boundary. */
   worktreeRel?: string;
@@ -391,7 +394,7 @@ async function resolveTaskDispatchOnTree(
   const resolveFacets = () => (taskFacets ??= resolveTaskFacets(db, taskId));
   const houseRules = req.input.kind === 'prompt' ? req.houseRules : undefined;
   const [
-    lspConfigured,
+    lspState,
     worktreeGitBoundary,
     mcpSurface,
     globalKb,
@@ -402,13 +405,12 @@ async function resolveTaskDispatchOnTree(
     agentRulesInjection,
     sandboxToolchain,
   ] = await Promise.all([
-    snapshotWorkspace
-      ? Object.fromEntries(req.providers.map((p) => [p.id, false]))
-      : readyLspBridgesByProvider(
-          db,
-          taskId,
-          req.providers.map((p) => ({ id: p.id, hash: lspProviderIdentity(p) })),
-        ),
+    lspDispatchState(
+      db,
+      taskId,
+      req.providers.map((p) => ({ id: p.id, hash: lspProviderIdentity(p) })),
+      snapshotWorkspace === null,
+    ),
     snapshotWorkspace
       ? false
       : resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
@@ -465,8 +467,9 @@ async function resolveTaskDispatchOnTree(
     snapshotWorkspace,
     ...req,
     input: neutraliseUnresolvedTemplateMarkers(req),
-    lspConfigured: Object.values(lspConfigured).some(Boolean),
-    lspByProvider: lspConfigured,
+    lspConfigured: Object.values(lspState.ready).some(Boolean),
+    lspByProvider: lspState.ready,
+    composedLspProviderIds: lspState.composedProviderIds,
     // Production callers cannot accidentally claim a boundary the mount will
     // not apply (or omit one it will): the DB-backed target wins any input.
     worktreeGitBoundary,
@@ -706,6 +709,20 @@ export function* dispatchCandidates(
   }
 }
 
+/** The providers a contract 2 task may launch: those holding an effective composed image, or,
+ *  before the first build makes any image effective, the lock's verified providers, so the
+ *  environment steps that build that image (and their AI repair) can still run. */
+function composedLspAllowedSet(
+  providers: readonly CliProviderRecord[],
+  composedIds: readonly string[] | null | undefined,
+): Set<string> | null {
+  if (!composedIds) return null;
+  if (composedIds.length > 0) return new Set(composedIds);
+  return new Set(
+    providers.filter((p) => COMPOSED_LSP_VERIFIED_PROVIDER_NAMES.includes(p.name)).map((p) => p.id),
+  );
+}
+
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const off = disabledProvider(req.providers, req.preferredProviderId ?? null);
   if (off) {
@@ -713,10 +730,16 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
       `the selected cli provider "${providerLabel(off)}" is disabled; enable it again or choose another CLI for this step`,
     );
   }
-  const enabled = req.providers.filter((p) => p.enabled);
+  const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
+  const preferredId = req.preferredProviderId ?? null;
+  if (composedSet && preferredId && !composedSet.has(preferredId)) {
+    const chosen = req.providers.find((p) => p.id === preferredId);
+    return skipPlan(composedLspLockReason(chosen ? providerLabel(chosen) : null));
+  }
+  const enabled = req.providers.filter((p) => p.enabled && (!composedSet || composedSet.has(p.id)));
 
   if (enabled.length === 0) {
-    return skipPlan('no enabled cli providers');
+    return skipPlan(composedSet ? composedLspLockReason(null) : 'no enabled cli providers');
   }
 
   const needsSubagents = req.input.capabilities.includes('subagents');
@@ -1118,6 +1141,15 @@ function assignedPersonaIds(req: DispatchRequest, prompts: string[]): string[] {
     for (const id of agentGuidanceIds(prompt)) ids.add(id);
   }
   return [...ids].sort();
+}
+
+/** Display copy for a contract 2 task refused a provider that holds no verified composed image. */
+function composedLspLockReason(label: string | null): string {
+  const remedy =
+    'choose that provider, or start a new task that keeps the language servers in the environment image';
+  return label
+    ? `the selected cli provider "${label}" cannot launch this task: its language servers live in a composed image only a provider with a verified image for this task can launch; ${remedy}`
+    : `no enabled cli provider holds a verified composed image for this task's language servers; ${remedy}`;
 }
 
 function skipPlan(reason: string): DispatchPlan {

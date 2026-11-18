@@ -116,12 +116,17 @@ export async function resolveSandboxImageComposition(
   // A linked row with refused metadata cannot quietly fall back to a provider
   // image, even while its saved environment body is unavailable.
   const contract = resolveComposedLspInstallContract(deps.lspInstallContractVersion, provider.name);
-  const effective =
-    contract === 2 && options.verifiedProviderId
-      ? parseImageReferences(task.metadata).entries.find(
-          (e) => e.providerId === options.verifiedProviderId,
-        )?.effective
-      : undefined;
+  const launchEntries =
+    contract === 2 && options.verifiedProviderId ? parseImageReferences(task.metadata).entries : [];
+  // Until some provider holds an effective composed image there is nothing to pin or refuse.
+  // The environment steps that build the first one (and their AI repair) launch on the provider
+  // image, as a legacy task does before its environment is built; LSP readiness stays false.
+  // Once any effective reference exists every refusal below applies.
+  if (contract === 2 && options.verifiedProviderId && !launchEntries.some((e) => e.effective))
+    return null;
+  const effective = launchEntries.find(
+    (e) => e.providerId === options.verifiedProviderId,
+  )?.effective;
   // Build status controls verification, not an unchanged pinned launch. A user
   // can rebuild the environment without invalidating the image already verified.
   if (!envTemplate.generatedDockerfile || (envTemplate.status !== 'ready' && !effective)) {

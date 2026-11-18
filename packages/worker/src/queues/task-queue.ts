@@ -201,10 +201,11 @@ import {
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import {
-  eligibleFixRoundProviders,
+  fixRoundOptionProviders,
   FIX_ROUND_CLI_FIELD,
   FixRoundCliUnavailable,
   fixRoundCliField,
+  fixRoundRefusalBody,
   recordFixRoundCliChoice,
 } from '../step-engine/steps/workflow/_fix-round-cli.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
@@ -2608,8 +2609,10 @@ export async function handleResult(
         if (osc.tripped && osc.conflictingDiagnoses) {
           const cliOptions = {
             round: nextRound,
-            providers: eligibleFixRoundProviders(
+            providers: await fixRoundOptionProviders(
+              db,
               ctx.userId,
+              ctx.taskId,
               await loadProviders(db, ctx.userId),
               stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
             ),
@@ -2688,8 +2691,10 @@ export async function handleResult(
         // the user accepts or aborts.
         const cliOptions = {
           round: nextRound,
-          providers: eligibleFixRoundProviders(
+          providers: await fixRoundOptionProviders(
+            db,
             ctx.userId,
+            ctx.taskId,
             await loadProviders(db, ctx.userId),
             stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
           ),
@@ -3018,8 +3023,10 @@ export async function resolveFixLoopGate(
           const title = 'CLI choice could not be applied';
           const field = fixRoundCliField({
             round: targetRound,
-            providers: eligibleFixRoundProviders(
+            providers: await fixRoundOptionProviders(
+              tx,
               ctx.userId,
+              ctx.taskId,
               await loadProviders(tx, ctx.userId),
               target,
             ),
@@ -3035,7 +3042,7 @@ export async function resolveFixLoopGate(
               infoSections: [
                 {
                   title,
-                  body: 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+                  body: fixRoundRefusalBody(err),
                   defaultOpen: true,
                 },
                 ...(form.infoSections ?? []).filter((s) => s.title !== title),

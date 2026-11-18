@@ -137,7 +137,7 @@ export function ToolingUpgradeBanner({ repositoryId }: ToolingUpgradeBannerProps
         ))}
       </ul>
       <p className="text-xs text-neutral-500">
-        Bumps this repo&apos;s version pins; the environment image rebuilds on the next task run.
+        Bumps this repo&apos;s version pins; the sandbox image rebuilds on the next task run.
       </p>
     </div>
   );

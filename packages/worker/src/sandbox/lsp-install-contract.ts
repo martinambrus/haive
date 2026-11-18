@@ -1,21 +1,19 @@
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 
 /** Absent metadata means the saved environment owns installation. Version 2 is
- * reserved for composed installation; no production writer emits it yet. This
+ * composed installation; step 01 writes it for new eligible environments. This
  * lives in declaredDeps (jsonb), so introducing it needs no database migration. */
 export interface LspInstallContract {
   lspInstallContractVersion?: 1 | 2;
 }
 
-/** Guard the environment-owned generator before saved-Dockerfile reuse.
- * Verification dispatches contract 2 separately; the generator still supports only 1. */
-export function assertEnvironmentLspInstallContract(deps: {
-  lspInstallContractVersion?: unknown;
-}): void {
+/** Accept only contracts this worker knows: 1 (environment installation) and 2
+ * (composed installation). Any other value must stop before a saved Dockerfile is reused. */
+export function assertKnownLspInstallContract(deps: { lspInstallContractVersion?: unknown }): void {
   const version = deps.lspInstallContractVersion;
-  if (version === undefined || version === 1) return;
+  if (version === undefined || version === 1 || version === 2) return;
   throw new Error(
-    `Unsupported LSP install contract ${JSON.stringify(version)}: this worker supports environment installation (1); composed installation is not enabled`,
+    `Unsupported LSP install contract ${JSON.stringify(version)}: this worker supports environment installation (1) and composed installation (2)`,
   );
 }
 

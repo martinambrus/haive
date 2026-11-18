@@ -1738,6 +1738,6 @@ Derived candidates built on the stock workflow inherit the step. An overlay that
 is accepted: it cannot become contract-2 eligible, so the final step fails closed at detect. Existing static snapshots and derived pins stay
 unchanged: a list that lacks 04, worktree setup, 01b and the final step in that order is ineligible
 for contract 2, and the step's detect refuses it without rewriting the list. run_app's dynamic modes
-and env_replicate's standalone list are unchanged. The contract-2 environment writer is still
-refused. See [Sandbox](sandbox.md) for the evidence, Retry recovery and the registered-step
-rollback requirement.
+and env_replicate's standalone list are unchanged. Step 01 gives a new environment contract 2 only
+when the task's list passes that check; an ineligible list stays legacy. See [Sandbox](sandbox.md)
+for the evidence, Retry recovery and the registered-step rollback requirement.

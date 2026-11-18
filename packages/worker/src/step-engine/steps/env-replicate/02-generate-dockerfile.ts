@@ -1,5 +1,5 @@
 import {
-  assertEnvironmentLspInstallContract,
+  assertKnownLspInstallContract,
   type LspInstallContract,
 } from '../../../sandbox/lsp-install-contract.js';
 import { assertDependencyTokens } from './_dependency-tokens.js';
@@ -75,7 +75,7 @@ export const generateDockerfileStep: StepDefinition<
     }
     const declaredDeps = (row.declaredDeps ?? {}) as Record<string, unknown>;
     assertDependencyTokens(declaredDeps);
-    assertEnvironmentLspInstallContract(declaredDeps);
+    assertKnownLspInstallContract(declaredDeps);
     // Reuse a previously-saved Dockerfile, EXCEPT when it still targets a PHP
     // version no apt repo can install (the pre-fix php<5.6 output). Such a
     // Dockerfile can never build, so re-render from declared deps — which now
@@ -148,6 +148,18 @@ export const generateDockerfileStep: StepDefinition<
   async apply(ctx, args) {
     const dockerfile = String(args.formValues.dockerfile ?? '').trim();
     if (!dockerfile) throw new Error('dockerfile cannot be empty');
+    // apply hashes the persisted detect output, so refuse when the row's LSP owner moved since.
+    const owner = await ctx.db.query.envTemplates.findFirst({
+      where: eq(schema.envTemplates.id, args.detected.envTemplateId),
+      columns: { declaredDeps: true },
+    });
+    const ownerVersion = (owner?.declaredDeps as Record<string, unknown> | null | undefined)
+      ?.lspInstallContractVersion;
+    if (ownerVersion !== args.detected.declaredDeps.lspInstallContractVersion) {
+      throw new Error(
+        'LSP install owner changed since this Dockerfile was generated; re-run the Generate Dockerfile step',
+      );
+    }
     // Keyed on the Dockerfile AND the declared deps (see envTemplateHash), so a merge
     // means the two tasks really do share one environment — not merely one rendering
     // of it.
@@ -367,7 +379,7 @@ function normalizeGoVersion(raw: string): string | null {
 export function renderDockerfile(baseImage: string, rawDeps: Record<string, unknown>): string {
   const deps = rawDeps as DeclaredDepsShape;
   assertDependencyTokens(deps);
-  assertEnvironmentLspInstallContract(deps);
+  assertKnownLspInstallContract(deps);
   // Docker references need separators a version token cannot contain. Check every
   // name/tag/digest component with the same token policy before writing FROM.
   for (const component of baseImage.split(/[/:@]/))
@@ -654,7 +666,8 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (lspServers.length > 0) {
+  // A composed layer installs the servers for contract 2.
+  if (lspServers.length > 0 && deps.lspInstallContractVersion !== 2) {
     const lspVersions = deps.lspServerVersions ?? {};
     lines.push('# Language servers');
     for (const lsp of lspServers) {

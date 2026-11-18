@@ -461,7 +461,7 @@ export default function RepoToolingPage() {
         <h1 className="mt-1 text-2xl font-bold text-neutral-50">Repository tooling</h1>
         <p className="text-sm text-neutral-400">
           Enable or disable RTK and LSP servers and pin their versions for this repository. Changes
-          take effect when the repository&apos;s next task rebuilds its environment image.
+          take effect on the repository&apos;s next task.
         </p>
       </div>
 
@@ -596,8 +596,8 @@ export default function RepoToolingPage() {
           <Card>
             <h2 className="text-lg font-semibold text-neutral-100">LSP servers</h2>
             <p className="mt-1 text-xs text-neutral-500">
-              Servers baked into the environment image. rust-analyzer and jdtls cannot be version
-              pinned (they track the toolchain / latest snapshot).
+              Servers installed into the task&apos;s sandbox image. rust-analyzer and jdtls cannot
+              be version pinned (they track the toolchain / latest snapshot).
             </p>
             <div className="mt-3 flex flex-col gap-2">
               {config.lspOptions.map((opt) => {

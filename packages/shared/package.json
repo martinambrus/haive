@@ -159,6 +159,10 @@
       "types": "./dist/repo-rebuild.d.ts",
       "import": "./dist/repo-rebuild.js"
     },
+    "./composed-lsp-provider-lock": {
+      "types": "./dist/composed-lsp-provider-lock.d.ts",
+      "import": "./dist/composed-lsp-provider-lock.js"
+    },
     "./onboarding-admission": {
       "types": "./dist/onboarding-admission.d.ts",
       "import": "./dist/onboarding-admission.js"

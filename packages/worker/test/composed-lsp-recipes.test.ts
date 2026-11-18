@@ -201,7 +201,7 @@ describe('rendered shell and launcher behavior', () => {
   );
 });
 
-describe('environment LSP install-contract field before cutover', () => {
+describe('environment LSP install-contract field', () => {
   it('keeps unversioned and explicit environment-contract templates byte identical', () => {
     const deps = { lspServers: ['gopls'], lspServerVersions: { gopls: '0.21.0' } };
     expect(renderDockerfile('ubuntu:24.04', { ...deps, lspInstallContractVersion: 1 })).toBe(
@@ -214,7 +214,7 @@ describe('environment LSP install-contract field before cutover', () => {
     ).toEqual(buildSmokeChecks(deps));
   });
 
-  it('refuses future contract metadata before reusing a saved custom Dockerfile', async () => {
+  it('reuses a saved custom Dockerfile whose metadata carries contract 2', async () => {
     const ctx = {
       taskId: 'task',
       db: {
@@ -230,22 +230,49 @@ describe('environment LSP install-contract field before cutover', () => {
         },
       },
     } as unknown as StepContext;
-    await expect(generateDockerfileStep.detect!(ctx)).rejects.toThrow(/LSP install contract/i);
+    await expect(generateDockerfileStep.detect!(ctx)).resolves.toMatchObject({
+      currentDockerfile: 'FROM ubuntu:24.04\nRUN echo custom\n',
+    });
   });
 
-  it.each([2, 3, 0, '1', null])(
-    'refuses contract %j until its generation and verification paths are supported',
+  it.each([3, 0, '1', null])(
+    'refuses saved Dockerfile metadata carrying contract %j',
+    async (version) => {
+      const ctx = {
+        taskId: 'task',
+        db: {
+          query: {
+            tasks: { findFirst: async () => ({ envTemplateId: 'env' }) },
+            envTemplates: {
+              findFirst: async () => ({
+                baseImage: 'ubuntu:24.04',
+                declaredDeps: { lspInstallContractVersion: version },
+                generatedDockerfile: 'FROM ubuntu:24.04\nRUN echo custom\n',
+              }),
+            },
+          },
+        },
+      } as unknown as StepContext;
+      await expect(generateDockerfileStep.detect!(ctx)).rejects.toThrow(/LSP install contract/i);
+    },
+  );
+
+  it('generates for contract 2 and smoke-checks only bash', () => {
+    const deps = { lspServers: ['gopls'], lspInstallContractVersion: 2 };
+    expect(() => renderDockerfile('ubuntu:24.04', deps)).not.toThrow();
+    expect(
+      buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0]).map((c) => c.id),
+    ).toEqual(['bash']);
+  });
+
+  it.each([3, 0, '1', null])(
+    'refuses unknown contract %j in generation and verification',
     (version) => {
       const deps = { lspServers: ['gopls'], lspInstallContractVersion: version };
       expect(() => renderDockerfile('ubuntu:24.04', deps)).toThrow(/LSP install contract/i);
-      if (version === 2) {
-        expect(
-          buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0]).map((c) => c.id),
-        ).toEqual(['bash']);
-      } else
-        expect(() => buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0])).toThrow(
-          /LSP install contract/i,
-        );
+      expect(() => buildSmokeChecks(deps as Parameters<typeof buildSmokeChecks>[0])).toThrow(
+        /LSP install contract/i,
+      );
     },
   );
 });

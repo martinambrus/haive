@@ -866,10 +866,12 @@ publication, described below.
 
 ## Composed LSP verification and retained images
 
-Contract 2 has readers and verification, with no 01 contract writer and no 02 installer suppression.
-Existing absent/1 rows retain their checks, reports, image composition and readiness rules.
-Generation, including saved-body reuse, still refuses contract 2. No manifest bump or SQL migration
-is included.
+Contract 2 has a writer (see Composed LSP adoption below), readers and verification. Existing
+absent/1 rows retain their checks, reports, image composition and readiness rules. Generation
+renders no "Language servers" installer block for 2, keeps every runtime addition, and refuses a
+contract that is not absent, 1 or 2, saved-body reuse included. 02 apply re-reads the row's
+contract and refuses a body generated under a different owner, so a stale parked form cannot save
+one. No manifest bump or SQL migration is included.
 
 Verification separates runtime/client checks (the inspected environment image) from selected LSP
 servers (the exact inspected composed image ID). Bootstrap 04 and the final step below run the
@@ -979,14 +981,62 @@ reference published before a lost done write cannot certify readiness: worker de
 or a concurrent reset leaves no done final row, and recovery repeats the checks under the same
 ownership, epoch and generation fences.
 
-Nothing here writes a contract-2 template, strips saved installers or changes an onboarding
-artifact version, and the generator still refuses 2. Rollback: stop adding the step to new
-definitions but keep its registered implementation while any resumable pinned task names it,
-since removing it under those pins creates dead tasks. Once none remain, revert this support
-before the earlier composed readers and cache contract; no schema, metadata or image rollback is
-needed. If a later writer has enabled contract 2, stop those writes and restore retained legacy
-template links and images before removing readers; never downgrade metadata on a body without its
-legacy installers.
+Nothing here strips installers from a saved Dockerfile or changes an onboarding artifact version.
+Rollback: stop adding the step to new definitions but keep its registered implementation while any
+resumable pinned task names it, since removing it under those pins creates dead tasks. Once none
+remain, revert this support before the earlier composed readers and cache contract; no schema,
+metadata or image rollback is needed. The writer is stopped first (see Composed LSP adoption);
+restore retained legacy template links and images before removing readers, and never downgrade
+metadata on a body without its legacy installers.
+
+## Composed LSP adoption
+
+Step `01-declare-deps` writes `declaredDeps.lspInstallContractVersion = 2` only for a new
+environment: no template is linked to the task when apply runs. The decision is made once. A
+template that exists keeps what it stores (absent stays absent, 1 stays 1, 2 stays 2) whatever the
+task's form says, and a stored value that is not absent, 1 or 2 is refused before any write.
+Replacing an absent/1 template with 2 is a separate, explicit action that 01 does not perform.
+
+A new environment gets 2 when every condition holds. They are checked cheapest first, and a failed
+one reads nothing further:
+
+- `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` in `lsp/composed-adoption.ts` is true.
+- The task's CLI supports LSP, and the effective server selection is not empty and holds only
+  `intelephense` and `intelephense-extended`, the one recipe with a verified composed layer. A
+  repository's saved selection wins over the form, an empty one included. Any other server or
+  alias keeps the task legacy.
+- The task's form did not tick `keepLegacyLspInstall`. It is read as `=== true`, because a parked
+  form is frozen and may lack the field.
+- The task's run list passes `composedLspRunListEligible`. run_app and a pinned definition without
+  the final step do not.
+- The providers the task can use for CLI work reduce to one enabled Claude Code provider: the
+  resolved task default, the per-step choices in `task_step_cli_choices`, the summary CLI and, unless
+  the task ignores saved preferences, the user's explicit saved step preferences for steps in the
+  run list. The set is a superset of what resolution can pick, so a doubtful case stays legacy.
+
+The form shows `keepLegacyLspInstall` ("Install language servers in the environment image") only
+when detect finds the task adoptable. Reused prior-task form values drop the field
+(`reconcileStaleDeps`), so each task derives its own default and an opt-out is never inherited;
+Auto-continue therefore adopts. An environment that is not adopted writes no contract key, so its
+template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
+the decision with a closed reason: `run_list`, `providers`, or none when adopted.
+
+Provider lock. A task whose template is contract 2 can launch only a provider that holds a
+retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
+the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
+`FixRoundCliLocked`, whose message the escalation gate shows; the gate offers only providers the
+lock accepts. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
+`claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
+the providers with an effective reference, a preferred provider outside it returns a skip plan
+with a named reason, and with no preference the choice floats only inside the set, so no capability
+gap falls through to another CLI. A prior or verifying reference does not count. Before the first
+build makes any reference effective, the set is the lock's verified providers, so the environment
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI, and LSP is never dropped silently.
+
+Rollback. Set `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` to false: new environments stop adopting,
+while templates already at 2 keep being carried, generated and read, so running tasks are
+unaffected. Keep the readers, the lock and verification until no task links a contract-2 template.
+Never set absent or 1 on a body whose installers were skipped.
 
 ## PHP database drivers in generated environments
 

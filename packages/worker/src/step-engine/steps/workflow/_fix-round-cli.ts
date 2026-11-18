@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
+import { checkTaskComposedLspProvider } from '@haive/shared/composed-lsp-provider-lock';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
 import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
@@ -22,6 +23,17 @@ export {
 };
 
 export class FixRoundCliUnavailable extends Error {}
+
+/** A fix-round pick refused because the task is composed-LSP locked; its message is the lock's reason. */
+export class FixRoundCliLocked extends FixRoundCliUnavailable {}
+
+const FIX_ROUND_UNAVAILABLE_BODY =
+  'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.';
+
+/** The gate re-park text for a refused pick: the lock's own reason, else the generic sentence. */
+export function fixRoundRefusalBody(err: FixRoundCliUnavailable): string {
+  return err instanceof FixRoundCliLocked ? err.message : FIX_ROUND_UNAVAILABLE_BODY;
+}
 
 /** Use the real dispatcher's capability and command-build checks, with one candidate so
  * an incompatible explicit pick cannot accidentally pass by falling back to another CLI.
@@ -53,6 +65,28 @@ export function eligibleFixRoundProviders(
       throw err;
     }
   });
+}
+
+/** The fix-round gate's options: eligible providers the task's composed-LSP lock also
+ * accepts, so the gate never offers a CLI that `recordFixRoundCliChoice` would refuse. */
+export async function fixRoundOptionProviders(
+  db: Pick<Database, 'query'>,
+  userId: string,
+  taskId: string,
+  providers: CliProviderRecord[],
+  target: StepDefinition | undefined,
+): Promise<CliProviderRecord[]> {
+  const eligible = eligibleFixRoundProviders(userId, providers, target);
+  const allowed: CliProviderRecord[] = [];
+  for (const provider of eligible) {
+    const lock = await checkTaskComposedLspProvider(db, {
+      userId,
+      taskId,
+      providerId: provider.id,
+    });
+    if (!lock || lock.ok) allowed.push(provider);
+  }
+  return allowed;
 }
 
 async function loadRoundProvider(
@@ -129,6 +163,8 @@ export async function recordFixRoundCliChoice(
     throw new FixRoundCliUnavailable(
       `Next fix round CLI "${provider.label}" cannot run ${target.metadata.id}; choose another CLI.`,
     );
+  const lock = await checkTaskComposedLspProvider(db, { userId, taskId, providerId: provider.id });
+  if (lock && !lock.ok) throw new FixRoundCliLocked(lock.message);
   await db
     .insert(schema.taskStepCliChoices)
     .values({

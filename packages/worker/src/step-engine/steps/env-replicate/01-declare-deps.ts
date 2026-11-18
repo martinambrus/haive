@@ -22,6 +22,12 @@ import {
   liveTasksSharingEnvTemplate,
 } from './_shared.js';
 import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
+import { assertKnownLspInstallContract } from '../../../sandbox/lsp-install-contract.js';
+import {
+  COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+  composedLspAdoptable,
+  isComposedLspSelection,
+} from '../../../lsp/composed-adoption.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
@@ -288,6 +294,9 @@ export interface DeclareDepsDetect {
    *  exists for that version). Null renders the apt install path, which is what shipped
    *  before this existed and is therefore the rollback. */
   rubyResolvedVersion?: string | null;
+  /** True when this task would declare a new environment that may install its language
+   *  servers in the composed layer. Absent in detect output cached before the field existed. */
+  composedLspAdoptable?: boolean;
 }
 
 export interface DeclareDepsApply {
@@ -522,6 +531,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       findVersion(result.runtimes, 'ruby'),
       rubyRow?.versions ?? [],
     );
+    if (
+      COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION &&
+      cliSupportsLsp &&
+      existingTpl === null &&
+      (
+        await composedLspAdoptable(ctx.db, {
+          taskId: ctx.taskId,
+          userId: ctx.userId,
+          defaultProviderId: ctx.cliProviderId,
+        })
+      ).ok
+    ) {
+      result.composedLspAdoptable = true;
+    }
     result.repositoryId = repositoryId;
     result.cliSupportsLsp = cliSupportsLsp;
     result.lspVersionByOption = lspVersionByOption;
@@ -640,6 +663,18 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
             },
           ]
         : []),
+      ...(detected.composedLspAdoptable === true
+        ? [
+            {
+              type: 'checkbox' as const,
+              id: 'keepLegacyLspInstall',
+              label: 'Install language servers in the environment image',
+              description:
+                'By default the selected language servers are installed in a separate image layer that Haive verifies after the environment is built, and only Claude Code can run it. Ticking this installs them in the environment image instead, which keeps other CLIs usable. It applies when this task first declares its environment and cannot be changed afterwards.',
+              default: false,
+            },
+          ]
+        : []),
       {
         type: 'checkbox',
         id: 'preinstallDeps',
@@ -732,6 +767,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
 
     const templateName = deriveEnvTemplateName(ctx.taskId);
     const existing = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    assertKnownLspInstallContract(existing?.declaredDeps ?? {});
 
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
@@ -817,6 +853,31 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           'installing Ruby from apt instead. Edit the generated Dockerfile if you need that exact version.',
       );
     }
+    let lspContract: 1 | 2 | undefined;
+    if (existing) {
+      lspContract = (existing.declaredDeps as { lspInstallContractVersion?: 1 | 2 } | null)
+        ?.lspInstallContractVersion;
+    } else if (
+      COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION &&
+      cliSupportsLsp &&
+      isComposedLspSelection(lspServers) &&
+      values.keepLegacyLspInstall !== true
+    ) {
+      const decision = await composedLspAdoptable(ctx.db, {
+        taskId: ctx.taskId,
+        userId: ctx.userId,
+        defaultProviderId: ctx.cliProviderId,
+      });
+      if (decision.ok) lspContract = 2;
+      ctx.logger.info(
+        {
+          taskId: ctx.taskId,
+          lspInstallContract: decision.ok ? 2 : null,
+          reason: decision.ok ? null : decision.reason,
+        },
+        'composed LSP adoption decided for a new environment',
+      );
+    }
     const declaredDeps: Record<string, unknown> = {
       runtimes: values.runtimes,
       versions: {
@@ -859,6 +920,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       // Unsupported CLIs deliberately receive an empty set even when a repo
       // retains settings for a different CLI.
       lspServers,
+      ...(lspContract !== undefined ? { lspInstallContractVersion: lspContract } : {}),
       ...(cliSupportsLsp && repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
       browserTesting: values.browserTesting,
       // Absent when nothing is pinned, so the generator renders its pre-picker output and the
@@ -999,6 +1061,11 @@ export function reconcileStaleDeps(
     }
   }
 
+  if (Object.hasOwn(reused, 'keepLegacyLspInstall')) {
+    const { keepLegacyLspInstall: _otherTask, ...rest } = reused;
+    return { ...rest, ...patch };
+  }
+
   return Object.keys(patch).length > 0 ? { ...reused, ...patch } : reused;
 }
 
@@ -1033,6 +1100,8 @@ export interface DeclareDepsFormValues extends FormValues {
   databaseKind: DatabaseKind;
   databaseVersion: string;
   lspServers?: LspKey[];
+  /** Opt out of composed installation for a new environment; a frozen parked form lacks it. */
+  keepLegacyLspInstall?: boolean;
   preinstallDeps: boolean;
   browserTesting: boolean;
   /** '' = system default, else a verified Chromium-family type. */

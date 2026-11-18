@@ -13,8 +13,10 @@ import {
 } from '../src/sandbox/image-composer.js';
 import { peekSandboxImageTag, resolveSandboxImageTag } from '../src/queues/cli-exec/images.js';
 import type { DockerBuildOpts } from '../src/sandbox/docker-runner.js';
+import { resolveImageTag } from '../src/sandbox/image-cache.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
-vi.mock('../src/sandbox/sandbox-core-image.js', () => ({
+vi.mock('../src/sandbox/sandbox-core-image.js', async (original) => ({
+  ...(await original<object>()),
   ensureSandboxCoreImage: vi.fn(async () => {}),
 }));
 
@@ -62,6 +64,29 @@ function database(
     },
   } as unknown as Database;
 }
+const providerTag = () => resolveImageTag({ ...provider, providerId: provider.id })!.tag;
+const effectiveRef = (
+  tag: string,
+  requestedDeps: Parameters<typeof composedRequestedInputsHash>[2] = deps,
+) => ({
+  schemaVersion: 1,
+  entries: [
+    {
+      providerId: provider.id,
+      effective: {
+        tag,
+        imageId: ID,
+        identityHash: 'verified',
+        inputs: {
+          rtkVersion: '0.42.4',
+          rtkPin: '0.42.4',
+          baseImageId: ID,
+          requestedHash: composedRequestedInputsHash(body, provider, requestedDeps),
+        },
+      },
+    },
+  ],
+});
 const expected = () =>
   composeSandboxImage({
     envTemplateDockerfile: body,
@@ -132,11 +157,15 @@ it('a contract-2 miss peeks unknown, then ensure builds the exact requested body
   const db = database();
   expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
   expect(build).not.toHaveBeenCalled();
-  await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
-    /verification after the plugin result/,
-  );
+  // No effective reference yet: a launch uses the provider image, never a composed one.
+  images.add(providerTag());
+  expect(await resolveSandboxImageTag(db, 't', provider, runner)).toBe(providerTag());
+  expect(build).not.toHaveBeenCalled();
   expect(await ensureComposedImage(db, 't', provider, runner)).toBe(image.tag);
-  expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
+  expect(await peekSandboxImageTag(db, 't', provider, runner)).toEqual({
+    tag: providerTag(),
+    imageId: ID,
+  });
   const published = database(deps, {
     metadata: {
       composedLspImageRefs: {
@@ -196,7 +225,10 @@ it('explicitly has no composed decision without an environment template', async 
 });
 it('a failed pin replacement preserves the old image and rejects the requested tag', async () => {
   const old = expected();
-  const db = database({ ...deps, lspServerVersions: { php: '1.18.5' } });
+  const db = database(
+    { ...deps, lspServerVersions: { php: '1.18.5' } },
+    { metadata: { composedLspImageRefs: effectiveRef(old.tag) } },
+  );
   const images = new Set([SANDBOX_CORE_IMAGE, old.tag]);
   const build = vi.fn(async (opts: DockerBuildOpts) => {
     expect(opts.tag).not.toBe(old.tag);
@@ -242,9 +274,53 @@ it('serializes simultaneous ensures of one tag and builds it once', async () => 
   expect(build).toHaveBeenCalledTimes(1);
 });
 
-it('keeps a cached contract-2 image unknown to peek until verification publishes it', async () => {
+it('never advertises a cached contract-2 image to peek until verification publishes it', async () => {
   const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
-  expect(await peekSandboxImageTag(database(), 't', provider, runner)).toBeNull();
+  const peeked = await peekSandboxImageTag(database(), 't', provider, runner);
+  expect(peeked).toEqual({ tag: providerTag(), imageId: ID });
+  expect(peeked?.tag).not.toBe(expected().tag);
+});
+it.each([
+  ['a ready template', {}],
+  ['a template still building', { status: 'building' }],
+])(
+  'launches %s on the provider image while no provider holds an effective reference',
+  async (_label, opts) => {
+    const build = vi.fn();
+    const runner = fakeDockerRunner({
+      inspect: async (ref) => ({ exists: ref === providerTag(), imageId: ID }),
+      build,
+    });
+    const db = database(deps, opts);
+    expect(await resolveSandboxImageTag(db, 't', provider, runner)).toBe(providerTag());
+    expect(build).not.toHaveBeenCalled();
+  },
+);
+it('keeps refusing a launch once another provider holds an effective reference', async () => {
+  const image = expected();
+  const other = effectiveRef(image.tag);
+  other.entries[0]!.providerId = 'other';
+  const runner = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
+  for (const opts of [{}, { status: 'building' }]) {
+    const db = database(deps, { ...opts, metadata: { composedLspImageRefs: other } });
+    await expect(resolveSandboxImageTag(db, 't', provider, runner)).rejects.toThrow(
+      /verification after the plugin result/,
+    );
+    expect(await peekSandboxImageTag(db, 't', provider, runner)).toBeNull();
+  }
+});
+it('keeps refusing changed inputs and a vanished image once the provider holds an effective reference', async () => {
+  const image = expected();
+  const refs = { composedLspImageRefs: effectiveRef(image.tag) };
+  const changed = database({ ...deps, lspServerVersions: { php: '1.18.5' } }, { metadata: refs });
+  const present = fakeDockerRunner({ inspect: async () => ({ exists: true, imageId: ID }) });
+  await expect(resolveSandboxImageTag(changed, 't', provider, present)).rejects.toThrow(
+    /inputs changed/,
+  );
+  const vanished = fakeDockerRunner({ inspect: async () => ({ exists: false, imageId: null }) });
+  await expect(
+    resolveSandboxImageTag(database(deps, { metadata: refs }), 't', provider, vanished),
+  ).rejects.toThrow(/changed or disappeared/);
 });
 
 it('refuses a peek when the provider moved after the caller captured its configuration', async () => {

@@ -1,6 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_CATALOG, type CliProviderName } from '@haive/shared';
+import {
+  checkTaskComposedLspProvider,
+  COMPOSED_LSP_PROVIDER_LOCKED,
+} from '@haive/shared/composed-lsp-provider-lock';
 import { HttpError } from '../context.js';
 
 /** Validate a requested per-step effort against the resolved provider's effortScale.
@@ -32,6 +36,19 @@ export async function loadUsableProvider(
   return provider;
 }
 
+/** Refuse (409) a provider a composed-LSP task cannot launch; a task without that contract passes. */
+export async function assertComposedLspProviderAllowed(
+  db: Pick<Database, 'query'>,
+  userId: string,
+  taskId: string,
+  providerId: string,
+): Promise<void> {
+  const decision = await checkTaskComposedLspProvider(db, { userId, taskId, providerId });
+  if (decision && !decision.ok) {
+    throw new HttpError(409, decision.message, COMPOSED_LSP_PROVIDER_LOCKED);
+  }
+}
+
 /** Record one (step, role) CLI choice for THIS task, and, when `remember` is set, as the user's
  *  saved (user, step, role) preference too, which every later task of theirs reads. A pick on a
  *  step card is about the task in front of the person, so it stays there unless they ask for
@@ -58,6 +75,7 @@ export async function writeStepCliChoice(
   let effortLevel: string | null = null;
   if (cliProviderId) {
     const provider = await loadUsableProvider(db, userId, cliProviderId);
+    await assertComposedLspProviderAllowed(db, userId, taskId, cliProviderId);
     effortLevel = clampEffort(provider.name, params.requestedEffort);
   }
   await (db as Database).transaction(async (tx) => {
