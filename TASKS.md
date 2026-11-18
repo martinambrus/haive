@@ -676,9 +676,21 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T717 · The sandbox image's own uv is unpinned and unused by Haive
+
+status: open · kind: design · found: git MCP warm start (#1279) · priority: P4
+
+The core image and the composer's runtime-tools layer still install uv from `https://astral.sh/uv/install.sh` with no version or hash (`worker/sandbox-image/Dockerfile:45`, `worker/src/sandbox/image-composer.ts:194`). Since #1279 nothing in Haive runs it: the git MCP server uses its own pinned uv at build time only. It costs about 40 MB per image, and agents may still call `uv`/`uvx` in a repository. PRE-EXISTING. Decision needed: drop it, or pin it the way `install-git-mcp.sh` pins its tarball (version plus per-target sha256).
+
+### T716 · Sandbox image supply chain lows
+
+status: open · kind: bug · found: git MCP warm start (#1279) · priority: P4
+
+(a) The filesystem and postgres default MCP servers run unpinned `npx --prefer-offline -y @modelcontextprotocol/server-*` (`worker/src/sandbox/mcp-config.ts:246,257,277`), so an upstream release changes their tool surface mid-experiment; pin them as #1279 pinned git. PRE-EXISTING. (b) Alpine environment templates cannot be composed: the runtime-tools layer runs `apk add uv` (`image-composer.ts:189`), which fails before Alpine 3.21, and the provider install falls back to `apt-get` (`worker/src/cli-versions/codegen.ts:10-12`). PRE-EXISTING. (c) A reused terminal shell container keeps the MCP config it was created with; the git label gate covers creation only (`worker/src/terminal/terminal-container.ts:433-447`). Transitional, REGRESSION-adjacent, clears on the next container. (d) `worker/src/sandbox/npm-cache.ts:76` still says "git pending (uvx)". (e) The first image build after a change needs GitHub and PyPI reachable; no mirror fallback.
+
 ### T715 · The git MCP server re-downloads its Python packages on every run
 
-status: open · kind: bug · found: agent-memory pilot canary failures 2026-11-18 · priority: P2
+status: in review (#1279) · kind: bug · found: agent-memory pilot canary failures 2026-11-18 · priority: P2
 
 Claude-family runs declare the `git` MCP server as `uvx mcp-server-git` (`worker/src/sandbox/mcp-config.ts:276`). The sandbox keeps no uv cache, so every invocation resolves and downloads 32 wheels from PyPI (`queues/cli-exec/resolvers.ts:252` says so). When PyPI CDN throughput drops, the cold start outgrows the CLI's MCP start window and exec-core discards the run: `MCP server failed to start: git`. MEASURED 2026-11-18 in a throwaway `haive-sandbox:6f3507776f7d11b7` container: "Prepared 32 packages in 54.14s" (pydantic-core 2.2 MiB in 38 s, cryptography 4.5 MiB in 54 s), against 4 s four minutes earlier. Python itself comes from the image (`/usr/bin/python3` 3.12.3). Three canary attempts of task f1eab19d failed this way, about $0.19 in all. Fix direction: a shared uv cache volume warmed and owned like the npm cache (`sandbox/npm-cache.ts`), or pin `mcp-server-git` and its dependencies into the image. Pinning also stops a new upstream release (2026.11.18 pulls `mcp` 2.3.0 and `cryptography`) from changing the tool surface in the middle of an experiment.
 
