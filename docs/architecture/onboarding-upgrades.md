@@ -71,10 +71,10 @@ Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from L
 
 The optional `env_templates.declared_deps.lspInstallContractVersion` describes who installs servers:
 absent or 1 means the saved environment Dockerfile owns installation; 2 selects composed-image
-installation in cache/peek identity for supported Claude-binary LSP providers. No production writer
-emits 2 yet. The generator (saved-body reuse included) continues refusing it and unknown versions.
-04 now accepts 2 and splits environment runtime/client checks from composed-image LSP protocol
-checks. Explicit 1 leaves Dockerfile bytes and smoke checks identical to unversioned inputs.
+installation in cache/peek identity for supported Claude-binary LSP providers. Step 01 writes 2 only
+for a new, eligible environment and carries a stored value as it is; the generator renders no
+installer block for 2 and refuses unknown versions, saved-body reuse included. 04 accepts 2 and
+splits environment runtime/client checks from composed-image LSP protocol checks. Explicit 1 leaves Dockerfile bytes and smoke checks identical to unversioned inputs.
 The contract field adds no SQL column/migration. Plugin artifact bytes and manifest versions stay
 unchanged; 01b adds machine-local provider/file identity to its task output only for contract 2.
 
@@ -98,12 +98,12 @@ reference; failure keeps the prior image and refuses to present it as newly requ
 The final verification step `01b1-verify-composed-lsp` follows 01b, so readiness validates against
 the finished plugin identity: bootstrap 04 publishes the image 01b launches in, and the final step
 repeats the checks once 01b is done. Retry 04 or Retry 01b resets the final step and makes readiness
-false until it completes again. It skips absent/1 templates, and no contract-2 writer exists yet.
-That writer must carry forward existing contract metadata like savedWebserver, may enable 2 only
-for a run list holding 04, worktree setup, 01b and the final step in that order, and leaves 02
-suppression last. See [Sandbox](sandbox.md).
-A manifest bump alone cannot migrate a stored/custom Dockerfile; the later cutover must keep the
-legacy installer until replacement images exist and are verified. See [Sandbox](sandbox.md).
+false until it completes again. It skips absent/1 templates. The writer in 01 carries existing
+contract metadata forward like savedWebserver and enables 2 only for a new environment whose run
+list holds 04, worktree setup, 01b and the final step in that order. See [Sandbox](sandbox.md).
+A manifest bump alone cannot migrate a stored/custom Dockerfile; 01 never replaces an absent/1
+template with 2, and the legacy installer stays until replacement images exist and are verified.
+See [Sandbox](sandbox.md).
 
 ## Upgrades and rollbacks
 
