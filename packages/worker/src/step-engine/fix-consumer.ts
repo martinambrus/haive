@@ -27,10 +27,13 @@ export function resolvePinnedFixConsumer(
   return { ok: true, def };
 }
 
+/** A fan-out step (`agentMining`) is never capable: repair evidence is captured only on
+ *  the LLM phase, so a fan-out repair would run without its before and after snapshots. */
 function isCapableModuleStep(target: PinnedFixTarget, def: StepDefinition | undefined): boolean {
   return (
     parseStepId(target.stepId)?.kind === 'module' &&
-    def?.fixConsumer?.version === target.capabilityVersion
+    def?.fixConsumer?.version === target.capabilityVersion &&
+    def.agentMining === undefined
   );
 }
 

@@ -833,6 +833,8 @@ forged or mismatched capability metadata; the existing catalog entry JSON
 carries the validated version for API admission. This capability grants no
 output-contract replacement or host role policy. A capable step must also declare
 `editsCodeOrTests: true`; boot rejects it otherwise (`fix-consumer-edits-code-required`).
+A fan-out step (`agentMining`) is not capable: repair evidence is captured only on the LLM
+phase, so the worker refuses a pin naming one rather than let it repair without snapshots.
 Every gate still refuses a pin that selects a fix target until target CLI parity and the
 existing reset/epoch protocol exist for it. The rest of what a capable target needs is in
 place and dormant: the fix router resolves a pinned target (see Fix loop),

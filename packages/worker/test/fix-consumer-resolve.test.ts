@@ -173,6 +173,13 @@ describe('resolveFixLoopTarget with a pinned fix target', () => {
     });
   });
 
+  it('refuses a capable module step that runs as a fan-out', () => {
+    const fanOut = { ...def(MODULE_TARGET, { version: 1 }), agentMining: {} } as StepDefinition;
+    expect(
+      resolveFixLoopTarget(args({ registry: registryOf([fanOut]), runList: [fanOut] })),
+    ).toEqual({ ok: false, reason: notCapable(MODULE_TARGET) });
+  });
+
   it('refuses a core step id even when the registry marks it capable', () => {
     const marked = def(FIX_LOOP_TARGET_STEP_ID, { version: 1 });
     expect(
@@ -288,6 +295,10 @@ describe('resolvePinnedFixConsumer', () => {
     ['an unregistered step', []],
     ['a step without the capability', [def(MODULE_TARGET)]],
     ['a capability of another version', [def(MODULE_TARGET, { version: 2 })]],
+    [
+      'a capable fan-out step',
+      [{ ...def(MODULE_TARGET, { version: 1 }), agentMining: {} } as StepDefinition],
+    ],
   ])('refuses %s', async (_name, defs) => {
     const resolvePinnedFixConsumer = await load();
     const result = resolvePinnedFixConsumer(target, registryOf(defs));
