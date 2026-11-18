@@ -369,6 +369,8 @@ function writeDb(providers: CliProviderRecord[] = PROVIDERS) {
           return providers.find((p) => params.includes(p.id));
         },
       },
+      // The composed-LSP provider lock reads the task row; no environment template means no lock.
+      tasks: { findFirst: async () => ({ cliProviderId: null, envTemplateId: null }) },
     },
     insert: () => ({
       values: (values: Record<string, unknown>) => ({
