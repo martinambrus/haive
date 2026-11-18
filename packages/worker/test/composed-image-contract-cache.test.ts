@@ -65,7 +65,10 @@ function database(
   } as unknown as Database;
 }
 const providerTag = () => resolveImageTag({ ...provider, providerId: provider.id })!.tag;
-const effectiveRef = (tag: string, requestedDeps: unknown = deps) => ({
+const effectiveRef = (
+  tag: string,
+  requestedDeps: Parameters<typeof composedRequestedInputsHash>[2] = deps,
+) => ({
   schemaVersion: 1,
   entries: [
     {
