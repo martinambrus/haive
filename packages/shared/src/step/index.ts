@@ -844,7 +844,9 @@ export type ReviewDiff =
       reason: string;
       scope: import('./review-types.js').ImplementationFileSet;
     };
-/** A repeat of the same failing check across consecutive fix rounds. `report` is raw text. */
+/** A repeat of the same failing check across consecutive fix rounds. `report` is cleaned and
+ *  capped and unfenced when machine-sourced: fence it when the prompt is built. A `personMarked`
+ *  one already fences the machine text it embeds: insert it as it is, never wrap it again. */
 export interface FixLoopRepeat {
   sourceStepId: string;
   round: number;
@@ -853,8 +855,13 @@ export interface FixLoopRepeat {
   personMarked: boolean;
 }
 
-/** The fix request recorded for the calling step row's round. Text is unfenced: fence it at
- *  prompt-build time, since detect output is persisted and replayed. */
+/** The fix request recorded for the calling step row's round. `diagnosis` is cleaned and capped
+ *  and unfenced when machine-sourced: fence it when the prompt is built (detect output is
+ *  persisted and replayed). When `humanSourced && marked` it is the developer's own words and
+ *  already fences the machine text it embeds: insert it as it is, never wrap it again.
+ *  `guidance` is Haive text, never fence it. `prior` and `honored` are finished blocks rendered
+ *  at read time, machine entries already fenced, Haive lines and a person's words outside:
+ *  insert verbatim, never fence again (`honored` is worded for a reviewing step). */
 export interface FixLoopRead {
   round: number;
   diagnosis: string;

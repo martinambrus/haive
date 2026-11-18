@@ -1009,8 +1009,9 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
   return render(kept, omitted);
 }
 
-/** The fix request for the row's round, composed from the core readers, text unfenced. Null
- *  unless a request is recorded for this round. */
+/** The fix request for the row's round, composed from the core readers; see `FixLoopRead` for
+ *  which fields are finished blocks and which the caller fences. Null unless a request is
+ *  recorded for this round. */
 export async function loadFixLoopRead(ctx: StepContext): Promise<FixLoopRead | null> {
   if (!(await isFixRound(ctx))) return null;
   const fix = (await loadFixLoopDiagnosis(ctx)) ?? {

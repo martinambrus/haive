@@ -123,7 +123,8 @@ export const contractedAudit = {
   },
 } satisfies StepDefinition<unknown, CodeAuditOutput>;
 
-// A fix consumer reads the task-bound request the host recorded for its round and fences it itself.
+// A fix consumer reads the task-bound request the host recorded for its round; FixLoopRead says
+// which fields it fences itself.
 export async function readFixRequest(ctx: import('@haive/shared/step').StepContext) {
   const host = ctx.host;
   if (!host) throw new Error('This module requires step host services.');
