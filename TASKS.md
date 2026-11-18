@@ -676,6 +676,12 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T715 · The git MCP server re-downloads its Python packages on every run
+
+status: open · kind: bug · found: agent-memory pilot canary failures 2026-11-18 · priority: P2
+
+Claude-family runs declare the `git` MCP server as `uvx mcp-server-git` (`worker/src/sandbox/mcp-config.ts:276`). The sandbox keeps no uv cache, so every invocation resolves and downloads 32 wheels from PyPI (`queues/cli-exec/resolvers.ts:252` says so). When PyPI CDN throughput drops, the cold start outgrows the CLI's MCP start window and exec-core discards the run: `MCP server failed to start: git`. MEASURED 2026-11-18 in a throwaway `haive-sandbox:6f3507776f7d11b7` container: "Prepared 32 packages in 54.14s" (pydantic-core 2.2 MiB in 38 s, cryptography 4.5 MiB in 54 s), against 4 s four minutes earlier. Python itself comes from the image (`/usr/bin/python3` 3.12.3). Three canary attempts of task f1eab19d failed this way, about $0.19 in all. Fix direction: a shared uv cache volume warmed and owned like the npm cache (`sandbox/npm-cache.ts`), or pin `mcp-server-git` and its dependencies into the image. Pinning also stops a new upstream release (2026.11.18 pulls `mcp` 2.3.0 and `cryptography`) from changing the tool surface in the middle of an experiment.
+
 ### T714 · Testing doc: `vitest run -u <file>` runs the whole suite
 
 status: open · kind: docs · found: LSP cold-start guidance driver (#1278) · priority: P4
