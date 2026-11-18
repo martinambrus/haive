@@ -28,6 +28,13 @@ is HARDCODED. Nine steps emit one (07b, 07c, 08, 08a, 08b, 08c, 08d2, 09), and 0
 reader of `loadFixLoopDiagnosis`, so a round in which 07 does not run is a round in which
 nobody reads the defect.
 
+A task pin may name a module step as the fix target instead (see Task types); every gate
+still refuses such a pin. The router then resolves that step in place of 07 and fails the
+task before any reset when it is unregistered, is not a module step declaring the pinned
+`fixConsumer` version, or is off the run list. The step reads the defect through
+`ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
+round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
+
 **The target is fixed; what varies is whether 07 runs.** In DAG mode
 (`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every
 loop_back wrote a diagnosis nothing consumed and re-ran the whole review chain against
@@ -301,8 +308,9 @@ expectation takes precedence. The 08b-to-07 hand-off carries that contract once.
 Final validation, related tests and review use the current tree, including test edits;
 only checks that actually ran count as evidence. This phase does not replay old tests.
 
-Before enqueueing each 07 fix invocation, 08b pass after its author pass, DAG review
-fix coder, and 07b validator fixer, the host measures a complete classified-path manifest.
+Before enqueueing each 07 fix invocation, a pinned fix target's invocation at a round a
+recorded request entered, 08b pass after its author pass, DAG review fix coder, and 07b
+validator fixer, the host measures a complete classified-path manifest.
 It captures the after manifest before consuming the ended invocation or starting another
 pass. Each `fix_tests.before` / `fix_tests.after` event carries only invocation/pass/round,
 manifest hash, file count, state/reason and before-event reference, never full manifests, file content, patches

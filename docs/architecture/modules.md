@@ -558,7 +558,7 @@ entries. These entries grant no new dispatch service.
 
 Every production context supplies `ctx.host`, typed as optional `StepHostServices` so existing
 test doubles remain valid. A module requiring it checks once and fails clearly when it is absent.
-The five services capture the context's task, user and round, verify task-step ownership, and
+The six services capture the context's task, user and round, verify task-step ownership, and
 the worktree-backed services accept only its resolved worktree, using the canonical latest setup decision (a skipped 01
 selects the repository root even with an old worktree column); a mismatch throws `StepHostBindingError`.
 `loadPreviousStepOutput(stepId)` adapts the core helper with a ceiling of `ctx.round`;
@@ -651,6 +651,28 @@ complete inventory before checking outstanding decisions. A bounded output keeps
 outcome totals (`itemCounts`) beside its item page, so the history line counts every item. Claims and classification/batch journal records stay complete in Postgres;
 `GET /tasks/:id/events` pages their insight arrays with omitted counts, and
 `?insightOffset=30` reads the next page (optionally combined with `type`).
+
+`loadFixLoopDiagnosis()` takes no argument and returns `FixLoopRead` or null. It serves only
+the step the task's pinned execution contract names as its fix target, and only while that
+step's registered definition is a module step declaring the pinned `fixConsumer` version; any
+other caller, a task with no pin and a pin without a target throw `StepHostBindingError`. The
+result is null unless a `fix_loop.requested` event is recorded for the row's own round, because
+`round > 0` is also true after a revise-loop fork. A request recorded with an empty diagnosis
+still returns a result with an empty `diagnosis`, so a fix round is never read as an original
+pass. `diagnosis`, `humanSourced`, `marked` and `guidance` are the values 07's detect reads;
+`prior` and `repeat` are the earlier-rounds block and the same-check repeat 07 renders;
+`honored` is the honored-constraints block for the rounds before this one (worded for a
+reviewing step), so the current request appears only in `diagnosis`. The service adds no
+fencing of its own, because detect output is persisted and replayed: read it in `detect`
+(prompt builders are synchronous). `diagnosis` and `repeat.report` arrive cleaned and capped.
+A machine-sourced one is unfenced: wrap it in `fencedAgentBlock` when the prompt is built. A
+person's own (`humanSourced && marked` for `diagnosis`, `repeat.personMarked` for
+`repeat.report`) stays outside any fence and already fences the machine text it embeds:
+insert it as it is. `guidance` is Haive's own text: never fence it. `prior` and
+`honored` are finished blocks rendered at read time, with agent entries already fenced and
+Haive's lines and a person's words outside: insert them as they are and never fence them
+again, since a second fence collapses the inner banners and puts those lines inside an
+untrusted fence.
 
 `InsightLoadOptions`, `InsightLoadResult`, `LoadedInsight` and `InsightSourceRef` are exported
 only through `@haive/shared/step`. A loaded record's stable versioned occurrence `id` hashes its
@@ -809,9 +831,12 @@ An executable fix consumer declares `fixConsumer: {version: 1}` on its
 `StepDefinition` and matching composable manifest entry. Boot rejects missing,
 forged or mismatched capability metadata; the existing catalog entry JSON
 carries the validated version for API admission. This capability grants no
-output-contract replacement or host role policy. Every gate refuses a pin that
-selects a fix target until diagnosis, repair evidence, target CLI parity and the
-existing reset/epoch protocol exist for it.
+output-contract replacement or host role policy. A capable step must also declare
+`editsCodeOrTests: true`; boot rejects it otherwise (`fix-consumer-edits-code-required`).
+Every gate still refuses a pin that selects a fix target until target CLI parity and the
+existing reset/epoch protocol exist for it. The rest of what a capable target needs is in
+place and dormant: the fix router resolves a pinned target (see Fix loop),
+`loadFixLoopDiagnosis()` supplies its diagnosis, and repair evidence follows the capability.
 
 The module-owned declaration participates in source-guarded upsert, no-op
 comparison and content hashing. A declaration with a selected fix

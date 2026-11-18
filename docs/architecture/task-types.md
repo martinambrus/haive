@@ -839,9 +839,11 @@ An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
 capable run-list target on every path where an emitter runs. For validation,
 core emitters aimed at 07 resolve through that selected target. A prompt step,
 off-list id, non-capable executable or wrong capability version is refused.
-This declares no output replacement role or host policy. The existing live
-`fix_loop` runtime, target-specific CLI readers and diagnosis services remain
-unchanged. No gate admits a pin that selects a fix target.
+This declares no output replacement role or host policy. At the fix router a pinned
+target replaces the live `fix_loop` target; one that is not a registered module step with
+the pinned capability, or is not in the run list, fails the task with
+`fix_loop.unroutable` before any reset. Target-specific CLI readers remain unchanged. No
+gate admits a pin that selects a fix target.
 
 The seeder owns execution declarations with its existing source-guarded upsert,
 no-op test and hash; absent contracts preserve the previous hash bytes. All five
