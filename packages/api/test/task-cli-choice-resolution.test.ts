@@ -162,12 +162,29 @@ describe("a step card's CLI", () => {
 
 describe('active fix-round CLI readers', () => {
   const stepId = '07-phase-2-implement';
-  it.each(['deleted', 'missing', 'foreign', 'disabled', 'enabled'])(
-    'matches worker refusal for an active %s round choice without fallback',
-    async (state) => {
-      const { db, choose, save } = setup();
-      choose(stepId, state === 'deleted' ? null : PICKED_CLI, 'fix:2:default');
-      save(stepId, SAVED_CLI);
+  const CUSTOM = 'module.fix-demo.repair';
+  const pin = (id: string) => ({
+    version: 1,
+    guardedSpans: [],
+    fixTarget: { stepId: id, capabilityVersion: 1 },
+  });
+  const targets = [
+    { name: 'legacy 07', fixStep: stepId, contract: null },
+    { name: 'pinned custom target', fixStep: CUSTOM, contract: pin(CUSTOM) },
+  ];
+  const states = ['deleted', 'missing', 'foreign', 'disabled', 'enabled'];
+  it.each(targets.flatMap((target) => states.map((state) => ({ ...target, state }))))(
+    '$name: matches worker refusal for an active $state round choice without fallback',
+    async ({ fixStep, contract, state }) => {
+      const { fake, db, choose, save } = setup();
+      fake.insert(schema.tasks, { id: TASK, executionContract: contract });
+      const stepFlags = new Map(flags).set(fixStep, {
+        ...flags.get(stepId)!,
+        stepId: fixStep,
+        title: fixStep,
+      });
+      choose(fixStep, state === 'deleted' ? null : PICKED_CLI, 'fix:2:default');
+      save(fixStep, SAVED_CLI);
       const change =
         state === 'disabled'
           ? { enabled: false }
@@ -182,7 +199,7 @@ describe('active fix-round CLI readers', () => {
         .where(eq(schema.cliProviders.id, PICKED_CLI));
       let refused = false;
       try {
-        await resolveFixRoundCli(db, USER, TASK, stepId, 'default', 2);
+        await resolveFixRoundCli(db, USER, TASK, fixStep, 'default', 2);
       } catch (error) {
         expect(error).toBeInstanceOf(FixRoundCliUnavailable);
         refused = true;
@@ -190,16 +207,16 @@ describe('active fix-round CLI readers', () => {
       expect(refused).toBe(state !== 'enabled');
       const [card] = await enrichStepsWithCliPreferences(
         db,
-        flags,
+        stepFlags,
         USER,
-        [{ stepId, round: 2 }],
+        [{ stepId: fixStep, round: 2 }],
         TASK,
       );
       expect(Boolean((card as { roundCliUnavailable?: true }).roundCliUnavailable)).toBe(refused);
-      const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      const listing = await resolveCurrentStepCliProviderIds(db, stepFlags, USER, [
         {
           id: TASK,
-          currentStepId: stepId,
+          currentStepId: fixStep,
           currentRound: 2,
           cliProviderId: TASK_CLI,
           ignoreSavedStepClis: false,
@@ -208,13 +225,13 @@ describe('active fix-round CLI readers', () => {
       expect(listing.get(TASK)).toEqual(refused ? [] : [PICKED_CLI]);
       const upcoming = await buildUpcomingCliSteps(
         db,
-        flags,
+        stepFlags,
         USER,
         TASK,
         'workflow',
         [],
         false,
-        [stepId],
+        [fixStep],
         2,
       );
       expect(Boolean((upcoming[0] as { roundCliUnavailable?: true }).roundCliUnavailable)).toBe(
