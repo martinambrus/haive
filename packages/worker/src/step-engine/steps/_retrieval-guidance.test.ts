@@ -175,6 +175,23 @@ describe('buildRetrievalGuidance', () => {
 });
 
 describe('adaptRetrievalProtocol', () => {
+  it('rewrites a canonical block saved before the cold-start lines', () => {
+    const current = buildRetrievalGuidance({ supportsLsp: true, ragWired: true });
+    const saved = current
+      .filter((line) => !/LSP starts on first use|server is starting/.test(line))
+      .join('\n');
+    expect(saved).not.toBe(current.join('\n'));
+    for (const axes of [
+      { supportsLsp: false, ragWired: true },
+      { supportsLsp: true, ragWired: false },
+      { supportsLsp: false, ragWired: false },
+    ]) {
+      expect(adaptRetrievalProtocol(`before\n${saved}\nafter`, axes)).toBe(
+        `before\n${buildRetrievalGuidance(axes).join('\n')}\nafter`,
+      );
+    }
+  });
+
   const canonical = retrievalGuidanceLines().join('\n');
 
   it('leaves the canonical arm untouched', () => {
@@ -206,6 +223,60 @@ describe('adaptRetrievalProtocol', () => {
   it('leaves surrounding prose alone', () => {
     const prompt = 'The task may legitimately discuss LSP and rag_search architecture.';
     expect(adaptRetrievalProtocol(prompt, { supportsLsp: false, ragWired: false })).toBe(prompt);
+  });
+});
+
+describe('LSP cold-start guidance', () => {
+  const PHRASES = [
+    'one at a time',
+    'cursor on the symbol itself',
+    '"server is starting"',
+    'wait a few seconds and retry',
+  ];
+  const count = (text: string, phrase: string): number => text.split(phrase).length - 1;
+  const guidanceLines = (axes: RetrievalAxes): string[] =>
+    buildRetrievalGuidance(axes).filter(
+      (line) => line.includes('LSP starts on first use') || line.includes('server is starting'),
+    );
+
+  it('puts each key phrase exactly once in every LSP arm', () => {
+    for (const axes of AXES.filter((a) => a.supportsLsp)) {
+      const text = buildRetrievalGuidance(axes).join('\n');
+      for (const phrase of PHRASES) expect(count(text, phrase), phrase).toBe(1);
+    }
+  });
+
+  it('puts no key phrase and no LSP mention in a non-LSP arm', () => {
+    for (const axes of AXES.filter((a) => !a.supportsLsp)) {
+      const text = buildRetrievalGuidance(axes).join('\n');
+      for (const phrase of PHRASES) expect(text).not.toContain(phrase);
+      expect(text).not.toContain('LSP');
+    }
+  });
+
+  it('gives both LSP arms the identical two guidance lines', () => {
+    const withRag = guidanceLines({ supportsLsp: true, ragWired: true });
+    const withoutRag = guidanceLines({ supportsLsp: true, ragWired: false });
+    expect(withRag).toHaveLength(2);
+    expect(withoutRag).toHaveLength(2);
+    expect(withoutRag).toEqual(withRag);
+  });
+
+  it('survives the dispatch rewrite in every cell', () => {
+    const canonical = retrievalGuidanceLines().join('\n');
+    for (const axes of AXES) {
+      const adapted = adaptRetrievalProtocol(`before\n${canonical}\nafter`, axes);
+      expect(adapted).toBe(`before\n${buildRetrievalGuidance(axes).join('\n')}\nafter`);
+      for (const phrase of PHRASES) expect(adapted.includes(phrase), phrase).toBe(axes.supportsLsp);
+    }
+  });
+
+  it('names no CLI and no tool', () => {
+    const lines = AXES.filter((a) => a.supportsLsp).flatMap(guidanceLines);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).not.toMatch(/claude|codex|grok|gemini|intelephense|ToolSearch|\bamp\b/i);
+    }
   });
 });
 

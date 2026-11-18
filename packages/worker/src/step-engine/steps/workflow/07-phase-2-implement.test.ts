@@ -793,7 +793,7 @@ describe('phase2ImplementStep person round needs the mark in the detect output',
       createHash('sha256')
         .update(p.replace(`${BEHAVIOUR_FIX_LINES.join('\n')}\n`, ''))
         .digest('hex'),
-    ).toEqual('355b20a9bfe0640870de3ebf1af97c4b66b76a6ccf0bf97de1a960b2cda36a70');
+    ).toEqual('2f3e04f41d16ba8cecb2685cd82f03e04691995ef745d95bb30b61e00780d2cb');
   });
 
   it('shows the form a marked person round as it always did', () => {

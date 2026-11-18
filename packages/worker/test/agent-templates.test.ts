@@ -224,6 +224,28 @@ describe('buildAgentFileForTarget routing', () => {
     expect(rendered).toContain('## Core Mission');
     expect(rendered).toContain('Find issues.');
   });
+
+  it('carries the LSP cold-start guidance only in the LSP-capable rendering', () => {
+    const phrases = [
+      'one at a time',
+      'cursor on the symbol itself',
+      '"server is starting"',
+      'wait a few seconds and retry',
+    ];
+    const lsp = buildAgentFileForTarget(baseSpec, {
+      dir: '.claude/agents',
+      format: 'markdown',
+      supportsLsp: true,
+    });
+    for (const phrase of phrases) expect(lsp).toContain(phrase);
+    for (const target of [
+      { dir: '.codex/agents', format: 'toml' as const },
+      { dir: '.gemini/agents', format: 'markdown' as const },
+    ]) {
+      const rendered = buildAgentFileForTarget(baseSpec, target);
+      for (const phrase of phrases) expect(rendered).not.toContain(phrase);
+    }
+  });
 });
 
 describe('shouldEmitAgentsReadme', () => {

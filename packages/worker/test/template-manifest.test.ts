@@ -82,6 +82,26 @@ describe('template manifest', () => {
     }
   });
 
+  it('agent renderings carry the LSP cold-start guidance only for an LSP-capable target', () => {
+    const phrases = [
+      'one at a time',
+      'cursor on the symbol itself',
+      '"server is starting"',
+      'wait a few seconds and retry',
+    ];
+    const agents = (ctx: TemplateRenderContext) =>
+      expandManifestFor(ctx).filter((r) => r.templateKind === 'agent');
+    const lsp = agents(REFERENCE_CONTEXT);
+    expect(lsp.length).toBeGreaterThan(0);
+    for (const r of lsp) for (const phrase of phrases) expect(r.content).toContain(phrase);
+    const plain = agents({
+      ...REFERENCE_CONTEXT,
+      agentTargets: [{ dir: '.codex/agents', format: 'toml', supportsLsp: false }],
+    });
+    expect(plain.length).toBeGreaterThan(0);
+    for (const r of plain) for (const phrase of phrases) expect(r.content).not.toContain(phrase);
+  });
+
   it('agent targets fan-out: multiple target dirs produce one rendering per target', () => {
     const singleTarget: TemplateRenderContext = {
       ...REFERENCE_CONTEXT,
