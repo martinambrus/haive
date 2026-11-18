@@ -1063,6 +1063,7 @@ async function routableFixLoopTarget(
     fixLoop: ctx.fixLoop,
     runList: await buildRunList(ctx, db),
     registry: stepRegistry,
+    executionContract: ctx.executionContract,
   });
   if (resolved.ok) return resolved.def;
   // Taken under the source row like the hand-off it replaces, as a Retry takes the steps first.

@@ -5,6 +5,7 @@ import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
+import type { FixLoopRead } from '@haive/shared/step';
 import {
   FIX_LOOP_TARGET_STEP_ID,
   fixRoundCliField,
@@ -1006,4 +1007,27 @@ export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
   }
 
   return render(kept, omitted);
+}
+
+/** The fix request for the row's round, composed from the core readers; see `FixLoopRead` for
+ *  which fields are finished blocks and which the caller fences. Null unless a request is
+ *  recorded for this round. */
+export async function loadFixLoopRead(ctx: StepContext): Promise<FixLoopRead | null> {
+  if (!(await isFixRound(ctx))) return null;
+  const fix = (await loadFixLoopDiagnosis(ctx)) ?? {
+    diagnosis: '',
+    humanSourced: false,
+    marked: false,
+    guidance: (await loadRecordedDiagnosisForRound(ctx.db, ctx.taskId, ctx.round)).guidance,
+  };
+  return {
+    round: ctx.round,
+    diagnosis: fix.diagnosis,
+    humanSourced: fix.humanSourced,
+    marked: fix.marked,
+    guidance: fix.guidance,
+    prior: await loadPriorFixContext(ctx),
+    repeat: await loadSameCheckRepeat(ctx),
+    honored: await loadHonoredConstraints({ ...ctx, round: ctx.round - 1 }),
+  };
 }

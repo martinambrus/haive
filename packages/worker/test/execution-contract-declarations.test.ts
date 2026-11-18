@@ -29,6 +29,7 @@ const def = {
   form: () => ({ title: 'Fix', fields: [] }),
   apply: async () => ({}),
   fixConsumer: { version: 1 as const },
+  editsCodeOrTests: true,
   guardPredicates: { planned: { argsSchema: z.strictObject({}), evaluate } },
 } as StepDefinition;
 function load(step = def, entry: unknown = composable) {
@@ -89,6 +90,15 @@ it('refuses forged catalog capability, missing declarations and unsupported vers
   expect(() => load({ ...def, fixConsumer: { version: 2 } } as unknown as StepDefinition)).toThrow(
     'fix-consumer',
   );
+});
+it('refuses a fix consumer that does not declare it edits code or tests, and accepts one that does', () => {
+  expect(() => load({ ...def, editsCodeOrTests: undefined })).toThrow(
+    'fix-consumer-edits-code-required',
+  );
+  expect(() => load({ ...def, editsCodeOrTests: false })).toThrow(
+    'fix-consumer-edits-code-required',
+  );
+  expect(() => load({ ...def, editsCodeOrTests: true })).not.toThrow();
 });
 it('refuses declarative predicates without executable trusted code', () => {
   const bad = {

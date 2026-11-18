@@ -19,7 +19,13 @@ type Declaration = Pick<
   Partial<
     Pick<
       StepDefinition,
-      'metadata' | 'fixLoop' | 'restartLoop' | 'reviseLoop' | 'loop' | 'fixLoopOnError'
+      | 'metadata'
+      | 'fixLoop'
+      | 'restartLoop'
+      | 'reviseLoop'
+      | 'loop'
+      | 'fixLoopOnError'
+      | 'editsCodeOrTests'
     >
   >;
 
@@ -71,6 +77,8 @@ export function assertMatchingOutputDeclaration(
   assertStepOutputDeclaration(entry);
   if (step.fixConsumer?.version !== entry.fixConsumer?.version)
     throw new Error('fix-consumer-mismatch');
+  if (step.fixConsumer !== undefined && step.editsCodeOrTests !== true)
+    throw new Error('fix-consumer-edits-code-required');
   if (
     (step.outputContract !== undefined || entry.outputContract !== undefined) &&
     !stepOutputContractsEqual(step.outputContract, entry.outputContract)

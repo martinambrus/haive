@@ -43,3 +43,10 @@ export function provenanceIsInventoryOnly(insight: import('@haive/shared/step').
   // @ts-expect-error Legacy triage/gate snapshots have no provenance field.
   void insight.sourceRefs;
 }
+
+export function invalidFixLoopReads(host: import('@haive/shared/step').StepHostServices) {
+  // @ts-expect-error The fix request read is task-bound and takes no arguments.
+  void host.loadFixLoopDiagnosis('foreign-task');
+  // @ts-expect-error The fix request read takes no options.
+  void host.loadFixLoopDiagnosis({ round: 1 });
+}

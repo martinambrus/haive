@@ -125,4 +125,7 @@ misses U+0085, a C0-only class misses the line separators, an ASCII class misses
 it, so anything applied in `detect()` never reaches a step detected before it shipped — the
 reason `fencedDebtBlock`, `assertReviewableChange` and the no-spec task brief
 (`hydrateNoSpecBrief`, in `llm.prepare`) live where the prompt is assembled, and the bug
-`listKbFiles` shipped with.
+`listKbFiles` shipped with. The host's fix read (`loadFixLoopDiagnosis`) follows the same rule:
+it returns a machine-sourced `diagnosis` and `repeat.report` unfenced, so the consumer fences
+them when the prompt is built; a person's own words, `prior` and `honored` (finished blocks)
+and `guidance` (Haive's text) are not fenced again.
