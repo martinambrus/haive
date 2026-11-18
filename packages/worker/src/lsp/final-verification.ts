@@ -8,18 +8,18 @@ import {
 } from '@haive/shared/run-list';
 import { stepRegistry } from '../step-engine/registry.js';
 
-/** Used at final verification and available to the future opt-in writer. Frozen
- * static/derived lists stay frozen; an old pin missing the final step is ineligible. */
-export async function taskSupportsComposedLspFinal(db: Database, taskId: string): Promise<boolean> {
+/** The step ids of the task's run list, or null when the task row is missing. Frozen
+ * static/derived lists stay frozen. */
+export async function taskRunListStepIds(db: Database, taskId: string): Promise<string[] | null> {
   const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
-  if (!task) return false;
+  if (!task) return null;
   const definition =
     task.runListSnapshot == null && task.derivedRunPlan == null
       ? await db.query.taskTypeDefinitions.findFirst({
           where: eq(schema.taskTypeDefinitions.slug, task.type),
         })
       : null;
-  const ids = taskRunListIds(
+  return taskRunListIds(
     {
       workflowType: task.type,
       runListStrategy:
@@ -35,5 +35,11 @@ export async function taskSupportsComposedLspFinal(db: Database, taskId: string)
     },
     (type) => stepRegistry.listByWorkflow(type).map((step) => step.metadata.id),
   );
-  return composedLspRunListEligible(ids);
+}
+
+/** Used at final verification and by the new-environment adoption check; an old pin
+ * missing the final step is ineligible. */
+export async function taskSupportsComposedLspFinal(db: Database, taskId: string): Promise<boolean> {
+  const ids = await taskRunListStepIds(db, taskId);
+  return ids !== null && composedLspRunListEligible(ids);
 }

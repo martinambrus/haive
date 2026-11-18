@@ -6,7 +6,7 @@ import { shellQuote } from './shell-quote.js';
 export const LSP_NPM_PREFIX = '/usr/local';
 
 /** Optional composed-image recipes, selected only by explicit contract-2 metadata.
- * No production writer opts in; existing templates keep their environment installers. */
+ * Step 01 writes it for new eligible environments; existing templates keep their environment installers. */
 export type ComposedLspServer =
   'intelephense' | 'vtsls' | 'pyright' | 'gopls' | 'rust-analyzer' | 'solargraph' | 'jdtls';
 export interface SelectedLspServer {

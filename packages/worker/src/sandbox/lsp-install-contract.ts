@@ -1,7 +1,7 @@
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 
 /** Absent metadata means the saved environment owns installation. Version 2 is
- * reserved for composed installation; no production writer emits it yet. This
+ * composed installation; step 01 writes it for new eligible environments. This
  * lives in declaredDeps (jsonb), so introducing it needs no database migration. */
 export interface LspInstallContract {
   lspInstallContractVersion?: 1 | 2;
