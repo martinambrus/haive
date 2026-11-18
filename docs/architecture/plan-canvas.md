@@ -149,9 +149,11 @@ capped-title children measured 109,172 → 86,175 prompt characters, while the s
 502-child group is still named and never dispatched. One live wave per arm requires separate
 repository/plan copies: `loadAskedParents` spans tasks. The 12-agent ceiling is per pass: do not
 Retry a completed experimental wave, since Retry deletes its mining rows and permits another
-first wave while keeping the task metadata. No live wave or model call has been run for this
-pilot; D1 remains open. Rollback is to omit the request option for new tasks or revert the code;
-no schema migration is involved.
+first wave while keeping the task metadata. One live wave per arm ran on a 279-node plan: the
+role-sized arm cut the median cache write by about 42% but left 3 of 12 parents unordered and
+disagreed more often, so the parity arm stays the default and the role-sized request option is not
+adopted. Rollback is to omit the request option for new tasks or revert the code; no schema
+migration is involved.
 
 **"Start next" is STRICTER than the gate that refuses a task, deliberately.** `computePlanReady`
 (`shared/plan/ready.ts`) picks the lowest-numbered node that is startable now: `todo`, no unmet
