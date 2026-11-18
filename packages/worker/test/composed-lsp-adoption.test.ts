@@ -7,6 +7,17 @@ import {
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
+// Adoption is switched off in the product until a composed build gets the repository build
+// context; most controls pin the writer as it behaves when the switch is on, and the rollback
+// controls below turn it off again.
+const adoption = vi.hoisted(() => ({ on: true }));
+vi.mock('../src/lsp/composed-adoption.js', async (original) => ({
+  ...(await original<object>()),
+  get COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION() {
+    return adoption.on;
+  },
+}));
+
 // Contract-2 writer in step 01. A genuinely NEW environment (no linked template) gets
 // declaredDeps.lspInstallContractVersion = 2 only when every eligibility rule holds; an
 // existing row's contract is carried verbatim; an unknown stored contract is refused.
@@ -395,5 +406,25 @@ describe('contract-2 writer: existing linked row', () => {
     const fork = rows.find((row) => row.id !== TEMPLATE)!;
     expect(fork.declaredDeps).not.toHaveProperty(KEY);
     expect(written(r)).toEqual(original);
+  });
+});
+
+describe('contract-2 writer: rollback switch', () => {
+  it('ships switched off', async () => {
+    const actual = await vi.importActual<typeof import('../src/lsp/composed-adoption.js')>(
+      '../src/lsp/composed-adoption.js',
+    );
+    expect(actual.COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION).toBe(false);
+  });
+
+  it('switched off, an eligible new environment writes no contract key', async () => {
+    adoption.on = false;
+    try {
+      const deps = await applyNew({});
+      expect(deps).not.toHaveProperty(KEY);
+      expect(stableStringify(deps)).toBe(stableStringify(await legacyDeps({})));
+    } finally {
+      adoption.on = true;
+    }
   });
 });
